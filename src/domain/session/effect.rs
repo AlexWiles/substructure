@@ -1,12 +1,13 @@
 use crate::domain::event::{LlmRequest, McpServerConfig};
-use super::command::SessionCommand;
+use super::command::CommandPayload;
 
 #[derive(Debug, Clone)]
 pub enum Effect {
-    Command(SessionCommand),
+    Command(CommandPayload),
     CallLlm {
         call_id: String,
         request: LlmRequest,
+        stream: bool,
     },
     CallMcpTool {
         tool_call_id: String,

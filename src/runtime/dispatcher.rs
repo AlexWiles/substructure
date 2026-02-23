@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::domain::event::Event;
 use super::session_actor::SessionMessage;
 use super::session_client::ClientMessage;
-use super::event_store::InMemoryEventStore;
+use super::event_store::EventStore;
 
 // ---------------------------------------------------------------------------
 // Dispatcher actor — reads global log, delivers events to session actors
@@ -21,12 +21,12 @@ pub enum DispatcherMessage {
 pub struct DispatcherActor;
 
 pub struct DispatcherState {
-    store: Arc<InMemoryEventStore>,
+    store: Arc<dyn EventStore>,
     offset: u64,
 }
 
 pub struct DispatcherArgs {
-    store: Arc<InMemoryEventStore>,
+    store: Arc<dyn EventStore>,
 }
 
 impl Actor for DispatcherActor {
@@ -123,7 +123,7 @@ impl Actor for DispatcherActor {
 }
 
 pub async fn spawn_dispatcher(
-    store: Arc<InMemoryEventStore>,
+    store: Arc<dyn EventStore>,
 ) -> (ActorRef<DispatcherMessage>, JoinHandle<()>) {
     let (actor_ref, handle) = Actor::spawn(
         Some("dispatcher".to_string()),

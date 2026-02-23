@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
-use crate::domain::event::{AgentConfig, Event, EventPayload, LlmRequest, Message, Role, SessionAuth};
+use crate::domain::event::{AgentConfig, Event, EventPayload, LlmRequest, LlmResponse, Message, Role, SessionAuth};
 use crate::domain::openai;
 
 #[derive(Debug, Clone)]
@@ -23,6 +23,8 @@ pub struct LlmCall {
     pub call_id: String,
     pub request: LlmRequest,
     pub status: LlmCallStatus,
+    pub response: Option<LlmResponse>,
+    pub response_processed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -50,6 +52,7 @@ pub struct SessionState {
     pub tool_calls: HashMap<String, TrackedToolCall>,
     pub pending_tool_results: usize,
     pub dirty: bool,
+    pub stream: bool,
     pub stream_version: u64,
     pub last_applied: Option<u64>,
     pub last_reacted: Option<u64>,
@@ -70,6 +73,7 @@ impl SessionState {
             tool_calls: HashMap::new(),
             pending_tool_results: 0,
             dirty: false,
+            stream: false,
             stream_version: 0,
             last_applied: None,
             last_reacted: None,
@@ -100,6 +104,7 @@ impl SessionState {
             EventPayload::MessageUser(payload) => {
                 self.track_tokens(&payload.message);
                 self.messages.push(payload.message.clone());
+                self.stream = payload.stream;
                 if self.active_llm_call().is_some() {
                     self.dirty = true;
                 }
@@ -108,6 +113,9 @@ impl SessionState {
                 self.track_tokens(&payload.message);
                 self.pending_tool_results = payload.message.tool_calls.len();
                 self.messages.push(payload.message.clone());
+                if let Some(call) = self.llm_calls.get_mut(&payload.call_id) {
+                    call.response_processed = true;
+                }
             }
             EventPayload::MessageTool(payload) => {
                 self.track_tokens(&payload.message);
@@ -121,12 +129,15 @@ impl SessionState {
                         call_id: payload.call_id.clone(),
                         request: payload.request.clone(),
                         status: LlmCallStatus::Pending,
+                        response: None,
+                        response_processed: false,
                     },
                 );
             }
             EventPayload::LlmCallCompleted(payload) => {
                 if let Some(call) = self.llm_calls.get_mut(&payload.call_id) {
                     call.status = LlmCallStatus::Completed;
+                    call.response = Some(payload.response.clone());
                 }
             }
             EventPayload::LlmCallErrored(payload) => {
@@ -175,13 +186,24 @@ impl SessionState {
             messages.push(to_openai_message(msg));
         }
 
+        let model = agent.llm.params.get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let temperature = agent.llm.params.get("temperature")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32);
+        let max_tokens = agent.llm.params.get("max_tokens")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+
         Some(LlmRequest::OpenAi(openai::ChatCompletionRequest {
-            model: agent.model.clone(),
+            model,
             messages,
             tools,
             tool_choice: None,
-            temperature: None,
-            max_tokens: None,
+            temperature,
+            max_tokens,
         }))
     }
 

@@ -4,7 +4,7 @@ use ractor::{call_t, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use uuid::Uuid;
 
 use crate::domain::session::{SessionCommand, SessionState};
-use crate::domain::event::{Event, SpanContext};
+use crate::domain::event::{Event, SessionAuth};
 use super::session_actor::{RuntimeError, SessionMessage};
 use super::event_store::EventStore;
 
@@ -15,7 +15,6 @@ use super::event_store::EventStore;
 pub enum ClientMessage {
     /// From transport: forward a command to the session
     SendCommand(
-        SpanContext,
         SessionCommand,
         RpcReplyPort<Result<Vec<Event>, RuntimeError>>,
     ),
@@ -39,6 +38,7 @@ pub struct SessionClientState {
 
 pub struct SessionClientArgs {
     pub session_id: Uuid,
+    pub auth: SessionAuth,
     pub session_actor: ActorRef<SessionMessage>,
     pub store: Arc<dyn EventStore>,
 }
@@ -56,7 +56,7 @@ impl Actor for SessionClientActor {
         let mut session = SessionState::new(args.session_id);
 
         // Replay existing history so the client starts up-to-date
-        if let Ok(events) = args.store.load(args.session_id) {
+        if let Ok(events) = args.store.load(args.session_id, &args.auth) {
             for event in &events {
                 session.apply(event);
             }
@@ -81,12 +81,11 @@ impl Actor for SessionClientActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            ClientMessage::SendCommand(span, cmd, reply) => {
+            ClientMessage::SendCommand(cmd, reply) => {
                 let result = call_t!(
                     state.session_actor,
                     SessionMessage::Execute,
                     5000,
-                    span,
                     cmd
                 );
                 match result {

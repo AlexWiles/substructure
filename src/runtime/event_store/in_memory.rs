@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use ractor::OutputPort;
 use uuid::Uuid;
 
-use crate::domain::event::{Event, EventPayload, SpanContext};
+use crate::domain::event::{Event, EventPayload, SessionAuth, SpanContext};
 use super::store::{EventStore, StoreError, Version};
 
 struct StoreInner {
@@ -31,20 +31,6 @@ impl InMemoryEventStore {
             notify: OutputPort::default(),
         }
     }
-
-    pub fn read_from(&self, offset: u64, limit: usize) -> Vec<Arc<Event>> {
-        let inner = self.inner.lock().expect("store lock poisoned");
-        let start = offset as usize;
-        if start >= inner.log.len() {
-            return Vec::new();
-        }
-        let end = (start + limit).min(inner.log.len());
-        inner.log[start..end].to_vec()
-    }
-
-    pub fn notify(&self) -> &OutputPort<()> {
-        &self.notify
-    }
 }
 
 #[async_trait]
@@ -52,8 +38,10 @@ impl EventStore for InMemoryEventStore {
     async fn append(
         &self,
         session_id: Uuid,
+        auth: &SessionAuth,
         expected_version: Version,
         span: SpanContext,
+        occurred_at: DateTime<Utc>,
         payloads: Vec<EventPayload>,
     ) -> Result<Vec<Event>, StoreError> {
         let events = {
@@ -68,16 +56,18 @@ impl EventStore for InMemoryEventStore {
                 });
             }
 
+            let tenant_id = auth.tenant_id.clone();
             let base_seq = inner.next_sequence;
             let events: Vec<Event> = payloads
                 .into_iter()
                 .enumerate()
                 .map(|(i, payload)| Event {
                     id: Uuid::new_v4(),
+                    tenant_id: tenant_id.clone(),
                     session_id,
                     sequence: base_seq + i as u64,
                     span: span.clone(),
-                    occurred_at: Utc::now(),
+                    occurred_at,
                     payload,
                 })
                 .collect();
@@ -95,13 +85,19 @@ impl EventStore for InMemoryEventStore {
         Ok(events)
     }
 
-    fn load(&self, session_id: Uuid) -> Result<Vec<Event>, StoreError> {
+    fn load(&self, session_id: Uuid, auth: &SessionAuth) -> Result<Vec<Event>, StoreError> {
         let inner = self.inner.lock().expect("store lock poisoned");
-        inner
+        let events = inner
             .streams
             .get(&session_id)
-            .cloned()
-            .ok_or(StoreError::SessionNotFound)
+            .ok_or(StoreError::SessionNotFound)?;
+        // Verify all events belong to the requesting tenant
+        if let Some(first) = events.first() {
+            if first.tenant_id != auth.tenant_id {
+                return Err(StoreError::TenantMismatch);
+            }
+        }
+        Ok(events.clone())
     }
 
     fn version(&self, session_id: Uuid) -> Version {
@@ -111,5 +107,19 @@ impl EventStore for InMemoryEventStore {
             .get(&session_id)
             .map(|s| Version(s.len() as u64))
             .unwrap_or(Version::initial())
+    }
+
+    fn read_from(&self, offset: u64, limit: usize) -> Vec<Arc<Event>> {
+        let inner = self.inner.lock().expect("store lock poisoned");
+        let start = offset as usize;
+        if start >= inner.log.len() {
+            return Vec::new();
+        }
+        let end = (start + limit).min(inner.log.len());
+        inner.log[start..end].to_vec()
+    }
+
+    fn notify(&self) -> &OutputPort<()> {
+        &self.notify
     }
 }

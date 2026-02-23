@@ -2,7 +2,7 @@ use uuid::Uuid;
 
 use crate::domain::event::*;
 use super::state::SessionState;
-use super::command::SessionCommand;
+use super::command::CommandPayload;
 use super::effect::Effect;
 
 fn new_call_id() -> String {
@@ -38,9 +38,10 @@ pub fn react(
                             "[session:{}] MessageUser -> requesting LLM call",
                             session_id
                         );
-                        vec![Effect::Command(SessionCommand::RequestLlmCall {
+                        vec![Effect::Command(CommandPayload::RequestLlmCall {
                             call_id: new_call_id(),
                             request,
+                            stream: state.stream,
                         })]
                     }
                     None => vec![],
@@ -56,6 +57,7 @@ pub fn react(
             vec![Effect::CallLlm {
                 call_id: payload.call_id.clone(),
                 request: payload.request.clone(),
+                stream: payload.stream,
             }]
         }
 
@@ -68,9 +70,10 @@ pub fn react(
                 state.dirty = false;
                 match state.build_llm_request(tools) {
                     Some(request) => {
-                        vec![Effect::Command(SessionCommand::RequestLlmCall {
+                        vec![Effect::Command(CommandPayload::RequestLlmCall {
                             call_id: new_call_id(),
                             request,
+                            stream: state.stream,
                         })]
                     }
                     None => vec![],
@@ -85,14 +88,15 @@ pub fn react(
                 );
 
                 let mut effects =
-                    vec![Effect::Command(SessionCommand::SendAssistantMessage {
+                    vec![Effect::Command(CommandPayload::SendAssistantMessage {
+                        call_id: payload.call_id.clone(),
                         content,
                         tool_calls: tool_calls.clone(),
                         token_count,
                     })];
 
                 for tc in &tool_calls {
-                    effects.push(Effect::Command(SessionCommand::RequestToolCall {
+                    effects.push(Effect::Command(CommandPayload::RequestToolCall {
                         tool_call_id: tc.id.clone(),
                         name: tc.name.clone(),
                         arguments: tc.arguments.clone(),
@@ -112,9 +116,10 @@ pub fn react(
                 state.dirty = false;
                 match state.build_llm_request(tools) {
                     Some(request) => {
-                        vec![Effect::Command(SessionCommand::RequestLlmCall {
+                        vec![Effect::Command(CommandPayload::RequestLlmCall {
                             call_id: new_call_id(),
                             request,
+                            stream: state.stream,
                         })]
                     }
                     None => vec![],
@@ -147,7 +152,7 @@ pub fn react(
                 "[session:{}] ToolCallCompleted [{}] -> sending tool message",
                 session_id, payload.tool_call_id,
             );
-            vec![Effect::Command(SessionCommand::SendToolMessage {
+            vec![Effect::Command(CommandPayload::SendToolMessage {
                 tool_call_id: payload.tool_call_id.clone(),
                 content: payload.result.clone(),
                 token_count: None,
@@ -159,7 +164,7 @@ pub fn react(
                 "[session:{}] ToolCallErrored [{}] -> sending tool error message",
                 session_id, payload.tool_call_id,
             );
-            vec![Effect::Command(SessionCommand::SendToolMessage {
+            vec![Effect::Command(CommandPayload::SendToolMessage {
                 tool_call_id: payload.tool_call_id.clone(),
                 content: format!("Error: {}", payload.error),
                 token_count: None,
@@ -173,8 +178,9 @@ pub fn react(
                     session_id,
                 );
                 match state.build_llm_request(tools) {
-                    Some(request) => vec![Effect::Command(SessionCommand::RequestLlmCall {
+                    Some(request) => vec![Effect::Command(CommandPayload::RequestLlmCall {
                         call_id: new_call_id(),
+                        stream: true,
                         request,
                     })],
                     None => vec![],
@@ -192,7 +198,7 @@ pub fn react(
     }
 }
 
-fn extract_assistant_message(
+pub fn extract_assistant_message(
     response: &LlmResponse,
 ) -> (Option<String>, Vec<ToolCall>, Option<u32>) {
     match response {

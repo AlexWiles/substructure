@@ -2,23 +2,14 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub use super::agent::{AgentConfig, LlmConfig};
 use super::openai;
-
-pub type TraceId = [u8; 16];
-pub type SpanId = [u8; 8];
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SpanContext {
-    pub trace_id: TraceId,
-    pub span_id: SpanId,
-    pub parent_span_id: Option<SpanId>,
-    pub trace_flags: u8,
-    pub trace_state: Option<String>,
-}
+pub use super::span::{SpanContext, SpanId, TraceId};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
     pub id: Uuid,
+    pub tenant_id: String,
     pub session_id: Uuid,
     pub sequence: u64,
     pub span: SpanContext,
@@ -54,17 +45,6 @@ pub enum EventPayload {
 }
 
 // --- Session ---
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentConfig {
-    pub id: Uuid,
-    pub name: String,
-    pub model: String,
-    pub provider: String,
-    pub system_prompt: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub mcp_servers: Vec<McpServerConfig>,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
@@ -120,16 +100,20 @@ pub struct Message {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub token_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageUser {
     pub message: Message,
+    pub stream: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageAssistant {
+    pub call_id: String,
     pub message: Message,
 }
 
@@ -188,6 +172,7 @@ pub struct LlmStreamChunk {
 pub struct LlmCallRequested {
     pub call_id: String,
     pub request: LlmRequest,
+    pub stream: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
