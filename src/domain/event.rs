@@ -135,6 +135,7 @@ pub struct ToolCallRequested {
     pub tool_call_id: String,
     pub name: String,
     pub arguments: String,
+    pub deadline: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,6 +202,7 @@ pub struct LlmCallRequested {
     pub call_id: String,
     pub request: LlmRequest,
     pub stream: bool,
+    pub deadline: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

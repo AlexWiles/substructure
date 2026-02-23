@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::agent_state::AgentState;
-use super::effect::Effect;
 use crate::domain::event::{Message, ToolCall};
 use crate::domain::openai;
 
@@ -139,15 +138,6 @@ pub enum ToolExecutionMode {
 pub enum StrategyKind {
     #[default]
     React,
-}
-
-// ---------------------------------------------------------------------------
-// RecoveryEffects
-// ---------------------------------------------------------------------------
-
-pub struct RecoveryEffects {
-    pub setup: Vec<Effect>,
-    pub resume: Vec<Effect>,
 }
 
 // ---------------------------------------------------------------------------

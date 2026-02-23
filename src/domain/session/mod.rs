@@ -14,4 +14,4 @@ pub use strategy::{
     Action, InterruptRequest, LlmResponseSummary, LlmTurnParams, ToolExecutionMode,
     ToolExecutionPlan, ToolResult, Turn,
 };
-pub use strategy::{ReactStrategy, RecoveryEffects, Strategy, StrategyKind};
+pub use strategy::{ReactStrategy, Strategy, StrategyKind};

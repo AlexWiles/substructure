@@ -1,5 +1,3 @@
-use chrono::{DateTime, Utc};
-
 use crate::domain::event::{LlmRequest, McpServerConfig};
 use super::command::CommandPayload;
 
@@ -17,7 +15,4 @@ pub enum Effect {
         arguments: serde_json::Value,
     },
     StartMcpServers(Vec<McpServerConfig>),
-    ScheduleWake {
-        wake_at: DateTime<Utc>,
-    },
 }

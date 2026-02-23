@@ -1,3 +1,4 @@
+use std::cmp::min;
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
@@ -31,8 +32,8 @@ pub struct TokenBudget {
 pub enum SessionStatus {
     /// Work in flight: LLM calls, tool calls, strategy decisions.
     Active,
-    /// Nothing in flight. Optional scheduled wake-up (e.g., retry backoff).
-    Idle { wake_at: Option<DateTime<Utc>> },
+    /// Nothing in flight. Wake scheduler will check wake_at() for retry timing.
+    Idle,
     /// Paused for external input (e.g., human approval).
     Interrupted { interrupt_id: String },
     /// Agent loop finished. Waiting for next user input.
@@ -68,6 +69,7 @@ pub struct LlmCallState {
     pub response: Option<LlmResponse>,
     pub response_processed: bool,
     pub retry: RetryState,
+    pub deadline: DateTime<Utc>,
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +90,7 @@ pub struct ToolCallState {
     pub status: ToolCallStatus,
     pub result: Option<ToolCallResult>,
     pub retry: RetryState,
+    pub deadline: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,6 +181,7 @@ impl AgentState {
                         response: None,
                         response_processed: false,
                         retry: RetryState::default(),
+                        deadline: payload.deadline,
                     },
                 );
             }
@@ -191,6 +195,14 @@ impl AgentState {
                 if let Some(call) = self.llm_calls.get_mut(&payload.call_id) {
                     call.status = LlmCallStatus::Failed;
                     call.retry.attempts += 1;
+                    let backoff_max = self
+                        .agent
+                        .as_ref()
+                        .map(|a| a.retry.backoff_max_secs)
+                        .unwrap_or(60);
+                    let backoff = min(2u64.pow(call.retry.attempts), backoff_max);
+                    call.retry.next_at =
+                        Some(event.occurred_at + chrono::Duration::seconds(backoff as i64));
                 }
             }
             EventPayload::ToolCallRequested(payload) => {
@@ -203,6 +215,7 @@ impl AgentState {
                         status: ToolCallStatus::Pending,
                         result: None,
                         retry: RetryState::default(),
+                        deadline: payload.deadline,
                     },
                 );
             }
@@ -338,6 +351,36 @@ impl AgentState {
                 })
             })
             .collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // Wake scheduling
+    // -----------------------------------------------------------------------
+
+    /// Compute the earliest time this session needs attention.
+    /// Returns `None` if the session is done/interrupted or has nothing pending.
+    pub fn wake_at(&self) -> Option<DateTime<Utc>> {
+        match self.status {
+            SessionStatus::Done | SessionStatus::Interrupted { .. } => return None,
+            _ => {}
+        }
+        // Earliest of: pending call deadlines, failed call retry.next_at
+        let pending_llm = self
+            .llm_calls
+            .values()
+            .filter(|c| c.status == LlmCallStatus::Pending)
+            .map(|c| c.deadline);
+        let pending_tool = self
+            .tool_calls
+            .values()
+            .filter(|c| c.status == ToolCallStatus::Pending)
+            .map(|c| c.deadline);
+        let retry_at = self
+            .llm_calls
+            .values()
+            .filter(|c| c.status == LlmCallStatus::Failed)
+            .filter_map(|c| c.retry.next_at);
+        pending_llm.chain(pending_tool).chain(retry_at).min()
     }
 
     // -----------------------------------------------------------------------

@@ -33,6 +33,7 @@ async fn main() {
                 system_prompt: "You are a helpful weather assistant. Use the get_weather tool to answer weather questions.".into(),
                 mcp_servers: vec![],
                 strategy: Default::default(),
+                retry: Default::default(),
             },
         )]),
     };

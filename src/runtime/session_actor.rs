@@ -13,8 +13,7 @@ use super::mcp::{Content, McpClient};
 use super::strategy::StrategyProvider;
 use crate::domain::event::*;
 use crate::domain::session::{
-    AgentSession, AgentState, CommandPayload, Effect, SessionCommand, SessionError, SessionStatus,
-    Strategy,
+    AgentSession, AgentState, CommandPayload, Effect, SessionCommand, SessionError, Strategy,
 };
 
 // ---------------------------------------------------------------------------
@@ -51,9 +50,9 @@ pub enum SessionMessage {
     Cast(SessionCommand),
     GetState(RpcReplyPort<AgentState>),
     Events(Vec<Arc<Event>>),
-    /// Resume effects to execute after MCP servers are ready.
-    ResumeRecovery(Vec<Effect>),
-    /// Timer-triggered wake from Idle state.
+    /// Setup effects to execute on resume (e.g., start MCP servers).
+    SetupEffects(Vec<Effect>),
+    /// Timer-triggered or scheduler-triggered wake.
     Wake,
 }
 
@@ -349,16 +348,6 @@ async fn handle_effect(
             }
             // else: no MCP client — client-side tool, handled via event fan-out
         }
-        Effect::ScheduleWake { wake_at } => {
-            let delay = (wake_at - Utc::now())
-                .to_std()
-                .unwrap_or(std::time::Duration::ZERO);
-            let myself = myself.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(delay).await;
-                let _ = myself.send_message(SessionMessage::Wake);
-            });
-        }
     }
 }
 
@@ -416,20 +405,18 @@ impl Actor for SessionActor {
             SessionMessage::GetState(reply) => {
                 let _ = reply.send(state.session.agent_state.clone());
             }
-            SessionMessage::ResumeRecovery(effects) => {
+            SessionMessage::SetupEffects(effects) => {
                 let span = SpanContext::root();
                 for effect in effects {
                     handle_effect(state, &myself, &span, effect).await;
                 }
             }
             SessionMessage::Wake => {
-                if matches!(state.session.agent_state.status, SessionStatus::Idle { .. }) {
-                    let tools = state.all_tools();
-                    let effects = state.session.wake(tools);
-                    let span = SpanContext::root();
-                    for effect in effects {
-                        handle_effect(state, &myself, &span, effect).await;
-                    }
+                let tools = state.all_tools();
+                let effects = state.session.wake(tools);
+                let span = SpanContext::root();
+                for effect in effects {
+                    handle_effect(state, &myself, &span, effect).await;
                 }
             }
         }
@@ -440,9 +427,18 @@ impl Actor for SessionActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration;
     use crate::domain::agent::{AgentConfig, LlmConfig};
     use crate::domain::openai;
     use crate::domain::session::ReactStrategy;
+
+    fn far_future() -> chrono::DateTime<Utc> {
+        Utc::now() + Duration::hours(1)
+    }
+
+    fn past() -> chrono::DateTime<Utc> {
+        Utc::now() - Duration::seconds(10)
+    }
 
     fn test_agent() -> AgentConfig {
         AgentConfig {
@@ -455,6 +451,7 @@ mod tests {
             system_prompt: "test".into(),
             mcp_servers: vec![],
             strategy: Default::default(),
+            retry: Default::default(),
         }
     }
 
@@ -533,11 +530,21 @@ mod tests {
         }
     }
 
-    #[test]
-    fn recover_pending_llm_call() {
-        let mut state = created_state();
+    // -----------------------------------------------------------------------
+    // wake_at() tests
+    // -----------------------------------------------------------------------
 
-        // Add a user message and a pending LLM call
+    #[test]
+    fn wake_at_none_when_done() {
+        let state = created_state();
+        assert!(state.agent_state.wake_at().is_none());
+    }
+
+    #[test]
+    fn wake_at_returns_pending_llm_deadline() {
+        let mut state = created_state();
+        let deadline = far_future();
+
         apply_events(
             &mut state,
             vec![
@@ -556,26 +563,111 @@ mod tests {
                     call_id: "call-1".into(),
                     request: mock_llm_request(),
                     stream: false,
+                    deadline,
                 }),
             ],
         );
 
-        let recovery = state.recover(None);
-        assert!(recovery.setup.is_empty());
+        assert_eq!(state.agent_state.wake_at(), Some(deadline));
+    }
+
+    #[test]
+    fn wake_at_returns_failed_retry_next_at() {
+        let mut state = created_state();
+
+        apply_events(
+            &mut state,
+            vec![
+                EventPayload::MessageUser(MessageUser {
+                    message: Message {
+                        role: Role::User,
+                        content: Some("hi".into()),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                        call_id: None,
+                        token_count: None,
+                    },
+                    stream: false,
+                }),
+                EventPayload::LlmCallRequested(LlmCallRequested {
+                    call_id: "call-1".into(),
+                    request: mock_llm_request(),
+                    stream: false,
+                    deadline: far_future(),
+                }),
+                EventPayload::LlmCallErrored(LlmCallErrored {
+                    call_id: "call-1".into(),
+                    error: "timeout".into(),
+                }),
+            ],
+        );
+
+        let wake = state.agent_state.wake_at();
+        assert!(wake.is_some(), "should have a retry wake_at");
+    }
+
+    #[test]
+    fn wake_at_none_when_interrupted() {
+        let mut state = created_state();
+
+        apply_events(
+            &mut state,
+            vec![EventPayload::SessionInterrupted(SessionInterrupted {
+                interrupt_id: "int-1".into(),
+                reason: "approval".into(),
+                payload: serde_json::json!({}),
+            })],
+        );
+
+        assert!(state.agent_state.wake_at().is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // wake() tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn wake_pending_llm_call_re_issues() {
+        let mut state = created_state();
+
+        // Pending LLM call with a future deadline → wake re-issues
+        apply_events(
+            &mut state,
+            vec![
+                EventPayload::MessageUser(MessageUser {
+                    message: Message {
+                        role: Role::User,
+                        content: Some("hi".into()),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                        call_id: None,
+                        token_count: None,
+                    },
+                    stream: false,
+                }),
+                EventPayload::LlmCallRequested(LlmCallRequested {
+                    call_id: "call-1".into(),
+                    request: mock_llm_request(),
+                    stream: false,
+                    deadline: far_future(),
+                }),
+            ],
+        );
+
+        let effects = state.wake(None);
         assert!(
-            recovery
-                .resume
+            effects
                 .iter()
                 .any(|e| matches!(e, Effect::CallLlm { call_id, .. } if call_id == "call-1")),
-            "should recover pending LLM call"
+            "should re-issue pending LLM call"
         );
     }
 
     #[test]
-    fn recover_completed_llm_no_assistant_message() {
+    fn wake_timed_out_llm_call_fails_and_retries() {
         let mut state = created_state();
 
-        // User message, LLM call requested, LLM call completed — but no assistant message
+        // Pending LLM call with a past deadline → wake fails it and retries
         apply_events(
             &mut state,
             vec![
@@ -594,6 +686,50 @@ mod tests {
                     call_id: "call-1".into(),
                     request: mock_llm_request(),
                     stream: false,
+                    deadline: past(),
+                }),
+            ],
+        );
+
+        let effects = state.wake(None);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::Command(CommandPayload::FailLlmCall { call_id, .. }) if call_id == "call-1")),
+            "should fail timed-out LLM call"
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::Command(CommandPayload::RequestLlmCall { .. }))),
+            "should retry with new LLM call"
+        );
+    }
+
+    #[test]
+    fn wake_completed_llm_no_assistant_message() {
+        let mut state = created_state();
+
+        // Completed LLM call but no assistant message → wake extracts it
+        apply_events(
+            &mut state,
+            vec![
+                EventPayload::MessageUser(MessageUser {
+                    message: Message {
+                        role: Role::User,
+                        content: Some("hi".into()),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                        call_id: None,
+                        token_count: None,
+                    },
+                    stream: false,
+                }),
+                EventPayload::LlmCallRequested(LlmCallRequested {
+                    call_id: "call-1".into(),
+                    request: mock_llm_request(),
+                    stream: false,
+                    deadline: far_future(),
                 }),
                 EventPayload::LlmCallCompleted(LlmCallCompleted {
                     call_id: "call-1".into(),
@@ -602,16 +738,15 @@ mod tests {
             ],
         );
 
-        let recovery = state.recover(None);
-        assert!(recovery.resume.iter().any(|e| matches!(e, Effect::Command(CommandPayload::SendAssistantMessage { call_id, .. }) if call_id == "call-1")),
-            "should recover completed LLM call with no assistant message");
+        let effects = state.wake(None);
+        assert!(effects.iter().any(|e| matches!(e, Effect::Command(CommandPayload::SendAssistantMessage { call_id, .. }) if call_id == "call-1")),
+            "should emit SendAssistantMessage for unprocessed completed call");
     }
 
     #[test]
-    fn recover_pending_tool_call() {
+    fn wake_pending_tool_call_re_issues() {
         let mut state = created_state();
 
-        // User msg, LLM call, LLM completed, assistant message with tool call, tool call requested
         let call_id = "call-1".to_string();
         let tool_call_id = "tc-1".to_string();
 
@@ -633,6 +768,7 @@ mod tests {
                     call_id: call_id.clone(),
                     request: mock_llm_request(),
                     stream: false,
+                    deadline: far_future(),
                 }),
                 EventPayload::LlmCallCompleted(LlmCallCompleted {
                     call_id: call_id.clone(),
@@ -657,22 +793,22 @@ mod tests {
                     tool_call_id: tool_call_id.clone(),
                     name: "test_tool".into(),
                     arguments: "{}".into(),
+                    deadline: far_future(),
                 }),
             ],
         );
 
-        let recovery = state.recover(None);
+        let effects = state.wake(None);
         assert!(
-            recovery
-                .resume
+            effects
                 .iter()
                 .any(|e| matches!(e, Effect::CallMcpTool { tool_call_id: id, .. } if id == "tc-1")),
-            "should recover pending tool call"
+            "should re-issue pending tool call"
         );
     }
 
     #[test]
-    fn recover_all_tools_done_last_msg_is_tool() {
+    fn wake_all_tools_done_triggers_next_llm_call() {
         let mut state = created_state();
 
         let call_id = "call-1".to_string();
@@ -696,6 +832,7 @@ mod tests {
                     call_id: call_id.clone(),
                     request: mock_llm_request(),
                     stream: false,
+                    deadline: far_future(),
                 }),
                 EventPayload::LlmCallCompleted(LlmCallCompleted {
                     call_id: call_id.clone(),
@@ -720,6 +857,7 @@ mod tests {
                     tool_call_id: tool_call_id.clone(),
                     name: "test_tool".into(),
                     arguments: "{}".into(),
+                    deadline: far_future(),
                 }),
                 EventPayload::ToolCallCompleted(ToolCallCompleted {
                     tool_call_id: tool_call_id.clone(),
@@ -741,10 +879,9 @@ mod tests {
 
         assert_eq!(state.agent_state.messages.last().unwrap().role, Role::Tool);
 
-        let recovery = state.recover(None);
+        let effects = state.wake(None);
         assert!(
-            recovery
-                .resume
+            effects
                 .iter()
                 .any(|e| matches!(e, Effect::Command(CommandPayload::RequestLlmCall { .. }))),
             "should trigger next LLM call when all tools done and last msg is tool"
@@ -752,73 +889,14 @@ mod tests {
     }
 
     #[test]
-    fn recover_no_stuck_conditions_returns_empty() {
-        let state = created_state();
-        let recovery = state.recover(None);
-        assert!(recovery.setup.is_empty());
-        assert!(recovery.resume.is_empty());
-    }
-
-    #[test]
-    fn recover_during_interrupt_skips_agent_loop() {
+    fn wake_no_stuck_conditions_returns_empty() {
         let mut state = created_state();
-
-        // User message, LLM call, LLM completed, assistant message with tool call,
-        // then session interrupted
-        let call_id = "call-1".to_string();
-        apply_events(
-            &mut state,
-            vec![
-                EventPayload::MessageUser(MessageUser {
-                    message: Message {
-                        role: Role::User,
-                        content: Some("hi".into()),
-                        tool_calls: vec![],
-                        tool_call_id: None,
-                        call_id: None,
-                        token_count: None,
-                    },
-                    stream: false,
-                }),
-                EventPayload::LlmCallRequested(LlmCallRequested {
-                    call_id: call_id.clone(),
-                    request: mock_llm_request(),
-                    stream: false,
-                }),
-                EventPayload::LlmCallCompleted(LlmCallCompleted {
-                    call_id: call_id.clone(),
-                    response: mock_llm_response(),
-                }),
-                EventPayload::MessageAssistant(MessageAssistant {
-                    call_id: call_id.clone(),
-                    message: Message {
-                        role: Role::Assistant,
-                        content: Some("hello".into()),
-                        tool_calls: vec![],
-                        tool_call_id: None,
-                        call_id: Some(call_id.clone()),
-                        token_count: None,
-                    },
-                }),
-                EventPayload::SessionInterrupted(SessionInterrupted {
-                    interrupt_id: "int-1".into(),
-                    reason: "approval_needed".into(),
-                    payload: serde_json::json!({}),
-                }),
-            ],
-        );
-
-        let recovery = state.recover(None);
-        // Setup should be empty (no MCP servers), resume should be empty (interrupted)
-        assert!(recovery.setup.is_empty());
-        assert!(
-            recovery.resume.is_empty(),
-            "interrupted session should not resume agent loop"
-        );
+        let effects = state.wake(None);
+        assert!(effects.is_empty());
     }
 
     #[test]
-    fn recover_completed_llm_with_response_processed_is_not_stuck() {
+    fn wake_completed_llm_with_response_processed_returns_empty() {
         let mut state = created_state();
 
         let call_id = "call-1".to_string();
@@ -840,6 +918,7 @@ mod tests {
                     call_id: call_id.clone(),
                     request: mock_llm_request(),
                     stream: false,
+                    deadline: far_future(),
                 }),
                 EventPayload::LlmCallCompleted(LlmCallCompleted {
                     call_id: call_id.clone(),
@@ -859,11 +938,87 @@ mod tests {
             ],
         );
 
-        let recovery = state.recover(None);
-        // No stuck conditions — completed LLM with message extracted, last msg is assistant (not tool)
+        // Status is Done (strategy returned Done for no tool calls)
+        let effects = state.wake(None);
         assert!(
-            recovery.resume.is_empty(),
-            "fully completed flow should have no recovery effects"
+            effects.is_empty(),
+            "fully completed flow should have no wake effects"
         );
+    }
+
+    #[test]
+    fn setup_effects_includes_mcp_servers() {
+        let mut agent = test_agent();
+        agent.mcp_servers = vec![McpServerConfig {
+            name: "test-server".into(),
+            transport: McpTransportConfig::Stdio {
+                command: "echo".into(),
+                args: vec![],
+            },
+        }];
+
+        let mut state = AgentSession::new(
+            Uuid::new_v4(),
+            Box::new(ReactStrategy::new()),
+            serde_json::Value::Null,
+        );
+        let event = Event {
+            id: Uuid::new_v4(),
+            tenant_id: "t".into(),
+            session_id: state.agent_state.session_id,
+            sequence: 1,
+            span: SpanContext::root(),
+            occurred_at: Utc::now(),
+            payload: EventPayload::SessionCreated(SessionCreated {
+                agent,
+                auth: test_auth(),
+            }),
+        };
+        state.apply(&event);
+
+        let effects = state.setup_effects();
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::StartMcpServers(_))),
+            "setup should include MCP server start"
+        );
+    }
+
+    #[test]
+    fn failed_llm_call_has_retry_wake_at() {
+        let mut state = created_state();
+
+        // Create a failed LLM call → apply_core computes retry.next_at
+        apply_events(
+            &mut state,
+            vec![
+                EventPayload::MessageUser(MessageUser {
+                    message: Message {
+                        role: Role::User,
+                        content: Some("hi".into()),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                        call_id: None,
+                        token_count: None,
+                    },
+                    stream: false,
+                }),
+                EventPayload::LlmCallRequested(LlmCallRequested {
+                    call_id: "call-1".into(),
+                    request: mock_llm_request(),
+                    stream: false,
+                    deadline: far_future(),
+                }),
+                EventPayload::LlmCallErrored(LlmCallErrored {
+                    call_id: "call-1".into(),
+                    error: "timeout".into(),
+                }),
+            ],
+        );
+
+        // apply_core computed retry.next_at for the failed call
+        let wake_at = state.agent_state.wake_at();
+        assert!(wake_at.is_some(), "should have a wake_at for retry");
     }
 }

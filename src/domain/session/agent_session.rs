@@ -1,5 +1,3 @@
-use std::cmp::min;
-
 use chrono::Utc;
 use uuid::Uuid;
 
@@ -9,7 +7,7 @@ use super::agent_state::{AgentState, LlmCallStatus, SessionStatus, ToolCallStatu
 use super::command::{CommandPayload, SessionError};
 use super::effect::Effect;
 use super::react::{extract_assistant_message, extract_response_summary};
-use super::strategy::{Action, RecoveryEffects, Strategy, Turn};
+use super::strategy::{Action, Strategy, Turn};
 use crate::domain::event::*;
 use crate::domain::openai;
 
@@ -197,10 +195,12 @@ impl AgentSession {
                 call_id,
                 request,
                 stream,
+                deadline,
             } => Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {
                 call_id,
                 request,
                 stream,
+                deadline,
             })]),
             CommandPayload::CompleteLlmCall { call_id, response } => {
                 Ok(vec![EventPayload::LlmCallCompleted(LlmCallCompleted {
@@ -260,10 +260,12 @@ impl AgentSession {
                 tool_call_id,
                 name,
                 arguments,
+                deadline,
             } => Ok(vec![EventPayload::ToolCallRequested(ToolCallRequested {
                 tool_call_id,
                 name,
                 arguments,
+                deadline,
             })]),
             CommandPayload::CompleteToolCall {
                 tool_call_id,
@@ -424,23 +426,12 @@ impl AgentSession {
             }
 
             EventPayload::LlmCallErrored(payload) => {
-                let attempts = self
-                    .agent_state
-                    .llm_call(&payload.call_id)
-                    .map(|c| c.retry.attempts)
-                    .unwrap_or(1);
-                let backoff_secs = min(2u64.pow(attempts), 60);
-                let wake_at = Utc::now() + chrono::Duration::seconds(backoff_secs as i64);
-
                 println!(
-                    "[session:{}] LlmCallErrored [{}] -> idle, retry in {}s",
-                    session_id, payload.call_id, backoff_secs,
+                    "[session:{}] LlmCallErrored [{}] -> idle, wake scheduler handles retry",
+                    session_id, payload.call_id,
                 );
-
-                self.agent_state.status = SessionStatus::Idle {
-                    wake_at: Some(wake_at),
-                };
-                vec![Effect::ScheduleWake { wake_at }]
+                self.agent_state.status = SessionStatus::Idle;
+                vec![] // wake scheduler handles retry timing
             }
 
             EventPayload::MessageTool(_) => {
@@ -499,6 +490,28 @@ impl AgentSession {
         effects
     }
 
+    /// Compute LLM call deadline from agent config.
+    fn llm_deadline(&self) -> chrono::DateTime<Utc> {
+        let timeout = self
+            .agent_state
+            .agent
+            .as_ref()
+            .map(|a| a.retry.llm_timeout_secs)
+            .unwrap_or(60);
+        Utc::now() + chrono::Duration::seconds(timeout as i64)
+    }
+
+    /// Compute tool call deadline from agent config.
+    fn tool_deadline(&self) -> chrono::DateTime<Utc> {
+        let timeout = self
+            .agent_state
+            .agent
+            .as_ref()
+            .map(|a| a.retry.tool_timeout_secs)
+            .unwrap_or(120);
+        Utc::now() + chrono::Duration::seconds(timeout as i64)
+    }
+
     /// Translate a strategy Action into Effects.
     fn execute_action(&mut self, action: Action, tools: Option<Vec<openai::Tool>>) -> Vec<Effect> {
         match action {
@@ -509,6 +522,7 @@ impl AgentSession {
                         call_id: new_call_id(),
                         request,
                         stream,
+                        deadline: self.llm_deadline(),
                     })],
                     None => vec![],
                 }
@@ -521,6 +535,7 @@ impl AgentSession {
                         tool_call_id: tc.id.clone(),
                         name: tc.name.clone(),
                         arguments: tc.arguments.clone(),
+                        deadline: self.tool_deadline(),
                     })
                 })
                 .collect(),
@@ -537,84 +552,85 @@ impl AgentSession {
     }
 
     // -----------------------------------------------------------------------
-    // Wake — resume from Idle state
+    // Wake — single "figure out what to do next" method
+    // Handles both normal retries (from Idle) and crash recovery (from Active)
     // -----------------------------------------------------------------------
 
     pub fn wake(&mut self, tools: Option<Vec<openai::Tool>>) -> Vec<Effect> {
-        self.agent_state.status = SessionStatus::Active;
-        if let Some(request) = self.agent_state.build_llm_request(tools) {
-            vec![Effect::Command(CommandPayload::RequestLlmCall {
-                call_id: new_call_id(),
-                request,
-                stream: true,
-            })]
-        } else {
-            vec![]
-        }
-    }
+        let now = Utc::now();
+        let max_retries = self
+            .agent_state
+            .agent
+            .as_ref()
+            .map(|a| a.retry.max_retries)
+            .unwrap_or(3);
 
-    // -----------------------------------------------------------------------
-    // Recover — derive in-flight state from AgentState
-    // -----------------------------------------------------------------------
-
-    pub fn recover(&self, tools: Option<Vec<openai::Tool>>) -> RecoveryEffects {
-        let mut setup = Vec::new();
-        let mut resume = Vec::new();
-
-        // MCP servers not running
-        if let Some(agent) = &self.agent_state.agent {
-            if !agent.mcp_servers.is_empty() {
-                setup.push(Effect::StartMcpServers(agent.mcp_servers.clone()));
-            }
-        }
-
-        // If interrupted, skip agent-loop recovery — session is paused
-        if matches!(self.agent_state.status, SessionStatus::Interrupted { .. }) {
-            return RecoveryEffects { setup, resume };
-        }
-
-        // If idle with a wake-up time, schedule it
-        if let SessionStatus::Idle {
-            wake_at: Some(wake_at),
-        } = self.agent_state.status
-        {
-            if wake_at <= Utc::now() {
-                // Wake-up time already passed — resume immediately
-                if let Some(request) = self.agent_state.build_llm_request(tools.clone()) {
-                    resume.push(Effect::Command(CommandPayload::RequestLlmCall {
-                        call_id: new_call_id(),
-                        request,
-                        stream: true,
-                    }));
-                }
-            } else {
-                setup.push(Effect::ScheduleWake { wake_at });
-            }
-            return RecoveryEffects { setup, resume };
-        }
-
-        // If idle without wake-up or done, nothing to recover
-        if matches!(
-            self.agent_state.status,
-            SessionStatus::Idle { .. } | SessionStatus::Done
-        ) {
-            return RecoveryEffects { setup, resume };
-        }
-
-        // Active — recover in-flight work
-        // Pending LLM call — re-issue the call
-        for call in self.agent_state.llm_calls() {
-            if call.status == LlmCallStatus::Pending {
-                resume.push(Effect::CallLlm {
+        // 1. Timed-out pending LLM calls → fail, then retry if within limits
+        for call in self.agent_state.llm_calls().cloned().collect::<Vec<_>>() {
+            if call.status == LlmCallStatus::Pending && call.deadline <= now {
+                let mut effects = vec![Effect::Command(CommandPayload::FailLlmCall {
                     call_id: call.call_id.clone(),
-                    request: call.request.clone(),
-                    stream: true,
-                });
+                    error: "deadline exceeded".to_string(),
+                })];
+                // After failing, retry if within limits (the FailLlmCall will increment attempts via apply_core)
+                if call.retry.attempts < max_retries {
+                    if let Some(request) = self.agent_state.build_llm_request(tools.clone()) {
+                        effects.push(Effect::Command(CommandPayload::RequestLlmCall {
+                            call_id: new_call_id(),
+                            request,
+                            stream: true,
+                            deadline: self.llm_deadline(),
+                        }));
+                    }
+                }
+                return effects;
             }
         }
 
-        // Completed LLM call, message not extracted — re-extract from stored response
-        for call in self.agent_state.llm_calls() {
+        // 2. Timed-out pending tool calls → fail
+        for tc in self
+            .agent_state
+            .tool_call_states()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            if tc.status == ToolCallStatus::Pending && tc.deadline <= now {
+                return vec![Effect::Command(CommandPayload::FailToolCall {
+                    tool_call_id: tc.tool_call_id.clone(),
+                    name: tc.name.clone(),
+                    error: "deadline exceeded".to_string(),
+                })];
+            }
+        }
+
+        // 3. Failed LLM call with retry.next_at passed → re-issue with new deadline
+        for call in self.agent_state.llm_calls().cloned().collect::<Vec<_>>() {
+            if call.status == LlmCallStatus::Failed {
+                if call.retry.attempts >= max_retries {
+                    // Past retry limit → done
+                    self.agent_state.status = SessionStatus::Done;
+                    return vec![];
+                }
+                if let Some(next_at) = call.retry.next_at {
+                    if next_at <= now {
+                        if let Some(request) =
+                            self.agent_state.build_llm_request(tools.clone())
+                        {
+                            self.agent_state.status = SessionStatus::Active;
+                            return vec![Effect::Command(CommandPayload::RequestLlmCall {
+                                call_id: new_call_id(),
+                                request,
+                                stream: true,
+                                deadline: self.llm_deadline(),
+                            })];
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Completed LLM call, response not processed → emit SendAssistantMessage + tool calls
+        for call in self.agent_state.llm_calls().cloned().collect::<Vec<_>>() {
             if call.status == LlmCallStatus::Completed && !call.response_processed {
                 if let Some(ref response) = call.response {
                     let (content, tool_calls, token_count) = extract_assistant_message(response);
@@ -629,16 +645,22 @@ impl AgentSession {
                             tool_call_id: tc.id.clone(),
                             name: tc.name.clone(),
                             arguments: tc.arguments.clone(),
+                            deadline: self.tool_deadline(),
                         }));
                     }
-                    resume.extend(effects);
+                    return effects;
                 }
             }
         }
 
-        // Pending tool calls — re-issue
-        for tc in self.agent_state.tool_call_states() {
-            if tc.status == ToolCallStatus::Pending {
+        // 5. Pending tool calls still in flight → re-issue them (crash recovery)
+        for tc in self
+            .agent_state
+            .tool_call_states()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            if tc.status == ToolCallStatus::Pending && tc.deadline > now {
                 let args: serde_json::Value = self
                     .agent_state
                     .messages
@@ -647,15 +669,26 @@ impl AgentSession {
                     .find(|t| t.id == tc.tool_call_id)
                     .and_then(|t| serde_json::from_str(&t.arguments).ok())
                     .unwrap_or_default();
-                resume.push(Effect::CallMcpTool {
+                return vec![Effect::CallMcpTool {
                     tool_call_id: tc.tool_call_id.clone(),
                     name: tc.name.clone(),
                     arguments: args,
-                });
+                }];
             }
         }
 
-        // All tools done, last message is Tool, no pending LLM call → trigger next LLM call
+        // 6. Pending LLM calls still in flight → re-issue (crash recovery)
+        for call in self.agent_state.llm_calls().cloned().collect::<Vec<_>>() {
+            if call.status == LlmCallStatus::Pending && call.deadline > now {
+                return vec![Effect::CallLlm {
+                    call_id: call.call_id.clone(),
+                    request: call.request.clone(),
+                    stream: true,
+                }];
+            }
+        }
+
+        // 7. All tools done, no next step → consult strategy (same as react does for MessageTool)
         let last_is_tool = self
             .agent_state
             .messages
@@ -665,15 +698,31 @@ impl AgentSession {
             && last_is_tool
             && !self.agent_state.has_pending_llm()
         {
+            self.agent_state.status = SessionStatus::Active;
             if let Some(request) = self.agent_state.build_llm_request(tools) {
-                resume.push(Effect::Command(CommandPayload::RequestLlmCall {
-                    call_id: Uuid::new_v4().to_string(),
+                return vec![Effect::Command(CommandPayload::RequestLlmCall {
+                    call_id: new_call_id(),
                     request,
                     stream: true,
-                }));
+                    deadline: self.llm_deadline(),
+                })];
             }
         }
 
-        RecoveryEffects { setup, resume }
+        vec![]
+    }
+
+    // -----------------------------------------------------------------------
+    // Setup — one-time effects needed after resume (MCP servers)
+    // -----------------------------------------------------------------------
+
+    pub fn setup_effects(&self) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        if let Some(agent) = &self.agent_state.agent {
+            if !agent.mcp_servers.is_empty() {
+                effects.push(Effect::StartMcpServers(agent.mcp_servers.clone()));
+            }
+        }
+        effects
     }
 }

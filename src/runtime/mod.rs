@@ -19,6 +19,7 @@ pub mod mcp;
 mod session_actor;
 pub mod session_client;
 mod strategy;
+pub mod wake_scheduler;
 
 pub use dispatcher::spawn_dispatcher;
 pub use event_store::{EventStore, InMemoryEventStore, SessionLoad, StoreError, Version};
@@ -45,6 +46,8 @@ pub struct Runtime {
     mcp_provider: Arc<dyn McpClientProvider>,
     strategy_provider: Arc<dyn StrategyProvider>,
     agents: HashMap<String, AgentConfig>,
+    wake_scheduler: ActorRef<wake_scheduler::WakeSchedulerMessage>,
+    wake_scheduler_handle: JoinHandle<()>,
 }
 
 impl Runtime {
@@ -56,6 +59,14 @@ impl Runtime {
             StaticLlmClientProvider::from_config(&config.llm_clients, &default_llm_factories())
                 .expect("failed to create LLM clients from config");
 
+        let (wake_scheduler, wake_scheduler_handle) = Actor::spawn(
+            Some("wake-scheduler".to_string()),
+            wake_scheduler::WakeScheduler,
+            (),
+        )
+        .await
+        .expect("failed to spawn wake scheduler");
+
         Runtime {
             store,
             dispatcher,
@@ -64,6 +75,8 @@ impl Runtime {
             mcp_provider: Arc::new(StaticMcpClientProvider),
             strategy_provider: Arc::new(StaticStrategyProvider),
             agents: config.agents.clone(),
+            wake_scheduler,
+            wake_scheduler_handle,
         }
     }
 
@@ -173,7 +186,8 @@ impl Runtime {
         })
     }
 
-    /// Resume an existing session from stored snapshot, triggering crash recovery.
+    /// Resume an existing session from stored snapshot.
+    /// Recovery is handled by the wake scheduler — no special recovery path needed.
     pub async fn resume_session(
         &self,
         session_id: Uuid,
@@ -211,8 +225,11 @@ impl Runtime {
         };
         session.agent_state.last_reacted = session.agent_state.last_applied;
 
-        // Compute recovery effects before spawning the actor
-        let recovery = session.recover(None);
+        // Compute setup effects (MCP servers — runtime state, never persisted)
+        let setup = session.setup_effects();
+
+        // Compute wake_at for scheduler registration
+        let wake_at = session.agent_state.wake_at();
 
         let actor_state = SessionActorState::from_session(
             session,
@@ -244,15 +261,19 @@ impl Runtime {
         .await
         .expect("failed to spawn session client");
 
-        // Phase 1: start MCP servers via the actor
-        if !recovery.setup.is_empty() {
-            let _ = actor.send_message(SessionMessage::ResumeRecovery(recovery.setup));
+        // Start MCP servers (always needed — runtime state, never persisted)
+        if !setup.is_empty() {
+            let _ = actor.send_message(SessionMessage::SetupEffects(setup));
         }
 
-        // Phase 2: send resume effects (LLM/tool calls)
-        if !recovery.resume.is_empty() {
-            let _ = actor.send_message(SessionMessage::ResumeRecovery(recovery.resume));
-        }
+        // Register with wake scheduler — it will immediately wake if wake_at is past due
+        let _ = self
+            .wake_scheduler
+            .send_message(wake_scheduler::WakeSchedulerMessage::UpdateWakeAt {
+                session_id,
+                wake_at,
+                actor_ref: actor.clone(),
+            });
 
         Ok(SessionHandle {
             session_id,
@@ -267,7 +288,13 @@ impl Runtime {
         &self.store
     }
 
+    pub fn wake_scheduler(&self) -> &ActorRef<wake_scheduler::WakeSchedulerMessage> {
+        &self.wake_scheduler
+    }
+
     pub async fn shutdown(self) {
+        self.wake_scheduler.stop(None);
+        let _ = self.wake_scheduler_handle.await;
         self.dispatcher.stop(None);
         let _ = self.dispatcher_handle.await;
     }

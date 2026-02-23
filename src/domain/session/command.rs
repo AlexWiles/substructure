@@ -34,6 +34,7 @@ pub enum CommandPayload {
         call_id: String,
         request: LlmRequest,
         stream: bool,
+        deadline: DateTime<Utc>,
     },
     CompleteLlmCall {
         call_id: String,
@@ -52,6 +53,7 @@ pub enum CommandPayload {
         tool_call_id: String,
         name: String,
         arguments: String,
+        deadline: DateTime<Utc>,
     },
     CompleteToolCall {
         tool_call_id: String,
@@ -96,7 +98,12 @@ mod tests {
     use super::*;
     use crate::domain::agent::{AgentConfig, LlmConfig};
     use crate::domain::openai;
+    use chrono::Utc;
     use uuid::Uuid;
+
+    fn far_future() -> DateTime<Utc> {
+        Utc::now() + chrono::Duration::hours(1)
+    }
 
     fn test_agent() -> AgentConfig {
         AgentConfig {
@@ -109,6 +116,7 @@ mod tests {
             system_prompt: "test".into(),
             mcp_servers: vec![],
             strategy: Default::default(),
+            retry: Default::default(),
         }
     }
 
@@ -198,6 +206,7 @@ mod tests {
                 call_id: call_id.clone(),
                 request: mock_llm_request(),
                 stream: false,
+                deadline: far_future(),
             })
             .unwrap();
         apply_events(&mut state, payloads);
@@ -249,6 +258,7 @@ mod tests {
                 call_id: call_id.clone(),
                 request: mock_llm_request(),
                 stream: false,
+                deadline: far_future(),
             })
             .unwrap();
         apply_events(&mut state, payloads);
@@ -280,6 +290,7 @@ mod tests {
                 tool_call_id: tool_call_id.clone(),
                 name: "test".into(),
                 arguments: "{}".into(),
+                deadline: far_future(),
             })
             .unwrap();
         apply_events(&mut state, payloads);
@@ -329,6 +340,7 @@ mod tests {
                 call_id: call_id.clone(),
                 request: mock_llm_request(),
                 stream: true,
+                deadline: far_future(),
             })
             .unwrap();
         apply_events(&mut state, payloads);
