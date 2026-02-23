@@ -1,11 +1,20 @@
+use std::collections::HashMap;
+
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use serde::{Deserialize, Serialize};
 
 use crate::domain::event::{
-    AgentConfig, Event, EventPayload, LlmRequest, Message, Role, SessionAuth,
+    AgentConfig, Event, EventPayload, LlmRequest, LlmResponse, Message, Role, SessionAuth,
 };
 use crate::domain::openai;
+
+use super::strategy::ToolResult;
+
+// ---------------------------------------------------------------------------
+// Token tracking
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenBudget {
@@ -13,9 +22,87 @@ pub struct TokenBudget {
     pub limit: Option<u64>,
 }
 
+// ---------------------------------------------------------------------------
+// Session status
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SessionStatus {
+    /// Work in flight: LLM calls, tool calls, strategy decisions.
+    Active,
+    /// Nothing in flight. Optional scheduled wake-up (e.g., retry backoff).
+    Idle { wake_at: Option<DateTime<Utc>> },
+    /// Paused for external input (e.g., human approval).
+    Interrupted { interrupt_id: String },
+    /// Agent loop finished. Waiting for next user input.
+    Done,
+}
+
+// ---------------------------------------------------------------------------
+// Retry tracking (per-call)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RetryState {
+    pub attempts: u32,
+    pub next_at: Option<DateTime<Utc>>,
+}
+
+// ---------------------------------------------------------------------------
+// LLM call lifecycle
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum LlmCallStatus {
+    Pending,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmCallState {
+    pub call_id: String,
+    pub request: LlmRequest,
+    pub status: LlmCallStatus,
+    pub response: Option<LlmResponse>,
+    pub response_processed: bool,
+    pub retry: RetryState,
+}
+
+// ---------------------------------------------------------------------------
+// Tool call lifecycle
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ToolCallStatus {
+    Pending,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallState {
+    pub tool_call_id: String,
+    pub name: String,
+    pub status: ToolCallStatus,
+    pub result: Option<ToolCallResult>,
+    pub retry: RetryState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallResult {
+    pub content: String,
+    pub is_error: bool,
+}
+
+// ---------------------------------------------------------------------------
+// AgentState — the complete aggregate projection
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentState {
     pub session_id: Uuid,
+    pub status: SessionStatus,
     pub agent: Option<AgentConfig>,
     pub auth: Option<SessionAuth>,
     pub messages: Vec<Message>,
@@ -23,12 +110,17 @@ pub struct AgentState {
     pub stream_version: u64,
     pub last_applied: Option<u64>,
     pub last_reacted: Option<u64>,
+
+    // Call lifecycle tracking
+    llm_calls: HashMap<String, LlmCallState>,
+    tool_calls: HashMap<String, ToolCallState>,
 }
 
 impl AgentState {
     pub fn new(session_id: Uuid) -> Self {
         AgentState {
             session_id,
+            status: SessionStatus::Done,
             agent: None,
             auth: None,
             messages: Vec::new(),
@@ -39,10 +131,12 @@ impl AgentState {
             stream_version: 0,
             last_applied: None,
             last_reacted: None,
+            llm_calls: HashMap::new(),
+            tool_calls: HashMap::new(),
         }
     }
 
-    /// Apply shared state from an event. Returns `true` if applied (not a duplicate).
+    /// Apply an event to the aggregate. Returns `true` if applied (not a duplicate).
     pub fn apply_core(&mut self, event: &Event) -> bool {
         if self.last_applied.is_some_and(|seq| event.sequence <= seq) {
             return false;
@@ -62,15 +156,187 @@ impl AgentState {
             EventPayload::MessageAssistant(payload) => {
                 self.track_tokens(&payload.message);
                 self.messages.push(payload.message.clone());
+                if let Some(call) = self.llm_calls.get_mut(&payload.call_id) {
+                    call.response_processed = true;
+                }
             }
             EventPayload::MessageTool(payload) => {
                 self.track_tokens(&payload.message);
                 self.messages.push(payload.message.clone());
             }
+            EventPayload::LlmCallRequested(payload) => {
+                self.status = SessionStatus::Active;
+                self.llm_calls.insert(
+                    payload.call_id.clone(),
+                    LlmCallState {
+                        call_id: payload.call_id.clone(),
+                        request: payload.request.clone(),
+                        status: LlmCallStatus::Pending,
+                        response: None,
+                        response_processed: false,
+                        retry: RetryState::default(),
+                    },
+                );
+            }
+            EventPayload::LlmCallCompleted(payload) => {
+                if let Some(call) = self.llm_calls.get_mut(&payload.call_id) {
+                    call.status = LlmCallStatus::Completed;
+                    call.response = Some(payload.response.clone());
+                }
+            }
+            EventPayload::LlmCallErrored(payload) => {
+                if let Some(call) = self.llm_calls.get_mut(&payload.call_id) {
+                    call.status = LlmCallStatus::Failed;
+                    call.retry.attempts += 1;
+                }
+            }
+            EventPayload::ToolCallRequested(payload) => {
+                self.status = SessionStatus::Active;
+                self.tool_calls.insert(
+                    payload.tool_call_id.clone(),
+                    ToolCallState {
+                        tool_call_id: payload.tool_call_id.clone(),
+                        name: payload.name.clone(),
+                        status: ToolCallStatus::Pending,
+                        result: None,
+                        retry: RetryState::default(),
+                    },
+                );
+            }
+            EventPayload::ToolCallCompleted(payload) => {
+                if let Some(tc) = self.tool_calls.get_mut(&payload.tool_call_id) {
+                    tc.status = ToolCallStatus::Completed;
+                    tc.result = Some(ToolCallResult {
+                        content: payload.result.clone(),
+                        is_error: false,
+                    });
+                }
+            }
+            EventPayload::ToolCallErrored(payload) => {
+                if let Some(tc) = self.tool_calls.get_mut(&payload.tool_call_id) {
+                    tc.status = ToolCallStatus::Failed;
+                    tc.result = Some(ToolCallResult {
+                        content: payload.error.clone(),
+                        is_error: true,
+                    });
+                    tc.retry.attempts += 1;
+                }
+            }
+            EventPayload::SessionInterrupted(payload) => {
+                self.status = SessionStatus::Interrupted {
+                    interrupt_id: payload.interrupt_id.clone(),
+                };
+            }
+            EventPayload::InterruptResumed(_) => {
+                self.status = SessionStatus::Active;
+            }
             _ => {}
         }
         true
     }
+
+    // -----------------------------------------------------------------------
+    // Query methods
+    // -----------------------------------------------------------------------
+
+    pub fn active_interrupt(&self) -> Option<&str> {
+        match &self.status {
+            SessionStatus::Interrupted { interrupt_id } => Some(interrupt_id),
+            _ => None,
+        }
+    }
+
+    pub fn has_llm_call(&self, call_id: &str) -> bool {
+        self.llm_calls.contains_key(call_id)
+    }
+
+    pub fn llm_call_status(&self, call_id: &str) -> Option<&LlmCallStatus> {
+        self.llm_calls.get(call_id).map(|c| &c.status)
+    }
+
+    pub fn active_llm_call(&self) -> Option<&LlmCallState> {
+        self.llm_calls
+            .values()
+            .find(|c| c.status == LlmCallStatus::Pending)
+    }
+
+    pub fn is_response_processed(&self, call_id: &str) -> bool {
+        self.llm_calls
+            .get(call_id)
+            .is_some_and(|c| c.response_processed)
+    }
+
+    pub fn has_tool_call(&self, tool_call_id: &str) -> bool {
+        self.tool_calls.contains_key(tool_call_id)
+    }
+
+    pub fn tool_call_status(&self, tool_call_id: &str) -> Option<&ToolCallStatus> {
+        self.tool_calls.get(tool_call_id).map(|tc| &tc.status)
+    }
+
+    pub fn has_pending_llm(&self) -> bool {
+        self.llm_calls
+            .values()
+            .any(|c| c.status == LlmCallStatus::Pending)
+    }
+
+    pub fn llm_calls(&self) -> impl Iterator<Item = &LlmCallState> {
+        self.llm_calls.values()
+    }
+
+    pub fn llm_call(&self, call_id: &str) -> Option<&LlmCallState> {
+        self.llm_calls.get(call_id)
+    }
+
+    pub fn tool_call_states(&self) -> impl Iterator<Item = &ToolCallState> {
+        self.tool_calls.values()
+    }
+
+    /// Derive pending tool result count from the message history.
+    pub fn pending_tool_results(&self) -> usize {
+        // Walk backwards: count Tool messages, then find the Assistant message.
+        let mut tool_msgs = 0;
+        for msg in self.messages.iter().rev() {
+            match msg.role {
+                Role::Tool => tool_msgs += 1,
+                Role::Assistant => {
+                    return msg.tool_calls.len().saturating_sub(tool_msgs);
+                }
+                _ => return 0,
+            }
+        }
+        0
+    }
+
+    /// Build the tool result batch from completed/errored tool calls
+    /// belonging to the most recent assistant message.
+    pub fn collect_tool_results(&self) -> Vec<ToolResult> {
+        let tool_call_ids: Vec<&str> = self
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::Assistant && !m.tool_calls.is_empty())
+            .map(|m| m.tool_calls.iter().map(|tc| tc.id.as_str()).collect())
+            .unwrap_or_default();
+
+        tool_call_ids
+            .iter()
+            .filter_map(|id| {
+                let tc = self.tool_calls.get(*id)?;
+                let result = tc.result.as_ref()?;
+                Some(ToolResult {
+                    tool_call_id: tc.tool_call_id.clone(),
+                    name: tc.name.clone(),
+                    content: result.content.clone(),
+                    is_error: result.is_error,
+                })
+            })
+            .collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // LLM request building
+    // -----------------------------------------------------------------------
 
     pub fn build_llm_request(&self, tools: Option<Vec<openai::Tool>>) -> Option<LlmRequest> {
         let agent = self.agent.as_ref()?;

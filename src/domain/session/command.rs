@@ -85,6 +85,8 @@ pub enum SessionError {
     SessionAlreadyCreated,
     #[error("session is interrupted")]
     SessionInterrupted,
+    #[error("session is busy")]
+    SessionBusy,
 }
 
 #[cfg(test)]
@@ -156,7 +158,7 @@ mod tests {
         let event = Event {
             id: Uuid::new_v4(),
             tenant_id: "t".into(),
-            session_id: state.core.session_id,
+            session_id: state.agent_state.session_id,
             sequence: 0,
             span: SpanContext::root(),
             occurred_at: chrono::Utc::now(),
@@ -170,12 +172,12 @@ mod tests {
     }
 
     fn apply_events(state: &mut AgentSession, payloads: Vec<EventPayload>) {
-        let seq = state.core.last_applied.unwrap_or(0);
+        let seq = state.agent_state.last_applied.unwrap_or(0);
         for (i, payload) in payloads.into_iter().enumerate() {
             let event = Event {
                 id: Uuid::new_v4(),
                 tenant_id: "t".into(),
-                session_id: state.core.session_id,
+                session_id: state.agent_state.session_id,
                 sequence: seq + 1 + i as u64,
                 span: SpanContext::root(),
                 occurred_at: chrono::Utc::now(),

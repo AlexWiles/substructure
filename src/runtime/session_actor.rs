@@ -13,7 +13,8 @@ use super::mcp::{Content, McpClient};
 use super::strategy::StrategyProvider;
 use crate::domain::event::*;
 use crate::domain::session::{
-    AgentSession, AgentState, CommandPayload, Effect, SessionCommand, SessionError, Strategy,
+    AgentSession, AgentState, CommandPayload, Effect, SessionCommand, SessionError, SessionStatus,
+    Strategy,
 };
 
 // ---------------------------------------------------------------------------
@@ -52,6 +53,8 @@ pub enum SessionMessage {
     Events(Vec<Arc<Event>>),
     /// Resume effects to execute after MCP servers are ready.
     ResumeRecovery(Vec<Effect>),
+    /// Timer-triggered wake from Idle state.
+    Wake,
 }
 
 // ---------------------------------------------------------------------------
@@ -106,7 +109,7 @@ impl SessionActorState {
         strategy_provider: Arc<dyn StrategyProvider>,
     ) -> Self {
         SessionActorState {
-            session_id: session.core.session_id,
+            session_id: session.agent_state.session_id,
             session,
             store,
             auth,
@@ -153,10 +156,10 @@ async fn execute(
         return Ok(vec![]);
     }
 
-    let version = Version(state.session.core.stream_version);
+    let version = Version(state.session.agent_state.stream_version);
 
     // Aggregate builds events (assigns session-local sequences)
-    let base_seq = state.session.core.stream_version + 1;
+    let base_seq = state.session.agent_state.stream_version + 1;
     let events: Vec<Event> = payloads
         .into_iter()
         .enumerate()
@@ -225,7 +228,7 @@ async fn handle_effect(
         } => {
             let client_id = state
                 .session
-                .core
+                .agent_state
                 .agent
                 .as_ref()
                 .map(|a| a.llm.client.clone())
@@ -346,6 +349,16 @@ async fn handle_effect(
             }
             // else: no MCP client — client-side tool, handled via event fan-out
         }
+        Effect::ScheduleWake { wake_at } => {
+            let delay = (wake_at - Utc::now())
+                .to_std()
+                .unwrap_or(std::time::Duration::ZERO);
+            let myself = myself.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                let _ = myself.send_message(SessionMessage::Wake);
+            });
+        }
     }
 }
 
@@ -387,7 +400,7 @@ impl Actor for SessionActor {
                     state.session.apply(event);
                     let reacted = state
                         .session
-                        .core
+                        .agent_state
                         .last_reacted
                         .is_some_and(|seq| event.sequence <= seq);
                     if !reacted {
@@ -396,17 +409,27 @@ impl Actor for SessionActor {
                         for effect in effects {
                             handle_effect(state, &myself, &event.span, effect).await;
                         }
-                        state.session.core.last_reacted = Some(event.sequence);
+                        state.session.agent_state.last_reacted = Some(event.sequence);
                     }
                 }
             }
             SessionMessage::GetState(reply) => {
-                let _ = reply.send(state.session.core.clone());
+                let _ = reply.send(state.session.agent_state.clone());
             }
             SessionMessage::ResumeRecovery(effects) => {
                 let span = SpanContext::root();
                 for effect in effects {
                     handle_effect(state, &myself, &span, effect).await;
+                }
+            }
+            SessionMessage::Wake => {
+                if matches!(state.session.agent_state.status, SessionStatus::Idle { .. }) {
+                    let tools = state.all_tools();
+                    let effects = state.session.wake(tools);
+                    let span = SpanContext::root();
+                    for effect in effects {
+                        handle_effect(state, &myself, &span, effect).await;
+                    }
                 }
             }
         }
@@ -481,7 +504,7 @@ mod tests {
         let event = Event {
             id: Uuid::new_v4(),
             tenant_id: "t".into(),
-            session_id: state.core.session_id,
+            session_id: state.agent_state.session_id,
             sequence: 1,
             span: SpanContext::root(),
             occurred_at: chrono::Utc::now(),
@@ -495,12 +518,12 @@ mod tests {
     }
 
     fn apply_events(state: &mut AgentSession, payloads: Vec<EventPayload>) {
-        let seq = state.core.last_applied.unwrap_or(0);
+        let seq = state.agent_state.last_applied.unwrap_or(0);
         for (i, payload) in payloads.into_iter().enumerate() {
             let event = Event {
                 id: Uuid::new_v4(),
                 tenant_id: "t".into(),
-                session_id: state.core.session_id,
+                session_id: state.agent_state.session_id,
                 sequence: seq + 1 + i as u64,
                 span: SpanContext::root(),
                 occurred_at: chrono::Utc::now(),
@@ -716,7 +739,7 @@ mod tests {
             ],
         );
 
-        assert_eq!(state.core.messages.last().unwrap().role, Role::Tool);
+        assert_eq!(state.agent_state.messages.last().unwrap().role, Role::Tool);
 
         let recovery = state.recover(None);
         assert!(

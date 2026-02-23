@@ -1,10 +1,12 @@
+use std::cmp::min;
+
+use chrono::Utc;
 use uuid::Uuid;
 
 use serde_json::Value;
 
-use super::call_tracker::{CallTracker, LlmCallStatus, ToolCallStatus};
+use super::agent_state::{AgentState, LlmCallStatus, SessionStatus, ToolCallStatus};
 use super::command::{CommandPayload, SessionError};
-use super::agent_state::AgentState;
 use super::effect::Effect;
 use super::react::{extract_assistant_message, extract_response_summary};
 use super::snapshot::SessionSnapshot;
@@ -17,56 +19,51 @@ fn new_call_id() -> String {
 }
 
 pub struct AgentSession {
-    pub core: AgentState,
+    pub agent_state: AgentState,
     pub strategy_state: Value,
-    tracker: CallTracker,
     strategy: Box<dyn Strategy>,
 }
 
 impl AgentSession {
     pub fn new(session_id: Uuid, strategy: Box<dyn Strategy>, strategy_state: Value) -> Self {
         AgentSession {
-            core: AgentState::new(session_id),
+            agent_state: AgentState::new(session_id),
             strategy_state,
-            tracker: CallTracker::new(),
             strategy,
         }
     }
 
-    /// Build from a pre-populated core and replay events through the tracker
-    /// and strategy state.
+    /// Build from a pre-populated core, scanning events for strategy state.
     pub fn from_core(
         core: AgentState,
         strategy: Box<dyn Strategy>,
-        strategy_state: Value,
+        default_strategy_state: Value,
         events: &[Event],
     ) -> Self {
-        let mut tracker = CallTracker::new();
-        let mut current_state = strategy_state;
-        for event in events {
-            tracker.apply(event);
-            if let EventPayload::StrategyStateChanged(payload) = &event.payload {
-                current_state = payload.state.clone();
-            }
-        }
+        let strategy_state = events
+            .iter()
+            .rev()
+            .find_map(|e| match &e.payload {
+                EventPayload::StrategyStateChanged(p) => Some(p.state.clone()),
+                _ => None,
+            })
+            .unwrap_or(default_strategy_state);
+
         AgentSession {
-            core,
-            tracker,
+            agent_state: core,
             strategy,
-            strategy_state: current_state,
+            strategy_state,
         }
     }
 
-    /// Build from a snapshot, applying any remaining events that occurred
-    /// after the snapshot was taken.
+    /// Build from a snapshot, applying any remaining events.
     pub fn from_snapshot(
         snapshot: SessionSnapshot,
         strategy: Box<dyn Strategy>,
         remaining_events: &[Event],
     ) -> Self {
         let mut session = AgentSession {
-            core: snapshot.core,
-            tracker: snapshot.tracker,
+            agent_state: snapshot.core,
             strategy,
             strategy_state: snapshot.strategy_state,
         };
@@ -79,24 +76,22 @@ impl AgentSession {
     /// Take a snapshot of the current session state.
     pub fn snapshot(&self) -> SessionSnapshot {
         SessionSnapshot {
-            core: self.core.clone(),
-            tracker: self.tracker.clone(),
+            core: self.agent_state.clone(),
             strategy_state: self.strategy_state.clone(),
         }
     }
 
     pub fn apply(&mut self, event: &Event) {
-        if !self.core.apply_core(event) {
+        if !self.agent_state.apply_core(event) {
             return;
         }
-        self.tracker.apply(event);
         if let EventPayload::StrategyStateChanged(payload) = &event.payload {
             self.strategy_state = payload.state.clone();
         }
     }
 
     pub fn handle(&self, cmd: CommandPayload) -> Result<Vec<EventPayload>, SessionError> {
-        match (&self.core.agent, cmd) {
+        match (&self.agent_state.agent, cmd) {
             // Uncreated session: only CreateSession is valid
             (None, CommandPayload::CreateSession { agent, auth }) => {
                 Ok(vec![EventPayload::SessionCreated(SessionCreated {
@@ -108,20 +103,28 @@ impl AgentSession {
                 Err(SessionError::SessionAlreadyCreated)
             }
             (None, _) => Err(SessionError::SessionNotCreated),
-            // Active session — use tracker for all guards
+            // Active session
             (Some(_), cmd) => self.handle_active(cmd),
         }
     }
 
-    /// Command validation using the CallTracker for idempotency guards.
+    /// Command validation using AgentState for idempotency guards.
     fn handle_active(&self, cmd: CommandPayload) -> Result<Vec<EventPayload>, SessionError> {
         match cmd {
             CommandPayload::CreateSession { .. } => {
                 unreachable!("CreateSession is handled by SessionState::handle")
             }
             // SendUserMessage guard: reject if session is interrupted
-            CommandPayload::SendUserMessage { .. } if self.tracker.active_interrupt().is_some() => {
+            CommandPayload::SendUserMessage { .. }
+                if matches!(self.agent_state.status, SessionStatus::Interrupted { .. }) =>
+            {
                 Err(SessionError::SessionInterrupted)
+            }
+            // SendUserMessage guard: reject if session is active (work in flight)
+            CommandPayload::SendUserMessage { .. }
+                if matches!(self.agent_state.status, SessionStatus::Active) =>
+            {
+                Err(SessionError::SessionBusy)
             }
             CommandPayload::SendUserMessage { content, stream } => {
                 Ok(vec![EventPayload::MessageUser(MessageUser {
@@ -138,7 +141,7 @@ impl AgentSession {
             }
             // SendAssistantMessage guard: skip if message already extracted for this call_id
             CommandPayload::SendAssistantMessage { ref call_id, .. }
-                if self.tracker.is_response_processed(call_id) =>
+                if self.agent_state.is_response_processed(call_id) =>
             {
                 Ok(vec![])
             }
@@ -162,7 +165,7 @@ impl AgentSession {
             CommandPayload::SendToolMessage {
                 ref tool_call_id, ..
             } if self
-                .core
+                .agent_state
                 .messages
                 .iter()
                 .any(|m| m.tool_call_id.as_ref() == Some(tool_call_id)) =>
@@ -185,15 +188,15 @@ impl AgentSession {
             })]),
             // RequestLlmCall: skip if call_id already known or another call is in flight
             CommandPayload::RequestLlmCall { ref call_id, .. }
-                if self.tracker.has_llm_call(call_id)
-                    || self.tracker.active_llm_call().is_some() =>
+                if self.agent_state.has_llm_call(call_id)
+                    || self.agent_state.active_llm_call().is_some() =>
             {
                 Ok(vec![])
             }
             // CompleteLlmCall: only valid if this call_id is currently pending
             CommandPayload::CompleteLlmCall { ref call_id, .. }
                 if !matches!(
-                    self.tracker.llm_call_status(call_id),
+                    self.agent_state.llm_call_status(call_id),
                     Some(&LlmCallStatus::Pending)
                 ) =>
             {
@@ -202,7 +205,7 @@ impl AgentSession {
             // FailLlmCall: only valid if this call_id is currently pending
             CommandPayload::FailLlmCall { ref call_id, .. }
                 if !matches!(
-                    self.tracker.llm_call_status(call_id),
+                    self.agent_state.llm_call_status(call_id),
                     Some(&LlmCallStatus::Pending)
                 ) =>
             {
@@ -232,7 +235,7 @@ impl AgentSession {
             // StreamLlmChunk guard: skip if this call_id is not Pending
             CommandPayload::StreamLlmChunk { ref call_id, .. }
                 if !matches!(
-                    self.tracker.llm_call_status(call_id),
+                    self.agent_state.llm_call_status(call_id),
                     Some(&LlmCallStatus::Pending)
                 ) =>
             {
@@ -250,12 +253,12 @@ impl AgentSession {
             // Tool call guards — skip if tool_call_id already known (duplicate)
             CommandPayload::RequestToolCall {
                 ref tool_call_id, ..
-            } if self.tracker.has_tool_call(tool_call_id) => Ok(vec![]),
+            } if self.agent_state.has_tool_call(tool_call_id) => Ok(vec![]),
             // CompleteToolCall: only valid if this tool_call_id is currently Pending
             CommandPayload::CompleteToolCall {
                 ref tool_call_id, ..
             } if !matches!(
-                self.tracker.tool_call_status(tool_call_id),
+                self.agent_state.tool_call_status(tool_call_id),
                 Some(&ToolCallStatus::Pending)
             ) =>
             {
@@ -265,7 +268,7 @@ impl AgentSession {
             CommandPayload::FailToolCall {
                 ref tool_call_id, ..
             } if !matches!(
-                self.tracker.tool_call_status(tool_call_id),
+                self.agent_state.tool_call_status(tool_call_id),
                 Some(&ToolCallStatus::Pending)
             ) =>
             {
@@ -299,7 +302,9 @@ impl AgentSession {
                 error,
             })]),
             // Interrupt guard: skip if already interrupted
-            CommandPayload::Interrupt { .. } if self.tracker.active_interrupt().is_some() => {
+            CommandPayload::Interrupt { .. }
+                if matches!(self.agent_state.status, SessionStatus::Interrupted { .. }) =>
+            {
                 Ok(vec![])
             }
             CommandPayload::Interrupt {
@@ -314,7 +319,7 @@ impl AgentSession {
             // ResumeInterrupt guard: reject if not interrupted or ID mismatch
             CommandPayload::ResumeInterrupt {
                 ref interrupt_id, ..
-            } if self.tracker.active_interrupt() != Some(interrupt_id.as_str()) => Ok(vec![]),
+            } if self.agent_state.active_interrupt() != Some(interrupt_id.as_str()) => Ok(vec![]),
             CommandPayload::ResumeInterrupt {
                 interrupt_id,
                 payload,
@@ -335,7 +340,7 @@ impl AgentSession {
     // -----------------------------------------------------------------------
 
     pub fn react(&mut self, tools: Option<Vec<openai::Tool>>, event: &Event) -> Vec<Effect> {
-        let session_id = self.core.session_id;
+        let session_id = self.agent_state.session_id;
 
         match &event.payload {
             // --- Infrastructure: always handled by runtime ---
@@ -348,6 +353,7 @@ impl AgentSession {
             }
 
             EventPayload::LlmCallRequested(payload) => {
+                self.agent_state.status = SessionStatus::Active;
                 println!(
                     "[session:{}] LlmCallRequested [{}] -> calling LLM client",
                     session_id, payload.call_id,
@@ -399,103 +405,80 @@ impl AgentSession {
 
             // --- Decision points: consult strategy ---
             EventPayload::MessageUser(_) => {
-                if self.tracker.active_llm_call().is_some() {
-                    println!(
-                        "[session:{}] MessageUser -> LLM call already pending, dirty",
-                        session_id
-                    );
-                    vec![]
-                } else {
-                    let turn = self.strategy.on_user_message(
-                        &self.strategy_state,
-                        &self.core,
-                        tools.as_deref(),
-                    );
-                    self.apply_turn(turn, tools)
-                }
+                self.agent_state.status = SessionStatus::Active;
+                let turn = self.strategy.on_user_message(
+                    &self.strategy_state,
+                    &self.agent_state,
+                    tools.as_deref(),
+                );
+                self.apply_turn(turn, tools)
             }
 
             EventPayload::LlmCallCompleted(payload) => {
-                if self.tracker.dirty {
-                    println!(
-                        "[session:{}] LlmCallCompleted [{}] -> stale (dirty), re-triggering",
-                        session_id, payload.call_id,
-                    );
-                    self.tracker.dirty = false;
-                    let turn = self.strategy.on_user_message(
-                        &self.strategy_state,
-                        &self.core,
-                        tools.as_deref(),
-                    );
-                    self.apply_turn(turn, tools)
-                } else {
-                    let summary = extract_response_summary(payload);
+                let summary = extract_response_summary(payload);
 
-                    println!(
-                        "[session:{}] LlmCallCompleted [{}] -> sending assistant message",
-                        session_id, payload.call_id,
-                    );
+                println!(
+                    "[session:{}] LlmCallCompleted [{}] -> sending assistant message",
+                    session_id, payload.call_id,
+                );
 
-                    // Always emit SendAssistantMessage (mechanical)
-                    let mut effects = vec![Effect::Command(CommandPayload::SendAssistantMessage {
-                        call_id: summary.call_id.clone(),
-                        content: summary.content.clone(),
-                        tool_calls: summary.tool_calls.clone(),
-                        token_count: summary.token_count,
-                    })];
+                // Always emit SendAssistantMessage (mechanical)
+                let mut effects = vec![Effect::Command(CommandPayload::SendAssistantMessage {
+                    call_id: summary.call_id.clone(),
+                    content: summary.content.clone(),
+                    tool_calls: summary.tool_calls.clone(),
+                    token_count: summary.token_count,
+                })];
 
-                    // Consult strategy for next step
-                    let turn = self.strategy.on_llm_response(
-                        &self.strategy_state,
-                        &self.core,
-                        tools.as_deref(),
-                        &summary,
-                    );
-                    effects.extend(self.apply_turn(turn, tools));
-                    effects
-                }
+                // Consult strategy for next step
+                let turn = self.strategy.on_llm_response(
+                    &self.strategy_state,
+                    &self.agent_state,
+                    tools.as_deref(),
+                    &summary,
+                );
+                effects.extend(self.apply_turn(turn, tools));
+                effects
             }
 
             EventPayload::LlmCallErrored(payload) => {
-                if self.tracker.dirty {
-                    println!(
-                        "[session:{}] LlmCallErrored [{}] -> dirty, re-triggering",
-                        session_id, payload.call_id,
-                    );
-                    self.tracker.dirty = false;
-                    let turn = self.strategy.on_user_message(
-                        &self.strategy_state,
-                        &self.core,
-                        tools.as_deref(),
-                    );
-                    self.apply_turn(turn, tools)
-                } else {
-                    println!(
-                        "[session:{}] LlmCallErrored [{}] -> no action",
-                        session_id, payload.call_id,
-                    );
-                    vec![]
-                }
+                let attempts = self
+                    .agent_state
+                    .llm_call(&payload.call_id)
+                    .map(|c| c.retry.attempts)
+                    .unwrap_or(1);
+                let backoff_secs = min(2u64.pow(attempts), 60);
+                let wake_at = Utc::now() + chrono::Duration::seconds(backoff_secs as i64);
+
+                println!(
+                    "[session:{}] LlmCallErrored [{}] -> idle, retry in {}s",
+                    session_id, payload.call_id, backoff_secs,
+                );
+
+                self.agent_state.status = SessionStatus::Idle {
+                    wake_at: Some(wake_at),
+                };
+                vec![Effect::ScheduleWake { wake_at }]
             }
 
             EventPayload::MessageTool(_) => {
-                if self.tracker.pending_tool_results == 0 {
+                if self.agent_state.pending_tool_results() == 0 {
                     println!(
                         "[session:{}] MessageTool -> all tool results in, consulting strategy",
                         session_id,
                     );
-                    let results = self.tracker.take_tool_result_batch();
+                    let results = self.agent_state.collect_tool_results();
                     let turn = self.strategy.on_tool_results(
                         &self.strategy_state,
-                        &self.core,
+                        &self.agent_state,
                         tools.as_deref(),
                         &results,
                     );
                     self.apply_turn(turn, tools)
                 } else {
                     println!(
-                        "[session:{}] MessageTool -> {} tool results still pending",
-                        session_id, self.tracker.pending_tool_results,
+                        "[session:{}] MessageTool -> tool results still pending",
+                        session_id,
                     );
                     vec![]
                 }
@@ -506,7 +489,7 @@ impl AgentSession {
             EventPayload::InterruptResumed(payload) => {
                 let turn = self.strategy.on_interrupt_resume(
                     &self.strategy_state,
-                    &self.core,
+                    &self.agent_state,
                     tools.as_deref(),
                     &payload.interrupt_id,
                     &payload.payload,
@@ -529,16 +512,17 @@ impl AgentSession {
                 state: turn.state,
             }));
         }
-        effects.extend(self.execute_action(turn.action, tools));
+        let action_effects = self.execute_action(turn.action, tools);
+        effects.extend(action_effects);
         effects
     }
 
     /// Translate a strategy Action into Effects.
-    fn execute_action(&self, action: Action, tools: Option<Vec<openai::Tool>>) -> Vec<Effect> {
+    fn execute_action(&mut self, action: Action, tools: Option<Vec<openai::Tool>>) -> Vec<Effect> {
         match action {
             Action::CallLlm(params) => {
-                let stream = params.stream.unwrap_or(self.tracker.stream);
-                match self.core.build_llm_request(tools) {
+                let stream = params.stream.unwrap_or(true);
+                match self.agent_state.build_llm_request(tools) {
                     Some(request) => vec![Effect::Command(CommandPayload::RequestLlmCall {
                         call_id: new_call_id(),
                         request,
@@ -558,7 +542,10 @@ impl AgentSession {
                     })
                 })
                 .collect(),
-            Action::Done => vec![],
+            Action::Done => {
+                self.agent_state.status = SessionStatus::Done;
+                vec![]
+            }
             Action::Interrupt(req) => vec![Effect::Command(CommandPayload::Interrupt {
                 interrupt_id: req.id,
                 reason: req.reason,
@@ -568,7 +555,24 @@ impl AgentSession {
     }
 
     // -----------------------------------------------------------------------
-    // Recover — uses tracker only, no strategy involvement
+    // Wake — resume from Idle state
+    // -----------------------------------------------------------------------
+
+    pub fn wake(&mut self, tools: Option<Vec<openai::Tool>>) -> Vec<Effect> {
+        self.agent_state.status = SessionStatus::Active;
+        if let Some(request) = self.agent_state.build_llm_request(tools) {
+            vec![Effect::Command(CommandPayload::RequestLlmCall {
+                call_id: new_call_id(),
+                request,
+                stream: true,
+            })]
+        } else {
+            vec![]
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Recover — derive in-flight state from AgentState
     // -----------------------------------------------------------------------
 
     pub fn recover(&self, tools: Option<Vec<openai::Tool>>) -> RecoveryEffects {
@@ -576,30 +580,59 @@ impl AgentSession {
         let mut resume = Vec::new();
 
         // MCP servers not running
-        if let Some(agent) = &self.core.agent {
+        if let Some(agent) = &self.agent_state.agent {
             if !agent.mcp_servers.is_empty() {
                 setup.push(Effect::StartMcpServers(agent.mcp_servers.clone()));
             }
         }
 
         // If interrupted, skip agent-loop recovery — session is paused
-        if self.tracker.active_interrupt().is_some() {
+        if matches!(self.agent_state.status, SessionStatus::Interrupted { .. }) {
             return RecoveryEffects { setup, resume };
         }
 
+        // If idle with a wake-up time, schedule it
+        if let SessionStatus::Idle {
+            wake_at: Some(wake_at),
+        } = self.agent_state.status
+        {
+            if wake_at <= Utc::now() {
+                // Wake-up time already passed — resume immediately
+                if let Some(request) = self.agent_state.build_llm_request(tools.clone()) {
+                    resume.push(Effect::Command(CommandPayload::RequestLlmCall {
+                        call_id: new_call_id(),
+                        request,
+                        stream: true,
+                    }));
+                }
+            } else {
+                setup.push(Effect::ScheduleWake { wake_at });
+            }
+            return RecoveryEffects { setup, resume };
+        }
+
+        // If idle without wake-up or done, nothing to recover
+        if matches!(
+            self.agent_state.status,
+            SessionStatus::Idle { .. } | SessionStatus::Done
+        ) {
+            return RecoveryEffects { setup, resume };
+        }
+
+        // Active — recover in-flight work
         // Pending LLM call — re-issue the call
-        for call in self.tracker.llm_calls() {
+        for call in self.agent_state.llm_calls() {
             if call.status == LlmCallStatus::Pending {
                 resume.push(Effect::CallLlm {
                     call_id: call.call_id.clone(),
                     request: call.request.clone(),
-                    stream: self.tracker.stream,
+                    stream: true,
                 });
             }
         }
 
         // Completed LLM call, message not extracted — re-extract from stored response
-        for call in self.tracker.llm_calls() {
+        for call in self.agent_state.llm_calls() {
             if call.status == LlmCallStatus::Completed && !call.response_processed {
                 if let Some(ref response) = call.response {
                     let (content, tool_calls, token_count) = extract_assistant_message(response);
@@ -622,10 +655,10 @@ impl AgentSession {
         }
 
         // Pending tool calls — re-issue
-        for tc in self.tracker.tool_calls() {
+        for tc in self.agent_state.tool_call_states() {
             if tc.status == ToolCallStatus::Pending {
                 let args: serde_json::Value = self
-                    .core
+                    .agent_state
                     .messages
                     .iter()
                     .flat_map(|m| m.tool_calls.iter())
@@ -642,17 +675,19 @@ impl AgentSession {
 
         // All tools done, last message is Tool, no pending LLM call → trigger next LLM call
         let last_is_tool = self
-            .core
+            .agent_state
             .messages
             .last()
             .is_some_and(|m| m.role == Role::Tool);
-        if self.tracker.pending_tool_results == 0 && last_is_tool && !self.tracker.has_pending_llm()
+        if self.agent_state.pending_tool_results() == 0
+            && last_is_tool
+            && !self.agent_state.has_pending_llm()
         {
-            if let Some(request) = self.core.build_llm_request(tools) {
+            if let Some(request) = self.agent_state.build_llm_request(tools) {
                 resume.push(Effect::Command(CommandPayload::RequestLlmCall {
                     call_id: Uuid::new_v4().to_string(),
                     request,
-                    stream: self.tracker.stream,
+                    stream: true,
                 }));
             }
         }

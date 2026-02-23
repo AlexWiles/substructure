@@ -210,7 +210,7 @@ impl Runtime {
 
             AgentSession::from_core(core, strategy, strategy_state, &load.events)
         };
-        session.core.last_reacted = session.core.last_applied;
+        session.agent_state.last_reacted = session.agent_state.last_applied;
 
         // Compute recovery effects before spawning the actor
         let recovery = session.recover(None);

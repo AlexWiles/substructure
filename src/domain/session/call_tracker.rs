@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::event::*;
 use super::strategy::ToolResult;
+use crate::domain::event::*;
 
 // ---------------------------------------------------------------------------
 // Types — tracking state for LLM and tool call lifecycles
@@ -170,7 +170,9 @@ impl CallTracker {
     }
 
     pub fn is_response_processed(&self, call_id: &str) -> bool {
-        self.llm_calls.get(call_id).is_some_and(|c| c.response_processed)
+        self.llm_calls
+            .get(call_id)
+            .is_some_and(|c| c.response_processed)
     }
 
     pub fn has_tool_call(&self, tool_call_id: &str) -> bool {
@@ -197,6 +199,8 @@ impl CallTracker {
     }
 
     pub fn has_pending_llm(&self) -> bool {
-        self.llm_calls.values().any(|c| c.status == LlmCallStatus::Pending)
+        self.llm_calls
+            .values()
+            .any(|c| c.status == LlmCallStatus::Pending)
     }
 }
