@@ -32,6 +32,7 @@ async fn main() {
                 },
                 system_prompt: "You are a helpful weather assistant. Use the get_weather tool to answer weather questions.".into(),
                 mcp_servers: vec![],
+                strategy: Default::default(),
             },
         )]),
     };
@@ -100,20 +101,12 @@ async fn main() {
         );
     }
     println!("Tokens used: {}", state.tokens.used);
-    println!("Tool calls tracked: {}", state.tool_calls.len());
-    for (id, tc) in &state.tool_calls {
-        println!("  {} '{}' -> {:?}", id, tc.name, tc.status);
-    }
 
     // 7. Verification
     println!("\n--- Verification ---");
     println!(
         "Expected message count (4: user, assistant+tool_call, tool, assistant): {}",
         state.messages.len() == 4
-    );
-    println!(
-        "Pending tool results: {} (expected 0)",
-        state.pending_tool_results
     );
     println!(
         "Final message is assistant text: {}",

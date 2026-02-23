@@ -5,16 +5,16 @@ use uuid::Uuid;
 
 use chrono::Utc;
 
-use crate::domain::event::*;
-use crate::domain::session::{
-    CommandPayload, Effect, SessionCommand, SessionError, SessionState,
-    extract_assistant_message, react, LlmCallStatus, ToolCallStatus,
-};
-use super::llm::StreamDelta;
-use super::mcp::{McpClient, Content};
 use super::event_store::{EventStore, StoreError, Version};
 use super::llm::LlmClientProvider;
+use super::llm::StreamDelta;
 use super::mcp::McpClientProvider;
+use super::mcp::{Content, McpClient};
+use super::strategy::StrategyProvider;
+use crate::domain::event::*;
+use crate::domain::session::{
+    AgentSession, AgentState, CommandPayload, Effect, SessionCommand, SessionError, Strategy,
+};
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -32,6 +32,10 @@ pub enum RuntimeError {
     UnknownLlmClient(String),
     #[error("unknown agent: {0}")]
     UnknownAgent(String),
+    #[error("session not found")]
+    SessionNotFound,
+    #[error("strategy resolution failed: {0}")]
+    StrategyResolution(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -44,7 +48,7 @@ pub enum SessionMessage {
         RpcReplyPort<Result<Vec<Event>, RuntimeError>>,
     ),
     Cast(SessionCommand),
-    GetState(RpcReplyPort<SessionState>),
+    GetState(RpcReplyPort<AgentState>),
     Events(Vec<Arc<Event>>),
     /// Resume effects to execute after MCP servers are ready.
     ResumeRecovery(Vec<Effect>),
@@ -58,11 +62,12 @@ pub struct SessionActor;
 
 pub struct SessionActorState {
     pub session_id: Uuid,
-    pub session: SessionState,
+    pub session: AgentSession,
     pub store: Arc<dyn EventStore>,
     pub auth: SessionAuth,
     pub llm_provider: Arc<dyn LlmClientProvider>,
     pub mcp_provider: Arc<dyn McpClientProvider>,
+    pub strategy_provider: Arc<dyn StrategyProvider>,
     pub mcp_clients: Vec<Arc<dyn McpClient>>,
 }
 
@@ -73,14 +78,41 @@ impl SessionActorState {
         auth: SessionAuth,
         llm_provider: Arc<dyn LlmClientProvider>,
         mcp_provider: Arc<dyn McpClientProvider>,
+        strategy_provider: Arc<dyn StrategyProvider>,
+        strategy: Box<dyn Strategy>,
+        strategy_state: serde_json::Value,
     ) -> Self {
         SessionActorState {
             session_id,
-            session: SessionState::new(session_id),
+            session: AgentSession::new(session_id, strategy, strategy_state),
             store,
             auth,
             llm_provider,
             mcp_provider,
+            strategy_provider,
+            mcp_clients: Vec::new(),
+        }
+    }
+
+    /// Build from a pre-constructed `AgentSession` (e.g. after resuming from
+    /// events). Avoids the caller having to know about `SessionActorState`
+    /// field layout.
+    pub fn from_session(
+        session: AgentSession,
+        store: Arc<dyn EventStore>,
+        auth: SessionAuth,
+        llm_provider: Arc<dyn LlmClientProvider>,
+        mcp_provider: Arc<dyn McpClientProvider>,
+        strategy_provider: Arc<dyn StrategyProvider>,
+    ) -> Self {
+        SessionActorState {
+            session_id: session.core.session_id,
+            session,
+            store,
+            auth,
+            llm_provider,
+            mcp_provider,
+            strategy_provider,
             mcp_clients: Vec::new(),
         }
     }
@@ -113,27 +145,49 @@ impl SessionActorState {
 }
 
 async fn execute(
-    actor_state: &mut SessionActorState,
+    state: &mut SessionActorState,
     cmd: SessionCommand,
 ) -> Result<Vec<Event>, RuntimeError> {
-    let payloads = actor_state.session.handle(cmd.payload)?;
+    let payloads = state.session.handle(cmd.payload)?;
     if payloads.is_empty() {
         return Ok(vec![]);
     }
 
-    // Use local stream_version — not store.version() — so the version check
-    // catches writes from other nodes that this actor hasn't seen yet.
-    let version = Version(actor_state.session.stream_version);
-    let events = actor_state
-        .store
-        .append(actor_state.session_id, &actor_state.auth, version, cmd.span, cmd.occurred_at, payloads)
-        .await?;
+    let version = Version(state.session.core.stream_version);
 
-    // Apply events to in-memory state immediately (so GetState is fresh).
-    // React happens later when the dispatcher delivers these events back.
+    // Aggregate builds events (assigns session-local sequences)
+    let base_seq = state.session.core.stream_version + 1;
+    let events: Vec<Event> = payloads
+        .into_iter()
+        .enumerate()
+        .map(|(i, payload)| Event {
+            id: Uuid::new_v4(),
+            tenant_id: state.auth.tenant_id.clone(),
+            session_id: state.session_id,
+            sequence: base_seq + i as u64,
+            span: cmd.span.clone(),
+            occurred_at: cmd.occurred_at,
+            payload,
+        })
+        .collect();
+
+    // Apply locally, then snapshot
     for event in &events {
-        actor_state.session.apply(event);
+        state.session.apply(event);
     }
+    let snapshot = state.session.snapshot();
+
+    // Persist events + snapshot atomically
+    state
+        .store
+        .append(
+            state.session_id,
+            &state.auth,
+            version,
+            events.clone(),
+            snapshot,
+        )
+        .await?;
 
     Ok(events)
 }
@@ -164,18 +218,33 @@ async fn handle_effect(
                 }
             }
         }
-        Effect::CallLlm { call_id, request, stream } => {
-            let client_id = state.session.agent.as_ref()
+        Effect::CallLlm {
+            call_id,
+            request,
+            stream,
+        } => {
+            let client_id = state
+                .session
+                .core
+                .agent
+                .as_ref()
                 .map(|a| a.llm.client.clone())
                 .unwrap_or_default();
             let client = match state.llm_provider.resolve(&client_id, &state.auth).await {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = execute(state, SessionCommand {
-                        span: span.child(),
-                        occurred_at: Utc::now(),
-                        payload: CommandPayload::FailLlmCall { call_id, error: e.to_string() },
-                    }).await;
+                    let _ = execute(
+                        state,
+                        SessionCommand {
+                            span: span.child(),
+                            occurred_at: Utc::now(),
+                            payload: CommandPayload::FailLlmCall {
+                                call_id,
+                                error: e.to_string(),
+                            },
+                        },
+                    )
+                    .await;
                     return;
                 }
             };
@@ -187,30 +256,27 @@ async fn handle_effect(
                 let call_id_fwd = call_id.clone();
                 let span_fwd = span.clone();
 
-                let (result, _) = tokio::join!(
-                    client.call_streaming(&request, chunk_tx),
-                    async {
-                        let mut chunk_index: u32 = 0;
-                        while let Some(delta) = chunk_rx.recv().await {
-                            if let Some(text) = delta.text {
-                                let _ = execute(
-                                    state,
-                                    SessionCommand {
-                                        span: span_fwd.child(),
-                                        occurred_at: Utc::now(),
-                                        payload: CommandPayload::StreamLlmChunk {
-                                            call_id: call_id_fwd.clone(),
-                                            chunk_index,
-                                            text,
-                                        },
+                let (result, _) = tokio::join!(client.call_streaming(&request, chunk_tx), async {
+                    let mut chunk_index: u32 = 0;
+                    while let Some(delta) = chunk_rx.recv().await {
+                        if let Some(text) = delta.text {
+                            let _ = execute(
+                                state,
+                                SessionCommand {
+                                    span: span_fwd.child(),
+                                    occurred_at: Utc::now(),
+                                    payload: CommandPayload::StreamLlmChunk {
+                                        call_id: call_id_fwd.clone(),
+                                        chunk_index,
+                                        text,
                                     },
-                                )
-                                .await;
-                                chunk_index += 1;
-                            }
+                                },
+                            )
+                            .await;
+                            chunk_index += 1;
                         }
                     }
-                );
+                });
                 result
             } else {
                 client.call(&request).await
@@ -220,11 +286,15 @@ async fn handle_effect(
                 Ok(response) => CommandPayload::CompleteLlmCall { call_id, response },
                 Err(error) => CommandPayload::FailLlmCall { call_id, error },
             };
-            let _ = execute(state, SessionCommand {
-                span: span.child(),
-                occurred_at: Utc::now(),
-                payload,
-            }).await;
+            let _ = execute(
+                state,
+                SessionCommand {
+                    span: span.child(),
+                    occurred_at: Utc::now(),
+                    payload,
+                },
+            )
+            .await;
         }
         Effect::CallMcpTool {
             tool_call_id,
@@ -264,121 +334,18 @@ async fn handle_effect(
                         error: e.to_string(),
                     },
                 };
-                let _ = execute(state, SessionCommand {
-                    span: span.child(),
-                    occurred_at: Utc::now(),
-                    payload,
-                }).await;
+                let _ = execute(
+                    state,
+                    SessionCommand {
+                        span: span.child(),
+                        occurred_at: Utc::now(),
+                        payload,
+                    },
+                )
+                .await;
             }
             // else: no MCP client — client-side tool, handled via event fan-out
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Recovery — rebuild state from events, detect stuck operations
-// ---------------------------------------------------------------------------
-
-/// Two-phase recovery effects: setup (MCP servers) must complete before
-/// resume effects (LLM/tool calls) can be dispatched.
-pub struct RecoveryEffects {
-    pub setup: Vec<Effect>,
-    pub resume: Vec<Effect>,
-}
-
-/// Scan rebuilt state for stuck conditions and return recovery effects.
-pub fn recover(
-    state: &SessionState,
-    tools: Option<Vec<crate::domain::openai::Tool>>,
-) -> RecoveryEffects {
-    let mut setup = Vec::new();
-    let mut resume = Vec::new();
-
-    // MCP servers not running
-    if let Some(agent) = &state.agent {
-        if !agent.mcp_servers.is_empty() {
-            setup.push(Effect::StartMcpServers(agent.mcp_servers.clone()));
-        }
-    }
-
-    // Pending LLM call — re-issue the call
-    for call in state.llm_calls.values() {
-        if call.status == LlmCallStatus::Pending {
-            resume.push(Effect::CallLlm {
-                call_id: call.call_id.clone(),
-                request: call.request.clone(),
-                stream: state.stream,
-            });
-        }
-    }
-
-    // Completed LLM call, message not extracted — re-extract from stored response
-    for call in state.llm_calls.values() {
-        if call.status == LlmCallStatus::Completed && !call.response_processed {
-            if let Some(ref response) = call.response {
-                let (content, tool_calls, token_count) = extract_assistant_message(response);
-                let mut effects = vec![Effect::Command(CommandPayload::SendAssistantMessage {
-                    call_id: call.call_id.clone(),
-                    content,
-                    tool_calls: tool_calls.clone(),
-                    token_count,
-                })];
-                for tc in &tool_calls {
-                    effects.push(Effect::Command(CommandPayload::RequestToolCall {
-                        tool_call_id: tc.id.clone(),
-                        name: tc.name.clone(),
-                        arguments: tc.arguments.clone(),
-                    }));
-                }
-                resume.extend(effects);
-            }
-        }
-    }
-
-    // Pending tool calls — re-issue
-    for tc in state.tool_calls.values() {
-        if tc.status == ToolCallStatus::Pending {
-            let args: serde_json::Value = state
-                .messages
-                .iter()
-                .flat_map(|m| m.tool_calls.iter())
-                .find(|t| t.id == tc.tool_call_id)
-                .and_then(|t| serde_json::from_str(&t.arguments).ok())
-                .unwrap_or_default();
-            resume.push(Effect::CallMcpTool {
-                tool_call_id: tc.tool_call_id.clone(),
-                name: tc.name.clone(),
-                arguments: args,
-            });
-        }
-    }
-
-    // All tools done, last message is Tool, no pending LLM call → trigger next LLM call
-    let has_pending_llm = state.llm_calls.values().any(|c| c.status == LlmCallStatus::Pending);
-    let last_is_tool = state.messages.last().is_some_and(|m| m.role == Role::Tool);
-    if state.pending_tool_results == 0 && last_is_tool && !has_pending_llm {
-        if let Some(request) = state.build_llm_request(tools) {
-            resume.push(Effect::Command(CommandPayload::RequestLlmCall {
-                call_id: Uuid::new_v4().to_string(),
-                request,
-                stream: state.stream,
-            }));
-        }
-    }
-
-    RecoveryEffects { setup, resume }
-}
-
-impl SessionActorState {
-    /// Load events from the store and rebuild state, setting last_reacted = last_applied
-    /// to prevent the dispatcher from re-reacting to old events.
-    pub fn recover_from_store(&mut self) -> Result<(), StoreError> {
-        let events = self.store.load(self.session_id, &self.auth)?;
-        for event in &events {
-            self.session.apply(event);
-        }
-        self.session.last_reacted = self.session.last_applied;
-        Ok(())
     }
 }
 
@@ -420,21 +387,21 @@ impl Actor for SessionActor {
                     state.session.apply(event);
                     let reacted = state
                         .session
+                        .core
                         .last_reacted
                         .is_some_and(|seq| event.sequence <= seq);
                     if !reacted {
                         let tools = state.all_tools();
-                        let effects =
-                            react(state.session_id, &mut state.session, tools, event);
+                        let effects = state.session.react(tools, event);
                         for effect in effects {
                             handle_effect(state, &myself, &event.span, effect).await;
                         }
-                        state.session.last_reacted = Some(event.sequence);
+                        state.session.core.last_reacted = Some(event.sequence);
                     }
                 }
             }
             SessionMessage::GetState(reply) => {
-                let _ = reply.send(state.session.clone());
+                let _ = reply.send(state.session.core.clone());
             }
             SessionMessage::ResumeRecovery(effects) => {
                 let span = SpanContext::root();
@@ -452,14 +419,19 @@ mod tests {
     use super::*;
     use crate::domain::agent::{AgentConfig, LlmConfig};
     use crate::domain::openai;
+    use crate::domain::session::ReactStrategy;
 
     fn test_agent() -> AgentConfig {
         AgentConfig {
             id: Uuid::new_v4(),
             name: "test".into(),
-            llm: LlmConfig { client: "mock".into(), params: Default::default() },
+            llm: LlmConfig {
+                client: "mock".into(),
+                params: Default::default(),
+            },
             system_prompt: "test".into(),
             mcp_servers: vec![],
+            strategy: Default::default(),
         }
     }
 
@@ -500,13 +472,17 @@ mod tests {
         })
     }
 
-    fn created_state() -> SessionState {
-        let mut state = SessionState::new(Uuid::new_v4());
+    fn created_state() -> AgentSession {
+        let mut state = AgentSession::new(
+            Uuid::new_v4(),
+            Box::new(ReactStrategy::new()),
+            serde_json::Value::Null,
+        );
         let event = Event {
             id: Uuid::new_v4(),
             tenant_id: "t".into(),
-            session_id: state.session_id,
-            sequence: 0,
+            session_id: state.core.session_id,
+            sequence: 1,
             span: SpanContext::root(),
             occurred_at: chrono::Utc::now(),
             payload: EventPayload::SessionCreated(SessionCreated {
@@ -518,13 +494,13 @@ mod tests {
         state
     }
 
-    fn apply_events(state: &mut SessionState, payloads: Vec<EventPayload>) {
-        let seq = state.last_applied.unwrap_or(0);
+    fn apply_events(state: &mut AgentSession, payloads: Vec<EventPayload>) {
+        let seq = state.core.last_applied.unwrap_or(0);
         for (i, payload) in payloads.into_iter().enumerate() {
             let event = Event {
                 id: Uuid::new_v4(),
                 tenant_id: "t".into(),
-                session_id: state.session_id,
+                session_id: state.core.session_id,
                 sequence: seq + 1 + i as u64,
                 span: SpanContext::root(),
                 occurred_at: chrono::Utc::now(),
@@ -539,29 +515,37 @@ mod tests {
         let mut state = created_state();
 
         // Add a user message and a pending LLM call
-        apply_events(&mut state, vec![
-            EventPayload::MessageUser(MessageUser {
-                message: Message {
-                    role: Role::User,
-                    content: Some("hi".into()),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                    call_id: None,
-                    token_count: None,
-                },
-                stream: false,
-            }),
-            EventPayload::LlmCallRequested(LlmCallRequested {
-                call_id: "call-1".into(),
-                request: mock_llm_request(),
-                stream: false,
-            }),
-        ]);
+        apply_events(
+            &mut state,
+            vec![
+                EventPayload::MessageUser(MessageUser {
+                    message: Message {
+                        role: Role::User,
+                        content: Some("hi".into()),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                        call_id: None,
+                        token_count: None,
+                    },
+                    stream: false,
+                }),
+                EventPayload::LlmCallRequested(LlmCallRequested {
+                    call_id: "call-1".into(),
+                    request: mock_llm_request(),
+                    stream: false,
+                }),
+            ],
+        );
 
-        let recovery = recover(&state, None);
+        let recovery = state.recover(None);
         assert!(recovery.setup.is_empty());
-        assert!(recovery.resume.iter().any(|e| matches!(e, Effect::CallLlm { call_id, .. } if call_id == "call-1")),
-            "should recover pending LLM call");
+        assert!(
+            recovery
+                .resume
+                .iter()
+                .any(|e| matches!(e, Effect::CallLlm { call_id, .. } if call_id == "call-1")),
+            "should recover pending LLM call"
+        );
     }
 
     #[test]
@@ -569,32 +553,33 @@ mod tests {
         let mut state = created_state();
 
         // User message, LLM call requested, LLM call completed — but no assistant message
-        apply_events(&mut state, vec![
-            EventPayload::MessageUser(MessageUser {
-                message: Message {
-                    role: Role::User,
-                    content: Some("hi".into()),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                    call_id: None,
-                    token_count: None,
-                },
-                stream: false,
-            }),
-            EventPayload::LlmCallRequested(LlmCallRequested {
-                call_id: "call-1".into(),
-                request: mock_llm_request(),
-                stream: false,
-            }),
-            EventPayload::LlmCallCompleted(LlmCallCompleted {
-                call_id: "call-1".into(),
-                response: mock_llm_response(),
-            }),
-        ]);
+        apply_events(
+            &mut state,
+            vec![
+                EventPayload::MessageUser(MessageUser {
+                    message: Message {
+                        role: Role::User,
+                        content: Some("hi".into()),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                        call_id: None,
+                        token_count: None,
+                    },
+                    stream: false,
+                }),
+                EventPayload::LlmCallRequested(LlmCallRequested {
+                    call_id: "call-1".into(),
+                    request: mock_llm_request(),
+                    stream: false,
+                }),
+                EventPayload::LlmCallCompleted(LlmCallCompleted {
+                    call_id: "call-1".into(),
+                    response: mock_llm_response(),
+                }),
+            ],
+        );
 
-        assert!(!state.llm_calls["call-1"].response_processed);
-
-        let recovery = recover(&state, None);
+        let recovery = state.recover(None);
         assert!(recovery.resume.iter().any(|e| matches!(e, Effect::Command(CommandPayload::SendAssistantMessage { call_id, .. }) if call_id == "call-1")),
             "should recover completed LLM call with no assistant message");
     }
@@ -607,52 +592,60 @@ mod tests {
         let call_id = "call-1".to_string();
         let tool_call_id = "tc-1".to_string();
 
-        apply_events(&mut state, vec![
-            EventPayload::MessageUser(MessageUser {
-                message: Message {
-                    role: Role::User,
-                    content: Some("hi".into()),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                    call_id: None,
-                    token_count: None,
-                },
-                stream: false,
-            }),
-            EventPayload::LlmCallRequested(LlmCallRequested {
-                call_id: call_id.clone(),
-                request: mock_llm_request(),
-                stream: false,
-            }),
-            EventPayload::LlmCallCompleted(LlmCallCompleted {
-                call_id: call_id.clone(),
-                response: mock_llm_response(),
-            }),
-            EventPayload::MessageAssistant(MessageAssistant {
-                call_id: call_id.clone(),
-                message: Message {
-                    role: Role::Assistant,
-                    content: None,
-                    tool_calls: vec![ToolCall {
-                        id: tool_call_id.clone(),
-                        name: "test_tool".into(),
-                        arguments: "{}".into(),
-                    }],
-                    tool_call_id: None,
-                    call_id: Some(call_id.clone()),
-                    token_count: None,
-                },
-            }),
-            EventPayload::ToolCallRequested(ToolCallRequested {
-                tool_call_id: tool_call_id.clone(),
-                name: "test_tool".into(),
-                arguments: "{}".into(),
-            }),
-        ]);
+        apply_events(
+            &mut state,
+            vec![
+                EventPayload::MessageUser(MessageUser {
+                    message: Message {
+                        role: Role::User,
+                        content: Some("hi".into()),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                        call_id: None,
+                        token_count: None,
+                    },
+                    stream: false,
+                }),
+                EventPayload::LlmCallRequested(LlmCallRequested {
+                    call_id: call_id.clone(),
+                    request: mock_llm_request(),
+                    stream: false,
+                }),
+                EventPayload::LlmCallCompleted(LlmCallCompleted {
+                    call_id: call_id.clone(),
+                    response: mock_llm_response(),
+                }),
+                EventPayload::MessageAssistant(MessageAssistant {
+                    call_id: call_id.clone(),
+                    message: Message {
+                        role: Role::Assistant,
+                        content: None,
+                        tool_calls: vec![ToolCall {
+                            id: tool_call_id.clone(),
+                            name: "test_tool".into(),
+                            arguments: "{}".into(),
+                        }],
+                        tool_call_id: None,
+                        call_id: Some(call_id.clone()),
+                        token_count: None,
+                    },
+                }),
+                EventPayload::ToolCallRequested(ToolCallRequested {
+                    tool_call_id: tool_call_id.clone(),
+                    name: "test_tool".into(),
+                    arguments: "{}".into(),
+                }),
+            ],
+        );
 
-        let recovery = recover(&state, None);
-        assert!(recovery.resume.iter().any(|e| matches!(e, Effect::CallMcpTool { tool_call_id: id, .. } if id == "tc-1")),
-            "should recover pending tool call");
+        let recovery = state.recover(None);
+        assert!(
+            recovery
+                .resume
+                .iter()
+                .any(|e| matches!(e, Effect::CallMcpTool { tool_call_id: id, .. } if id == "tc-1")),
+            "should recover pending tool call"
+        );
     }
 
     #[test]
@@ -662,78 +655,143 @@ mod tests {
         let call_id = "call-1".to_string();
         let tool_call_id = "tc-1".to_string();
 
-        apply_events(&mut state, vec![
-            EventPayload::MessageUser(MessageUser {
-                message: Message {
-                    role: Role::User,
-                    content: Some("hi".into()),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                    call_id: None,
-                    token_count: None,
-                },
-                stream: false,
-            }),
-            EventPayload::LlmCallRequested(LlmCallRequested {
-                call_id: call_id.clone(),
-                request: mock_llm_request(),
-                stream: false,
-            }),
-            EventPayload::LlmCallCompleted(LlmCallCompleted {
-                call_id: call_id.clone(),
-                response: mock_llm_response(),
-            }),
-            EventPayload::MessageAssistant(MessageAssistant {
-                call_id: call_id.clone(),
-                message: Message {
-                    role: Role::Assistant,
-                    content: None,
-                    tool_calls: vec![ToolCall {
-                        id: tool_call_id.clone(),
-                        name: "test_tool".into(),
-                        arguments: "{}".into(),
-                    }],
-                    tool_call_id: None,
-                    call_id: Some(call_id.clone()),
-                    token_count: None,
-                },
-            }),
-            EventPayload::ToolCallRequested(ToolCallRequested {
-                tool_call_id: tool_call_id.clone(),
-                name: "test_tool".into(),
-                arguments: "{}".into(),
-            }),
-            EventPayload::ToolCallCompleted(ToolCallCompleted {
-                tool_call_id: tool_call_id.clone(),
-                name: "test_tool".into(),
-                result: "ok".into(),
-            }),
-            EventPayload::MessageTool(MessageTool {
-                message: Message {
-                    role: Role::Tool,
-                    content: Some("ok".into()),
-                    tool_calls: vec![],
-                    tool_call_id: Some(tool_call_id.clone()),
-                    call_id: None,
-                    token_count: None,
-                },
-            }),
-        ]);
+        apply_events(
+            &mut state,
+            vec![
+                EventPayload::MessageUser(MessageUser {
+                    message: Message {
+                        role: Role::User,
+                        content: Some("hi".into()),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                        call_id: None,
+                        token_count: None,
+                    },
+                    stream: false,
+                }),
+                EventPayload::LlmCallRequested(LlmCallRequested {
+                    call_id: call_id.clone(),
+                    request: mock_llm_request(),
+                    stream: false,
+                }),
+                EventPayload::LlmCallCompleted(LlmCallCompleted {
+                    call_id: call_id.clone(),
+                    response: mock_llm_response(),
+                }),
+                EventPayload::MessageAssistant(MessageAssistant {
+                    call_id: call_id.clone(),
+                    message: Message {
+                        role: Role::Assistant,
+                        content: None,
+                        tool_calls: vec![ToolCall {
+                            id: tool_call_id.clone(),
+                            name: "test_tool".into(),
+                            arguments: "{}".into(),
+                        }],
+                        tool_call_id: None,
+                        call_id: Some(call_id.clone()),
+                        token_count: None,
+                    },
+                }),
+                EventPayload::ToolCallRequested(ToolCallRequested {
+                    tool_call_id: tool_call_id.clone(),
+                    name: "test_tool".into(),
+                    arguments: "{}".into(),
+                }),
+                EventPayload::ToolCallCompleted(ToolCallCompleted {
+                    tool_call_id: tool_call_id.clone(),
+                    name: "test_tool".into(),
+                    result: "ok".into(),
+                }),
+                EventPayload::MessageTool(MessageTool {
+                    message: Message {
+                        role: Role::Tool,
+                        content: Some("ok".into()),
+                        tool_calls: vec![],
+                        tool_call_id: Some(tool_call_id.clone()),
+                        call_id: None,
+                        token_count: None,
+                    },
+                }),
+            ],
+        );
 
-        assert_eq!(state.pending_tool_results, 0);
-        assert_eq!(state.messages.last().unwrap().role, Role::Tool);
+        assert_eq!(state.core.messages.last().unwrap().role, Role::Tool);
 
-        let recovery = recover(&state, None);
-        assert!(recovery.resume.iter().any(|e| matches!(e, Effect::Command(CommandPayload::RequestLlmCall { .. }))),
-            "should trigger next LLM call when all tools done and last msg is tool");
+        let recovery = state.recover(None);
+        assert!(
+            recovery
+                .resume
+                .iter()
+                .any(|e| matches!(e, Effect::Command(CommandPayload::RequestLlmCall { .. }))),
+            "should trigger next LLM call when all tools done and last msg is tool"
+        );
     }
 
     #[test]
     fn recover_no_stuck_conditions_returns_empty() {
         let state = created_state();
-        let recovery = recover(&state, None);
+        let recovery = state.recover(None);
         assert!(recovery.setup.is_empty());
         assert!(recovery.resume.is_empty());
+    }
+
+    #[test]
+    fn recover_during_interrupt_skips_agent_loop() {
+        let mut state = created_state();
+
+        // User message, LLM call, LLM completed, assistant message with tool call,
+        // then session interrupted
+        let call_id = "call-1".to_string();
+        apply_events(
+            &mut state,
+            vec![
+                EventPayload::MessageUser(MessageUser {
+                    message: Message {
+                        role: Role::User,
+                        content: Some("hi".into()),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                        call_id: None,
+                        token_count: None,
+                    },
+                    stream: false,
+                }),
+                EventPayload::LlmCallRequested(LlmCallRequested {
+                    call_id: call_id.clone(),
+                    request: mock_llm_request(),
+                    stream: false,
+                }),
+                EventPayload::LlmCallCompleted(LlmCallCompleted {
+                    call_id: call_id.clone(),
+                    response: mock_llm_response(),
+                }),
+                EventPayload::MessageAssistant(MessageAssistant {
+                    call_id: call_id.clone(),
+                    message: Message {
+                        role: Role::Assistant,
+                        content: Some("hello".into()),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                        call_id: Some(call_id.clone()),
+                        token_count: None,
+                    },
+                }),
+                EventPayload::SessionInterrupted(SessionInterrupted {
+                    interrupt_id: "int-1".into(),
+                    reason: "approval_needed".into(),
+                    payload: serde_json::json!({}),
+                }),
+            ],
+        );
+
+        let recovery = state.recover(None);
+        // Setup should be empty (no MCP servers), resume should be empty (interrupted)
+        assert!(recovery.setup.is_empty());
+        assert!(
+            recovery.resume.is_empty(),
+            "interrupted session should not resume agent loop"
+        );
     }
 
     #[test]
@@ -741,44 +799,48 @@ mod tests {
         let mut state = created_state();
 
         let call_id = "call-1".to_string();
-        apply_events(&mut state, vec![
-            EventPayload::MessageUser(MessageUser {
-                message: Message {
-                    role: Role::User,
-                    content: Some("hi".into()),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                    call_id: None,
-                    token_count: None,
-                },
-                stream: false,
-            }),
-            EventPayload::LlmCallRequested(LlmCallRequested {
-                call_id: call_id.clone(),
-                request: mock_llm_request(),
-                stream: false,
-            }),
-            EventPayload::LlmCallCompleted(LlmCallCompleted {
-                call_id: call_id.clone(),
-                response: mock_llm_response(),
-            }),
-            EventPayload::MessageAssistant(MessageAssistant {
-                call_id: call_id.clone(),
-                message: Message {
-                    role: Role::Assistant,
-                    content: Some("hello".into()),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                    call_id: Some(call_id.clone()),
-                    token_count: None,
-                },
-            }),
-        ]);
+        apply_events(
+            &mut state,
+            vec![
+                EventPayload::MessageUser(MessageUser {
+                    message: Message {
+                        role: Role::User,
+                        content: Some("hi".into()),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                        call_id: None,
+                        token_count: None,
+                    },
+                    stream: false,
+                }),
+                EventPayload::LlmCallRequested(LlmCallRequested {
+                    call_id: call_id.clone(),
+                    request: mock_llm_request(),
+                    stream: false,
+                }),
+                EventPayload::LlmCallCompleted(LlmCallCompleted {
+                    call_id: call_id.clone(),
+                    response: mock_llm_response(),
+                }),
+                EventPayload::MessageAssistant(MessageAssistant {
+                    call_id: call_id.clone(),
+                    message: Message {
+                        role: Role::Assistant,
+                        content: Some("hello".into()),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                        call_id: Some(call_id.clone()),
+                        token_count: None,
+                    },
+                }),
+            ],
+        );
 
-        assert!(state.llm_calls["call-1"].response_processed);
-
-        let recovery = recover(&state, None);
+        let recovery = state.recover(None);
         // No stuck conditions — completed LLM with message extracted, last msg is assistant (not tool)
-        assert!(recovery.resume.is_empty(), "fully completed flow should have no recovery effects");
+        assert!(
+            recovery.resume.is_empty(),
+            "fully completed flow should have no recovery effects"
+        );
     }
 }

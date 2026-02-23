@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use ractor::OutputPort;
 use uuid::Uuid;
 
-use crate::domain::event::{Event, EventPayload, SessionAuth, SpanContext};
+use crate::domain::event::{Event, SessionAuth};
+use crate::domain::session::SessionSnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Version(pub u64);
@@ -26,21 +26,26 @@ pub enum StoreError {
     TenantMismatch,
 }
 
+pub struct SessionLoad {
+    pub snapshot: Option<SessionSnapshot>,
+    pub events: Vec<Event>,
+}
+
 #[async_trait]
 pub trait EventStore: Send + Sync {
+    /// Persist pre-built events + snapshot atomically. Version check for
+    /// concurrency control.
     async fn append(
         &self,
         session_id: Uuid,
         auth: &SessionAuth,
         expected_version: Version,
-        span: SpanContext,
-        occurred_at: DateTime<Utc>,
-        payloads: Vec<EventPayload>,
-    ) -> Result<Vec<Event>, StoreError>;
+        events: Vec<Event>,
+        snapshot: SessionSnapshot,
+    ) -> Result<(), StoreError>;
 
-    fn load(&self, session_id: Uuid, auth: &SessionAuth) -> Result<Vec<Event>, StoreError>;
-
-    fn version(&self, session_id: Uuid) -> Version;
+    /// Load latest snapshot + any events after it.
+    fn load(&self, session_id: Uuid, auth: &SessionAuth) -> Result<SessionLoad, StoreError>;
 
     /// Read events from the global log starting at `offset`, up to `limit` events.
     fn read_from(&self, offset: u64, limit: usize) -> Vec<Arc<Event>>;

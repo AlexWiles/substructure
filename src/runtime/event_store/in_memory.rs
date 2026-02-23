@@ -2,17 +2,17 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use ractor::OutputPort;
 use uuid::Uuid;
 
-use crate::domain::event::{Event, EventPayload, SessionAuth, SpanContext};
-use super::store::{EventStore, StoreError, Version};
+use crate::domain::event::{Event, SessionAuth};
+use crate::domain::session::SessionSnapshot;
+use super::store::{EventStore, SessionLoad, StoreError, Version};
 
 struct StoreInner {
     streams: HashMap<Uuid, Vec<Event>>,
+    snapshots: HashMap<Uuid, (SessionSnapshot, u64)>, // (snapshot, version_at_snapshot)
     log: Vec<Arc<Event>>,
-    next_sequence: u64,
 }
 
 pub struct InMemoryEventStore {
@@ -25,8 +25,8 @@ impl InMemoryEventStore {
         InMemoryEventStore {
             inner: Mutex::new(StoreInner {
                 streams: HashMap::new(),
+                snapshots: HashMap::new(),
                 log: Vec::new(),
-                next_sequence: 0,
             }),
             notify: OutputPort::default(),
         }
@@ -40,11 +40,10 @@ impl EventStore for InMemoryEventStore {
         session_id: Uuid,
         auth: &SessionAuth,
         expected_version: Version,
-        span: SpanContext,
-        occurred_at: DateTime<Utc>,
-        payloads: Vec<EventPayload>,
-    ) -> Result<Vec<Event>, StoreError> {
-        let events = {
+        events: Vec<Event>,
+        snapshot: SessionSnapshot,
+    ) -> Result<(), StoreError> {
+        {
             let mut inner = self.inner.lock().expect("store lock poisoned");
 
             let stream_len = inner.streams.entry(session_id).or_default().len();
@@ -56,57 +55,55 @@ impl EventStore for InMemoryEventStore {
                 });
             }
 
-            let tenant_id = auth.tenant_id.clone();
-            let base_seq = inner.next_sequence;
-            let events: Vec<Event> = payloads
-                .into_iter()
-                .enumerate()
-                .map(|(i, payload)| Event {
-                    id: Uuid::new_v4(),
-                    tenant_id: tenant_id.clone(),
-                    session_id,
-                    sequence: base_seq + i as u64,
-                    span: span.clone(),
-                    occurred_at,
-                    payload,
-                })
-                .collect();
+            // Tenant check on existing events
+            if let Some(first) = inner.streams.get(&session_id).and_then(|s| s.first()) {
+                if first.tenant_id != auth.tenant_id {
+                    return Err(StoreError::TenantMismatch);
+                }
+            }
 
-            inner.next_sequence = base_seq + events.len() as u64;
             for event in &events {
                 inner.log.push(Arc::new(event.clone()));
             }
-            inner.streams.entry(session_id).or_default().extend(events.clone());
+            let new_version = stream_len as u64 + events.len() as u64;
+            inner.streams.entry(session_id).or_default().extend(events);
 
-            events
-        };
+            // Store snapshot at the new version
+            inner.snapshots.insert(session_id, (snapshot, new_version));
+        }
 
         self.notify.send(());
-        Ok(events)
+        Ok(())
     }
 
-    fn load(&self, session_id: Uuid, auth: &SessionAuth) -> Result<Vec<Event>, StoreError> {
+    fn load(&self, session_id: Uuid, auth: &SessionAuth) -> Result<SessionLoad, StoreError> {
         let inner = self.inner.lock().expect("store lock poisoned");
-        let events = inner
+        let stream = inner
             .streams
             .get(&session_id)
             .ok_or(StoreError::SessionNotFound)?;
-        // Verify all events belong to the requesting tenant
-        if let Some(first) = events.first() {
+
+        // Verify tenant
+        if let Some(first) = stream.first() {
             if first.tenant_id != auth.tenant_id {
                 return Err(StoreError::TenantMismatch);
             }
         }
-        Ok(events.clone())
-    }
 
-    fn version(&self, session_id: Uuid) -> Version {
-        let inner = self.inner.lock().expect("store lock poisoned");
-        inner
-            .streams
-            .get(&session_id)
-            .map(|s| Version(s.len() as u64))
-            .unwrap_or(Version::initial())
+        if let Some((snapshot, version_at_snapshot)) = inner.snapshots.get(&session_id) {
+            // Return snapshot + any events after it
+            let remaining = stream[*version_at_snapshot as usize..].to_vec();
+            Ok(SessionLoad {
+                snapshot: Some(snapshot.clone()),
+                events: remaining,
+            })
+        } else {
+            // No snapshot — cold replay fallback
+            Ok(SessionLoad {
+                snapshot: None,
+                events: stream.clone(),
+            })
+        }
     }
 
     fn read_from(&self, offset: u64, limit: usize) -> Vec<Arc<Event>> {

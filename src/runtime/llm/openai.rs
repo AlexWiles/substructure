@@ -18,24 +18,25 @@ use super::client::{LlmClient, StreamDelta};
 // Client
 // ---------------------------------------------------------------------------
 
-pub struct OpenAiClient {
-    http: Client,
-    base_url: String,
-    api_key: String,
+#[derive(Deserialize)]
+pub struct OpenAiClientConfig {
+    pub base_url: String,
+    pub api_key: String,
 }
 
-#[derive(Deserialize)]
-struct OpenAiClientConfig {
-    base_url: String,
-    api_key: String,
+pub struct OpenAiClient {
+    http: Client,
+    config: OpenAiClientConfig,
 }
 
 impl OpenAiClient {
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
         Self {
             http: Client::new(),
-            base_url: base_url.into(),
-            api_key: api_key.into(),
+            config: OpenAiClientConfig {
+                base_url: base_url.into(),
+                api_key: api_key.into(),
+            },
         }
     }
 
@@ -45,7 +46,7 @@ impl OpenAiClient {
         let config: OpenAiClientConfig =
             serde_json::from_value(serde_json::Value::Object(settings.clone()))
                 .map_err(|e| format!("openai_compatible config: {e}"))?;
-        Ok(Arc::new(Self::new(config.base_url, config.api_key)))
+        Ok(Arc::new(Self { http: Client::new(), config }))
     }
 
     /// Build and send the POST to `/v1/chat/completions`.
@@ -61,10 +62,10 @@ impl OpenAiClient {
             stream: bool,
         }
 
-        let url = format!("{}/v1/chat/completions", self.base_url.trim_end_matches('/'));
+        let url = format!("{}/v1/chat/completions", self.config.base_url.trim_end_matches('/'));
         self.http
             .post(&url)
-            .bearer_auth(&self.api_key)
+            .bearer_auth(&self.config.api_key)
             .json(&Body {
                 inner: request,
                 stream,

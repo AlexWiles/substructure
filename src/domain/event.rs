@@ -42,6 +42,12 @@ pub enum EventPayload {
     ToolCallCompleted(ToolCallCompleted),
     #[serde(rename = "tool.call.errored")]
     ToolCallErrored(ToolCallErrored),
+    #[serde(rename = "session.interrupted")]
+    SessionInterrupted(SessionInterrupted),
+    #[serde(rename = "session.interrupt_resumed")]
+    InterruptResumed(InterruptResumed),
+    #[serde(rename = "strategy.state_changed")]
+    StrategyStateChanged(StrategyStateChanged),
 }
 
 // --- Session ---
@@ -143,6 +149,28 @@ pub struct ToolCallErrored {
     pub tool_call_id: String,
     pub name: String,
     pub error: String,
+}
+
+// --- Interrupts ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionInterrupted {
+    pub interrupt_id: String,
+    pub reason: String,
+    pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterruptResumed {
+    pub interrupt_id: String,
+    pub payload: serde_json::Value,
+}
+
+// --- Strategy ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyStateChanged {
+    pub state: serde_json::Value,
 }
 
 // --- LLM ---

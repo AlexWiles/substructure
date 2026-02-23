@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::event::McpServerConfig;
+use super::session::StrategyKind;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
@@ -19,4 +20,6 @@ pub struct AgentConfig {
     pub system_prompt: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<McpServerConfig>,
+    #[serde(default)]
+    pub strategy: StrategyKind,
 }

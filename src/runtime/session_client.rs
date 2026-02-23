@@ -3,10 +3,10 @@ use std::sync::Arc;
 use ractor::{call_t, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use uuid::Uuid;
 
-use crate::domain::session::{SessionCommand, SessionState};
-use crate::domain::event::{Event, SessionAuth};
-use super::session_actor::{RuntimeError, SessionMessage};
 use super::event_store::EventStore;
+use super::session_actor::{RuntimeError, SessionMessage};
+use crate::domain::event::{Event, SessionAuth};
+use crate::domain::session::{AgentState, SessionCommand};
 
 // ---------------------------------------------------------------------------
 // ClientMessage — commands from transport + events from dispatcher
@@ -21,7 +21,7 @@ pub enum ClientMessage {
     /// From dispatcher: events for this session
     Events(Vec<Arc<Event>>),
     /// From transport: query current session state
-    GetState(RpcReplyPort<SessionState>),
+    GetState(RpcReplyPort<AgentState>),
 }
 
 // ---------------------------------------------------------------------------
@@ -32,7 +32,7 @@ pub struct SessionClientActor;
 
 pub struct SessionClientState {
     session_id: Uuid,
-    session: SessionState,
+    core: AgentState,
     session_actor: ActorRef<SessionMessage>,
 }
 
@@ -53,12 +53,15 @@ impl Actor for SessionClientActor {
         myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        let mut session = SessionState::new(args.session_id);
+        let mut core = AgentState::new(args.session_id);
 
-        // Replay existing history so the client starts up-to-date
-        if let Ok(events) = args.store.load(args.session_id, &args.auth) {
-            for event in &events {
-                session.apply(event);
+        // Load snapshot + any remaining events
+        if let Ok(load) = args.store.load(args.session_id, &args.auth) {
+            if let Some(snapshot) = load.snapshot {
+                core = snapshot.core;
+            }
+            for event in &load.events {
+                core.apply_core(event);
             }
         }
 
@@ -69,7 +72,7 @@ impl Actor for SessionClientActor {
 
         Ok(SessionClientState {
             session_id: args.session_id,
-            session,
+            core,
             session_actor: args.session_actor,
         })
     }
@@ -82,12 +85,7 @@ impl Actor for SessionClientActor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             ClientMessage::SendCommand(cmd, reply) => {
-                let result = call_t!(
-                    state.session_actor,
-                    SessionMessage::Execute,
-                    5000,
-                    cmd
-                );
+                let result = call_t!(state.session_actor, SessionMessage::Execute, 5000, cmd);
                 match result {
                     Ok(inner) => {
                         let _ = reply.send(inner);
@@ -102,11 +100,11 @@ impl Actor for SessionClientActor {
             }
             ClientMessage::Events(events) => {
                 for event in &events {
-                    state.session.apply(event);
+                    state.core.apply_core(event);
                 }
             }
             ClientMessage::GetState(reply) => {
-                let _ = reply.send(state.session.clone());
+                let _ = reply.send(state.core.clone());
             }
         }
         Ok(())

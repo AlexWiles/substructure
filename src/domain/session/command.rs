@@ -1,7 +1,6 @@
 use chrono::{DateTime, Utc};
 
 use crate::domain::event::*;
-use super::state::{LlmCallStatus, SessionState, ToolCallStatus};
 
 #[derive(Debug, Clone)]
 pub struct SessionCommand {
@@ -64,6 +63,18 @@ pub enum CommandPayload {
         name: String,
         error: String,
     },
+    Interrupt {
+        interrupt_id: String,
+        reason: String,
+        payload: serde_json::Value,
+    },
+    ResumeInterrupt {
+        interrupt_id: String,
+        payload: serde_json::Value,
+    },
+    UpdateStrategyState {
+        state: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -72,167 +83,14 @@ pub enum SessionError {
     SessionNotCreated,
     #[error("session already exists")]
     SessionAlreadyCreated,
-}
-
-impl SessionState {
-    pub fn handle(&self, cmd: CommandPayload) -> Result<Vec<EventPayload>, SessionError> {
-        match (&self.agent, cmd) {
-            // Uncreated session: only CreateSession is valid
-            (None, CommandPayload::CreateSession { agent, auth }) => {
-                Ok(vec![EventPayload::SessionCreated(SessionCreated { agent, auth })])
-            }
-            (Some(_), CommandPayload::CreateSession { .. }) => {
-                Err(SessionError::SessionAlreadyCreated)
-            }
-            (None, _) => {
-                Err(SessionError::SessionNotCreated)
-            }
-
-            // Active session
-            (Some(_), CommandPayload::SendUserMessage { content, stream }) => {
-                Ok(vec![EventPayload::MessageUser(MessageUser {
-                    message: Message {
-                        role: Role::User,
-                        content: Some(content),
-                        tool_calls: Vec::new(),
-                        tool_call_id: None,
-                        call_id: None,
-                        token_count: None,
-                    },
-                    stream,
-                })])
-            }
-            // SendAssistantMessage guard: skip if message already extracted for this call_id
-            (Some(_), CommandPayload::SendAssistantMessage { ref call_id, .. })
-                if self.llm_calls.get(call_id).is_some_and(|c| c.response_processed) =>
-            {
-                Ok(vec![])
-            }
-            (Some(_), CommandPayload::SendAssistantMessage { call_id, content, tool_calls, token_count }) => {
-                Ok(vec![EventPayload::MessageAssistant(MessageAssistant {
-                    call_id: call_id.clone(),
-                    message: Message {
-                        role: Role::Assistant,
-                        content,
-                        tool_calls,
-                        tool_call_id: None,
-                        call_id: Some(call_id),
-                        token_count,
-                    },
-                })])
-            }
-            // SendToolMessage guard: skip if a tool message with this tool_call_id already exists
-            (Some(_), CommandPayload::SendToolMessage { ref tool_call_id, .. })
-                if self.messages.iter().any(|m| m.tool_call_id.as_ref() == Some(tool_call_id)) =>
-            {
-                Ok(vec![])
-            }
-            (Some(_), CommandPayload::SendToolMessage { tool_call_id, content, token_count }) => {
-                Ok(vec![EventPayload::MessageTool(MessageTool {
-                    message: Message {
-                        role: Role::Tool,
-                        content: Some(content),
-                        tool_calls: Vec::new(),
-                        tool_call_id: Some(tool_call_id),
-                        call_id: None,
-                        token_count,
-                    },
-                })])
-            }
-            // Command guards — use LLM call lifecycle to decide.
-            //
-            // RequestLlmCall: skip if call_id already known (duplicate) or
-            // another call is already in flight.
-            (Some(_), CommandPayload::RequestLlmCall { ref call_id, .. })
-                if self.llm_calls.contains_key(call_id)
-                    || self.active_llm_call().is_some() =>
-            {
-                Ok(vec![])
-            }
-            // CompleteLlmCall: only valid if this call_id is currently pending.
-            (Some(_), CommandPayload::CompleteLlmCall { ref call_id, .. })
-                if !matches!(
-                    self.llm_calls.get(call_id).map(|c| &c.status),
-                    Some(&LlmCallStatus::Pending)
-                ) =>
-            {
-                Ok(vec![])
-            }
-            // FailLlmCall: same — only valid if this call_id is currently pending.
-            (Some(_), CommandPayload::FailLlmCall { ref call_id, .. })
-                if !matches!(
-                    self.llm_calls.get(call_id).map(|c| &c.status),
-                    Some(&LlmCallStatus::Pending)
-                ) =>
-            {
-                Ok(vec![])
-            }
-            (Some(_), CommandPayload::RequestLlmCall { call_id, request, stream }) => {
-                Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested { call_id, request, stream })])
-            }
-            (Some(_), CommandPayload::CompleteLlmCall { call_id, response }) => {
-                Ok(vec![EventPayload::LlmCallCompleted(LlmCallCompleted { call_id, response })])
-            }
-            (Some(_), CommandPayload::FailLlmCall { call_id, error }) => {
-                Ok(vec![EventPayload::LlmCallErrored(LlmCallErrored { call_id, error })])
-            }
-            // StreamLlmChunk guard: skip if this call_id is not Pending
-            (Some(_), CommandPayload::StreamLlmChunk { ref call_id, .. })
-                if !matches!(
-                    self.llm_calls.get(call_id).map(|c| &c.status),
-                    Some(&LlmCallStatus::Pending)
-                ) =>
-            {
-                Ok(vec![])
-            }
-            (Some(_), CommandPayload::StreamLlmChunk { call_id, chunk_index, text }) => {
-                Ok(vec![EventPayload::LlmStreamChunk(LlmStreamChunk { call_id, chunk_index, text })])
-            }
-            // Tool call guards — skip if tool_call_id already known (duplicate).
-            (Some(_), CommandPayload::RequestToolCall { ref tool_call_id, .. })
-                if self.tool_calls.contains_key(tool_call_id) =>
-            {
-                Ok(vec![])
-            }
-            // CompleteToolCall: only valid if this tool_call_id is currently Pending.
-            (Some(_), CommandPayload::CompleteToolCall { ref tool_call_id, .. })
-                if !matches!(
-                    self.tool_calls.get(tool_call_id).map(|tc| &tc.status),
-                    Some(&ToolCallStatus::Pending)
-                ) =>
-            {
-                Ok(vec![])
-            }
-            // FailToolCall: only valid if this tool_call_id is currently Pending.
-            (Some(_), CommandPayload::FailToolCall { ref tool_call_id, .. })
-                if !matches!(
-                    self.tool_calls.get(tool_call_id).map(|tc| &tc.status),
-                    Some(&ToolCallStatus::Pending)
-                ) =>
-            {
-                Ok(vec![])
-            }
-            (Some(_), CommandPayload::RequestToolCall { tool_call_id, name, arguments }) => {
-                Ok(vec![EventPayload::ToolCallRequested(ToolCallRequested {
-                    tool_call_id, name, arguments,
-                })])
-            }
-            (Some(_), CommandPayload::CompleteToolCall { tool_call_id, name, result }) => {
-                Ok(vec![EventPayload::ToolCallCompleted(ToolCallCompleted {
-                    tool_call_id, name, result,
-                })])
-            }
-            (Some(_), CommandPayload::FailToolCall { tool_call_id, name, error }) => {
-                Ok(vec![EventPayload::ToolCallErrored(ToolCallErrored {
-                    tool_call_id, name, error,
-                })])
-            }
-        }
-    }
+    #[error("session is interrupted")]
+    SessionInterrupted,
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::agent_session::AgentSession;
+    use super::super::strategy::ReactStrategy;
     use super::*;
     use crate::domain::agent::{AgentConfig, LlmConfig};
     use crate::domain::openai;
@@ -242,9 +100,13 @@ mod tests {
         AgentConfig {
             id: Uuid::new_v4(),
             name: "test".into(),
-            llm: LlmConfig { client: "mock".into(), params: Default::default() },
+            llm: LlmConfig {
+                client: "mock".into(),
+                params: Default::default(),
+            },
             system_prompt: "test".into(),
             mcp_servers: vec![],
+            strategy: Default::default(),
         }
     }
 
@@ -285,12 +147,16 @@ mod tests {
         })
     }
 
-    fn created_state() -> SessionState {
-        let mut state = SessionState::new(Uuid::new_v4());
+    fn created_state() -> AgentSession {
+        let mut state = AgentSession::new(
+            Uuid::new_v4(),
+            Box::new(ReactStrategy::new()),
+            serde_json::Value::Null,
+        );
         let event = Event {
             id: Uuid::new_v4(),
             tenant_id: "t".into(),
-            session_id: state.session_id,
+            session_id: state.core.session_id,
             sequence: 0,
             span: SpanContext::root(),
             occurred_at: chrono::Utc::now(),
@@ -303,13 +169,13 @@ mod tests {
         state
     }
 
-    fn apply_events(state: &mut SessionState, payloads: Vec<EventPayload>) {
-        let seq = state.last_applied.unwrap_or(0);
+    fn apply_events(state: &mut AgentSession, payloads: Vec<EventPayload>) {
+        let seq = state.core.last_applied.unwrap_or(0);
         for (i, payload) in payloads.into_iter().enumerate() {
             let event = Event {
                 id: Uuid::new_v4(),
                 tenant_id: "t".into(),
-                session_id: state.session_id,
+                session_id: state.core.session_id,
                 sequence: seq + 1 + i as u64,
                 span: SpanContext::root(),
                 occurred_at: chrono::Utc::now(),
@@ -325,37 +191,48 @@ mod tests {
         let call_id = "call-1".to_string();
 
         // Request and complete an LLM call
-        let payloads = state.handle(CommandPayload::RequestLlmCall {
-            call_id: call_id.clone(),
-            request: mock_llm_request(),
-            stream: false,
-        }).unwrap();
+        let payloads = state
+            .handle(CommandPayload::RequestLlmCall {
+                call_id: call_id.clone(),
+                request: mock_llm_request(),
+                stream: false,
+            })
+            .unwrap();
         apply_events(&mut state, payloads);
 
-        let payloads = state.handle(CommandPayload::CompleteLlmCall {
-            call_id: call_id.clone(),
-            response: mock_llm_response(),
-        }).unwrap();
+        let payloads = state
+            .handle(CommandPayload::CompleteLlmCall {
+                call_id: call_id.clone(),
+                response: mock_llm_response(),
+            })
+            .unwrap();
         apply_events(&mut state, payloads);
 
         // First SendAssistantMessage succeeds
-        let payloads = state.handle(CommandPayload::SendAssistantMessage {
-            call_id: call_id.clone(),
-            content: Some("hello".into()),
-            tool_calls: vec![],
-            token_count: None,
-        }).unwrap();
+        let payloads = state
+            .handle(CommandPayload::SendAssistantMessage {
+                call_id: call_id.clone(),
+                content: Some("hello".into()),
+                tool_calls: vec![],
+                token_count: None,
+            })
+            .unwrap();
         assert!(!payloads.is_empty());
         apply_events(&mut state, payloads);
 
         // Duplicate SendAssistantMessage is skipped
-        let payloads = state.handle(CommandPayload::SendAssistantMessage {
-            call_id: call_id.clone(),
-            content: Some("hello".into()),
-            tool_calls: vec![],
-            token_count: None,
-        }).unwrap();
-        assert!(payloads.is_empty(), "duplicate SendAssistantMessage should produce no events");
+        let payloads = state
+            .handle(CommandPayload::SendAssistantMessage {
+                call_id: call_id.clone(),
+                content: Some("hello".into()),
+                tool_calls: vec![],
+                token_count: None,
+            })
+            .unwrap();
+        assert!(
+            payloads.is_empty(),
+            "duplicate SendAssistantMessage should produce no events"
+        );
     }
 
     #[test]
@@ -365,57 +242,78 @@ mod tests {
         let tool_call_id = "tc-1".to_string();
 
         // Set up: LLM call -> assistant message with tool call -> tool call requested -> tool call completed
-        let payloads = state.handle(CommandPayload::RequestLlmCall {
-            call_id: call_id.clone(),
-            request: mock_llm_request(),
-            stream: false,
-        }).unwrap();
+        let payloads = state
+            .handle(CommandPayload::RequestLlmCall {
+                call_id: call_id.clone(),
+                request: mock_llm_request(),
+                stream: false,
+            })
+            .unwrap();
         apply_events(&mut state, payloads);
 
-        let payloads = state.handle(CommandPayload::CompleteLlmCall {
-            call_id: call_id.clone(),
-            response: mock_llm_response(),
-        }).unwrap();
+        let payloads = state
+            .handle(CommandPayload::CompleteLlmCall {
+                call_id: call_id.clone(),
+                response: mock_llm_response(),
+            })
+            .unwrap();
         apply_events(&mut state, payloads);
 
-        let payloads = state.handle(CommandPayload::SendAssistantMessage {
-            call_id: call_id.clone(),
-            content: None,
-            tool_calls: vec![ToolCall { id: tool_call_id.clone(), name: "test".into(), arguments: "{}".into() }],
-            token_count: None,
-        }).unwrap();
+        let payloads = state
+            .handle(CommandPayload::SendAssistantMessage {
+                call_id: call_id.clone(),
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: tool_call_id.clone(),
+                    name: "test".into(),
+                    arguments: "{}".into(),
+                }],
+                token_count: None,
+            })
+            .unwrap();
         apply_events(&mut state, payloads);
 
-        let payloads = state.handle(CommandPayload::RequestToolCall {
-            tool_call_id: tool_call_id.clone(),
-            name: "test".into(),
-            arguments: "{}".into(),
-        }).unwrap();
+        let payloads = state
+            .handle(CommandPayload::RequestToolCall {
+                tool_call_id: tool_call_id.clone(),
+                name: "test".into(),
+                arguments: "{}".into(),
+            })
+            .unwrap();
         apply_events(&mut state, payloads);
 
-        let payloads = state.handle(CommandPayload::CompleteToolCall {
-            tool_call_id: tool_call_id.clone(),
-            name: "test".into(),
-            result: "ok".into(),
-        }).unwrap();
+        let payloads = state
+            .handle(CommandPayload::CompleteToolCall {
+                tool_call_id: tool_call_id.clone(),
+                name: "test".into(),
+                result: "ok".into(),
+            })
+            .unwrap();
         apply_events(&mut state, payloads);
 
         // First SendToolMessage succeeds
-        let payloads = state.handle(CommandPayload::SendToolMessage {
-            tool_call_id: tool_call_id.clone(),
-            content: "ok".into(),
-            token_count: None,
-        }).unwrap();
+        let payloads = state
+            .handle(CommandPayload::SendToolMessage {
+                tool_call_id: tool_call_id.clone(),
+                content: "ok".into(),
+                token_count: None,
+            })
+            .unwrap();
         assert!(!payloads.is_empty());
         apply_events(&mut state, payloads);
 
         // Duplicate SendToolMessage is skipped
-        let payloads = state.handle(CommandPayload::SendToolMessage {
-            tool_call_id: tool_call_id.clone(),
-            content: "ok".into(),
-            token_count: None,
-        }).unwrap();
-        assert!(payloads.is_empty(), "duplicate SendToolMessage should produce no events");
+        let payloads = state
+            .handle(CommandPayload::SendToolMessage {
+                tool_call_id: tool_call_id.clone(),
+                content: "ok".into(),
+                token_count: None,
+            })
+            .unwrap();
+        assert!(
+            payloads.is_empty(),
+            "duplicate SendToolMessage should produce no events"
+        );
     }
 
     #[test]
@@ -424,25 +322,127 @@ mod tests {
         let call_id = "call-1".to_string();
 
         // Request and complete an LLM call
-        let payloads = state.handle(CommandPayload::RequestLlmCall {
-            call_id: call_id.clone(),
-            request: mock_llm_request(),
-            stream: true,
-        }).unwrap();
+        let payloads = state
+            .handle(CommandPayload::RequestLlmCall {
+                call_id: call_id.clone(),
+                request: mock_llm_request(),
+                stream: true,
+            })
+            .unwrap();
         apply_events(&mut state, payloads);
 
-        let payloads = state.handle(CommandPayload::CompleteLlmCall {
-            call_id: call_id.clone(),
-            response: mock_llm_response(),
-        }).unwrap();
+        let payloads = state
+            .handle(CommandPayload::CompleteLlmCall {
+                call_id: call_id.clone(),
+                response: mock_llm_response(),
+            })
+            .unwrap();
         apply_events(&mut state, payloads);
 
         // StreamLlmChunk for completed call is skipped
-        let payloads = state.handle(CommandPayload::StreamLlmChunk {
-            call_id: call_id.clone(),
-            chunk_index: 0,
-            text: "late chunk".into(),
-        }).unwrap();
-        assert!(payloads.is_empty(), "StreamLlmChunk for completed call should produce no events");
+        let payloads = state
+            .handle(CommandPayload::StreamLlmChunk {
+                call_id: call_id.clone(),
+                chunk_index: 0,
+                text: "late chunk".into(),
+            })
+            .unwrap();
+        assert!(
+            payloads.is_empty(),
+            "StreamLlmChunk for completed call should produce no events"
+        );
+    }
+
+    #[test]
+    fn interrupt_command_produces_session_interrupted_event() {
+        let state = created_state();
+
+        let payloads = state
+            .handle(CommandPayload::Interrupt {
+                interrupt_id: "int-1".into(),
+                reason: "approval_needed".into(),
+                payload: serde_json::json!({"tool": "delete_file"}),
+            })
+            .unwrap();
+        assert_eq!(payloads.len(), 1);
+        assert!(
+            matches!(&payloads[0], EventPayload::SessionInterrupted(p) if p.interrupt_id == "int-1")
+        );
+    }
+
+    #[test]
+    fn resume_interrupt_with_matching_id_produces_event() {
+        let mut state = created_state();
+
+        // Interrupt first
+        let payloads = state
+            .handle(CommandPayload::Interrupt {
+                interrupt_id: "int-1".into(),
+                reason: "approval_needed".into(),
+                payload: serde_json::json!({}),
+            })
+            .unwrap();
+        apply_events(&mut state, payloads);
+
+        // Resume with matching ID
+        let payloads = state
+            .handle(CommandPayload::ResumeInterrupt {
+                interrupt_id: "int-1".into(),
+                payload: serde_json::json!({"approved": true}),
+            })
+            .unwrap();
+        assert_eq!(payloads.len(), 1);
+        assert!(
+            matches!(&payloads[0], EventPayload::InterruptResumed(p) if p.interrupt_id == "int-1")
+        );
+    }
+
+    #[test]
+    fn resume_interrupt_with_wrong_id_is_skipped() {
+        let mut state = created_state();
+
+        // Interrupt first
+        let payloads = state
+            .handle(CommandPayload::Interrupt {
+                interrupt_id: "int-1".into(),
+                reason: "approval_needed".into(),
+                payload: serde_json::json!({}),
+            })
+            .unwrap();
+        apply_events(&mut state, payloads);
+
+        // Resume with wrong ID
+        let payloads = state
+            .handle(CommandPayload::ResumeInterrupt {
+                interrupt_id: "int-WRONG".into(),
+                payload: serde_json::json!({}),
+            })
+            .unwrap();
+        assert!(
+            payloads.is_empty(),
+            "ResumeInterrupt with wrong ID should produce no events"
+        );
+    }
+
+    #[test]
+    fn send_user_message_during_interrupt_returns_error() {
+        let mut state = created_state();
+
+        // Interrupt first
+        let payloads = state
+            .handle(CommandPayload::Interrupt {
+                interrupt_id: "int-1".into(),
+                reason: "approval_needed".into(),
+                payload: serde_json::json!({}),
+            })
+            .unwrap();
+        apply_events(&mut state, payloads);
+
+        // SendUserMessage should fail
+        let result = state.handle(CommandPayload::SendUserMessage {
+            content: "hello".into(),
+            stream: true,
+        });
+        assert!(matches!(result, Err(SessionError::SessionInterrupted)));
     }
 }

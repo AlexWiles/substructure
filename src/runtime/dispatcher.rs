@@ -93,10 +93,9 @@ impl Actor for DispatcherActor {
                         }
                     }
 
-                    // Advance offset
-                    if let Some(last) = events.last() {
-                        state.offset = last.sequence + 1;
-                    }
+                    // Advance offset (position in global log, decoupled from
+                    // session-local sequences)
+                    state.offset += events.len() as u64;
                 }
             }
         }
