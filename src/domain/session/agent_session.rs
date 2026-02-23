@@ -9,7 +9,6 @@ use super::agent_state::{AgentState, LlmCallStatus, SessionStatus, ToolCallStatu
 use super::command::{CommandPayload, SessionError};
 use super::effect::Effect;
 use super::react::{extract_assistant_message, extract_response_summary};
-use super::snapshot::SessionSnapshot;
 use super::strategy::{Action, RecoveryEffects, Strategy, Turn};
 use crate::domain::event::*;
 use crate::domain::openai;
@@ -20,52 +19,43 @@ fn new_call_id() -> String {
 
 pub struct AgentSession {
     pub agent_state: AgentState,
-    pub strategy_state: Value,
     strategy: Box<dyn Strategy>,
 }
 
 impl AgentSession {
     pub fn new(session_id: Uuid, strategy: Box<dyn Strategy>, strategy_state: Value) -> Self {
+        let mut agent_state = AgentState::new(session_id);
+        agent_state.strategy_state = strategy_state;
         AgentSession {
-            agent_state: AgentState::new(session_id),
-            strategy_state,
+            agent_state,
             strategy,
         }
     }
 
-    /// Build from a pre-populated core, scanning events for strategy state.
+    /// Build from a pre-populated core (cold replay already applied strategy state via apply_core).
     pub fn from_core(
-        core: AgentState,
+        mut core: AgentState,
         strategy: Box<dyn Strategy>,
         default_strategy_state: Value,
-        events: &[Event],
     ) -> Self {
-        let strategy_state = events
-            .iter()
-            .rev()
-            .find_map(|e| match &e.payload {
-                EventPayload::StrategyStateChanged(p) => Some(p.state.clone()),
-                _ => None,
-            })
-            .unwrap_or(default_strategy_state);
-
+        if core.strategy_state.is_null() {
+            core.strategy_state = default_strategy_state;
+        }
         AgentSession {
             agent_state: core,
             strategy,
-            strategy_state,
         }
     }
 
     /// Build from a snapshot, applying any remaining events.
     pub fn from_snapshot(
-        snapshot: SessionSnapshot,
+        snapshot: AgentState,
         strategy: Box<dyn Strategy>,
         remaining_events: &[Event],
     ) -> Self {
         let mut session = AgentSession {
-            agent_state: snapshot.core,
+            agent_state: snapshot,
             strategy,
-            strategy_state: snapshot.strategy_state,
         };
         for event in remaining_events {
             session.apply(event);
@@ -74,20 +64,12 @@ impl AgentSession {
     }
 
     /// Take a snapshot of the current session state.
-    pub fn snapshot(&self) -> SessionSnapshot {
-        SessionSnapshot {
-            core: self.agent_state.clone(),
-            strategy_state: self.strategy_state.clone(),
-        }
+    pub fn snapshot(&self) -> AgentState {
+        self.agent_state.clone()
     }
 
     pub fn apply(&mut self, event: &Event) {
-        if !self.agent_state.apply_core(event) {
-            return;
-        }
-        if let EventPayload::StrategyStateChanged(payload) = &event.payload {
-            self.strategy_state = payload.state.clone();
-        }
+        self.agent_state.apply_core(event);
     }
 
     pub fn handle(&self, cmd: CommandPayload) -> Result<Vec<EventPayload>, SessionError> {
@@ -407,7 +389,7 @@ impl AgentSession {
             EventPayload::MessageUser(_) => {
                 self.agent_state.status = SessionStatus::Active;
                 let turn = self.strategy.on_user_message(
-                    &self.strategy_state,
+                    &self.agent_state.strategy_state,
                     &self.agent_state,
                     tools.as_deref(),
                 );
@@ -432,7 +414,7 @@ impl AgentSession {
 
                 // Consult strategy for next step
                 let turn = self.strategy.on_llm_response(
-                    &self.strategy_state,
+                    &self.agent_state.strategy_state,
                     &self.agent_state,
                     tools.as_deref(),
                     &summary,
@@ -469,7 +451,7 @@ impl AgentSession {
                     );
                     let results = self.agent_state.collect_tool_results();
                     let turn = self.strategy.on_tool_results(
-                        &self.strategy_state,
+                        &self.agent_state.strategy_state,
                         &self.agent_state,
                         tools.as_deref(),
                         &results,
@@ -488,7 +470,7 @@ impl AgentSession {
 
             EventPayload::InterruptResumed(payload) => {
                 let turn = self.strategy.on_interrupt_resume(
-                    &self.strategy_state,
+                    &self.agent_state.strategy_state,
                     &self.agent_state,
                     tools.as_deref(),
                     &payload.interrupt_id,
@@ -506,8 +488,8 @@ impl AgentSession {
     /// Absorb strategy state update + translate action into Effects.
     fn apply_turn(&mut self, turn: Turn, tools: Option<Vec<openai::Tool>>) -> Vec<Effect> {
         let mut effects = Vec::new();
-        if turn.state != self.strategy_state {
-            self.strategy_state = turn.state.clone();
+        if turn.state != self.agent_state.strategy_state {
+            self.agent_state.strategy_state = turn.state.clone();
             effects.push(Effect::Command(CommandPayload::UpdateStrategyState {
                 state: turn.state,
             }));

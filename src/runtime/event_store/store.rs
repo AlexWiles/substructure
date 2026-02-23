@@ -5,7 +5,7 @@ use ractor::OutputPort;
 use uuid::Uuid;
 
 use crate::domain::event::{Event, SessionAuth};
-use crate::domain::session::SessionSnapshot;
+use crate::domain::session::AgentState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Version(pub u64);
@@ -27,7 +27,7 @@ pub enum StoreError {
 }
 
 pub struct SessionLoad {
-    pub snapshot: Option<SessionSnapshot>,
+    pub snapshot: Option<AgentState>,
     pub events: Vec<Event>,
 }
 
@@ -41,7 +41,7 @@ pub trait EventStore: Send + Sync {
         auth: &SessionAuth,
         expected_version: Version,
         events: Vec<Event>,
-        snapshot: SessionSnapshot,
+        snapshot: AgentState,
     ) -> Result<(), StoreError>;
 
     /// Load latest snapshot + any events after it.

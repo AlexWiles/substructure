@@ -58,7 +58,7 @@ impl Actor for SessionClientActor {
         // Load snapshot + any remaining events
         if let Ok(load) = args.store.load(args.session_id, &args.auth) {
             if let Some(snapshot) = load.snapshot {
-                core = snapshot.core;
+                core = snapshot;
             }
             for event in &load.events {
                 core.apply_core(event);

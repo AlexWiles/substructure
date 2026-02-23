@@ -184,7 +184,6 @@ impl Runtime {
         // Build session from snapshot (fast path) or cold replay (fallback)
         let mut session = if let Some(snapshot) = load.snapshot {
             let agent = snapshot
-                .core
                 .agent
                 .as_ref()
                 .ok_or(RuntimeError::SessionNotFound)?;
@@ -208,7 +207,7 @@ impl Runtime {
                 .await
                 .map_err(|e| RuntimeError::StrategyResolution(e.to_string()))?;
 
-            AgentSession::from_core(core, strategy, strategy_state, &load.events)
+            AgentSession::from_core(core, strategy, strategy_state)
         };
         session.agent_state.last_reacted = session.agent_state.last_applied;
 

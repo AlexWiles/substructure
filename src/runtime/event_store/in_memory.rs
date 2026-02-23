@@ -6,12 +6,12 @@ use ractor::OutputPort;
 use uuid::Uuid;
 
 use crate::domain::event::{Event, SessionAuth};
-use crate::domain::session::SessionSnapshot;
+use crate::domain::session::AgentState;
 use super::store::{EventStore, SessionLoad, StoreError, Version};
 
 struct StoreInner {
     streams: HashMap<Uuid, Vec<Event>>,
-    snapshots: HashMap<Uuid, (SessionSnapshot, u64)>, // (snapshot, version_at_snapshot)
+    snapshots: HashMap<Uuid, (AgentState, u64)>, // (snapshot, version_at_snapshot)
     log: Vec<Arc<Event>>,
 }
 
@@ -41,7 +41,7 @@ impl EventStore for InMemoryEventStore {
         auth: &SessionAuth,
         expected_version: Version,
         events: Vec<Event>,
-        snapshot: SessionSnapshot,
+        snapshot: AgentState,
     ) -> Result<(), StoreError> {
         {
             let mut inner = self.inner.lock().expect("store lock poisoned");

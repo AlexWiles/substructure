@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::domain::event::{
     AgentConfig, Event, EventPayload, LlmRequest, LlmResponse, Message, Role, SessionAuth,
@@ -110,6 +111,7 @@ pub struct AgentState {
     pub stream_version: u64,
     pub last_applied: Option<u64>,
     pub last_reacted: Option<u64>,
+    pub strategy_state: Value,
 
     // Call lifecycle tracking
     llm_calls: HashMap<String, LlmCallState>,
@@ -131,6 +133,7 @@ impl AgentState {
             stream_version: 0,
             last_applied: None,
             last_reacted: None,
+            strategy_state: Value::Null,
             llm_calls: HashMap::new(),
             tool_calls: HashMap::new(),
         }
@@ -229,6 +232,9 @@ impl AgentState {
             }
             EventPayload::InterruptResumed(_) => {
                 self.status = SessionStatus::Active;
+            }
+            EventPayload::StrategyStateChanged(payload) => {
+                self.strategy_state = payload.state.clone();
             }
             _ => {}
         }
