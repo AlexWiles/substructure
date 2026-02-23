@@ -3,11 +3,10 @@ use std::sync::Arc;
 use ractor::{call_t, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use uuid::Uuid;
 
-use crate::command::SessionCommand;
-use crate::event::{Event, SpanContext};
-use crate::runtime::{RuntimeError, SessionMessage};
-use crate::session::SessionState;
-use crate::store::EventStore;
+use crate::domain::session::{SessionCommand, SessionState};
+use crate::domain::event::{Event, SpanContext};
+use super::session_actor::{RuntimeError, SessionMessage};
+use super::event_store::EventStore;
 
 // ---------------------------------------------------------------------------
 // ClientMessage — commands from transport + events from dispatcher

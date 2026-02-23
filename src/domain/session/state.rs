@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
-use crate::event::{AgentConfig, Event, EventPayload, LlmRequest, Message, Role, SessionAuth};
-use crate::openai;
+use crate::domain::event::{AgentConfig, Event, EventPayload, LlmRequest, Message, Role, SessionAuth};
+use crate::domain::openai;
 
 #[derive(Debug, Clone)]
 pub struct TokenBudget {
@@ -25,6 +25,20 @@ pub struct LlmCall {
     pub status: LlmCallStatus,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolCallStatus {
+    Pending,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+pub struct TrackedToolCall {
+    pub tool_call_id: String,
+    pub name: String,
+    pub status: ToolCallStatus,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionState {
     pub session_id: Uuid,
@@ -33,6 +47,8 @@ pub struct SessionState {
     pub messages: Vec<Message>,
     pub tokens: TokenBudget,
     pub llm_calls: HashMap<String, LlmCall>,
+    pub tool_calls: HashMap<String, TrackedToolCall>,
+    pub pending_tool_results: usize,
     pub dirty: bool,
     pub stream_version: u64,
     pub last_applied: Option<u64>,
@@ -51,6 +67,8 @@ impl SessionState {
                 limit: None,
             },
             llm_calls: HashMap::new(),
+            tool_calls: HashMap::new(),
+            pending_tool_results: 0,
             dirty: false,
             stream_version: 0,
             last_applied: None,
@@ -88,10 +106,12 @@ impl SessionState {
             }
             EventPayload::MessageAssistant(payload) => {
                 self.track_tokens(&payload.message);
+                self.pending_tool_results = payload.message.tool_calls.len();
                 self.messages.push(payload.message.clone());
             }
             EventPayload::MessageTool(payload) => {
                 self.track_tokens(&payload.message);
+                self.pending_tool_results = self.pending_tool_results.saturating_sub(1);
                 self.messages.push(payload.message.clone());
             }
             EventPayload::LlmCallRequested(payload) => {
@@ -114,11 +134,34 @@ impl SessionState {
                     call.status = LlmCallStatus::Failed;
                 }
             }
+            EventPayload::ToolCallRequested(payload) => {
+                self.tool_calls.insert(
+                    payload.tool_call_id.clone(),
+                    TrackedToolCall {
+                        tool_call_id: payload.tool_call_id.clone(),
+                        name: payload.name.clone(),
+                        status: ToolCallStatus::Pending,
+                    },
+                );
+            }
+            EventPayload::ToolCallCompleted(payload) => {
+                if let Some(tc) = self.tool_calls.get_mut(&payload.tool_call_id) {
+                    tc.status = ToolCallStatus::Completed;
+                }
+            }
+            EventPayload::ToolCallErrored(payload) => {
+                if let Some(tc) = self.tool_calls.get_mut(&payload.tool_call_id) {
+                    tc.status = ToolCallStatus::Failed;
+                }
+            }
             _ => {}
         }
     }
 
-    pub fn build_llm_request(&self) -> Option<LlmRequest> {
+    pub fn build_llm_request(
+        &self,
+        tools: Option<Vec<openai::Tool>>,
+    ) -> Option<LlmRequest> {
         let agent = self.agent.as_ref()?;
 
         let mut messages = vec![openai::ChatMessage {
@@ -135,7 +178,7 @@ impl SessionState {
         Some(LlmRequest::OpenAi(openai::ChatCompletionRequest {
             model: agent.model.clone(),
             messages,
-            tools: None,
+            tools,
             tool_choice: None,
             temperature: None,
             max_tokens: None,

@@ -5,10 +5,10 @@ use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::client::ClientMessage;
-use crate::event::Event;
-use crate::runtime::SessionMessage;
-use crate::store::InMemoryEventStore;
+use crate::domain::event::Event;
+use super::session_actor::SessionMessage;
+use super::session_client::ClientMessage;
+use super::event_store::InMemoryEventStore;
 
 // ---------------------------------------------------------------------------
 // Dispatcher actor — reads global log, delivers events to session actors
@@ -26,7 +26,7 @@ pub struct DispatcherState {
 }
 
 pub struct DispatcherArgs {
-    pub store: Arc<InMemoryEventStore>,
+    store: Arc<InMemoryEventStore>,
 }
 
 impl Actor for DispatcherActor {

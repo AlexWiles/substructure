@@ -1,9 +1,3 @@
 pub mod a2a;
-pub mod client;
-pub mod command;
-pub mod event;
-pub mod openai;
-pub mod reactor;
+pub mod domain;
 pub mod runtime;
-pub mod session;
-pub mod store;

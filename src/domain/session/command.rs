@@ -1,5 +1,5 @@
-use crate::event::*;
-use crate::session::{LlmCallStatus, SessionState};
+use crate::domain::event::*;
+use super::state::{LlmCallStatus, SessionState, ToolCallStatus};
 
 #[derive(Debug, Clone)]
 pub enum SessionCommand {
@@ -149,6 +149,30 @@ impl SessionState {
             }
             (Some(_), SessionCommand::StreamLlmChunk { call_id, chunk_index, text }) => {
                 Ok(vec![EventPayload::LlmStreamChunk(LlmStreamChunk { call_id, chunk_index, text })])
+            }
+            // Tool call guards — skip if tool_call_id already known (duplicate).
+            (Some(_), SessionCommand::RequestToolCall { ref tool_call_id, .. })
+                if self.tool_calls.contains_key(tool_call_id) =>
+            {
+                Ok(vec![])
+            }
+            // CompleteToolCall: only valid if this tool_call_id is currently Pending.
+            (Some(_), SessionCommand::CompleteToolCall { ref tool_call_id, .. })
+                if !matches!(
+                    self.tool_calls.get(tool_call_id).map(|tc| &tc.status),
+                    Some(&ToolCallStatus::Pending)
+                ) =>
+            {
+                Ok(vec![])
+            }
+            // FailToolCall: only valid if this tool_call_id is currently Pending.
+            (Some(_), SessionCommand::FailToolCall { ref tool_call_id, .. })
+                if !matches!(
+                    self.tool_calls.get(tool_call_id).map(|tc| &tc.status),
+                    Some(&ToolCallStatus::Pending)
+                ) =>
+            {
+                Ok(vec![])
             }
             (Some(_), SessionCommand::RequestToolCall { tool_call_id, name, arguments }) => {
                 Ok(vec![EventPayload::ToolCallRequested(ToolCallRequested {

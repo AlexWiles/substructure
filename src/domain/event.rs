@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::openai;
+use super::openai;
 
 pub type TraceId = [u8; 16];
 pub type SpanId = [u8; 8];
@@ -62,6 +62,21 @@ pub struct AgentConfig {
     pub model: String,
     pub provider: String,
     pub system_prompt: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<McpServerConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    pub name: String,
+    pub transport: McpTransportConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum McpTransportConfig {
+    #[serde(rename = "stdio")]
+    Stdio { command: String, args: Vec<String> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
