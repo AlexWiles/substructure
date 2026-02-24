@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use ractor::OutputPort;
 use uuid::Uuid;
 
 use crate::domain::event::{Event, SessionAuth};
-use crate::domain::session::AgentState;
+use crate::domain::session::{AgentState, SessionStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Version(pub u64);
@@ -27,8 +28,32 @@ pub enum StoreError {
 }
 
 pub struct SessionLoad {
-    pub snapshot: Option<AgentState>,
-    pub events: Vec<Event>,
+    pub snapshot: AgentState,
+}
+
+// ---------------------------------------------------------------------------
+// Session listing
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default)]
+pub struct SessionFilter {
+    pub tenant_id: Option<String>,
+    pub statuses: Option<Vec<SessionStatus>>,
+    pub needs_wake: Option<bool>,
+    pub agent_name: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionSummary {
+    pub session_id: Uuid,
+    pub tenant_id: String,
+    pub client_id: String,
+    pub status: SessionStatus,
+    pub wake_at: Option<DateTime<Utc>>,
+    pub agent_name: String,
+    pub message_count: usize,
+    pub token_usage: u64,
+    pub stream_version: u64,
 }
 
 #[async_trait]
@@ -49,6 +74,9 @@ pub trait EventStore: Send + Sync {
 
     /// Read events from the global log starting at `offset`, up to `limit` events.
     fn read_from(&self, offset: u64, limit: usize) -> Vec<Arc<Event>>;
+
+    /// List sessions matching the given filter. Empty filter returns all sessions.
+    fn list_sessions(&self, filter: &SessionFilter) -> Vec<SessionSummary>;
 
     /// Returns the notification port that fires when new events are appended.
     fn notify(&self) -> &OutputPort<()>;

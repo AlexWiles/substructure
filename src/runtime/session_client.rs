@@ -53,17 +53,10 @@ impl Actor for SessionClientActor {
         myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        let mut core = AgentState::new(args.session_id);
-
-        // Load snapshot + any remaining events
-        if let Ok(load) = args.store.load(args.session_id, &args.auth) {
-            if let Some(snapshot) = load.snapshot {
-                core = snapshot;
-            }
-            for event in &load.events {
-                core.apply_core(event);
-            }
-        }
+        let core = match args.store.load(args.session_id, &args.auth) {
+            Ok(load) => load.snapshot,
+            Err(_) => AgentState::new(args.session_id),
+        };
 
         // Join the process group *after* replay so we don't double-apply
         // events that arrive from the dispatcher while we're catching up

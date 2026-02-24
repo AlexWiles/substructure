@@ -4,7 +4,14 @@ use uuid::Uuid;
 
 pub use super::agent::{AgentConfig, LlmConfig};
 use super::openai;
+use super::session::SessionStatus;
 pub use super::span::{SpanContext, SpanId, TraceId};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DerivedState {
+    pub status: SessionStatus,
+    pub wake_at: Option<DateTime<Utc>>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
@@ -15,6 +22,8 @@ pub struct Event {
     pub span: SpanContext,
     pub occurred_at: DateTime<Utc>,
     pub payload: EventPayload,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived: Option<DerivedState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -267,6 +267,7 @@ mod tests {
             span: SpanContext::root(),
             occurred_at: Utc::now(),
             payload,
+            derived: None,
         }
     }
 
@@ -325,6 +326,7 @@ mod tests {
                     max_tokens: None,
                 }),
                 stream: true,
+                deadline: Utc::now() + chrono::Duration::hours(1),
             }),
         )));
         assert_eq!(events.len(), 1);
@@ -459,6 +461,7 @@ mod tests {
                 tool_call_id: tc_id.clone(),
                 name: "get_weather".into(),
                 arguments: r#"{"city":"NYC"}"#.into(),
+                deadline: Utc::now() + chrono::Duration::hours(1),
             }),
         )));
         assert_eq!(events.len(), 0);
@@ -592,6 +595,7 @@ mod tests {
                     system_prompt: "You are helpful.".into(),
                     mcp_servers: vec![],
                     strategy: Default::default(),
+                    retry: Default::default(),
                 },
                 auth: SessionAuth {
                     tenant_id: "t".into(),

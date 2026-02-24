@@ -1,10 +1,8 @@
 use chrono::Utc;
 use uuid::Uuid;
 
-use serde_json::Value;
-
 use super::agent_state::{AgentState, LlmCallStatus, SessionStatus, ToolCallStatus};
-use super::command::{CommandPayload, SessionError};
+use super::command::{CommandPayload, SessionCommand, SessionError};
 use super::effect::Effect;
 use super::react::{extract_assistant_message, extract_response_summary};
 use super::strategy::{Action, Strategy, Turn};
@@ -21,44 +19,21 @@ pub struct AgentSession {
 }
 
 impl AgentSession {
-    pub fn new(session_id: Uuid, strategy: Box<dyn Strategy>, strategy_state: Value) -> Self {
+    pub fn new(session_id: Uuid, strategy: Box<dyn Strategy>) -> Self {
         let mut agent_state = AgentState::new(session_id);
-        agent_state.strategy_state = strategy_state;
+        agent_state.strategy_state = strategy.default_state();
         AgentSession {
             agent_state,
             strategy,
         }
     }
 
-    /// Build from a pre-populated core (cold replay already applied strategy state via apply_core).
-    pub fn from_core(
-        mut core: AgentState,
-        strategy: Box<dyn Strategy>,
-        default_strategy_state: Value,
-    ) -> Self {
-        if core.strategy_state.is_null() {
-            core.strategy_state = default_strategy_state;
-        }
+    /// Build from a stored snapshot.
+    pub fn from_snapshot(snapshot: AgentState, strategy: Box<dyn Strategy>) -> Self {
         AgentSession {
-            agent_state: core,
-            strategy,
-        }
-    }
-
-    /// Build from a snapshot, applying any remaining events.
-    pub fn from_snapshot(
-        snapshot: AgentState,
-        strategy: Box<dyn Strategy>,
-        remaining_events: &[Event],
-    ) -> Self {
-        let mut session = AgentSession {
             agent_state: snapshot,
             strategy,
-        };
-        for event in remaining_events {
-            session.apply(event);
         }
-        session
     }
 
     /// Take a snapshot of the current session state.
@@ -68,6 +43,55 @@ impl AgentSession {
 
     pub fn apply(&mut self, event: &Event) {
         self.agent_state.apply_core(event);
+    }
+
+    /// Compute the derived state envelope for the current session state.
+    pub fn derived_state(&self) -> DerivedState {
+        DerivedState {
+            status: self.agent_state.status.clone(),
+            wake_at: self.agent_state.wake_at(),
+        }
+    }
+
+    /// Process a command: validate, build events, apply, and stamp derived state.
+    ///
+    /// Returns the fully-stamped events and a post-apply snapshot, ready for
+    /// persistence. The caller only needs to persist — no domain logic leaks out.
+    pub fn process_command(
+        &mut self,
+        cmd: SessionCommand,
+        tenant_id: &str,
+    ) -> Result<(Vec<Event>, AgentState), SessionError> {
+        let payloads = self.handle(cmd.payload)?;
+        if payloads.is_empty() {
+            return Ok((vec![], self.snapshot()));
+        }
+
+        let base_seq = self.agent_state.stream_version + 1;
+        let mut events: Vec<Event> = payloads
+            .into_iter()
+            .enumerate()
+            .map(|(i, payload)| Event {
+                id: Uuid::new_v4(),
+                tenant_id: tenant_id.to_string(),
+                session_id: self.agent_state.session_id,
+                sequence: base_seq + i as u64,
+                span: cmd.span.clone(),
+                occurred_at: cmd.occurred_at,
+                payload,
+                derived: None,
+            })
+            .collect();
+
+        for event in &events {
+            self.apply(event);
+        }
+        let derived = Some(self.derived_state());
+        for event in &mut events {
+            event.derived = derived.clone();
+        }
+
+        Ok((events, self.snapshot()))
     }
 
     pub fn handle(&self, cmd: CommandPayload) -> Result<Vec<EventPayload>, SessionError> {
@@ -121,7 +145,11 @@ impl AgentSession {
             }
             // SendAssistantMessage guard: skip if message already extracted for this call_id
             CommandPayload::SendAssistantMessage { ref call_id, .. }
-                if self.agent_state.is_response_processed(call_id) =>
+                if self
+                    .agent_state
+                    .llm_calls
+                    .get(call_id)
+                    .is_some_and(|c| c.response_processed) =>
             {
                 Ok(vec![])
             }
@@ -168,15 +196,19 @@ impl AgentSession {
             })]),
             // RequestLlmCall: skip if call_id already known or another call is in flight
             CommandPayload::RequestLlmCall { ref call_id, .. }
-                if self.agent_state.has_llm_call(call_id)
-                    || self.agent_state.active_llm_call().is_some() =>
+                if self.agent_state.llm_calls.contains_key(call_id)
+                    || self
+                        .agent_state
+                        .llm_calls
+                        .values()
+                        .any(|c| c.status == LlmCallStatus::Pending) =>
             {
                 Ok(vec![])
             }
             // CompleteLlmCall: only valid if this call_id is currently pending
             CommandPayload::CompleteLlmCall { ref call_id, .. }
                 if !matches!(
-                    self.agent_state.llm_call_status(call_id),
+                    self.agent_state.llm_calls.get(call_id).map(|c| &c.status),
                     Some(&LlmCallStatus::Pending)
                 ) =>
             {
@@ -185,7 +217,7 @@ impl AgentSession {
             // FailLlmCall: only valid if this call_id is currently pending
             CommandPayload::FailLlmCall { ref call_id, .. }
                 if !matches!(
-                    self.agent_state.llm_call_status(call_id),
+                    self.agent_state.llm_calls.get(call_id).map(|c| &c.status),
                     Some(&LlmCallStatus::Pending)
                 ) =>
             {
@@ -217,7 +249,7 @@ impl AgentSession {
             // StreamLlmChunk guard: skip if this call_id is not Pending
             CommandPayload::StreamLlmChunk { ref call_id, .. }
                 if !matches!(
-                    self.agent_state.llm_call_status(call_id),
+                    self.agent_state.llm_calls.get(call_id).map(|c| &c.status),
                     Some(&LlmCallStatus::Pending)
                 ) =>
             {
@@ -235,12 +267,15 @@ impl AgentSession {
             // Tool call guards — skip if tool_call_id already known (duplicate)
             CommandPayload::RequestToolCall {
                 ref tool_call_id, ..
-            } if self.agent_state.has_tool_call(tool_call_id) => Ok(vec![]),
+            } if self.agent_state.tool_calls.contains_key(tool_call_id) => Ok(vec![]),
             // CompleteToolCall: only valid if this tool_call_id is currently Pending
             CommandPayload::CompleteToolCall {
                 ref tool_call_id, ..
             } if !matches!(
-                self.agent_state.tool_call_status(tool_call_id),
+                self.agent_state
+                    .tool_calls
+                    .get(tool_call_id)
+                    .map(|tc| &tc.status),
                 Some(&ToolCallStatus::Pending)
             ) =>
             {
@@ -250,7 +285,10 @@ impl AgentSession {
             CommandPayload::FailToolCall {
                 ref tool_call_id, ..
             } if !matches!(
-                self.agent_state.tool_call_status(tool_call_id),
+                self.agent_state
+                    .tool_calls
+                    .get(tool_call_id)
+                    .map(|tc| &tc.status),
                 Some(&ToolCallStatus::Pending)
             ) =>
             {
@@ -566,7 +604,13 @@ impl AgentSession {
             .unwrap_or(3);
 
         // 1. Timed-out pending LLM calls → fail, then retry if within limits
-        for call in self.agent_state.llm_calls().cloned().collect::<Vec<_>>() {
+        for call in self
+            .agent_state
+            .llm_calls
+            .values()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
             if call.status == LlmCallStatus::Pending && call.deadline <= now {
                 let mut effects = vec![Effect::Command(CommandPayload::FailLlmCall {
                     call_id: call.call_id.clone(),
@@ -590,7 +634,8 @@ impl AgentSession {
         // 2. Timed-out pending tool calls → fail
         for tc in self
             .agent_state
-            .tool_call_states()
+            .tool_calls
+            .values()
             .cloned()
             .collect::<Vec<_>>()
         {
@@ -604,7 +649,13 @@ impl AgentSession {
         }
 
         // 3. Failed LLM call with retry.next_at passed → re-issue with new deadline
-        for call in self.agent_state.llm_calls().cloned().collect::<Vec<_>>() {
+        for call in self
+            .agent_state
+            .llm_calls
+            .values()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
             if call.status == LlmCallStatus::Failed {
                 if call.retry.attempts >= max_retries {
                     // Past retry limit → done
@@ -613,9 +664,7 @@ impl AgentSession {
                 }
                 if let Some(next_at) = call.retry.next_at {
                     if next_at <= now {
-                        if let Some(request) =
-                            self.agent_state.build_llm_request(tools.clone())
-                        {
+                        if let Some(request) = self.agent_state.build_llm_request(tools.clone()) {
                             self.agent_state.status = SessionStatus::Active;
                             return vec![Effect::Command(CommandPayload::RequestLlmCall {
                                 call_id: new_call_id(),
@@ -630,7 +679,13 @@ impl AgentSession {
         }
 
         // 4. Completed LLM call, response not processed → emit SendAssistantMessage + tool calls
-        for call in self.agent_state.llm_calls().cloned().collect::<Vec<_>>() {
+        for call in self
+            .agent_state
+            .llm_calls
+            .values()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
             if call.status == LlmCallStatus::Completed && !call.response_processed {
                 if let Some(ref response) = call.response {
                     let (content, tool_calls, token_count) = extract_assistant_message(response);
@@ -656,7 +711,8 @@ impl AgentSession {
         // 5. Pending tool calls still in flight → re-issue them (crash recovery)
         for tc in self
             .agent_state
-            .tool_call_states()
+            .tool_calls
+            .values()
             .cloned()
             .collect::<Vec<_>>()
         {
@@ -678,7 +734,13 @@ impl AgentSession {
         }
 
         // 6. Pending LLM calls still in flight → re-issue (crash recovery)
-        for call in self.agent_state.llm_calls().cloned().collect::<Vec<_>>() {
+        for call in self
+            .agent_state
+            .llm_calls
+            .values()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
             if call.status == LlmCallStatus::Pending && call.deadline > now {
                 return vec![Effect::CallLlm {
                     call_id: call.call_id.clone(),
@@ -696,7 +758,11 @@ impl AgentSession {
             .is_some_and(|m| m.role == Role::Tool);
         if self.agent_state.pending_tool_results() == 0
             && last_is_tool
-            && !self.agent_state.has_pending_llm()
+            && !self
+                .agent_state
+                .llm_calls
+                .values()
+                .any(|c| c.status == LlmCallStatus::Pending)
         {
             self.agent_state.status = SessionStatus::Active;
             if let Some(request) = self.agent_state.build_llm_request(tools) {
@@ -710,19 +776,5 @@ impl AgentSession {
         }
 
         vec![]
-    }
-
-    // -----------------------------------------------------------------------
-    // Setup — one-time effects needed after resume (MCP servers)
-    // -----------------------------------------------------------------------
-
-    pub fn setup_effects(&self) -> Vec<Effect> {
-        let mut effects = Vec::new();
-        if let Some(agent) = &self.agent_state.agent {
-            if !agent.mcp_servers.is_empty() {
-                effects.push(Effect::StartMcpServers(agent.mcp_servers.clone()));
-            }
-        }
-        effects
     }
 }

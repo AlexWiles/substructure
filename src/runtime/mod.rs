@@ -1,15 +1,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use chrono::Utc;
 use ractor::{call_t, Actor, ActorRef};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::domain::agent::AgentConfig;
 use crate::domain::config::{EventStoreConfig, SystemConfig};
-use crate::domain::event::{Event, SessionAuth, SpanContext};
-use crate::domain::session::{AgentSession, AgentState, CommandPayload, SessionCommand};
+use crate::domain::event::{Event, SessionAuth};
+use crate::domain::session::{AgentState, SessionCommand};
+use session_actor::SessionActorArgs;
+use wake_scheduler::spawn_wake_scheduler;
 
 pub mod dispatcher;
 pub mod event_store;
@@ -22,7 +23,9 @@ mod strategy;
 pub mod wake_scheduler;
 
 pub use dispatcher::spawn_dispatcher;
-pub use event_store::{EventStore, InMemoryEventStore, SessionLoad, StoreError, Version};
+pub use event_store::{
+    EventStore, InMemoryEventStore, SessionFilter, SessionLoad, SessionSummary, StoreError, Version,
+};
 pub use llm::{LlmClient, MockLlmClient, OpenAiClient, StreamDelta};
 pub use llm::{LlmClientFactory, LlmClientProvider, ProviderError, StaticLlmClientProvider};
 pub use mcp::{
@@ -30,7 +33,7 @@ pub use mcp::{
     ToolAnnotations, ToolDefinition,
 };
 pub use mcp::{McpClientProvider, StaticMcpClientProvider};
-pub use session_actor::{RuntimeError, SessionActor, SessionActorState, SessionMessage};
+pub use session_actor::{RuntimeError, SessionActor, SessionActorState, SessionInit, SessionMessage};
 pub use session_client::{ClientMessage, SessionClientActor, SessionClientArgs};
 pub use strategy::{StaticStrategyProvider, StrategyProvider, StrategyProviderError};
 
@@ -59,15 +62,10 @@ impl Runtime {
             StaticLlmClientProvider::from_config(&config.llm_clients, &default_llm_factories())
                 .expect("failed to create LLM clients from config");
 
-        let (wake_scheduler, wake_scheduler_handle) = Actor::spawn(
-            Some("wake-scheduler".to_string()),
-            wake_scheduler::WakeScheduler,
-            (),
-        )
-        .await
-        .expect("failed to spawn wake scheduler");
+        let (wake_scheduler, wake_scheduler_handle) =
+            spawn_wake_scheduler(store.clone()).await;
 
-        Runtime {
+        let runtime = Runtime {
             store,
             dispatcher,
             dispatcher_handle,
@@ -77,7 +75,12 @@ impl Runtime {
             agents: config.agents.clone(),
             wake_scheduler,
             wake_scheduler_handle,
-        }
+        };
+
+        // Resume sessions that need waking after restart
+        runtime.resume_all().await;
+
+        runtime
     }
 
     /// Replace the LLM client provider.
@@ -114,141 +117,39 @@ impl Runtime {
             .get(agent_name)
             .cloned()
             .ok_or_else(|| RuntimeError::UnknownAgent(agent_name.to_string()))?;
-        self.create_session(agent, auth).await
+        self.start_session(SessionInit::Create {
+            session_id: Uuid::new_v4(),
+            agent,
+            auth,
+        })
+        .await
     }
 
-    /// Create a new session, resolving LLM/MCP clients through providers.
-    pub async fn create_session(
-        &self,
-        agent: AgentConfig,
-        auth: SessionAuth,
-    ) -> Result<SessionHandle, RuntimeError> {
-        let session_id = Uuid::new_v4();
+    /// Start a session — either creating a new one or resuming from a snapshot.
+    ///
+    /// The actor's `pre_start` handles all startup logic: resolving the
+    /// strategy, building or loading the session, persisting the initial
+    /// `CreateSession` event (for new sessions), starting MCP servers,
+    /// and setting `last_reacted` to prevent double-react.
+    pub async fn start_session(&self, init: SessionInit) -> Result<SessionHandle, RuntimeError> {
+        let session_id = init.session_id();
+        let auth = init.auth().clone();
 
-        let (strategy, strategy_state) = self
-            .strategy_provider
-            .resolve(&agent.strategy, &agent, &auth)
-            .await
-            .map_err(|e| RuntimeError::StrategyResolution(e.to_string()))?;
-
-        let initial_state = SessionActorState::new(
-            session_id,
-            self.store.clone(),
-            auth.clone(),
-            self.llm_provider.clone(),
-            self.mcp_provider.clone(),
-            self.strategy_provider.clone(),
-            strategy,
-            strategy_state,
-        );
-        let (actor, session_handle) = Actor::spawn(
+        let (actor, actor_handle) = Actor::spawn(
             Some(format!("session-{session_id}")),
             SessionActor,
-            initial_state,
-        )
-        .await
-        .expect("failed to spawn session actor");
-
-        let (session_client, client_handle) = Actor::spawn(
-            None,
-            SessionClientActor,
-            SessionClientArgs {
-                session_id,
-                auth: auth.clone(),
-                session_actor: actor.clone(),
+            SessionActorArgs {
+                init,
                 store: self.store.clone(),
+                llm_provider: self.llm_provider.clone(),
+                mcp_provider: self.mcp_provider.clone(),
+                strategy_provider: self.strategy_provider.clone(),
             },
         )
         .await
-        .expect("failed to spawn session client");
+        .map_err(|e| RuntimeError::ActorCall(format!("session startup failed: {e}")))?;
 
-        // Send CreateSession command to initialize domain state
-        let result = call_t!(
-            session_client,
-            ClientMessage::SendCommand,
-            5000,
-            SessionCommand {
-                span: SpanContext::root(),
-                occurred_at: Utc::now(),
-                payload: CommandPayload::CreateSession { agent, auth },
-            }
-        );
-        if let Ok(inner) = result {
-            inner.expect("CreateSession command failed");
-        }
-
-        Ok(SessionHandle {
-            session_id,
-            session_actor: actor,
-            session_client,
-            session_actor_handle: session_handle,
-            session_client_handle: client_handle,
-        })
-    }
-
-    /// Resume an existing session from stored snapshot.
-    /// Recovery is handled by the wake scheduler — no special recovery path needed.
-    pub async fn resume_session(
-        &self,
-        session_id: Uuid,
-        auth: SessionAuth,
-    ) -> Result<SessionHandle, RuntimeError> {
-        let load = self.store.load(session_id, &auth)?;
-
-        // Build session from snapshot (fast path) or cold replay (fallback)
-        let mut session = if let Some(snapshot) = load.snapshot {
-            let agent = snapshot
-                .agent
-                .as_ref()
-                .ok_or(RuntimeError::SessionNotFound)?;
-            let (strategy, _default_state) = self
-                .strategy_provider
-                .resolve(&agent.strategy, agent, &auth)
-                .await
-                .map_err(|e| RuntimeError::StrategyResolution(e.to_string()))?;
-
-            AgentSession::from_snapshot(snapshot, strategy, &load.events)
-        } else {
-            // No snapshot — cold replay all events
-            let mut core = AgentState::new(session_id);
-            for event in &load.events {
-                core.apply_core(event);
-            }
-            let agent = core.agent.as_ref().ok_or(RuntimeError::SessionNotFound)?;
-            let (strategy, strategy_state) = self
-                .strategy_provider
-                .resolve(&agent.strategy, agent, &auth)
-                .await
-                .map_err(|e| RuntimeError::StrategyResolution(e.to_string()))?;
-
-            AgentSession::from_core(core, strategy, strategy_state)
-        };
-        session.agent_state.last_reacted = session.agent_state.last_applied;
-
-        // Compute setup effects (MCP servers — runtime state, never persisted)
-        let setup = session.setup_effects();
-
-        // Compute wake_at for scheduler registration
-        let wake_at = session.agent_state.wake_at();
-
-        let actor_state = SessionActorState::from_session(
-            session,
-            self.store.clone(),
-            auth.clone(),
-            self.llm_provider.clone(),
-            self.mcp_provider.clone(),
-            self.strategy_provider.clone(),
-        );
-
-        let (actor, session_handle) = Actor::spawn(
-            Some(format!("session-{session_id}")),
-            SessionActor,
-            actor_state,
-        )
-        .await
-        .expect("failed to spawn session actor");
-
-        let (session_client, client_handle) = Actor::spawn(
+        let (client, client_handle) = Actor::spawn(
             None,
             SessionClientActor,
             SessionClientArgs {
@@ -261,35 +162,49 @@ impl Runtime {
         .await
         .expect("failed to spawn session client");
 
-        // Start MCP servers (always needed — runtime state, never persisted)
-        if !setup.is_empty() {
-            let _ = actor.send_message(SessionMessage::SetupEffects(setup));
-        }
-
-        // Register with wake scheduler — it will immediately wake if wake_at is past due
-        let _ = self
-            .wake_scheduler
-            .send_message(wake_scheduler::WakeSchedulerMessage::UpdateWakeAt {
-                session_id,
-                wake_at,
-                actor_ref: actor.clone(),
-            });
-
         Ok(SessionHandle {
             session_id,
             session_actor: actor,
-            session_client,
-            session_actor_handle: session_handle,
+            session_client: client,
+            session_actor_handle: actor_handle,
             session_client_handle: client_handle,
         })
     }
 
-    pub fn store(&self) -> &Arc<dyn EventStore> {
-        &self.store
+    /// Resume all sessions that need a wake, populating the wake scheduler.
+    /// Called on startup to recover in-flight sessions after a restart.
+    pub async fn resume_all(&self) -> Vec<SessionHandle> {
+        let filter = SessionFilter {
+            needs_wake: Some(true),
+            ..Default::default()
+        };
+        let sessions = self.store.list_sessions(&filter);
+        let mut handles = Vec::new();
+        for summary in sessions {
+            let auth = SessionAuth {
+                tenant_id: summary.tenant_id,
+                client_id: summary.client_id,
+                sub: None,
+            };
+            let init = SessionInit::Resume {
+                session_id: summary.session_id,
+                auth,
+            };
+            match self.start_session(init).await {
+                Ok(handle) => handles.push(handle),
+                Err(e) => {
+                    eprintln!(
+                        "warn: failed to resume session {}: {}",
+                        summary.session_id, e
+                    );
+                }
+            }
+        }
+        handles
     }
 
-    pub fn wake_scheduler(&self) -> &ActorRef<wake_scheduler::WakeSchedulerMessage> {
-        &self.wake_scheduler
+    pub fn store(&self) -> &Arc<dyn EventStore> {
+        &self.store
     }
 
     pub async fn shutdown(self) {

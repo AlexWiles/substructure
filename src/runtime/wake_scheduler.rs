@@ -1,9 +1,12 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use ractor::{Actor, ActorProcessingErr, ActorRef};
+use tokio::task::{AbortHandle, JoinHandle};
 use uuid::Uuid;
 
+use super::event_store::EventStore;
 use super::session_actor::SessionMessage;
 
 // ---------------------------------------------------------------------------
@@ -11,15 +14,9 @@ use super::session_actor::SessionMessage;
 // ---------------------------------------------------------------------------
 
 pub enum WakeSchedulerMessage {
-    /// Register or update a session's wake_at time.
-    UpdateWakeAt {
-        session_id: Uuid,
-        wake_at: Option<DateTime<Utc>>,
-        actor_ref: ActorRef<SessionMessage>,
-    },
-    /// Remove a session from the scheduler (e.g., on shutdown).
-    Deregister { session_id: Uuid },
-    /// Internal tick — check all sessions.
+    /// New events in store — read and update wake times.
+    Wake,
+    /// Timer tick — fire due sessions.
     Tick,
 }
 
@@ -30,40 +27,70 @@ pub enum WakeSchedulerMessage {
 pub struct WakeScheduler;
 
 pub struct WakeSchedulerState {
-    sessions: HashMap<Uuid, WakeEntry>,
+    store: Arc<dyn EventStore>,
+    offset: u64,
+    sessions: HashMap<Uuid, Option<DateTime<Utc>>>,
+    myself: Option<ActorRef<WakeSchedulerMessage>>,
+    timer_handle: Option<AbortHandle>,
 }
 
-struct WakeEntry {
-    wake_at: Option<DateTime<Utc>>,
-    actor_ref: ActorRef<SessionMessage>,
+pub struct WakeSchedulerArgs {
+    pub store: Arc<dyn EventStore>,
+}
+
+fn reschedule(state: &mut WakeSchedulerState) {
+    // Abort existing timer
+    if let Some(handle) = state.timer_handle.take() {
+        handle.abort();
+    }
+
+    // Find the earliest wake_at
+    let next_wake = state
+        .sessions
+        .values()
+        .filter_map(|t| *t)
+        .min();
+
+    let wake_at = match next_wake {
+        Some(t) => t,
+        None => return,
+    };
+
+    let myself = match &state.myself {
+        Some(r) => r.clone(),
+        None => return,
+    };
+
+    // Compute delay, clamped to zero if past-due
+    let now = Utc::now();
+    let delay = (wake_at - now)
+        .to_std()
+        .unwrap_or(std::time::Duration::ZERO);
+
+    let handle = tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        let _ = myself.send_message(WakeSchedulerMessage::Tick);
+    });
+
+    state.timer_handle = Some(handle.abort_handle());
 }
 
 impl Actor for WakeScheduler {
     type Msg = WakeSchedulerMessage;
     type State = WakeSchedulerState;
-    type Arguments = ();
+    type Arguments = WakeSchedulerArgs;
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        _args: (),
+        args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        // Start the tick loop
-        let myself_clone = myself.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                if myself_clone
-                    .send_message(WakeSchedulerMessage::Tick)
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
-
         Ok(WakeSchedulerState {
+            store: args.store,
+            offset: 0,
             sessions: HashMap::new(),
+            myself: Some(myself),
+            timer_handle: None,
         })
     }
 
@@ -74,29 +101,74 @@ impl Actor for WakeScheduler {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            WakeSchedulerMessage::UpdateWakeAt {
-                session_id,
-                wake_at,
-                actor_ref,
-            } => {
-                state
-                    .sessions
-                    .insert(session_id, WakeEntry { wake_at, actor_ref });
-            }
-            WakeSchedulerMessage::Deregister { session_id } => {
-                state.sessions.remove(&session_id);
+            WakeSchedulerMessage::Wake => {
+                loop {
+                    let events = state.store.read_from(state.offset, 100);
+                    if events.is_empty() {
+                        break;
+                    }
+
+                    for event in &events {
+                        if let Some(derived) = &event.derived {
+                            match derived.wake_at {
+                                Some(wake_at) => {
+                                    state.sessions.insert(event.session_id, Some(wake_at));
+                                }
+                                None => {
+                                    state.sessions.remove(&event.session_id);
+                                }
+                            };
+                        }
+                    }
+
+                    state.offset += events.len() as u64;
+                }
+                reschedule(state);
             }
             WakeSchedulerMessage::Tick => {
                 let now = Utc::now();
-                for entry in state.sessions.values() {
-                    if let Some(wake_at) = entry.wake_at {
-                        if wake_at <= now {
-                            let _ = entry.actor_ref.send_message(SessionMessage::Wake);
-                        }
+                let due: Vec<Uuid> = state
+                    .sessions
+                    .iter()
+                    .filter_map(|(id, wake_at)| {
+                        wake_at.filter(|t| *t <= now).map(|_| *id)
+                    })
+                    .collect();
+
+                for session_id in due {
+                    let name = format!("session-{session_id}");
+                    if let Some(cell) = ractor::registry::where_is(name) {
+                        let actor: ActorRef<SessionMessage> = cell.into();
+                        let _ = actor.send_message(SessionMessage::Wake);
                     }
+                    state.sessions.remove(&session_id);
                 }
+                reschedule(state);
             }
         }
         Ok(())
     }
+}
+
+pub async fn spawn_wake_scheduler(
+    store: Arc<dyn EventStore>,
+) -> (ActorRef<WakeSchedulerMessage>, JoinHandle<()>) {
+    let (actor_ref, handle) = Actor::spawn(
+        Some("wake-scheduler".to_string()),
+        WakeScheduler,
+        WakeSchedulerArgs {
+            store: store.clone(),
+        },
+    )
+    .await
+    .expect("failed to spawn wake scheduler");
+
+    store
+        .notify()
+        .subscribe(actor_ref.clone(), |_| Some(WakeSchedulerMessage::Wake));
+
+    // Send initial Wake to catch up on existing log
+    let _ = actor_ref.send_message(WakeSchedulerMessage::Wake);
+
+    (actor_ref, handle)
 }

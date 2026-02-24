@@ -117,8 +117,8 @@ pub struct AgentState {
     pub strategy_state: Value,
 
     // Call lifecycle tracking
-    llm_calls: HashMap<String, LlmCallState>,
-    tool_calls: HashMap<String, ToolCallState>,
+    pub llm_calls: HashMap<String, LlmCallState>,
+    pub tool_calls: HashMap<String, ToolCallState>,
 }
 
 impl AgentState {
@@ -263,52 +263,6 @@ impl AgentState {
             SessionStatus::Interrupted { interrupt_id } => Some(interrupt_id),
             _ => None,
         }
-    }
-
-    pub fn has_llm_call(&self, call_id: &str) -> bool {
-        self.llm_calls.contains_key(call_id)
-    }
-
-    pub fn llm_call_status(&self, call_id: &str) -> Option<&LlmCallStatus> {
-        self.llm_calls.get(call_id).map(|c| &c.status)
-    }
-
-    pub fn active_llm_call(&self) -> Option<&LlmCallState> {
-        self.llm_calls
-            .values()
-            .find(|c| c.status == LlmCallStatus::Pending)
-    }
-
-    pub fn is_response_processed(&self, call_id: &str) -> bool {
-        self.llm_calls
-            .get(call_id)
-            .is_some_and(|c| c.response_processed)
-    }
-
-    pub fn has_tool_call(&self, tool_call_id: &str) -> bool {
-        self.tool_calls.contains_key(tool_call_id)
-    }
-
-    pub fn tool_call_status(&self, tool_call_id: &str) -> Option<&ToolCallStatus> {
-        self.tool_calls.get(tool_call_id).map(|tc| &tc.status)
-    }
-
-    pub fn has_pending_llm(&self) -> bool {
-        self.llm_calls
-            .values()
-            .any(|c| c.status == LlmCallStatus::Pending)
-    }
-
-    pub fn llm_calls(&self) -> impl Iterator<Item = &LlmCallState> {
-        self.llm_calls.values()
-    }
-
-    pub fn llm_call(&self, call_id: &str) -> Option<&LlmCallState> {
-        self.llm_calls.get(call_id)
-    }
-
-    pub fn tool_call_states(&self) -> impl Iterator<Item = &ToolCallState> {
-        self.tool_calls.values()
     }
 
     /// Derive pending tool result count from the message history.

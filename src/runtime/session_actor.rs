@@ -11,9 +11,10 @@ use super::llm::StreamDelta;
 use super::mcp::McpClientProvider;
 use super::mcp::{Content, McpClient};
 use super::strategy::StrategyProvider;
+use crate::domain::agent::AgentConfig;
 use crate::domain::event::*;
 use crate::domain::session::{
-    AgentSession, AgentState, CommandPayload, Effect, SessionCommand, SessionError, Strategy,
+    AgentSession, AgentState, CommandPayload, Effect, SessionCommand, SessionError,
 };
 
 // ---------------------------------------------------------------------------
@@ -50,10 +51,46 @@ pub enum SessionMessage {
     Cast(SessionCommand),
     GetState(RpcReplyPort<AgentState>),
     Events(Vec<Arc<Event>>),
-    /// Setup effects to execute on resume (e.g., start MCP servers).
-    SetupEffects(Vec<Effect>),
     /// Timer-triggered or scheduler-triggered wake.
     Wake,
+}
+
+// ---------------------------------------------------------------------------
+// SessionInit — what the actor needs to start up
+// ---------------------------------------------------------------------------
+
+pub enum SessionInit {
+    Create {
+        session_id: Uuid,
+        agent: AgentConfig,
+        auth: SessionAuth,
+    },
+    Resume {
+        session_id: Uuid,
+        auth: SessionAuth,
+    },
+}
+
+impl SessionInit {
+    pub fn session_id(&self) -> Uuid {
+        match self {
+            Self::Create { session_id, .. } | Self::Resume { session_id, .. } => *session_id,
+        }
+    }
+
+    pub fn auth(&self) -> &SessionAuth {
+        match self {
+            Self::Create { auth, .. } | Self::Resume { auth, .. } => auth,
+        }
+    }
+}
+
+pub struct SessionActorArgs {
+    pub init: SessionInit,
+    pub store: Arc<dyn EventStore>,
+    pub llm_provider: Arc<dyn LlmClientProvider>,
+    pub mcp_provider: Arc<dyn McpClientProvider>,
+    pub strategy_provider: Arc<dyn StrategyProvider>,
 }
 
 // ---------------------------------------------------------------------------
@@ -74,55 +111,6 @@ pub struct SessionActorState {
 }
 
 impl SessionActorState {
-    pub fn new(
-        session_id: Uuid,
-        store: Arc<dyn EventStore>,
-        auth: SessionAuth,
-        llm_provider: Arc<dyn LlmClientProvider>,
-        mcp_provider: Arc<dyn McpClientProvider>,
-        strategy_provider: Arc<dyn StrategyProvider>,
-        strategy: Box<dyn Strategy>,
-        strategy_state: serde_json::Value,
-    ) -> Self {
-        SessionActorState {
-            session_id,
-            session: AgentSession::new(session_id, strategy, strategy_state),
-            store,
-            auth,
-            llm_provider,
-            mcp_provider,
-            strategy_provider,
-            mcp_clients: Vec::new(),
-        }
-    }
-
-    /// Build from a pre-constructed `AgentSession` (e.g. after resuming from
-    /// events). Avoids the caller having to know about `SessionActorState`
-    /// field layout.
-    pub fn from_session(
-        session: AgentSession,
-        store: Arc<dyn EventStore>,
-        auth: SessionAuth,
-        llm_provider: Arc<dyn LlmClientProvider>,
-        mcp_provider: Arc<dyn McpClientProvider>,
-        strategy_provider: Arc<dyn StrategyProvider>,
-    ) -> Self {
-        SessionActorState {
-            session_id: session.agent_state.session_id,
-            session,
-            store,
-            auth,
-            llm_provider,
-            mcp_provider,
-            strategy_provider,
-            mcp_clients: Vec::new(),
-        }
-    }
-
-    pub fn with_mcp_clients(mut self, mcp_clients: Vec<Arc<dyn McpClient>>) -> Self {
-        self.mcp_clients = mcp_clients;
-        self
-    }
 
     /// Collect all tool definitions from all MCP clients as OpenAI tools.
     pub fn all_tools(&self) -> Option<Vec<crate::domain::openai::Tool>> {
@@ -150,36 +138,15 @@ async fn execute(
     state: &mut SessionActorState,
     cmd: SessionCommand,
 ) -> Result<Vec<Event>, RuntimeError> {
-    let payloads = state.session.handle(cmd.payload)?;
-    if payloads.is_empty() {
+    let version = Version(state.session.agent_state.stream_version);
+    let (events, snapshot) = state
+        .session
+        .process_command(cmd, &state.auth.tenant_id)?;
+
+    if events.is_empty() {
         return Ok(vec![]);
     }
 
-    let version = Version(state.session.agent_state.stream_version);
-
-    // Aggregate builds events (assigns session-local sequences)
-    let base_seq = state.session.agent_state.stream_version + 1;
-    let events: Vec<Event> = payloads
-        .into_iter()
-        .enumerate()
-        .map(|(i, payload)| Event {
-            id: Uuid::new_v4(),
-            tenant_id: state.auth.tenant_id.clone(),
-            session_id: state.session_id,
-            sequence: base_seq + i as u64,
-            span: cmd.span.clone(),
-            occurred_at: cmd.occurred_at,
-            payload,
-        })
-        .collect();
-
-    // Apply locally, then snapshot
-    for event in &events {
-        state.session.apply(event);
-    }
-    let snapshot = state.session.snapshot();
-
-    // Persist events + snapshot atomically
     state
         .store
         .append(
@@ -358,14 +325,86 @@ async fn handle_effect(
 impl Actor for SessionActor {
     type Msg = SessionMessage;
     type State = SessionActorState;
-    type Arguments = SessionActorState;
+    type Arguments = SessionActorArgs;
 
     async fn pre_start(
         &self,
         _myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        Ok(args)
+        let (session_id, mut session, auth) = match args.init {
+            SessionInit::Create {
+                session_id,
+                agent,
+                auth,
+            } => {
+                let strategy = args
+                    .strategy_provider
+                    .resolve(&agent.strategy, &agent, &auth)
+                    .await
+                    .map_err(|e| format!("strategy resolution: {e}"))?;
+                let mut session = AgentSession::new(session_id, strategy);
+                let cmd = SessionCommand {
+                    span: SpanContext::root(),
+                    occurred_at: Utc::now(),
+                    payload: CommandPayload::CreateSession {
+                        agent,
+                        auth: auth.clone(),
+                    },
+                };
+                let (events, snapshot) = session
+                    .process_command(cmd, &auth.tenant_id)
+                    .map_err(|e| format!("init: {e}"))?;
+                args.store
+                    .append(session_id, &auth, Version(0), events, snapshot)
+                    .await
+                    .map_err(|e| format!("store: {e}"))?;
+                (session_id, session, auth)
+            }
+            SessionInit::Resume { session_id, auth } => {
+                let snapshot = args
+                    .store
+                    .load(session_id, &auth)
+                    .map_err(|e| format!("load: {e}"))?
+                    .snapshot;
+                let agent = snapshot
+                    .agent
+                    .as_ref()
+                    .ok_or("session has no agent config")?;
+                let strategy = args
+                    .strategy_provider
+                    .resolve(&agent.strategy, agent, &auth)
+                    .await
+                    .map_err(|e| format!("strategy resolution: {e}"))?;
+                let session = AgentSession::from_snapshot(snapshot, strategy);
+                (session_id, session, auth)
+            }
+        };
+
+        // Start MCP servers
+        let mut mcp_clients = Vec::new();
+        if let Some(agent) = &session.agent_state.agent {
+            for config in &agent.mcp_servers {
+                match args.mcp_provider.start_server(config, &auth).await {
+                    Ok(client) => mcp_clients.push(client),
+                    Err(e) => eprintln!("MCP '{}' failed: {}", config.name, e),
+                }
+            }
+        }
+
+        // Prevent double-react on events already in the store
+        session.agent_state.last_reacted = session.agent_state.last_applied;
+
+        Ok(SessionActorState {
+            session_id,
+            session,
+            store: args.store,
+            auth,
+            llm_provider: args.llm_provider,
+            mcp_provider: args.mcp_provider,
+            strategy_provider: args.strategy_provider,
+            mcp_clients,
+        })
     }
 
     async fn handle(
@@ -404,12 +443,6 @@ impl Actor for SessionActor {
             }
             SessionMessage::GetState(reply) => {
                 let _ = reply.send(state.session.agent_state.clone());
-            }
-            SessionMessage::SetupEffects(effects) => {
-                let span = SpanContext::root();
-                for effect in effects {
-                    handle_effect(state, &myself, &span, effect).await;
-                }
             }
             SessionMessage::Wake => {
                 let tools = state.all_tools();
@@ -496,7 +529,6 @@ mod tests {
         let mut state = AgentSession::new(
             Uuid::new_v4(),
             Box::new(ReactStrategy::new()),
-            serde_json::Value::Null,
         );
         let event = Event {
             id: Uuid::new_v4(),
@@ -509,6 +541,7 @@ mod tests {
                 agent: test_agent(),
                 auth: test_auth(),
             }),
+            derived: None,
         };
         state.apply(&event);
         state
@@ -525,6 +558,7 @@ mod tests {
                 span: SpanContext::root(),
                 occurred_at: chrono::Utc::now(),
                 payload,
+                derived: None,
             };
             state.apply(&event);
         }
@@ -943,45 +977,6 @@ mod tests {
         assert!(
             effects.is_empty(),
             "fully completed flow should have no wake effects"
-        );
-    }
-
-    #[test]
-    fn setup_effects_includes_mcp_servers() {
-        let mut agent = test_agent();
-        agent.mcp_servers = vec![McpServerConfig {
-            name: "test-server".into(),
-            transport: McpTransportConfig::Stdio {
-                command: "echo".into(),
-                args: vec![],
-            },
-        }];
-
-        let mut state = AgentSession::new(
-            Uuid::new_v4(),
-            Box::new(ReactStrategy::new()),
-            serde_json::Value::Null,
-        );
-        let event = Event {
-            id: Uuid::new_v4(),
-            tenant_id: "t".into(),
-            session_id: state.agent_state.session_id,
-            sequence: 1,
-            span: SpanContext::root(),
-            occurred_at: Utc::now(),
-            payload: EventPayload::SessionCreated(SessionCreated {
-                agent,
-                auth: test_auth(),
-            }),
-        };
-        state.apply(&event);
-
-        let effects = state.setup_effects();
-        assert!(
-            effects
-                .iter()
-                .any(|e| matches!(e, Effect::StartMcpServers(_))),
-            "setup should include MCP server start"
         );
     }
 

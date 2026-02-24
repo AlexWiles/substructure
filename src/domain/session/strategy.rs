@@ -10,6 +10,11 @@ use crate::domain::openai;
 // ---------------------------------------------------------------------------
 
 pub trait Strategy: Send + Sync {
+    /// Initial strategy state for a new or cold-replayed session.
+    fn default_state(&self) -> Value {
+        Value::Null
+    }
+
     /// A new user message arrived.
     fn on_user_message(
         &self,

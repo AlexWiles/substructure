@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use serde_json::Value;
 
 use crate::domain::agent::AgentConfig;
 use crate::domain::event::SessionAuth;
@@ -18,7 +17,7 @@ pub trait StrategyProvider: Send + Sync + 'static {
         kind: &StrategyKind,
         agent: &AgentConfig,
         auth: &SessionAuth,
-    ) -> Result<(Box<dyn Strategy>, Value), StrategyProviderError>;
+    ) -> Result<Box<dyn Strategy>, StrategyProviderError>;
 }
 
 pub struct StaticStrategyProvider;
@@ -30,9 +29,9 @@ impl StrategyProvider for StaticStrategyProvider {
         kind: &StrategyKind,
         _agent: &AgentConfig,
         _auth: &SessionAuth,
-    ) -> Result<(Box<dyn Strategy>, Value), StrategyProviderError> {
+    ) -> Result<Box<dyn Strategy>, StrategyProviderError> {
         match kind {
-            StrategyKind::React => Ok((Box::new(ReactStrategy::new()), Value::Null)),
+            StrategyKind::React => Ok(Box::new(ReactStrategy::new())),
         }
     }
 }

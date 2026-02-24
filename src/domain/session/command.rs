@@ -161,7 +161,6 @@ mod tests {
         let mut state = AgentSession::new(
             Uuid::new_v4(),
             Box::new(ReactStrategy::new()),
-            serde_json::Value::Null,
         );
         let event = Event {
             id: Uuid::new_v4(),
@@ -174,6 +173,7 @@ mod tests {
                 agent: test_agent(),
                 auth: test_auth(),
             }),
+            derived: None,
         };
         state.apply(&event);
         state
@@ -190,6 +190,7 @@ mod tests {
                 span: SpanContext::root(),
                 occurred_at: chrono::Utc::now(),
                 payload,
+                derived: None,
             };
             state.apply(&event);
         }
