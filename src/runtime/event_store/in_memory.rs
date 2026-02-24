@@ -22,8 +22,8 @@ pub struct InMemoryEventStore {
     notify: OutputPort<()>,
 }
 
-impl InMemoryEventStore {
-    pub fn new() -> Self {
+impl Default for InMemoryEventStore {
+    fn default() -> Self {
         InMemoryEventStore {
             inner: Mutex::new(StoreInner {
                 streams: HashMap::new(),
@@ -32,6 +32,12 @@ impl InMemoryEventStore {
             }),
             notify: OutputPort::default(),
         }
+    }
+}
+
+impl InMemoryEventStore {
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 

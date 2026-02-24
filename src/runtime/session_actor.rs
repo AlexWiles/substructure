@@ -61,7 +61,6 @@ pub enum SessionMessage {
 
 pub enum SessionInit {
     Create {
-        session_id: Uuid,
         agent: AgentConfig,
         auth: SessionAuth,
     },
@@ -71,21 +70,8 @@ pub enum SessionInit {
     },
 }
 
-impl SessionInit {
-    pub fn session_id(&self) -> Uuid {
-        match self {
-            Self::Create { session_id, .. } | Self::Resume { session_id, .. } => *session_id,
-        }
-    }
-
-    pub fn auth(&self) -> &SessionAuth {
-        match self {
-            Self::Create { auth, .. } | Self::Resume { auth, .. } => auth,
-        }
-    }
-}
-
 pub struct SessionActorArgs {
+    pub session_id: Uuid,
     pub init: SessionInit,
     pub store: Arc<dyn EventStore>,
     pub llm_provider: Arc<dyn LlmClientProvider>,
@@ -332,9 +318,9 @@ impl Actor for SessionActor {
         _myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
+        let session_id = args.session_id;
         let (session_id, mut session, auth) = match args.init {
             SessionInit::Create {
-                session_id,
                 agent,
                 auth,
             } => {

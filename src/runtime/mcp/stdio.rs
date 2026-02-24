@@ -108,10 +108,9 @@ impl StdioMcpClient {
         let mut cursor: Option<String> = None;
 
         loop {
-            let params = match &cursor {
-                Some(c) => Some(serde_json::json!({ "cursor": c })),
-                None => None,
-            };
+            let params = cursor
+                .as_ref()
+                .map(|c| serde_json::json!({ "cursor": c }));
             let result = self.request("tools/list", params).await?;
 
             let tools: Vec<ToolDefinition> = serde_json::from_value(

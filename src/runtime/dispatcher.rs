@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
-use tokio::task::JoinHandle;
+use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef, SpawnErr};
 use uuid::Uuid;
 
 use crate::domain::event::Event;
@@ -102,41 +101,25 @@ impl Actor for DispatcherActor {
         Ok(())
     }
 
-    async fn handle_supervisor_evt(
-        &self,
-        _myself: ActorRef<Self::Msg>,
-        message: SupervisionEvent,
-        _state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        match &message {
-            SupervisionEvent::ActorFailed(who, err) => {
-                eprintln!("session {:?} failed: {err}", who.get_name());
-            }
-            SupervisionEvent::ActorTerminated(who, _, reason) => {
-                eprintln!("session {:?} terminated: {reason:?}", who.get_name());
-            }
-            _ => {}
-        }
-        Ok(())
-    }
 }
 
 pub async fn spawn_dispatcher(
     store: Arc<dyn EventStore>,
-) -> (ActorRef<DispatcherMessage>, JoinHandle<()>) {
-    let (actor_ref, handle) = Actor::spawn(
+    supervisor: ActorCell,
+) -> Result<ActorRef<DispatcherMessage>, SpawnErr> {
+    let (actor_ref, _handle) = Actor::spawn_linked(
         Some("dispatcher".to_string()),
         DispatcherActor,
         DispatcherArgs {
             store: store.clone(),
         },
+        supervisor,
     )
-    .await
-    .expect("failed to spawn dispatcher");
+    .await?;
 
     store
         .notify()
         .subscribe(actor_ref.clone(), |_| Some(DispatcherMessage::Wake));
 
-    (actor_ref, handle)
+    Ok(actor_ref)
 }

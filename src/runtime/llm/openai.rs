@@ -119,7 +119,7 @@ impl LlmClient for OpenAiClient {
         // SSE line-based parser over the byte stream
         let byte_stream = resp.bytes_stream();
         let mut stream = tokio_stream::StreamExt::map(byte_stream, |chunk| {
-            chunk.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+            chunk.map_err(std::io::Error::other)
         });
 
         let mut line_buf = String::new();

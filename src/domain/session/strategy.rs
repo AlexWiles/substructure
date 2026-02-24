@@ -151,9 +151,15 @@ pub enum StrategyKind {
 
 pub struct ReactStrategy;
 
+impl Default for ReactStrategy {
+    fn default() -> Self {
+        ReactStrategy
+    }
+}
+
 impl ReactStrategy {
     pub fn new() -> Self {
-        ReactStrategy
+        Self
     }
 }
 

@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use ractor::{Actor, ActorProcessingErr, ActorRef};
-use tokio::task::{AbortHandle, JoinHandle};
+use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef, SpawnErr};
+use tokio::task::AbortHandle;
 use uuid::Uuid;
 
 use super::event_store::EventStore;
@@ -152,16 +152,17 @@ impl Actor for WakeScheduler {
 
 pub async fn spawn_wake_scheduler(
     store: Arc<dyn EventStore>,
-) -> (ActorRef<WakeSchedulerMessage>, JoinHandle<()>) {
-    let (actor_ref, handle) = Actor::spawn(
+    supervisor: ActorCell,
+) -> Result<ActorRef<WakeSchedulerMessage>, SpawnErr> {
+    let (actor_ref, _handle) = Actor::spawn_linked(
         Some("wake-scheduler".to_string()),
         WakeScheduler,
         WakeSchedulerArgs {
             store: store.clone(),
         },
+        supervisor,
     )
-    .await
-    .expect("failed to spawn wake scheduler");
+    .await?;
 
     store
         .notify()
@@ -170,5 +171,5 @@ pub async fn spawn_wake_scheduler(
     // Send initial Wake to catch up on existing log
     let _ = actor_ref.send_message(WakeSchedulerMessage::Wake);
 
-    (actor_ref, handle)
+    Ok(actor_ref)
 }

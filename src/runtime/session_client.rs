@@ -15,7 +15,7 @@ use crate::domain::session::{AgentState, SessionCommand};
 pub enum ClientMessage {
     /// From transport: forward a command to the session
     SendCommand(
-        SessionCommand,
+        Box<SessionCommand>,
         RpcReplyPort<Result<Vec<Event>, RuntimeError>>,
     ),
     /// From dispatcher: events for this session
@@ -30,10 +30,14 @@ pub enum ClientMessage {
 
 pub struct SessionClientActor;
 
+/// Callback invoked for each event after it is applied.
+pub type OnEvent = Box<dyn Fn(&Event) + Send + Sync>;
+
 pub struct SessionClientState {
     session_id: Uuid,
     core: AgentState,
     session_actor: ActorRef<SessionMessage>,
+    on_event: Option<OnEvent>,
 }
 
 pub struct SessionClientArgs {
@@ -41,6 +45,7 @@ pub struct SessionClientArgs {
     pub auth: SessionAuth,
     pub session_actor: ActorRef<SessionMessage>,
     pub store: Arc<dyn EventStore>,
+    pub on_event: Option<OnEvent>,
 }
 
 impl Actor for SessionClientActor {
@@ -58,15 +63,15 @@ impl Actor for SessionClientActor {
             Err(_) => AgentState::new(args.session_id),
         };
 
-        // Join the process group *after* replay so we don't double-apply
-        // events that arrive from the dispatcher while we're catching up
         let group = format!("session-clients-{}", args.session_id);
+
         ractor::pg::join(group, vec![myself.get_cell()]);
 
         Ok(SessionClientState {
             session_id: args.session_id,
             core,
             session_actor: args.session_actor,
+            on_event: args.on_event,
         })
     }
 
@@ -78,7 +83,7 @@ impl Actor for SessionClientActor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             ClientMessage::SendCommand(cmd, reply) => {
-                let result = call_t!(state.session_actor, SessionMessage::Execute, 5000, cmd);
+                let result = call_t!(state.session_actor, SessionMessage::Execute, 5000, *cmd);
                 match result {
                     Ok(inner) => {
                         let _ = reply.send(inner);
@@ -94,6 +99,9 @@ impl Actor for SessionClientActor {
             ClientMessage::Events(events) => {
                 for event in &events {
                     state.core.apply_core(event);
+                    if let Some(f) = &state.on_event {
+                        f(event);
+                    }
                 }
             }
             ClientMessage::GetState(reply) => {

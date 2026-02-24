@@ -1,126 +1,123 @@
-use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
-use substructure::domain::agent::{AgentConfig, LlmConfig};
-use substructure::domain::config::{EventStoreConfig, LlmClientConfig, SystemConfig};
-use substructure::domain::event::{Role, SessionAuth, SpanContext};
+use clap::{Parser, Subcommand};
+
+use substructure::domain::config::SystemConfig;
+use substructure::domain::event::{EventPayload, SessionAuth, SpanContext};
 use substructure::domain::session::{CommandPayload, SessionCommand};
 use substructure::runtime::Runtime;
 
-// ---------------------------------------------------------------------------
+#[derive(Parser)]
+#[command(name = "substructure", about = "Substructure agent runtime CLI")]
+struct Cli {
+    /// Path to TOML config file
+    #[arg(long, global = true)]
+    config: Option<String>,
+
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Send a one-shot message to a named agent
+    Run {
+        /// Agent name (must match a key in [agents])
+        #[arg(long)]
+        agent: String,
+        /// Message to send
+        #[arg(long)]
+        message: String,
+    },
+}
 
 #[tokio::main]
-async fn main() {
-    println!("=== MCP Agentic Loop Demo ===\n");
+async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
 
-    // 1. Build system config — agents and LLM clients defined in one place
-    let config = SystemConfig {
-        event_store: EventStoreConfig::InMemory,
-        llm_clients: HashMap::from([("mock".into(), LlmClientConfig {
-            client_type: "mock".into(),
-            settings: serde_json::Map::new(),
-        })]),
-        agents: HashMap::from([(
-            "weather-agent".into(),
-            AgentConfig {
-                id: Default::default(),
-                name: "weather-agent".into(),
-                llm: LlmConfig {
-                    client: "mock".into(),
-                    params: serde_json::Map::from_iter([
-                        ("model".into(), serde_json::Value::String("mock-model".into())),
-                    ]),
-                },
-                system_prompt: "You are a helpful weather assistant. Use the get_weather tool to answer weather questions.".into(),
-                mcp_servers: vec![],
-                strategy: Default::default(),
-                retry: Default::default(),
-            },
-        )]),
+    let config = cli
+        .config
+        .ok_or_else(|| anyhow::anyhow!("--config <path> is required"))?;
+
+    match cli.command {
+        Command::Run { agent, message } => run_one_shot(&config, &agent, &message).await,
+    }
+}
+
+async fn run_one_shot(config_path: &str, agent_name: &str, message: &str) -> anyhow::Result<()> {
+    let raw = std::fs::read_to_string(config_path)
+        .map_err(|e| anyhow::anyhow!("failed to read {config_path}: {e}"))?;
+    let config: SystemConfig =
+        toml::from_str(&raw).map_err(|e| anyhow::anyhow!("failed to parse config: {e}"))?;
+
+    let runtime = Runtime::start(&config).await?;
+
+    let auth = SessionAuth {
+        tenant_id: "cli".into(),
+        client_id: "substructure-cli".into(),
+        sub: None,
     };
-    let runtime = Runtime::start(&config).await;
 
-    // 2. Create session for a named agent
-    let session = runtime
-        .create_session_for(
-            "weather-agent",
-            SessionAuth {
-                tenant_id: "tenant_acme".into(),
-                client_id: "cli_v1".into(),
-                sub: Some("user_abc123".into()),
-            },
-        )
-        .await
-        .unwrap();
+    // Create the session
+    let session = runtime.create_session_for(agent_name, auth.clone()).await?;
+    let session_id = session.session_id;
 
-    // 4. User sends a message — this triggers the full agentic loop:
-    //    user msg → LLM (returns tool call) → MCP executes tool → tool result → LLM (returns text) → done
-    println!("\n--- User sends: \"What's the weather in San Francisco?\" ---\n");
-    let result = session
+    // Connect a client with a callback that captures the final assistant reply
+    let reply = Arc::new(Mutex::new(None::<String>));
+    let notify = Arc::new(tokio::sync::Notify::new());
+
+    let client = {
+        let reply = reply.clone();
+        let notify = notify.clone();
+        runtime
+            .connect(
+                session_id,
+                auth,
+                Some(Box::new(move |event| {
+                    let ev = serde_json::to_string_pretty(event).unwrap();
+
+                    println!("{}", ev);
+
+                    if let EventPayload::MessageAssistant(payload) = &event.payload {
+                        if payload.message.content.is_some()
+                            && payload.message.tool_calls.is_empty()
+                        {
+                            *reply.lock().unwrap() = payload.message.content.clone();
+                            notify.notify_one();
+                        }
+                    }
+                })),
+            )
+            .await?
+    };
+
+    // Send the user message
+    client
         .send_command(SessionCommand {
             span: SpanContext::root(),
             occurred_at: chrono::Utc::now(),
             payload: CommandPayload::SendUserMessage {
-                content: "What's the weather in San Francisco?".into(),
-                stream: true,
+                content: message.into(),
+                stream: false,
             },
         })
-        .await;
-    println!("send message result: {:?}\n", result.unwrap());
+        .await?;
 
-    // 5. Wait for the full agentic loop to complete
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    // Wait for the callback to fire
+    let result =
+        tokio::time::timeout(tokio::time::Duration::from_secs(30), notify.notified()).await;
 
-    // 6. Query final state
-    let state = session.get_state().await;
-
-    println!("\n--- Final Session State ---");
-    println!("Session: {}", state.session_id);
-    if let Some(agent) = &state.agent {
-        println!("Agent: {} (model: {})", agent.name, agent.llm.params.get("model").and_then(|v| v.as_str()).unwrap_or("unknown"));
+    match result {
+        Ok(()) => {
+            if let Some(text) = reply.lock().unwrap().take() {
+                println!("{text}");
+            }
+        }
+        Err(_) => anyhow::bail!("timed out waiting for assistant response"),
     }
-    println!("Messages ({}):", state.messages.len());
-    for msg in &state.messages {
-        let tool_info = if !msg.tool_calls.is_empty() {
-            format!(
-                " [tool_calls: {}]",
-                msg.tool_calls
-                    .iter()
-                    .map(|tc| tc.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        } else if let Some(ref tcid) = msg.tool_call_id {
-            format!(" [tool_call_id: {}]", tcid)
-        } else {
-            String::new()
-        };
-        println!(
-            "  [{:?}]{} {}",
-            msg.role,
-            tool_info,
-            msg.content.as_deref().unwrap_or("(no content)")
-        );
-    }
-    println!("Tokens used: {}", state.tokens.used);
 
-    // 7. Verification
-    println!("\n--- Verification ---");
-    println!(
-        "Expected message count (4: user, assistant+tool_call, tool, assistant): {}",
-        state.messages.len() == 4
-    );
-    println!(
-        "Final message is assistant text: {}",
-        state
-            .messages
-            .last()
-            .map(|m| m.role == Role::Assistant && m.content.is_some())
-            .unwrap_or(false)
-    );
-
-    // Clean shutdown
-    session.shutdown().await;
-    runtime.shutdown().await;
-
-    println!("\nDone!");
+    client.shutdown();
+    session.shutdown();
+    runtime.shutdown();
+    Ok(())
 }

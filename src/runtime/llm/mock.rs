@@ -12,11 +12,17 @@ pub struct MockLlmClient {
     call_count: std::sync::atomic::AtomicU32,
 }
 
-impl MockLlmClient {
-    pub fn new() -> Self {
+impl Default for MockLlmClient {
+    fn default() -> Self {
         Self {
             call_count: std::sync::atomic::AtomicU32::new(0),
         }
+    }
+}
+
+impl MockLlmClient {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn from_config(

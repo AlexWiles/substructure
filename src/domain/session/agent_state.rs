@@ -29,6 +29,7 @@ pub struct TokenBudget {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SessionStatus {
     /// Work in flight: LLM calls, tool calls, strategy decisions.
     Active,

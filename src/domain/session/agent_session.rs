@@ -362,8 +362,6 @@ impl AgentSession {
     // -----------------------------------------------------------------------
 
     pub fn react(&mut self, tools: Option<Vec<openai::Tool>>, event: &Event) -> Vec<Effect> {
-        let session_id = self.agent_state.session_id;
-
         match &event.payload {
             // --- Infrastructure: always handled by runtime ---
             EventPayload::SessionCreated(payload) => {
@@ -376,10 +374,7 @@ impl AgentSession {
 
             EventPayload::LlmCallRequested(payload) => {
                 self.agent_state.status = SessionStatus::Active;
-                println!(
-                    "[session:{}] LlmCallRequested [{}] -> calling LLM client",
-                    session_id, payload.call_id,
-                );
+
                 vec![Effect::CallLlm {
                     call_id: payload.call_id.clone(),
                     request: payload.request.clone(),
@@ -390,10 +385,7 @@ impl AgentSession {
             EventPayload::ToolCallRequested(payload) => {
                 let args: serde_json::Value =
                     serde_json::from_str(&payload.arguments).unwrap_or_default();
-                println!(
-                    "[session:{}] ToolCallRequested [{}] -> dispatching MCP tool '{}'",
-                    session_id, payload.tool_call_id, payload.name,
-                );
+
                 vec![Effect::CallMcpTool {
                     tool_call_id: payload.tool_call_id.clone(),
                     name: payload.name.clone(),
@@ -402,10 +394,6 @@ impl AgentSession {
             }
 
             EventPayload::ToolCallCompleted(payload) => {
-                println!(
-                    "[session:{}] ToolCallCompleted [{}] -> sending tool message",
-                    session_id, payload.tool_call_id,
-                );
                 vec![Effect::Command(CommandPayload::SendToolMessage {
                     tool_call_id: payload.tool_call_id.clone(),
                     content: payload.result.clone(),
@@ -414,10 +402,6 @@ impl AgentSession {
             }
 
             EventPayload::ToolCallErrored(payload) => {
-                println!(
-                    "[session:{}] ToolCallErrored [{}] -> sending tool error message",
-                    session_id, payload.tool_call_id,
-                );
                 vec![Effect::Command(CommandPayload::SendToolMessage {
                     tool_call_id: payload.tool_call_id.clone(),
                     content: format!("Error: {}", payload.error),
@@ -439,11 +423,6 @@ impl AgentSession {
             EventPayload::LlmCallCompleted(payload) => {
                 let summary = extract_response_summary(payload);
 
-                println!(
-                    "[session:{}] LlmCallCompleted [{}] -> sending assistant message",
-                    session_id, payload.call_id,
-                );
-
                 // Always emit SendAssistantMessage (mechanical)
                 let mut effects = vec![Effect::Command(CommandPayload::SendAssistantMessage {
                     call_id: summary.call_id.clone(),
@@ -463,21 +442,13 @@ impl AgentSession {
                 effects
             }
 
-            EventPayload::LlmCallErrored(payload) => {
-                println!(
-                    "[session:{}] LlmCallErrored [{}] -> idle, wake scheduler handles retry",
-                    session_id, payload.call_id,
-                );
+            EventPayload::LlmCallErrored(_) => {
                 self.agent_state.status = SessionStatus::Idle;
                 vec![] // wake scheduler handles retry timing
             }
 
             EventPayload::MessageTool(_) => {
                 if self.agent_state.pending_tool_results() == 0 {
-                    println!(
-                        "[session:{}] MessageTool -> all tool results in, consulting strategy",
-                        session_id,
-                    );
                     let results = self.agent_state.collect_tool_results();
                     let turn = self.strategy.on_tool_results(
                         &self.agent_state.strategy_state,
@@ -487,10 +458,6 @@ impl AgentSession {
                     );
                     self.apply_turn(turn, tools)
                 } else {
-                    println!(
-                        "[session:{}] MessageTool -> tool results still pending",
-                        session_id,
-                    );
                     vec![]
                 }
             }

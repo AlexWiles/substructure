@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use ractor::{call_t, Actor, ActorRef};
-use tokio::task::JoinHandle;
+use ractor::{call_t, Actor, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent};
 use uuid::Uuid;
 
 use crate::domain::agent::AgentConfig;
@@ -33,72 +32,249 @@ pub use mcp::{
     ToolAnnotations, ToolDefinition,
 };
 pub use mcp::{McpClientProvider, StaticMcpClientProvider};
-pub use session_actor::{RuntimeError, SessionActor, SessionActorState, SessionInit, SessionMessage};
-pub use session_client::{ClientMessage, SessionClientActor, SessionClientArgs};
+pub use session_actor::{
+    RuntimeError, SessionActor, SessionActorState, SessionInit, SessionMessage,
+};
+pub use session_client::{ClientMessage, OnEvent, SessionClientActor, SessionClientArgs};
 pub use strategy::{StaticStrategyProvider, StrategyProvider, StrategyProviderError};
 
 // ---------------------------------------------------------------------------
-// Runtime — top-level handle for the system
+// RuntimeMessage — commands handled by the RuntimeActor
 // ---------------------------------------------------------------------------
 
-pub struct Runtime {
+pub enum RuntimeMessage {
+    StartSession(
+        SessionInit,
+        RpcReplyPort<Result<SessionHandle, RuntimeError>>,
+    ),
+}
+
+// ---------------------------------------------------------------------------
+// RuntimeActor — owns providers, spawns session actors
+// ---------------------------------------------------------------------------
+
+struct RuntimeActor;
+
+struct RuntimeState {
+    myself: ActorRef<RuntimeMessage>,
     store: Arc<dyn EventStore>,
-    dispatcher: ActorRef<dispatcher::DispatcherMessage>,
-    dispatcher_handle: JoinHandle<()>,
     llm_provider: Arc<dyn LlmClientProvider>,
     mcp_provider: Arc<dyn McpClientProvider>,
     strategy_provider: Arc<dyn StrategyProvider>,
+}
+
+struct RuntimeArgs {
+    store: Arc<dyn EventStore>,
+    llm_provider: Arc<dyn LlmClientProvider>,
+    mcp_provider: Arc<dyn McpClientProvider>,
+    strategy_provider: Arc<dyn StrategyProvider>,
+}
+
+impl RuntimeState {
+    async fn start_session(&self, init: SessionInit) -> Result<SessionHandle, RuntimeError> {
+        let session_id = match &init {
+            SessionInit::Create { .. } => Uuid::new_v4(),
+            SessionInit::Resume { session_id, .. } => *session_id,
+        };
+        let auth = match &init {
+            SessionInit::Create { auth, .. } | SessionInit::Resume { auth, .. } => auth.clone(),
+        };
+
+        // SessionActor is supervised by RuntimeActor
+        let (actor, _actor_handle) = Actor::spawn_linked(
+            Some(format!("session-{session_id}")),
+            SessionActor,
+            SessionActorArgs {
+                session_id,
+                init,
+                store: self.store.clone(),
+                llm_provider: self.llm_provider.clone(),
+                mcp_provider: self.mcp_provider.clone(),
+                strategy_provider: self.strategy_provider.clone(),
+            },
+            self.myself.get_cell(),
+        )
+        .await
+        .map_err(|e| RuntimeError::ActorCall(format!("session startup failed: {e}")))?;
+
+        // SessionClientActor spawned standalone, then linked to SessionActor
+        // so it dies automatically when the session dies
+        let (client, _client_handle) = Actor::spawn(
+            None,
+            SessionClientActor,
+            SessionClientArgs {
+                session_id,
+                auth,
+                session_actor: actor.clone(),
+                store: self.store.clone(),
+                on_event: None,
+            },
+        )
+        .await
+        .map_err(|e| RuntimeError::ActorCall(format!("session client startup failed: {e}")))?;
+
+        client.get_cell().link(actor.get_cell());
+
+        Ok(SessionHandle {
+            session_id,
+            session_client: client,
+        })
+    }
+
+    async fn resume_all(&self) {
+        let filter = SessionFilter {
+            needs_wake: Some(true),
+            ..Default::default()
+        };
+        let sessions = self.store.list_sessions(&filter);
+        for summary in sessions {
+            let auth = SessionAuth {
+                tenant_id: summary.tenant_id,
+                client_id: summary.client_id,
+                sub: None,
+            };
+            let init = SessionInit::Resume {
+                session_id: summary.session_id,
+                auth,
+            };
+            if let Err(e) = self.start_session(init).await {
+                eprintln!(
+                    "warn: failed to resume session {}: {}",
+                    summary.session_id, e
+                );
+            }
+        }
+    }
+}
+
+impl Actor for RuntimeActor {
+    type Msg = RuntimeMessage;
+    type State = RuntimeState;
+    type Arguments = RuntimeArgs;
+
+    async fn pre_start(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        let state = RuntimeState {
+            myself: myself.clone(),
+            store: args.store.clone(),
+            llm_provider: args.llm_provider,
+            mcp_provider: args.mcp_provider,
+            strategy_provider: args.strategy_provider,
+        };
+
+        // Spawn infrastructure actors (linked to RuntimeActor)
+        spawn_dispatcher(args.store.clone(), myself.get_cell())
+            .await
+            .map_err(|e| format!("failed to spawn dispatcher: {e}"))?;
+        spawn_wake_scheduler(args.store, myself.get_cell())
+            .await
+            .map_err(|e| format!("failed to spawn wake scheduler: {e}"))?;
+
+        // Resume sessions that need waking after restart
+        state.resume_all().await;
+
+        Ok(state)
+    }
+
+    async fn handle(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match message {
+            RuntimeMessage::StartSession(init, reply) => {
+                let result = state.start_session(init).await;
+                let _ = reply.send(result);
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_supervisor_evt(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        message: SupervisionEvent,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match &message {
+            SupervisionEvent::ActorFailed(who, err) => {
+                let name = who.get_name();
+                eprintln!("runtime: child {:?} failed: {err}", name);
+                restart_infrastructure(name, state).await;
+            }
+            SupervisionEvent::ActorTerminated(who, _, reason) => {
+                let name = who.get_name();
+                eprintln!("runtime: child {:?} terminated: {reason:?}", name);
+                restart_infrastructure(name, state).await;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+/// Restart dispatcher or wake-scheduler if they died; sessions just get logged.
+async fn restart_infrastructure(name: Option<String>, state: &RuntimeState) {
+    match name.as_deref() {
+        Some("dispatcher") => {
+            eprintln!("runtime: restarting dispatcher");
+            if let Err(e) = spawn_dispatcher(state.store.clone(), state.myself.get_cell()).await {
+                eprintln!("runtime: failed to restart dispatcher: {e}");
+            }
+        }
+        Some("wake-scheduler") => {
+            eprintln!("runtime: restarting wake-scheduler");
+            if let Err(e) = spawn_wake_scheduler(state.store.clone(), state.myself.get_cell()).await
+            {
+                eprintln!("runtime: failed to restart wake-scheduler: {e}");
+            }
+        }
+        _ => {
+            // SessionActor death — children auto-terminated, just log
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Runtime — thin wrapper for the RuntimeActor
+// ---------------------------------------------------------------------------
+
+pub struct Runtime {
+    actor: ActorRef<RuntimeMessage>,
+    store: Arc<dyn EventStore>,
     agents: HashMap<String, AgentConfig>,
-    wake_scheduler: ActorRef<wake_scheduler::WakeSchedulerMessage>,
-    wake_scheduler_handle: JoinHandle<()>,
 }
 
 impl Runtime {
-    pub async fn start(config: &SystemConfig) -> Self {
+    pub async fn start(config: &SystemConfig) -> Result<Self, RuntimeError> {
         let store = create_event_store(&config.event_store);
-        let (dispatcher, dispatcher_handle) = spawn_dispatcher(store.clone()).await;
 
         let llm_provider =
             StaticLlmClientProvider::from_config(&config.llm_clients, &default_llm_factories())
-                .expect("failed to create LLM clients from config");
+                .map_err(RuntimeError::ActorCall)?;
 
-        let (wake_scheduler, wake_scheduler_handle) =
-            spawn_wake_scheduler(store.clone()).await;
+        let (actor, _handle) = Actor::spawn(
+            Some("runtime".to_string()),
+            RuntimeActor,
+            RuntimeArgs {
+                store: store.clone(),
+                llm_provider: Arc::new(llm_provider),
+                mcp_provider: Arc::new(StaticMcpClientProvider),
+                strategy_provider: Arc::new(StaticStrategyProvider),
+            },
+        )
+        .await
+        .map_err(|e| RuntimeError::ActorCall(e.to_string()))?;
 
-        let runtime = Runtime {
+        Ok(Runtime {
+            actor,
             store,
-            dispatcher,
-            dispatcher_handle,
-            llm_provider: Arc::new(llm_provider),
-            mcp_provider: Arc::new(StaticMcpClientProvider),
-            strategy_provider: Arc::new(StaticStrategyProvider),
             agents: config.agents.clone(),
-            wake_scheduler,
-            wake_scheduler_handle,
-        };
-
-        // Resume sessions that need waking after restart
-        runtime.resume_all().await;
-
-        runtime
-    }
-
-    /// Replace the LLM client provider.
-    pub fn with_llm_provider(mut self, provider: Arc<dyn LlmClientProvider>) -> Self {
-        self.llm_provider = provider;
-        self
-    }
-
-    /// Replace the MCP client provider.
-    pub fn with_mcp_provider(mut self, provider: Arc<dyn McpClientProvider>) -> Self {
-        self.mcp_provider = provider;
-        self
-    }
-
-    /// Replace the strategy provider.
-    pub fn with_strategy_provider(mut self, provider: Arc<dyn StrategyProvider>) -> Self {
-        self.strategy_provider = provider;
-        self
+        })
     }
 
     /// Look up an agent definition by name.
@@ -117,101 +293,58 @@ impl Runtime {
             .get(agent_name)
             .cloned()
             .ok_or_else(|| RuntimeError::UnknownAgent(agent_name.to_string()))?;
-        self.start_session(SessionInit::Create {
-            session_id: Uuid::new_v4(),
-            agent,
-            auth,
-        })
-        .await
+
+        self.start_session(SessionInit::Create { agent, auth })
+            .await
     }
 
     /// Start a session — either creating a new one or resuming from a snapshot.
-    ///
-    /// The actor's `pre_start` handles all startup logic: resolving the
-    /// strategy, building or loading the session, persisting the initial
-    /// `CreateSession` event (for new sessions), starting MCP servers,
-    /// and setting `last_reacted` to prevent double-react.
     pub async fn start_session(&self, init: SessionInit) -> Result<SessionHandle, RuntimeError> {
-        let session_id = init.session_id();
-        let auth = init.auth().clone();
+        call_t!(self.actor, RuntimeMessage::StartSession, 30_000, init)
+            .map_err(|e| RuntimeError::ActorCall(e.to_string()))?
+    }
 
-        let (actor, actor_handle) = Actor::spawn(
-            Some(format!("session-{session_id}")),
-            SessionActor,
-            SessionActorArgs {
-                init,
-                store: self.store.clone(),
-                llm_provider: self.llm_provider.clone(),
-                mcp_provider: self.mcp_provider.clone(),
-                strategy_provider: self.strategy_provider.clone(),
-            },
-        )
-        .await
-        .map_err(|e| RuntimeError::ActorCall(format!("session startup failed: {e}")))?;
+    /// Spawn a new session client for an existing session.
+    /// The client joins the dispatcher's process group so it receives events
+    /// and keeps its projected state up to date.
+    /// An optional `on_event` callback is invoked for each event after it is applied.
+    pub async fn connect(
+        &self,
+        session_id: Uuid,
+        auth: SessionAuth,
+        on_event: Option<OnEvent>,
+    ) -> Result<SessionHandle, RuntimeError> {
+        let session_actor: ActorRef<SessionMessage> =
+            ractor::registry::where_is(format!("session-{session_id}"))
+                .ok_or(RuntimeError::SessionNotFound)?
+                .into();
 
-        let (client, client_handle) = Actor::spawn(
+        let (client, _handle) = Actor::spawn(
             None,
             SessionClientActor,
             SessionClientArgs {
                 session_id,
                 auth,
-                session_actor: actor.clone(),
+                session_actor,
                 store: self.store.clone(),
+                on_event,
             },
         )
         .await
-        .expect("failed to spawn session client");
+        .map_err(|e| RuntimeError::ActorCall(format!("session client spawn failed: {e}")))?;
 
         Ok(SessionHandle {
             session_id,
-            session_actor: actor,
             session_client: client,
-            session_actor_handle: actor_handle,
-            session_client_handle: client_handle,
         })
-    }
-
-    /// Resume all sessions that need a wake, populating the wake scheduler.
-    /// Called on startup to recover in-flight sessions after a restart.
-    pub async fn resume_all(&self) -> Vec<SessionHandle> {
-        let filter = SessionFilter {
-            needs_wake: Some(true),
-            ..Default::default()
-        };
-        let sessions = self.store.list_sessions(&filter);
-        let mut handles = Vec::new();
-        for summary in sessions {
-            let auth = SessionAuth {
-                tenant_id: summary.tenant_id,
-                client_id: summary.client_id,
-                sub: None,
-            };
-            let init = SessionInit::Resume {
-                session_id: summary.session_id,
-                auth,
-            };
-            match self.start_session(init).await {
-                Ok(handle) => handles.push(handle),
-                Err(e) => {
-                    eprintln!(
-                        "warn: failed to resume session {}: {}",
-                        summary.session_id, e
-                    );
-                }
-            }
-        }
-        handles
     }
 
     pub fn store(&self) -> &Arc<dyn EventStore> {
         &self.store
     }
 
-    pub async fn shutdown(self) {
-        self.wake_scheduler.stop(None);
-        let _ = self.wake_scheduler_handle.await;
-        self.dispatcher.stop(None);
-        let _ = self.dispatcher_handle.await;
+    pub fn shutdown(self) {
+        self.actor.stop(None);
     }
 }
 
@@ -221,15 +354,12 @@ impl Runtime {
 
 pub struct SessionHandle {
     pub session_id: Uuid,
-    session_actor: ActorRef<SessionMessage>,
     session_client: ActorRef<ClientMessage>,
-    session_actor_handle: JoinHandle<()>,
-    session_client_handle: JoinHandle<()>,
 }
 
 impl SessionHandle {
     pub async fn send_command(&self, cmd: SessionCommand) -> Result<Vec<Event>, RuntimeError> {
-        let result = call_t!(self.session_client, ClientMessage::SendCommand, 5000, cmd)
+        let result = call_t!(self.session_client, ClientMessage::SendCommand, 5000, Box::new(cmd))
             .map_err(|e| RuntimeError::ActorCall(e.to_string()))?;
         result
     }
@@ -239,11 +369,8 @@ impl SessionHandle {
             .expect("failed to query session state")
     }
 
-    pub async fn shutdown(self) {
+    pub fn shutdown(self) {
         self.session_client.stop(None);
-        self.session_actor.stop(None);
-        let _ = self.session_client_handle.await;
-        let _ = self.session_actor_handle.await;
     }
 }
 
