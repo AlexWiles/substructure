@@ -65,6 +65,20 @@ struct DefaultStrategyState {
     compacted_summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     compacted_at_message_index: Option<usize>,
+    /// When compaction is triggered by a new user message, the reply is
+    /// deferred until compaction finishes. This stores the stream preference
+    /// and the message index so the new message is excluded from compaction
+    /// but included in the follow-up LLM context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_reply: Option<PendingReply>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingReply {
+    /// Index of the buffered user message in state.messages.
+    message_index: usize,
+    /// Stream preference from the original SendUserMessage command.
+    stream: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -251,6 +265,10 @@ impl DefaultStrategy {
         serde_json::from_value(raw.clone()).unwrap_or_default()
     }
 
+    fn serialize_state(ss: &DefaultStrategyState) -> Value {
+        serde_json::to_value(ss).unwrap_or(Value::Null)
+    }
+
     /// Build LlmTurnParams, using compacted context when available.
     fn llm_params(&self, state: &AgentState, stream: Option<bool>) -> LlmTurnParams {
         if !self.config.compaction.enabled {
@@ -260,8 +278,19 @@ impl DefaultStrategy {
             };
         }
         let ss = Self::parse_strategy_state(&state.strategy_state);
+        self.llm_params_with_state(state, &ss, stream)
+    }
+
+    /// Like `llm_params` but with an explicit strategy state (used when the
+    /// caller has a freshly computed state that isn't persisted yet).
+    fn llm_params_with_state(
+        &self,
+        state: &AgentState,
+        ss: &DefaultStrategyState,
+        stream: Option<bool>,
+    ) -> LlmTurnParams {
         LlmTurnParams {
-            context: self.build_compacted_context(state, &ss),
+            context: self.build_compacted_context(state, ss),
             stream,
         }
     }
@@ -304,16 +333,25 @@ impl DefaultStrategy {
     }
 
     /// Check if compaction should trigger, and if so return the compaction Turn.
-    fn maybe_compact(&self, state: &AgentState) -> Option<Turn> {
-        let ss = Self::parse_strategy_state(&state.strategy_state);
+    ///
+    /// `compact_end` limits which messages are included in the compaction
+    /// context. When `None`, all messages from the compaction start are
+    /// included. When `Some(idx)`, only `messages[start..idx]` are included
+    /// (used to exclude a newly buffered user message).
+    fn maybe_compact(
+        &self,
+        state: &AgentState,
+        ss: &DefaultStrategyState,
+        compact_end: Option<usize>,
+    ) -> Option<Turn> {
         if matches!(ss.phase, CompactionPhase::Compacting) {
             return None;
         }
 
-        let messages_since = match ss.compacted_at_message_index {
-            Some(idx) => state.messages.len().saturating_sub(idx),
-            None => state.messages.len(),
-        };
+        let end = compact_end.unwrap_or(state.messages.len());
+        let start = ss.compacted_at_message_index.unwrap_or(0);
+
+        let messages_since = end.saturating_sub(start);
 
         if messages_since < self.config.compaction.threshold {
             return None;
@@ -335,12 +373,11 @@ impl DefaultStrategy {
             token_count: None,
         }];
 
-        let start = ss.compacted_at_message_index.unwrap_or(0);
-        context.extend(state.messages[start..].iter().cloned());
+        context.extend(state.messages[start..end].iter().cloned());
 
         let new_ss = DefaultStrategyState {
             phase: CompactionPhase::Compacting,
-            ..ss
+            ..ss.clone()
         };
 
         Some(Turn {
@@ -348,7 +385,7 @@ impl DefaultStrategy {
                 context: Some(context),
                 stream: Some(false),
             })),
-            state: serde_json::to_value(&new_ss).unwrap_or(Value::Null),
+            state: Self::serialize_state(&new_ss),
         })
     }
 
@@ -356,19 +393,46 @@ impl DefaultStrategy {
     fn handle_compaction_response(
         &self,
         state: &AgentState,
+        ss: &DefaultStrategyState,
         payload: &LlmCallCompleted,
     ) -> Option<Turn> {
         let summary = extract_response_summary(payload);
         let summary_text = summary.content.unwrap_or_default();
+        let pending = ss.pending_reply.clone();
 
         // +1 because the assistant message (compaction summary) will be added
         // by the mechanical handler before the CallLlm effect is processed.
+        //
+        // When a user message was buffered, set the index to the buffered
+        // message so that build_compacted_context includes it as a recent
+        // message after the summary.
+        let compacted_at = match &pending {
+            Some(pr) => pr.message_index,
+            None => state.messages.len() + 1,
+        };
+
         let new_ss = DefaultStrategyState {
             phase: CompactionPhase::Normal,
             compacted_summary: Some(summary_text.clone()),
-            compacted_at_message_index: Some(state.messages.len() + 1),
+            compacted_at_message_index: Some(compacted_at),
+            pending_reply: None,
         };
 
+        if let Some(pr) = pending {
+            // A user message was buffered — use llm_params which builds
+            // compacted context (summary + recent messages including the
+            // buffered user message).
+            return Some(Turn {
+                action: Some(Action::CallLlm(self.llm_params_with_state(
+                    state,
+                    &new_ss,
+                    Some(pr.stream),
+                ))),
+                state: Self::serialize_state(&new_ss),
+            });
+        }
+
+        // Mid-turn compaction (after tools) — continue with summary context.
         let mut context = Vec::new();
         if let Some(agent) = state.agent.as_ref() {
             context.push(Message {
@@ -394,7 +458,7 @@ impl DefaultStrategy {
                 context: Some(context),
                 stream: Some(true),
             })),
-            state: serde_json::to_value(&new_ss).unwrap_or(Value::Null),
+            state: Self::serialize_state(&new_ss),
         })
     }
 }
@@ -416,19 +480,37 @@ impl Strategy for DefaultStrategy {
         state: &AgentState,
         event: &EventPayload,
     ) -> Option<Turn> {
+        let ss = Self::parse_strategy_state(&state.strategy_state);
+
         match event {
-            EventPayload::MessageUser(_) => Some(Turn {
-                action: Some(Action::CallLlm(self.llm_params(state, None))),
-                state: state.strategy_state.clone(),
-            }),
+            EventPayload::MessageUser(payload) => {
+                // The new user message is the last entry in state.messages.
+                // Check if we should compact the prior history first.
+                if self.config.compaction.enabled {
+                    let msg_idx = state.messages.len().saturating_sub(1);
+                    if let Some(mut turn) = self.maybe_compact(state, &ss, Some(msg_idx)) {
+                        // Stash the pending reply so handle_compaction_response
+                        // can issue the real LLM call afterwards.
+                        let mut compact_ss: DefaultStrategyState =
+                            serde_json::from_value(turn.state.clone()).unwrap_or_default();
+                        compact_ss.pending_reply = Some(PendingReply {
+                            message_index: msg_idx,
+                            stream: payload.stream,
+                        });
+                        turn.state = Self::serialize_state(&compact_ss);
+                        return Some(turn);
+                    }
+                }
+                Some(Turn {
+                    action: Some(Action::CallLlm(self.llm_params(state, Some(payload.stream)))),
+                    state: Self::serialize_state(&ss),
+                })
+            }
 
             EventPayload::LlmCallCompleted(payload) => {
                 // Handle compaction phase: the LLM response is the summary.
-                if self.config.compaction.enabled {
-                    let ss = Self::parse_strategy_state(&state.strategy_state);
-                    if matches!(ss.phase, CompactionPhase::Compacting) {
-                        return self.handle_compaction_response(state, payload);
-                    }
+                if matches!(ss.phase, CompactionPhase::Compacting) {
+                    return self.handle_compaction_response(state, &ss, payload);
                 }
 
                 // Normal flow.
@@ -443,7 +525,7 @@ impl Strategy for DefaultStrategy {
                 };
                 Some(Turn {
                     action: Some(action),
-                    state: state.strategy_state.clone(),
+                    state: Self::serialize_state(&ss),
                 })
             }
 
@@ -454,22 +536,26 @@ impl Strategy for DefaultStrategy {
                     return None;
                 }
                 // If we were compacting and the call failed, reset to normal phase.
-                if self.config.compaction.enabled {
-                    let ss = Self::parse_strategy_state(&state.strategy_state);
-                    if matches!(ss.phase, CompactionPhase::Compacting) {
-                        let new_ss = DefaultStrategyState {
-                            phase: CompactionPhase::Normal,
-                            ..ss
-                        };
-                        return Some(Turn {
-                            action: Some(Action::Done),
-                            state: serde_json::to_value(&new_ss).unwrap_or(Value::Null),
-                        });
-                    }
+                // If a user message was buffered, still issue the LLM call.
+                if matches!(ss.phase, CompactionPhase::Compacting) {
+                    let pending = ss.pending_reply.clone();
+                    let new_ss = DefaultStrategyState {
+                        phase: CompactionPhase::Normal,
+                        pending_reply: None,
+                        ..ss
+                    };
+                    let action = match pending {
+                        Some(pr) => Action::CallLlm(self.llm_params(state, Some(pr.stream))),
+                        None => Action::Done,
+                    };
+                    return Some(Turn {
+                        action: Some(action),
+                        state: Self::serialize_state(&new_ss),
+                    });
                 }
                 Some(Turn {
                     action: Some(Action::Done),
-                    state: state.strategy_state.clone(),
+                    state: Self::serialize_state(&ss),
                 })
             }
 
@@ -481,20 +567,20 @@ impl Strategy for DefaultStrategy {
 
                 // Check if compaction should trigger.
                 if self.config.compaction.enabled {
-                    if let Some(turn) = self.maybe_compact(state) {
+                    if let Some(turn) = self.maybe_compact(state, &ss, None) {
                         return Some(turn);
                     }
                 }
 
                 Some(Turn {
                     action: Some(Action::CallLlm(self.llm_params(state, Some(true)))),
-                    state: state.strategy_state.clone(),
+                    state: Self::serialize_state(&ss),
                 })
             }
 
             EventPayload::InterruptResumed(_) => Some(Turn {
                 action: Some(Action::CallLlm(self.llm_params(state, None))),
-                state: state.strategy_state.clone(),
+                state: Self::serialize_state(&ss),
             }),
 
             EventPayload::BudgetExceeded => Some(Turn {
@@ -506,7 +592,7 @@ impl Strategy for DefaultStrategy {
                         "limit": state.token_budget.limit,
                     }),
                 })),
-                state: state.strategy_state.clone(),
+                state: Self::serialize_state(&ss),
             }),
 
             // All other events: no strategy decision needed.
@@ -787,6 +873,7 @@ mod tests {
             phase: CompactionPhase::Compacting,
             compacted_summary: None,
             compacted_at_message_index: None,
+            pending_reply: None,
         })
         .unwrap();
 
@@ -855,6 +942,7 @@ mod tests {
             phase: CompactionPhase::Normal,
             compacted_summary: Some("User said hello and world.".into()),
             compacted_at_message_index: Some(2), // Compact point after 2 messages.
+            pending_reply: None,
         })
         .unwrap();
 
@@ -918,6 +1006,6 @@ mod tests {
             matches!(turn.action, Some(Action::CallLlm(ref p)) if p.context.is_none()),
             "should not compact below threshold"
         );
-        assert_eq!(turn.state, Value::Null);
+        assert_eq!(turn.state, DefaultStrategy::serialize_state(&DefaultStrategyState::default()));
     }
 }

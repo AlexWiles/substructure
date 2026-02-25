@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use uuid::Uuid;
@@ -81,11 +81,9 @@ async fn run_one_shot(
     let session_id = session.session_id;
 
     // Connect a client with a callback that captures the final assistant reply
-    let reply = Arc::new(Mutex::new(None::<String>));
     let notify = Arc::new(tokio::sync::Notify::new());
 
     let client = {
-        let reply = reply.clone();
         let notify = notify.clone();
         runtime
             .connect(
@@ -96,13 +94,8 @@ async fn run_one_shot(
 
                     println!("{}", ev);
 
-                    if let EventPayload::MessageAssistant(payload) = &event.payload {
-                        if payload.message.content.is_some()
-                            && payload.message.tool_calls.is_empty()
-                        {
-                            *reply.lock().unwrap() = payload.message.content.clone();
-                            notify.notify_one();
-                        }
+                    if let EventPayload::SessionDone = &event.payload {
+                        notify.notify_one();
                     }
                 })),
             )

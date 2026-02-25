@@ -14,6 +14,8 @@ api_key = { provider = "env", key = "OPENROUTER_API_KEY" }
 [agents.alex]
 name = "alex"
 system_prompt = "You are a helpful assistant named Alex."
-strategy = { type = "default" }
+strategy.kind = "default"
+strategy.compaction.enabled = true
+strategy.compaction.threshold = 4
 llm.client = "openrouter"
 llm.model = "arcee-ai/trinity-large-preview:free"
