@@ -76,10 +76,38 @@ pub struct Choice {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptTokensDetails {
+    #[serde(default)]
+    pub cached_tokens: u32,
+    #[serde(default)]
+    pub cache_write_tokens: u32,
+    #[serde(default)]
+    pub audio_tokens: u32,
+    #[serde(default)]
+    pub video_tokens: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletionTokensDetails {
+    #[serde(default)]
+    pub reasoning_tokens: Option<u32>,
+    #[serde(default)]
+    pub audio_tokens: Option<u32>,
+    #[serde(default)]
+    pub accepted_prediction_tokens: Option<u32>,
+    #[serde(default)]
+    pub rejected_prediction_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    #[serde(default)]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
+    #[serde(default)]
+    pub completion_tokens_details: Option<CompletionTokensDetails>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

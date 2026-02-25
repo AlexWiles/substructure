@@ -1,9 +1,11 @@
 use std::sync::{Arc, Mutex};
 
 use clap::{Parser, Subcommand};
+use uuid::Uuid;
 
 use substructure::domain::config::SystemConfig;
 use substructure::domain::event::{EventPayload, SessionAuth, SpanContext};
+use substructure::domain::secret::resolve_secrets;
 use substructure::domain::session::{CommandPayload, SessionCommand};
 use substructure::runtime::Runtime;
 
@@ -28,6 +30,9 @@ enum Command {
         /// Message to send
         #[arg(long)]
         message: String,
+        /// Optional session ID to resume (UUID)
+        #[arg(long)]
+        session: Option<Uuid>,
     },
 }
 
@@ -40,15 +45,25 @@ async fn main() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("--config <path> is required"))?;
 
     match cli.command {
-        Command::Run { agent, message } => run_one_shot(&config, &agent, &message).await,
+        Command::Run {
+            agent,
+            message,
+            session,
+        } => run_one_shot(&config, &agent, &message, session).await,
     }
 }
 
-async fn run_one_shot(config_path: &str, agent_name: &str, message: &str) -> anyhow::Result<()> {
+async fn run_one_shot(
+    config_path: &str,
+    agent_name: &str,
+    message: &str,
+    session_id: Option<Uuid>,
+) -> anyhow::Result<()> {
     let raw = std::fs::read_to_string(config_path)
         .map_err(|e| anyhow::anyhow!("failed to read {config_path}: {e}"))?;
     let config: SystemConfig =
         toml::from_str(&raw).map_err(|e| anyhow::anyhow!("failed to parse config: {e}"))?;
+    let config = resolve_secrets(config)?;
 
     let runtime = Runtime::start(&config).await?;
 
@@ -58,8 +73,11 @@ async fn run_one_shot(config_path: &str, agent_name: &str, message: &str) -> any
         sub: None,
     };
 
-    // Create the session
-    let session = runtime.create_session_for(agent_name, auth.clone()).await?;
+    // Start the session — resumes if it exists, creates otherwise
+    let session = match session_id {
+        Some(id) => runtime.start_session(id, agent_name, auth.clone()).await?,
+        None => runtime.create_session_for(agent_name, auth.clone()).await?,
+    };
     let session_id = session.session_id;
 
     // Connect a client with a callback that captures the final assistant reply
@@ -104,17 +122,8 @@ async fn run_one_shot(config_path: &str, agent_name: &str, message: &str) -> any
         .await?;
 
     // Wait for the callback to fire
-    let result =
+    let _result =
         tokio::time::timeout(tokio::time::Duration::from_secs(30), notify.notified()).await;
-
-    match result {
-        Ok(()) => {
-            if let Some(text) = reply.lock().unwrap().take() {
-                println!("{text}");
-            }
-        }
-        Err(_) => anyhow::bail!("timed out waiting for assistant response"),
-    }
 
     client.shutdown();
     session.shutdown();

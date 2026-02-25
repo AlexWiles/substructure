@@ -1,23 +1,26 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
 use crate::domain::agent::AgentConfig;
 use crate::domain::event::SessionAuth;
-use crate::domain::session::{Strategy, StrategyKind, ReactStrategy};
+use crate::domain::session::{Strategy, DefaultStrategy};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StrategyProviderError {
-    #[error("unknown strategy: {0:?}")]
-    UnknownStrategy(StrategyKind),
+    #[error("unknown strategy: {0}")]
+    UnknownStrategy(String),
+    #[error("invalid strategy config: {0}")]
+    InvalidConfig(String),
 }
 
 #[async_trait]
 pub trait StrategyProvider: Send + Sync + 'static {
     async fn resolve(
         &self,
-        kind: &StrategyKind,
         agent: &AgentConfig,
         auth: &SessionAuth,
-    ) -> Result<Box<dyn Strategy>, StrategyProviderError>;
+    ) -> Result<Arc<dyn Strategy>, StrategyProviderError>;
 }
 
 pub struct StaticStrategyProvider;
@@ -26,12 +29,16 @@ pub struct StaticStrategyProvider;
 impl StrategyProvider for StaticStrategyProvider {
     async fn resolve(
         &self,
-        kind: &StrategyKind,
-        _agent: &AgentConfig,
+        agent: &AgentConfig,
         _auth: &SessionAuth,
-    ) -> Result<Box<dyn Strategy>, StrategyProviderError> {
-        match kind {
-            StrategyKind::React => Ok(Box::new(ReactStrategy::new())),
+    ) -> Result<Arc<dyn Strategy>, StrategyProviderError> {
+        match agent.strategy.kind.as_str() {
+            "default" => {
+                let strategy = DefaultStrategy::init(&agent.strategy.params)
+                    .map_err(StrategyProviderError::InvalidConfig)?;
+                Ok(Arc::from(strategy))
+            }
+            other => Err(StrategyProviderError::UnknownStrategy(other.to_string())),
         }
     }
 }

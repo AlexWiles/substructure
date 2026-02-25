@@ -1,17 +1,19 @@
 [event_store]
-type = "in_memory"
+type = "sqlite"
+path = "events.db"
+
+
+[secret_providers.env]
+type = "env"
 
 [llm_clients.openrouter]
 type = "openai_compatible"
 base_url = "https://openrouter.ai/api"
-api_key = "sk-or-v1-YOUR-KEY-HERE"
+api_key = { provider = "env", key = "OPENROUTER_API_KEY" }
 
 [agents.alex]
 name = "alex"
 system_prompt = "You are a helpful assistant named Alex."
-
-[agents.alex.llm]
-client = "openrouter"
-
-[agents.alex.llm.params]
-model = "arcee-ai/trinity-large-preview:free"
+strategy = { type = "default" }
+llm.client = "openrouter"
+llm.model = "arcee-ai/trinity-large-preview:free"

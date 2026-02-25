@@ -25,6 +25,8 @@ pub use dispatcher::spawn_dispatcher;
 pub use event_store::{
     EventStore, InMemoryEventStore, SessionFilter, SessionLoad, SessionSummary, StoreError, Version,
 };
+#[cfg(feature = "sqlite")]
+pub use event_store::SqliteEventStore;
 pub use llm::{LlmClient, MockLlmClient, OpenAiClient, StreamDelta};
 pub use llm::{LlmClientFactory, LlmClientProvider, ProviderError, StaticLlmClientProvider};
 pub use mcp::{
@@ -44,6 +46,7 @@ pub use strategy::{StaticStrategyProvider, StrategyProvider, StrategyProviderErr
 
 pub enum RuntimeMessage {
     StartSession(
+        Uuid,
         SessionInit,
         RpcReplyPort<Result<SessionHandle, RuntimeError>>,
     ),
@@ -58,6 +61,7 @@ struct RuntimeActor;
 struct RuntimeState {
     myself: ActorRef<RuntimeMessage>,
     store: Arc<dyn EventStore>,
+    agents: HashMap<String, AgentConfig>,
     llm_provider: Arc<dyn LlmClientProvider>,
     mcp_provider: Arc<dyn McpClientProvider>,
     strategy_provider: Arc<dyn StrategyProvider>,
@@ -65,37 +69,45 @@ struct RuntimeState {
 
 struct RuntimeArgs {
     store: Arc<dyn EventStore>,
+    agents: HashMap<String, AgentConfig>,
     llm_provider: Arc<dyn LlmClientProvider>,
     mcp_provider: Arc<dyn McpClientProvider>,
     strategy_provider: Arc<dyn StrategyProvider>,
 }
 
 impl RuntimeState {
-    async fn start_session(&self, init: SessionInit) -> Result<SessionHandle, RuntimeError> {
-        let session_id = match &init {
-            SessionInit::Create { .. } => Uuid::new_v4(),
-            SessionInit::Resume { session_id, .. } => *session_id,
-        };
-        let auth = match &init {
-            SessionInit::Create { auth, .. } | SessionInit::Resume { auth, .. } => auth.clone(),
-        };
+    async fn start_session(
+        &self,
+        session_id: Uuid,
+        init: SessionInit,
+    ) -> Result<SessionHandle, RuntimeError> {
+        let auth = init.auth.clone();
+        let actor_name = format!("session-{session_id}");
 
-        // SessionActor is supervised by RuntimeActor
-        let (actor, _actor_handle) = Actor::spawn_linked(
-            Some(format!("session-{session_id}")),
-            SessionActor,
-            SessionActorArgs {
-                session_id,
-                init,
-                store: self.store.clone(),
-                llm_provider: self.llm_provider.clone(),
-                mcp_provider: self.mcp_provider.clone(),
-                strategy_provider: self.strategy_provider.clone(),
-            },
-            self.myself.get_cell(),
-        )
-        .await
-        .map_err(|e| RuntimeError::ActorCall(format!("session startup failed: {e}")))?;
+        // Reuse existing actor if already running, otherwise spawn a new one.
+        let actor: ActorRef<SessionMessage> =
+            if let Some(cell) = ractor::registry::where_is(actor_name.clone()) {
+                cell.into()
+            } else {
+                let (actor, _actor_handle) = Actor::spawn_linked(
+                    Some(actor_name),
+                    SessionActor,
+                    SessionActorArgs {
+                        session_id,
+                        init,
+                        store: self.store.clone(),
+                        llm_provider: self.llm_provider.clone(),
+                        mcp_provider: self.mcp_provider.clone(),
+                        strategy_provider: self.strategy_provider.clone(),
+                    },
+                    self.myself.get_cell(),
+                )
+                .await
+                .map_err(|e| {
+                    RuntimeError::ActorCall(format!("session startup failed: {e}"))
+                })?;
+                actor
+            };
 
         // SessionClientActor spawned standalone, then linked to SessionActor
         // so it dies automatically when the session dies
@@ -128,16 +140,23 @@ impl RuntimeState {
         };
         let sessions = self.store.list_sessions(&filter);
         for summary in sessions {
+            let agent = match self.agents.get(&summary.agent_name) {
+                Some(a) => a.clone(),
+                None => {
+                    eprintln!(
+                        "warn: unknown agent '{}' for session {}, skipping resume",
+                        summary.agent_name, summary.session_id
+                    );
+                    continue;
+                }
+            };
             let auth = SessionAuth {
                 tenant_id: summary.tenant_id,
                 client_id: summary.client_id,
                 sub: None,
             };
-            let init = SessionInit::Resume {
-                session_id: summary.session_id,
-                auth,
-            };
-            if let Err(e) = self.start_session(init).await {
+            let init = SessionInit { agent, auth };
+            if let Err(e) = self.start_session(summary.session_id, init).await {
                 eprintln!(
                     "warn: failed to resume session {}: {}",
                     summary.session_id, e
@@ -160,6 +179,7 @@ impl Actor for RuntimeActor {
         let state = RuntimeState {
             myself: myself.clone(),
             store: args.store.clone(),
+            agents: args.agents,
             llm_provider: args.llm_provider,
             mcp_provider: args.mcp_provider,
             strategy_provider: args.strategy_provider,
@@ -186,8 +206,8 @@ impl Actor for RuntimeActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            RuntimeMessage::StartSession(init, reply) => {
-                let result = state.start_session(init).await;
+            RuntimeMessage::StartSession(session_id, init, reply) => {
+                let result = state.start_session(session_id, init).await;
                 let _ = reply.send(result);
             }
         }
@@ -262,6 +282,7 @@ impl Runtime {
             RuntimeActor,
             RuntimeArgs {
                 store: store.clone(),
+                agents: config.agents.clone(),
                 llm_provider: Arc::new(llm_provider),
                 mcp_provider: Arc::new(StaticMcpClientProvider),
                 strategy_provider: Arc::new(StaticStrategyProvider),
@@ -283,8 +304,19 @@ impl Runtime {
     }
 
     /// Create a new session for a named agent from the config.
+    /// Generates a fresh session ID.
     pub async fn create_session_for(
         &self,
+        agent_name: &str,
+        auth: SessionAuth,
+    ) -> Result<SessionHandle, RuntimeError> {
+        self.start_session(Uuid::new_v4(), agent_name, auth).await
+    }
+
+    /// Start a session — resumes from store if it exists, otherwise creates new.
+    pub async fn start_session(
+        &self,
+        session_id: Uuid,
         agent_name: &str,
         auth: SessionAuth,
     ) -> Result<SessionHandle, RuntimeError> {
@@ -294,13 +326,8 @@ impl Runtime {
             .cloned()
             .ok_or_else(|| RuntimeError::UnknownAgent(agent_name.to_string()))?;
 
-        self.start_session(SessionInit::Create { agent, auth })
-            .await
-    }
-
-    /// Start a session — either creating a new one or resuming from a snapshot.
-    pub async fn start_session(&self, init: SessionInit) -> Result<SessionHandle, RuntimeError> {
-        call_t!(self.actor, RuntimeMessage::StartSession, 30_000, init)
+        let init = SessionInit { agent, auth };
+        call_t!(self.actor, RuntimeMessage::StartSession, 30_000, session_id, init)
             .map_err(|e| RuntimeError::ActorCall(e.to_string()))?
     }
 
@@ -381,6 +408,14 @@ impl SessionHandle {
 fn create_event_store(config: &EventStoreConfig) -> Arc<dyn EventStore> {
     match config {
         EventStoreConfig::InMemory => Arc::new(InMemoryEventStore::new()),
+        #[cfg(feature = "sqlite")]
+        EventStoreConfig::Sqlite { path } => {
+            Arc::new(SqliteEventStore::new(path).expect("failed to open SQLite event store"))
+        }
+        #[cfg(not(feature = "sqlite"))]
+        EventStoreConfig::Sqlite { .. } => {
+            panic!("SQLite event store requires the 'sqlite' feature flag")
+        }
     }
 }
 

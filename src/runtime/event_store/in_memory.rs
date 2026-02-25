@@ -9,28 +9,18 @@ use crate::domain::event::{Event, SessionAuth};
 use crate::domain::session::AgentState;
 use chrono::Utc;
 
-use super::store::{EventStore, SessionFilter, SessionLoad, SessionSummary, StoreError, Version};
-
-struct StoreInner {
-    streams: HashMap<Uuid, Vec<Event>>,
-    snapshots: HashMap<Uuid, (AgentState, u64)>, // (snapshot, version_at_snapshot)
-    log: Vec<Arc<Event>>,
-}
+use super::store::{EventBatch, EventStore, SessionFilter, SessionLoad, SessionSummary, StoreError, Version};
 
 pub struct InMemoryEventStore {
-    inner: Mutex<StoreInner>,
-    notify: OutputPort<()>,
+    snapshots: Mutex<HashMap<Uuid, (AgentState, u64)>>,
+    events: OutputPort<EventBatch>,
 }
 
 impl Default for InMemoryEventStore {
     fn default() -> Self {
         InMemoryEventStore {
-            inner: Mutex::new(StoreInner {
-                streams: HashMap::new(),
-                snapshots: HashMap::new(),
-                log: Vec::new(),
-            }),
-            notify: OutputPort::default(),
+            snapshots: Mutex::new(HashMap::new()),
+            events: OutputPort::default(),
         }
     }
 }
@@ -47,63 +37,52 @@ impl EventStore for InMemoryEventStore {
         &self,
         session_id: Uuid,
         auth: &SessionAuth,
-        expected_version: Version,
         events: Vec<Event>,
         snapshot: AgentState,
     ) -> Result<(), StoreError> {
-        {
-            let mut inner = self.inner.lock().expect("store lock poisoned");
+        let expected_version = snapshot.stream_version - events.len() as u64;
 
-            let stream_len = inner.streams.entry(session_id).or_default().len();
-            let actual = Version(stream_len as u64);
-            if expected_version != actual {
+        let batch = {
+            let mut snapshots = self.snapshots.lock().expect("store lock poisoned");
+
+            let actual_version = snapshots.get(&session_id).map_or(0, |(_, v)| *v);
+            if expected_version != actual_version {
                 return Err(StoreError::VersionConflict {
-                    expected: expected_version,
-                    actual,
+                    expected: Version(expected_version),
+                    actual: Version(actual_version),
                 });
             }
 
-            // Tenant check on existing events
-            if let Some(first) = inner.streams.get(&session_id).and_then(|s| s.first()) {
-                if first.tenant_id != auth.tenant_id {
-                    return Err(StoreError::TenantMismatch);
+            // Tenant check on existing session
+            if let Some((state, _)) = snapshots.get(&session_id) {
+                if let Some(existing_auth) = &state.auth {
+                    if existing_auth.tenant_id != auth.tenant_id {
+                        return Err(StoreError::TenantMismatch);
+                    }
                 }
             }
 
-            for event in &events {
-                inner.log.push(Arc::new(event.clone()));
-            }
-            let new_version = stream_len as u64 + events.len() as u64;
-            inner.streams.entry(session_id).or_default().extend(events);
+            let batch: EventBatch = events.into_iter().map(Arc::new).collect();
+            snapshots.insert(session_id, (snapshot.clone(), snapshot.stream_version));
+            batch
+        };
 
-            // Store snapshot at the new version
-            inner.snapshots.insert(session_id, (snapshot, new_version));
-        }
-
-        self.notify.send(());
+        self.events.send(batch);
         Ok(())
     }
 
     fn load(&self, session_id: Uuid, auth: &SessionAuth) -> Result<SessionLoad, StoreError> {
-        let inner = self.inner.lock().expect("store lock poisoned");
+        let snapshots = self.snapshots.lock().expect("store lock poisoned");
 
-        // Verify session exists
-        let stream = inner
-            .streams
+        let (snapshot, _version) = snapshots
             .get(&session_id)
             .ok_or(StoreError::SessionNotFound)?;
 
-        // Verify tenant
-        if let Some(first) = stream.first() {
-            if first.tenant_id != auth.tenant_id {
+        if let Some(existing_auth) = &snapshot.auth {
+            if existing_auth.tenant_id != auth.tenant_id {
                 return Err(StoreError::TenantMismatch);
             }
         }
-
-        let (snapshot, _version) = inner
-            .snapshots
-            .get(&session_id)
-            .ok_or(StoreError::SessionNotFound)?;
 
         Ok(SessionLoad {
             snapshot: snapshot.clone(),
@@ -111,11 +90,10 @@ impl EventStore for InMemoryEventStore {
     }
 
     fn list_sessions(&self, filter: &SessionFilter) -> Vec<SessionSummary> {
-        let inner = self.inner.lock().expect("store lock poisoned");
+        let snapshots = self.snapshots.lock().expect("store lock poisoned");
         let now = Utc::now();
 
-        inner
-            .snapshots
+        snapshots
             .values()
             .filter_map(|(state, _version_at)| {
                 let auth = state.auth.as_ref()?;
@@ -154,25 +132,15 @@ impl EventStore for InMemoryEventStore {
                     wake_at,
                     agent_name: agent.name.clone(),
                     message_count: state.messages.len(),
-                    token_usage: state.tokens.used,
+                    token_usage: state.token_usage.total_tokens,
                     stream_version: state.stream_version,
                 })
             })
             .collect()
     }
 
-    fn read_from(&self, offset: u64, limit: usize) -> Vec<Arc<Event>> {
-        let inner = self.inner.lock().expect("store lock poisoned");
-        let start = offset as usize;
-        if start >= inner.log.len() {
-            return Vec::new();
-        }
-        let end = (start + limit).min(inner.log.len());
-        inner.log[start..end].to_vec()
-    }
-
-    fn notify(&self) -> &OutputPort<()> {
-        &self.notify
+    fn events(&self) -> &OutputPort<EventBatch> {
+        &self.events
     }
 }
 
@@ -203,6 +171,8 @@ mod tests {
             mcp_servers: vec![],
             strategy: Default::default(),
             retry: Default::default(),
+            token_budget: None,
+
         }
     }
 
@@ -248,11 +218,11 @@ mod tests {
         let (ev2, snap2) = session_created_event(id2, "tenant-b", "bot-2");
 
         store
-            .append(id1, &test_auth("tenant-a"), Version(0), vec![ev1], snap1)
+            .append(id1, &test_auth("tenant-a"), vec![ev1], snap1)
             .await
             .unwrap();
         store
-            .append(id2, &test_auth("tenant-b"), Version(0), vec![ev2], snap2)
+            .append(id2, &test_auth("tenant-b"), vec![ev2], snap2)
             .await
             .unwrap();
 
@@ -270,11 +240,11 @@ mod tests {
         let (ev2, snap2) = session_created_event(id2, "tenant-b", "bot");
 
         store
-            .append(id1, &test_auth("tenant-a"), Version(0), vec![ev1], snap1)
+            .append(id1, &test_auth("tenant-a"), vec![ev1], snap1)
             .await
             .unwrap();
         store
-            .append(id2, &test_auth("tenant-b"), Version(0), vec![ev2], snap2)
+            .append(id2, &test_auth("tenant-b"), vec![ev2], snap2)
             .await
             .unwrap();
 
@@ -300,11 +270,11 @@ mod tests {
         snap2.status = SessionStatus::Active;
 
         store
-            .append(id1, &test_auth("t"), Version(0), vec![ev1], snap1)
+            .append(id1, &test_auth("t"), vec![ev1], snap1)
             .await
             .unwrap();
         store
-            .append(id2, &test_auth("t"), Version(0), vec![ev2], snap2)
+            .append(id2, &test_auth("t"), vec![ev2], snap2)
             .await
             .unwrap();
 
@@ -327,11 +297,11 @@ mod tests {
         let (ev2, snap2) = session_created_event(id2, "t", "chat-bot");
 
         store
-            .append(id1, &test_auth("t"), Version(0), vec![ev1], snap1)
+            .append(id1, &test_auth("t"), vec![ev1], snap1)
             .await
             .unwrap();
         store
-            .append(id2, &test_auth("t"), Version(0), vec![ev2], snap2)
+            .append(id2, &test_auth("t"), vec![ev2], snap2)
             .await
             .unwrap();
 
@@ -351,7 +321,7 @@ mod tests {
         let (ev, snap) = session_created_event(id, "acme", "helper");
 
         store
-            .append(id, &test_auth("acme"), Version(0), vec![ev], snap)
+            .append(id, &test_auth("acme"), vec![ev], snap)
             .await
             .unwrap();
 

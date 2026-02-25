@@ -12,7 +12,7 @@ use crate::domain::openai::{
 
 use std::sync::Arc;
 
-use super::client::{LlmClient, StreamDelta};
+use super::client::{ErrorSource, LlmClient, LlmError, StreamDelta};
 
 // ---------------------------------------------------------------------------
 // Client
@@ -54,7 +54,7 @@ impl OpenAiClient {
         &self,
         request: &ChatCompletionRequest,
         stream: bool,
-    ) -> Result<reqwest::Response, String> {
+    ) -> Result<reqwest::Response, LlmError> {
         #[derive(Serialize)]
         struct Body<'a> {
             #[serde(flatten)]
@@ -72,7 +72,14 @@ impl OpenAiClient {
             })
             .send()
             .await
-            .map_err(|e| format!("HTTP request failed: {e}"))
+            .map_err(|e| LlmError {
+                message: format!("HTTP request failed: {e}"),
+                retryable: true,
+                source: ErrorSource {
+                    kind: "network".into(),
+                    detail: serde_json::Value::Null,
+                },
+            })
     }
 }
 
@@ -82,16 +89,41 @@ impl OpenAiClient {
 
 #[async_trait]
 impl LlmClient for OpenAiClient {
-    async fn call(&self, request: &LlmRequest) -> Result<LlmResponse, String> {
+    async fn call(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
         let LlmRequest::OpenAi(req) = request;
         let resp = self.post_chat_completion(req, false).await?;
         let status = resp.status();
-        let body = resp.text().await.map_err(|e| format!("read body: {e}"))?;
+        let body = resp.text().await.map_err(|e| LlmError {
+            message: format!("read body: {e}"),
+            retryable: true,
+            source: ErrorSource {
+                kind: "network".into(),
+                detail: serde_json::Value::Null,
+            },
+        })?;
         if !status.is_success() {
-            return Err(format!("OpenAI API error {status}: {body}"));
+            let status_code = status.as_u16();
+            let body_json = serde_json::from_str(&body)
+                .unwrap_or(serde_json::Value::String(body.clone()));
+            let retryable = status.is_server_error() || status_code == 408 || status_code == 429;
+            return Err(LlmError {
+                message: format!("OpenAI API error {status}: {body}"),
+                retryable,
+                source: ErrorSource {
+                    kind: "openai".into(),
+                    detail: serde_json::json!({ "status": status_code, "body": body_json }),
+                },
+            });
         }
         let parsed: ChatCompletionResponse =
-            serde_json::from_str(&body).map_err(|e| format!("parse response: {e}"))?;
+            serde_json::from_str(&body).map_err(|e| LlmError {
+                message: format!("parse response: {e}"),
+                retryable: false,
+                source: ErrorSource {
+                    kind: "openai".into(),
+                    detail: serde_json::Value::Null,
+                },
+            })?;
         Ok(LlmResponse::OpenAi(parsed))
     }
 
@@ -99,13 +131,31 @@ impl LlmClient for OpenAiClient {
         &self,
         request: &LlmRequest,
         chunk_tx: UnboundedSender<StreamDelta>,
-    ) -> Result<LlmResponse, String> {
+    ) -> Result<LlmResponse, LlmError> {
         let LlmRequest::OpenAi(req) = request;
         let resp = self.post_chat_completion(req, true).await?;
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.map_err(|e| format!("read body: {e}"))?;
-            return Err(format!("OpenAI API error {status}: {body}"));
+            let body = resp.text().await.map_err(|e| LlmError {
+                message: format!("read body: {e}"),
+                retryable: true,
+                source: ErrorSource {
+                    kind: "network".into(),
+                    detail: serde_json::Value::Null,
+                },
+            })?;
+            let status_code = status.as_u16();
+            let body_json = serde_json::from_str(&body)
+                .unwrap_or(serde_json::Value::String(body.clone()));
+            let retryable = status.is_server_error() || status_code == 408 || status_code == 429;
+            return Err(LlmError {
+                message: format!("OpenAI API error {status}: {body}"),
+                retryable,
+                source: ErrorSource {
+                    kind: "openai".into(),
+                    detail: serde_json::json!({ "status": status_code, "body": body_json }),
+                },
+            });
         }
 
         // Accumulator for the final response
@@ -125,7 +175,14 @@ impl LlmClient for OpenAiClient {
         let mut line_buf = String::new();
 
         while let Some(chunk_result) = stream.next().await {
-            let bytes = chunk_result.map_err(|e| format!("stream read: {e}"))?;
+            let bytes = chunk_result.map_err(|e| LlmError {
+                message: format!("stream read: {e}"),
+                retryable: true,
+                source: ErrorSource {
+                    kind: "network".into(),
+                    detail: serde_json::Value::Null,
+                },
+            })?;
             let text = String::from_utf8_lossy(&bytes);
             line_buf.push_str(&text);
 

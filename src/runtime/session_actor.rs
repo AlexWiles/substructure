@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use chrono::Utc;
 
-use super::event_store::{EventStore, StoreError, Version};
+use super::event_store::{EventStore, StoreError};
 use super::llm::LlmClientProvider;
 use super::llm::StreamDelta;
 use super::mcp::McpClientProvider;
@@ -59,15 +59,9 @@ pub enum SessionMessage {
 // SessionInit — what the actor needs to start up
 // ---------------------------------------------------------------------------
 
-pub enum SessionInit {
-    Create {
-        agent: AgentConfig,
-        auth: SessionAuth,
-    },
-    Resume {
-        session_id: Uuid,
-        auth: SessionAuth,
-    },
+pub struct SessionInit {
+    pub agent: AgentConfig,
+    pub auth: SessionAuth,
 }
 
 pub struct SessionActorArgs {
@@ -124,7 +118,6 @@ async fn execute(
     state: &mut SessionActorState,
     cmd: SessionCommand,
 ) -> Result<Vec<Event>, RuntimeError> {
-    let version = Version(state.session.agent_state.stream_version);
     let (events, snapshot) = state
         .session
         .process_command(cmd, &state.auth.tenant_id)?;
@@ -138,7 +131,6 @@ async fn execute(
         .append(
             state.session_id,
             &state.auth,
-            version,
             events.clone(),
             snapshot,
         )
@@ -196,6 +188,8 @@ async fn handle_effect(
                             payload: CommandPayload::FailLlmCall {
                                 call_id,
                                 error: e.to_string(),
+                                retryable: true,
+                                source: None,
                             },
                         },
                     )
@@ -239,7 +233,12 @@ async fn handle_effect(
 
             let payload = match result {
                 Ok(response) => CommandPayload::CompleteLlmCall { call_id, response },
-                Err(error) => CommandPayload::FailLlmCall { call_id, error },
+                Err(llm_error) => CommandPayload::FailLlmCall {
+                    call_id,
+                    error: llm_error.message,
+                    retryable: llm_error.retryable,
+                    source: serde_json::to_value(&llm_error.source).ok(),
+                },
             };
             let _ = execute(
                 state,
@@ -319,14 +318,28 @@ impl Actor for SessionActor {
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         let session_id = args.session_id;
-        let (session_id, mut session, auth) = match args.init {
-            SessionInit::Create {
-                agent,
-                auth,
-            } => {
+        let auth = args.init.auth;
+        let agent = args.init.agent;
+
+        // Try to resume from store; if not found, create a new session.
+        let mut session = match args.store.load(session_id, &auth) {
+            Ok(loaded) => {
+                let snapshot = loaded.snapshot;
+                let snap_agent = snapshot
+                    .agent
+                    .as_ref()
+                    .ok_or("session has no agent config")?;
                 let strategy = args
                     .strategy_provider
-                    .resolve(&agent.strategy, &agent, &auth)
+                    .resolve(snap_agent, &auth)
+                    .await
+                    .map_err(|e| format!("strategy resolution: {e}"))?;
+                AgentSession::from_snapshot(snapshot, strategy)
+            }
+            Err(StoreError::SessionNotFound) => {
+                let strategy = args
+                    .strategy_provider
+                    .resolve(&agent, &auth)
                     .await
                     .map_err(|e| format!("strategy resolution: {e}"))?;
                 let mut session = AgentSession::new(session_id, strategy);
@@ -342,29 +355,12 @@ impl Actor for SessionActor {
                     .process_command(cmd, &auth.tenant_id)
                     .map_err(|e| format!("init: {e}"))?;
                 args.store
-                    .append(session_id, &auth, Version(0), events, snapshot)
+                    .append(session_id, &auth, events, snapshot)
                     .await
                     .map_err(|e| format!("store: {e}"))?;
-                (session_id, session, auth)
+                session
             }
-            SessionInit::Resume { session_id, auth } => {
-                let snapshot = args
-                    .store
-                    .load(session_id, &auth)
-                    .map_err(|e| format!("load: {e}"))?
-                    .snapshot;
-                let agent = snapshot
-                    .agent
-                    .as_ref()
-                    .ok_or("session has no agent config")?;
-                let strategy = args
-                    .strategy_provider
-                    .resolve(&agent.strategy, agent, &auth)
-                    .await
-                    .map_err(|e| format!("strategy resolution: {e}"))?;
-                let session = AgentSession::from_snapshot(snapshot, strategy);
-                (session_id, session, auth)
-            }
+            Err(e) => return Err(format!("load: {e}").into()),
         };
 
         // Start MCP servers
@@ -419,7 +415,7 @@ impl Actor for SessionActor {
                         .is_some_and(|seq| event.sequence <= seq);
                     if !reacted {
                         let tools = state.all_tools();
-                        let effects = state.session.react(tools, event);
+                        let effects = state.session.react(tools, event).await;
                         for effect in effects {
                             handle_effect(state, &myself, &event.span, effect).await;
                         }
@@ -431,11 +427,13 @@ impl Actor for SessionActor {
                 let _ = reply.send(state.session.agent_state.clone());
             }
             SessionMessage::Wake => {
-                let tools = state.all_tools();
-                let effects = state.session.wake(tools);
-                let span = SpanContext::root();
-                for effect in effects {
-                    handle_effect(state, &myself, &span, effect).await;
+                let cmd = SessionCommand {
+                    span: SpanContext::root(),
+                    occurred_at: Utc::now(),
+                    payload: CommandPayload::Wake,
+                };
+                if let Err(e) = execute(state, cmd).await {
+                    eprintln!("session wake error: {e}");
                 }
             }
         }
@@ -449,7 +447,7 @@ mod tests {
     use chrono::Duration;
     use crate::domain::agent::{AgentConfig, LlmConfig};
     use crate::domain::openai;
-    use crate::domain::session::ReactStrategy;
+    use crate::domain::session::DefaultStrategy;
 
     fn far_future() -> chrono::DateTime<Utc> {
         Utc::now() + Duration::hours(1)
@@ -471,6 +469,8 @@ mod tests {
             mcp_servers: vec![],
             strategy: Default::default(),
             retry: Default::default(),
+            token_budget: None,
+
         }
     }
 
@@ -514,7 +514,7 @@ mod tests {
     fn created_state() -> AgentSession {
         let mut state = AgentSession::new(
             Uuid::new_v4(),
-            Box::new(ReactStrategy::new()),
+            Arc::new(DefaultStrategy::default()),
         );
         let event = Event {
             id: Uuid::new_v4(),
@@ -618,6 +618,8 @@ mod tests {
                 EventPayload::LlmCallErrored(LlmCallErrored {
                     call_id: "call-1".into(),
                     error: "timeout".into(),
+                    retryable: true,
+                    source: None,
                 }),
             ],
         );
@@ -650,7 +652,6 @@ mod tests {
     fn wake_pending_llm_call_re_issues() {
         let mut state = created_state();
 
-        // Pending LLM call with a future deadline → wake re-issues
         apply_events(
             &mut state,
             vec![
@@ -674,20 +675,19 @@ mod tests {
             ],
         );
 
-        let effects = state.wake(None);
+        let events = state.handle(CommandPayload::Wake).unwrap();
         assert!(
-            effects
+            events
                 .iter()
-                .any(|e| matches!(e, Effect::CallLlm { call_id, .. } if call_id == "call-1")),
+                .any(|e| matches!(e, EventPayload::LlmCallRequested(p) if p.call_id == "call-1")),
             "should re-issue pending LLM call"
         );
     }
 
     #[test]
-    fn wake_timed_out_llm_call_fails_and_retries() {
+    fn wake_timed_out_llm_call_emits_fail() {
         let mut state = created_state();
 
-        // Pending LLM call with a past deadline → wake fails it and retries
         apply_events(
             &mut state,
             vec![
@@ -711,18 +711,11 @@ mod tests {
             ],
         );
 
-        let effects = state.wake(None);
+        let events = state.handle(CommandPayload::Wake).unwrap();
+        assert_eq!(events.len(), 1, "should produce exactly one event");
         assert!(
-            effects
-                .iter()
-                .any(|e| matches!(e, Effect::Command(CommandPayload::FailLlmCall { call_id, .. }) if call_id == "call-1")),
-            "should fail timed-out LLM call"
-        );
-        assert!(
-            effects
-                .iter()
-                .any(|e| matches!(e, Effect::Command(CommandPayload::RequestLlmCall { .. }))),
-            "should retry with new LLM call"
+            matches!(&events[0], EventPayload::LlmCallErrored(p) if p.call_id == "call-1" && p.retryable),
+            "should fail timed-out LLM call as retryable"
         );
     }
 
@@ -730,7 +723,6 @@ mod tests {
     fn wake_completed_llm_no_assistant_message() {
         let mut state = created_state();
 
-        // Completed LLM call but no assistant message → wake extracts it
         apply_events(
             &mut state,
             vec![
@@ -758,9 +750,11 @@ mod tests {
             ],
         );
 
-        let effects = state.wake(None);
-        assert!(effects.iter().any(|e| matches!(e, Effect::Command(CommandPayload::SendAssistantMessage { call_id, .. }) if call_id == "call-1")),
-            "should emit SendAssistantMessage for unprocessed completed call");
+        let events = state.handle(CommandPayload::Wake).unwrap();
+        assert!(
+            events.iter().any(|e| matches!(e, EventPayload::MessageAssistant(p) if p.call_id == "call-1")),
+            "should emit MessageAssistant for unprocessed completed call"
+        );
     }
 
     #[test]
@@ -818,11 +812,11 @@ mod tests {
             ],
         );
 
-        let effects = state.wake(None);
+        let events = state.handle(CommandPayload::Wake).unwrap();
         assert!(
-            effects
+            events
                 .iter()
-                .any(|e| matches!(e, Effect::CallMcpTool { tool_call_id: id, .. } if id == "tc-1")),
+                .any(|e| matches!(e, EventPayload::ToolCallRequested(p) if p.tool_call_id == "tc-1")),
             "should re-issue pending tool call"
         );
     }
@@ -899,20 +893,20 @@ mod tests {
 
         assert_eq!(state.agent_state.messages.last().unwrap().role, Role::Tool);
 
-        let effects = state.wake(None);
+        let events = state.handle(CommandPayload::Wake).unwrap();
         assert!(
-            effects
+            events
                 .iter()
-                .any(|e| matches!(e, Effect::Command(CommandPayload::RequestLlmCall { .. }))),
+                .any(|e| matches!(e, EventPayload::LlmCallRequested(_))),
             "should trigger next LLM call when all tools done and last msg is tool"
         );
     }
 
     #[test]
     fn wake_no_stuck_conditions_returns_empty() {
-        let mut state = created_state();
-        let effects = state.wake(None);
-        assert!(effects.is_empty());
+        let state = created_state();
+        let events = state.handle(CommandPayload::Wake).unwrap();
+        assert!(events.is_empty());
     }
 
     #[test]
@@ -958,11 +952,10 @@ mod tests {
             ],
         );
 
-        // Status is Done (strategy returned Done for no tool calls)
-        let effects = state.wake(None);
+        let events = state.handle(CommandPayload::Wake).unwrap();
         assert!(
-            effects.is_empty(),
-            "fully completed flow should have no wake effects"
+            events.is_empty(),
+            "fully completed flow should have no wake events"
         );
     }
 
@@ -994,6 +987,8 @@ mod tests {
                 EventPayload::LlmCallErrored(LlmCallErrored {
                     call_id: "call-1".into(),
                     error: "timeout".into(),
+                    retryable: true,
+                    source: None,
                 }),
             ],
         );
@@ -1001,5 +996,246 @@ mod tests {
         // apply_core computed retry.next_at for the failed call
         let wake_at = state.agent_state.wake_at();
         assert!(wake_at.is_some(), "should have a wake_at for retry");
+    }
+
+    #[test]
+    fn wake_failed_llm_retry_reuses_call_id() {
+        let mut state = created_state();
+
+        // Set up: user message → LLM call requested → LLM call errored (retryable)
+        apply_events(
+            &mut state,
+            vec![
+                EventPayload::MessageUser(MessageUser {
+                    message: Message {
+                        role: Role::User,
+                        content: Some("hi".into()),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                        call_id: None,
+                        token_count: None,
+                    },
+                    stream: false,
+                }),
+                EventPayload::LlmCallRequested(LlmCallRequested {
+                    call_id: "call-1".into(),
+                    request: mock_llm_request(),
+                    stream: false,
+                    deadline: far_future(),
+                }),
+                EventPayload::LlmCallErrored(LlmCallErrored {
+                    call_id: "call-1".into(),
+                    error: "server error".into(),
+                    retryable: true,
+                    source: None,
+                }),
+            ],
+        );
+
+        // Manually set retry.next_at to past so wake triggers retry
+        state
+            .agent_state
+            .llm_calls
+            .get_mut("call-1")
+            .unwrap()
+            .retry
+            .next_at = Some(past());
+
+        let events = state.handle(CommandPayload::Wake).unwrap();
+
+        // Should reuse "call-1" instead of generating a new call_id
+        let retry_call_id = events.iter().find_map(|e| match e {
+            EventPayload::LlmCallRequested(p) => Some(p.call_id.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            retry_call_id.as_deref(),
+            Some("call-1"),
+            "wake should reuse the same call_id for retries"
+        );
+
+        // Apply the re-request events
+        apply_events(&mut state, events);
+
+        let call = state.agent_state.llm_calls.get("call-1").unwrap();
+        assert_eq!(call.retry.attempts, 1, "retry count should be preserved from the previous failure");
+        assert_eq!(call.status, crate::domain::session::LlmCallStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn wake_failed_llm_retries_exhaust() {
+        let mut state = created_state();
+
+        // Set up: user message → LLM call requested → LLM call errored
+        apply_events(
+            &mut state,
+            vec![
+                EventPayload::MessageUser(MessageUser {
+                    message: Message {
+                        role: Role::User,
+                        content: Some("hi".into()),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                        call_id: None,
+                        token_count: None,
+                    },
+                    stream: false,
+                }),
+                EventPayload::LlmCallRequested(LlmCallRequested {
+                    call_id: "call-1".into(),
+                    request: mock_llm_request(),
+                    stream: false,
+                    deadline: far_future(),
+                }),
+                EventPayload::LlmCallErrored(LlmCallErrored {
+                    call_id: "call-1".into(),
+                    error: "server error".into(),
+                    retryable: true,
+                    source: None,
+                }),
+            ],
+        );
+
+        // First error: attempts=1, max_retries=3 → RetryScheduled
+        let call = state.agent_state.llm_calls.get("call-1").unwrap();
+        assert_eq!(
+            call.status,
+            crate::domain::session::LlmCallStatus::RetryScheduled,
+            "first retryable error should schedule retry"
+        );
+
+        // Apply two more retryable errors to exhaust retries
+        apply_events(
+            &mut state,
+            vec![
+                EventPayload::LlmCallRequested(LlmCallRequested {
+                    call_id: "call-1".into(),
+                    request: mock_llm_request(),
+                    stream: false,
+                    deadline: far_future(),
+                }),
+                EventPayload::LlmCallErrored(LlmCallErrored {
+                    call_id: "call-1".into(),
+                    error: "server error".into(),
+                    retryable: true,
+                    source: None,
+                }),
+                EventPayload::LlmCallRequested(LlmCallRequested {
+                    call_id: "call-1".into(),
+                    request: mock_llm_request(),
+                    stream: false,
+                    deadline: far_future(),
+                }),
+                EventPayload::LlmCallErrored(LlmCallErrored {
+                    call_id: "call-1".into(),
+                    error: "server error".into(),
+                    retryable: true,
+                    source: None,
+                }),
+            ],
+        );
+
+        // After 3 errors (attempts=3, max_retries=3): Failed
+        let call = state.agent_state.llm_calls.get("call-1").unwrap();
+        assert_eq!(
+            call.status,
+            crate::domain::session::LlmCallStatus::Failed,
+            "call should be Failed when retries exhausted"
+        );
+
+        // react() for the last LlmCallErrored should produce MarkDone
+        let last_error_event = Event {
+            id: Uuid::new_v4(),
+            tenant_id: "t".into(),
+            session_id: state.agent_state.session_id,
+            sequence: 999, // doesn't matter for react
+            span: SpanContext::root(),
+            occurred_at: chrono::Utc::now(),
+            payload: EventPayload::LlmCallErrored(LlmCallErrored {
+                call_id: "call-1".into(),
+                error: "server error".into(),
+                retryable: true,
+                source: None,
+            }),
+            derived: None,
+        };
+        let effects = state.react(None, &last_error_event).await;
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::Command(CommandPayload::MarkDone))),
+            "react should emit MarkDone when retries exhausted"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_retryable_error_stops_immediately() {
+        let mut state = created_state();
+
+        // Set up: user message → LLM call requested → LLM call errored (non-retryable)
+        apply_events(
+            &mut state,
+            vec![
+                EventPayload::MessageUser(MessageUser {
+                    message: Message {
+                        role: Role::User,
+                        content: Some("hi".into()),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                        call_id: None,
+                        token_count: None,
+                    },
+                    stream: false,
+                }),
+                EventPayload::LlmCallRequested(LlmCallRequested {
+                    call_id: "call-1".into(),
+                    request: mock_llm_request(),
+                    stream: false,
+                    deadline: far_future(),
+                }),
+                EventPayload::LlmCallErrored(LlmCallErrored {
+                    call_id: "call-1".into(),
+                    error: "400 Bad Request".into(),
+                    retryable: false,
+                    source: Some(serde_json::json!({ "kind": "openai", "detail": { "status": 400 } })),
+                }),
+            ],
+        );
+
+        // Verify: call is Failed with no next_at
+        let call = state.agent_state.llm_calls.get("call-1").unwrap();
+        assert_eq!(
+            call.status,
+            crate::domain::session::LlmCallStatus::Failed,
+            "non-retryable error should set status to Failed"
+        );
+        assert!(
+            call.retry.next_at.is_none(),
+            "non-retryable error should not set next_at"
+        );
+
+        // react() should emit MarkDone for non-retryable errors
+        let error_event = Event {
+            id: Uuid::new_v4(),
+            tenant_id: "t".into(),
+            session_id: state.agent_state.session_id,
+            sequence: 999,
+            span: SpanContext::root(),
+            occurred_at: chrono::Utc::now(),
+            payload: EventPayload::LlmCallErrored(LlmCallErrored {
+                call_id: "call-1".into(),
+                error: "400 Bad Request".into(),
+                retryable: false,
+                source: Some(serde_json::json!({ "kind": "openai", "detail": { "status": 400 } })),
+            }),
+            derived: None,
+        };
+        let effects = state.react(None, &error_event).await;
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::Command(CommandPayload::MarkDone))),
+            "react should emit MarkDone for non-retryable errors"
+        );
     }
 }

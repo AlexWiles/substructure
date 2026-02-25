@@ -5,7 +5,7 @@ use crate::domain::openai;
 
 use std::sync::Arc;
 
-use super::client::LlmClient;
+use super::client::{LlmClient, LlmError};
 
 /// A mock LLM client that returns a static text response.
 pub struct MockLlmClient {
@@ -34,7 +34,7 @@ impl MockLlmClient {
 
 #[async_trait]
 impl LlmClient for MockLlmClient {
-    async fn call(&self, request: &LlmRequest) -> Result<LlmResponse, String> {
+    async fn call(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
         let n = self
             .call_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -58,6 +58,8 @@ impl LlmClient for MockLlmClient {
                 prompt_tokens: 0,
                 completion_tokens: 0,
                 total_tokens: 0,
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
             }),
         }))
     }

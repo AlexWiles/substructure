@@ -55,8 +55,12 @@ pub enum EventPayload {
     SessionInterrupted(SessionInterrupted),
     #[serde(rename = "session.interrupt_resumed")]
     InterruptResumed(InterruptResumed),
+    #[serde(rename = "session.budget_exceeded")]
+    BudgetExceeded,
     #[serde(rename = "strategy.state_changed")]
     StrategyStateChanged(StrategyStateChanged),
+    #[serde(rename = "session.done")]
+    SessionDone,
 }
 
 // --- Session ---
@@ -220,8 +224,16 @@ pub struct LlmCallCompleted {
     pub response: LlmResponse,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmCallErrored {
     pub call_id: String,
     pub error: String,
+    #[serde(default = "default_true")]
+    pub retryable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<serde_json::Value>,
 }

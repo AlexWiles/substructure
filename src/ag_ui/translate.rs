@@ -225,6 +225,7 @@ impl EventTranslator {
             EventPayload::InterruptResumed(_) => TranslateOutput::Events(vec![]),
 
             EventPayload::StrategyStateChanged(_) => TranslateOutput::Events(vec![]),
+            EventPayload::SessionDone => TranslateOutput::Events(vec![]),
 
             EventPayload::MessageTool(msg) => {
                 // Skip if already emitted via ToolCallCompleted/Errored
@@ -571,6 +572,8 @@ mod tests {
             LlmCallErrored {
                 call_id: "call-1".into(),
                 error: "API rate limit".into(),
+                retryable: true,
+                source: None,
             },
         )));
         let events = assert_terminal(output);
@@ -596,6 +599,8 @@ mod tests {
                     mcp_servers: vec![],
                     strategy: Default::default(),
                     retry: Default::default(),
+                    token_budget: None,
+
                 },
                 auth: SessionAuth {
                     tenant_id: "t".into(),

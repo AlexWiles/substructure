@@ -1,5 +1,7 @@
 use std::cmp::min;
 use std::collections::HashMap;
+use std::fmt;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -12,15 +14,62 @@ use crate::domain::event::{
 };
 use crate::domain::openai;
 
-use super::strategy::ToolResult;
+use super::strategy::{Strategy, ToolResult};
+
+// ---------------------------------------------------------------------------
+// StrategySlot — Arc<dyn Strategy> wrapper with Debug + Clone + Default
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Default)]
+pub struct StrategySlot(pub Option<Arc<dyn Strategy>>);
+
+impl fmt::Debug for StrategySlot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            Some(_) => f.write_str("Some(<strategy>)"),
+            None => f.write_str("None"),
+        }
+    }
+}
+
+impl std::ops::Deref for StrategySlot {
+    type Target = Option<Arc<dyn Strategy>>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Token tracking
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PromptTokensDetails {
+    pub cached_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub audio_tokens: u64,
+    pub video_tokens: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CompletionTokensDetails {
+    pub reasoning_tokens: u64,
+    pub audio_tokens: u64,
+    pub accepted_prediction_tokens: u64,
+    pub rejected_prediction_tokens: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    pub prompt_tokens_details: PromptTokensDetails,
+    pub completion_tokens_details: CompletionTokensDetails,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenBudget {
-    pub used: u64,
     pub limit: Option<u64>,
 }
 
@@ -60,6 +109,7 @@ pub enum LlmCallStatus {
     Pending,
     Completed,
     Failed,
+    RetryScheduled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,11 +161,18 @@ pub struct AgentState {
     pub agent: Option<AgentConfig>,
     pub auth: Option<SessionAuth>,
     pub messages: Vec<Message>,
-    pub tokens: TokenBudget,
+    pub started_at: Option<DateTime<Utc>>,
+    pub token_usage: TokenUsage,
+    pub token_budget: TokenBudget,
     pub stream_version: u64,
     pub last_applied: Option<u64>,
     pub last_reacted: Option<u64>,
     pub strategy_state: Value,
+
+    /// The strategy driving this session. Skipped during serialization;
+    /// must be re-attached after deserialization (e.g. via `from_snapshot`).
+    #[serde(skip)]
+    pub strategy: StrategySlot,
 
     // Call lifecycle tracking
     pub llm_calls: HashMap<String, LlmCallState>,
@@ -130,14 +187,14 @@ impl AgentState {
             agent: None,
             auth: None,
             messages: Vec::new(),
-            tokens: TokenBudget {
-                used: 0,
-                limit: None,
-            },
+            started_at: None,
+            token_usage: TokenUsage::default(),
+            token_budget: TokenBudget { limit: None },
             stream_version: 0,
             last_applied: None,
             last_reacted: None,
             strategy_state: Value::Null,
+            strategy: StrategySlot(None),
             llm_calls: HashMap::new(),
             tool_calls: HashMap::new(),
         }
@@ -153,58 +210,82 @@ impl AgentState {
         match &event.payload {
             EventPayload::SessionCreated(payload) => {
                 self.session_id = event.session_id;
+                self.started_at = Some(event.occurred_at);
+                self.token_budget.limit = payload.agent.token_budget;
                 self.agent = Some(payload.agent.clone());
                 self.auth = Some(payload.auth.clone());
             }
             EventPayload::MessageUser(payload) => {
-                self.track_tokens(&payload.message);
                 self.messages.push(payload.message.clone());
+                self.status = SessionStatus::Idle;
             }
             EventPayload::MessageAssistant(payload) => {
-                self.track_tokens(&payload.message);
                 self.messages.push(payload.message.clone());
                 if let Some(call) = self.llm_calls.get_mut(&payload.call_id) {
                     call.response_processed = true;
                 }
             }
             EventPayload::MessageTool(payload) => {
-                self.track_tokens(&payload.message);
                 self.messages.push(payload.message.clone());
             }
             EventPayload::LlmCallRequested(payload) => {
                 self.status = SessionStatus::Active;
-                self.llm_calls.insert(
-                    payload.call_id.clone(),
-                    LlmCallState {
-                        call_id: payload.call_id.clone(),
-                        request: payload.request.clone(),
-                        status: LlmCallStatus::Pending,
-                        response: None,
-                        response_processed: false,
-                        retry: RetryState::default(),
-                        deadline: payload.deadline,
-                    },
-                );
+                if let Some(existing) = self.llm_calls.get_mut(&payload.call_id) {
+                    // Re-request (retry): preserve retry count, reset call state
+                    existing.status = LlmCallStatus::Pending;
+                    existing.request = payload.request.clone();
+                    existing.response = None;
+                    existing.response_processed = false;
+                    existing.deadline = payload.deadline;
+                    existing.retry.next_at = None;
+                } else {
+                    // New call
+                    self.llm_calls.insert(
+                        payload.call_id.clone(),
+                        LlmCallState {
+                            call_id: payload.call_id.clone(),
+                            request: payload.request.clone(),
+                            status: LlmCallStatus::Pending,
+                            response: None,
+                            response_processed: false,
+                            retry: RetryState::default(),
+                            deadline: payload.deadline,
+                        },
+                    );
+                }
             }
             EventPayload::LlmCallCompleted(payload) => {
+                self.track_usage(&payload.response);
                 if let Some(call) = self.llm_calls.get_mut(&payload.call_id) {
                     call.status = LlmCallStatus::Completed;
                     call.response = Some(payload.response.clone());
                 }
+                self.status = SessionStatus::Idle;
             }
             EventPayload::LlmCallErrored(payload) => {
                 if let Some(call) = self.llm_calls.get_mut(&payload.call_id) {
-                    call.status = LlmCallStatus::Failed;
                     call.retry.attempts += 1;
-                    let backoff_max = self
+                    let max_retries = self
                         .agent
                         .as_ref()
-                        .map(|a| a.retry.backoff_max_secs)
-                        .unwrap_or(60);
-                    let backoff = min(2u64.pow(call.retry.attempts), backoff_max);
-                    call.retry.next_at =
-                        Some(event.occurred_at + chrono::Duration::seconds(backoff as i64));
+                        .map(|a| a.retry.max_retries)
+                        .unwrap_or(3);
+                    if payload.retryable && call.retry.attempts < max_retries {
+                        call.status = LlmCallStatus::RetryScheduled;
+                        let backoff_max = self
+                            .agent
+                            .as_ref()
+                            .map(|a| a.retry.backoff_max_secs)
+                            .unwrap_or(60);
+                        let backoff = min(2u64.pow(call.retry.attempts), backoff_max);
+                        call.retry.next_at =
+                            Some(event.occurred_at + chrono::Duration::seconds(backoff as i64));
+                    } else {
+                        call.status = LlmCallStatus::Failed;
+                        call.retry.next_at = None;
+                    }
                 }
+                self.status = SessionStatus::Idle;
             }
             EventPayload::ToolCallRequested(payload) => {
                 self.status = SessionStatus::Active;
@@ -228,6 +309,9 @@ impl AgentState {
                         is_error: false,
                     });
                 }
+                if self.pending_tool_results() == 0 {
+                    self.status = SessionStatus::Idle;
+                }
             }
             EventPayload::ToolCallErrored(payload) => {
                 if let Some(tc) = self.tool_calls.get_mut(&payload.tool_call_id) {
@@ -238,6 +322,9 @@ impl AgentState {
                     });
                     tc.retry.attempts += 1;
                 }
+                if self.pending_tool_results() == 0 {
+                    self.status = SessionStatus::Idle;
+                }
             }
             EventPayload::SessionInterrupted(payload) => {
                 self.status = SessionStatus::Interrupted {
@@ -247,8 +334,14 @@ impl AgentState {
             EventPayload::InterruptResumed(_) => {
                 self.status = SessionStatus::Active;
             }
+            EventPayload::BudgetExceeded => {
+                self.status = SessionStatus::Idle;
+            }
             EventPayload::StrategyStateChanged(payload) => {
                 self.strategy_state = payload.state.clone();
+            }
+            EventPayload::SessionDone => {
+                self.status = SessionStatus::Done;
             }
             _ => {}
         }
@@ -264,6 +357,12 @@ impl AgentState {
             SessionStatus::Interrupted { interrupt_id } => Some(interrupt_id),
             _ => None,
         }
+    }
+
+    pub fn is_over_budget(&self) -> bool {
+        self.token_budget
+            .limit
+            .is_some_and(|limit| self.token_usage.total_tokens >= limit)
     }
 
     /// Derive pending tool result count from the message history.
@@ -333,7 +432,7 @@ impl AgentState {
         let retry_at = self
             .llm_calls
             .values()
-            .filter(|c| c.status == LlmCallStatus::Failed)
+            .filter(|c| c.status == LlmCallStatus::RetryScheduled)
             .filter_map(|c| c.retry.next_at);
         pending_llm.chain(pending_tool).chain(retry_at).min()
     }
@@ -356,6 +455,27 @@ impl AgentState {
             messages.push(to_openai_message(msg));
         }
 
+        Some(self.make_llm_request(messages, tools))
+    }
+
+    /// Build an LLM request using a custom context (e.g. compacted history).
+    /// The context messages are used as-is (no system prompt prepended).
+    pub fn build_llm_request_with_context(
+        &self,
+        context: &[Message],
+        tools: Option<Vec<openai::Tool>>,
+    ) -> Option<LlmRequest> {
+        self.agent.as_ref()?;
+        let messages = context.iter().map(to_openai_message).collect();
+        Some(self.make_llm_request(messages, tools))
+    }
+
+    fn make_llm_request(
+        &self,
+        messages: Vec<openai::ChatMessage>,
+        tools: Option<Vec<openai::Tool>>,
+    ) -> LlmRequest {
+        let agent = self.agent.as_ref().expect("agent must be set");
         let model = agent
             .llm
             .params
@@ -376,19 +496,42 @@ impl AgentState {
             .and_then(|v| v.as_u64())
             .map(|v| v as u32);
 
-        Some(LlmRequest::OpenAi(openai::ChatCompletionRequest {
+        LlmRequest::OpenAi(openai::ChatCompletionRequest {
             model,
             messages,
             tools,
             tool_choice: None,
             temperature,
             max_tokens,
-        }))
+        })
     }
 
-    fn track_tokens(&mut self, message: &Message) {
-        if let Some(count) = message.token_count {
-            self.tokens.used += count as u64;
+    fn track_usage(&mut self, response: &LlmResponse) {
+        let usage = match response {
+            LlmResponse::OpenAi(resp) => match &resp.usage {
+                Some(u) => u,
+                None => return,
+            },
+        };
+        self.token_usage.prompt_tokens += usage.prompt_tokens as u64;
+        self.token_usage.completion_tokens += usage.completion_tokens as u64;
+        self.token_usage.total_tokens += usage.total_tokens as u64;
+        if let Some(details) = &usage.prompt_tokens_details {
+            self.token_usage.prompt_tokens_details.cached_tokens += details.cached_tokens as u64;
+            self.token_usage.prompt_tokens_details.cache_write_tokens +=
+                details.cache_write_tokens as u64;
+            self.token_usage.prompt_tokens_details.audio_tokens += details.audio_tokens as u64;
+            self.token_usage.prompt_tokens_details.video_tokens += details.video_tokens as u64;
+        }
+        if let Some(details) = &usage.completion_tokens_details {
+            self.token_usage.completion_tokens_details.reasoning_tokens +=
+                details.reasoning_tokens.unwrap_or(0) as u64;
+            self.token_usage.completion_tokens_details.audio_tokens +=
+                details.audio_tokens.unwrap_or(0) as u64;
+            self.token_usage.completion_tokens_details.accepted_prediction_tokens +=
+                details.accepted_prediction_tokens.unwrap_or(0) as u64;
+            self.token_usage.completion_tokens_details.rejected_prediction_tokens +=
+                details.rejected_prediction_tokens.unwrap_or(0) as u64;
         }
     }
 }

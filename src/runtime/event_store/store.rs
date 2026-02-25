@@ -8,6 +8,9 @@ use uuid::Uuid;
 use crate::domain::event::{Event, SessionAuth};
 use crate::domain::session::{AgentState, SessionStatus};
 
+/// Events broadcast by the store after a successful append.
+pub type EventBatch = Vec<Arc<Event>>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Version(pub u64);
 
@@ -25,6 +28,8 @@ pub enum StoreError {
     SessionNotFound,
     #[error("tenant mismatch")]
     TenantMismatch,
+    #[error("internal store error: {0}")]
+    Internal(String),
 }
 
 pub struct SessionLoad {
@@ -58,13 +63,12 @@ pub struct SessionSummary {
 
 #[async_trait]
 pub trait EventStore: Send + Sync {
-    /// Persist pre-built events + snapshot atomically. Version check for
-    /// concurrency control.
+    /// Persist pre-built events + snapshot atomically. The expected
+    /// (pre-append) version is derived from `snapshot.stream_version - events.len()`.
     async fn append(
         &self,
         session_id: Uuid,
         auth: &SessionAuth,
-        expected_version: Version,
         events: Vec<Event>,
         snapshot: AgentState,
     ) -> Result<(), StoreError>;
@@ -72,12 +76,9 @@ pub trait EventStore: Send + Sync {
     /// Load latest snapshot + any events after it.
     fn load(&self, session_id: Uuid, auth: &SessionAuth) -> Result<SessionLoad, StoreError>;
 
-    /// Read events from the global log starting at `offset`, up to `limit` events.
-    fn read_from(&self, offset: u64, limit: usize) -> Vec<Arc<Event>>;
-
     /// List sessions matching the given filter. Empty filter returns all sessions.
     fn list_sessions(&self, filter: &SessionFilter) -> Vec<SessionSummary>;
 
-    /// Returns the notification port that fires when new events are appended.
-    fn notify(&self) -> &OutputPort<()>;
+    /// Returns the port that broadcasts newly appended events.
+    fn events(&self) -> &OutputPort<EventBatch>;
 }
