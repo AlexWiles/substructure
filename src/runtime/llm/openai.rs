@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -9,8 +11,6 @@ use crate::domain::openai::{
     ChatCompletionRequest, ChatCompletionResponse, ChatMessage, Choice, FunctionCall, Role,
     ToolCall, Usage,
 };
-
-use std::sync::Arc;
 
 use super::client::{ErrorSource, LlmClient, LlmError, StreamDelta};
 

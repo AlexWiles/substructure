@@ -4,10 +4,9 @@ use std::fmt;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use uuid::Uuid;
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::domain::event::{
     AgentConfig, Event, EventPayload, LlmRequest, LlmResponse, Message, Role, SessionAuth,

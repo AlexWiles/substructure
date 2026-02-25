@@ -1,8 +1,9 @@
+use crate::domain::event::*;
+use crate::domain::openai;
+
 use super::agent_session::{new_call_id, AgentSession};
 use super::command_handler::CommandPayload;
 use super::strategy::{extract_response_summary, Action, Turn};
-use crate::domain::event::*;
-use crate::domain::openai;
 
 // ---------------------------------------------------------------------------
 // Effect types

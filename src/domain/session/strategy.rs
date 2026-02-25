@@ -10,18 +10,10 @@ use crate::domain::event::{EventPayload, LlmCallCompleted, Message, Role, ToolCa
 // DefaultStrategy config
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DefaultStrategyConfig {
     #[serde(default)]
     pub compaction: CompactionConfig,
-}
-
-impl Default for DefaultStrategyConfig {
-    fn default() -> Self {
-        Self {
-            compaction: CompactionConfig::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,16 +231,9 @@ pub enum ToolExecutionMode {
 // DefaultStrategy — concurrent ReAct with full history
 // ---------------------------------------------------------------------------
 
+#[derive(Default)]
 pub struct DefaultStrategy {
     config: DefaultStrategyConfig,
-}
-
-impl Default for DefaultStrategy {
-    fn default() -> Self {
-        Self {
-            config: DefaultStrategyConfig::default(),
-        }
-    }
 }
 
 impl DefaultStrategy {

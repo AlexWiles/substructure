@@ -1,9 +1,10 @@
 use chrono::{DateTime, Utc};
 
+use crate::domain::event::*;
+
 use super::agent_session::{new_call_id, AgentSession};
 use super::agent_state::{LlmCallStatus, SessionStatus, ToolCallStatus};
 use super::event_handler::extract_assistant_message;
-use crate::domain::event::*;
 
 // ---------------------------------------------------------------------------
 // Command types

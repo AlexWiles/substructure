@@ -6,11 +6,12 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::Mutex;
 
+use crate::runtime::jsonrpc;
+
 use super::client::{
     CallToolResult, InitializeResult, McpClient, McpError, ServerCapabilities, ServerInfo,
     ToolDefinition,
 };
-use crate::runtime::jsonrpc;
 
 // ---------------------------------------------------------------------------
 // Protocol version

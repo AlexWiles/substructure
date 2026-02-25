@@ -1,21 +1,19 @@
 use std::sync::Arc;
 
+use chrono::Utc;
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use uuid::Uuid;
 
-use chrono::Utc;
-
-use super::event_store::{EventStore, StoreError};
-use super::llm::LlmClientProvider;
-use super::llm::StreamDelta;
-use super::mcp::McpClientProvider;
-use super::mcp::{Content, McpClient};
-use super::strategy::StrategyProvider;
 use crate::domain::agent::AgentConfig;
 use crate::domain::event::*;
 use crate::domain::session::{
     AgentSession, AgentState, CommandPayload, Effect, SessionCommand, SessionError,
 };
+
+use super::event_store::{EventStore, StoreError};
+use super::llm::{LlmClientProvider, StreamDelta};
+use super::mcp::{Content, McpClient, McpClientProvider};
+use super::strategy::StrategyProvider;
 
 // ---------------------------------------------------------------------------
 // Errors
