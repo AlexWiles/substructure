@@ -43,11 +43,7 @@ fn reschedule(state: &mut WakeSchedulerState) {
     }
 
     // Find the earliest wake_at
-    let next_wake = state
-        .sessions
-        .values()
-        .filter_map(|t| *t)
-        .min();
+    let next_wake = state.sessions.values().filter_map(|t| *t).min();
 
     let wake_at = match next_wake {
         Some(t) => t,
@@ -129,9 +125,7 @@ impl Actor for WakeScheduler {
                 let due: Vec<Uuid> = state
                     .sessions
                     .iter()
-                    .filter_map(|(id, wake_at)| {
-                        wake_at.filter(|t| *t <= now).map(|_| *id)
-                    })
+                    .filter_map(|(id, wake_at)| wake_at.filter(|t| *t <= now).map(|_| *id))
                     .collect();
 
                 for session_id in due {
@@ -163,9 +157,9 @@ pub async fn spawn_wake_scheduler(
     )
     .await?;
 
-    store
-        .events()
-        .subscribe(actor_ref.clone(), |batch| Some(WakeSchedulerMessage::Events(batch)));
+    store.events().subscribe(actor_ref.clone(), |batch| {
+        Some(WakeSchedulerMessage::Events(batch))
+    });
 
     Ok(actor_ref)
 }

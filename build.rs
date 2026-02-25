@@ -14,7 +14,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Rewrite to use ::pbjson_types (drop-in replacements with serde support).
     let prost_path = out_dir.join("a2a.rs");
     let code = std::fs::read_to_string(&prost_path)?;
-    std::fs::write(&prost_path, code.replace("::prost_types::", "::pbjson_types::"))?;
+    std::fs::write(
+        &prost_path,
+        code.replace("::prost_types::", "::pbjson_types::"),
+    )?;
 
     // Generate serde impls for our A2A types
     let descriptor_set = std::fs::read(&descriptor_path)?;

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 
 use crate::domain::agent::AgentConfig;
 use crate::domain::event::SessionAuth;
-use crate::domain::session::{Strategy, DefaultStrategy};
+use crate::domain::session::{DefaultStrategy, Strategy};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StrategyProviderError {

@@ -66,9 +66,7 @@ impl EventTranslator {
                 if self.open_text_message.is_none() {
                     let message_id = chunk.call_id.clone();
                     self.open_text_message = Some(message_id.clone());
-                    events.push(AgUiEvent::TextMessageStart {
-                        message_id,
-                    });
+                    events.push(AgUiEvent::TextMessageStart { message_id });
                 }
 
                 let message_id = self
@@ -137,9 +135,7 @@ impl EventTranslator {
                         message_id: message_id.clone(),
                         delta: content,
                     });
-                    events.push(AgUiEvent::TextMessageEnd {
-                        message_id,
-                    });
+                    events.push(AgUiEvent::TextMessageEnd { message_id });
                 }
 
                 // Emit tool calls
@@ -191,7 +187,10 @@ impl EventTranslator {
             }
 
             EventPayload::ToolCallCompleted(completed) => {
-                if !self.emitted_tool_results.insert(completed.tool_call_id.clone()) {
+                if !self
+                    .emitted_tool_results
+                    .insert(completed.tool_call_id.clone())
+                {
                     return TranslateOutput::Events(vec![]);
                 }
 
@@ -203,7 +202,10 @@ impl EventTranslator {
             }
 
             EventPayload::ToolCallErrored(errored) => {
-                if !self.emitted_tool_results.insert(errored.tool_call_id.clone()) {
+                if !self
+                    .emitted_tool_results
+                    .insert(errored.tool_call_id.clone())
+                {
                     return TranslateOutput::Events(vec![]);
                 }
 
@@ -214,13 +216,14 @@ impl EventTranslator {
                 }])
             }
 
-            EventPayload::SessionInterrupted(payload) => {
-                TranslateOutput::Interrupt(vec![], InterruptInfo {
+            EventPayload::SessionInterrupted(payload) => TranslateOutput::Interrupt(
+                vec![],
+                InterruptInfo {
                     id: payload.interrupt_id.clone(),
                     reason: payload.reason.clone(),
                     payload: payload.payload.clone(),
-                })
-            }
+                },
+            ),
 
             EventPayload::InterruptResumed(_) => TranslateOutput::Events(vec![]),
 
@@ -485,8 +488,8 @@ mod tests {
         assert_eq!(event_type(&events[0]), "ToolCallResult");
 
         // MessageTool for the same tool_call_id -> deduplicated (skipped)
-        let events = assert_events(translator.translate(&make_event(
-            EventPayload::MessageTool(MessageTool {
+        let events = assert_events(translator.translate(&make_event(EventPayload::MessageTool(
+            MessageTool {
                 message: Message {
                     role: Role::Tool,
                     content: Some("Sunny, 72F".into()),
@@ -495,8 +498,8 @@ mod tests {
                     call_id: None,
                     token_count: None,
                 },
-            }),
-        )));
+            },
+        ))));
         assert_eq!(events.len(), 0);
     }
 
@@ -568,14 +571,13 @@ mod tests {
     fn test_llm_error_is_terminal() {
         let mut translator = EventTranslator::new();
 
-        let output = translator.translate(&make_event(EventPayload::LlmCallErrored(
-            LlmCallErrored {
+        let output =
+            translator.translate(&make_event(EventPayload::LlmCallErrored(LlmCallErrored {
                 call_id: "call-1".into(),
                 error: "API rate limit".into(),
                 retryable: true,
                 source: None,
-            },
-        )));
+            })));
         let events = assert_terminal(output);
         assert_eq!(events.len(), 2); // StepFinished + RunError
         assert_eq!(event_type(&events[0]), "StepFinished");
@@ -600,7 +602,6 @@ mod tests {
                     strategy: Default::default(),
                     retry: Default::default(),
                     token_budget: None,
-
                 },
                 auth: SessionAuth {
                     tenant_id: "t".into(),
@@ -611,8 +612,8 @@ mod tests {
         )));
         assert_eq!(events.len(), 0);
 
-        let events = assert_events(translator.translate(&make_event(
-            EventPayload::MessageUser(MessageUser {
+        let events = assert_events(translator.translate(&make_event(EventPayload::MessageUser(
+            MessageUser {
                 message: Message {
                     role: Role::User,
                     content: Some("Hi".into()),
@@ -622,8 +623,8 @@ mod tests {
                     token_count: None,
                 },
                 stream: true,
-            }),
-        )));
+            },
+        ))));
         assert_eq!(events.len(), 0);
     }
 }

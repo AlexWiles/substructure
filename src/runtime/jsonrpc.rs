@@ -34,7 +34,11 @@ pub struct Request {
 }
 
 impl Request {
-    pub fn new(id: impl Into<Id>, method: impl Into<String>, params: Option<serde_json::Value>) -> Self {
+    pub fn new(
+        id: impl Into<Id>,
+        method: impl Into<String>,
+        params: Option<serde_json::Value>,
+    ) -> Self {
         Self {
             jsonrpc: "2.0",
             id: id.into(),

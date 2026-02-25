@@ -89,7 +89,6 @@ pub struct SessionActorState {
 }
 
 impl SessionActorState {
-
     /// Collect all tool definitions from all MCP clients as OpenAI tools.
     pub fn all_tools(&self) -> Option<Vec<crate::domain::openai::Tool>> {
         let tools: Vec<crate::domain::openai::Tool> = self
@@ -116,9 +115,7 @@ async fn execute(
     state: &mut SessionActorState,
     cmd: SessionCommand,
 ) -> Result<Vec<Event>, RuntimeError> {
-    let (events, snapshot) = state
-        .session
-        .process_command(cmd, &state.auth.tenant_id)?;
+    let (events, snapshot) = state.session.process_command(cmd, &state.auth.tenant_id)?;
 
     if events.is_empty() {
         return Ok(vec![]);
@@ -126,12 +123,7 @@ async fn execute(
 
     state
         .store
-        .append(
-            state.session_id,
-            &state.auth,
-            events.clone(),
-            snapshot,
-        )
+        .append(state.session_id, &state.auth, events.clone(), snapshot)
         .await?;
 
     Ok(events)
@@ -442,10 +434,10 @@ impl Actor for SessionActor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration;
     use crate::domain::agent::{AgentConfig, LlmConfig};
     use crate::domain::openai;
     use crate::domain::session::DefaultStrategy;
+    use chrono::Duration;
 
     fn far_future() -> chrono::DateTime<Utc> {
         Utc::now() + Duration::hours(1)
@@ -468,7 +460,6 @@ mod tests {
             strategy: Default::default(),
             retry: Default::default(),
             token_budget: None,
-
         }
     }
 
@@ -510,10 +501,7 @@ mod tests {
     }
 
     fn created_state() -> AgentSession {
-        let mut state = AgentSession::new(
-            Uuid::new_v4(),
-            Arc::new(DefaultStrategy::default()),
-        );
+        let mut state = AgentSession::new(Uuid::new_v4(), Arc::new(DefaultStrategy::default()));
         let event = Event {
             id: Uuid::new_v4(),
             tenant_id: "t".into(),
@@ -750,7 +738,9 @@ mod tests {
 
         let events = state.handle(CommandPayload::Wake).unwrap();
         assert!(
-            events.iter().any(|e| matches!(e, EventPayload::MessageAssistant(p) if p.call_id == "call-1")),
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::MessageAssistant(p) if p.call_id == "call-1")),
             "should emit MessageAssistant for unprocessed completed call"
         );
     }
@@ -812,9 +802,9 @@ mod tests {
 
         let events = state.handle(CommandPayload::Wake).unwrap();
         assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, EventPayload::ToolCallRequested(p) if p.tool_call_id == "tc-1")),
+            events.iter().any(
+                |e| matches!(e, EventPayload::ToolCallRequested(p) if p.tool_call_id == "tc-1")
+            ),
             "should re-issue pending tool call"
         );
     }
@@ -1056,7 +1046,10 @@ mod tests {
         apply_events(&mut state, events);
 
         let call = state.agent_state.llm_calls.get("call-1").unwrap();
-        assert_eq!(call.retry.attempts, 1, "retry count should be preserved from the previous failure");
+        assert_eq!(
+            call.retry.attempts, 1,
+            "retry count should be preserved from the previous failure"
+        );
         assert_eq!(call.status, crate::domain::session::LlmCallStatus::Pending);
     }
 
@@ -1195,7 +1188,9 @@ mod tests {
                     call_id: "call-1".into(),
                     error: "400 Bad Request".into(),
                     retryable: false,
-                    source: Some(serde_json::json!({ "kind": "openai", "detail": { "status": 400 } })),
+                    source: Some(
+                        serde_json::json!({ "kind": "openai", "detail": { "status": 400 } }),
+                    ),
                 }),
             ],
         );

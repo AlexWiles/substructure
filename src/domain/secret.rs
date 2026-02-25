@@ -15,17 +15,22 @@ pub enum SecretError {
 }
 
 pub trait SecretProvider: Send + Sync {
-    fn resolve(&self, secret: &serde_json::Map<String, serde_json::Value>) -> Result<String, SecretError>;
+    fn resolve(
+        &self,
+        secret: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<String, SecretError>;
 }
 
 pub struct EnvSecretProvider;
 
 impl SecretProvider for EnvSecretProvider {
-    fn resolve(&self, secret: &serde_json::Map<String, serde_json::Value>) -> Result<String, SecretError> {
-        let key = secret
-            .get("key")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| SecretError::Resolution("env provider requires a \"key\" field".into()))?;
+    fn resolve(
+        &self,
+        secret: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<String, SecretError> {
+        let key = secret.get("key").and_then(|v| v.as_str()).ok_or_else(|| {
+            SecretError::Resolution("env provider requires a \"key\" field".into())
+        })?;
         std::env::var(key).map_err(|_| SecretError::NotFound {
             provider: "env".into(),
             key: key.into(),
@@ -55,8 +60,7 @@ pub fn resolve_secrets(config: SystemConfig) -> Result<SystemConfig, SecretError
 
     resolve_value(&providers, &mut value)?;
 
-    serde_json::from_value(value)
-        .map_err(|e| SecretError::Resolution(format!("deserialize: {e}")))
+    serde_json::from_value(value).map_err(|e| SecretError::Resolution(format!("deserialize: {e}")))
 }
 
 fn resolve_value(
@@ -144,10 +148,13 @@ mod tests {
     #[test]
     fn unknown_provider_in_config_errors() {
         let mut configs = HashMap::new();
-        configs.insert("bad".into(), SecretProviderConfig {
-            provider_type: "nonexistent".into(),
-            settings: serde_json::Map::new(),
-        });
+        configs.insert(
+            "bad".into(),
+            SecretProviderConfig {
+                provider_type: "nonexistent".into(),
+                settings: serde_json::Map::new(),
+            },
+        );
         match build_providers(&configs) {
             Err(SecretError::UnknownProvider(_)) => {}
             Ok(_) => panic!("expected UnknownProvider error"),

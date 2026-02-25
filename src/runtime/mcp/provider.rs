@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::domain::event::{McpServerConfig, McpTransportConfig, SessionAuth};
 use super::client::{McpClient, McpError};
 use super::stdio::StdioMcpClient;
+use crate::domain::event::{McpServerConfig, McpTransportConfig, SessionAuth};
 
 #[async_trait]
 pub trait McpClientProvider: Send + Sync + 'static {

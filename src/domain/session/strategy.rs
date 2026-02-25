@@ -106,11 +106,7 @@ pub trait Strategy: Send + Sync {
     /// (dispatching LLM/tool calls, emitting assistant/tool messages).
     ///
     /// Return `Some(Turn)` to issue an action, or `None` to do nothing.
-    async fn on_event(
-        &self,
-        state: &AgentState,
-        event: &EventPayload,
-    ) -> Option<Turn>;
+    async fn on_event(&self, state: &AgentState, event: &EventPayload) -> Option<Turn>;
 }
 
 // ---------------------------------------------------------------------------
@@ -243,7 +239,10 @@ impl DefaultStrategy {
 
     /// Check if all pending tool calls are done.
     fn all_tools_done(state: &AgentState) -> bool {
-        !state.tool_calls.values().any(|tc| tc.status == ToolCallStatus::Pending)
+        !state
+            .tool_calls
+            .values()
+            .any(|tc| tc.status == ToolCallStatus::Pending)
     }
 
     fn parse_strategy_state(raw: &Value) -> DefaultStrategyState {
@@ -460,11 +459,7 @@ impl Strategy for DefaultStrategy {
         Ok(Box::new(Self::new(config)))
     }
 
-    async fn on_event(
-        &self,
-        state: &AgentState,
-        event: &EventPayload,
-    ) -> Option<Turn> {
+    async fn on_event(&self, state: &AgentState, event: &EventPayload) -> Option<Turn> {
         let ss = Self::parse_strategy_state(&state.strategy_state);
 
         match event {
@@ -487,7 +482,9 @@ impl Strategy for DefaultStrategy {
                     }
                 }
                 Some(Turn {
-                    action: Some(Action::CallLlm(self.llm_params(state, Some(payload.stream)))),
+                    action: Some(Action::CallLlm(
+                        self.llm_params(state, Some(payload.stream)),
+                    )),
                     state: Self::serialize_state(&ss),
                 })
             }
@@ -611,7 +608,6 @@ mod tests {
             strategy: Default::default(),
             retry: Default::default(),
             token_budget: None,
-
         }
     }
 
@@ -797,8 +793,7 @@ mod tests {
         let turn = strategy.on_event(&state, &last_tool_event).await.unwrap();
 
         // Should enter compaction phase.
-        let new_state: DefaultStrategyState =
-            serde_json::from_value(turn.state.clone()).unwrap();
+        let new_state: DefaultStrategyState = serde_json::from_value(turn.state.clone()).unwrap();
         assert!(
             matches!(new_state.phase, CompactionPhase::Compacting),
             "should enter compacting phase"
@@ -865,11 +860,13 @@ mod tests {
         // Simulate the compaction LLM response.
         let compaction_response = mock_llm_completed("compact-1", "Summary of conversation.");
 
-        let turn = strategy.on_event(&state, &compaction_response).await.unwrap();
+        let turn = strategy
+            .on_event(&state, &compaction_response)
+            .await
+            .unwrap();
 
         // State should be back to normal with summary stored.
-        let new_state: DefaultStrategyState =
-            serde_json::from_value(turn.state.clone()).unwrap();
+        let new_state: DefaultStrategyState = serde_json::from_value(turn.state.clone()).unwrap();
         assert!(
             matches!(new_state.phase, CompactionPhase::Normal),
             "should return to normal phase"
@@ -917,10 +914,7 @@ mod tests {
         let mut state = make_session(&agent);
 
         // Add some messages.
-        apply(
-            &mut state,
-            vec![user_msg("hello"), user_msg("world")],
-        );
+        apply(&mut state, vec![user_msg("hello"), user_msg("world")]);
 
         // Simulate state after compaction completed.
         state.strategy_state = serde_json::to_value(DefaultStrategyState {
@@ -939,14 +933,21 @@ mod tests {
 
         match &turn.action {
             Some(Action::CallLlm(params)) => {
-                let ctx = params.context.as_ref().expect("should use compacted context");
+                let ctx = params
+                    .context
+                    .as_ref()
+                    .expect("should use compacted context");
                 // System prompt.
                 assert_eq!(ctx[0].role, Role::System);
                 // Summary.
                 assert_eq!(ctx[1].role, Role::User);
                 assert!(ctx[1].content.as_ref().unwrap().contains("hello and world"));
                 // Recent messages (after compaction point).
-                assert!(ctx.len() >= 3, "should include recent messages, got {}", ctx.len());
+                assert!(
+                    ctx.len() >= 3,
+                    "should include recent messages, got {}",
+                    ctx.len()
+                );
                 assert_eq!(ctx[2].role, Role::User);
                 assert_eq!(ctx[2].content.as_deref(), Some("how are you?"));
             }
@@ -991,6 +992,9 @@ mod tests {
             matches!(turn.action, Some(Action::CallLlm(ref p)) if p.context.is_none()),
             "should not compact below threshold"
         );
-        assert_eq!(turn.state, DefaultStrategy::serialize_state(&DefaultStrategyState::default()));
+        assert_eq!(
+            turn.state,
+            DefaultStrategy::serialize_state(&DefaultStrategyState::default())
+        );
     }
 }

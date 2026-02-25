@@ -4,10 +4,10 @@ use std::sync::Arc;
 use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef, SpawnErr};
 use uuid::Uuid;
 
-use crate::domain::event::Event;
+use super::event_store::{EventBatch, EventStore};
 use super::session_actor::SessionMessage;
 use super::session_client::ClientMessage;
-use super::event_store::{EventBatch, EventStore};
+use crate::domain::event::Event;
 
 // ---------------------------------------------------------------------------
 // Dispatcher actor — fans out new events to session actors and clients
@@ -54,16 +54,14 @@ impl Actor for DispatcherActor {
                     let name = format!("session-{session_id}");
                     if let Some(cell) = ractor::registry::where_is(name) {
                         let actor: ActorRef<SessionMessage> = cell.into();
-                        let _ = actor
-                            .send_message(SessionMessage::Events(session_events.clone()));
+                        let _ = actor.send_message(SessionMessage::Events(session_events.clone()));
                     }
 
                     // Fan-out to session clients via process group
                     let client_group = format!("session-clients-{session_id}");
                     for cell in ractor::pg::get_members(&client_group) {
                         let client: ActorRef<ClientMessage> = cell.into();
-                        let _ = client
-                            .send_message(ClientMessage::Events(session_events.clone()));
+                        let _ = client.send_message(ClientMessage::Events(session_events.clone()));
                     }
                 }
             }
@@ -84,9 +82,9 @@ pub async fn spawn_dispatcher(
     )
     .await?;
 
-    store
-        .events()
-        .subscribe(actor_ref.clone(), |batch| Some(DispatcherMessage::Events(batch)));
+    store.events().subscribe(actor_ref.clone(), |batch| {
+        Some(DispatcherMessage::Events(batch))
+    });
 
     Ok(actor_ref)
 }

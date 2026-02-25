@@ -22,11 +22,11 @@ mod strategy;
 pub mod wake_scheduler;
 
 pub use dispatcher::spawn_dispatcher;
+#[cfg(feature = "sqlite")]
+pub use event_store::SqliteEventStore;
 pub use event_store::{
     EventStore, InMemoryEventStore, SessionFilter, SessionLoad, SessionSummary, StoreError, Version,
 };
-#[cfg(feature = "sqlite")]
-pub use event_store::SqliteEventStore;
 pub use llm::{LlmClient, MockLlmClient, OpenAiClient, StreamDelta};
 pub use llm::{LlmClientFactory, LlmClientProvider, ProviderError, StaticLlmClientProvider};
 pub use mcp::{
@@ -103,9 +103,7 @@ impl RuntimeState {
                     self.myself.get_cell(),
                 )
                 .await
-                .map_err(|e| {
-                    RuntimeError::ActorCall(format!("session startup failed: {e}"))
-                })?;
+                .map_err(|e| RuntimeError::ActorCall(format!("session startup failed: {e}")))?;
                 actor
             };
 
@@ -327,8 +325,14 @@ impl Runtime {
             .ok_or_else(|| RuntimeError::UnknownAgent(agent_name.to_string()))?;
 
         let init = SessionInit { agent, auth };
-        call_t!(self.actor, RuntimeMessage::StartSession, 30_000, session_id, init)
-            .map_err(|e| RuntimeError::ActorCall(e.to_string()))?
+        call_t!(
+            self.actor,
+            RuntimeMessage::StartSession,
+            30_000,
+            session_id,
+            init
+        )
+        .map_err(|e| RuntimeError::ActorCall(e.to_string()))?
     }
 
     /// Spawn a new session client for an existing session.
@@ -386,8 +390,13 @@ pub struct SessionHandle {
 
 impl SessionHandle {
     pub async fn send_command(&self, cmd: SessionCommand) -> Result<Vec<Event>, RuntimeError> {
-        let result = call_t!(self.session_client, ClientMessage::SendCommand, 5000, Box::new(cmd))
-            .map_err(|e| RuntimeError::ActorCall(e.to_string()))?;
+        let result = call_t!(
+            self.session_client,
+            ClientMessage::SendCommand,
+            5000,
+            Box::new(cmd)
+        )
+        .map_err(|e| RuntimeError::ActorCall(e.to_string()))?;
         result
     }
 

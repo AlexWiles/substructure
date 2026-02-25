@@ -3,12 +3,15 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use super::client::LlmClient;
 use crate::domain::config::LlmClientConfig;
 use crate::domain::event::SessionAuth;
-use super::client::LlmClient;
 
-pub type LlmClientFactory =
-    Box<dyn Fn(&serde_json::Map<String, serde_json::Value>) -> Result<Arc<dyn LlmClient>, String> + Send + Sync>;
+pub type LlmClientFactory = Box<
+    dyn Fn(&serde_json::Map<String, serde_json::Value>) -> Result<Arc<dyn LlmClient>, String>
+        + Send
+        + Sync,
+>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
@@ -40,7 +43,8 @@ impl StaticLlmClientProvider {
     ) -> Result<Self, String> {
         let mut clients = HashMap::new();
         for (id, config) in configs {
-            let factory = factories.get(config.client_type.as_str())
+            let factory = factories
+                .get(config.client_type.as_str())
                 .ok_or_else(|| format!("unknown LLM client type: {}", config.client_type))?;
             clients.insert(id.clone(), factory(&config.settings)?);
         }

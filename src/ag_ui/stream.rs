@@ -7,8 +7,8 @@ use uuid::Uuid;
 
 use crate::domain::event::{Role, SessionAuth, SpanContext};
 use crate::domain::session::{CommandPayload, SessionCommand};
-use crate::runtime::{RuntimeError, SessionHandle};
 use crate::runtime::Runtime;
+use crate::runtime::{RuntimeError, SessionHandle};
 
 use super::observer::{AgUiObserverActor, ObserverArgs};
 use super::types::{AgUiEvent, Message, RunAgentInput};
@@ -79,10 +79,7 @@ pub async fn run_session(
             thread_id: thread_id.clone(),
             run_id: run_id.clone(),
             event_tx: tx,
-            init_events: vec![AgUiEvent::RunStarted {
-                thread_id,
-                run_id,
-            }],
+            init_events: vec![AgUiEvent::RunStarted { thread_id, run_id }],
             skip_until: 0,
         },
     )
@@ -130,10 +127,7 @@ pub async fn resume_run(
             thread_id: thread_id.clone(),
             run_id: run_id.clone(),
             event_tx: tx,
-            init_events: vec![AgUiEvent::RunStarted {
-                thread_id,
-                run_id,
-            }],
+            init_events: vec![AgUiEvent::RunStarted { thread_id, run_id }],
             skip_until: 0,
         },
     )
@@ -206,9 +200,7 @@ fn domain_message_to_ag_ui(msg: &crate::domain::event::Message) -> Message {
     match msg.role {
         Role::User => Message::User {
             id: None,
-            content: super::types::MessageContent::Text(
-                msg.content.clone().unwrap_or_default(),
-            ),
+            content: super::types::MessageContent::Text(msg.content.clone().unwrap_or_default()),
         },
         Role::Assistant => Message::Assistant {
             id: None,

@@ -158,7 +158,11 @@ impl AgentSession {
                 tool_calls,
                 token_count,
             } => {
-                if state.llm_calls.get(&call_id).is_some_and(|c| c.response_processed) {
+                if state
+                    .llm_calls
+                    .get(&call_id)
+                    .is_some_and(|c| c.response_processed)
+                {
                     return Ok(vec![]);
                 }
                 Ok(vec![EventPayload::MessageAssistant(MessageAssistant {
@@ -178,7 +182,11 @@ impl AgentSession {
                 content,
                 token_count,
             } => {
-                if state.messages.iter().any(|m| m.tool_call_id.as_ref() == Some(&tool_call_id)) {
+                if state
+                    .messages
+                    .iter()
+                    .any(|m| m.tool_call_id.as_ref() == Some(&tool_call_id))
+                {
                     return Ok(vec![]);
                 }
                 Ok(vec![EventPayload::MessageTool(MessageTool {
@@ -203,9 +211,11 @@ impl AgentSession {
                 }
                 let existing = state.llm_calls.get(&call_id);
                 if existing.is_some_and(|c| {
-                    c.status != LlmCallStatus::Failed
-                        && c.status != LlmCallStatus::RetryScheduled
-                }) || state.llm_calls.values().any(|c| c.status == LlmCallStatus::Pending)
+                    c.status != LlmCallStatus::Failed && c.status != LlmCallStatus::RetryScheduled
+                }) || state
+                    .llm_calls
+                    .values()
+                    .any(|c| c.status == LlmCallStatus::Pending)
                 {
                     return Ok(vec![]);
                 }
@@ -217,7 +227,10 @@ impl AgentSession {
                 })])
             }
             CommandPayload::CompleteLlmCall { call_id, response } => {
-                if !matches!(state.llm_calls.get(&call_id).map(|c| &c.status), Some(&LlmCallStatus::Pending)) {
+                if !matches!(
+                    state.llm_calls.get(&call_id).map(|c| &c.status),
+                    Some(&LlmCallStatus::Pending)
+                ) {
                     return Ok(vec![]);
                 }
                 Ok(vec![EventPayload::LlmCallCompleted(LlmCallCompleted {
@@ -231,7 +244,10 @@ impl AgentSession {
                 retryable,
                 source,
             } => {
-                if !matches!(state.llm_calls.get(&call_id).map(|c| &c.status), Some(&LlmCallStatus::Pending)) {
+                if !matches!(
+                    state.llm_calls.get(&call_id).map(|c| &c.status),
+                    Some(&LlmCallStatus::Pending)
+                ) {
                     return Ok(vec![]);
                 }
                 Ok(vec![EventPayload::LlmCallErrored(LlmCallErrored {
@@ -246,7 +262,10 @@ impl AgentSession {
                 chunk_index,
                 text,
             } => {
-                if !matches!(state.llm_calls.get(&call_id).map(|c| &c.status), Some(&LlmCallStatus::Pending)) {
+                if !matches!(
+                    state.llm_calls.get(&call_id).map(|c| &c.status),
+                    Some(&LlmCallStatus::Pending)
+                ) {
                     return Ok(vec![]);
                 }
                 Ok(vec![EventPayload::LlmStreamChunk(LlmStreamChunk {
@@ -276,7 +295,10 @@ impl AgentSession {
                 name,
                 result,
             } => {
-                if !matches!(state.tool_calls.get(&tool_call_id).map(|tc| &tc.status), Some(&ToolCallStatus::Pending)) {
+                if !matches!(
+                    state.tool_calls.get(&tool_call_id).map(|tc| &tc.status),
+                    Some(&ToolCallStatus::Pending)
+                ) {
                     return Ok(vec![]);
                 }
                 Ok(vec![EventPayload::ToolCallCompleted(ToolCallCompleted {
@@ -290,7 +312,10 @@ impl AgentSession {
                 name,
                 error,
             } => {
-                if !matches!(state.tool_calls.get(&tool_call_id).map(|tc| &tc.status), Some(&ToolCallStatus::Pending)) {
+                if !matches!(
+                    state.tool_calls.get(&tool_call_id).map(|tc| &tc.status),
+                    Some(&ToolCallStatus::Pending)
+                ) {
                     return Ok(vec![]);
                 }
                 Ok(vec![EventPayload::ToolCallErrored(ToolCallErrored {
@@ -450,10 +475,7 @@ impl AgentSession {
         }
 
         // 7. All tools done, no next step → request next LLM call
-        let last_is_tool = state
-            .messages
-            .last()
-            .is_some_and(|m| m.role == Role::Tool);
+        let last_is_tool = state.messages.last().is_some_and(|m| m.role == Role::Tool);
         if state.pending_tool_results() == 0
             && last_is_tool
             && !state
@@ -511,7 +533,6 @@ mod tests {
             strategy: Default::default(),
             retry: Default::default(),
             token_budget: None,
-
         }
     }
 
@@ -553,10 +574,7 @@ mod tests {
     }
 
     fn created_state() -> AgentSession {
-        let mut state = AgentSession::new(
-            Uuid::new_v4(),
-            Arc::new(DefaultStrategy::default()),
-        );
+        let mut state = AgentSession::new(Uuid::new_v4(), Arc::new(DefaultStrategy::default()));
         let event = Event {
             id: Uuid::new_v4(),
             tenant_id: "t".into(),
@@ -839,10 +857,7 @@ mod tests {
         let mut agent = test_agent();
         agent.token_budget = Some(100);
 
-        let mut state = AgentSession::new(
-            Uuid::new_v4(),
-            Arc::new(DefaultStrategy::default()),
-        );
+        let mut state = AgentSession::new(Uuid::new_v4(), Arc::new(DefaultStrategy::default()));
         let event = Event {
             id: Uuid::new_v4(),
             tenant_id: "t".into(),
@@ -873,7 +888,8 @@ mod tests {
         assert_eq!(payloads.len(), 1);
         assert!(
             matches!(&payloads[0], EventPayload::BudgetExceeded),
-            "expected BudgetExceeded, got {:?}", payloads[0],
+            "expected BudgetExceeded, got {:?}",
+            payloads[0],
         );
     }
 

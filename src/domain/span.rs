@@ -24,7 +24,9 @@ macro_rules! hex_id {
                 let bytes: [u8; $len] = hex::decode(s)
                     .map_err(serde::de::Error::custom)?
                     .try_into()
-                    .map_err(|_| serde::de::Error::custom(concat!("expected ", stringify!($len), " bytes")))?;
+                    .map_err(|_| {
+                        serde::de::Error::custom(concat!("expected ", stringify!($len), " bytes"))
+                    })?;
                 Ok(Self(bytes))
             }
         }

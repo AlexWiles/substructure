@@ -8,7 +8,9 @@ use uuid::Uuid;
 use crate::domain::event::{Event, SessionAuth};
 use crate::domain::session::AgentState;
 
-use super::store::{EventBatch, EventStore, SessionFilter, SessionLoad, SessionSummary, StoreError, Version};
+use super::store::{
+    EventBatch, EventStore, SessionFilter, SessionLoad, SessionSummary, StoreError, Version,
+};
 
 const SCHEMA_SQL: &str = r#"
     CREATE TABLE IF NOT EXISTS events (
@@ -94,8 +96,12 @@ impl EventStore for SqliteEventStore {
                         .map_err(|e| StoreError::Internal(e.to_string()))?;
                     let rows = stmt
                         .execute(rusqlite::params![
-                            sid, event.tenant_id, event.sequence, data,
-                            expected_version as i64, auth.tenant_id
+                            sid,
+                            event.tenant_id,
+                            event.sequence,
+                            data,
+                            expected_version as i64,
+                            auth.tenant_id
                         ])
                         .map_err(|e| StoreError::Internal(e.to_string()))?;
 
@@ -128,8 +134,8 @@ impl EventStore for SqliteEventStore {
             let batch: EventBatch = events.into_iter().map(Arc::new).collect();
 
             // Upsert snapshot
-            let snapshot_data =
-                serde_json::to_string(&snapshot).map_err(|e| StoreError::Internal(e.to_string()))?;
+            let snapshot_data = serde_json::to_string(&snapshot)
+                .map_err(|e| StoreError::Internal(e.to_string()))?;
             let status_str = serde_json::to_string(&snapshot.status)
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
             let agent_name = snapshot.agent.as_ref().map(|a| a.name.clone());
@@ -178,8 +184,8 @@ impl EventStore for SqliteEventStore {
             return Err(StoreError::TenantMismatch);
         }
 
-        let snapshot: AgentState =
-            serde_json::from_str(&snapshot_data).map_err(|e| StoreError::Internal(e.to_string()))?;
+        let snapshot: AgentState = serde_json::from_str(&snapshot_data)
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
 
         Ok(SessionLoad { snapshot })
     }
@@ -294,7 +300,6 @@ mod tests {
             strategy: Default::default(),
             retry: Default::default(),
             token_budget: None,
-
         }
     }
 
@@ -355,9 +360,7 @@ mod tests {
             .unwrap();
 
         let (ev2, snap2) = session_created_event(id, "t", "bot");
-        let result = store
-            .append(id, &test_auth("t"), vec![ev2], snap2)
-            .await;
+        let result = store.append(id, &test_auth("t"), vec![ev2], snap2).await;
         assert!(matches!(result, Err(StoreError::VersionConflict { .. })));
     }
 

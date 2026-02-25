@@ -133,9 +133,7 @@ pub enum Content {
         mime_type: String,
     },
     #[serde(rename = "resource")]
-    Resource {
-        resource: serde_json::Value,
-    },
+    Resource { resource: serde_json::Value },
     #[serde(other)]
     Unknown,
 }

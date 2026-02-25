@@ -527,9 +527,13 @@ impl AgentState {
                 details.reasoning_tokens.unwrap_or(0) as u64;
             self.token_usage.completion_tokens_details.audio_tokens +=
                 details.audio_tokens.unwrap_or(0) as u64;
-            self.token_usage.completion_tokens_details.accepted_prediction_tokens +=
+            self.token_usage
+                .completion_tokens_details
+                .accepted_prediction_tokens +=
                 details.accepted_prediction_tokens.unwrap_or(0) as u64;
-            self.token_usage.completion_tokens_details.rejected_prediction_tokens +=
+            self.token_usage
+                .completion_tokens_details
+                .rejected_prediction_tokens +=
                 details.rejected_prediction_tokens.unwrap_or(0) as u64;
         }
     }

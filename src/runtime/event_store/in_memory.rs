@@ -9,7 +9,9 @@ use crate::domain::event::{Event, SessionAuth};
 use crate::domain::session::AgentState;
 use chrono::Utc;
 
-use super::store::{EventBatch, EventStore, SessionFilter, SessionLoad, SessionSummary, StoreError, Version};
+use super::store::{
+    EventBatch, EventStore, SessionFilter, SessionLoad, SessionSummary, StoreError, Version,
+};
 
 pub struct InMemoryEventStore {
     snapshots: Mutex<HashMap<Uuid, (AgentState, u64)>>,
@@ -172,7 +174,6 @@ mod tests {
             strategy: Default::default(),
             retry: Default::default(),
             token_budget: None,
-
         }
     }
 
