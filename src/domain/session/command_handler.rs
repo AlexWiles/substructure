@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 
 use crate::domain::event::*;
+use crate::domain::session::agent_state::ToolCallState;
 
 use super::agent_session::{new_call_id, AgentSession};
 use super::agent_state::{LlmCallStatus, SessionStatus, ToolCallStatus};
@@ -9,6 +10,19 @@ use super::event_handler::extract_assistant_message;
 // ---------------------------------------------------------------------------
 // Command types
 // ---------------------------------------------------------------------------
+
+/// A message from an external client (AG-UI, HTTP, etc.).
+#[derive(Debug, Clone)]
+pub enum IncomingMessage {
+    User {
+        content: String,
+    },
+    ToolResult {
+        tool_call_id: String,
+        content: String,
+        error: Option<String>,
+    },
+}
 
 #[derive(Debug, Clone)]
 pub struct SessionCommand {
@@ -22,21 +36,11 @@ pub enum CommandPayload {
     CreateSession {
         agent: AgentConfig,
         auth: SessionAuth,
+        on_done: Option<CompletionDelivery>,
     },
-    SendUserMessage {
-        content: String,
+    SendMessage {
+        message: IncomingMessage,
         stream: bool,
-    },
-    SendAssistantMessage {
-        call_id: String,
-        content: Option<String>,
-        tool_calls: Vec<ToolCall>,
-        token_count: Option<u32>,
-    },
-    SendToolMessage {
-        tool_call_id: String,
-        content: String,
-        token_count: Option<u32>,
     },
     RequestLlmCall {
         call_id: String,
@@ -64,6 +68,8 @@ pub enum CommandPayload {
         name: String,
         arguments: String,
         deadline: DateTime<Utc>,
+        #[allow(dead_code)]
+        handler: ToolHandler,
     },
     CompleteToolCall {
         tool_call_id: String,
@@ -87,7 +93,10 @@ pub enum CommandPayload {
     UpdateStrategyState {
         state: serde_json::Value,
     },
-    MarkDone,
+    CancelSession,
+    MarkDone {
+        artifacts: Vec<Artifact>,
+    },
     Wake,
 }
 
@@ -110,13 +119,18 @@ pub enum SessionError {
 impl AgentSession {
     pub fn handle(&self, cmd: CommandPayload) -> Result<Vec<EventPayload>, SessionError> {
         match (&self.agent_state.agent, cmd) {
-            // Uncreated session: only CreateSession is valid
-            (None, CommandPayload::CreateSession { agent, auth }) => {
-                Ok(vec![EventPayload::SessionCreated(SessionCreated {
+            (
+                None,
+                CommandPayload::CreateSession {
                     agent,
                     auth,
-                })])
-            }
+                    on_done,
+                },
+            ) => Ok(vec![EventPayload::SessionCreated(SessionCreated {
+                agent,
+                auth,
+                on_done,
+            })]),
             (Some(_), CommandPayload::CreateSession { .. }) => {
                 Err(SessionError::SessionAlreadyCreated)
             }
@@ -133,73 +147,60 @@ impl AgentSession {
             CommandPayload::CreateSession { .. } => {
                 unreachable!("CreateSession is handled by SessionState::handle")
             }
-            CommandPayload::SendUserMessage { content, stream } => {
-                if matches!(state.status, SessionStatus::Interrupted { .. }) {
-                    return Err(SessionError::SessionInterrupted);
+            CommandPayload::SendMessage { message, stream } => match message {
+                IncomingMessage::User { content } => match state.status {
+                    SessionStatus::Interrupted { .. } => Err(SessionError::SessionInterrupted),
+                    SessionStatus::Active => Err(SessionError::SessionBusy),
+                    _ => Ok(vec![EventPayload::MessageUser(MessageUser {
+                        message: Message {
+                            role: Role::User,
+                            content: Some(content),
+                            tool_calls: Vec::new(),
+                            tool_call_id: None,
+                            call_id: None,
+                            token_count: None,
+                        },
+                        stream,
+                    })]),
+                },
+                IncomingMessage::ToolResult {
+                    tool_call_id,
+                    content,
+                    error,
+                } => {
+                    let tc = state.tool_calls.get(&tool_call_id);
+
+                    match tc {
+                        // Case where we havent seen the tool call before. We ignore it.
+                        None => Ok(vec![]),
+                        // Have seen a terminal state for this toolcall already
+                        Some(ToolCallState {
+                            status: ToolCallStatus::Completed | ToolCallStatus::Failed,
+                            ..
+                        }) => Ok(vec![]),
+                        // We are expecting a result
+                        Some(ToolCallState {
+                            status: ToolCallStatus::Pending,
+                            name,
+                            ..
+                        }) => {
+                            if let Some(err) = error {
+                                Ok(vec![EventPayload::ToolCallErrored(ToolCallErrored {
+                                    tool_call_id,
+                                    name: name.clone(),
+                                    error: err,
+                                })])
+                            } else {
+                                Ok(vec![EventPayload::ToolCallCompleted(ToolCallCompleted {
+                                    tool_call_id,
+                                    name: name.clone(),
+                                    result: content,
+                                })])
+                            }
+                        }
+                    }
                 }
-                if matches!(state.status, SessionStatus::Active) {
-                    return Err(SessionError::SessionBusy);
-                }
-                Ok(vec![EventPayload::MessageUser(MessageUser {
-                    message: Message {
-                        role: Role::User,
-                        content: Some(content),
-                        tool_calls: Vec::new(),
-                        tool_call_id: None,
-                        call_id: None,
-                        token_count: None,
-                    },
-                    stream,
-                })])
-            }
-            CommandPayload::SendAssistantMessage {
-                call_id,
-                content,
-                tool_calls,
-                token_count,
-            } => {
-                if state
-                    .llm_calls
-                    .get(&call_id)
-                    .is_some_and(|c| c.response_processed)
-                {
-                    return Ok(vec![]);
-                }
-                Ok(vec![EventPayload::MessageAssistant(MessageAssistant {
-                    call_id: call_id.clone(),
-                    message: Message {
-                        role: Role::Assistant,
-                        content,
-                        tool_calls,
-                        tool_call_id: None,
-                        call_id: Some(call_id),
-                        token_count,
-                    },
-                })])
-            }
-            CommandPayload::SendToolMessage {
-                tool_call_id,
-                content,
-                token_count,
-            } => {
-                if state
-                    .messages
-                    .iter()
-                    .any(|m| m.tool_call_id.as_ref() == Some(&tool_call_id))
-                {
-                    return Ok(vec![]);
-                }
-                Ok(vec![EventPayload::MessageTool(MessageTool {
-                    message: Message {
-                        role: Role::Tool,
-                        content: Some(content),
-                        tool_calls: Vec::new(),
-                        tool_call_id: Some(tool_call_id),
-                        call_id: None,
-                        token_count,
-                    },
-                })])
-            }
+            },
             CommandPayload::RequestLlmCall {
                 call_id,
                 request,
@@ -209,153 +210,218 @@ impl AgentSession {
                 if state.is_over_budget() {
                     return Ok(vec![EventPayload::BudgetExceeded]);
                 }
-                let existing = state.llm_calls.get(&call_id);
-                if existing.is_some_and(|c| {
-                    c.status != LlmCallStatus::Failed && c.status != LlmCallStatus::RetryScheduled
-                }) || state
+                let has_pending = state
                     .llm_calls
                     .values()
-                    .any(|c| c.status == LlmCallStatus::Pending)
-                {
+                    .any(|c| c.status == LlmCallStatus::Pending);
+
+                if has_pending {
                     return Ok(vec![]);
                 }
-                Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {
-                    call_id,
-                    request,
-                    stream,
-                    deadline,
-                })])
+
+                let issue = match state.llm_calls.get(&call_id).map(|c| &c.status) {
+                    // New call
+                    None => true,
+                    // Previously failed — retry
+                    Some(&LlmCallStatus::Failed) => true,
+                    // Retry scheduled but not yet fired — short-circuit the backoff
+                    Some(&LlmCallStatus::RetryScheduled) => true,
+                    // Already in flight or completed — skip
+                    _ => false,
+                };
+                if issue {
+                    Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {
+                        call_id,
+                        request,
+                        stream,
+                        deadline,
+                    })])
+                } else {
+                    Ok(vec![])
+                }
             }
             CommandPayload::CompleteLlmCall { call_id, response } => {
-                if !matches!(
-                    state.llm_calls.get(&call_id).map(|c| &c.status),
-                    Some(&LlmCallStatus::Pending)
-                ) {
-                    return Ok(vec![]);
+                match state.llm_calls.get(&call_id).map(|c| &c.status) {
+                    // Pending call — complete it
+                    Some(&LlmCallStatus::Pending) => {
+                        let (content, tool_calls, token_count) =
+                            extract_assistant_message(&response);
+
+                        let mut events = vec![
+                            EventPayload::LlmCallCompleted(LlmCallCompleted {
+                                call_id: call_id.clone(),
+                                response,
+                            }),
+                            EventPayload::MessageAssistant(MessageAssistant {
+                                call_id: call_id.clone(),
+                                message: Message {
+                                    role: Role::Assistant,
+                                    content,
+                                    tool_calls: tool_calls.clone(),
+                                    tool_call_id: None,
+                                    call_id: Some(call_id),
+                                    token_count,
+                                },
+                            }),
+                        ];
+                        for tc in &tool_calls {
+                            events.push(EventPayload::ToolCallRequested(ToolCallRequested {
+                                tool_call_id: tc.id.clone(),
+                                name: tc.name.clone(),
+                                arguments: tc.arguments.clone(),
+                                deadline: self.tool_deadline(),
+                                handler: Default::default(),
+                            }));
+                        }
+                        Ok(events)
+                    }
+                    // Not pending or unknown — skip
+                    _ => Ok(vec![]),
                 }
-                Ok(vec![EventPayload::LlmCallCompleted(LlmCallCompleted {
-                    call_id,
-                    response,
-                })])
             }
             CommandPayload::FailLlmCall {
                 call_id,
                 error,
                 retryable,
                 source,
-            } => {
-                if !matches!(
-                    state.llm_calls.get(&call_id).map(|c| &c.status),
-                    Some(&LlmCallStatus::Pending)
-                ) {
-                    return Ok(vec![]);
+            } => match state.llm_calls.get(&call_id).map(|c| &c.status) {
+                // Pending call — fail it
+                Some(&LlmCallStatus::Pending) => {
+                    Ok(vec![EventPayload::LlmCallErrored(LlmCallErrored {
+                        call_id,
+                        error,
+                        retryable,
+                        source,
+                    })])
                 }
-                Ok(vec![EventPayload::LlmCallErrored(LlmCallErrored {
-                    call_id,
-                    error,
-                    retryable,
-                    source,
-                })])
-            }
+                // Not pending or unknown — skip
+                _ => Ok(vec![]),
+            },
             CommandPayload::StreamLlmChunk {
                 call_id,
                 chunk_index,
                 text,
-            } => {
-                if !matches!(
-                    state.llm_calls.get(&call_id).map(|c| &c.status),
-                    Some(&LlmCallStatus::Pending)
-                ) {
-                    return Ok(vec![]);
+            } => match state.llm_calls.get(&call_id).map(|c| &c.status) {
+                // Pending call — forward chunk
+                Some(&LlmCallStatus::Pending) => {
+                    Ok(vec![EventPayload::LlmStreamChunk(LlmStreamChunk {
+                        call_id,
+                        chunk_index,
+                        text,
+                    })])
                 }
-                Ok(vec![EventPayload::LlmStreamChunk(LlmStreamChunk {
-                    call_id,
-                    chunk_index,
-                    text,
-                })])
-            }
+                // Not pending or unknown — skip
+                _ => Ok(vec![]),
+            },
             CommandPayload::RequestToolCall {
                 tool_call_id,
                 name,
                 arguments,
                 deadline,
-            } => {
-                if state.tool_calls.contains_key(&tool_call_id) {
-                    return Ok(vec![]);
-                }
-                Ok(vec![EventPayload::ToolCallRequested(ToolCallRequested {
+                handler,
+            } => match state.tool_calls.get(&tool_call_id) {
+                // Already tracked — skip
+                Some(_) => Ok(vec![]),
+                // New tool call
+                None => Ok(vec![EventPayload::ToolCallRequested(ToolCallRequested {
                     tool_call_id,
                     name,
                     arguments,
                     deadline,
-                })])
-            }
+                    handler,
+                })]),
+            },
             CommandPayload::CompleteToolCall {
                 tool_call_id,
                 name,
                 result,
-            } => {
-                if !matches!(
-                    state.tool_calls.get(&tool_call_id).map(|tc| &tc.status),
-                    Some(&ToolCallStatus::Pending)
-                ) {
-                    return Ok(vec![]);
-                }
-                Ok(vec![EventPayload::ToolCallCompleted(ToolCallCompleted {
-                    tool_call_id,
-                    name,
-                    result,
-                })])
-            }
+            } => match state.tool_calls.get(&tool_call_id).map(|tc| &tc.status) {
+                // Pending — complete and emit tool message
+                Some(&ToolCallStatus::Pending) => Ok(vec![
+                    EventPayload::ToolCallCompleted(ToolCallCompleted {
+                        tool_call_id: tool_call_id.clone(),
+                        name,
+                        result: result.clone(),
+                    }),
+                    EventPayload::MessageTool(MessageTool {
+                        message: Message {
+                            role: Role::Tool,
+                            content: Some(result),
+                            tool_calls: Vec::new(),
+                            tool_call_id: Some(tool_call_id),
+                            call_id: None,
+                            token_count: None,
+                        },
+                    }),
+                ]),
+                // Not pending or unknown — skip
+                _ => Ok(vec![]),
+            },
             CommandPayload::FailToolCall {
                 tool_call_id,
                 name,
                 error,
-            } => {
-                if !matches!(
-                    state.tool_calls.get(&tool_call_id).map(|tc| &tc.status),
-                    Some(&ToolCallStatus::Pending)
-                ) {
-                    return Ok(vec![]);
+            } => match state.tool_calls.get(&tool_call_id).map(|tc| &tc.status) {
+                // Pending — fail and emit error tool message
+                Some(&ToolCallStatus::Pending) => {
+                    let error_content = format!("Error: {}", error);
+                    Ok(vec![
+                        EventPayload::ToolCallErrored(ToolCallErrored {
+                            tool_call_id: tool_call_id.clone(),
+                            name,
+                            error,
+                        }),
+                        EventPayload::MessageTool(MessageTool {
+                            message: Message {
+                                role: Role::Tool,
+                                content: Some(error_content),
+                                tool_calls: Vec::new(),
+                                tool_call_id: Some(tool_call_id),
+                                call_id: None,
+                                token_count: None,
+                            },
+                        }),
+                    ])
                 }
-                Ok(vec![EventPayload::ToolCallErrored(ToolCallErrored {
-                    tool_call_id,
-                    name,
-                    error,
-                })])
-            }
+                // Not pending or unknown — skip
+                _ => Ok(vec![]),
+            },
             CommandPayload::Interrupt {
                 interrupt_id,
                 reason,
                 payload,
-            } => {
-                if matches!(state.status, SessionStatus::Interrupted { .. }) {
-                    return Ok(vec![]);
-                }
-                Ok(vec![EventPayload::SessionInterrupted(SessionInterrupted {
+            } => match state.status {
+                // Already interrupted — skip
+                SessionStatus::Interrupted { .. } => Ok(vec![]),
+                _ => Ok(vec![EventPayload::SessionInterrupted(SessionInterrupted {
                     interrupt_id,
                     reason,
                     payload,
-                })])
-            }
+                })]),
+            },
             CommandPayload::ResumeInterrupt {
                 interrupt_id,
                 payload,
-            } => {
-                if state.active_interrupt() != Some(interrupt_id.as_str()) {
-                    return Ok(vec![]);
+            } => match state.active_interrupt() {
+                // Matching active interrupt — resume
+                Some(id) if id == interrupt_id => {
+                    Ok(vec![EventPayload::InterruptResumed(InterruptResumed {
+                        interrupt_id,
+                        payload,
+                    })])
                 }
-                Ok(vec![EventPayload::InterruptResumed(InterruptResumed {
-                    interrupt_id,
-                    payload,
-                })])
-            }
+                // No active interrupt or wrong ID — skip
+                _ => Ok(vec![]),
+            },
             CommandPayload::UpdateStrategyState { state } => {
                 Ok(vec![EventPayload::StrategyStateChanged(
                     StrategyStateChanged { state },
                 )])
             }
-            CommandPayload::MarkDone => Ok(vec![EventPayload::SessionDone]),
+            CommandPayload::CancelSession => Ok(vec![EventPayload::SessionCancelled]),
+            CommandPayload::MarkDone { artifacts } => {
+                Ok(vec![EventPayload::SessionDone(SessionDone { artifacts })])
+            }
             CommandPayload::Wake => self.handle_wake(),
         }
     }
@@ -380,9 +446,29 @@ impl AgentSession {
             }
         }
 
-        // 2. Timed-out pending tool calls → fail
+        // 2. Timed-out pending tool calls → fail (or re-issue for sub-agents)
         for tc in state.tool_calls.values() {
-            if tc.status == ToolCallStatus::Pending && tc.deadline <= now {
+            if tc.status == ToolCallStatus::Pending
+                && tc.deadline <= now
+                && tc.handler != ToolHandler::Client
+            {
+                if tc.child_session_id.is_some() {
+                    // Sub-agent: re-arm with fresh deadline (parent-driven retry)
+                    let arguments = state
+                        .messages
+                        .iter()
+                        .flat_map(|m| m.tool_calls.iter())
+                        .find(|t| t.id == tc.tool_call_id)
+                        .map(|t| t.arguments.clone())
+                        .unwrap_or_default();
+                    return Ok(vec![EventPayload::ToolCallRequested(ToolCallRequested {
+                        tool_call_id: tc.tool_call_id.clone(),
+                        name: tc.name.clone(),
+                        arguments,
+                        deadline: self.tool_deadline(),
+                        handler: tc.handler.clone(),
+                    })]);
+                }
                 return Ok(vec![EventPayload::ToolCallErrored(ToolCallErrored {
                     tool_call_id: tc.tool_call_id.clone(),
                     name: tc.name.clone(),
@@ -412,38 +498,12 @@ impl AgentSession {
             }
         }
 
-        // 4. Completed LLM call, response not processed → emit message + tool calls
-        for call in state.llm_calls.values() {
-            if call.status == LlmCallStatus::Completed && !call.response_processed {
-                if let Some(ref response) = call.response {
-                    let (content, tool_calls, token_count) = extract_assistant_message(response);
-                    let mut events = vec![EventPayload::MessageAssistant(MessageAssistant {
-                        call_id: call.call_id.clone(),
-                        message: Message {
-                            role: Role::Assistant,
-                            content,
-                            tool_calls: tool_calls.clone(),
-                            tool_call_id: None,
-                            call_id: Some(call.call_id.clone()),
-                            token_count,
-                        },
-                    })];
-                    for tc in &tool_calls {
-                        events.push(EventPayload::ToolCallRequested(ToolCallRequested {
-                            tool_call_id: tc.id.clone(),
-                            name: tc.name.clone(),
-                            arguments: tc.arguments.clone(),
-                            deadline: self.tool_deadline(),
-                        }));
-                    }
-                    return Ok(events);
-                }
-            }
-        }
-
-        // 5. Pending tool calls still in flight → re-emit (crash recovery)
+        // 4. Pending tool calls still in flight → re-emit (crash recovery)
         for tc in state.tool_calls.values() {
-            if tc.status == ToolCallStatus::Pending && tc.deadline > now {
+            if tc.status == ToolCallStatus::Pending
+                && tc.deadline > now
+                && tc.handler != ToolHandler::Client
+            {
                 return Ok(vec![EventPayload::ToolCallRequested(ToolCallRequested {
                     tool_call_id: tc.tool_call_id.clone(),
                     name: tc.name.clone(),
@@ -455,11 +515,12 @@ impl AgentSession {
                         .map(|t| t.arguments.clone())
                         .unwrap_or_default(),
                     deadline: tc.deadline,
+                    handler: tc.handler.clone(),
                 })]);
             }
         }
 
-        // 6. Pending LLM calls still in flight → re-emit (crash recovery)
+        // 5. Pending LLM calls still in flight → re-emit (crash recovery)
         for call in state.llm_calls.values() {
             if call.status == LlmCallStatus::Pending && call.deadline > now {
                 if state.is_over_budget() {
@@ -474,7 +535,7 @@ impl AgentSession {
             }
         }
 
-        // 7. All tools done, no next step → request next LLM call
+        // 6. All tools done, no next step → request next LLM call
         let last_is_tool = state.messages.last().is_some_and(|m| m.role == Role::Tool);
         if state.pending_tool_results() == 0
             && last_is_tool
@@ -524,6 +585,7 @@ mod tests {
         AgentConfig {
             id: Uuid::new_v4(),
             name: "test".into(),
+            description: None,
             llm: LlmConfig {
                 client: "mock".into(),
                 params: Default::default(),
@@ -533,6 +595,7 @@ mod tests {
             strategy: Default::default(),
             retry: Default::default(),
             token_budget: None,
+            sub_agents: vec![],
         }
     }
 
@@ -585,6 +648,7 @@ mod tests {
             payload: EventPayload::SessionCreated(SessionCreated {
                 agent: test_agent(),
                 auth: test_auth(),
+                on_done: None,
             }),
             derived: None,
         };
@@ -610,11 +674,11 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_send_assistant_message_is_skipped() {
+    fn complete_llm_call_emits_message_and_tool_calls() {
         let mut state = created_state();
         let call_id = "call-1".to_string();
 
-        // Request and complete an LLM call
+        // Request an LLM call
         let payloads = state
             .handle(CommandPayload::RequestLlmCall {
                 call_id: call_id.clone(),
@@ -625,48 +689,58 @@ mod tests {
             .unwrap();
         apply_events(&mut state, payloads);
 
+        // Complete with a response that has tool calls
+        let response = LlmResponse::OpenAi(openai::ChatCompletionResponse {
+            id: "resp-1".into(),
+            model: "mock".into(),
+            choices: vec![openai::Choice {
+                index: 0,
+                message: openai::ChatMessage {
+                    role: openai::Role::Assistant,
+                    content: Some("thinking...".into()),
+                    tool_calls: Some(vec![openai::ToolCall {
+                        id: "tc-1".into(),
+                        call_type: "function".into(),
+                        function: openai::FunctionCall {
+                            name: "read_file".into(),
+                            arguments: r#"{"path":"foo.rs"}"#.into(),
+                        },
+                    }]),
+                    tool_call_id: None,
+                },
+                finish_reason: Some("tool_calls".into()),
+            }],
+            usage: None,
+        });
+
         let payloads = state
             .handle(CommandPayload::CompleteLlmCall {
                 call_id: call_id.clone(),
-                response: mock_llm_response(),
+                response,
             })
             .unwrap();
-        apply_events(&mut state, payloads);
 
-        // First SendAssistantMessage succeeds
-        let payloads = state
-            .handle(CommandPayload::SendAssistantMessage {
-                call_id: call_id.clone(),
-                content: Some("hello".into()),
-                tool_calls: vec![],
-                token_count: None,
-            })
-            .unwrap();
-        assert!(!payloads.is_empty());
-        apply_events(&mut state, payloads);
-
-        // Duplicate SendAssistantMessage is skipped
-        let payloads = state
-            .handle(CommandPayload::SendAssistantMessage {
-                call_id: call_id.clone(),
-                content: Some("hello".into()),
-                tool_calls: vec![],
-                token_count: None,
-            })
-            .unwrap();
+        assert_eq!(
+            payloads.len(),
+            3,
+            "expected LlmCallCompleted + MessageAssistant + ToolCallRequested"
+        );
+        assert!(matches!(&payloads[0], EventPayload::LlmCallCompleted(_)));
         assert!(
-            payloads.is_empty(),
-            "duplicate SendAssistantMessage should produce no events"
+            matches!(&payloads[1], EventPayload::MessageAssistant(m) if m.message.content == Some("thinking...".into()))
+        );
+        assert!(
+            matches!(&payloads[2], EventPayload::ToolCallRequested(t) if t.tool_call_id == "tc-1" && t.name == "read_file")
         );
     }
 
     #[test]
-    fn duplicate_send_tool_message_is_skipped() {
+    fn complete_tool_call_emits_message_tool() {
         let mut state = created_state();
         let call_id = "call-1".to_string();
         let tool_call_id = "tc-1".to_string();
 
-        // Set up: LLM call -> assistant message with tool call -> tool call requested -> tool call completed
+        // Set up: LLM call -> complete (emits assistant message + tool call requested)
         let payloads = state
             .handle(CommandPayload::RequestLlmCall {
                 call_id: call_id.clone(),
@@ -677,38 +751,38 @@ mod tests {
             .unwrap();
         apply_events(&mut state, payloads);
 
+        let response = LlmResponse::OpenAi(openai::ChatCompletionResponse {
+            id: "resp-1".into(),
+            model: "mock".into(),
+            choices: vec![openai::Choice {
+                index: 0,
+                message: openai::ChatMessage {
+                    role: openai::Role::Assistant,
+                    content: None,
+                    tool_calls: Some(vec![openai::ToolCall {
+                        id: tool_call_id.clone(),
+                        call_type: "function".into(),
+                        function: openai::FunctionCall {
+                            name: "test".into(),
+                            arguments: "{}".into(),
+                        },
+                    }]),
+                    tool_call_id: None,
+                },
+                finish_reason: Some("tool_calls".into()),
+            }],
+            usage: None,
+        });
+
         let payloads = state
             .handle(CommandPayload::CompleteLlmCall {
                 call_id: call_id.clone(),
-                response: mock_llm_response(),
+                response,
             })
             .unwrap();
         apply_events(&mut state, payloads);
 
-        let payloads = state
-            .handle(CommandPayload::SendAssistantMessage {
-                call_id: call_id.clone(),
-                content: None,
-                tool_calls: vec![ToolCall {
-                    id: tool_call_id.clone(),
-                    name: "test".into(),
-                    arguments: "{}".into(),
-                }],
-                token_count: None,
-            })
-            .unwrap();
-        apply_events(&mut state, payloads);
-
-        let payloads = state
-            .handle(CommandPayload::RequestToolCall {
-                tool_call_id: tool_call_id.clone(),
-                name: "test".into(),
-                arguments: "{}".into(),
-                deadline: far_future(),
-            })
-            .unwrap();
-        apply_events(&mut state, payloads);
-
+        // Complete the tool call
         let payloads = state
             .handle(CommandPayload::CompleteToolCall {
                 tool_call_id: tool_call_id.clone(),
@@ -716,30 +790,17 @@ mod tests {
                 result: "ok".into(),
             })
             .unwrap();
-        apply_events(&mut state, payloads);
 
-        // First SendToolMessage succeeds
-        let payloads = state
-            .handle(CommandPayload::SendToolMessage {
-                tool_call_id: tool_call_id.clone(),
-                content: "ok".into(),
-                token_count: None,
-            })
-            .unwrap();
-        assert!(!payloads.is_empty());
-        apply_events(&mut state, payloads);
-
-        // Duplicate SendToolMessage is skipped
-        let payloads = state
-            .handle(CommandPayload::SendToolMessage {
-                tool_call_id: tool_call_id.clone(),
-                content: "ok".into(),
-                token_count: None,
-            })
-            .unwrap();
+        assert_eq!(
+            payloads.len(),
+            2,
+            "expected ToolCallCompleted + MessageTool"
+        );
         assert!(
-            payloads.is_empty(),
-            "duplicate SendToolMessage should produce no events"
+            matches!(&payloads[0], EventPayload::ToolCallCompleted(t) if t.tool_call_id == "tc-1")
+        );
+        assert!(
+            matches!(&payloads[1], EventPayload::MessageTool(m) if m.message.content == Some("ok".into()))
         );
     }
 
@@ -868,6 +929,7 @@ mod tests {
             payload: EventPayload::SessionCreated(SessionCreated {
                 agent,
                 auth: test_auth(),
+                on_done: None,
             }),
             derived: None,
         };
@@ -907,9 +969,11 @@ mod tests {
             .unwrap();
         apply_events(&mut state, payloads);
 
-        // SendUserMessage should fail
-        let result = state.handle(CommandPayload::SendUserMessage {
-            content: "hello".into(),
+        // SendMessage with user content should fail
+        let result = state.handle(CommandPayload::SendMessage {
+            message: IncomingMessage::User {
+                content: "hello".into(),
+            },
             stream: true,
         });
         assert!(matches!(result, Err(SessionError::SessionInterrupted)));

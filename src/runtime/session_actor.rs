@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -7,13 +8,15 @@ use uuid::Uuid;
 use crate::domain::agent::AgentConfig;
 use crate::domain::event::*;
 use crate::domain::session::{
-    AgentSession, AgentState, CommandPayload, Effect, SessionCommand, SessionError,
+    AgentSession, AgentState, CommandPayload, Effect, IncomingMessage, SessionCommand,
+    SessionError, SessionStatus,
 };
 
 use super::event_store::{EventStore, StoreError};
 use super::llm::{LlmClientProvider, StreamDelta};
 use super::mcp::{Content, McpClient, McpClientProvider};
 use super::strategy::StrategyProvider;
+use super::{RuntimeMessage, SubAgentRequest};
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -51,6 +54,10 @@ pub enum SessionMessage {
     Events(Vec<Arc<Event>>),
     /// Timer-triggered or scheduler-triggered wake.
     Wake,
+    /// Cancel this session (used by parent to cancel sub-agent).
+    Cancel,
+    /// Set client-provided tools (from AG-UI RunAgentInput).
+    SetClientTools(Vec<crate::domain::openai::Tool>),
 }
 
 // ---------------------------------------------------------------------------
@@ -60,6 +67,8 @@ pub enum SessionMessage {
 pub struct SessionInit {
     pub agent: AgentConfig,
     pub auth: SessionAuth,
+    pub on_done: Option<CompletionDelivery>,
+    pub span: SpanContext,
 }
 
 pub struct SessionActorArgs {
@@ -69,6 +78,8 @@ pub struct SessionActorArgs {
     pub llm_provider: Arc<dyn LlmClientProvider>,
     pub mcp_provider: Arc<dyn McpClientProvider>,
     pub strategy_provider: Arc<dyn StrategyProvider>,
+    pub agents: HashMap<String, AgentConfig>,
+    pub runtime: ActorRef<RuntimeMessage>,
 }
 
 // ---------------------------------------------------------------------------
@@ -86,16 +97,55 @@ pub struct SessionActorState {
     pub mcp_provider: Arc<dyn McpClientProvider>,
     pub strategy_provider: Arc<dyn StrategyProvider>,
     pub mcp_clients: Vec<Arc<dyn McpClient>>,
+    pub agents: HashMap<String, AgentConfig>,
+    pub runtime: ActorRef<RuntimeMessage>,
+    /// Whether this session streams LLM responses (set from user message).
+    pub stream: bool,
+    /// Tools provided by the client (frontend), executed client-side.
+    pub client_tools: Vec<crate::domain::openai::Tool>,
 }
 
 impl SessionActorState {
-    /// Collect all tool definitions from all MCP clients as OpenAI tools.
+    /// Collect all tool definitions from all MCP clients and sub-agents as OpenAI tools.
     pub fn all_tools(&self) -> Option<Vec<crate::domain::openai::Tool>> {
-        let tools: Vec<crate::domain::openai::Tool> = self
+        let mut tools: Vec<crate::domain::openai::Tool> = self
             .mcp_clients
             .iter()
             .flat_map(|c| c.tools().iter().map(|t| t.to_openai_tool()))
             .collect();
+
+        // Add sub-agent tools
+        if let Some(agent) = &self.session.agent_state.agent {
+            for name in &agent.sub_agents {
+                if let Some(sub) = self.agents.get(name) {
+                    let tool_name = crate::runtime::mcp::ToolDefinition::sanitized_name(name);
+                    tools.push(crate::domain::openai::Tool {
+                        tool_type: "function".to_string(),
+                        function: crate::domain::openai::ToolFunction {
+                            name: tool_name,
+                            description: sub
+                                .description
+                                .clone()
+                                .unwrap_or_else(|| sub.name.clone()),
+                            parameters: serde_json::json!({
+                                "type": "object",
+                                "properties": {
+                                    "message": {
+                                        "type": "string",
+                                        "description": "The message to send to the sub-agent"
+                                    }
+                                },
+                                "required": ["message"]
+                            }),
+                        },
+                    });
+                }
+            }
+        }
+
+        // Add client tools
+        tools.extend(self.client_tools.iter().cloned());
+
         if tools.is_empty() {
             None
         } else {
@@ -140,7 +190,22 @@ async fn handle_effect(
     effect: Effect,
 ) {
     match effect {
-        Effect::Command(payload) => {
+        Effect::Command(mut payload) => {
+            // Tag client tool calls so the session goes Idle instead of Active
+            if let CommandPayload::RequestToolCall {
+                ref name,
+                ref mut handler,
+                ..
+            } = payload
+            {
+                if state
+                    .client_tools
+                    .iter()
+                    .any(|ct| ct.function.name == *name)
+                {
+                    *handler = ToolHandler::Client;
+                }
+            }
             let _ = myself.send_message(SessionMessage::Cast(SessionCommand {
                 span: span.child(),
                 occurred_at: Utc::now(),
@@ -240,11 +305,46 @@ async fn handle_effect(
             )
             .await;
         }
-        Effect::CallMcpTool {
+        Effect::CallTool {
             tool_call_id,
             name,
             arguments,
         } => {
+            // Sub-agent tool call
+            if let Some(child_session_id) = state
+                .session
+                .agent_state
+                .tool_calls
+                .get(&tool_call_id)
+                .and_then(|tc| tc.child_session_id)
+            {
+                let message = arguments
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                let _ = state
+                    .runtime
+                    .send_message(RuntimeMessage::RunSubAgent(SubAgentRequest {
+                        session_id: child_session_id,
+                        agent_name: name.clone(),
+                        message,
+                        auth: state.auth.clone(),
+                        delivery: CompletionDelivery {
+                            parent_session_id: state.session_id,
+                            tool_call_id,
+                            tool_name: name,
+                            span: span.child(),
+                        },
+                        span: span.clone(),
+                        token_budget: None,
+                        stream: state.stream,
+                    }));
+                return;
+            }
+
+            // MCP tool call
             let mcp = state.find_mcp_client(&name).cloned();
             if let Some(mcp) = mcp {
                 let payload = match mcp.call_tool(&name, arguments).await {
@@ -288,9 +388,30 @@ async fn handle_effect(
                 )
                 .await;
             }
-            // else: no MCP client — client-side tool, handled via event fan-out
+            // else: no MCP client — client tool, session is Idle and waits for
+            // the client to POST the result back via the tool-result endpoint
+        }
+        Effect::DeliverCompletion { delivery } => {
+            deliver_to_parent(&delivery, &state.session.agent_state.artifacts);
         }
     }
+}
+
+/// Fire-and-forget delivery of sub-agent result to parent session.
+fn deliver_to_parent(delivery: &CompletionDelivery, artifacts: &[Artifact]) {
+    let result = serde_json::to_string(artifacts).unwrap_or_default();
+    super::send_to_session(
+        delivery.parent_session_id,
+        SessionMessage::Cast(SessionCommand {
+            span: delivery.span.child(),
+            occurred_at: Utc::now(),
+            payload: CommandPayload::CompleteToolCall {
+                tool_call_id: delivery.tool_call_id.clone(),
+                name: delivery.tool_name.clone(),
+                result,
+            },
+        }),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -310,6 +431,8 @@ impl Actor for SessionActor {
         let session_id = args.session_id;
         let auth = args.init.auth;
         let agent = args.init.agent;
+        let on_done = args.init.on_done;
+        let init_span = args.init.span;
 
         // Try to resume from store; if not found, create a new session.
         let mut session = match args.store.load(session_id, &auth) {
@@ -334,11 +457,12 @@ impl Actor for SessionActor {
                     .map_err(|e| format!("strategy resolution: {e}"))?;
                 let mut session = AgentSession::new(session_id, strategy);
                 let cmd = SessionCommand {
-                    span: SpanContext::root(),
+                    span: init_span.child(),
                     occurred_at: Utc::now(),
                     payload: CommandPayload::CreateSession {
                         agent,
                         auth: auth.clone(),
+                        on_done,
                     },
                 };
                 let (events, snapshot) = session
@@ -367,6 +491,14 @@ impl Actor for SessionActor {
         // Prevent double-react on events already in the store
         session.agent_state.last_reacted = session.agent_state.last_applied;
 
+        // If resuming a completed sub-agent, deliver result and stop.
+        if session.agent_state.status == SessionStatus::Done {
+            if let Some(ref delivery) = session.agent_state.on_done {
+                deliver_to_parent(delivery, &session.agent_state.artifacts);
+            }
+            _myself.stop(None);
+        }
+
         Ok(SessionActorState {
             session_id,
             session,
@@ -376,6 +508,10 @@ impl Actor for SessionActor {
             mcp_provider: args.mcp_provider,
             strategy_provider: args.strategy_provider,
             mcp_clients,
+            agents: args.agents,
+            runtime: args.runtime,
+            stream: false,
+            client_tools: Vec::new(),
         })
     }
 
@@ -387,10 +523,24 @@ impl Actor for SessionActor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SessionMessage::Execute(cmd, reply) => {
+                if let CommandPayload::SendMessage {
+                    message: IncomingMessage::User { .. },
+                    stream,
+                } = &cmd.payload
+                {
+                    state.stream = *stream;
+                }
                 let result = execute(state, cmd).await;
                 let _ = reply.send(result);
             }
             SessionMessage::Cast(cmd) => {
+                if let CommandPayload::SendMessage {
+                    message: IncomingMessage::User { .. },
+                    stream,
+                } = &cmd.payload
+                {
+                    state.stream = *stream;
+                }
                 if let Err(e) = execute(state, cmd).await {
                     eprintln!("session cast error: {e}");
                 }
@@ -398,11 +548,13 @@ impl Actor for SessionActor {
             SessionMessage::Events(events) => {
                 for event in &events {
                     state.session.apply(event);
+
                     let reacted = state
                         .session
                         .agent_state
                         .last_reacted
                         .is_some_and(|seq| event.sequence <= seq);
+
                     if !reacted {
                         let tools = state.all_tools();
                         let effects = state.session.react(tools, event).await;
@@ -411,6 +563,24 @@ impl Actor for SessionActor {
                         }
                         state.session.agent_state.last_reacted = Some(event.sequence);
                     }
+
+                    // Cancel linked sub-agent on tool call timeout
+                    if let EventPayload::ToolCallErrored(payload) = &event.payload {
+                        if let Some(tc) = state
+                            .session
+                            .agent_state
+                            .tool_calls
+                            .get(&payload.tool_call_id)
+                        {
+                            if let Some(child_id) = tc.child_session_id {
+                                super::send_to_session(child_id, SessionMessage::Cancel);
+                            }
+                        }
+                    }
+                }
+
+                if state.session.agent_state.status == SessionStatus::Done {
+                    myself.stop(None);
                 }
             }
             SessionMessage::GetState(reply) => {
@@ -425,6 +595,21 @@ impl Actor for SessionActor {
                 if let Err(e) = execute(state, cmd).await {
                     eprintln!("session wake error: {e}");
                 }
+            }
+            SessionMessage::Cancel => {
+                let _ = execute(
+                    state,
+                    SessionCommand {
+                        span: SpanContext::root(),
+                        occurred_at: Utc::now(),
+                        payload: CommandPayload::CancelSession,
+                    },
+                )
+                .await;
+                myself.stop(None);
+            }
+            SessionMessage::SetClientTools(tools) => {
+                state.client_tools = tools;
             }
         }
         Ok(())
@@ -451,6 +636,7 @@ mod tests {
         AgentConfig {
             id: Uuid::new_v4(),
             name: "test".into(),
+            description: None,
             llm: LlmConfig {
                 client: "mock".into(),
                 params: Default::default(),
@@ -460,6 +646,7 @@ mod tests {
             strategy: Default::default(),
             retry: Default::default(),
             token_budget: None,
+            sub_agents: vec![],
         }
     }
 
@@ -512,6 +699,7 @@ mod tests {
             payload: EventPayload::SessionCreated(SessionCreated {
                 agent: test_agent(),
                 auth: test_auth(),
+                on_done: None,
             }),
             derived: None,
         };
@@ -706,46 +894,6 @@ mod tests {
     }
 
     #[test]
-    fn wake_completed_llm_no_assistant_message() {
-        let mut state = created_state();
-
-        apply_events(
-            &mut state,
-            vec![
-                EventPayload::MessageUser(MessageUser {
-                    message: Message {
-                        role: Role::User,
-                        content: Some("hi".into()),
-                        tool_calls: vec![],
-                        tool_call_id: None,
-                        call_id: None,
-                        token_count: None,
-                    },
-                    stream: false,
-                }),
-                EventPayload::LlmCallRequested(LlmCallRequested {
-                    call_id: "call-1".into(),
-                    request: mock_llm_request(),
-                    stream: false,
-                    deadline: far_future(),
-                }),
-                EventPayload::LlmCallCompleted(LlmCallCompleted {
-                    call_id: "call-1".into(),
-                    response: mock_llm_response(),
-                }),
-            ],
-        );
-
-        let events = state.handle(CommandPayload::Wake).unwrap();
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, EventPayload::MessageAssistant(p) if p.call_id == "call-1")),
-            "should emit MessageAssistant for unprocessed completed call"
-        );
-    }
-
-    #[test]
     fn wake_pending_tool_call_re_issues() {
         let mut state = created_state();
 
@@ -796,6 +944,7 @@ mod tests {
                     name: "test_tool".into(),
                     arguments: "{}".into(),
                     deadline: far_future(),
+                    handler: Default::default(),
                 }),
             ],
         );
@@ -860,6 +1009,7 @@ mod tests {
                     name: "test_tool".into(),
                     arguments: "{}".into(),
                     deadline: far_future(),
+                    handler: Default::default(),
                 }),
                 EventPayload::ToolCallCompleted(ToolCallCompleted {
                     tool_call_id: tool_call_id.clone(),
@@ -898,7 +1048,7 @@ mod tests {
     }
 
     #[test]
-    fn wake_completed_llm_with_response_processed_returns_empty() {
+    fn wake_completed_llm_flow_returns_empty() {
         let mut state = created_state();
 
         let call_id = "call-1".to_string();
@@ -1154,7 +1304,7 @@ mod tests {
         assert!(
             effects
                 .iter()
-                .any(|e| matches!(e, Effect::Command(CommandPayload::MarkDone))),
+                .any(|e| matches!(e, Effect::Command(CommandPayload::MarkDone { .. }))),
             "react should emit MarkDone when retries exhausted"
         );
     }
@@ -1227,7 +1377,7 @@ mod tests {
         assert!(
             effects
                 .iter()
-                .any(|e| matches!(e, Effect::Command(CommandPayload::MarkDone))),
+                .any(|e| matches!(e, Effect::Command(CommandPayload::MarkDone { .. }))),
             "react should emit MarkDone for non-retryable errors"
         );
     }

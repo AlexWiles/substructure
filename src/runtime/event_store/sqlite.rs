@@ -291,6 +291,7 @@ mod tests {
         AgentConfig {
             id: Uuid::new_v4(),
             name: name.into(),
+            description: None,
             llm: LlmConfig {
                 client: "mock".into(),
                 params: Default::default(),
@@ -300,6 +301,7 @@ mod tests {
             strategy: Default::default(),
             retry: Default::default(),
             token_budget: None,
+            sub_agents: vec![],
         }
     }
 
@@ -320,6 +322,7 @@ mod tests {
             payload: EventPayload::SessionCreated(SessionCreated {
                 agent: agent.clone(),
                 auth: auth.clone(),
+                on_done: None,
             }),
             derived: None,
         };

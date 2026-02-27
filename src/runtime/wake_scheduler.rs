@@ -129,11 +129,7 @@ impl Actor for WakeScheduler {
                     .collect();
 
                 for session_id in due {
-                    let name = format!("session-{session_id}");
-                    if let Some(cell) = ractor::registry::where_is(name) {
-                        let actor: ActorRef<SessionMessage> = cell.into();
-                        let _ = actor.send_message(SessionMessage::Wake);
-                    }
+                    super::send_to_session(session_id, SessionMessage::Wake);
                     state.sessions.remove(&session_id);
                 }
                 reschedule(state);

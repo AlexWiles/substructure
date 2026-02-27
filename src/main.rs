@@ -6,7 +6,9 @@ use uuid::Uuid;
 use substructure::domain::config::SystemConfig;
 use substructure::domain::event::{EventPayload, SessionAuth, SpanContext};
 use substructure::domain::secret::resolve_secrets;
-use substructure::domain::session::{CommandPayload, SessionCommand};
+use substructure::domain::session::{CommandPayload, IncomingMessage, SessionCommand};
+#[cfg(feature = "http")]
+use substructure::http::start_server;
 use substructure::runtime::Runtime;
 
 #[derive(Parser)]
@@ -34,6 +36,16 @@ enum Command {
         #[arg(long)]
         session: Option<Uuid>,
     },
+    /// Start the HTTP server
+    #[cfg(feature = "http")]
+    Serve {
+        /// Bind host
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Bind port
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+    },
 }
 
 #[tokio::main]
@@ -50,6 +62,8 @@ async fn main() -> anyhow::Result<()> {
             message,
             session,
         } => run_one_shot(&config, &agent, &message, session).await,
+        #[cfg(feature = "http")]
+        Command::Serve { host, port } => run_http(&config, &host, port).await,
     }
 }
 
@@ -61,8 +75,10 @@ async fn run_one_shot(
 ) -> anyhow::Result<()> {
     let raw = std::fs::read_to_string(config_path)
         .map_err(|e| anyhow::anyhow!("failed to read {config_path}: {e}"))?;
+
     let config: SystemConfig =
         toml::from_str(&raw).map_err(|e| anyhow::anyhow!("failed to parse config: {e}"))?;
+
     let config = resolve_secrets(config)?;
 
     let runtime = Runtime::start(&config).await?;
@@ -94,7 +110,7 @@ async fn run_one_shot(
 
                     println!("{}", ev);
 
-                    if let EventPayload::SessionDone = &event.payload {
+                    if matches!(event.payload, EventPayload::SessionDone(_)) {
                         notify.notify_one();
                     }
                 })),
@@ -107,19 +123,35 @@ async fn run_one_shot(
         .send_command(SessionCommand {
             span: SpanContext::root(),
             occurred_at: chrono::Utc::now(),
-            payload: CommandPayload::SendUserMessage {
-                content: message.into(),
+            payload: CommandPayload::SendMessage {
+                message: IncomingMessage::User {
+                    content: message.into(),
+                },
                 stream: false,
             },
         })
         .await?;
 
     // Wait for the callback to fire
-    let _result =
-        tokio::time::timeout(tokio::time::Duration::from_secs(30), notify.notified()).await;
+    let _result = notify.notified().await;
 
     client.shutdown();
     session.shutdown();
     runtime.shutdown();
     Ok(())
+}
+
+#[cfg(feature = "http")]
+async fn run_http(config_path: &str, host: &str, port: u16) -> anyhow::Result<()> {
+    let raw = std::fs::read_to_string(config_path)
+        .map_err(|e| anyhow::anyhow!("failed to read {config_path}: {e}"))?;
+    let config: SystemConfig =
+        toml::from_str(&raw).map_err(|e| anyhow::anyhow!("failed to parse config: {e}"))?;
+    let config = resolve_secrets(config)?;
+
+    let addr: std::net::SocketAddr = format!("{host}:{port}")
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid host/port: {e}"))?;
+
+    start_server(config, addr).await
 }

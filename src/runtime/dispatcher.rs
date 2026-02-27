@@ -51,14 +51,13 @@ impl Actor for DispatcherActor {
 
                 // Deliver to session actors via registry
                 for (session_id, session_events) in by_session {
-                    let name = format!("session-{session_id}");
-                    if let Some(cell) = ractor::registry::where_is(name) {
-                        let actor: ActorRef<SessionMessage> = cell.into();
-                        let _ = actor.send_message(SessionMessage::Events(session_events.clone()));
-                    }
+                    super::send_to_session(
+                        session_id,
+                        SessionMessage::Events(session_events.clone()),
+                    );
 
                     // Fan-out to session clients via process group
-                    let client_group = format!("session-clients-{session_id}");
+                    let client_group = super::session_clients_group(session_id);
                     for cell in ractor::pg::get_members(&client_group) {
                         let client: ActorRef<ClientMessage> = cell.into();
                         let _ = client.send_message(ClientMessage::Events(session_events.clone()));

@@ -9,7 +9,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::domain::event::{
-    AgentConfig, Event, EventPayload, LlmRequest, LlmResponse, Message, Role, SessionAuth,
+    AgentConfig, Artifact, CompletionDelivery, Event, EventPayload, LlmRequest, LlmResponse,
+    Message, Role, SessionAuth, ToolHandler,
 };
 use crate::domain::openai;
 
@@ -117,7 +118,6 @@ pub struct LlmCallState {
     pub request: LlmRequest,
     pub status: LlmCallStatus,
     pub response: Option<LlmResponse>,
-    pub response_processed: bool,
     pub retry: RetryState,
     pub deadline: DateTime<Utc>,
 }
@@ -141,6 +141,10 @@ pub struct ToolCallState {
     pub result: Option<ToolCallResult>,
     pub retry: RetryState,
     pub deadline: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_session_id: Option<Uuid>,
+    #[serde(default)]
+    pub handler: ToolHandler,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,6 +177,14 @@ pub struct AgentState {
     #[serde(skip)]
     pub strategy: StrategySlot,
 
+    /// Sub-agent completion delivery target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_done: Option<CompletionDelivery>,
+
+    /// Artifacts produced when the session completes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<Artifact>,
+
     // Call lifecycle tracking
     pub llm_calls: HashMap<String, LlmCallState>,
     pub tool_calls: HashMap<String, ToolCallState>,
@@ -194,6 +206,8 @@ impl AgentState {
             last_reacted: None,
             strategy_state: Value::Null,
             strategy: StrategySlot(None),
+            on_done: None,
+            artifacts: vec![],
             llm_calls: HashMap::new(),
             tool_calls: HashMap::new(),
         }
@@ -213,6 +227,7 @@ impl AgentState {
                 self.token_budget.limit = payload.agent.token_budget;
                 self.agent = Some(payload.agent.clone());
                 self.auth = Some(payload.auth.clone());
+                self.on_done = payload.on_done.clone();
             }
             EventPayload::MessageUser(payload) => {
                 self.messages.push(payload.message.clone());
@@ -220,9 +235,6 @@ impl AgentState {
             }
             EventPayload::MessageAssistant(payload) => {
                 self.messages.push(payload.message.clone());
-                if let Some(call) = self.llm_calls.get_mut(&payload.call_id) {
-                    call.response_processed = true;
-                }
             }
             EventPayload::MessageTool(payload) => {
                 self.messages.push(payload.message.clone());
@@ -234,7 +246,6 @@ impl AgentState {
                     existing.status = LlmCallStatus::Pending;
                     existing.request = payload.request.clone();
                     existing.response = None;
-                    existing.response_processed = false;
                     existing.deadline = payload.deadline;
                     existing.retry.next_at = None;
                 } else {
@@ -246,7 +257,6 @@ impl AgentState {
                             request: payload.request.clone(),
                             status: LlmCallStatus::Pending,
                             response: None,
-                            response_processed: false,
                             retry: RetryState::default(),
                             deadline: payload.deadline,
                         },
@@ -287,18 +297,48 @@ impl AgentState {
                 self.status = SessionStatus::Idle;
             }
             EventPayload::ToolCallRequested(payload) => {
-                self.status = SessionStatus::Active;
-                self.tool_calls.insert(
-                    payload.tool_call_id.clone(),
-                    ToolCallState {
-                        tool_call_id: payload.tool_call_id.clone(),
-                        name: payload.name.clone(),
-                        status: ToolCallStatus::Pending,
-                        result: None,
-                        retry: RetryState::default(),
-                        deadline: payload.deadline,
-                    },
-                );
+                if let Some(existing) = self.tool_calls.get_mut(&payload.tool_call_id) {
+                    // Re-request (sub-agent retry): reset to pending with fresh deadline
+                    existing.status = ToolCallStatus::Pending;
+                    existing.deadline = payload.deadline;
+                } else {
+                    let is_sub_agent = self
+                        .agent
+                        .as_ref()
+                        .map(|a| a.sub_agents.iter().any(|s| s == &payload.name))
+                        .unwrap_or(false);
+                    let child_session_id = if is_sub_agent {
+                        Some(Uuid::new_v5(
+                            &self.session_id,
+                            payload.tool_call_id.as_bytes(),
+                        ))
+                    } else {
+                        None
+                    };
+                    self.tool_calls.insert(
+                        payload.tool_call_id.clone(),
+                        ToolCallState {
+                            tool_call_id: payload.tool_call_id.clone(),
+                            name: payload.name.clone(),
+                            status: ToolCallStatus::Pending,
+                            result: None,
+                            retry: RetryState::default(),
+                            deadline: payload.deadline,
+                            child_session_id,
+                            handler: payload.handler.clone(),
+                        },
+                    );
+                }
+                // Active only if there's runtime-handled work to do;
+                // Idle if all pending calls are client tools.
+                let has_runtime_work = self.tool_calls.values().any(|tc| {
+                    tc.status == ToolCallStatus::Pending && tc.handler == ToolHandler::Runtime
+                });
+                self.status = if has_runtime_work {
+                    SessionStatus::Active
+                } else {
+                    SessionStatus::Idle
+                };
             }
             EventPayload::ToolCallCompleted(payload) => {
                 if let Some(tc) = self.tool_calls.get_mut(&payload.tool_call_id) {
@@ -339,8 +379,12 @@ impl AgentState {
             EventPayload::StrategyStateChanged(payload) => {
                 self.strategy_state = payload.state.clone();
             }
-            EventPayload::SessionDone => {
+            EventPayload::SessionCancelled => {
                 self.status = SessionStatus::Done;
+            }
+            EventPayload::SessionDone(payload) => {
+                self.status = SessionStatus::Done;
+                self.artifacts = payload.artifacts.clone();
             }
             _ => {}
         }
@@ -426,7 +470,7 @@ impl AgentState {
         let pending_tool = self
             .tool_calls
             .values()
-            .filter(|c| c.status == ToolCallStatus::Pending)
+            .filter(|c| c.status == ToolCallStatus::Pending && c.handler != ToolHandler::Client)
             .map(|c| c.deadline);
         let retry_at = self
             .llm_calls

@@ -4,11 +4,12 @@ use std::sync::Arc;
 use ractor::{call_t, Actor, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent};
 use uuid::Uuid;
 
+use chrono::Utc;
+
 use crate::domain::agent::AgentConfig;
 use crate::domain::config::{EventStoreConfig, SystemConfig};
-use crate::domain::event::{Event, SessionAuth};
-use crate::domain::session::{AgentState, SessionCommand};
-use session_actor::SessionActorArgs;
+use crate::domain::event::{CompletionDelivery, Event, SessionAuth, SpanContext};
+use crate::domain::session::{AgentState, CommandPayload, IncomingMessage, SessionCommand};
 use wake_scheduler::spawn_wake_scheduler;
 
 pub mod dispatcher;
@@ -34,11 +35,33 @@ pub use mcp::{
     ToolAnnotations, ToolDefinition,
 };
 pub use mcp::{McpClientProvider, StaticMcpClientProvider};
+pub use session_actor::SessionActorArgs;
 pub use session_actor::{
     RuntimeError, SessionActor, SessionActorState, SessionInit, SessionMessage,
 };
 pub use session_client::{ClientMessage, OnEvent, SessionClientActor, SessionClientArgs};
 pub use strategy::{StaticStrategyProvider, StrategyProvider, StrategyProviderError};
+
+// ---------------------------------------------------------------------------
+// Naming conventions for ractor registry / process groups
+// ---------------------------------------------------------------------------
+
+pub fn session_actor_name(session_id: Uuid) -> String {
+    format!("session-{session_id}")
+}
+
+pub fn session_clients_group(session_id: Uuid) -> String {
+    format!("session-clients-{session_id}")
+}
+
+/// Look up a running session actor by ID and send it a message.
+/// Silently no-ops if the actor is not running.
+pub fn send_to_session(session_id: Uuid, message: SessionMessage) {
+    if let Some(cell) = ractor::registry::where_is(session_actor_name(session_id)) {
+        let actor: ActorRef<SessionMessage> = cell.into();
+        let _ = actor.send_message(message);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // RuntimeMessage — commands handled by the RuntimeActor
@@ -50,6 +73,18 @@ pub enum RuntimeMessage {
         SessionInit,
         RpcReplyPort<Result<SessionHandle, RuntimeError>>,
     ),
+    RunSubAgent(SubAgentRequest),
+}
+
+pub struct SubAgentRequest {
+    pub session_id: Uuid,
+    pub agent_name: String,
+    pub message: String,
+    pub auth: SessionAuth,
+    pub delivery: CompletionDelivery,
+    pub span: SpanContext,
+    pub token_budget: Option<u64>,
+    pub stream: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -82,7 +117,7 @@ impl RuntimeState {
         init: SessionInit,
     ) -> Result<SessionHandle, RuntimeError> {
         let auth = init.auth.clone();
-        let actor_name = format!("session-{session_id}");
+        let actor_name = session_actor_name(session_id);
 
         // Reuse existing actor if already running, otherwise spawn a new one.
         let actor: ActorRef<SessionMessage> =
@@ -99,6 +134,8 @@ impl RuntimeState {
                         llm_provider: self.llm_provider.clone(),
                         mcp_provider: self.mcp_provider.clone(),
                         strategy_provider: self.strategy_provider.clone(),
+                        agents: self.agents.clone(),
+                        runtime: self.myself.clone(),
                     },
                     self.myself.get_cell(),
                 )
@@ -153,7 +190,12 @@ impl RuntimeState {
                 client_id: summary.client_id,
                 sub: None,
             };
-            let init = SessionInit { agent, auth };
+            let init = SessionInit {
+                agent,
+                auth,
+                on_done: None,
+                span: SpanContext::root(),
+            };
             if let Err(e) = self.start_session(summary.session_id, init).await {
                 eprintln!(
                     "warn: failed to resume session {}: {}",
@@ -161,6 +203,65 @@ impl RuntimeState {
                 );
             }
         }
+    }
+
+    async fn run_sub_agent(&self, req: SubAgentRequest) -> Result<(), RuntimeError> {
+        let mut agent = self
+            .agents
+            .get(&req.agent_name)
+            .cloned()
+            .ok_or_else(|| RuntimeError::UnknownAgent(req.agent_name.clone()))?;
+
+        if let Some(budget) = req.token_budget {
+            agent.token_budget = Some(budget);
+        }
+
+        let msg_span = req.span.child();
+
+        let init = SessionInit {
+            agent,
+            auth: req.auth,
+            on_done: Some(req.delivery),
+            span: req.span,
+        };
+
+        let actor_name = session_actor_name(req.session_id);
+        let (session_actor, _) = Actor::spawn_linked(
+            Some(actor_name),
+            SessionActor,
+            SessionActorArgs {
+                session_id: req.session_id,
+                init,
+                store: self.store.clone(),
+                llm_provider: self.llm_provider.clone(),
+                mcp_provider: self.mcp_provider.clone(),
+                strategy_provider: self.strategy_provider.clone(),
+                agents: self.agents.clone(),
+                runtime: self.myself.clone(),
+            },
+            self.myself.get_cell(),
+        )
+        .await
+        .map_err(|e| RuntimeError::ActorCall(format!("sub-agent: {e}")))?;
+
+        // Send user message to the sub-agent
+        let _ = call_t!(
+            session_actor,
+            SessionMessage::Execute,
+            5000,
+            SessionCommand {
+                span: msg_span,
+                occurred_at: Utc::now(),
+                payload: CommandPayload::SendMessage {
+                    message: IncomingMessage::User {
+                        content: req.message,
+                    },
+                    stream: req.stream,
+                },
+            }
+        );
+
+        Ok(())
     }
 }
 
@@ -207,6 +308,11 @@ impl Actor for RuntimeActor {
             RuntimeMessage::StartSession(session_id, init, reply) => {
                 let result = state.start_session(session_id, init).await;
                 let _ = reply.send(result);
+            }
+            RuntimeMessage::RunSubAgent(req) => {
+                if let Err(e) = state.run_sub_agent(req).await {
+                    eprintln!("runtime: sub-agent error: {e}");
+                }
             }
         }
         Ok(())
@@ -324,7 +430,12 @@ impl Runtime {
             .cloned()
             .ok_or_else(|| RuntimeError::UnknownAgent(agent_name.to_string()))?;
 
-        let init = SessionInit { agent, auth };
+        let init = SessionInit {
+            agent,
+            auth,
+            on_done: None,
+            span: SpanContext::root(),
+        };
         call_t!(
             self.actor,
             RuntimeMessage::StartSession,
@@ -346,7 +457,7 @@ impl Runtime {
         on_event: Option<OnEvent>,
     ) -> Result<SessionHandle, RuntimeError> {
         let session_actor: ActorRef<SessionMessage> =
-            ractor::registry::where_is(format!("session-{session_id}"))
+            ractor::registry::where_is(session_actor_name(session_id))
                 .ok_or(RuntimeError::SessionNotFound)?
                 .into();
 
@@ -356,7 +467,7 @@ impl Runtime {
             SessionClientArgs {
                 session_id,
                 auth,
-                session_actor,
+                session_actor: session_actor.clone(),
                 store: self.store.clone(),
                 on_event,
             },
@@ -364,10 +475,17 @@ impl Runtime {
         .await
         .map_err(|e| RuntimeError::ActorCall(format!("session client spawn failed: {e}")))?;
 
+        client.get_cell().link(session_actor.get_cell());
+
         Ok(SessionHandle {
             session_id,
             session_client: client,
         })
+    }
+
+    /// Check whether a session actor is currently running.
+    pub fn session_is_running(&self, session_id: Uuid) -> bool {
+        ractor::registry::where_is(session_actor_name(session_id)).is_some()
     }
 
     pub fn store(&self) -> &Arc<dyn EventStore> {

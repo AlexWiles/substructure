@@ -7,6 +7,22 @@ use super::openai;
 use super::session::SessionStatus;
 pub use super::span::{SpanContext, SpanId, TraceId};
 
+// ---------------------------------------------------------------------------
+// CompletionDelivery — where a sub-agent delivers its result
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletionDelivery {
+    /// Session ID of the parent session to deliver to
+    pub parent_session_id: Uuid,
+    /// Tool call ID that this result satisfies on the parent session
+    pub tool_call_id: String,
+    /// Tool name for the completion
+    pub tool_name: String,
+    /// Span context for tracing
+    pub span: SpanContext,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DerivedState {
     pub status: SessionStatus,
@@ -59,8 +75,10 @@ pub enum EventPayload {
     BudgetExceeded,
     #[serde(rename = "strategy.state_changed")]
     StrategyStateChanged(StrategyStateChanged),
+    #[serde(rename = "session.cancelled")]
+    SessionCancelled,
     #[serde(rename = "session.done")]
-    SessionDone,
+    SessionDone(SessionDone),
 }
 
 // --- Session ---
@@ -90,6 +108,8 @@ pub struct SessionAuth {
 pub struct SessionCreated {
     pub agent: AgentConfig,
     pub auth: SessionAuth,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_done: Option<CompletionDelivery>,
 }
 
 // --- Messages (internal, provider-agnostic) ---
@@ -143,12 +163,25 @@ pub struct MessageTool {
 
 // --- Tool Calls ---
 
+/// Who is responsible for executing a tool call.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolHandler {
+    /// Executed by the runtime (MCP or sub-agent).
+    #[default]
+    Runtime,
+    /// Executed by the client. Session goes Idle while waiting.
+    Client,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallRequested {
     pub tool_call_id: String,
     pub name: String,
     pub arguments: String,
     pub deadline: DateTime<Utc>,
+    #[serde(default)]
+    pub handler: ToolHandler,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +196,30 @@ pub struct ToolCallErrored {
     pub tool_call_id: String,
     pub name: String,
     pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionDone {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<Artifact>,
+}
+
+// --- Artifacts ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Artifact {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub parts: Vec<Part>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Part {
+    Text { text: String },
+    Data { data: serde_json::Value },
 }
 
 // --- Interrupts ---

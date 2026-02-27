@@ -9,7 +9,7 @@ pub use agent_state::{
     AgentState, CompletionTokensDetails, LlmCallStatus, PromptTokensDetails, SessionStatus,
     StrategySlot, TokenBudget, TokenUsage, ToolCallStatus,
 };
-pub use command_handler::{CommandPayload, SessionCommand, SessionError};
+pub use command_handler::{CommandPayload, IncomingMessage, SessionCommand, SessionError};
 pub use event_handler::{extract_assistant_message, Effect};
 pub use strategy::{
     Action, CompactionConfig, DefaultStrategy, DefaultStrategyConfig, InterruptRequest,

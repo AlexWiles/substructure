@@ -29,6 +29,8 @@ pub enum TranslateOutput {
 pub struct EventTranslator {
     /// If we're currently streaming text, the message_id.
     open_text_message: Option<String>,
+    /// Message IDs that already streamed text chunks.
+    streamed_text_messages: HashSet<String>,
     /// Tool call IDs for which we already emitted Start/Args/End.
     emitted_tool_calls: HashSet<String>,
     /// Tool call IDs for which we already emitted ToolCallResult.
@@ -39,6 +41,7 @@ impl EventTranslator {
     pub fn new() -> Self {
         Self {
             open_text_message: None,
+            streamed_text_messages: HashSet::new(),
             emitted_tool_calls: HashSet::new(),
             emitted_tool_results: HashSet::new(),
         }
@@ -66,6 +69,7 @@ impl EventTranslator {
                 if self.open_text_message.is_none() {
                     let message_id = chunk.call_id.clone();
                     self.open_text_message = Some(message_id.clone());
+                    self.streamed_text_messages.insert(message_id.clone());
                     events.push(AgUiEvent::TextMessageStart { message_id });
                 }
 
@@ -124,7 +128,10 @@ impl EventTranslator {
                 let has_tool_calls = !msg.message.tool_calls.is_empty();
 
                 // Emit text message if not already streamed
-                if has_text && self.open_text_message.is_none() {
+                if has_text
+                    && self.open_text_message.is_none()
+                    && !self.streamed_text_messages.contains(&msg.call_id)
+                {
                     let message_id = msg.call_id.clone();
                     let content = msg.message.content.clone().unwrap_or_default();
 
@@ -228,7 +235,9 @@ impl EventTranslator {
             EventPayload::InterruptResumed(_) => TranslateOutput::Events(vec![]),
 
             EventPayload::StrategyStateChanged(_) => TranslateOutput::Events(vec![]),
-            EventPayload::SessionDone => TranslateOutput::Events(vec![]),
+            EventPayload::BudgetExceeded => TranslateOutput::Events(vec![]),
+            EventPayload::SessionCancelled => TranslateOutput::Events(vec![]),
+            EventPayload::SessionDone(_) => TranslateOutput::Events(vec![]),
 
             EventPayload::MessageTool(msg) => {
                 // Skip if already emitted via ToolCallCompleted/Errored
@@ -279,6 +288,7 @@ mod tests {
         match output {
             TranslateOutput::Events(e) => e,
             TranslateOutput::Terminal(_) => panic!("expected Events, got Terminal"),
+            TranslateOutput::Interrupt(_, _) => panic!("expected Events, got Interrupt"),
         }
     }
 
@@ -286,6 +296,7 @@ mod tests {
         match output {
             TranslateOutput::Terminal(e) => e,
             TranslateOutput::Events(_) => panic!("expected Terminal, got Events"),
+            TranslateOutput::Interrupt(_, _) => panic!("expected Terminal, got Interrupt"),
         }
     }
 
@@ -389,13 +400,9 @@ mod tests {
                 },
             }),
         )));
-        // The text was already streamed, so no text events emitted.
-        // But since open_text_message was taken by LlmCallCompleted,
-        // it would re-emit. Let's verify what actually happens.
-        // After LlmCallCompleted, open_text_message is None, so
-        // MessageAssistant will emit text events again. This is the
-        // non-streaming-already-completed path.
-        assert!(events.len() >= 1);
+        // The text was already streamed (tracked in streamed_text_messages),
+        // so MessageAssistant emits no duplicate text events.
+        assert_eq!(events.len(), 0);
     }
 
     #[test]
@@ -466,6 +473,7 @@ mod tests {
                 name: "get_weather".into(),
                 arguments: r#"{"city":"NYC"}"#.into(),
                 deadline: Utc::now() + chrono::Duration::hours(1),
+                handler: Default::default(),
             }),
         )));
         assert_eq!(events.len(), 0);
@@ -593,6 +601,7 @@ mod tests {
                 agent: crate::domain::agent::AgentConfig {
                     id: Uuid::new_v4(),
                     name: "test".into(),
+                    description: None,
                     llm: crate::domain::agent::LlmConfig {
                         client: "mock".into(),
                         params: Default::default(),
@@ -602,12 +611,14 @@ mod tests {
                     strategy: Default::default(),
                     retry: Default::default(),
                     token_budget: None,
+                    sub_agents: vec![],
                 },
                 auth: SessionAuth {
                     tenant_id: "t".into(),
                     client_id: "c".into(),
                     sub: None,
                 },
+                on_done: None,
             }),
         )));
         assert_eq!(events.len(), 0);

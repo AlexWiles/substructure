@@ -82,6 +82,8 @@ pub struct AgentConfig {
     #[serde(default = "Uuid::new_v4")]
     pub id: Uuid,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub llm: LlmConfig,
     pub system_prompt: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -92,4 +94,6 @@ pub struct AgentConfig {
     pub retry: RetryConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sub_agents: Vec<String>,
 }

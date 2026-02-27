@@ -171,11 +171,36 @@ pub trait McpClient: Send + Sync + 'static {
 }
 
 impl ToolDefinition {
+    pub fn sanitized_name(name: &str) -> String {
+        let mut cleaned: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+
+        cleaned = cleaned.trim_matches('_').to_string();
+
+        if cleaned.is_empty() {
+            cleaned = "tool".to_string();
+        }
+
+        if cleaned.len() > 64 {
+            cleaned.truncate(64);
+        }
+
+        cleaned
+    }
+
     pub fn to_openai_tool(&self) -> openai::Tool {
         openai::Tool {
             tool_type: "function".to_string(),
             function: openai::ToolFunction {
-                name: self.name.clone(),
+                name: Self::sanitized_name(&self.name),
                 description: self.description.clone(),
                 parameters: self.input_schema.clone(),
             },

@@ -63,7 +63,7 @@ impl Actor for SessionClientActor {
             Err(_) => AgentState::new(args.session_id),
         };
 
-        let group = format!("session-clients-{}", args.session_id);
+        let group = super::session_clients_group(args.session_id);
 
         ractor::pg::join(group, vec![myself.get_cell()]);
 

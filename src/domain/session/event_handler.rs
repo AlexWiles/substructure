@@ -3,7 +3,7 @@ use crate::domain::openai;
 
 use super::agent_session::{new_call_id, AgentSession};
 use super::command_handler::CommandPayload;
-use super::strategy::{extract_response_summary, Action, Turn};
+use super::strategy::{Action, Turn};
 
 // ---------------------------------------------------------------------------
 // Effect types
@@ -17,10 +17,13 @@ pub enum Effect {
         request: LlmRequest,
         stream: bool,
     },
-    CallMcpTool {
+    CallTool {
         tool_call_id: String,
         name: String,
         arguments: serde_json::Value,
+    },
+    DeliverCompletion {
+        delivery: CompletionDelivery,
     },
     StartMcpServers(Vec<McpServerConfig>),
 }
@@ -85,37 +88,19 @@ impl AgentSession {
             EventPayload::ToolCallRequested(payload) => {
                 let args: serde_json::Value =
                     serde_json::from_str(&payload.arguments).unwrap_or_default();
-                effects.push(Effect::CallMcpTool {
+                effects.push(Effect::CallTool {
                     tool_call_id: payload.tool_call_id.clone(),
                     name: payload.name.clone(),
                     arguments: args,
                 });
             }
 
-            EventPayload::ToolCallCompleted(payload) => {
-                effects.push(Effect::Command(CommandPayload::SendToolMessage {
-                    tool_call_id: payload.tool_call_id.clone(),
-                    content: payload.result.clone(),
-                    token_count: None,
-                }));
-            }
-
-            EventPayload::ToolCallErrored(payload) => {
-                effects.push(Effect::Command(CommandPayload::SendToolMessage {
-                    tool_call_id: payload.tool_call_id.clone(),
-                    content: format!("Error: {}", payload.error),
-                    token_count: None,
-                }));
-            }
-
-            EventPayload::LlmCallCompleted(payload) => {
-                let summary = extract_response_summary(payload);
-                effects.push(Effect::Command(CommandPayload::SendAssistantMessage {
-                    call_id: summary.call_id,
-                    content: summary.content,
-                    tool_calls: summary.tool_calls,
-                    token_count: summary.token_count,
-                }));
+            EventPayload::SessionDone(_) => {
+                if let Some(ref delivery) = self.agent_state.on_done {
+                    effects.push(Effect::DeliverCompletion {
+                        delivery: delivery.clone(),
+                    });
+                }
             }
 
             _ => {}
@@ -161,7 +146,7 @@ impl AgentSession {
     fn execute_action(&self, action: Action, tools: Option<Vec<openai::Tool>>) -> Vec<Effect> {
         match action {
             Action::CallLlm(params) => {
-                let stream = params.stream.unwrap_or(true);
+                let stream = params.stream.unwrap_or(false);
                 let request = if let Some(ref context) = params.context {
                     self.agent_state
                         .build_llm_request_with_context(context, tools)
@@ -187,11 +172,12 @@ impl AgentSession {
                         name: tc.name.clone(),
                         arguments: tc.arguments.clone(),
                         deadline: self.tool_deadline(),
+                        handler: Default::default(),
                     })
                 })
                 .collect(),
-            Action::Done => {
-                vec![Effect::Command(CommandPayload::MarkDone)]
+            Action::Done { artifacts } => {
+                vec![Effect::Command(CommandPayload::MarkDone { artifacts })]
             }
             Action::Interrupt(req) => vec![Effect::Command(CommandPayload::Interrupt {
                 interrupt_id: req.id,

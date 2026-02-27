@@ -86,6 +86,8 @@ pub enum Message {
         id: Option<String>,
         tool_call_id: String,
         content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     #[serde(rename = "developer")]
     Developer {

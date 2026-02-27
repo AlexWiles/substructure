@@ -4,7 +4,9 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::agent_state::{AgentState, LlmCallStatus, ToolCallStatus};
-use crate::domain::event::{EventPayload, LlmCallCompleted, Message, Role, ToolCall};
+use crate::domain::event::{
+    Artifact, EventPayload, LlmCallCompleted, Message, Part, Role, ToolCall,
+};
 
 // ---------------------------------------------------------------------------
 // DefaultStrategy config
@@ -63,6 +65,10 @@ struct DefaultStrategyState {
     /// but included in the follow-up LLM context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending_reply: Option<PendingReply>,
+    /// Stream preference from the most recent user message, used for
+    /// subsequent LLM calls within the same turn (e.g. after tool results).
+    #[serde(default)]
+    stream: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,7 +137,8 @@ pub enum Action {
     /// Execute tool calls, then consult strategy again.
     ExecuteTools(ToolExecutionPlan),
     /// Agent loop is done — idle until next external input.
-    Done,
+    /// Carries artifacts produced by this agent turn.
+    Done { artifacts: Vec<Artifact> },
     /// Pause the session and ask the client to resume with a response.
     Interrupt(InterruptRequest),
 }
@@ -194,6 +201,18 @@ pub struct LlmResponseSummary {
     pub content: Option<String>,
     pub tool_calls: Vec<ToolCall>,
     pub token_count: Option<u32>,
+}
+
+/// Create a single text artifact from optional content, filtering empty strings.
+fn text_artifact(content: &Option<String>) -> Vec<Artifact> {
+    match content {
+        Some(text) if !text.is_empty() => vec![Artifact {
+            name: None,
+            description: None,
+            parts: vec![Part::Text { text: text.clone() }],
+        }],
+        _ => vec![],
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -400,6 +419,7 @@ impl DefaultStrategy {
             compacted_summary: Some(summary_text.clone()),
             compacted_at_message_index: Some(compacted_at),
             pending_reply: None,
+            stream: ss.stream,
         };
 
         if let Some(pr) = pending {
@@ -440,7 +460,7 @@ impl DefaultStrategy {
         Some(Turn {
             action: Some(Action::CallLlm(LlmTurnParams {
                 context: Some(context),
-                stream: Some(true),
+                stream: Some(ss.stream),
             })),
             state: Self::serialize_state(&new_ss),
         })
@@ -464,6 +484,9 @@ impl Strategy for DefaultStrategy {
 
         match event {
             EventPayload::MessageUser(payload) => {
+                let mut ss = ss;
+                ss.stream = payload.stream;
+
                 // The new user message is the last entry in state.messages.
                 // Check if we should compact the prior history first.
                 if self.config.compaction.enabled {
@@ -498,7 +521,9 @@ impl Strategy for DefaultStrategy {
                 // Normal flow.
                 let summary = extract_response_summary(payload);
                 let action = if summary.tool_calls.is_empty() {
-                    Action::Done
+                    Action::Done {
+                        artifacts: text_artifact(&summary.content),
+                    }
                 } else {
                     Action::ExecuteTools(ToolExecutionPlan {
                         calls: summary.tool_calls,
@@ -528,7 +553,7 @@ impl Strategy for DefaultStrategy {
                     };
                     let action = match pending {
                         Some(pr) => Action::CallLlm(self.llm_params(state, Some(pr.stream))),
-                        None => Action::Done,
+                        None => Action::Done { artifacts: vec![] },
                     };
                     return Some(Turn {
                         action: Some(action),
@@ -536,7 +561,7 @@ impl Strategy for DefaultStrategy {
                     });
                 }
                 Some(Turn {
-                    action: Some(Action::Done),
+                    action: Some(Action::Done { artifacts: vec![] }),
                     state: Self::serialize_state(&ss),
                 })
             }
@@ -555,13 +580,13 @@ impl Strategy for DefaultStrategy {
                 }
 
                 Some(Turn {
-                    action: Some(Action::CallLlm(self.llm_params(state, Some(true)))),
+                    action: Some(Action::CallLlm(self.llm_params(state, Some(ss.stream)))),
                     state: Self::serialize_state(&ss),
                 })
             }
 
             EventPayload::InterruptResumed(_) => Some(Turn {
-                action: Some(Action::CallLlm(self.llm_params(state, None))),
+                action: Some(Action::CallLlm(self.llm_params(state, Some(ss.stream)))),
                 state: Self::serialize_state(&ss),
             }),
 
@@ -599,6 +624,7 @@ mod tests {
         AgentConfig {
             id: Uuid::new_v4(),
             name: "test".into(),
+            description: None,
             llm: LlmConfig {
                 client: "mock".into(),
                 params: Default::default(),
@@ -608,6 +634,7 @@ mod tests {
             strategy: Default::default(),
             retry: Default::default(),
             token_budget: None,
+            sub_agents: vec![],
         }
     }
 
@@ -631,6 +658,7 @@ mod tests {
             payload: EventPayload::SessionCreated(SessionCreated {
                 agent: agent.clone(),
                 auth: test_auth(),
+                on_done: None,
             }),
             derived: None,
         };
@@ -774,6 +802,7 @@ mod tests {
                 name: "test_tool".into(),
                 arguments: "{}".into(),
                 deadline: chrono::Utc::now() + chrono::Duration::hours(1),
+                handler: Default::default(),
             }));
             payloads.push(tool_call_completed(&tc_id));
             payloads.push(tool_msg(&tc_id));
@@ -840,6 +869,7 @@ mod tests {
                 name: "test_tool".into(),
                 arguments: "{}".into(),
                 deadline: chrono::Utc::now() + chrono::Duration::hours(1),
+                handler: Default::default(),
             }));
             payloads.push(tool_call_completed(&tc_id));
             payloads.push(tool_msg(&tc_id));
@@ -854,6 +884,7 @@ mod tests {
             compacted_summary: None,
             compacted_at_message_index: None,
             pending_reply: None,
+            stream: false,
         })
         .unwrap();
 
@@ -894,7 +925,7 @@ mod tests {
                     .as_ref()
                     .unwrap()
                     .contains("Summary of conversation."));
-                assert_eq!(params.stream, Some(true));
+                assert_eq!(params.stream, Some(false));
             }
             other => panic!("expected CallLlm, got {:?}", other),
         }
@@ -922,6 +953,7 @@ mod tests {
             compacted_summary: Some("User said hello and world.".into()),
             compacted_at_message_index: Some(2), // Compact point after 2 messages.
             pending_reply: None,
+            stream: false,
         })
         .unwrap();
 
@@ -979,6 +1011,7 @@ mod tests {
                     name: "test_tool".into(),
                     arguments: "{}".into(),
                     deadline: chrono::Utc::now() + chrono::Duration::hours(1),
+                    handler: Default::default(),
                 }),
                 tool_call_completed(tc_id),
                 tool_msg(tc_id),

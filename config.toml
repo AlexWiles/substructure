@@ -2,7 +2,6 @@
 type = "sqlite"
 path = "events.db"
 
-
 [secret_providers.env]
 type = "env"
 
@@ -13,9 +12,21 @@ api_key = { provider = "env", key = "OPENROUTER_API_KEY" }
 
 [agents.alex]
 name = "alex"
-system_prompt = "You are a helpful assistant named Alex."
-strategy.kind = "default"
-strategy.compaction.enabled = true
-strategy.compaction.threshold = 4
-llm.client = "openrouter"
-llm.model = "arcee-ai/trinity-large-preview:free"
+description = """A helpful assistant named Alex"""
+system_prompt = """You are a helpful assistant named Alex."""
+llm = { client = "openrouter", model = "minimax/minimax-m2.5" }
+sub_agents = ["researcher"]
+
+[agents.researcher]
+name = "researcher"
+description = "Explores the filesystem — reads files, lists directories, and searches for content. Returns a summary of findings."
+system_prompt = """You are a filesystem research assistant. \
+Use the filesystem tools to explore files and directories, then return a clear summary of what you found. \
+Be concise and factual."""
+llm = { client = "openrouter", model = "minimax/minimax-m2.5" }
+
+[[agents.researcher.mcp_servers]]
+name = "filesystem"
+transport.type = "stdio"
+transport.command = "npx"
+transport.args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
