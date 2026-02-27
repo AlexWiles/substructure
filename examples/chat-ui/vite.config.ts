@@ -6,8 +6,8 @@ export default defineConfig({
   server: {
     port: 3000,
     proxy: {
-      "/api/copilotkit": {
-        target: "http://localhost:4111",
+      "/client": {
+        target: "http://localhost:8080",
         changeOrigin: true,
       },
     },

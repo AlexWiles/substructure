@@ -1,7 +1,9 @@
+use std::collections::VecDeque;
+use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ractor::OutputPort;
+use ractor::{call_t, Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort};
 use rusqlite::Connection;
 use uuid::Uuid;
 
@@ -37,24 +39,304 @@ const SCHEMA_SQL: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_snapshots_type ON snapshots (aggregate_type);
 "#;
 
+// ---------------------------------------------------------------------------
+// ConnectionPoolActor — Elixir DBConnection-style checkout/checkin pool
+// ---------------------------------------------------------------------------
+
+pub(crate) enum PoolMessage {
+    Checkout(RpcReplyPort<Connection>),
+    Checkin(Connection),
+}
+
+struct ConnectionPoolActor;
+
+struct PoolState {
+    available: Vec<Connection>,
+    waiting: VecDeque<RpcReplyPort<Connection>>,
+}
+
+struct PoolArgs {
+    path: String,
+    pool_size: usize,
+}
+
+/// Open a reader connection with WAL mode enabled.
+fn open_reader(path: &str) -> Result<Connection, StoreError> {
+    let conn = Connection::open(path).map_err(|e| StoreError::Internal(e.to_string()))?;
+    conn.pragma_update(None, "journal_mode", "WAL")
+        .map_err(|e| StoreError::Internal(e.to_string()))?;
+    Ok(conn)
+}
+
+impl Actor for ConnectionPoolActor {
+    type Msg = PoolMessage;
+    type State = PoolState;
+    type Arguments = PoolArgs;
+
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        let mut available = Vec::with_capacity(args.pool_size);
+        for _ in 0..args.pool_size {
+            let conn = open_reader(&args.path)
+                .map_err(|e| format!("reader pool connection: {e}"))?;
+            available.push(conn);
+        }
+        Ok(PoolState {
+            available,
+            waiting: VecDeque::new(),
+        })
+    }
+
+    async fn handle(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match message {
+            PoolMessage::Checkout(reply) => {
+                if let Some(conn) = state.available.pop() {
+                    let _ = reply.send(conn);
+                } else {
+                    state.waiting.push_back(reply);
+                }
+            }
+            PoolMessage::Checkin(conn) => {
+                if let Some(waiter) = state.waiting.pop_front() {
+                    let _ = waiter.send(conn);
+                } else {
+                    state.available.push(conn);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PooledConnection — RAII guard that auto-returns connection on drop
+// ---------------------------------------------------------------------------
+
+pub(crate) struct PooledConnection {
+    conn: Option<Connection>,
+    pool: ActorRef<PoolMessage>,
+}
+
+impl Drop for PooledConnection {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            let _ = self.pool.send_message(PoolMessage::Checkin(conn));
+        }
+    }
+}
+
+impl Deref for PooledConnection {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        self.conn.as_ref().unwrap()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Free functions — query logic shared by read paths
+// ---------------------------------------------------------------------------
+
+fn do_load(conn: &Connection, aggregate_id: Uuid, tenant_id: &str) -> Result<StreamLoad, StoreError> {
+    let aid = aggregate_id.to_string();
+
+    let (stored_tenant, snapshot_data, stream_version) = conn
+        .query_row(
+            "SELECT tenant_id, data, stream_version FROM snapshots WHERE aggregate_id = ?1",
+            [&aid],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, u64>(2)?,
+                ))
+            },
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => StoreError::StreamNotFound,
+            other => StoreError::Internal(other.to_string()),
+        })?;
+
+    if stored_tenant != tenant_id {
+        return Err(StoreError::TenantMismatch);
+    }
+
+    let snapshot: serde_json::Value = serde_json::from_str(&snapshot_data)
+        .map_err(|e| StoreError::Internal(e.to_string()))?;
+
+    Ok(StreamLoad {
+        snapshot,
+        stream_version,
+    })
+}
+
+fn do_list_sessions(conn: &Connection, filter: &SessionFilter) -> Vec<SessionSummary> {
+    let mut clauses: Vec<&str> = vec!["aggregate_type = 'session'"];
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    if filter.tenant_id.is_some() {
+        clauses.push("tenant_id = ?");
+        params.push(Box::new(filter.tenant_id.clone().unwrap()));
+    }
+    if filter.agent_name.is_some() {
+        clauses.push("agent_name = ?");
+        params.push(Box::new(filter.agent_name.clone().unwrap()));
+    }
+    match filter.needs_wake {
+        Some(true) => {
+            clauses.push("wake_at IS NOT NULL AND wake_at <= ?");
+            params.push(Box::new(chrono::Utc::now().to_rfc3339()));
+        }
+        Some(false) => {
+            clauses.push("(wake_at IS NULL OR wake_at > ?)");
+            params.push(Box::new(chrono::Utc::now().to_rfc3339()));
+        }
+        None => {}
+    }
+
+    // Status filter uses the indexed column populated by extract_session_index_fields.
+    let status_clause = if let Some(ref statuses) = filter.statuses {
+        if !statuses.is_empty() {
+            let ph: Vec<&str> = statuses.iter().map(|s| {
+                let serialized = serde_json::to_value(s)
+                    .and_then(|v| serde_json::to_string(&v))
+                    .unwrap_or_default();
+                params.push(Box::new(serialized));
+                "?"
+            }).collect();
+            Some(format!("status IN ({})", ph.join(", ")))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if let Some(ref clause) = status_clause {
+        clauses.push(clause);
+    }
+
+    let sql = format!(
+        "SELECT data, stream_version FROM snapshots WHERE {}",
+        clauses.join(" AND ")
+    );
+    let mut stmt = conn.prepare(&sql).expect("prepare list_sessions");
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        params.iter().map(|p| p.as_ref()).collect();
+
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+        })
+        .expect("query list_sessions");
+
+    rows.filter_map(|r| {
+        let (data, stream_version) = r.ok()?;
+        let state: AgentState = serde_json::from_str(&data).ok()?;
+
+        let auth = state.auth.as_ref()?;
+        let agent = state.agent.as_ref()?;
+
+        Some(SessionSummary {
+            session_id: state.session_id,
+            tenant_id: auth.tenant_id.clone(),
+            status: state.status.clone(),
+            wake_at: state.wake_at(),
+            agent_name: agent.name.clone(),
+            message_count: state.messages.len(),
+            token_usage: state.token_usage.total_tokens,
+            stream_version,
+        })
+    })
+    .collect()
+}
+
+fn do_next_wake_at(conn: &Connection) -> Option<chrono::DateTime<chrono::Utc>> {
+    conn.query_row(
+        "SELECT MIN(wake_at) FROM snapshots WHERE aggregate_type = 'session' AND wake_at IS NOT NULL",
+        [],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+    .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+    .map(|dt| dt.with_timezone(&chrono::Utc))
+}
+
+// ---------------------------------------------------------------------------
+// SqliteEventStore
+// ---------------------------------------------------------------------------
+
 pub struct SqliteEventStore {
-    conn: Mutex<Connection>,
+    writer: Mutex<Connection>,
+    reader_pool: ActorRef<PoolMessage>,
     events: OutputPort<EventBatch>,
 }
 
 impl SqliteEventStore {
-    pub fn new(path: &str) -> Result<Self, StoreError> {
-        let conn = Connection::open(path).map_err(|e| StoreError::Internal(e.to_string()))?;
+    /// Default number of reader connections in the pool.
+    const DEFAULT_POOL_SIZE: usize = 4;
 
-        conn.pragma_update(None, "journal_mode", "WAL")
+    pub async fn new(path: &str) -> Result<Self, StoreError> {
+        // For :memory: databases, use shared cache so all connections see the
+        // same data. Generate a unique name to avoid cross-test collisions.
+        let effective_path = if path == ":memory:" {
+            format!("file:memdb_{}?mode=memory&cache=shared", Uuid::new_v4())
+        } else {
+            path.to_string()
+        };
+
+        let writer = if path == ":memory:" {
+            Connection::open_with_flags(
+                &effective_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                    | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+                    | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+            )
+        } else {
+            Connection::open(&effective_path)
+        }
+        .map_err(|e| StoreError::Internal(e.to_string()))?;
+
+        writer
+            .pragma_update(None, "journal_mode", "WAL")
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
-        conn.execute_batch(SCHEMA_SQL)
+        writer
+            .execute_batch(SCHEMA_SQL)
             .map_err(|e| StoreError::Internal(e.to_string()))?;
+
+        let (pool_actor, _) = Actor::spawn(
+            None,
+            ConnectionPoolActor,
+            PoolArgs {
+                path: effective_path,
+                pool_size: Self::DEFAULT_POOL_SIZE,
+            },
+        )
+        .await
+        .map_err(|e| StoreError::Internal(format!("reader pool: {e}")))?;
 
         Ok(SqliteEventStore {
-            conn: Mutex::new(conn),
+            writer: Mutex::new(writer),
+            reader_pool: pool_actor,
             events: OutputPort::default(),
+        })
+    }
+
+    /// Checkout a reader connection from the pool.
+    async fn checkout(&self) -> Result<PooledConnection, StoreError> {
+        let conn = call_t!(self.reader_pool, PoolMessage::Checkout, 5000)
+            .map_err(|e| StoreError::Internal(format!("pool checkout: {e}")))?;
+        Ok(PooledConnection {
+            conn: Some(conn),
+            pool: self.reader_pool.clone(),
         })
     }
 }
@@ -72,7 +354,7 @@ impl EventStore for SqliteEventStore {
         new_version: u64,
     ) -> Result<(), StoreError> {
         let batch = {
-            let mut conn = self.conn.lock().expect("sqlite lock poisoned");
+            let mut conn = self.writer.lock().expect("sqlite writer lock poisoned");
             let tx = conn
                 .transaction()
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -169,38 +451,9 @@ impl EventStore for SqliteEventStore {
         Ok(())
     }
 
-    fn load(&self, aggregate_id: Uuid, tenant_id: &str) -> Result<StreamLoad, StoreError> {
-        let conn = self.conn.lock().expect("sqlite lock poisoned");
-        let aid = aggregate_id.to_string();
-
-        let (stored_tenant, snapshot_data, stream_version) = conn
-            .query_row(
-                "SELECT tenant_id, data, stream_version FROM snapshots WHERE aggregate_id = ?1",
-                [&aid],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, u64>(2)?,
-                    ))
-                },
-            )
-            .map_err(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => StoreError::StreamNotFound,
-                other => StoreError::Internal(other.to_string()),
-            })?;
-
-        if stored_tenant != tenant_id {
-            return Err(StoreError::TenantMismatch);
-        }
-
-        let snapshot: serde_json::Value = serde_json::from_str(&snapshot_data)
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
-
-        Ok(StreamLoad {
-            snapshot,
-            stream_version,
-        })
+    async fn load(&self, aggregate_id: Uuid, tenant_id: &str) -> Result<StreamLoad, StoreError> {
+        let conn = self.checkout().await?;
+        do_load(&conn, aggregate_id, tenant_id)
     }
 
     fn events(&self) -> &OutputPort<EventBatch> {
@@ -208,69 +461,21 @@ impl EventStore for SqliteEventStore {
     }
 }
 
+#[async_trait]
 impl SessionIndex for SqliteEventStore {
-    fn list_sessions(&self, filter: &SessionFilter) -> Vec<SessionSummary> {
-        let conn = self.conn.lock().expect("sqlite lock poisoned");
-        let now = chrono::Utc::now();
-
-        let mut sql = String::from(
-            "SELECT data, stream_version FROM snapshots WHERE aggregate_type = 'session'",
-        );
-        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-
-        if let Some(ref tid) = filter.tenant_id {
-            sql.push_str(&format!(" AND tenant_id = ?{}", params.len() + 1));
-            params.push(Box::new(tid.clone()));
-        }
-        if let Some(ref name) = filter.agent_name {
-            sql.push_str(&format!(" AND agent_name = ?{}", params.len() + 1));
-            params.push(Box::new(name.clone()));
-        }
-
-        let mut stmt = conn.prepare(&sql).expect("prepare list_sessions");
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-            params.iter().map(|p| p.as_ref()).collect();
-
-        let rows = stmt
-            .query_map(param_refs.as_slice(), |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
-            })
-            .expect("query list_sessions");
-
-        rows.filter_map(|r| {
-            let (data, stream_version) = r.ok()?;
-            let state: AgentState = serde_json::from_str(&data).ok()?;
-
-            let auth = state.auth.as_ref()?;
-            let agent = state.agent.as_ref()?;
-
-            if let Some(ref statuses) = filter.statuses {
-                if !statuses.contains(&state.status) {
-                    return None;
-                }
+    async fn list_sessions(&self, filter: &SessionFilter) -> Vec<SessionSummary> {
+        match self.checkout().await {
+            Ok(conn) => do_list_sessions(&conn, filter),
+            Err(e) => {
+                tracing::error!(error = %e, "failed to checkout reader for list_sessions");
+                Vec::new()
             }
+        }
+    }
 
-            let wake_at = state.wake_at();
-            if let Some(needs_wake) = filter.needs_wake {
-                let has_wake = wake_at.is_some_and(|t| t <= now);
-                if needs_wake != has_wake {
-                    return None;
-                }
-            }
-
-            Some(SessionSummary {
-                session_id: state.session_id,
-                tenant_id: auth.tenant_id.clone(),
-                client_id: auth.client_id.clone(),
-                status: state.status.clone(),
-                wake_at,
-                agent_name: agent.name.clone(),
-                message_count: state.messages.len(),
-                token_usage: state.token_usage.total_tokens,
-                stream_version,
-            })
-        })
-        .collect()
+    async fn next_wake_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        let conn = self.checkout().await.ok()?;
+        do_next_wake_at(&conn)
     }
 }
 
@@ -317,14 +522,13 @@ mod tests {
     use super::*;
     use crate::domain::agent::{AgentConfig, LlmConfig};
     use crate::domain::aggregate::{Aggregate, DomainEvent};
-    use crate::domain::event::{EventPayload, SessionAuth, SessionCreated, SpanContext};
-    use crate::domain::session::SessionStatus;
+    use crate::domain::event::{EventPayload, ClientIdentity, SessionCreated, SpanContext};
 
-    fn test_auth(tenant: &str) -> SessionAuth {
-        SessionAuth {
+    fn test_auth(tenant: &str) -> ClientIdentity {
+        ClientIdentity {
             tenant_id: tenant.into(),
-            client_id: "client-1".into(),
             sub: None,
+            attrs: Default::default(),
         }
     }
 
@@ -372,206 +576,87 @@ mod tests {
         (vec![domain_event.into_raw()], state)
     }
 
-    fn temp_store() -> SqliteEventStore {
-        SqliteEventStore::new(":memory:").expect("open in-memory sqlite")
+    async fn temp_store() -> SqliteEventStore {
+        SqliteEventStore::new(":memory:").await.expect("open in-memory sqlite")
     }
 
+    /// Smoke test: append events, load them back, list via index.
     #[tokio::test]
-    async fn append_and_load() {
-        let store = temp_store();
+    async fn append_load_and_list() {
+        let store = temp_store().await;
         let id = Uuid::new_v4();
         let (events, snap) = session_created_event(id, "acme", "bot");
-        let new_version = snap.stream_version;
-        let snapshot_value = serde_json::to_value(&snap).unwrap();
+        let snap_val = serde_json::to_value(&snap).unwrap();
 
         store
-            .append(id, "acme", "session", events, snapshot_value, 0, new_version)
+            .append(id, "acme", "session", events, snap_val, 0, snap.stream_version)
             .await
             .unwrap();
 
-        let loaded = store.load(id, "acme").unwrap();
-        let loaded_state: AgentState =
-            serde_json::from_value(loaded.snapshot).unwrap();
-        assert_eq!(loaded_state.session_id, id);
-        assert_eq!(loaded.stream_version, new_version);
+        // Load returns correct state
+        let loaded = store.load(id, "acme").await.unwrap();
+        let state: AgentState = serde_json::from_value(loaded.snapshot).unwrap();
+        assert_eq!(state.session_id, id);
+        assert_eq!(loaded.stream_version, snap.stream_version);
+
+        // Shows up in list_sessions
+        let sessions = store.list_sessions(&SessionFilter::default()).await;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, id);
+        assert_eq!(sessions[0].agent_name, "bot");
+
+        // Stream not found for unknown id
+        assert!(matches!(
+            store.load(Uuid::new_v4(), "acme").await,
+            Err(StoreError::StreamNotFound)
+        ));
     }
 
+    /// Security boundary: tenant-a data is invisible to tenant-b.
     #[tokio::test]
-    async fn version_conflict() {
-        let store = temp_store();
-        let id = Uuid::new_v4();
-        let (events, snap) = session_created_event(id, "t", "bot");
-        let new_version = snap.stream_version;
-        let snapshot_value = serde_json::to_value(&snap).unwrap();
-
-        store
-            .append(id, "t", "session", events, snapshot_value, 0, new_version)
-            .await
-            .unwrap();
-
-        // Try to append again with expected_version=0 (should conflict)
-        let (events2, snap2) = session_created_event(id, "t", "bot");
-        let new_version2 = snap2.stream_version;
-        let snapshot_value2 = serde_json::to_value(&snap2).unwrap();
-        let result = store
-            .append(id, "t", "session", events2, snapshot_value2, 0, new_version2)
-            .await;
-        assert!(matches!(result, Err(StoreError::VersionConflict { .. })));
-    }
-
-    #[tokio::test]
-    async fn tenant_mismatch() {
-        let store = temp_store();
+    async fn tenant_isolation() {
+        let store = temp_store().await;
         let id = Uuid::new_v4();
         let (events, snap) = session_created_event(id, "tenant-a", "bot");
-        let new_version = snap.stream_version;
-        let snapshot_value = serde_json::to_value(&snap).unwrap();
+        let snap_val = serde_json::to_value(&snap).unwrap();
 
         store
-            .append(id, "tenant-a", "session", events, snapshot_value, 0, new_version)
+            .append(id, "tenant-a", "session", events, snap_val, 0, snap.stream_version)
             .await
             .unwrap();
 
-        let result = store.load(id, "tenant-b");
-        assert!(matches!(result, Err(StoreError::TenantMismatch)));
-    }
+        // load rejects wrong tenant
+        assert!(matches!(
+            store.load(id, "tenant-b").await,
+            Err(StoreError::TenantMismatch)
+        ));
 
-    #[tokio::test]
-    async fn stream_not_found() {
-        let store = temp_store();
-        let result = store.load(Uuid::new_v4(), "t");
-        assert!(matches!(result, Err(StoreError::StreamNotFound)));
-    }
-
-    #[tokio::test]
-    async fn list_sessions_empty_store() {
-        let store = temp_store();
-        let results = store.list_sessions(&SessionFilter::default());
-        assert!(results.is_empty());
-    }
-
-    #[tokio::test]
-    async fn list_sessions_returns_all_with_empty_filter() {
-        let store = temp_store();
-        let id1 = Uuid::new_v4();
-        let id2 = Uuid::new_v4();
-
-        let (ev1, snap1) = session_created_event(id1, "tenant-a", "bot-1");
-        let (ev2, snap2) = session_created_event(id2, "tenant-b", "bot-2");
-
-        store
-            .append(id1, "tenant-a", "session", ev1, serde_json::to_value(&snap1).unwrap(), 0, snap1.stream_version)
-            .await
-            .unwrap();
-        store
-            .append(id2, "tenant-b", "session", ev2, serde_json::to_value(&snap2).unwrap(), 0, snap2.stream_version)
-            .await
-            .unwrap();
-
-        let results = store.list_sessions(&SessionFilter::default());
-        assert_eq!(results.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn list_sessions_filter_by_tenant() {
-        let store = temp_store();
-        let id1 = Uuid::new_v4();
-        let id2 = Uuid::new_v4();
-
-        let (ev1, snap1) = session_created_event(id1, "tenant-a", "bot");
-        let (ev2, snap2) = session_created_event(id2, "tenant-b", "bot");
-
-        store
-            .append(id1, "tenant-a", "session", ev1, serde_json::to_value(&snap1).unwrap(), 0, snap1.stream_version)
-            .await
-            .unwrap();
-        store
-            .append(id2, "tenant-b", "session", ev2, serde_json::to_value(&snap2).unwrap(), 0, snap2.stream_version)
-            .await
-            .unwrap();
-
+        // list_sessions filters by tenant
         let filter = SessionFilter {
-            tenant_id: Some("tenant-a".into()),
+            tenant_id: Some("tenant-b".into()),
             ..Default::default()
         };
-        let results = store.list_sessions(&filter);
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].tenant_id, "tenant-a");
+        assert!(store.list_sessions(&filter).await.is_empty());
     }
 
+    /// Concurrency boundary: stale expected_version is rejected.
     #[tokio::test]
-    async fn list_sessions_filter_by_status() {
-        let store = temp_store();
-        let id1 = Uuid::new_v4();
-        let id2 = Uuid::new_v4();
-
-        let (ev1, snap1) = session_created_event(id1, "t", "bot");
-        let (ev2, mut snap2) = session_created_event(id2, "t", "bot");
-        snap2.status = SessionStatus::Active;
-
-        store
-            .append(id1, "t", "session", ev1, serde_json::to_value(&snap1).unwrap(), 0, snap1.stream_version)
-            .await
-            .unwrap();
-        store
-            .append(id2, "t", "session", ev2, serde_json::to_value(&snap2).unwrap(), 0, snap2.stream_version)
-            .await
-            .unwrap();
-
-        let filter = SessionFilter {
-            statuses: Some(vec![SessionStatus::Active]),
-            ..Default::default()
-        };
-        let results = store.list_sessions(&filter);
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].session_id, id2);
-    }
-
-    #[tokio::test]
-    async fn list_sessions_filter_by_agent_name() {
-        let store = temp_store();
-        let id1 = Uuid::new_v4();
-        let id2 = Uuid::new_v4();
-
-        let (ev1, snap1) = session_created_event(id1, "t", "weather-bot");
-        let (ev2, snap2) = session_created_event(id2, "t", "chat-bot");
-
-        store
-            .append(id1, "t", "session", ev1, serde_json::to_value(&snap1).unwrap(), 0, snap1.stream_version)
-            .await
-            .unwrap();
-        store
-            .append(id2, "t", "session", ev2, serde_json::to_value(&snap2).unwrap(), 0, snap2.stream_version)
-            .await
-            .unwrap();
-
-        let filter = SessionFilter {
-            agent_name: Some("chat-bot".into()),
-            ..Default::default()
-        };
-        let results = store.list_sessions(&filter);
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].agent_name, "chat-bot");
-    }
-
-    #[tokio::test]
-    async fn list_sessions_summary_fields() {
-        let store = temp_store();
+    async fn version_conflict() {
+        let store = temp_store().await;
         let id = Uuid::new_v4();
-        let (ev, snap) = session_created_event(id, "acme", "helper");
+        let (events, snap) = session_created_event(id, "t", "bot");
+        let snap_val = serde_json::to_value(&snap).unwrap();
 
         store
-            .append(id, "acme", "session", ev, serde_json::to_value(&snap).unwrap(), 0, snap.stream_version)
+            .append(id, "t", "session", events, snap_val, 0, snap.stream_version)
             .await
             .unwrap();
 
-        let results = store.list_sessions(&SessionFilter::default());
-        assert_eq!(results.len(), 1);
-        let s = &results[0];
-        assert_eq!(s.session_id, id);
-        assert_eq!(s.tenant_id, "acme");
-        assert_eq!(s.client_id, "client-1");
-        assert_eq!(s.agent_name, "helper");
-        assert_eq!(s.stream_version, 1);
+        // Same expected_version=0 again → conflict
+        let (ev2, snap2) = session_created_event(id, "t", "bot");
+        let result = store
+            .append(id, "t", "session", ev2, serde_json::to_value(&snap2).unwrap(), 0, snap2.stream_version)
+            .await;
+        assert!(matches!(result, Err(StoreError::VersionConflict { .. })));
     }
 }

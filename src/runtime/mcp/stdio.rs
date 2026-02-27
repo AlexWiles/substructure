@@ -39,6 +39,7 @@ struct StdioIo {
 }
 
 impl StdioMcpClient {
+    #[tracing::instrument(skip(args), fields(%command))]
     pub async fn new(command: &str, args: &[String]) -> Result<Self, McpError> {
         let mut child = tokio::process::Command::new(command)
             .args(args)
@@ -84,10 +85,7 @@ impl StdioMcpClient {
 
         // Validate protocol version
         if init.protocol_version != PROTOCOL_VERSION {
-            eprintln!(
-                "MCP server negotiated protocol version '{}', expected '{}'",
-                init.protocol_version, PROTOCOL_VERSION
-            );
+            tracing::warn!(negotiated = %init.protocol_version, expected = %PROTOCOL_VERSION, "MCP protocol version mismatch");
         }
 
         client.capabilities = init.capabilities;

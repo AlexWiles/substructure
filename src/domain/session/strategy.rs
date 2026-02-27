@@ -638,11 +638,11 @@ mod tests {
         }
     }
 
-    fn test_auth() -> SessionAuth {
-        SessionAuth {
+    fn test_auth() -> ClientIdentity {
+        ClientIdentity {
             tenant_id: "t".into(),
-            client_id: "c".into(),
             sub: None,
+            attrs: Default::default(),
         }
     }
 
@@ -786,6 +786,7 @@ mod tests {
                 arguments: "{}".into(),
                 deadline: chrono::Utc::now() + chrono::Duration::hours(1),
                 handler: Default::default(),
+                meta: None,
             }));
             payloads.push(tool_call_completed(&tc_id));
             payloads.push(tool_msg(&tc_id));
@@ -853,6 +854,7 @@ mod tests {
                 arguments: "{}".into(),
                 deadline: chrono::Utc::now() + chrono::Duration::hours(1),
                 handler: Default::default(),
+                meta: None,
             }));
             payloads.push(tool_call_completed(&tc_id));
             payloads.push(tool_msg(&tc_id));
@@ -995,6 +997,7 @@ mod tests {
                     arguments: "{}".into(),
                     deadline: chrono::Utc::now() + chrono::Duration::hours(1),
                     handler: Default::default(),
+                    meta: None,
                 }),
                 tool_call_completed(tc_id),
                 tool_msg(tc_id),

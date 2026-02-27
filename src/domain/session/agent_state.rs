@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::domain::aggregate::Aggregate;
 use crate::domain::event::{
     AgentConfig, Artifact, CompletionDelivery, EventPayload, LlmRequest, LlmResponse, Message,
-    Role, SessionAuth, ToolHandler,
+    Role, ClientIdentity, ToolCallMeta, ToolHandler,
 };
 use crate::domain::openai;
 
@@ -143,9 +143,18 @@ pub struct ToolCallState {
     pub retry: RetryState,
     pub deadline: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub child_session_id: Option<Uuid>,
+    pub meta: Option<ToolCallMeta>,
     #[serde(default)]
     pub handler: ToolHandler,
+}
+
+impl ToolCallState {
+    pub fn child_session_id(&self) -> Option<Uuid> {
+        match &self.meta {
+            Some(ToolCallMeta::SubAgent { child_session_id, .. }) => Some(*child_session_id),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,7 +182,7 @@ pub struct AgentState {
     pub session_id: Uuid,
     pub status: SessionStatus,
     pub agent: Option<AgentConfig>,
-    pub auth: Option<SessionAuth>,
+    pub auth: Option<ClientIdentity>,
     pub messages: Vec<Message>,
     pub started_at: Option<DateTime<Utc>>,
     pub token_usage: TokenUsage,
@@ -312,19 +321,6 @@ impl AgentState {
                     existing.status = ToolCallStatus::Pending;
                     existing.deadline = payload.deadline;
                 } else {
-                    let is_sub_agent = self
-                        .agent
-                        .as_ref()
-                        .map(|a| a.sub_agents.iter().any(|s| s == &payload.name))
-                        .unwrap_or(false);
-                    let child_session_id = if is_sub_agent {
-                        Some(Uuid::new_v5(
-                            &self.session_id,
-                            payload.tool_call_id.as_bytes(),
-                        ))
-                    } else {
-                        None
-                    };
                     self.tool_calls.insert(
                         payload.tool_call_id.clone(),
                         ToolCallState {
@@ -334,7 +330,7 @@ impl AgentState {
                             result: None,
                             retry: RetryState::default(),
                             deadline: payload.deadline,
-                            child_session_id,
+                            meta: payload.meta.clone(),
                             handler: payload.handler.clone(),
                         },
                     );

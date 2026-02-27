@@ -225,6 +225,8 @@ pub enum AgUiEvent {
         tool_call_name: String,
         #[serde(skip_serializing_if = "Option::is_none", rename = "parentMessageId")]
         parent_message_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none", rename = "childSessionId")]
+        child_session_id: Option<String>,
     },
     ToolCallArgs {
         #[serde(rename = "toolCallId")]

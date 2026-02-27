@@ -2,20 +2,20 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Utc;
-use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
+use ractor::{call_t, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use uuid::Uuid;
 
 use crate::domain::agent::AgentConfig;
 use crate::domain::aggregate::DomainEvent;
 use crate::domain::event::*;
 use crate::domain::session::{
-    AgentSession, AgentState, CommandPayload, Effect, IncomingMessage, SessionCommand,
-    SessionError, SessionStatus,
+    AgentSession, AgentState, CommandPayload, Effect, IncomingMessage, McpToolEntry,
+    SessionCommand, SessionError, SessionStatus,
 };
 
 use super::event_store::{Event, EventStore, StoreError};
 use super::llm::{LlmClientProvider, StreamDelta};
-use super::mcp::{Content, McpClient, McpClientProvider};
+use super::mcp::{Content, McpClient};
 use super::strategy::StrategyProvider;
 use super::{RuntimeMessage, SubAgentRequest};
 
@@ -67,7 +67,7 @@ pub enum SessionMessage {
 
 pub struct SessionInit {
     pub agent: AgentConfig,
-    pub auth: SessionAuth,
+    pub auth: ClientIdentity,
     pub on_done: Option<CompletionDelivery>,
     pub span: SpanContext,
 }
@@ -77,10 +77,11 @@ pub struct SessionActorArgs {
     pub init: SessionInit,
     pub store: Arc<dyn EventStore>,
     pub llm_provider: Arc<dyn LlmClientProvider>,
-    pub mcp_provider: Arc<dyn McpClientProvider>,
+    pub mcp_clients: Vec<Arc<dyn McpClient>>,
     pub strategy_provider: Arc<dyn StrategyProvider>,
     pub agents: HashMap<String, AgentConfig>,
     pub runtime: ActorRef<RuntimeMessage>,
+    pub budget_actor: Option<ActorRef<super::budget::BudgetMessage>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -93,9 +94,8 @@ pub struct SessionActorState {
     pub session_id: Uuid,
     pub session: AgentSession,
     pub store: Arc<dyn EventStore>,
-    pub auth: SessionAuth,
+    pub auth: ClientIdentity,
     pub llm_provider: Arc<dyn LlmClientProvider>,
-    pub mcp_provider: Arc<dyn McpClientProvider>,
     pub strategy_provider: Arc<dyn StrategyProvider>,
     pub mcp_clients: Vec<Arc<dyn McpClient>>,
     pub agents: HashMap<String, AgentConfig>,
@@ -104,6 +104,8 @@ pub struct SessionActorState {
     pub stream: bool,
     /// Tools provided by the client (frontend), executed client-side.
     pub client_tools: Vec<crate::domain::openai::Tool>,
+    /// Optional budget actor for cross-session budget enforcement.
+    pub budget_actor: Option<ActorRef<super::budget::BudgetMessage>>,
 }
 
 impl SessionActorState {
@@ -159,6 +161,28 @@ impl SessionActorState {
         self.mcp_clients
             .iter()
             .find(|c| c.tools().iter().any(|t| t.name == tool_name))
+    }
+
+    /// Sync the session's MCP tool map from the current MCP clients.
+    fn sync_mcp_tools(&mut self) {
+        self.session.mcp_tools = self
+            .mcp_clients
+            .iter()
+            .flat_map(|c| {
+                let info = c.server_info();
+                let server_name = info.name.clone();
+                let server_version = info.version.clone();
+                c.tools().iter().map(move |t| {
+                    (
+                        t.name.clone(),
+                        McpToolEntry {
+                            server_name: server_name.clone(),
+                            server_version: server_version.clone(),
+                        },
+                    )
+                })
+            })
+            .collect();
     }
 }
 
@@ -232,19 +256,70 @@ async fn handle_effect(
                 payload,
             }));
         }
-        Effect::StartMcpServers(configs) => {
-            for config in &configs {
-                match state.mcp_provider.start_server(config, &state.auth).await {
-                    Ok(client) => state.mcp_clients.push(client),
-                    Err(e) => eprintln!("MCP '{}' failed: {}", config.name, e),
-                }
-            }
+        Effect::StartMcpServers(_configs) => {
+            // MCP clients are pre-resolved by the runtime before session startup.
+            // Sync tools in case this is a fresh session reacting to SessionCreated.
+            state.sync_mcp_tools();
         }
         Effect::CallLlm {
             call_id,
             request,
             stream,
         } => {
+            // Budget reservation check (fail-open if unreachable)
+            if let Some(ref budget_actor) = state.budget_actor {
+                let ctx = build_budget_context(state);
+                let estimated = estimate_tokens(&request);
+
+                match call_t!(
+                    budget_actor,
+                    super::budget::BudgetMessage::Reserve,
+                    5000,
+                    super::budget::ReserveRequest {
+                        session_id: state.session_id,
+                        call_id: call_id.clone(),
+                        context: ctx,
+                        estimated_tokens: estimated,
+                    }
+                ) {
+                    Ok(crate::domain::budget::ReservationResult::Denied {
+                        policy_name,
+                        strategy,
+                        ..
+                    }) => {
+                        let payload = match strategy {
+                            crate::domain::config::ExhaustionStrategy::Reject => {
+                                CommandPayload::FailLlmCall {
+                                    call_id,
+                                    error: format!("budget '{}' exceeded", policy_name),
+                                    retryable: false,
+                                    source: None,
+                                }
+                            }
+                            crate::domain::config::ExhaustionStrategy::Interrupt => {
+                                CommandPayload::Interrupt {
+                                    interrupt_id: Uuid::new_v4().to_string(),
+                                    reason: format!("budget_exceeded:{}", policy_name),
+                                    payload: serde_json::json!({ "policy": policy_name }),
+                                }
+                            }
+                        };
+                        let _ = execute(
+                            state,
+                            SessionCommand {
+                                span: span.child(),
+                                occurred_at: Utc::now(),
+                                payload,
+                            },
+                        )
+                        .await;
+                        return;
+                    }
+                    Ok(crate::domain::budget::ReservationResult::Granted) => {}
+                    Err(_) => { /* fail-open: budget actor unreachable, proceed */ }
+                }
+            }
+
             let client_id = state
                 .session
                 .agent_state
@@ -336,7 +411,7 @@ async fn handle_effect(
                 .agent_state
                 .tool_calls
                 .get(&tool_call_id)
-                .and_then(|tc| tc.child_session_id)
+                .and_then(|tc| tc.child_session_id())
             {
                 let message = arguments
                     .get("message")
@@ -417,6 +492,45 @@ async fn handle_effect(
     }
 }
 
+/// Build a budget context from the current session state.
+fn build_budget_context(state: &SessionActorState) -> crate::domain::budget::BudgetContext {
+    let mut ctx = crate::domain::budget::BudgetContext::default();
+    ctx.set("session_id", state.session_id.to_string());
+    ctx.set("tenant_id", &state.auth.tenant_id);
+    if let Some(ref sub) = state.auth.sub {
+        ctx.set("user_id", sub);
+    }
+    for (k, v) in &state.auth.attrs {
+        ctx.set(k, v);
+    }
+    if let Some(ref agent) = state.session.agent_state.agent {
+        ctx.set("agent", &agent.name);
+        ctx.set("model", agent.llm.params.get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown"));
+        ctx.set("llm_client", &agent.llm.client);
+    }
+    ctx
+}
+
+/// Estimate tokens for a budget reservation.
+fn estimate_tokens(request: &LlmRequest) -> u64 {
+    match request {
+        LlmRequest::OpenAi(req) => {
+            if let Some(max) = req.max_tokens {
+                return max as u64;
+            }
+            // Rough estimate: count characters in messages / 4
+            let chars: usize = req
+                .messages
+                .iter()
+                .map(|m| m.content.as_deref().map_or(0, |c| c.len()))
+                .sum();
+            (chars / 4).max(100) as u64
+        }
+    }
+}
+
 /// Fire-and-forget delivery of sub-agent result to parent session.
 fn deliver_to_parent(delivery: &CompletionDelivery, artifacts: &[Artifact]) {
     let result = serde_json::to_string(artifacts).unwrap_or_default();
@@ -455,7 +569,7 @@ impl Actor for SessionActor {
         let init_span = args.init.span;
 
         // Try to resume from store; if not found, create a new session.
-        let mut session = match args.store.load(session_id, &auth.tenant_id) {
+        let mut session = match args.store.load(session_id, &auth.tenant_id).await {
             Ok(loaded) => {
                 let snapshot: AgentState = serde_json::from_value(loaded.snapshot)
                     .map_err(|e| format!("snapshot deserialize: {e}"))?;
@@ -515,16 +629,27 @@ impl Actor for SessionActor {
             Err(e) => return Err(format!("load: {e}").into()),
         };
 
-        // Start MCP servers
-        let mut mcp_clients = Vec::new();
-        if let Some(agent) = &session.agent_state.agent {
-            for config in &agent.mcp_servers {
-                match args.mcp_provider.start_server(config, &auth).await {
-                    Ok(client) => mcp_clients.push(client),
-                    Err(e) => eprintln!("MCP '{}' failed: {}", config.name, e),
-                }
-            }
-        }
+        // MCP clients are pre-resolved by the runtime (shared actors per agent).
+        let mcp_clients = args.mcp_clients;
+
+        // Populate MCP tool metadata on the session
+        session.mcp_tools = mcp_clients
+            .iter()
+            .flat_map(|c| {
+                let info = c.server_info();
+                let server_name = info.name.clone();
+                let server_version = info.version.clone();
+                c.tools().iter().map(move |t| {
+                    (
+                        t.name.clone(),
+                        McpToolEntry {
+                            server_name: server_name.clone(),
+                            server_version: server_version.clone(),
+                        },
+                    )
+                })
+            })
+            .collect();
 
         // Prevent double-react on events already in the store
         session.agent_state.last_reacted = session.agent_state.last_applied;
@@ -547,13 +672,13 @@ impl Actor for SessionActor {
             store: args.store,
             auth,
             llm_provider: args.llm_provider,
-            mcp_provider: args.mcp_provider,
             strategy_provider: args.strategy_provider,
             mcp_clients,
             agents: args.agents,
             runtime: args.runtime,
             stream: false,
             client_tools: Vec::new(),
+            budget_actor: args.budget_actor,
         })
     }
 
@@ -584,7 +709,7 @@ impl Actor for SessionActor {
                     state.stream = *stream;
                 }
                 if let Err(e) = execute(state, cmd).await {
-                    eprintln!("session cast error: {e}");
+                    tracing::error!(error = %e, "session cast error");
                 }
             }
             SessionMessage::Events(typed_events) => {
@@ -614,7 +739,7 @@ impl Actor for SessionActor {
                             .tool_calls
                             .get(&payload.tool_call_id)
                         {
-                            if let Some(child_id) = tc.child_session_id {
+                            if let Some(child_id) = tc.child_session_id() {
                                 super::send_to_session(child_id, SessionMessage::Cancel);
                             }
                         }
@@ -635,7 +760,7 @@ impl Actor for SessionActor {
                     payload: CommandPayload::Wake,
                 };
                 if let Err(e) = execute(state, cmd).await {
-                    eprintln!("session wake error: {e}");
+                    tracing::error!(error = %e, "session wake error");
                 }
             }
             SessionMessage::Cancel => {
@@ -692,11 +817,11 @@ mod tests {
         }
     }
 
-    fn test_auth() -> SessionAuth {
-        SessionAuth {
+    fn test_auth() -> ClientIdentity {
+        ClientIdentity {
             tenant_id: "t".into(),
-            client_id: "c".into(),
             sub: None,
+            attrs: Default::default(),
         }
     }
 
@@ -970,6 +1095,7 @@ mod tests {
                     arguments: "{}".into(),
                     deadline: far_future(),
                     handler: Default::default(),
+                    meta: None,
                 }),
             ],
         );
@@ -1035,6 +1161,7 @@ mod tests {
                     arguments: "{}".into(),
                     deadline: far_future(),
                     handler: Default::default(),
+                    meta: None,
                 }),
                 EventPayload::ToolCallCompleted(ToolCallCompleted {
                     tool_call_id: tool_call_id.clone(),

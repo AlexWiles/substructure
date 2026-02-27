@@ -7,14 +7,15 @@ use uuid::Uuid;
 use chrono::Utc;
 
 use crate::domain::agent::AgentConfig;
-use crate::domain::config::{EventStoreConfig, SystemConfig};
-use crate::domain::event::{CompletionDelivery, SessionAuth, SpanContext};
+use crate::domain::config::{BudgetPolicyConfig, EventStoreConfig, SystemConfig};
+use crate::domain::event::{CompletionDelivery, ClientIdentity, SpanContext};
 use crate::domain::session::{AgentState, CommandPayload, IncomingMessage, SessionCommand};
 use crate::domain::aggregate::DomainEvent;
 use dispatcher::spawn_aggregate_dispatcher;
 use event_store::Event;
 use wake_scheduler::spawn_wake_scheduler;
 
+pub mod budget;
 pub mod dispatcher;
 pub mod event_store;
 pub mod jsonrpc;
@@ -28,7 +29,7 @@ pub mod wake_scheduler;
 #[cfg(feature = "sqlite")]
 pub use event_store::SqliteEventStore;
 pub use event_store::{
-    EventStore, InMemoryEventStore, SessionFilter, SessionIndex, SessionSummary, StoreError,
+    EventStore, SessionFilter, SessionIndex, SessionSummary, StoreError,
     StreamLoad, Version,
 };
 pub use llm::{LlmClient, MockLlmClient, OpenAiClient, StreamDelta};
@@ -37,7 +38,7 @@ pub use mcp::{
     CallToolResult, Content, McpClient, McpError, ServerCapabilities, ServerInfo, StdioMcpClient,
     ToolAnnotations, ToolDefinition,
 };
-pub use mcp::{McpClientProvider, StaticMcpClientProvider};
+pub use mcp::{McpActorClient, McpMessage, mcp_actor_name, spawn_mcp_actor};
 pub use session_actor::SessionActorArgs;
 pub use session_actor::{
     RuntimeError, SessionActor, SessionActorState, SessionInit, SessionMessage,
@@ -87,13 +88,14 @@ pub enum RuntimeMessage {
         RpcReplyPort<Result<SessionHandle, RuntimeError>>,
     ),
     RunSubAgent(SubAgentRequest),
+    ResumeAll,
 }
 
 pub struct SubAgentRequest {
     pub session_id: Uuid,
     pub agent_name: String,
     pub message: String,
-    pub auth: SessionAuth,
+    pub auth: ClientIdentity,
     pub delivery: CompletionDelivery,
     pub span: SpanContext,
     pub token_budget: Option<u64>,
@@ -112,8 +114,8 @@ struct RuntimeState {
     session_index: Arc<dyn SessionIndex>,
     agents: HashMap<String, AgentConfig>,
     llm_provider: Arc<dyn LlmClientProvider>,
-    mcp_provider: Arc<dyn McpClientProvider>,
     strategy_provider: Arc<dyn StrategyProvider>,
+    budget_policies: Vec<BudgetPolicyConfig>,
 }
 
 struct RuntimeArgs {
@@ -121,11 +123,65 @@ struct RuntimeArgs {
     session_index: Arc<dyn SessionIndex>,
     agents: HashMap<String, AgentConfig>,
     llm_provider: Arc<dyn LlmClientProvider>,
-    mcp_provider: Arc<dyn McpClientProvider>,
     strategy_provider: Arc<dyn StrategyProvider>,
+    budget_policies: Vec<BudgetPolicyConfig>,
 }
 
 impl RuntimeState {
+    /// Get or spawn a budget actor for the given tenant.
+    /// Returns `None` if no budget policies are configured.
+    async fn get_or_spawn_budget_actor(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<ActorRef<budget::BudgetMessage>>, RuntimeError> {
+        if self.budget_policies.is_empty() {
+            return Ok(None);
+        }
+        let actor_name = budget::budget_actor_name(tenant_id);
+        if let Some(cell) = ractor::registry::where_is(actor_name) {
+            return Ok(Some(cell.into()));
+        }
+        let actor = budget::spawn_budget_actor(
+            tenant_id.to_string(),
+            self.budget_policies.clone(),
+            self.store.clone(),
+            self.myself.get_cell(),
+        )
+        .await
+        .map_err(|e| RuntimeError::ActorCall(format!("budget: {e}")))?;
+        Ok(Some(actor))
+    }
+
+    #[tracing::instrument(skip(self, agent), fields(agent = %agent.name))]
+    async fn get_or_spawn_mcp_actors(
+        &self,
+        agent: &AgentConfig,
+    ) -> Result<Vec<Arc<dyn McpClient>>, RuntimeError> {
+        if agent.mcp_servers.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut clients: Vec<Arc<dyn McpClient>> = Vec::with_capacity(agent.mcp_servers.len());
+        for config in &agent.mcp_servers {
+            let name = mcp::mcp_actor_name(&agent.name, &config.name);
+            let actor_ref: ActorRef<mcp::McpMessage> =
+                if let Some(cell) = ractor::registry::where_is(name) {
+                    cell.into()
+                } else {
+                    mcp::spawn_mcp_actor(&agent.name, config.clone(), self.myself.get_cell())
+                        .await
+                        .map_err(|e| {
+                            RuntimeError::ActorCall(format!("mcp {}: {e}", config.name))
+                        })?
+                };
+            let client = mcp::McpActorClient::from_actor(actor_ref)
+                .await
+                .map_err(|e| RuntimeError::ActorCall(format!("mcp {}: {e}", config.name)))?;
+            clients.push(Arc::new(client));
+        }
+        Ok(clients)
+    }
+
+    #[tracing::instrument(skip(self, init), fields(%session_id))]
     async fn start_session(
         &self,
         session_id: Uuid,
@@ -139,6 +195,8 @@ impl RuntimeState {
             if let Some(cell) = ractor::registry::where_is(actor_name.clone()) {
                 cell.into()
             } else {
+                let budget_actor = self.get_or_spawn_budget_actor(&auth.tenant_id).await?;
+                let mcp_clients = self.get_or_spawn_mcp_actors(&init.agent).await?;
                 let (actor, _actor_handle) = Actor::spawn_linked(
                     Some(actor_name),
                     SessionActor,
@@ -147,10 +205,11 @@ impl RuntimeState {
                         init,
                         store: self.store.clone(),
                         llm_provider: self.llm_provider.clone(),
-                        mcp_provider: self.mcp_provider.clone(),
+                        mcp_clients,
                         strategy_provider: self.strategy_provider.clone(),
                         agents: self.agents.clone(),
                         runtime: self.myself.clone(),
+                        budget_actor,
                     },
                     self.myself.get_cell(),
                 )
@@ -188,22 +247,22 @@ impl RuntimeState {
             needs_wake: Some(true),
             ..Default::default()
         };
-        let sessions = self.session_index.list_sessions(&filter);
+        let sessions = self.session_index.list_sessions(&filter).await;
+        if !sessions.is_empty() {
+            tracing::info!(count = sessions.len(), "resuming sessions");
+        }
         for summary in sessions {
             let agent = match self.agents.get(&summary.agent_name) {
                 Some(a) => a.clone(),
                 None => {
-                    eprintln!(
-                        "warn: unknown agent '{}' for session {}, skipping resume",
-                        summary.agent_name, summary.session_id
-                    );
+                    tracing::warn!(agent = %summary.agent_name, session = %summary.session_id, "unknown agent, skipping resume");
                     continue;
                 }
             };
-            let auth = SessionAuth {
+            let auth = ClientIdentity {
                 tenant_id: summary.tenant_id,
-                client_id: summary.client_id,
                 sub: None,
+                attrs: Default::default(),
             };
             let init = SessionInit {
                 agent,
@@ -212,10 +271,7 @@ impl RuntimeState {
                 span: SpanContext::root(),
             };
             if let Err(e) = self.start_session(summary.session_id, init).await {
-                eprintln!(
-                    "warn: failed to resume session {}: {}",
-                    summary.session_id, e
-                );
+                tracing::warn!(session = %summary.session_id, error = %e, "failed to resume session");
             }
         }
     }
@@ -231,6 +287,8 @@ impl RuntimeState {
             agent.token_budget = Some(budget);
         }
 
+        let budget_actor = self.get_or_spawn_budget_actor(&req.auth.tenant_id).await?;
+        let mcp_clients = self.get_or_spawn_mcp_actors(&agent).await?;
         let msg_span = req.span.child();
 
         let init = SessionInit {
@@ -241,23 +299,30 @@ impl RuntimeState {
         };
 
         let actor_name = session_actor_name(req.session_id);
-        let (session_actor, _) = Actor::spawn_linked(
-            Some(actor_name),
-            SessionActor,
-            SessionActorArgs {
-                session_id: req.session_id,
-                init,
-                store: self.store.clone(),
-                llm_provider: self.llm_provider.clone(),
-                mcp_provider: self.mcp_provider.clone(),
-                strategy_provider: self.strategy_provider.clone(),
-                agents: self.agents.clone(),
-                runtime: self.myself.clone(),
-            },
-            self.myself.get_cell(),
-        )
-        .await
-        .map_err(|e| RuntimeError::ActorCall(format!("sub-agent: {e}")))?;
+        let session_actor: ActorRef<SessionMessage> =
+            if let Some(cell) = ractor::registry::where_is(actor_name.clone()) {
+                cell.into()
+            } else {
+                let (actor, _) = Actor::spawn_linked(
+                    Some(actor_name),
+                    SessionActor,
+                    SessionActorArgs {
+                        session_id: req.session_id,
+                        init,
+                        store: self.store.clone(),
+                        llm_provider: self.llm_provider.clone(),
+                        mcp_clients,
+                        strategy_provider: self.strategy_provider.clone(),
+                        agents: self.agents.clone(),
+                        runtime: self.myself.clone(),
+                        budget_actor,
+                    },
+                    self.myself.get_cell(),
+                )
+                .await
+                .map_err(|e| RuntimeError::ActorCall(format!("sub-agent: {e}")))?;
+                actor
+            };
 
         // Send user message to the sub-agent
         let _ = call_t!(
@@ -296,11 +361,12 @@ impl Actor for RuntimeActor {
             session_index: args.session_index,
             agents: args.agents,
             llm_provider: args.llm_provider,
-            mcp_provider: args.mcp_provider,
             strategy_provider: args.strategy_provider,
+            budget_policies: args.budget_policies,
         };
 
         // Spawn infrastructure actors (linked to RuntimeActor)
+        tracing::debug!("spawning event dispatcher");
         spawn_aggregate_dispatcher::<AgentState>(
             &args.store,
             Arc::new(session_route),
@@ -308,6 +374,7 @@ impl Actor for RuntimeActor {
         )
         .await
         .map_err(|e| format!("failed to spawn dispatcher: {e}"))?;
+        tracing::debug!("spawning wake scheduler");
         spawn_wake_scheduler(
             args.store,
             state.session_index.clone(),
@@ -316,8 +383,8 @@ impl Actor for RuntimeActor {
         .await
         .map_err(|e| format!("failed to spawn wake scheduler: {e}"))?;
 
-        // Resume sessions that need waking after restart
-        state.resume_all().await;
+        // Defer session resumption so pre_start completes immediately
+        let _ = myself.send_message(RuntimeMessage::ResumeAll);
 
         Ok(state)
     }
@@ -335,8 +402,11 @@ impl Actor for RuntimeActor {
             }
             RuntimeMessage::RunSubAgent(req) => {
                 if let Err(e) = state.run_sub_agent(req).await {
-                    eprintln!("runtime: sub-agent error: {e}");
+                    tracing::error!(error = %e, "sub-agent error");
                 }
+            }
+            RuntimeMessage::ResumeAll => {
+                state.resume_all().await;
             }
         }
         Ok(())
@@ -351,12 +421,12 @@ impl Actor for RuntimeActor {
         match &message {
             SupervisionEvent::ActorFailed(who, err) => {
                 let name = who.get_name();
-                eprintln!("runtime: child {:?} failed: {err}", name);
+                tracing::error!(actor = ?name, error = %err, "child actor failed");
                 restart_infrastructure(name, state).await;
             }
             SupervisionEvent::ActorTerminated(who, _, reason) => {
                 let name = who.get_name();
-                eprintln!("runtime: child {:?} terminated: {reason:?}", name);
+                tracing::error!(actor = ?name, reason = ?reason, "child actor terminated");
                 restart_infrastructure(name, state).await;
             }
             _ => {}
@@ -365,11 +435,11 @@ impl Actor for RuntimeActor {
     }
 }
 
-/// Restart dispatcher or wake-scheduler if they died; sessions just get logged.
+/// Restart dispatcher, wake-scheduler, or budget actors if they died; sessions just get logged.
 async fn restart_infrastructure(name: Option<String>, state: &RuntimeState) {
     match name.as_deref() {
         Some("session-dispatcher") => {
-            eprintln!("runtime: restarting session-dispatcher");
+            tracing::info!("restarting session-dispatcher");
             if let Err(e) = spawn_aggregate_dispatcher::<AgentState>(
                 &state.store,
                 Arc::new(session_route),
@@ -377,11 +447,11 @@ async fn restart_infrastructure(name: Option<String>, state: &RuntimeState) {
             )
             .await
             {
-                eprintln!("runtime: failed to restart session-dispatcher: {e}");
+                tracing::error!(error = %e, "failed to restart session-dispatcher");
             }
         }
         Some("wake-scheduler") => {
-            eprintln!("runtime: restarting wake-scheduler");
+            tracing::info!("restarting wake-scheduler");
             if let Err(e) = spawn_wake_scheduler(
                 state.store.clone(),
                 state.session_index.clone(),
@@ -389,7 +459,25 @@ async fn restart_infrastructure(name: Option<String>, state: &RuntimeState) {
             )
             .await
             {
-                eprintln!("runtime: failed to restart wake-scheduler: {e}");
+                tracing::error!(error = %e, "failed to restart wake-scheduler");
+            }
+        }
+        Some(name) if name.starts_with("mcp-") => {
+            tracing::info!(server = %name, "MCP actor died, will re-spawn on next use");
+            // MCP actors are lazily re-spawned by get_or_spawn_mcp_actors on next session start.
+        }
+        Some(name) if name.starts_with("budget-") => {
+            let tenant_id = &name["budget-".len()..];
+            tracing::info!(tenant = %tenant_id, "restarting budget actor");
+            if let Err(e) = budget::spawn_budget_actor(
+                tenant_id.to_string(),
+                state.budget_policies.clone(),
+                state.store.clone(),
+                state.myself.get_cell(),
+            )
+            .await
+            {
+                tracing::error!(error = %e, "failed to restart budget actor");
             }
         }
         _ => {
@@ -411,7 +499,7 @@ pub struct Runtime {
 
 impl Runtime {
     pub async fn start(config: &SystemConfig) -> Result<Self, RuntimeError> {
-        let (store, session_index) = create_event_store(&config.event_store);
+        let (store, session_index) = create_event_store(&config.event_store).await;
 
         let llm_provider =
             StaticLlmClientProvider::from_config(&config.llm_clients, &default_llm_factories())
@@ -425,12 +513,18 @@ impl Runtime {
                 session_index: session_index.clone(),
                 agents: config.agents.clone(),
                 llm_provider: Arc::new(llm_provider),
-                mcp_provider: Arc::new(StaticMcpClientProvider),
                 strategy_provider: Arc::new(StaticStrategyProvider),
+                budget_policies: config.budgets.clone(),
             },
         )
         .await
         .map_err(|e| RuntimeError::ActorCall(e.to_string()))?;
+
+        tracing::info!(
+            agents = config.agents.len(),
+            budgets = config.budgets.len(),
+            "runtime started",
+        );
 
         Ok(Runtime {
             actor,
@@ -450,7 +544,7 @@ impl Runtime {
     pub async fn create_session_for(
         &self,
         agent_name: &str,
-        auth: SessionAuth,
+        auth: ClientIdentity,
     ) -> Result<SessionHandle, RuntimeError> {
         self.start_session(Uuid::new_v4(), agent_name, auth).await
     }
@@ -460,7 +554,7 @@ impl Runtime {
         &self,
         session_id: Uuid,
         agent_name: &str,
-        auth: SessionAuth,
+        auth: ClientIdentity,
     ) -> Result<SessionHandle, RuntimeError> {
         let agent = self
             .agents
@@ -491,7 +585,7 @@ impl Runtime {
     pub async fn connect(
         &self,
         session_id: Uuid,
-        auth: SessionAuth,
+        auth: ClientIdentity,
         on_event: Option<OnEvent>,
     ) -> Result<SessionHandle, RuntimeError> {
         let session_actor: ActorRef<SessionMessage> =
@@ -534,6 +628,11 @@ impl Runtime {
         &self.session_index
     }
 
+    /// Return the names of all configured agents.
+    pub fn agent_names(&self) -> Vec<&str> {
+        self.agents.keys().map(|s| s.as_str()).collect()
+    }
+
     pub fn shutdown(self) {
         self.actor.stop(None);
     }
@@ -569,16 +668,15 @@ impl SessionHandle {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-fn create_event_store(config: &EventStoreConfig) -> (Arc<dyn EventStore>, Arc<dyn SessionIndex>) {
+async fn create_event_store(config: &EventStoreConfig) -> (Arc<dyn EventStore>, Arc<dyn SessionIndex>) {
     match config {
-        EventStoreConfig::InMemory => {
-            let store = Arc::new(InMemoryEventStore::new());
-            (store.clone(), store)
-        }
         #[cfg(feature = "sqlite")]
         EventStoreConfig::Sqlite { path } => {
-            let store =
-                Arc::new(SqliteEventStore::new(path).expect("failed to open SQLite event store"));
+            let store = Arc::new(
+                SqliteEventStore::new(path)
+                    .await
+                    .expect("failed to open SQLite event store"),
+            );
             (store.clone(), store)
         }
         #[cfg(not(feature = "sqlite"))]

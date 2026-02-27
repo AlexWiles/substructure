@@ -5,7 +5,7 @@ use async_trait::async_trait;
 
 use super::client::LlmClient;
 use crate::domain::config::LlmClientConfig;
-use crate::domain::event::SessionAuth;
+use crate::domain::event::ClientIdentity;
 
 pub type LlmClientFactory = Box<
     dyn Fn(&serde_json::Map<String, serde_json::Value>) -> Result<Arc<dyn LlmClient>, String>
@@ -24,7 +24,7 @@ pub trait LlmClientProvider: Send + Sync + 'static {
     async fn resolve(
         &self,
         client_id: &str,
-        auth: &SessionAuth,
+        auth: &ClientIdentity,
     ) -> Result<Arc<dyn LlmClient>, ProviderError>;
 }
 
@@ -57,7 +57,7 @@ impl LlmClientProvider for StaticLlmClientProvider {
     async fn resolve(
         &self,
         client_id: &str,
-        _auth: &SessionAuth,
+        _auth: &ClientIdentity,
     ) -> Result<Arc<dyn LlmClient>, ProviderError> {
         self.clients
             .get(client_id)

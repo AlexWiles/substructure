@@ -4,7 +4,7 @@ mod command_handler;
 mod event_handler;
 pub mod strategy;
 
-pub use agent_session::AgentSession;
+pub use agent_session::{AgentSession, McpToolEntry};
 pub use agent_state::{
     AgentState, CompletionTokensDetails, DerivedState, LlmCallStatus, PromptTokensDetails,
     SessionStatus, StrategySlot, TokenBudget, TokenUsage, ToolCallStatus,

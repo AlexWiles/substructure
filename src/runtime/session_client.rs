@@ -6,7 +6,7 @@ use uuid::Uuid;
 use super::event_store::EventStore;
 use super::session_actor::SessionMessage;
 use crate::domain::aggregate::DomainEvent;
-use crate::domain::event::SessionAuth;
+use crate::domain::event::ClientIdentity;
 use crate::domain::session::AgentState;
 
 // ---------------------------------------------------------------------------
@@ -27,7 +27,7 @@ pub struct SessionClientState {
 
 pub struct SessionClientArgs {
     pub session_id: Uuid,
-    pub auth: SessionAuth,
+    pub auth: ClientIdentity,
     pub session_actor: ActorRef<SessionMessage>,
     pub store: Arc<dyn EventStore>,
     pub on_event: Option<OnEvent>,
@@ -43,7 +43,7 @@ impl Actor for SessionClientActor {
         myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        let core = match args.store.load(args.session_id, &args.auth.tenant_id) {
+        let core = match args.store.load(args.session_id, &args.auth.tenant_id).await {
             Ok(load) => serde_json::from_value(load.snapshot)
                 .unwrap_or_else(|_| AgentState::new(args.session_id)),
             Err(_) => AgentState::new(args.session_id),
@@ -74,10 +74,7 @@ impl Actor for SessionClientActor {
                         let _ = reply.send(inner);
                     }
                     Err(e) => {
-                        eprintln!(
-                            "session-client[{}]: call to session actor failed: {e}",
-                            state.session_id
-                        );
+                        tracing::error!(session = %state.session_id, error = %e, "call to session actor failed");
                     }
                 }
             }

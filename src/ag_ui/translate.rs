@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::domain::aggregate::DomainEvent;
-use crate::domain::event::EventPayload;
+use crate::domain::event::{EventPayload, ToolCallMeta};
 use crate::domain::session::AgentState;
 
 use super::types::{AgUiEvent, InterruptInfo};
@@ -154,25 +154,8 @@ impl EventTranslator {
                     events.push(AgUiEvent::TextMessageEnd { message_id });
                 }
 
-                // Emit tool calls
-                for tc in &msg.message.tool_calls {
-                    if self.emitted_tool_calls.insert(tc.id.clone()) {
-                        events.push(AgUiEvent::ToolCallStart {
-                            tool_call_id: tc.id.clone(),
-                            tool_call_name: tc.name.clone(),
-                            parent_message_id: Some(msg.call_id.clone()),
-                        });
-                        if !tc.arguments.is_empty() {
-                            events.push(AgUiEvent::ToolCallArgs {
-                                tool_call_id: tc.id.clone(),
-                                delta: tc.arguments.clone(),
-                            });
-                        }
-                        events.push(AgUiEvent::ToolCallEnd {
-                            tool_call_id: tc.id.clone(),
-                        });
-                    }
-                }
+                // Tool calls are emitted from ToolCallRequested (which follows
+                // immediately in the event stream) to include meta like child_session_id.
 
                 // Terminal detection: text content with no tool calls = run finished
                 if has_text && !has_tool_calls {
@@ -183,15 +166,21 @@ impl EventTranslator {
             }
 
             EventPayload::ToolCallRequested(req) => {
-                // Skip if already emitted via MessageAssistant
                 if !self.emitted_tool_calls.insert(req.tool_call_id.clone()) {
                     return TranslateOutput::Events(vec![]);
                 }
 
+                let child_session_id = match &req.meta {
+                    Some(ToolCallMeta::SubAgent {
+                        child_session_id, ..
+                    }) => Some(child_session_id.to_string()),
+                    _ => None,
+                };
                 let mut events = vec![AgUiEvent::ToolCallStart {
                     tool_call_id: req.tool_call_id.clone(),
                     tool_call_name: req.name.clone(),
                     parent_message_id: None,
+                    child_session_id,
                 }];
                 if !req.arguments.is_empty() {
                     events.push(AgUiEvent::ToolCallArgs {
@@ -461,7 +450,8 @@ mod tests {
         let call_id = "call-1".to_string();
         let tc_id = "tc-1".to_string();
 
-        // MessageAssistant with tool calls
+        // MessageAssistant with tool calls — no longer emits ToolCallStart
+        // (deferred to ToolCallRequested which carries meta)
         let events = assert_events(translator.translate(&make_event(
             EventPayload::MessageAssistant(MessageAssistant {
                 call_id: call_id.clone(),
@@ -479,12 +469,9 @@ mod tests {
                 },
             }),
         )));
-        assert_eq!(events.len(), 3);
-        assert_eq!(event_type(&events[0]), "ToolCallStart");
-        assert_eq!(event_type(&events[1]), "ToolCallArgs");
-        assert_eq!(event_type(&events[2]), "ToolCallEnd");
+        assert_eq!(events.len(), 0);
 
-        // ToolCallRequested for the same ID -> deduplicated (skipped)
+        // ToolCallRequested emits ToolCallStart/Args/End
         let events = assert_events(translator.translate(&make_event(
             EventPayload::ToolCallRequested(ToolCallRequested {
                 tool_call_id: tc_id.clone(),
@@ -492,9 +479,13 @@ mod tests {
                 arguments: r#"{"city":"NYC"}"#.into(),
                 deadline: Utc::now() + chrono::Duration::hours(1),
                 handler: Default::default(),
+                meta: None,
             }),
         )));
-        assert_eq!(events.len(), 0);
+        assert_eq!(events.len(), 3);
+        assert_eq!(event_type(&events[0]), "ToolCallStart");
+        assert_eq!(event_type(&events[1]), "ToolCallArgs");
+        assert_eq!(event_type(&events[2]), "ToolCallEnd");
     }
 
     #[test]
@@ -631,10 +622,10 @@ mod tests {
                     token_budget: None,
                     sub_agents: vec![],
                 },
-                auth: SessionAuth {
+                auth: ClientIdentity {
                     tenant_id: "t".into(),
-                    client_id: "c".into(),
                     sub: None,
+                    attrs: Default::default(),
                 },
                 on_done: None,
             }),

@@ -10,13 +10,26 @@ const rootRoute = createRootRoute({
   component: () => <Outlet />,
 });
 
-const chatRoute = createRoute({
+// Layout route — Chat stays mounted when navigating between / and /sessions/$id
+const chatLayout = createRoute({
   getParentRoute: () => rootRoute,
-  path: "/",
+  id: "chat-layout",
   component: Chat,
 });
 
-const routeTree = rootRoute.addChildren([chatRoute]);
+const indexRoute = createRoute({
+  getParentRoute: () => chatLayout,
+  path: "/",
+});
+
+const sessionRoute = createRoute({
+  getParentRoute: () => chatLayout,
+  path: "sessions/$sessionId",
+});
+
+const routeTree = rootRoute.addChildren([
+  chatLayout.addChildren([indexRoute, sessionRoute]),
+]);
 
 export const router = createRouter({ routeTree });
 

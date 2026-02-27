@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
@@ -15,11 +16,10 @@ pub struct SessionFilter {
     pub agent_name: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionSummary {
     pub session_id: Uuid,
     pub tenant_id: String,
-    pub client_id: String,
     pub status: SessionStatus,
     pub wake_at: Option<DateTime<Utc>>,
     pub agent_name: String,
@@ -31,6 +31,10 @@ pub struct SessionSummary {
 /// Session-specific query interface layered on top of the generic event store.
 ///
 /// Implemented by store backends that can filter/list session aggregates.
+#[async_trait]
 pub trait SessionIndex: Send + Sync {
-    fn list_sessions(&self, filter: &SessionFilter) -> Vec<SessionSummary>;
+    async fn list_sessions(&self, filter: &SessionFilter) -> Vec<SessionSummary>;
+
+    /// Return the earliest future `wake_at` across all sessions, if any.
+    async fn next_wake_at(&self) -> Option<DateTime<Utc>>;
 }

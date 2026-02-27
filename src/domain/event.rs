@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -77,17 +79,18 @@ pub enum McpTransportConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionAuth {
+pub struct ClientIdentity {
     pub tenant_id: String,
-    pub client_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sub: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub attrs: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionCreated {
     pub agent: AgentConfig,
-    pub auth: SessionAuth,
+    pub auth: ClientIdentity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_done: Option<CompletionDelivery>,
 }
@@ -154,6 +157,22 @@ pub enum ToolHandler {
     Client,
 }
 
+/// Metadata describing the type of tool call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolCallMeta {
+    /// Tool is a sub-agent invocation.
+    SubAgent {
+        child_session_id: Uuid,
+        agent_name: String,
+    },
+    /// Tool is served by an MCP server.
+    Mcp {
+        server_name: String,
+        server_version: String,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallRequested {
     pub tool_call_id: String,
@@ -162,6 +181,8 @@ pub struct ToolCallRequested {
     pub deadline: DateTime<Utc>,
     #[serde(default)]
     pub handler: ToolHandler,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<ToolCallMeta>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

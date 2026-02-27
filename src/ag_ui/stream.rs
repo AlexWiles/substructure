@@ -7,7 +7,7 @@ use tokio_stream::Stream;
 use uuid::Uuid;
 
 use crate::domain::aggregate::DomainEvent;
-use crate::domain::event::{Message as DomainMessage, Role, SessionAuth, SpanContext, ToolCall as DomainToolCall};
+use crate::domain::event::{Message as DomainMessage, Role, ClientIdentity, SpanContext, ToolCall as DomainToolCall};
 use crate::domain::openai;
 use crate::domain::session::{AgentState, CommandPayload, SessionCommand};
 use crate::runtime::{OnEvent, Runtime, RuntimeError, SessionMessage};
@@ -113,7 +113,7 @@ fn build_ag_ui_callback(
 pub async fn run_session(
     runtime: &Runtime,
     agent_name: &str,
-    auth: SessionAuth,
+    auth: ClientIdentity,
     input: RunAgentInput,
 ) -> Result<impl Stream<Item = AgUiEvent> + Send, AgUiError> {
     let messages: Vec<DomainMessage> = input.messages.iter().map(ag_ui_to_domain_message).collect();
@@ -166,10 +166,11 @@ pub async fn run_session(
 // ---------------------------------------------------------------------------
 
 /// Send input to an existing session and return a stream of AG-UI events.
+#[tracing::instrument(skip(runtime, auth, input), fields(%session_id))]
 pub async fn run_existing_session(
     runtime: &Runtime,
     session_id: Uuid,
-    auth: SessionAuth,
+    auth: ClientIdentity,
     input: RunAgentInput,
 ) -> Result<impl Stream<Item = AgUiEvent> + Send, AgUiError> {
     let messages: Vec<DomainMessage> = input.messages.iter().map(ag_ui_to_domain_message).collect();
@@ -180,7 +181,7 @@ pub async fn run_existing_session(
     let thread_id = input.thread_id.unwrap_or_else(|| session_id.to_string());
     let run_id = input.run_id.unwrap_or_else(|| Uuid::new_v4().to_string());
 
-    let skip_until = load_state(runtime, session_id, &auth).1;
+    let skip_until = load_state(runtime, session_id, &auth).await.1;
 
     let (tx, rx) = mpsc::channel(256);
     let _ = tx.try_send(AgUiEvent::RunStarted {
@@ -223,7 +224,7 @@ pub async fn run_existing_session(
 pub async fn resume_run(
     runtime: &Runtime,
     session_id: Uuid,
-    auth: SessionAuth,
+    auth: ClientIdentity,
     input: RunAgentInput,
 ) -> Result<impl Stream<Item = AgUiEvent> + Send, AgUiError> {
     let resume = input.resume.ok_or(AgUiError::NoResumeInfo)?;
@@ -271,12 +272,12 @@ pub async fn resume_run(
 pub async fn observe_session(
     runtime: &Runtime,
     session_id: Uuid,
-    auth: SessionAuth,
+    auth: ClientIdentity,
     run_id: String,
 ) -> Result<impl Stream<Item = AgUiEvent> + Send, AgUiError> {
     let thread_id = session_id.to_string();
 
-    let (state, last_applied) = load_state(runtime, session_id, &auth);
+    let (state, last_applied) = load_state(runtime, session_id, &auth).await;
 
     let messages = state
         .messages
@@ -306,8 +307,8 @@ pub async fn observe_session(
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn load_state(runtime: &Runtime, session_id: Uuid, auth: &SessionAuth) -> (AgentState, u64) {
-    match runtime.store().load(session_id, &auth.tenant_id) {
+async fn load_state(runtime: &Runtime, session_id: Uuid, auth: &ClientIdentity) -> (AgentState, u64) {
+    match runtime.store().load(session_id, &auth.tenant_id).await {
         Ok(load) => {
             let state: AgentState = serde_json::from_value(load.snapshot)
                 .unwrap_or_else(|_| AgentState::new(session_id));

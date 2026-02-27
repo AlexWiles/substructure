@@ -1,3 +1,7 @@
+[logging]
+level = "debug"
+format = "compact"
+
 [event_store]
 type = "sqlite"
 path = "events.db"
@@ -14,18 +18,18 @@ api_key = { provider = "env", key = "OPENROUTER_API_KEY" }
 name = "alex"
 description = """A helpful assistant named Alex"""
 system_prompt = """You are a helpful assistant named Alex."""
-llm = { client = "openrouter", model = "minimax/minimax-m2.5" }
-sub_agents = ["researcher"]
+llm = { client = "openrouter", model = "stepfun/step-3.5-flash:free" }
+sub_agents = ["file-system"]
 
-[agents.researcher]
-name = "researcher"
+[agents.file-system]
+name = "file-system"
 description = "Explores the filesystem — reads files, lists directories, and searches for content. Returns a summary of findings."
 system_prompt = """You are a filesystem research assistant. \
 Use the filesystem tools to explore files and directories, then return a clear summary of what you found. \
 Be concise and factual."""
-llm = { client = "openrouter", model = "minimax/minimax-m2.5" }
+llm = { client = "openrouter", model = "stepfun/step-3.5-flash:free" }
 
-[[agents.researcher.mcp_servers]]
+[[agents.file-system.mcp_servers]]
 name = "filesystem"
 transport.type = "stdio"
 transport.command = "npx"

@@ -95,7 +95,7 @@ pub trait EventStore: Send + Sync {
     ) -> Result<(), StoreError>;
 
     /// Load latest snapshot for a stream.
-    fn load(&self, aggregate_id: Uuid, tenant_id: &str) -> Result<StreamLoad, StoreError>;
+    async fn load(&self, aggregate_id: Uuid, tenant_id: &str) -> Result<StreamLoad, StoreError>;
 
     /// Returns the port that broadcasts newly appended events.
     fn events(&self) -> &OutputPort<EventBatch>;

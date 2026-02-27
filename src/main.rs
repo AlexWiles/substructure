@@ -1,11 +1,14 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
+use tracing_subscriber::fmt::format::FmtSpan;
+use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 use substructure::domain::aggregate::DomainEvent;
-use substructure::domain::config::SystemConfig;
-use substructure::domain::event::{EventPayload, SessionAuth, SpanContext};
+use substructure::domain::config::{LoggingConfig, SystemConfig};
+use substructure::domain::event::{EventPayload, ClientIdentity, SpanContext};
 use substructure::domain::secret::resolve_secrets;
 use substructure::domain::session::{AgentState, CommandPayload, IncomingMessage, SessionCommand};
 #[cfg(feature = "http")]
@@ -49,45 +52,64 @@ enum Command {
     },
 }
 
+fn init_tracing(config: &LoggingConfig) {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(&config.level));
+
+    match config.format.as_str() {
+        "json" => tracing_subscriber::fmt().json().with_span_events(FmtSpan::CLOSE).with_env_filter(filter).init(),
+        "pretty" => tracing_subscriber::fmt().pretty().with_span_events(FmtSpan::CLOSE).with_env_filter(filter).init(),
+        "full" => tracing_subscriber::fmt().with_span_events(FmtSpan::CLOSE).with_env_filter(filter).init(),
+        _ => tracing_subscriber::fmt().compact().with_span_events(FmtSpan::CLOSE).with_env_filter(filter).init(),
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    let config = cli
+    let config_path = cli
         .config
         .ok_or_else(|| anyhow::anyhow!("--config <path> is required"))?;
+
+    let raw = std::fs::read_to_string(&config_path)
+        .map_err(|e| anyhow::anyhow!("failed to read {config_path}: {e}"))?;
+    let config: SystemConfig =
+        toml::from_str(&raw).map_err(|e| anyhow::anyhow!("failed to parse config: {e}"))?;
+    let config = resolve_secrets(config)?;
+
+    init_tracing(&config.logging);
+
+    tracing::info!(
+        agents = config.agents.len(),
+        llm_clients = config.llm_clients.len(),
+        budgets = config.budgets.len(),
+        "config loaded from {config_path}",
+    );
 
     match cli.command {
         Command::Run {
             agent,
             message,
             session,
-        } => run_one_shot(&config, &agent, &message, session).await,
+        } => run_one_shot(config, &agent, &message, session).await,
         #[cfg(feature = "http")]
-        Command::Serve { host, port } => run_http(&config, &host, port).await,
+        Command::Serve { host, port } => run_http(config, &host, port).await,
     }
 }
 
 async fn run_one_shot(
-    config_path: &str,
+    config: SystemConfig,
     agent_name: &str,
     message: &str,
     session_id: Option<Uuid>,
 ) -> anyhow::Result<()> {
-    let raw = std::fs::read_to_string(config_path)
-        .map_err(|e| anyhow::anyhow!("failed to read {config_path}: {e}"))?;
-
-    let config: SystemConfig =
-        toml::from_str(&raw).map_err(|e| anyhow::anyhow!("failed to parse config: {e}"))?;
-
-    let config = resolve_secrets(config)?;
-
     let runtime = Runtime::start(&config).await?;
 
-    let auth = SessionAuth {
+    let auth = ClientIdentity {
         tenant_id: "cli".into(),
-        client_id: "substructure-cli".into(),
         sub: None,
+        attrs: HashMap::from([("source".into(), "cli".into())]),
     };
 
     // Start the session — resumes if it exists, creates otherwise
@@ -143,13 +165,7 @@ async fn run_one_shot(
 }
 
 #[cfg(feature = "http")]
-async fn run_http(config_path: &str, host: &str, port: u16) -> anyhow::Result<()> {
-    let raw = std::fs::read_to_string(config_path)
-        .map_err(|e| anyhow::anyhow!("failed to read {config_path}: {e}"))?;
-    let config: SystemConfig =
-        toml::from_str(&raw).map_err(|e| anyhow::anyhow!("failed to parse config: {e}"))?;
-    let config = resolve_secrets(config)?;
-
+async fn run_http(config: SystemConfig, host: &str, port: u16) -> anyhow::Result<()> {
     let addr: std::net::SocketAddr = format!("{host}:{port}")
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid host/port: {e}"))?;

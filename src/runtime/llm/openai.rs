@@ -95,6 +95,7 @@ impl OpenAiClient {
 
 #[async_trait]
 impl LlmClient for OpenAiClient {
+    #[tracing::instrument(skip(self, request), fields(base_url = %self.config.base_url))]
     async fn call(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
         let LlmRequest::OpenAi(req) = request;
         let resp = self.post_chat_completion(req, false).await?;
@@ -132,6 +133,7 @@ impl LlmClient for OpenAiClient {
         Ok(LlmResponse::OpenAi(parsed))
     }
 
+    #[tracing::instrument(skip(self, request, chunk_tx), fields(base_url = %self.config.base_url))]
     async fn call_streaming(
         &self,
         request: &LlmRequest,

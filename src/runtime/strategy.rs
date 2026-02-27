@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::domain::agent::AgentConfig;
-use crate::domain::event::SessionAuth;
+use crate::domain::event::ClientIdentity;
 use crate::domain::session::{DefaultStrategy, Strategy};
 
 #[derive(Debug, thiserror::Error)]
@@ -19,7 +19,7 @@ pub trait StrategyProvider: Send + Sync + 'static {
     async fn resolve(
         &self,
         agent: &AgentConfig,
-        auth: &SessionAuth,
+        auth: &ClientIdentity,
     ) -> Result<Arc<dyn Strategy>, StrategyProviderError>;
 }
 
@@ -30,7 +30,7 @@ impl StrategyProvider for StaticStrategyProvider {
     async fn resolve(
         &self,
         agent: &AgentConfig,
-        _auth: &SessionAuth,
+        _auth: &ClientIdentity,
     ) -> Result<Arc<dyn Strategy>, StrategyProviderError> {
         match agent.strategy.kind.as_str() {
             "default" => {

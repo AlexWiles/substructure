@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -13,8 +14,17 @@ pub(super) fn new_call_id() -> String {
     Uuid::new_v4().to_string()
 }
 
+/// MCP server info associated with a tool name (transient, populated by runtime).
+#[derive(Debug, Clone)]
+pub struct McpToolEntry {
+    pub server_name: String,
+    pub server_version: String,
+}
+
 pub struct AgentSession {
     pub agent_state: AgentState,
+    /// MCP tool name → server info (transient, populated by runtime).
+    pub mcp_tools: HashMap<String, McpToolEntry>,
 }
 
 impl AgentSession {
@@ -22,14 +32,20 @@ impl AgentSession {
         let mut agent_state = AgentState::new(session_id);
         agent_state.strategy_state = strategy.default_state();
         agent_state.strategy = StrategySlot(Some(strategy));
-        AgentSession { agent_state }
+        AgentSession {
+            agent_state,
+            mcp_tools: HashMap::new(),
+        }
     }
 
     /// Build from a stored snapshot.
     pub fn from_snapshot(snapshot: AgentState, strategy: Arc<dyn Strategy>) -> Self {
         let mut agent_state = snapshot;
         agent_state.strategy = StrategySlot(Some(strategy));
-        AgentSession { agent_state }
+        AgentSession {
+            agent_state,
+            mcp_tools: HashMap::new(),
+        }
     }
 
     /// Take a snapshot of the current session state.
@@ -104,5 +120,32 @@ impl AgentSession {
             .map(|a| a.retry.tool_timeout_secs)
             .unwrap_or(120);
         Utc::now() + chrono::Duration::seconds(timeout as i64)
+    }
+
+    /// Compute tool call metadata based on the tool name.
+    pub(super) fn tool_call_meta(&self, name: &str, tool_call_id: &str) -> Option<ToolCallMeta> {
+        // Check sub-agents
+        if let Some(agent_name) = self
+            .agent_state
+            .agent
+            .as_ref()
+            .and_then(|a| a.sub_agents.iter().find(|s| s.as_str() == name))
+        {
+            return Some(ToolCallMeta::SubAgent {
+                child_session_id: Uuid::new_v5(
+                    &self.agent_state.session_id,
+                    tool_call_id.as_bytes(),
+                ),
+                agent_name: agent_name.clone(),
+            });
+        }
+        // Check MCP tools
+        if let Some(entry) = self.mcp_tools.get(name) {
+            return Some(ToolCallMeta::Mcp {
+                server_name: entry.server_name.clone(),
+                server_version: entry.server_version.clone(),
+            });
+        }
+        None
     }
 }

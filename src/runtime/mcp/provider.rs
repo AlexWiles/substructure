@@ -4,14 +4,14 @@ use async_trait::async_trait;
 
 use super::client::{McpClient, McpError};
 use super::stdio::StdioMcpClient;
-use crate::domain::event::{McpServerConfig, McpTransportConfig, SessionAuth};
+use crate::domain::event::{McpServerConfig, McpTransportConfig, ClientIdentity};
 
 #[async_trait]
 pub trait McpClientProvider: Send + Sync + 'static {
     async fn start_server(
         &self,
         config: &McpServerConfig,
-        auth: &SessionAuth,
+        auth: &ClientIdentity,
     ) -> Result<Arc<dyn McpClient>, McpError>;
 }
 
@@ -22,7 +22,7 @@ impl McpClientProvider for StaticMcpClientProvider {
     async fn start_server(
         &self,
         config: &McpServerConfig,
-        _auth: &SessionAuth,
+        _auth: &ClientIdentity,
     ) -> Result<Arc<dyn McpClient>, McpError> {
         match &config.transport {
             McpTransportConfig::Stdio { command, args } => {

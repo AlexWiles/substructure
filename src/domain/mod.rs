@@ -1,5 +1,7 @@
 pub mod agent;
 pub mod aggregate;
+pub mod auth;
+pub mod budget;
 pub mod config;
 pub mod event;
 pub mod openai;

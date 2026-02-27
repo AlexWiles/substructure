@@ -1,25 +1,92 @@
 use std::convert::Infallible;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::connect_info::ConnectInfo;
+use axum::extract::{FromRequestParts, Path, Query, State};
+use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use tokio_stream::{Stream, StreamExt};
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 use crate::ag_ui::{observe_session, resume_run, run_existing_session, AgUiError, AgUiEvent};
+use crate::domain::auth::{build_auth_resolver, AdminContext, AuthError, AuthResolver};
 use crate::domain::config::SystemConfig;
-use crate::domain::event::SessionAuth;
+use crate::domain::event::ClientIdentity;
+use crate::domain::session::SessionStatus;
 use crate::runtime::{Runtime, RuntimeError, SessionFilter, SessionSummary};
 
 #[derive(Clone)]
 pub struct HttpState {
     runtime: Arc<Runtime>,
+    auth: Arc<dyn AuthResolver>,
+}
+
+// ---------------------------------------------------------------------------
+// Extractors
+// ---------------------------------------------------------------------------
+
+/// Extractor for admin routes — validates `X-API-Key` header.
+pub struct AdminAuth(pub AdminContext);
+
+impl FromRequestParts<HttpState> for AdminAuth {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &HttpState,
+    ) -> Result<Self, Self::Rejection> {
+        let api_key = parts
+            .headers
+            .get("x-api-key")
+            .and_then(|v| v.to_str().ok());
+        let ctx = state.auth.resolve_admin(api_key)?;
+        Ok(AdminAuth(ctx))
+    }
+}
+
+/// Extractor for client routes — validates `Authorization: Bearer <token>` header
+/// and merges `client_ip` into attrs.
+pub struct ClientAuth(pub ClientIdentity);
+
+impl FromRequestParts<HttpState> for ClientAuth {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &HttpState,
+    ) -> Result<Self, Self::Rejection> {
+        let token = parts
+            .headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "));
+        let mut session_auth = state.auth.resolve(token).await?;
+        if let Some(ConnectInfo(addr)) = parts.extensions.get::<ConnectInfo<SocketAddr>>() {
+            session_auth
+                .attrs
+                .insert("client_ip".into(), addr.ip().to_string());
+        }
+        Ok(ClientAuth(session_auth))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Request / response types
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct AgentInfoResponse {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -37,28 +104,68 @@ pub struct ObserveQuery {
     pub run_id: Option<String>,
 }
 
+#[derive(serde::Deserialize, Default)]
+pub struct ListSessionsQuery {
+    /// Repeated query param, e.g. ?status=active&status=idle
+    #[serde(default)]
+    pub status: Vec<SessionStatus>,
+    pub agent: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct TokenRequest {
+    pub sub: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct TokenResponse {
+    pub token: String,
+}
+
+// ---------------------------------------------------------------------------
+// Server
+// ---------------------------------------------------------------------------
+
 pub async fn start_server(config: SystemConfig, addr: std::net::SocketAddr) -> anyhow::Result<()> {
     let runtime = Runtime::start(&config).await?;
+
+    let auth: Arc<dyn AuthResolver> = build_auth_resolver(&config.auth)
+        .map_err(|e| anyhow::anyhow!("failed to build auth resolver: {e}"))?;
+
     let state = HttpState {
         runtime: Arc::new(runtime),
+        auth,
     };
+
+    let admin_routes = Router::new()
+        .route("/auth/token", post(issue_token));
+
+    let client_routes = Router::new()
+        .route("/agents", get(list_agents))
+        .route("/sessions", get(list_sessions).post(create_session))
+        .route("/sessions/{session_id}", get(get_session))
+        .route("/sessions/{session_id}/ag-ui", post(run_ag_ui))
+        .route("/sessions/{session_id}/ag-ui/observe", get(observe_ag_ui));
 
     let app = Router::new()
         .route("/healthz", get(healthz))
-        .route("/sessions", post(create_session))
-        .route("/sessions/:session_id/ag-ui", post(run_ag_ui))
-        .route("/sessions/:session_id/ag-ui/observe", get(observe_ag_ui))
+        .nest("/admin", admin_routes)
+        .nest("/client", client_routes)
         .layer(
             CorsLayer::new()
                 .allow_methods(Any)
                 .allow_headers(Any)
                 .allow_origin(Any),
         )
+        .layer(TraceLayer::new_for_http())
         .with_state(state);
 
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!(%addr, "listening");
+
     axum::serve(
-        tokio::net::TcpListener::bind(addr).await?,
-        app.into_make_service(),
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await?;
 
@@ -69,17 +176,51 @@ async fn healthz() -> StatusCode {
     StatusCode::OK
 }
 
+// ---------------------------------------------------------------------------
+// Admin handlers
+// ---------------------------------------------------------------------------
+
+async fn issue_token(
+    AdminAuth(admin): AdminAuth,
+    State(state): State<HttpState>,
+    Json(payload): Json<TokenRequest>,
+) -> Result<Json<TokenResponse>, AppError> {
+    let token = state
+        .auth
+        .issue_token(&admin.tenant_id, payload.sub.as_deref())?;
+
+    Ok(Json(TokenResponse { token }))
+}
+
+// ---------------------------------------------------------------------------
+// Client handlers
+// ---------------------------------------------------------------------------
+
+async fn list_agents(
+    ClientAuth(_auth): ClientAuth,
+    State(state): State<HttpState>,
+) -> Json<Vec<AgentInfoResponse>> {
+    let agents: Vec<AgentInfoResponse> = state
+        .runtime
+        .agent_names()
+        .into_iter()
+        .map(|name| {
+            let description = state.runtime.agent(name).and_then(|a| a.description.clone());
+            AgentInfoResponse {
+                name: name.to_string(),
+                description,
+            }
+        })
+        .collect();
+    Json(agents)
+}
+
 async fn create_session(
+    ClientAuth(auth): ClientAuth,
     State(state): State<HttpState>,
     Json(payload): Json<CreateSessionRequest>,
 ) -> Result<Json<CreateSessionResponse>, AppError> {
     let session_id = Uuid::new_v4();
-    let auth = SessionAuth {
-        tenant_id: "http".into(),
-        client_id: "substructure-http".into(),
-        sub: None,
-    };
-
     let _session = state
         .runtime
         .start_session(session_id, &payload.agent, auth)
@@ -90,17 +231,44 @@ async fn create_session(
     }))
 }
 
+async fn list_sessions(
+    ClientAuth(auth): ClientAuth,
+    State(state): State<HttpState>,
+    axum_extra::extract::Query(query): axum_extra::extract::Query<ListSessionsQuery>,
+) -> Result<Json<Vec<SessionSummary>>, AppError> {
+    let statuses = if query.status.is_empty() {
+        None
+    } else {
+        Some(query.status)
+    };
+
+    let filter = SessionFilter {
+        tenant_id: Some(auth.tenant_id),
+        statuses,
+        agent_name: query.agent,
+        ..Default::default()
+    };
+
+    let sessions = state.runtime.session_index().list_sessions(&filter).await;
+    Ok(Json(sessions))
+}
+
+async fn get_session(
+    ClientAuth(auth): ClientAuth,
+    State(state): State<HttpState>,
+    Path(session_id): Path<Uuid>,
+) -> Result<Json<SessionSummary>, AppError> {
+    let summary = find_session_summary(&state.runtime, session_id, &auth.tenant_id).await?;
+    Ok(Json(summary))
+}
+
+#[tracing::instrument(skip(auth, state, input), fields(%session_id))]
 async fn run_ag_ui(
+    ClientAuth(auth): ClientAuth,
     State(state): State<HttpState>,
     Path(session_id): Path<Uuid>,
     Json(input): Json<crate::ag_ui::RunAgentInput>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
-    let auth = SessionAuth {
-        tenant_id: "http".into(),
-        client_id: "substructure-http".into(),
-        sub: None,
-    };
-
     ensure_session_running(&state.runtime, session_id, &auth).await?;
 
     let stream: Pin<Box<dyn Stream<Item = AgUiEvent> + Send>> = if input.resume.is_some() {
@@ -120,16 +288,11 @@ async fn run_ag_ui(
 }
 
 async fn observe_ag_ui(
+    ClientAuth(auth): ClientAuth,
     State(state): State<HttpState>,
     Path(session_id): Path<Uuid>,
     Query(query): Query<ObserveQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
-    let auth = SessionAuth {
-        tenant_id: "http".into(),
-        client_id: "substructure-http".into(),
-        sub: None,
-    };
-
     ensure_session_running(&state.runtime, session_id, &auth).await?;
 
     let run_id = query.run_id.unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -137,6 +300,10 @@ async fn observe_ag_ui(
 
     Ok(sse_from_ag_ui(Box::pin(stream)))
 }
+
+// ---------------------------------------------------------------------------
+// Shared
+// ---------------------------------------------------------------------------
 
 fn sse_from_ag_ui(
     stream: Pin<Box<dyn Stream<Item = AgUiEvent> + Send>>,
@@ -155,13 +322,16 @@ pub enum AppError {
     Runtime(#[from] RuntimeError),
     #[error("ag-ui error: {0}")]
     AgUi(#[from] AgUiError),
+    #[error("auth error: {0}")]
+    Auth(#[from] AuthError),
 }
 
 impl axum::response::IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
-        let status = match self {
+        let status = match &self {
             AppError::Runtime(RuntimeError::SessionNotFound) => StatusCode::NOT_FOUND,
             AppError::Runtime(RuntimeError::UnknownAgent(_)) => StatusCode::BAD_REQUEST,
+            AppError::Auth(_) => StatusCode::UNAUTHORIZED,
             _ => StatusCode::BAD_REQUEST,
         };
         let body = Json(serde_json::json!({
@@ -172,30 +342,36 @@ impl axum::response::IntoResponse for AppError {
 }
 
 /// Ensure the session actor is running (start from store if needed).
+#[tracing::instrument(skip(runtime, auth), fields(%session_id))]
 async fn ensure_session_running(
     runtime: &Runtime,
     session_id: Uuid,
-    auth: &SessionAuth,
+    auth: &ClientIdentity,
 ) -> Result<(), AppError> {
     if runtime.session_is_running(session_id) {
         return Ok(());
     }
 
-    let summary = find_session_summary(runtime, session_id)?;
+    let summary = find_session_summary(runtime, session_id, &auth.tenant_id).await?;
     let _handle = runtime
         .start_session(session_id, &summary.agent_name, auth.clone())
         .await?;
     Ok(())
 }
 
-fn find_session_summary(runtime: &Runtime, session_id: Uuid) -> Result<SessionSummary, AppError> {
+async fn find_session_summary(
+    runtime: &Runtime,
+    session_id: Uuid,
+    tenant_id: &str,
+) -> Result<SessionSummary, AppError> {
     let filter = SessionFilter {
-        tenant_id: Some("http".into()),
+        tenant_id: Some(tenant_id.into()),
         ..Default::default()
     };
     runtime
         .session_index()
         .list_sessions(&filter)
+        .await
         .into_iter()
         .find(|summary| summary.session_id == session_id)
         .ok_or_else(|| AppError::Runtime(RuntimeError::SessionNotFound))

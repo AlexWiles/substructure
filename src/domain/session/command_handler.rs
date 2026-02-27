@@ -35,7 +35,7 @@ pub struct SessionCommand {
 pub enum CommandPayload {
     CreateSession {
         agent: AgentConfig,
-        auth: SessionAuth,
+        auth: ClientIdentity,
         on_done: Option<CompletionDelivery>,
     },
     SendMessage {
@@ -277,6 +277,7 @@ impl AgentSession {
                                 arguments: tc.arguments.clone(),
                                 deadline: self.tool_deadline(),
                                 handler: Default::default(),
+                                meta: self.tool_call_meta(&tc.name, &tc.id),
                             }));
                         }
                         Ok(events)
@@ -329,13 +330,17 @@ impl AgentSession {
                 // Already tracked — skip
                 Some(_) => Ok(vec![]),
                 // New tool call
-                None => Ok(vec![EventPayload::ToolCallRequested(ToolCallRequested {
-                    tool_call_id,
-                    name,
-                    arguments,
-                    deadline,
-                    handler,
-                })]),
+                None => {
+                    let meta = self.tool_call_meta(&name, &tool_call_id);
+                    Ok(vec![EventPayload::ToolCallRequested(ToolCallRequested {
+                        tool_call_id,
+                        name,
+                        arguments,
+                        deadline,
+                        handler,
+                        meta,
+                    })])
+                }
             },
             CommandPayload::CompleteToolCall {
                 tool_call_id,
@@ -461,7 +466,7 @@ impl AgentSession {
                 && tc.deadline <= now
                 && tc.handler != ToolHandler::Client
             {
-                if tc.child_session_id.is_some() {
+                if tc.child_session_id().is_some() {
                     // Sub-agent: re-arm with fresh deadline (parent-driven retry)
                     let arguments = state
                         .messages
@@ -476,6 +481,7 @@ impl AgentSession {
                         arguments,
                         deadline: self.tool_deadline(),
                         handler: tc.handler.clone(),
+                        meta: tc.meta.clone(),
                     })]);
                 }
                 return Ok(vec![EventPayload::ToolCallErrored(ToolCallErrored {
@@ -525,6 +531,7 @@ impl AgentSession {
                         .unwrap_or_default(),
                     deadline: tc.deadline,
                     handler: tc.handler.clone(),
+                    meta: tc.meta.clone(),
                 })]);
             }
         }
@@ -619,6 +626,7 @@ impl AgentSession {
                             arguments: tc.arguments.clone(),
                             deadline: self.tool_deadline(),
                             handler: Default::default(),
+                            meta: self.tool_call_meta(&tc.name, &tc.id),
                         }));
                     }
                 }
@@ -718,11 +726,11 @@ mod tests {
         }
     }
 
-    fn test_auth() -> SessionAuth {
-        SessionAuth {
+    fn test_auth() -> ClientIdentity {
+        ClientIdentity {
             tenant_id: "t".into(),
-            client_id: "c".into(),
             sub: None,
+            attrs: Default::default(),
         }
     }
 
