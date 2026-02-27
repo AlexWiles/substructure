@@ -6,7 +6,10 @@ use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef, SpawnErr};
 use tokio::task::AbortHandle;
 use uuid::Uuid;
 
-use super::event_store::{EventBatch, EventStore, SessionFilter};
+use crate::domain::session::DerivedState;
+
+use super::event_store::session_index::{SessionFilter, SessionIndex};
+use super::event_store::{EventBatch, EventStore};
 use super::session_actor::SessionMessage;
 
 // ---------------------------------------------------------------------------
@@ -34,6 +37,7 @@ pub struct WakeSchedulerState {
 
 pub struct WakeSchedulerArgs {
     pub store: Arc<dyn EventStore>,
+    pub session_index: Arc<dyn SessionIndex>,
 }
 
 fn reschedule(state: &mut WakeSchedulerState) {
@@ -81,7 +85,7 @@ impl Actor for WakeScheduler {
     ) -> Result<Self::State, ActorProcessingErr> {
         // Catch up on existing sessions that need waking
         let mut sessions: HashMap<Uuid, Option<DateTime<Utc>>> = HashMap::new();
-        let summaries = args.store.list_sessions(&SessionFilter {
+        let summaries = args.session_index.list_sessions(&SessionFilter {
             needs_wake: Some(true),
             ..Default::default()
         });
@@ -107,15 +111,21 @@ impl Actor for WakeScheduler {
         match message {
             WakeSchedulerMessage::Events(events) => {
                 for event in &events {
-                    if let Some(derived) = &event.derived {
-                        match derived.wake_at {
-                            Some(wake_at) => {
-                                state.sessions.insert(event.session_id, Some(wake_at));
-                            }
-                            None => {
-                                state.sessions.remove(&event.session_id);
-                            }
-                        };
+                    if let Some(derived_value) = &event.derived {
+                        if let Ok(derived) =
+                            serde_json::from_value::<DerivedState>(derived_value.clone())
+                        {
+                            match derived.wake_at {
+                                Some(wake_at) => {
+                                    state
+                                        .sessions
+                                        .insert(event.aggregate_id, Some(wake_at));
+                                }
+                                None => {
+                                    state.sessions.remove(&event.aggregate_id);
+                                }
+                            };
+                        }
                     }
                 }
                 reschedule(state);
@@ -141,6 +151,7 @@ impl Actor for WakeScheduler {
 
 pub async fn spawn_wake_scheduler(
     store: Arc<dyn EventStore>,
+    session_index: Arc<dyn SessionIndex>,
     supervisor: ActorCell,
 ) -> Result<ActorRef<WakeSchedulerMessage>, SpawnErr> {
     let (actor_ref, _handle) = Actor::spawn_linked(
@@ -148,6 +159,7 @@ pub async fn spawn_wake_scheduler(
         WakeScheduler,
         WakeSchedulerArgs {
             store: store.clone(),
+            session_index,
         },
         supervisor,
     )

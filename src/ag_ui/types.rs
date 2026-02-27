@@ -71,7 +71,7 @@ pub enum Message {
         id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         content: Option<String>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[serde(default, skip_serializing_if = "Vec::is_empty", rename = "toolCalls")]
         tool_calls: Vec<ToolCallInfo>,
     },
     #[serde(rename = "system")]
@@ -84,6 +84,7 @@ pub enum Message {
     Tool {
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,
+        #[serde(rename = "toolCallId")]
         tool_call_id: String,
         content: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -166,11 +167,15 @@ pub struct Context {
 pub enum AgUiEvent {
     // -- Lifecycle --
     RunStarted {
+        #[serde(rename = "threadId")]
         thread_id: String,
+        #[serde(rename = "runId")]
         run_id: String,
     },
     RunFinished {
+        #[serde(rename = "threadId")]
         thread_id: String,
+        #[serde(rename = "runId")]
         run_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         outcome: Option<String>,
@@ -185,41 +190,59 @@ pub enum AgUiEvent {
 
     // -- Steps --
     StepStarted {
+        #[serde(rename = "stepId")]
         step_id: String,
+        #[serde(rename = "stepName")]
+        step_name: String,
     },
     StepFinished {
+        #[serde(rename = "stepId")]
         step_id: String,
+        #[serde(rename = "stepName")]
+        step_name: String,
     },
 
     // -- Text message streaming --
     TextMessageStart {
+        #[serde(rename = "messageId")]
         message_id: String,
     },
     TextMessageContent {
+        #[serde(rename = "messageId")]
         message_id: String,
         delta: String,
     },
     TextMessageEnd {
+        #[serde(rename = "messageId")]
         message_id: String,
     },
 
     // -- Tool call streaming --
     ToolCallStart {
+        #[serde(rename = "toolCallId")]
         tool_call_id: String,
+        #[serde(rename = "toolCallName")]
         tool_call_name: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none", rename = "parentMessageId")]
         parent_message_id: Option<String>,
     },
     ToolCallArgs {
+        #[serde(rename = "toolCallId")]
         tool_call_id: String,
         delta: String,
     },
     ToolCallEnd {
+        #[serde(rename = "toolCallId")]
         tool_call_id: String,
     },
     ToolCallResult {
+        #[serde(rename = "messageId")]
+        message_id: String,
+        #[serde(rename = "toolCallId")]
         tool_call_id: String,
-        result: String,
+        content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        role: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },

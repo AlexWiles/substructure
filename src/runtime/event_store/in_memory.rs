@@ -2,26 +2,31 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use chrono::Utc;
 use ractor::OutputPort;
 use uuid::Uuid;
 
-use crate::domain::event::{Event, SessionAuth};
 use crate::domain::session::AgentState;
-use chrono::Utc;
 
-use super::store::{
-    EventBatch, EventStore, SessionFilter, SessionLoad, SessionSummary, StoreError, Version,
-};
+use super::session_index::{SessionFilter, SessionIndex, SessionSummary};
+use super::store::{Event, EventBatch, EventStore, StoreError, StreamLoad, Version};
+
+struct StreamEntry {
+    snapshot: serde_json::Value,
+    stream_version: u64,
+    tenant_id: String,
+    aggregate_type: String,
+}
 
 pub struct InMemoryEventStore {
-    snapshots: Mutex<HashMap<Uuid, (AgentState, u64)>>,
+    streams: Mutex<HashMap<Uuid, StreamEntry>>,
     events: OutputPort<EventBatch>,
 }
 
 impl Default for InMemoryEventStore {
     fn default() -> Self {
         InMemoryEventStore {
-            snapshots: Mutex::new(HashMap::new()),
+            streams: Mutex::new(HashMap::new()),
             events: OutputPort::default(),
         }
     }
@@ -37,17 +42,18 @@ impl InMemoryEventStore {
 impl EventStore for InMemoryEventStore {
     async fn append(
         &self,
-        session_id: Uuid,
-        auth: &SessionAuth,
+        aggregate_id: Uuid,
+        tenant_id: &str,
+        aggregate_type: &str,
         events: Vec<Event>,
-        snapshot: AgentState,
+        snapshot: serde_json::Value,
+        expected_version: u64,
+        new_version: u64,
     ) -> Result<(), StoreError> {
-        let expected_version = snapshot.stream_version - events.len() as u64;
-
         let batch = {
-            let mut snapshots = self.snapshots.lock().expect("store lock poisoned");
+            let mut streams = self.streams.lock().expect("store lock poisoned");
 
-            let actual_version = snapshots.get(&session_id).map_or(0, |(_, v)| *v);
+            let actual_version = streams.get(&aggregate_id).map_or(0, |e| e.stream_version);
             if expected_version != actual_version {
                 return Err(StoreError::VersionConflict {
                     expected: Version(expected_version),
@@ -55,17 +61,23 @@ impl EventStore for InMemoryEventStore {
                 });
             }
 
-            // Tenant check on existing session
-            if let Some((state, _)) = snapshots.get(&session_id) {
-                if let Some(existing_auth) = &state.auth {
-                    if existing_auth.tenant_id != auth.tenant_id {
-                        return Err(StoreError::TenantMismatch);
-                    }
+            // Tenant check on existing stream
+            if let Some(entry) = streams.get(&aggregate_id) {
+                if entry.tenant_id != tenant_id {
+                    return Err(StoreError::TenantMismatch);
                 }
             }
 
             let batch: EventBatch = events.into_iter().map(Arc::new).collect();
-            snapshots.insert(session_id, (snapshot.clone(), snapshot.stream_version));
+            streams.insert(
+                aggregate_id,
+                StreamEntry {
+                    snapshot,
+                    stream_version: new_version,
+                    tenant_id: tenant_id.to_string(),
+                    aggregate_type: aggregate_type.to_string(),
+                },
+            );
             batch
         };
 
@@ -73,31 +85,39 @@ impl EventStore for InMemoryEventStore {
         Ok(())
     }
 
-    fn load(&self, session_id: Uuid, auth: &SessionAuth) -> Result<SessionLoad, StoreError> {
-        let snapshots = self.snapshots.lock().expect("store lock poisoned");
+    fn load(&self, aggregate_id: Uuid, tenant_id: &str) -> Result<StreamLoad, StoreError> {
+        let streams = self.streams.lock().expect("store lock poisoned");
 
-        let (snapshot, _version) = snapshots
-            .get(&session_id)
-            .ok_or(StoreError::SessionNotFound)?;
+        let entry = streams
+            .get(&aggregate_id)
+            .ok_or(StoreError::StreamNotFound)?;
 
-        if let Some(existing_auth) = &snapshot.auth {
-            if existing_auth.tenant_id != auth.tenant_id {
-                return Err(StoreError::TenantMismatch);
-            }
+        if entry.tenant_id != tenant_id {
+            return Err(StoreError::TenantMismatch);
         }
 
-        Ok(SessionLoad {
-            snapshot: snapshot.clone(),
+        Ok(StreamLoad {
+            snapshot: entry.snapshot.clone(),
+            stream_version: entry.stream_version,
         })
     }
 
+    fn events(&self) -> &OutputPort<EventBatch> {
+        &self.events
+    }
+}
+
+impl SessionIndex for InMemoryEventStore {
     fn list_sessions(&self, filter: &SessionFilter) -> Vec<SessionSummary> {
-        let snapshots = self.snapshots.lock().expect("store lock poisoned");
+        let streams = self.streams.lock().expect("store lock poisoned");
         let now = Utc::now();
 
-        snapshots
+        streams
             .values()
-            .filter_map(|(state, _version_at)| {
+            .filter(|entry| entry.aggregate_type == "session")
+            .filter_map(|entry| {
+                let state: AgentState = serde_json::from_value(entry.snapshot.clone()).ok()?;
+
                 let auth = state.auth.as_ref()?;
                 let agent = state.agent.as_ref()?;
 
@@ -135,14 +155,10 @@ impl EventStore for InMemoryEventStore {
                     agent_name: agent.name.clone(),
                     message_count: state.messages.len(),
                     token_usage: state.token_usage.total_tokens,
-                    stream_version: state.stream_version,
+                    stream_version: entry.stream_version,
                 })
             })
             .collect()
-    }
-
-    fn events(&self) -> &OutputPort<EventBatch> {
-        &self.events
     }
 }
 
@@ -150,7 +166,8 @@ impl EventStore for InMemoryEventStore {
 mod tests {
     use super::*;
     use crate::domain::agent::{AgentConfig, LlmConfig};
-    use crate::domain::event::{EventPayload, SessionCreated, SpanContext};
+    use crate::domain::aggregate::{Aggregate, DomainEvent};
+    use crate::domain::event::{EventPayload, SessionAuth, SessionCreated, SpanContext};
     use crate::domain::session::SessionStatus;
 
     fn test_auth(tenant: &str) -> SessionAuth {
@@ -183,13 +200,13 @@ mod tests {
         session_id: Uuid,
         tenant: &str,
         agent_name: &str,
-    ) -> (Event, AgentState) {
+    ) -> (Vec<Event>, AgentState) {
         let auth = test_auth(tenant);
         let agent = test_agent(agent_name);
-        let event = Event {
+        let domain_event: DomainEvent<AgentState> = DomainEvent {
             id: Uuid::new_v4(),
             tenant_id: tenant.into(),
-            session_id,
+            aggregate_id: session_id,
             sequence: 0,
             span: SpanContext::root(),
             occurred_at: Utc::now(),
@@ -201,8 +218,8 @@ mod tests {
             derived: None,
         };
         let mut state = AgentState::new(session_id);
-        state.apply_core(&event);
-        (event, state)
+        state.apply(&domain_event.payload, domain_event.sequence);
+        (vec![domain_event.into_raw()], state)
     }
 
     #[tokio::test]
@@ -222,11 +239,11 @@ mod tests {
         let (ev2, snap2) = session_created_event(id2, "tenant-b", "bot-2");
 
         store
-            .append(id1, &test_auth("tenant-a"), vec![ev1], snap1)
+            .append(id1, "tenant-a", "session", ev1, serde_json::to_value(&snap1).unwrap(), 0, snap1.stream_version)
             .await
             .unwrap();
         store
-            .append(id2, &test_auth("tenant-b"), vec![ev2], snap2)
+            .append(id2, "tenant-b", "session", ev2, serde_json::to_value(&snap2).unwrap(), 0, snap2.stream_version)
             .await
             .unwrap();
 
@@ -244,11 +261,11 @@ mod tests {
         let (ev2, snap2) = session_created_event(id2, "tenant-b", "bot");
 
         store
-            .append(id1, &test_auth("tenant-a"), vec![ev1], snap1)
+            .append(id1, "tenant-a", "session", ev1, serde_json::to_value(&snap1).unwrap(), 0, snap1.stream_version)
             .await
             .unwrap();
         store
-            .append(id2, &test_auth("tenant-b"), vec![ev2], snap2)
+            .append(id2, "tenant-b", "session", ev2, serde_json::to_value(&snap2).unwrap(), 0, snap2.stream_version)
             .await
             .unwrap();
 
@@ -267,18 +284,16 @@ mod tests {
         let id1 = Uuid::new_v4();
         let id2 = Uuid::new_v4();
 
-        // session_created sets status to Done via apply_core (SessionCreated doesn't change status,
-        // it stays at the initial Done). We'll make one Active by appending an LlmCallRequested.
         let (ev1, snap1) = session_created_event(id1, "t", "bot");
         let (ev2, mut snap2) = session_created_event(id2, "t", "bot");
         snap2.status = SessionStatus::Active;
 
         store
-            .append(id1, &test_auth("t"), vec![ev1], snap1)
+            .append(id1, "t", "session", ev1, serde_json::to_value(&snap1).unwrap(), 0, snap1.stream_version)
             .await
             .unwrap();
         store
-            .append(id2, &test_auth("t"), vec![ev2], snap2)
+            .append(id2, "t", "session", ev2, serde_json::to_value(&snap2).unwrap(), 0, snap2.stream_version)
             .await
             .unwrap();
 
@@ -301,11 +316,11 @@ mod tests {
         let (ev2, snap2) = session_created_event(id2, "t", "chat-bot");
 
         store
-            .append(id1, &test_auth("t"), vec![ev1], snap1)
+            .append(id1, "t", "session", ev1, serde_json::to_value(&snap1).unwrap(), 0, snap1.stream_version)
             .await
             .unwrap();
         store
-            .append(id2, &test_auth("t"), vec![ev2], snap2)
+            .append(id2, "t", "session", ev2, serde_json::to_value(&snap2).unwrap(), 0, snap2.stream_version)
             .await
             .unwrap();
 
@@ -325,7 +340,7 @@ mod tests {
         let (ev, snap) = session_created_event(id, "acme", "helper");
 
         store
-            .append(id, &test_auth("acme"), vec![ev], snap)
+            .append(id, "acme", "session", ev, serde_json::to_value(&snap).unwrap(), 0, snap.stream_version)
             .await
             .unwrap();
 
@@ -336,6 +351,6 @@ mod tests {
         assert_eq!(s.tenant_id, "acme");
         assert_eq!(s.client_id, "client-1");
         assert_eq!(s.agent_name, "helper");
-        assert_eq!(s.stream_version, 1); // one event applied
+        assert_eq!(s.stream_version, 1);
     }
 }

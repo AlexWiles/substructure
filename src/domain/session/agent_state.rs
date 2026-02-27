@@ -8,9 +8,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::domain::aggregate::Aggregate;
 use crate::domain::event::{
-    AgentConfig, Artifact, CompletionDelivery, Event, EventPayload, LlmRequest, LlmResponse,
-    Message, Role, SessionAuth, ToolHandler,
+    AgentConfig, Artifact, CompletionDelivery, EventPayload, LlmRequest, LlmResponse, Message,
+    Role, SessionAuth, ToolHandler,
 };
 use crate::domain::openai;
 
@@ -154,6 +155,16 @@ pub struct ToolCallResult {
 }
 
 // ---------------------------------------------------------------------------
+// DerivedState — session-specific query optimization data stamped on events
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DerivedState {
+    pub status: SessionStatus,
+    pub wake_at: Option<DateTime<Utc>>,
+}
+
+// ---------------------------------------------------------------------------
 // AgentState — the complete aggregate projection
 // ---------------------------------------------------------------------------
 
@@ -214,16 +225,15 @@ impl AgentState {
     }
 
     /// Apply an event to the aggregate. Returns `true` if applied (not a duplicate).
-    pub fn apply_core(&mut self, event: &Event) -> bool {
-        if self.last_applied.is_some_and(|seq| event.sequence <= seq) {
+    pub fn apply_core(&mut self, payload: &EventPayload, sequence: u64) -> bool {
+        if self.last_applied.is_some_and(|seq| sequence <= seq) {
             return false;
         }
-        self.last_applied = Some(event.sequence);
+        self.last_applied = Some(sequence);
         self.stream_version += 1;
-        match &event.payload {
+        match payload {
             EventPayload::SessionCreated(payload) => {
-                self.session_id = event.session_id;
-                self.started_at = Some(event.occurred_at);
+                self.status = SessionStatus::Idle;
                 self.token_budget.limit = payload.agent.token_budget;
                 self.agent = Some(payload.agent.clone());
                 self.auth = Some(payload.auth.clone());
@@ -288,7 +298,7 @@ impl AgentState {
                             .unwrap_or(60);
                         let backoff = min(2u64.pow(call.retry.attempts), backoff_max);
                         call.retry.next_at =
-                            Some(event.occurred_at + chrono::Duration::seconds(backoff as i64));
+                            Some(Utc::now() + chrono::Duration::seconds(backoff as i64));
                     } else {
                         call.status = LlmCallStatus::Failed;
                         call.retry.next_at = None;
@@ -383,8 +393,12 @@ impl AgentState {
                 self.status = SessionStatus::Done;
             }
             EventPayload::SessionDone(payload) => {
-                self.status = SessionStatus::Done;
                 self.artifacts = payload.artifacts.clone();
+                if self.on_done.is_some() {
+                    self.status = SessionStatus::Done;
+                } else {
+                    self.status = SessionStatus::Idle;
+                }
             }
             _ => {}
         }
@@ -549,6 +563,14 @@ impl AgentState {
         })
     }
 
+    /// Compute the derived state envelope for the current session state.
+    pub fn derived_state(&self) -> DerivedState {
+        DerivedState {
+            status: self.status.clone(),
+            wake_at: self.wake_at(),
+        }
+    }
+
     fn track_usage(&mut self, response: &LlmResponse) {
         let usage = match response {
             LlmResponse::OpenAi(resp) => match &resp.usage {
@@ -580,6 +602,23 @@ impl AgentState {
                 .rejected_prediction_tokens +=
                 details.rejected_prediction_tokens.unwrap_or(0) as u64;
         }
+    }
+}
+
+impl Aggregate for AgentState {
+    type Event = EventPayload;
+    type Derived = DerivedState;
+
+    fn aggregate_type() -> &'static str {
+        "session"
+    }
+
+    fn stream_version(&self) -> u64 {
+        self.stream_version
+    }
+
+    fn apply(&mut self, event: &Self::Event, sequence: u64) {
+        self.apply_core(event, sequence);
     }
 }
 

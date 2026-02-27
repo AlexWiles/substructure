@@ -4,7 +4,6 @@ use uuid::Uuid;
 
 pub use super::agent::{AgentConfig, LlmConfig};
 use super::openai;
-use super::session::SessionStatus;
 pub use super::span::{SpanContext, SpanId, TraceId};
 
 // ---------------------------------------------------------------------------
@@ -21,25 +20,6 @@ pub struct CompletionDelivery {
     pub tool_name: String,
     /// Span context for tracing
     pub span: SpanContext,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DerivedState {
-    pub status: SessionStatus,
-    pub wake_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Event {
-    pub id: Uuid,
-    pub tenant_id: String,
-    pub session_id: Uuid,
-    pub sequence: u64,
-    pub span: SpanContext,
-    pub occurred_at: DateTime<Utc>,
-    pub payload: EventPayload,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub derived: Option<DerivedState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

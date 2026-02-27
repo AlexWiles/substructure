@@ -8,8 +8,11 @@ use chrono::Utc;
 
 use crate::domain::agent::AgentConfig;
 use crate::domain::config::{EventStoreConfig, SystemConfig};
-use crate::domain::event::{CompletionDelivery, Event, SessionAuth, SpanContext};
+use crate::domain::event::{CompletionDelivery, SessionAuth, SpanContext};
 use crate::domain::session::{AgentState, CommandPayload, IncomingMessage, SessionCommand};
+use crate::domain::aggregate::DomainEvent;
+use dispatcher::spawn_aggregate_dispatcher;
+use event_store::Event;
 use wake_scheduler::spawn_wake_scheduler;
 
 pub mod dispatcher;
@@ -22,11 +25,11 @@ pub mod session_client;
 mod strategy;
 pub mod wake_scheduler;
 
-pub use dispatcher::spawn_dispatcher;
 #[cfg(feature = "sqlite")]
 pub use event_store::SqliteEventStore;
 pub use event_store::{
-    EventStore, InMemoryEventStore, SessionFilter, SessionLoad, SessionSummary, StoreError, Version,
+    EventStore, InMemoryEventStore, SessionFilter, SessionIndex, SessionSummary, StoreError,
+    StreamLoad, Version,
 };
 pub use llm::{LlmClient, MockLlmClient, OpenAiClient, StreamDelta};
 pub use llm::{LlmClientFactory, LlmClientProvider, ProviderError, StaticLlmClientProvider};
@@ -39,7 +42,7 @@ pub use session_actor::SessionActorArgs;
 pub use session_actor::{
     RuntimeError, SessionActor, SessionActorState, SessionInit, SessionMessage,
 };
-pub use session_client::{ClientMessage, OnEvent, SessionClientActor, SessionClientArgs};
+pub use session_client::{OnEvent, SessionClientActor, SessionClientArgs};
 pub use strategy::{StaticStrategyProvider, StrategyProvider, StrategyProviderError};
 
 // ---------------------------------------------------------------------------
@@ -50,8 +53,18 @@ pub fn session_actor_name(session_id: Uuid) -> String {
     format!("session-{session_id}")
 }
 
-pub fn session_clients_group(session_id: Uuid) -> String {
-    format!("session-clients-{session_id}")
+pub fn session_group(session_id: Uuid) -> String {
+    format!("session-group-{session_id}")
+}
+
+/// Routing closure for the session aggregate dispatcher.
+/// Broadcasts typed events to the session process group.
+fn session_route(aggregate_id: Uuid, events: Vec<Arc<DomainEvent<AgentState>>>) {
+    let group = session_group(aggregate_id);
+    for cell in ractor::pg::get_members(&group) {
+        let actor: ActorRef<SessionMessage> = cell.into();
+        let _ = actor.send_message(SessionMessage::Events(events.clone()));
+    }
 }
 
 /// Look up a running session actor by ID and send it a message.
@@ -96,6 +109,7 @@ struct RuntimeActor;
 struct RuntimeState {
     myself: ActorRef<RuntimeMessage>,
     store: Arc<dyn EventStore>,
+    session_index: Arc<dyn SessionIndex>,
     agents: HashMap<String, AgentConfig>,
     llm_provider: Arc<dyn LlmClientProvider>,
     mcp_provider: Arc<dyn McpClientProvider>,
@@ -104,6 +118,7 @@ struct RuntimeState {
 
 struct RuntimeArgs {
     store: Arc<dyn EventStore>,
+    session_index: Arc<dyn SessionIndex>,
     agents: HashMap<String, AgentConfig>,
     llm_provider: Arc<dyn LlmClientProvider>,
     mcp_provider: Arc<dyn McpClientProvider>,
@@ -173,7 +188,7 @@ impl RuntimeState {
             needs_wake: Some(true),
             ..Default::default()
         };
-        let sessions = self.store.list_sessions(&filter);
+        let sessions = self.session_index.list_sessions(&filter);
         for summary in sessions {
             let agent = match self.agents.get(&summary.agent_name) {
                 Some(a) => a.clone(),
@@ -278,6 +293,7 @@ impl Actor for RuntimeActor {
         let state = RuntimeState {
             myself: myself.clone(),
             store: args.store.clone(),
+            session_index: args.session_index,
             agents: args.agents,
             llm_provider: args.llm_provider,
             mcp_provider: args.mcp_provider,
@@ -285,12 +301,20 @@ impl Actor for RuntimeActor {
         };
 
         // Spawn infrastructure actors (linked to RuntimeActor)
-        spawn_dispatcher(args.store.clone(), myself.get_cell())
-            .await
-            .map_err(|e| format!("failed to spawn dispatcher: {e}"))?;
-        spawn_wake_scheduler(args.store, myself.get_cell())
-            .await
-            .map_err(|e| format!("failed to spawn wake scheduler: {e}"))?;
+        spawn_aggregate_dispatcher::<AgentState>(
+            &args.store,
+            Arc::new(session_route),
+            myself.get_cell(),
+        )
+        .await
+        .map_err(|e| format!("failed to spawn dispatcher: {e}"))?;
+        spawn_wake_scheduler(
+            args.store,
+            state.session_index.clone(),
+            myself.get_cell(),
+        )
+        .await
+        .map_err(|e| format!("failed to spawn wake scheduler: {e}"))?;
 
         // Resume sessions that need waking after restart
         state.resume_all().await;
@@ -344,15 +368,26 @@ impl Actor for RuntimeActor {
 /// Restart dispatcher or wake-scheduler if they died; sessions just get logged.
 async fn restart_infrastructure(name: Option<String>, state: &RuntimeState) {
     match name.as_deref() {
-        Some("dispatcher") => {
-            eprintln!("runtime: restarting dispatcher");
-            if let Err(e) = spawn_dispatcher(state.store.clone(), state.myself.get_cell()).await {
-                eprintln!("runtime: failed to restart dispatcher: {e}");
+        Some("session-dispatcher") => {
+            eprintln!("runtime: restarting session-dispatcher");
+            if let Err(e) = spawn_aggregate_dispatcher::<AgentState>(
+                &state.store,
+                Arc::new(session_route),
+                state.myself.get_cell(),
+            )
+            .await
+            {
+                eprintln!("runtime: failed to restart session-dispatcher: {e}");
             }
         }
         Some("wake-scheduler") => {
             eprintln!("runtime: restarting wake-scheduler");
-            if let Err(e) = spawn_wake_scheduler(state.store.clone(), state.myself.get_cell()).await
+            if let Err(e) = spawn_wake_scheduler(
+                state.store.clone(),
+                state.session_index.clone(),
+                state.myself.get_cell(),
+            )
+            .await
             {
                 eprintln!("runtime: failed to restart wake-scheduler: {e}");
             }
@@ -370,12 +405,13 @@ async fn restart_infrastructure(name: Option<String>, state: &RuntimeState) {
 pub struct Runtime {
     actor: ActorRef<RuntimeMessage>,
     store: Arc<dyn EventStore>,
+    session_index: Arc<dyn SessionIndex>,
     agents: HashMap<String, AgentConfig>,
 }
 
 impl Runtime {
     pub async fn start(config: &SystemConfig) -> Result<Self, RuntimeError> {
-        let store = create_event_store(&config.event_store);
+        let (store, session_index) = create_event_store(&config.event_store);
 
         let llm_provider =
             StaticLlmClientProvider::from_config(&config.llm_clients, &default_llm_factories())
@@ -386,6 +422,7 @@ impl Runtime {
             RuntimeActor,
             RuntimeArgs {
                 store: store.clone(),
+                session_index: session_index.clone(),
                 agents: config.agents.clone(),
                 llm_provider: Arc::new(llm_provider),
                 mcp_provider: Arc::new(StaticMcpClientProvider),
@@ -398,6 +435,7 @@ impl Runtime {
         Ok(Runtime {
             actor,
             store,
+            session_index,
             agents: config.agents.clone(),
         })
     }
@@ -492,6 +530,10 @@ impl Runtime {
         &self.store
     }
 
+    pub fn session_index(&self) -> &Arc<dyn SessionIndex> {
+        &self.session_index
+    }
+
     pub fn shutdown(self) {
         self.actor.stop(None);
     }
@@ -503,23 +545,18 @@ impl Runtime {
 
 pub struct SessionHandle {
     pub session_id: Uuid,
-    session_client: ActorRef<ClientMessage>,
+    session_client: ActorRef<SessionMessage>,
 }
 
 impl SessionHandle {
-    pub async fn send_command(&self, cmd: SessionCommand) -> Result<Vec<Event>, RuntimeError> {
-        let result = call_t!(
-            self.session_client,
-            ClientMessage::SendCommand,
-            5000,
-            Box::new(cmd)
-        )
-        .map_err(|e| RuntimeError::ActorCall(e.to_string()))?;
+    pub async fn send_command(&self, cmd: SessionCommand) -> Result<Vec<Arc<Event>>, RuntimeError> {
+        let result = call_t!(self.session_client, SessionMessage::Execute, 5000, cmd)
+            .map_err(|e| RuntimeError::ActorCall(e.to_string()))?;
         result
     }
 
     pub async fn get_state(&self) -> AgentState {
-        call_t!(self.session_client, ClientMessage::GetState, 5000)
+        call_t!(self.session_client, SessionMessage::GetState, 5000)
             .expect("failed to query session state")
     }
 
@@ -532,12 +569,17 @@ impl SessionHandle {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-fn create_event_store(config: &EventStoreConfig) -> Arc<dyn EventStore> {
+fn create_event_store(config: &EventStoreConfig) -> (Arc<dyn EventStore>, Arc<dyn SessionIndex>) {
     match config {
-        EventStoreConfig::InMemory => Arc::new(InMemoryEventStore::new()),
+        EventStoreConfig::InMemory => {
+            let store = Arc::new(InMemoryEventStore::new());
+            (store.clone(), store)
+        }
         #[cfg(feature = "sqlite")]
         EventStoreConfig::Sqlite { path } => {
-            Arc::new(SqliteEventStore::new(path).expect("failed to open SQLite event store"))
+            let store =
+                Arc::new(SqliteEventStore::new(path).expect("failed to open SQLite event store"));
+            (store.clone(), store)
         }
         #[cfg(not(feature = "sqlite"))]
         EventStoreConfig::Sqlite { .. } => {

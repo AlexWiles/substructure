@@ -6,6 +6,7 @@ use uuid::Uuid;
 use super::agent_state::{AgentState, StrategySlot};
 use super::command_handler::{SessionCommand, SessionError};
 use super::strategy::Strategy;
+use crate::domain::aggregate::DomainEvent;
 use crate::domain::event::*;
 
 pub(super) fn new_call_id() -> String {
@@ -36,55 +37,49 @@ impl AgentSession {
         self.agent_state.clone()
     }
 
-    pub fn apply(&mut self, event: &Event) {
-        self.agent_state.apply_core(event);
-    }
-
-    /// Compute the derived state envelope for the current session state.
-    pub fn derived_state(&self) -> DerivedState {
-        DerivedState {
-            status: self.agent_state.status.clone(),
-            wake_at: self.agent_state.wake_at(),
-        }
+    pub fn apply(&mut self, payload: &EventPayload, sequence: u64) {
+        self.agent_state.apply_core(payload, sequence);
     }
 
     /// Process a command: validate, build events, apply, and stamp derived state.
     ///
-    /// Returns the fully-stamped events and a post-apply snapshot, ready for
-    /// persistence. The caller only needs to persist — no domain logic leaks out.
+    /// Returns the fully-stamped domain events and a post-apply snapshot, ready for
+    /// persistence. The caller converts to raw events before storing.
     pub fn process_command(
         &mut self,
         cmd: SessionCommand,
         tenant_id: &str,
-    ) -> Result<(Vec<Event>, AgentState), SessionError> {
+    ) -> Result<(Vec<DomainEvent<AgentState>>, AgentState), SessionError> {
         let payloads = self.handle(cmd.payload)?;
         if payloads.is_empty() {
             return Ok((vec![], self.snapshot()));
         }
 
         let base_seq = self.agent_state.stream_version + 1;
-        let mut events: Vec<Event> = payloads
+
+        // Apply each payload to the state
+        for (i, payload) in payloads.iter().enumerate() {
+            self.apply(payload, base_seq + i as u64);
+        }
+
+        // Compute derived state after all events applied
+        let derived = self.agent_state.derived_state();
+
+        // Build domain events
+        let events: Vec<DomainEvent<AgentState>> = payloads
             .into_iter()
             .enumerate()
-            .map(|(i, payload)| Event {
+            .map(|(i, payload)| DomainEvent {
                 id: Uuid::new_v4(),
                 tenant_id: tenant_id.to_string(),
-                session_id: self.agent_state.session_id,
+                aggregate_id: self.agent_state.session_id,
                 sequence: base_seq + i as u64,
                 span: cmd.span.clone(),
                 occurred_at: cmd.occurred_at,
                 payload,
-                derived: None,
+                derived: Some(derived.clone()),
             })
             .collect();
-
-        for event in &events {
-            self.apply(event);
-        }
-        let derived = Some(self.derived_state());
-        for event in &mut events {
-            event.derived = derived.clone();
-        }
 
         Ok((events, self.snapshot()))
     }

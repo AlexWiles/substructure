@@ -6,9 +6,10 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream;
 use uuid::Uuid;
 
-use crate::domain::event::{Event, Role, SessionAuth, SpanContext};
+use crate::domain::aggregate::DomainEvent;
+use crate::domain::event::{Message as DomainMessage, Role, SessionAuth, SpanContext, ToolCall as DomainToolCall};
 use crate::domain::openai;
-use crate::domain::session::{AgentState, CommandPayload, IncomingMessage, SessionCommand};
+use crate::domain::session::{AgentState, CommandPayload, SessionCommand};
 use crate::runtime::{OnEvent, Runtime, RuntimeError, SessionMessage};
 
 use super::translate::{EventTranslator, TranslateOutput};
@@ -54,7 +55,7 @@ fn build_ag_ui_callback(
         skip_until,
     });
 
-    Box::new(move |event: &Event| {
+    Box::new(move |event: &DomainEvent<AgentState>| {
         let mut s = state.lock().expect("ag-ui callback lock poisoned");
 
         if s.tx.is_none() {
@@ -115,8 +116,8 @@ pub async fn run_session(
     auth: SessionAuth,
     input: RunAgentInput,
 ) -> Result<impl Stream<Item = AgUiEvent> + Send, AgUiError> {
-    let new_messages = extract_new_messages(&input);
-    if new_messages.is_empty() {
+    let messages: Vec<DomainMessage> = input.messages.iter().map(ag_ui_to_domain_message).collect();
+    if messages.is_empty() {
         return Err(AgUiError::NoUserMessage);
     }
 
@@ -146,18 +147,16 @@ pub async fn run_session(
         send_client_tools(session_id, input.tools);
     }
 
-    for message in new_messages {
-        client
-            .send_command(SessionCommand {
-                span: SpanContext::root(),
-                occurred_at: Utc::now(),
-                payload: CommandPayload::SendMessage {
-                    message,
-                    stream: true,
-                },
-            })
-            .await?;
-    }
+    client
+        .send_command(SessionCommand {
+            span: SpanContext::root(),
+            occurred_at: Utc::now(),
+            payload: CommandPayload::SyncConversation {
+                messages,
+                stream: true,
+            },
+        })
+        .await?;
 
     Ok(ReceiverStream::new(rx))
 }
@@ -173,15 +172,15 @@ pub async fn run_existing_session(
     auth: SessionAuth,
     input: RunAgentInput,
 ) -> Result<impl Stream<Item = AgUiEvent> + Send, AgUiError> {
-    let new_messages = extract_new_messages(&input);
-    if new_messages.is_empty() {
+    let messages: Vec<DomainMessage> = input.messages.iter().map(ag_ui_to_domain_message).collect();
+    if messages.is_empty() {
         return Err(AgUiError::NoUserMessage);
     }
 
     let thread_id = input.thread_id.unwrap_or_else(|| session_id.to_string());
     let run_id = input.run_id.unwrap_or_else(|| Uuid::new_v4().to_string());
 
-    let skip_until = load_last_applied(runtime, session_id, &auth);
+    let skip_until = load_state(runtime, session_id, &auth).1;
 
     let (tx, rx) = mpsc::channel(256);
     let _ = tx.try_send(AgUiEvent::RunStarted {
@@ -202,18 +201,16 @@ pub async fn run_existing_session(
         send_client_tools(session_id, input.tools);
     }
 
-    for message in new_messages {
-        client
-            .send_command(SessionCommand {
-                span: SpanContext::root(),
-                occurred_at: Utc::now(),
-                payload: CommandPayload::SendMessage {
-                    message,
-                    stream: true,
-                },
-            })
-            .await?;
-    }
+    client
+        .send_command(SessionCommand {
+            span: SpanContext::root(),
+            occurred_at: Utc::now(),
+            payload: CommandPayload::SyncConversation {
+                messages,
+                stream: true,
+            },
+        })
+        .await?;
 
     Ok(ReceiverStream::new(rx))
 }
@@ -310,17 +307,15 @@ pub async fn observe_session(
 // ---------------------------------------------------------------------------
 
 fn load_state(runtime: &Runtime, session_id: Uuid, auth: &SessionAuth) -> (AgentState, u64) {
-    match runtime.store().load(session_id, auth) {
+    match runtime.store().load(session_id, &auth.tenant_id) {
         Ok(load) => {
-            let last_applied = load.snapshot.last_applied.unwrap_or(0);
-            (load.snapshot, last_applied)
+            let state: AgentState = serde_json::from_value(load.snapshot)
+                .unwrap_or_else(|_| AgentState::new(session_id));
+            let last_applied = state.last_applied.unwrap_or(0);
+            (state, last_applied)
         }
         Err(_) => (AgentState::new(session_id), 0),
     }
-}
-
-fn load_last_applied(runtime: &Runtime, session_id: Uuid, auth: &SessionAuth) -> u64 {
-    load_state(runtime, session_id, auth).1
 }
 
 /// Convert a domain `Message` to an AG-UI `Message`.
@@ -373,30 +368,9 @@ fn send_client_tools(session_id: Uuid, tools: Vec<super::types::Tool>) {
     crate::runtime::send_to_session(session_id, SessionMessage::SetClientTools(oai_tools));
 }
 
-/// Extract new messages from the AG-UI input as domain `IncomingMessage`s.
-/// Tool results come first, then the last user message (if any).
-fn extract_new_messages(input: &RunAgentInput) -> Vec<IncomingMessage> {
-    let mut messages = Vec::new();
-
-    // Collect tool result messages
-    for m in &input.messages {
-        if let Message::Tool {
-            tool_call_id,
-            content,
-            error,
-            ..
-        } = m
-        {
-            messages.push(IncomingMessage::ToolResult {
-                tool_call_id: tool_call_id.clone(),
-                content: content.clone(),
-                error: error.clone(),
-            });
-        }
-    }
-
-    // Extract last user message
-    if let Some(content) = input.messages.iter().rev().find_map(|m| match m {
+/// Convert an AG-UI `Message` to a domain `Message`.
+pub(super) fn ag_ui_to_domain_message(msg: &Message) -> DomainMessage {
+    match msg {
         Message::User { content, .. } => {
             let text = match content {
                 super::types::MessageContent::Text(t) => t.clone(),
@@ -409,12 +383,115 @@ fn extract_new_messages(input: &RunAgentInput) -> Vec<IncomingMessage> {
                     .collect::<Vec<_>>()
                     .join(""),
             };
-            Some(text)
+            DomainMessage {
+                role: Role::User,
+                content: Some(text),
+                tool_calls: vec![],
+                tool_call_id: None,
+                call_id: None,
+                token_count: None,
+            }
         }
-        _ => None,
-    }) {
-        messages.push(IncomingMessage::User { content });
+        Message::Assistant {
+            content,
+            tool_calls,
+            ..
+        } => DomainMessage {
+            role: Role::Assistant,
+            content: content.clone(),
+            tool_calls: tool_calls
+                .iter()
+                .map(|tc| DomainToolCall {
+                    id: tc.id.clone(),
+                    name: tc.function.name.clone(),
+                    arguments: tc.function.arguments.clone(),
+                })
+                .collect(),
+            tool_call_id: None,
+            call_id: None,
+            token_count: None,
+        },
+        Message::Tool {
+            tool_call_id,
+            content,
+            ..
+        } => DomainMessage {
+            role: Role::Tool,
+            content: Some(content.clone()),
+            tool_calls: vec![],
+            tool_call_id: Some(tool_call_id.clone()),
+            call_id: None,
+            token_count: None,
+        },
+        Message::System { content, .. } | Message::Developer { content, .. } => DomainMessage {
+            role: Role::System,
+            content: Some(content.clone()),
+            tool_calls: vec![],
+            tool_call_id: None,
+            call_id: None,
+            token_count: None,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::types::*;
+
+    #[test]
+    fn user_message_with_parts_joins_text() {
+        let msg = Message::User {
+            id: None,
+            content: MessageContent::Parts(vec![
+                InputContent::Text { text: "hello ".into() },
+                InputContent::ImageUrl { image_url: ImageUrl { url: "http://img".into() } },
+                InputContent::Text { text: "world".into() },
+            ]),
+        };
+        let domain = ag_ui_to_domain_message(&msg);
+        assert_eq!(domain.role, Role::User);
+        assert_eq!(domain.content.as_deref(), Some("hello world"));
     }
 
-    messages
+    #[test]
+    fn assistant_message_preserves_tool_calls() {
+        let msg = Message::Assistant {
+            id: None,
+            content: Some("thinking".into()),
+            tool_calls: vec![
+                ToolCallInfo {
+                    id: "tc-1".into(),
+                    function: FunctionCall { name: "read".into(), arguments: "{}".into() },
+                },
+                ToolCallInfo {
+                    id: "tc-2".into(),
+                    function: FunctionCall { name: "write".into(), arguments: r#"{"x":1}"#.into() },
+                },
+            ],
+        };
+        let domain = ag_ui_to_domain_message(&msg);
+        assert_eq!(domain.role, Role::Assistant);
+        assert_eq!(domain.content.as_deref(), Some("thinking"));
+        assert_eq!(domain.tool_calls.len(), 2);
+        assert_eq!(domain.tool_calls[0].id, "tc-1");
+        assert_eq!(domain.tool_calls[0].name, "read");
+        assert_eq!(domain.tool_calls[1].id, "tc-2");
+        assert_eq!(domain.tool_calls[1].arguments, r#"{"x":1}"#);
+    }
+
+    #[test]
+    fn tool_message_maps_tool_call_id() {
+        let msg = Message::Tool {
+            id: None,
+            tool_call_id: "tc-1".into(),
+            content: "42".into(),
+            error: Some("oops".into()),
+        };
+        let domain = ag_ui_to_domain_message(&msg);
+        assert_eq!(domain.role, Role::Tool);
+        assert_eq!(domain.content.as_deref(), Some("42"));
+        assert_eq!(domain.tool_call_id.as_deref(), Some("tc-1"));
+        assert!(domain.tool_calls.is_empty());
+    }
 }

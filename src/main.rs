@@ -3,10 +3,11 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 use uuid::Uuid;
 
+use substructure::domain::aggregate::DomainEvent;
 use substructure::domain::config::SystemConfig;
 use substructure::domain::event::{EventPayload, SessionAuth, SpanContext};
 use substructure::domain::secret::resolve_secrets;
-use substructure::domain::session::{CommandPayload, IncomingMessage, SessionCommand};
+use substructure::domain::session::{AgentState, CommandPayload, IncomingMessage, SessionCommand};
 #[cfg(feature = "http")]
 use substructure::http::start_server;
 use substructure::runtime::Runtime;
@@ -105,12 +106,12 @@ async fn run_one_shot(
             .connect(
                 session_id,
                 auth,
-                Some(Box::new(move |event| {
-                    let ev = serde_json::to_string_pretty(event).unwrap();
+                Some(Box::new(move |event: &DomainEvent<AgentState>| {
+                    if let Ok(ev) = serde_json::to_string_pretty(&event.payload) {
+                        println!("{}", ev);
+                    }
 
-                    println!("{}", ev);
-
-                    if matches!(event.payload, EventPayload::SessionDone(_)) {
+                    if matches!(&event.payload, EventPayload::SessionDone(_)) {
                         notify.notify_one();
                     }
                 })),

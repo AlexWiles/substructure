@@ -1,67 +1,73 @@
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef, SpawnErr};
 use uuid::Uuid;
 
+use crate::domain::aggregate::{Aggregate, DomainEvent};
+
 use super::event_store::{EventBatch, EventStore};
-use super::session_actor::SessionMessage;
-use super::session_client::ClientMessage;
-use crate::domain::event::Event;
 
 // ---------------------------------------------------------------------------
-// Dispatcher actor — fans out new events to session actors and clients
+// AggregateDispatcher<A> — generic, per-aggregate-type event dispatcher
 // ---------------------------------------------------------------------------
 
-pub enum DispatcherMessage {
+/// Routing closure: receives aggregate_id + typed events, delivers to actors.
+pub type RouteTypedEvents<A> =
+    Arc<dyn Fn(Uuid, Vec<Arc<DomainEvent<A>>>) + Send + Sync>;
+
+pub enum AggregateDispatcherMsg {
     Events(EventBatch),
 }
 
-pub struct DispatcherActor;
+pub struct AggregateDispatcher<A: Aggregate> {
+    _phantom: PhantomData<A>,
+}
 
-impl Actor for DispatcherActor {
-    type Msg = DispatcherMessage;
-    type State = ();
-    type Arguments = ();
+pub struct AggregateDispatcherState<A: Aggregate> {
+    route: RouteTypedEvents<A>,
+}
+
+pub struct AggregateDispatcherArgs<A: Aggregate> {
+    pub route: RouteTypedEvents<A>,
+}
+
+impl<A: Aggregate> Actor for AggregateDispatcher<A> {
+    type Msg = AggregateDispatcherMsg;
+    type State = AggregateDispatcherState<A>;
+    type Arguments = AggregateDispatcherArgs<A>;
 
     async fn pre_start(
         &self,
         _myself: ActorRef<Self::Msg>,
-        _args: Self::Arguments,
+        args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        Ok(())
+        Ok(AggregateDispatcherState { route: args.route })
     }
 
     async fn handle(
         &self,
         _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
-        _state: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            DispatcherMessage::Events(events) => {
-                // Group events by session_id
-                let mut by_session: HashMap<Uuid, Vec<Arc<Event>>> = HashMap::new();
-                for event in &events {
-                    by_session
-                        .entry(event.session_id)
-                        .or_default()
-                        .push(Arc::clone(event));
-                }
-
-                // Deliver to session actors via registry
-                for (session_id, session_events) in by_session {
-                    super::send_to_session(
-                        session_id,
-                        SessionMessage::Events(session_events.clone()),
-                    );
-
-                    // Fan-out to session clients via process group
-                    let client_group = super::session_clients_group(session_id);
-                    for cell in ractor::pg::get_members(&client_group) {
-                        let client: ActorRef<ClientMessage> = cell.into();
-                        let _ = client.send_message(ClientMessage::Events(session_events.clone()));
+            AggregateDispatcherMsg::Events(batch) => {
+                let mut by_id: HashMap<Uuid, Vec<Arc<DomainEvent<A>>>> = HashMap::new();
+                for raw in &batch {
+                    if raw.aggregate_type != A::aggregate_type() {
+                        continue;
                     }
+                    if let Ok(typed) = DomainEvent::<A>::from_raw(raw) {
+                        by_id
+                            .entry(typed.aggregate_id)
+                            .or_default()
+                            .push(Arc::new(typed));
+                    }
+                }
+                for (id, events) in by_id {
+                    (state.route)(id, events);
                 }
             }
         }
@@ -69,21 +75,25 @@ impl Actor for DispatcherActor {
     }
 }
 
-pub async fn spawn_dispatcher(
-    store: Arc<dyn EventStore>,
+pub async fn spawn_aggregate_dispatcher<A: Aggregate>(
+    store: &Arc<dyn EventStore>,
+    route: RouteTypedEvents<A>,
     supervisor: ActorCell,
-) -> Result<ActorRef<DispatcherMessage>, SpawnErr> {
-    let (actor_ref, _handle) = Actor::spawn_linked(
-        Some("dispatcher".to_string()),
-        DispatcherActor,
-        (),
+) -> Result<(), SpawnErr> {
+    let name = format!("{}-dispatcher", A::aggregate_type());
+    let (actor_ref, _) = Actor::spawn_linked(
+        Some(name),
+        AggregateDispatcher::<A> {
+            _phantom: PhantomData,
+        },
+        AggregateDispatcherArgs { route },
         supervisor,
     )
     .await?;
 
-    store.events().subscribe(actor_ref.clone(), |batch| {
-        Some(DispatcherMessage::Events(batch))
-    });
+    store
+        .events()
+        .subscribe(actor_ref, |batch| Some(AggregateDispatcherMsg::Events(batch)));
 
-    Ok(actor_ref)
+    Ok(())
 }

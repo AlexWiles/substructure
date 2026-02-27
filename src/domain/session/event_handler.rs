@@ -2,6 +2,7 @@ use crate::domain::event::*;
 use crate::domain::openai;
 
 use super::agent_session::{new_call_id, AgentSession};
+use super::agent_state::{LlmCallStatus, ToolCallStatus};
 use super::command_handler::CommandPayload;
 use super::strategy::{Action, Turn};
 
@@ -64,11 +65,11 @@ pub fn extract_assistant_message(
 // ---------------------------------------------------------------------------
 
 impl AgentSession {
-    pub async fn react(&self, tools: Option<Vec<openai::Tool>>, event: &Event) -> Vec<Effect> {
+    pub async fn react(&self, tools: Option<Vec<openai::Tool>>, payload: &EventPayload) -> Vec<Effect> {
         let mut effects = Vec::new();
 
         // --- Mechanical work: infrastructure I/O and bookkeeping ---
-        match &event.payload {
+        match payload {
             EventPayload::SessionCreated(payload) => {
                 if !payload.agent.mcp_servers.is_empty() {
                     effects.push(Effect::StartMcpServers(payload.agent.mcp_servers.clone()));
@@ -76,23 +77,37 @@ impl AgentSession {
             }
 
             EventPayload::LlmCallRequested(payload) => {
-                let LlmRequest::OpenAi(mut oai_req) = payload.request.clone();
-                oai_req.tools = tools.clone();
-                effects.push(Effect::CallLlm {
-                    call_id: payload.call_id.clone(),
-                    request: LlmRequest::OpenAi(oai_req),
-                    stream: payload.stream,
-                });
+                if self
+                    .agent_state
+                    .llm_calls
+                    .get(&payload.call_id)
+                    .is_some_and(|c| c.status == LlmCallStatus::Pending)
+                {
+                    let LlmRequest::OpenAi(mut oai_req) = payload.request.clone();
+                    oai_req.tools = tools.clone();
+                    effects.push(Effect::CallLlm {
+                        call_id: payload.call_id.clone(),
+                        request: LlmRequest::OpenAi(oai_req),
+                        stream: payload.stream,
+                    });
+                }
             }
 
             EventPayload::ToolCallRequested(payload) => {
-                let args: serde_json::Value =
-                    serde_json::from_str(&payload.arguments).unwrap_or_default();
-                effects.push(Effect::CallTool {
-                    tool_call_id: payload.tool_call_id.clone(),
-                    name: payload.name.clone(),
-                    arguments: args,
-                });
+                if self
+                    .agent_state
+                    .tool_calls
+                    .get(&payload.tool_call_id)
+                    .is_some_and(|tc| tc.status == ToolCallStatus::Pending)
+                {
+                    let args: serde_json::Value =
+                        serde_json::from_str(&payload.arguments).unwrap_or_default();
+                    effects.push(Effect::CallTool {
+                        tool_call_id: payload.tool_call_id.clone(),
+                        name: payload.name.clone(),
+                        arguments: args,
+                    });
+                }
             }
 
             EventPayload::SessionDone(_) => {
@@ -107,7 +122,7 @@ impl AgentSession {
         }
 
         // --- Consult strategy ---
-        effects.extend(self.consult_strategy(tools, &event.payload).await);
+        effects.extend(self.consult_strategy(tools, payload).await);
 
         effects
     }

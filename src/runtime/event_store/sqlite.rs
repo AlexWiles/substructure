@@ -5,33 +5,36 @@ use ractor::OutputPort;
 use rusqlite::Connection;
 use uuid::Uuid;
 
-use crate::domain::event::{Event, SessionAuth};
 use crate::domain::session::AgentState;
 
-use super::store::{
-    EventBatch, EventStore, SessionFilter, SessionLoad, SessionSummary, StoreError, Version,
-};
+use super::session_index::{SessionFilter, SessionIndex, SessionSummary};
+use super::store::{Event, EventBatch, EventStore, StoreError, StreamLoad, Version};
 
 const SCHEMA_SQL: &str = r#"
     CREATE TABLE IF NOT EXISTS events (
-        global_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id      TEXT NOT NULL,
-        tenant_id       TEXT NOT NULL,
-        sequence        INTEGER NOT NULL,
-        data            TEXT NOT NULL
+        global_sequence  INTEGER PRIMARY KEY AUTOINCREMENT,
+        aggregate_type   TEXT NOT NULL,
+        aggregate_id     TEXT NOT NULL,
+        event_type       TEXT NOT NULL,
+        tenant_id        TEXT NOT NULL,
+        sequence         INTEGER NOT NULL,
+        data             TEXT NOT NULL
     );
-    CREATE INDEX IF NOT EXISTS idx_events_session ON events (session_id);
+    CREATE INDEX IF NOT EXISTS idx_events_aggregate ON events (aggregate_id);
+    CREATE INDEX IF NOT EXISTS idx_events_type ON events (aggregate_type);
 
     CREATE TABLE IF NOT EXISTS snapshots (
-        session_id      TEXT PRIMARY KEY,
-        tenant_id       TEXT NOT NULL,
-        stream_version  INTEGER NOT NULL,
-        status          TEXT NOT NULL,
-        agent_name      TEXT,
-        wake_at         TEXT,
-        data            TEXT NOT NULL
+        aggregate_id     TEXT PRIMARY KEY,
+        aggregate_type   TEXT NOT NULL,
+        tenant_id        TEXT NOT NULL,
+        stream_version   INTEGER NOT NULL,
+        data             TEXT NOT NULL,
+        status           TEXT,
+        agent_name       TEXT,
+        wake_at          TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_snapshots_tenant ON snapshots (tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_snapshots_type ON snapshots (aggregate_type);
 "#;
 
 pub struct SqliteEventStore {
@@ -60,32 +63,33 @@ impl SqliteEventStore {
 impl EventStore for SqliteEventStore {
     async fn append(
         &self,
-        session_id: Uuid,
-        auth: &SessionAuth,
+        aggregate_id: Uuid,
+        tenant_id: &str,
+        aggregate_type: &str,
         events: Vec<Event>,
-        snapshot: AgentState,
+        snapshot: serde_json::Value,
+        expected_version: u64,
+        new_version: u64,
     ) -> Result<(), StoreError> {
-        let expected_version = snapshot.stream_version - events.len() as u64;
-
         let batch = {
             let mut conn = self.conn.lock().expect("sqlite lock poisoned");
             let tx = conn
                 .transaction()
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
 
-            let sid = session_id.to_string();
+            let aid = aggregate_id.to_string();
 
             // Insert events — version + tenant guard embedded in query.
             {
                 let mut stmt = tx
                     .prepare(
-                        "INSERT INTO events (session_id, tenant_id, sequence, data)
-                         SELECT ?1, ?2, ?3, ?4
+                        "INSERT INTO events (aggregate_type, aggregate_id, event_type, tenant_id, sequence, data)
+                         SELECT ?1, ?2, ?3, ?4, ?5, ?6
                          WHERE (
-                             (?5 = 0 AND NOT EXISTS (SELECT 1 FROM snapshots WHERE session_id = ?1))
+                             (?7 = 0 AND NOT EXISTS (SELECT 1 FROM snapshots WHERE aggregate_id = ?2))
                              OR EXISTS (
                                  SELECT 1 FROM snapshots
-                                 WHERE session_id = ?1 AND stream_version = ?5 AND tenant_id = ?6
+                                 WHERE aggregate_id = ?2 AND stream_version = ?7 AND tenant_id = ?8
                              )
                          )",
                     )
@@ -96,28 +100,28 @@ impl EventStore for SqliteEventStore {
                         .map_err(|e| StoreError::Internal(e.to_string()))?;
                     let rows = stmt
                         .execute(rusqlite::params![
-                            sid,
+                            aggregate_type,
+                            aid,
+                            event.event_type,
                             event.tenant_id,
                             event.sequence,
                             data,
                             expected_version as i64,
-                            auth.tenant_id
+                            tenant_id
                         ])
                         .map_err(|e| StoreError::Internal(e.to_string()))?;
 
                     if rows == 0 {
                         return match tx
                             .query_row(
-                                "SELECT stream_version, tenant_id FROM snapshots WHERE session_id = ?1",
-                                [&sid],
+                                "SELECT stream_version, tenant_id FROM snapshots WHERE aggregate_id = ?1",
+                                [&aid],
                                 |row| Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?)),
                             )
                             .optional()
                             .map_err(|e| StoreError::Internal(e.to_string()))?
                         {
-                            Some((_, ref t)) if t != &auth.tenant_id => {
-                                Err(StoreError::TenantMismatch)
-                            }
+                            Some((_, ref t)) if t != tenant_id => Err(StoreError::TenantMismatch),
                             Some((v, _)) => Err(StoreError::VersionConflict {
                                 expected: Version(expected_version),
                                 actual: Version(v),
@@ -136,22 +140,22 @@ impl EventStore for SqliteEventStore {
             // Upsert snapshot
             let snapshot_data = serde_json::to_string(&snapshot)
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
-            let status_str = serde_json::to_string(&snapshot.status)
-                .map_err(|e| StoreError::Internal(e.to_string()))?;
-            let agent_name = snapshot.agent.as_ref().map(|a| a.name.clone());
-            let wake_at = snapshot.wake_at().map(|t| t.to_rfc3339());
+
+            // Extract session-specific indexed fields from the snapshot (if applicable).
+            let (status, agent_name, wake_at) = extract_session_index_fields(&snapshot);
 
             tx.execute(
-                "INSERT INTO snapshots (session_id, tenant_id, stream_version, status, agent_name, wake_at, data)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                 ON CONFLICT(session_id) DO UPDATE SET
+                "INSERT INTO snapshots (aggregate_id, aggregate_type, tenant_id, stream_version, data, status, agent_name, wake_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(aggregate_id) DO UPDATE SET
+                     aggregate_type = excluded.aggregate_type,
                      tenant_id = excluded.tenant_id,
                      stream_version = excluded.stream_version,
+                     data = excluded.data,
                      status = excluded.status,
                      agent_name = excluded.agent_name,
-                     wake_at = excluded.wake_at,
-                     data = excluded.data",
-                rusqlite::params![sid, auth.tenant_id, snapshot.stream_version, status_str, agent_name, wake_at, snapshot_data],
+                     wake_at = excluded.wake_at",
+                rusqlite::params![aid, aggregate_type, tenant_id, new_version, snapshot_data, status, agent_name, wake_at],
             )
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
@@ -165,36 +169,53 @@ impl EventStore for SqliteEventStore {
         Ok(())
     }
 
-    fn load(&self, session_id: Uuid, auth: &SessionAuth) -> Result<SessionLoad, StoreError> {
+    fn load(&self, aggregate_id: Uuid, tenant_id: &str) -> Result<StreamLoad, StoreError> {
         let conn = self.conn.lock().expect("sqlite lock poisoned");
-        let sid = session_id.to_string();
+        let aid = aggregate_id.to_string();
 
-        let (tenant_id, snapshot_data) = conn
+        let (stored_tenant, snapshot_data, stream_version) = conn
             .query_row(
-                "SELECT tenant_id, data FROM snapshots WHERE session_id = ?1",
-                [&sid],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                "SELECT tenant_id, data, stream_version FROM snapshots WHERE aggregate_id = ?1",
+                [&aid],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, u64>(2)?,
+                    ))
+                },
             )
             .map_err(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => StoreError::SessionNotFound,
+                rusqlite::Error::QueryReturnedNoRows => StoreError::StreamNotFound,
                 other => StoreError::Internal(other.to_string()),
             })?;
 
-        if tenant_id != auth.tenant_id {
+        if stored_tenant != tenant_id {
             return Err(StoreError::TenantMismatch);
         }
 
-        let snapshot: AgentState = serde_json::from_str(&snapshot_data)
+        let snapshot: serde_json::Value = serde_json::from_str(&snapshot_data)
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
-        Ok(SessionLoad { snapshot })
+        Ok(StreamLoad {
+            snapshot,
+            stream_version,
+        })
     }
 
+    fn events(&self) -> &OutputPort<EventBatch> {
+        &self.events
+    }
+}
+
+impl SessionIndex for SqliteEventStore {
     fn list_sessions(&self, filter: &SessionFilter) -> Vec<SessionSummary> {
         let conn = self.conn.lock().expect("sqlite lock poisoned");
         let now = chrono::Utc::now();
 
-        let mut sql = String::from("SELECT data, stream_version FROM snapshots WHERE 1=1");
+        let mut sql = String::from(
+            "SELECT data, stream_version FROM snapshots WHERE aggregate_type = 'session'",
+        );
         let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
         if let Some(ref tid) = filter.tenant_id {
@@ -251,10 +272,29 @@ impl EventStore for SqliteEventStore {
         })
         .collect()
     }
+}
 
-    fn events(&self) -> &OutputPort<EventBatch> {
-        &self.events
-    }
+/// Extract session-specific indexed fields from a snapshot Value.
+/// Returns (status, agent_name, wake_at) if the snapshot is a session.
+fn extract_session_index_fields(
+    snapshot: &serde_json::Value,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let status = snapshot.get("status").and_then(|v| {
+        // SessionStatus serializes to a JSON value; store as string for index.
+        serde_json::to_string(v).ok()
+    });
+    let agent_name = snapshot
+        .get("agent")
+        .and_then(|a| a.get("name"))
+        .and_then(|n| n.as_str())
+        .map(|s| s.to_string());
+
+    // Compute wake_at from the deserialized AgentState (if possible).
+    let wake_at = serde_json::from_value::<AgentState>(snapshot.clone())
+        .ok()
+        .and_then(|state| state.wake_at().map(|t| t.to_rfc3339()));
+
+    (status, agent_name, wake_at)
 }
 
 /// Extension trait for optional query results.
@@ -276,7 +316,8 @@ impl<T> OptionalExt<T> for Result<T, rusqlite::Error> {
 mod tests {
     use super::*;
     use crate::domain::agent::{AgentConfig, LlmConfig};
-    use crate::domain::event::{EventPayload, SessionCreated, SpanContext};
+    use crate::domain::aggregate::{Aggregate, DomainEvent};
+    use crate::domain::event::{EventPayload, SessionAuth, SessionCreated, SpanContext};
     use crate::domain::session::SessionStatus;
 
     fn test_auth(tenant: &str) -> SessionAuth {
@@ -309,13 +350,13 @@ mod tests {
         session_id: Uuid,
         tenant: &str,
         agent_name: &str,
-    ) -> (Event, AgentState) {
+    ) -> (Vec<Event>, AgentState) {
         let auth = test_auth(tenant);
         let agent = test_agent(agent_name);
-        let event = Event {
+        let domain_event: DomainEvent<AgentState> = DomainEvent {
             id: Uuid::new_v4(),
             tenant_id: tenant.into(),
-            session_id,
+            aggregate_id: session_id,
             sequence: 0,
             span: SpanContext::root(),
             occurred_at: chrono::Utc::now(),
@@ -327,8 +368,8 @@ mod tests {
             derived: None,
         };
         let mut state = AgentState::new(session_id);
-        state.apply_core(&event);
-        (event, state)
+        state.apply(&domain_event.payload, domain_event.sequence);
+        (vec![domain_event.into_raw()], state)
     }
 
     fn temp_store() -> SqliteEventStore {
@@ -339,31 +380,42 @@ mod tests {
     async fn append_and_load() {
         let store = temp_store();
         let id = Uuid::new_v4();
-        let (ev, snap) = session_created_event(id, "acme", "bot");
+        let (events, snap) = session_created_event(id, "acme", "bot");
+        let new_version = snap.stream_version;
+        let snapshot_value = serde_json::to_value(&snap).unwrap();
 
         store
-            .append(id, &test_auth("acme"), vec![ev], snap.clone())
+            .append(id, "acme", "session", events, snapshot_value, 0, new_version)
             .await
             .unwrap();
 
-        let loaded = store.load(id, &test_auth("acme")).unwrap();
-        assert_eq!(loaded.snapshot.session_id, id);
-        assert_eq!(loaded.snapshot.stream_version, snap.stream_version);
+        let loaded = store.load(id, "acme").unwrap();
+        let loaded_state: AgentState =
+            serde_json::from_value(loaded.snapshot).unwrap();
+        assert_eq!(loaded_state.session_id, id);
+        assert_eq!(loaded.stream_version, new_version);
     }
 
     #[tokio::test]
     async fn version_conflict() {
         let store = temp_store();
         let id = Uuid::new_v4();
-        let (ev, snap) = session_created_event(id, "t", "bot");
+        let (events, snap) = session_created_event(id, "t", "bot");
+        let new_version = snap.stream_version;
+        let snapshot_value = serde_json::to_value(&snap).unwrap();
 
         store
-            .append(id, &test_auth("t"), vec![ev], snap)
+            .append(id, "t", "session", events, snapshot_value, 0, new_version)
             .await
             .unwrap();
 
-        let (ev2, snap2) = session_created_event(id, "t", "bot");
-        let result = store.append(id, &test_auth("t"), vec![ev2], snap2).await;
+        // Try to append again with expected_version=0 (should conflict)
+        let (events2, snap2) = session_created_event(id, "t", "bot");
+        let new_version2 = snap2.stream_version;
+        let snapshot_value2 = serde_json::to_value(&snap2).unwrap();
+        let result = store
+            .append(id, "t", "session", events2, snapshot_value2, 0, new_version2)
+            .await;
         assert!(matches!(result, Err(StoreError::VersionConflict { .. })));
     }
 
@@ -371,22 +423,24 @@ mod tests {
     async fn tenant_mismatch() {
         let store = temp_store();
         let id = Uuid::new_v4();
-        let (ev, snap) = session_created_event(id, "tenant-a", "bot");
+        let (events, snap) = session_created_event(id, "tenant-a", "bot");
+        let new_version = snap.stream_version;
+        let snapshot_value = serde_json::to_value(&snap).unwrap();
 
         store
-            .append(id, &test_auth("tenant-a"), vec![ev], snap)
+            .append(id, "tenant-a", "session", events, snapshot_value, 0, new_version)
             .await
             .unwrap();
 
-        let result = store.load(id, &test_auth("tenant-b"));
+        let result = store.load(id, "tenant-b");
         assert!(matches!(result, Err(StoreError::TenantMismatch)));
     }
 
     #[tokio::test]
-    async fn session_not_found() {
+    async fn stream_not_found() {
         let store = temp_store();
-        let result = store.load(Uuid::new_v4(), &test_auth("t"));
-        assert!(matches!(result, Err(StoreError::SessionNotFound)));
+        let result = store.load(Uuid::new_v4(), "t");
+        assert!(matches!(result, Err(StoreError::StreamNotFound)));
     }
 
     #[tokio::test]
@@ -406,11 +460,11 @@ mod tests {
         let (ev2, snap2) = session_created_event(id2, "tenant-b", "bot-2");
 
         store
-            .append(id1, &test_auth("tenant-a"), vec![ev1], snap1)
+            .append(id1, "tenant-a", "session", ev1, serde_json::to_value(&snap1).unwrap(), 0, snap1.stream_version)
             .await
             .unwrap();
         store
-            .append(id2, &test_auth("tenant-b"), vec![ev2], snap2)
+            .append(id2, "tenant-b", "session", ev2, serde_json::to_value(&snap2).unwrap(), 0, snap2.stream_version)
             .await
             .unwrap();
 
@@ -428,11 +482,11 @@ mod tests {
         let (ev2, snap2) = session_created_event(id2, "tenant-b", "bot");
 
         store
-            .append(id1, &test_auth("tenant-a"), vec![ev1], snap1)
+            .append(id1, "tenant-a", "session", ev1, serde_json::to_value(&snap1).unwrap(), 0, snap1.stream_version)
             .await
             .unwrap();
         store
-            .append(id2, &test_auth("tenant-b"), vec![ev2], snap2)
+            .append(id2, "tenant-b", "session", ev2, serde_json::to_value(&snap2).unwrap(), 0, snap2.stream_version)
             .await
             .unwrap();
 
@@ -456,11 +510,11 @@ mod tests {
         snap2.status = SessionStatus::Active;
 
         store
-            .append(id1, &test_auth("t"), vec![ev1], snap1)
+            .append(id1, "t", "session", ev1, serde_json::to_value(&snap1).unwrap(), 0, snap1.stream_version)
             .await
             .unwrap();
         store
-            .append(id2, &test_auth("t"), vec![ev2], snap2)
+            .append(id2, "t", "session", ev2, serde_json::to_value(&snap2).unwrap(), 0, snap2.stream_version)
             .await
             .unwrap();
 
@@ -483,11 +537,11 @@ mod tests {
         let (ev2, snap2) = session_created_event(id2, "t", "chat-bot");
 
         store
-            .append(id1, &test_auth("t"), vec![ev1], snap1)
+            .append(id1, "t", "session", ev1, serde_json::to_value(&snap1).unwrap(), 0, snap1.stream_version)
             .await
             .unwrap();
         store
-            .append(id2, &test_auth("t"), vec![ev2], snap2)
+            .append(id2, "t", "session", ev2, serde_json::to_value(&snap2).unwrap(), 0, snap2.stream_version)
             .await
             .unwrap();
 
@@ -507,7 +561,7 @@ mod tests {
         let (ev, snap) = session_created_event(id, "acme", "helper");
 
         store
-            .append(id, &test_auth("acme"), vec![ev], snap)
+            .append(id, "acme", "session", ev, serde_json::to_value(&snap).unwrap(), 0, snap.stream_version)
             .await
             .unwrap();
 

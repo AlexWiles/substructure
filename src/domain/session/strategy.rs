@@ -648,38 +648,21 @@ mod tests {
 
     fn make_session(agent: &AgentConfig) -> AgentState {
         let mut state = AgentState::new(Uuid::new_v4());
-        let event = Event {
-            id: Uuid::new_v4(),
-            tenant_id: "t".into(),
-            session_id: state.session_id,
-            sequence: 1,
-            span: SpanContext::root(),
-            occurred_at: chrono::Utc::now(),
-            payload: EventPayload::SessionCreated(SessionCreated {
+        state.apply_core(
+            &EventPayload::SessionCreated(SessionCreated {
                 agent: agent.clone(),
                 auth: test_auth(),
                 on_done: None,
             }),
-            derived: None,
-        };
-        state.apply_core(&event);
+            1,
+        );
         state
     }
 
     fn apply(state: &mut AgentState, payloads: Vec<EventPayload>) {
         let seq = state.last_applied.unwrap_or(0);
-        for (i, payload) in payloads.into_iter().enumerate() {
-            let event = Event {
-                id: Uuid::new_v4(),
-                tenant_id: "t".into(),
-                session_id: state.session_id,
-                sequence: seq + 1 + i as u64,
-                span: SpanContext::root(),
-                occurred_at: chrono::Utc::now(),
-                payload,
-                derived: None,
-            };
-            state.apply_core(&event);
+        for (i, payload) in payloads.iter().enumerate() {
+            state.apply_core(payload, seq + 1 + i as u64);
         }
     }
 

@@ -93,6 +93,10 @@ pub enum CommandPayload {
     UpdateStrategyState {
         state: serde_json::Value,
     },
+    SyncConversation {
+        messages: Vec<Message>,
+        stream: bool,
+    },
     CancelSession,
     MarkDone {
         artifacts: Vec<Artifact>,
@@ -110,6 +114,8 @@ pub enum SessionError {
     SessionInterrupted,
     #[error("session is busy")]
     SessionBusy,
+    #[error("conversation has diverged")]
+    ConversationDiverged,
 }
 
 // ---------------------------------------------------------------------------
@@ -418,6 +424,9 @@ impl AgentSession {
                     StrategyStateChanged { state },
                 )])
             }
+            CommandPayload::SyncConversation { messages, stream } => {
+                self.handle_sync_conversation(messages, stream)
+            }
             CommandPayload::CancelSession => Ok(vec![EventPayload::SessionCancelled]),
             CommandPayload::MarkDone { artifacts } => {
                 Ok(vec![EventPayload::SessionDone(SessionDone { artifacts })])
@@ -559,6 +568,116 @@ impl AgentSession {
 
         Ok(vec![])
     }
+
+    // -----------------------------------------------------------------------
+    // SyncConversation — diff incoming history and emit events for the delta
+    // -----------------------------------------------------------------------
+
+    fn handle_sync_conversation(
+        &self,
+        incoming: Vec<Message>,
+        stream: bool,
+    ) -> Result<Vec<EventPayload>, SessionError> {
+        let state = &self.agent_state;
+
+        // Verify prefix matches current state
+        let prefix_len = state.messages.len();
+        if incoming.len() < prefix_len {
+            return Err(SessionError::ConversationDiverged);
+        }
+        for (existing, incoming_msg) in state.messages.iter().zip(incoming.iter()) {
+            if !messages_match(existing, incoming_msg) {
+                return Err(SessionError::ConversationDiverged);
+            }
+        }
+
+        // Delta = incoming messages beyond what we already have
+        let delta = &incoming[prefix_len..];
+        if delta.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut events = Vec::new();
+        for msg in delta {
+            match msg.role {
+                Role::User => {
+                    events.push(EventPayload::MessageUser(MessageUser {
+                        message: msg.clone(),
+                        stream,
+                    }));
+                }
+                Role::Assistant => {
+                    let call_id = new_call_id();
+                    events.push(EventPayload::MessageAssistant(MessageAssistant {
+                        call_id: call_id.clone(),
+                        message: msg.clone(),
+                    }));
+                    for tc in &msg.tool_calls {
+                        events.push(EventPayload::ToolCallRequested(ToolCallRequested {
+                            tool_call_id: tc.id.clone(),
+                            name: tc.name.clone(),
+                            arguments: tc.arguments.clone(),
+                            deadline: self.tool_deadline(),
+                            handler: Default::default(),
+                        }));
+                    }
+                }
+                Role::Tool => {
+                    if let Some(ref tc_id) = msg.tool_call_id {
+                        let name = state
+                            .tool_calls
+                            .get(tc_id)
+                            .map(|tc| tc.name.clone())
+                            .or_else(|| {
+                                delta
+                                    .iter()
+                                    .flat_map(|m| m.tool_calls.iter())
+                                    .find(|t| t.id == *tc_id)
+                                    .map(|t| t.name.clone())
+                            })
+                            .unwrap_or_default();
+
+                        events.push(EventPayload::ToolCallCompleted(ToolCallCompleted {
+                            tool_call_id: tc_id.clone(),
+                            name,
+                            result: msg.content.clone().unwrap_or_default(),
+                        }));
+                    }
+                    events.push(EventPayload::MessageTool(MessageTool {
+                        message: msg.clone(),
+                    }));
+                }
+                Role::System => {}
+            }
+        }
+
+        Ok(events)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Compare two messages for structural equality (role, content, tool_call_id,
+/// and tool call IDs). Used by SyncConversation to verify the prefix.
+fn messages_match(a: &Message, b: &Message) -> bool {
+    if a.role != b.role {
+        return false;
+    }
+    if a.content != b.content {
+        return false;
+    }
+    if a.tool_call_id != b.tool_call_id {
+        return false;
+    }
+    if a.tool_calls.len() != b.tool_calls.len() {
+        return false;
+    }
+    a.tool_calls
+        .iter()
+        .zip(b.tool_calls.iter())
+        .all(|(ta, tb)| ta.id == tb.id && ta.name == tb.name)
 }
 
 // ---------------------------------------------------------------------------
@@ -638,38 +757,21 @@ mod tests {
 
     fn created_state() -> AgentSession {
         let mut state = AgentSession::new(Uuid::new_v4(), Arc::new(DefaultStrategy::default()));
-        let event = Event {
-            id: Uuid::new_v4(),
-            tenant_id: "t".into(),
-            session_id: state.agent_state.session_id,
-            sequence: 0,
-            span: SpanContext::root(),
-            occurred_at: chrono::Utc::now(),
-            payload: EventPayload::SessionCreated(SessionCreated {
+        state.apply(
+            &EventPayload::SessionCreated(SessionCreated {
                 agent: test_agent(),
                 auth: test_auth(),
                 on_done: None,
             }),
-            derived: None,
-        };
-        state.apply(&event);
+            1,
+        );
         state
     }
 
     fn apply_events(state: &mut AgentSession, payloads: Vec<EventPayload>) {
         let seq = state.agent_state.last_applied.unwrap_or(0);
-        for (i, payload) in payloads.into_iter().enumerate() {
-            let event = Event {
-                id: Uuid::new_v4(),
-                tenant_id: "t".into(),
-                session_id: state.agent_state.session_id,
-                sequence: seq + 1 + i as u64,
-                span: SpanContext::root(),
-                occurred_at: chrono::Utc::now(),
-                payload,
-                derived: None,
-            };
-            state.apply(&event);
+        for (i, payload) in payloads.iter().enumerate() {
+            state.apply(payload, seq + 1 + i as u64);
         }
     }
 
@@ -919,21 +1021,14 @@ mod tests {
         agent.token_budget = Some(100);
 
         let mut state = AgentSession::new(Uuid::new_v4(), Arc::new(DefaultStrategy::default()));
-        let event = Event {
-            id: Uuid::new_v4(),
-            tenant_id: "t".into(),
-            session_id: state.agent_state.session_id,
-            sequence: 0,
-            span: SpanContext::root(),
-            occurred_at: chrono::Utc::now(),
-            payload: EventPayload::SessionCreated(SessionCreated {
+        state.apply(
+            &EventPayload::SessionCreated(SessionCreated {
                 agent,
                 auth: test_auth(),
                 on_done: None,
             }),
-            derived: None,
-        };
-        state.apply(&event);
+            1,
+        );
 
         // Simulate token usage exceeding budget
         state.agent_state.token_usage.total_tokens = 200;

@@ -194,7 +194,7 @@ fn find_session_summary(runtime: &Runtime, session_id: Uuid) -> Result<SessionSu
         ..Default::default()
     };
     runtime
-        .store()
+        .session_index()
         .list_sessions(&filter)
         .into_iter()
         .find(|summary| summary.session_id == session_id)

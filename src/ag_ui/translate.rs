@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 
-use crate::domain::event::{Event, EventPayload};
+use crate::domain::aggregate::DomainEvent;
+use crate::domain::event::EventPayload;
+use crate::domain::session::AgentState;
 
 use super::types::{AgUiEvent, InterruptInfo};
 
@@ -47,8 +49,8 @@ impl EventTranslator {
         }
     }
 
-    /// Translate a domain event into zero or more AG-UI events.
-    pub fn translate(&mut self, event: &Event) -> TranslateOutput {
+    /// Translate a typed domain event into zero or more AG-UI events.
+    pub fn translate(&mut self, event: &DomainEvent<AgentState>) -> TranslateOutput {
         match &event.payload {
             // SessionCreated is skipped — RunStarted is emitted by the stream wrapper
             EventPayload::SessionCreated(_) => TranslateOutput::Events(vec![]),
@@ -59,10 +61,15 @@ impl EventTranslator {
             EventPayload::LlmCallRequested(req) => {
                 TranslateOutput::Events(vec![AgUiEvent::StepStarted {
                     step_id: req.call_id.clone(),
+                    step_name: "llm_call".into(),
                 }])
             }
 
             EventPayload::LlmStreamChunk(chunk) => {
+                if chunk.text.is_empty() {
+                    return TranslateOutput::Events(vec![]);
+                }
+
                 let mut events = Vec::new();
 
                 // Emit TextMessageStart on the first chunk
@@ -97,6 +104,7 @@ impl EventTranslator {
 
                 events.push(AgUiEvent::StepFinished {
                     step_id: completed.call_id.clone(),
+                    step_name: "llm_call".into(),
                 });
 
                 TranslateOutput::Events(events)
@@ -112,6 +120,7 @@ impl EventTranslator {
 
                 events.push(AgUiEvent::StepFinished {
                     step_id: errored.call_id.clone(),
+                    step_name: "llm_call".into(),
                 });
 
                 events.push(AgUiEvent::RunError {
@@ -153,10 +162,12 @@ impl EventTranslator {
                             tool_call_name: tc.name.clone(),
                             parent_message_id: Some(msg.call_id.clone()),
                         });
-                        events.push(AgUiEvent::ToolCallArgs {
-                            tool_call_id: tc.id.clone(),
-                            delta: tc.arguments.clone(),
-                        });
+                        if !tc.arguments.is_empty() {
+                            events.push(AgUiEvent::ToolCallArgs {
+                                tool_call_id: tc.id.clone(),
+                                delta: tc.arguments.clone(),
+                            });
+                        }
                         events.push(AgUiEvent::ToolCallEnd {
                             tool_call_id: tc.id.clone(),
                         });
@@ -177,20 +188,21 @@ impl EventTranslator {
                     return TranslateOutput::Events(vec![]);
                 }
 
-                TranslateOutput::Events(vec![
-                    AgUiEvent::ToolCallStart {
-                        tool_call_id: req.tool_call_id.clone(),
-                        tool_call_name: req.name.clone(),
-                        parent_message_id: None,
-                    },
-                    AgUiEvent::ToolCallArgs {
+                let mut events = vec![AgUiEvent::ToolCallStart {
+                    tool_call_id: req.tool_call_id.clone(),
+                    tool_call_name: req.name.clone(),
+                    parent_message_id: None,
+                }];
+                if !req.arguments.is_empty() {
+                    events.push(AgUiEvent::ToolCallArgs {
                         tool_call_id: req.tool_call_id.clone(),
                         delta: req.arguments.clone(),
-                    },
-                    AgUiEvent::ToolCallEnd {
-                        tool_call_id: req.tool_call_id.clone(),
-                    },
-                ])
+                    });
+                }
+                events.push(AgUiEvent::ToolCallEnd {
+                    tool_call_id: req.tool_call_id.clone(),
+                });
+                TranslateOutput::Events(events)
             }
 
             EventPayload::ToolCallCompleted(completed) => {
@@ -202,8 +214,10 @@ impl EventTranslator {
                 }
 
                 TranslateOutput::Events(vec![AgUiEvent::ToolCallResult {
+                    message_id: format!("{}-result", completed.tool_call_id),
                     tool_call_id: completed.tool_call_id.clone(),
-                    result: completed.result.clone(),
+                    content: completed.result.clone(),
+                    role: Some("tool".into()),
                     error: None,
                 }])
             }
@@ -217,8 +231,10 @@ impl EventTranslator {
                 }
 
                 TranslateOutput::Events(vec![AgUiEvent::ToolCallResult {
+                    message_id: format!("{}-result", errored.tool_call_id),
                     tool_call_id: errored.tool_call_id.clone(),
-                    result: String::new(),
+                    content: String::new(),
+                    role: Some("tool".into()),
                     error: Some(errored.error.clone()),
                 }])
             }
@@ -251,8 +267,10 @@ impl EventTranslator {
                 }
 
                 TranslateOutput::Events(vec![AgUiEvent::ToolCallResult {
+                    message_id: format!("{}-result", tool_call_id),
                     tool_call_id,
-                    result: msg.message.content.clone().unwrap_or_default(),
+                    content: msg.message.content.clone().unwrap_or_default(),
+                    role: Some("tool".into()),
                     error: None,
                 }])
             }
@@ -271,11 +289,11 @@ mod tests {
     use chrono::Utc;
     use uuid::Uuid;
 
-    fn make_event(payload: EventPayload) -> Event {
-        Event {
+    fn make_event(payload: EventPayload) -> DomainEvent<AgentState> {
+        DomainEvent {
             id: Uuid::new_v4(),
             tenant_id: "test".into(),
-            session_id: Uuid::new_v4(),
+            aggregate_id: Uuid::new_v4(),
             sequence: 1,
             span: SpanContext::root(),
             occurred_at: Utc::now(),
@@ -525,9 +543,9 @@ mod tests {
         )));
         assert_eq!(events.len(), 1);
         assert_eq!(event_type(&events[0]), "ToolCallResult");
-        if let AgUiEvent::ToolCallResult { error, result, .. } = &events[0] {
+        if let AgUiEvent::ToolCallResult { error, content, .. } = &events[0] {
             assert_eq!(error.as_deref(), Some("tool not found"));
-            assert_eq!(result, "");
+            assert_eq!(content, "");
         } else {
             panic!("expected ToolCallResult");
         }

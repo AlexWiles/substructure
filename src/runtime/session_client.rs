@@ -1,28 +1,13 @@
 use std::sync::Arc;
 
-use ractor::{call_t, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
+use ractor::{call_t, Actor, ActorProcessingErr, ActorRef};
 use uuid::Uuid;
 
 use super::event_store::EventStore;
-use super::session_actor::{RuntimeError, SessionMessage};
-use crate::domain::event::{Event, SessionAuth};
-use crate::domain::session::{AgentState, SessionCommand};
-
-// ---------------------------------------------------------------------------
-// ClientMessage — commands from transport + events from dispatcher
-// ---------------------------------------------------------------------------
-
-pub enum ClientMessage {
-    /// From transport: forward a command to the session
-    SendCommand(
-        Box<SessionCommand>,
-        RpcReplyPort<Result<Vec<Event>, RuntimeError>>,
-    ),
-    /// From dispatcher: events for this session
-    Events(Vec<Arc<Event>>),
-    /// From transport: query current session state
-    GetState(RpcReplyPort<AgentState>),
-}
+use super::session_actor::SessionMessage;
+use crate::domain::aggregate::DomainEvent;
+use crate::domain::event::SessionAuth;
+use crate::domain::session::AgentState;
 
 // ---------------------------------------------------------------------------
 // SessionClientActor
@@ -30,8 +15,8 @@ pub enum ClientMessage {
 
 pub struct SessionClientActor;
 
-/// Callback invoked for each event after it is applied.
-pub type OnEvent = Box<dyn Fn(&Event) + Send + Sync>;
+/// Callback invoked for each typed event after it is applied.
+pub type OnEvent = Box<dyn Fn(&DomainEvent<AgentState>) + Send + Sync>;
 
 pub struct SessionClientState {
     session_id: Uuid,
@@ -49,7 +34,7 @@ pub struct SessionClientArgs {
 }
 
 impl Actor for SessionClientActor {
-    type Msg = ClientMessage;
+    type Msg = SessionMessage;
     type State = SessionClientState;
     type Arguments = SessionClientArgs;
 
@@ -58,13 +43,13 @@ impl Actor for SessionClientActor {
         myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        let core = match args.store.load(args.session_id, &args.auth) {
-            Ok(load) => load.snapshot,
+        let core = match args.store.load(args.session_id, &args.auth.tenant_id) {
+            Ok(load) => serde_json::from_value(load.snapshot)
+                .unwrap_or_else(|_| AgentState::new(args.session_id)),
             Err(_) => AgentState::new(args.session_id),
         };
 
-        let group = super::session_clients_group(args.session_id);
-
+        let group = super::session_group(args.session_id);
         ractor::pg::join(group, vec![myself.get_cell()]);
 
         Ok(SessionClientState {
@@ -82,8 +67,8 @@ impl Actor for SessionClientActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            ClientMessage::SendCommand(cmd, reply) => {
-                let result = call_t!(state.session_actor, SessionMessage::Execute, 5000, *cmd);
+            SessionMessage::Execute(cmd, reply) => {
+                let result = call_t!(state.session_actor, SessionMessage::Execute, 5000, cmd);
                 match result {
                     Ok(inner) => {
                         let _ = reply.send(inner);
@@ -96,17 +81,18 @@ impl Actor for SessionClientActor {
                     }
                 }
             }
-            ClientMessage::Events(events) => {
-                for event in &events {
-                    state.core.apply_core(event);
+            SessionMessage::Events(typed_events) => {
+                for typed in &typed_events {
+                    state.core.apply_core(&typed.payload, typed.sequence);
                     if let Some(f) = &state.on_event {
-                        f(event);
+                        f(typed);
                     }
                 }
             }
-            ClientMessage::GetState(reply) => {
+            SessionMessage::GetState(reply) => {
                 let _ = reply.send(state.core.clone());
             }
+            _ => {} // Wake, Cancel, Cast, SetClientTools — not for clients
         }
         Ok(())
     }

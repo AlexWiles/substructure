@@ -6,13 +6,14 @@ use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use uuid::Uuid;
 
 use crate::domain::agent::AgentConfig;
+use crate::domain::aggregate::DomainEvent;
 use crate::domain::event::*;
 use crate::domain::session::{
     AgentSession, AgentState, CommandPayload, Effect, IncomingMessage, SessionCommand,
     SessionError, SessionStatus,
 };
 
-use super::event_store::{EventStore, StoreError};
+use super::event_store::{Event, EventStore, StoreError};
 use super::llm::{LlmClientProvider, StreamDelta};
 use super::mcp::{Content, McpClient, McpClientProvider};
 use super::strategy::StrategyProvider;
@@ -47,11 +48,11 @@ pub enum RuntimeError {
 pub enum SessionMessage {
     Execute(
         SessionCommand,
-        RpcReplyPort<Result<Vec<Event>, RuntimeError>>,
+        RpcReplyPort<Result<Vec<Arc<Event>>, RuntimeError>>,
     ),
     Cast(SessionCommand),
     GetState(RpcReplyPort<AgentState>),
-    Events(Vec<Arc<Event>>),
+    Events(Vec<Arc<DomainEvent<AgentState>>>),
     /// Timer-triggered or scheduler-triggered wake.
     Wake,
     /// Cancel this session (used by parent to cancel sub-agent).
@@ -164,19 +165,38 @@ impl SessionActorState {
 async fn execute(
     state: &mut SessionActorState,
     cmd: SessionCommand,
-) -> Result<Vec<Event>, RuntimeError> {
-    let (events, snapshot) = state.session.process_command(cmd, &state.auth.tenant_id)?;
+) -> Result<Vec<Arc<Event>>, RuntimeError> {
+    let (domain_events, snapshot) =
+        state.session.process_command(cmd, &state.auth.tenant_id)?;
 
-    if events.is_empty() {
+    if domain_events.is_empty() {
         return Ok(vec![]);
     }
 
+    let expected_version = snapshot.stream_version - domain_events.len() as u64;
+    let new_version = snapshot.stream_version;
+    let raw_events: Vec<Event> = domain_events
+        .into_iter()
+        .map(|e| e.into_raw())
+        .collect();
+
+    let snapshot_value =
+        serde_json::to_value(&snapshot).map_err(|e| StoreError::Internal(e.to_string()))?;
+
     state
         .store
-        .append(state.session_id, &state.auth, events.clone(), snapshot)
+        .append(
+            state.session_id,
+            &state.auth.tenant_id,
+            "session",
+            raw_events.clone(),
+            snapshot_value,
+            expected_version,
+            new_version,
+        )
         .await?;
 
-    Ok(events)
+    Ok(raw_events.into_iter().map(Arc::new).collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -435,9 +455,10 @@ impl Actor for SessionActor {
         let init_span = args.init.span;
 
         // Try to resume from store; if not found, create a new session.
-        let mut session = match args.store.load(session_id, &auth) {
+        let mut session = match args.store.load(session_id, &auth.tenant_id) {
             Ok(loaded) => {
-                let snapshot = loaded.snapshot;
+                let snapshot: AgentState = serde_json::from_value(loaded.snapshot)
+                    .map_err(|e| format!("snapshot deserialize: {e}"))?;
                 let snap_agent = snapshot
                     .agent
                     .as_ref()
@@ -449,7 +470,7 @@ impl Actor for SessionActor {
                     .map_err(|e| format!("strategy resolution: {e}"))?;
                 AgentSession::from_snapshot(snapshot, strategy)
             }
-            Err(StoreError::SessionNotFound) => {
+            Err(StoreError::StreamNotFound) => {
                 let strategy = args
                     .strategy_provider
                     .resolve(&agent, &auth)
@@ -465,11 +486,28 @@ impl Actor for SessionActor {
                         on_done,
                     },
                 };
-                let (events, snapshot) = session
+                let (domain_events, snapshot) = session
                     .process_command(cmd, &auth.tenant_id)
                     .map_err(|e| format!("init: {e}"))?;
+
+                let expected_version =
+                    snapshot.stream_version - domain_events.len() as u64;
+                let new_version = snapshot.stream_version;
+                let raw_events: Vec<Event> =
+                    domain_events.into_iter().map(|e| e.into_raw()).collect();
+                let snapshot_value = serde_json::to_value(&snapshot)
+                    .map_err(|e| format!("snapshot serialize: {e}"))?;
+
                 args.store
-                    .append(session_id, &auth, events, snapshot)
+                    .append(
+                        session_id,
+                        &auth.tenant_id,
+                        "session",
+                        raw_events,
+                        snapshot_value,
+                        expected_version,
+                        new_version,
+                    )
                     .await
                     .map_err(|e| format!("store: {e}"))?;
                 session
@@ -491,12 +529,16 @@ impl Actor for SessionActor {
         // Prevent double-react on events already in the store
         session.agent_state.last_reacted = session.agent_state.last_applied;
 
+        // Join the session process group for event delivery
+        let group = super::session_group(session_id);
+        ractor::pg::join(group, vec![_myself.get_cell()]);
+
         // If resuming a completed sub-agent, deliver result and stop.
         if session.agent_state.status == SessionStatus::Done {
             if let Some(ref delivery) = session.agent_state.on_done {
                 deliver_to_parent(delivery, &session.agent_state.artifacts);
+                _myself.stop(None);
             }
-            _myself.stop(None);
         }
 
         Ok(SessionActorState {
@@ -545,27 +587,27 @@ impl Actor for SessionActor {
                     eprintln!("session cast error: {e}");
                 }
             }
-            SessionMessage::Events(events) => {
-                for event in &events {
-                    state.session.apply(event);
+            SessionMessage::Events(typed_events) => {
+                for typed in &typed_events {
+                    state.session.apply(&typed.payload, typed.sequence);
 
                     let reacted = state
                         .session
                         .agent_state
                         .last_reacted
-                        .is_some_and(|seq| event.sequence <= seq);
+                        .is_some_and(|seq| typed.sequence <= seq);
 
                     if !reacted {
                         let tools = state.all_tools();
-                        let effects = state.session.react(tools, event).await;
+                        let effects = state.session.react(tools, &typed.payload).await;
                         for effect in effects {
-                            handle_effect(state, &myself, &event.span, effect).await;
+                            handle_effect(state, &myself, &typed.span, effect).await;
                         }
-                        state.session.agent_state.last_reacted = Some(event.sequence);
+                        state.session.agent_state.last_reacted = Some(typed.sequence);
                     }
 
                     // Cancel linked sub-agent on tool call timeout
-                    if let EventPayload::ToolCallErrored(payload) = &event.payload {
+                    if let EventPayload::ToolCallErrored(payload) = &typed.payload {
                         if let Some(tc) = state
                             .session
                             .agent_state
@@ -689,38 +731,21 @@ mod tests {
 
     fn created_state() -> AgentSession {
         let mut state = AgentSession::new(Uuid::new_v4(), Arc::new(DefaultStrategy::default()));
-        let event = Event {
-            id: Uuid::new_v4(),
-            tenant_id: "t".into(),
-            session_id: state.agent_state.session_id,
-            sequence: 1,
-            span: SpanContext::root(),
-            occurred_at: chrono::Utc::now(),
-            payload: EventPayload::SessionCreated(SessionCreated {
+        state.apply(
+            &EventPayload::SessionCreated(SessionCreated {
                 agent: test_agent(),
                 auth: test_auth(),
                 on_done: None,
             }),
-            derived: None,
-        };
-        state.apply(&event);
+            1,
+        );
         state
     }
 
     fn apply_events(state: &mut AgentSession, payloads: Vec<EventPayload>) {
         let seq = state.agent_state.last_applied.unwrap_or(0);
         for (i, payload) in payloads.into_iter().enumerate() {
-            let event = Event {
-                id: Uuid::new_v4(),
-                tenant_id: "t".into(),
-                session_id: state.agent_state.session_id,
-                sequence: seq + 1 + i as u64,
-                span: SpanContext::root(),
-                occurred_at: chrono::Utc::now(),
-                payload,
-                derived: None,
-            };
-            state.apply(&event);
+            state.apply(&payload, seq + 1 + i as u64);
         }
     }
 
@@ -1101,7 +1126,6 @@ mod tests {
     fn failed_llm_call_has_retry_wake_at() {
         let mut state = created_state();
 
-        // Create a failed LLM call → apply_core computes retry.next_at
         apply_events(
             &mut state,
             vec![
@@ -1131,7 +1155,6 @@ mod tests {
             ],
         );
 
-        // apply_core computed retry.next_at for the failed call
         let wake_at = state.agent_state.wake_at();
         assert!(wake_at.is_some(), "should have a wake_at for retry");
     }
@@ -1140,7 +1163,6 @@ mod tests {
     fn wake_failed_llm_retry_reuses_call_id() {
         let mut state = created_state();
 
-        // Set up: user message → LLM call requested → LLM call errored (retryable)
         apply_events(
             &mut state,
             vec![
@@ -1181,7 +1203,6 @@ mod tests {
 
         let events = state.handle(CommandPayload::Wake).unwrap();
 
-        // Should reuse "call-1" instead of generating a new call_id
         let retry_call_id = events.iter().find_map(|e| match e {
             EventPayload::LlmCallRequested(p) => Some(p.call_id.clone()),
             _ => None,
@@ -1207,7 +1228,6 @@ mod tests {
     async fn wake_failed_llm_retries_exhaust() {
         let mut state = created_state();
 
-        // Set up: user message → LLM call requested → LLM call errored
         apply_events(
             &mut state,
             vec![
@@ -1237,7 +1257,6 @@ mod tests {
             ],
         );
 
-        // First error: attempts=1, max_retries=3 → RetryScheduled
         let call = state.agent_state.llm_calls.get("call-1").unwrap();
         assert_eq!(
             call.status,
@@ -1245,7 +1264,6 @@ mod tests {
             "first retryable error should schedule retry"
         );
 
-        // Apply two more retryable errors to exhaust retries
         apply_events(
             &mut state,
             vec![
@@ -1276,7 +1294,6 @@ mod tests {
             ],
         );
 
-        // After 3 errors (attempts=3, max_retries=3): Failed
         let call = state.agent_state.llm_calls.get("call-1").unwrap();
         assert_eq!(
             call.status,
@@ -1284,23 +1301,17 @@ mod tests {
             "call should be Failed when retries exhausted"
         );
 
-        // react() for the last LlmCallErrored should produce MarkDone
-        let last_error_event = Event {
-            id: Uuid::new_v4(),
-            tenant_id: "t".into(),
-            session_id: state.agent_state.session_id,
-            sequence: 999, // doesn't matter for react
-            span: SpanContext::root(),
-            occurred_at: chrono::Utc::now(),
-            payload: EventPayload::LlmCallErrored(LlmCallErrored {
-                call_id: "call-1".into(),
-                error: "server error".into(),
-                retryable: true,
-                source: None,
-            }),
-            derived: None,
-        };
-        let effects = state.react(None, &last_error_event).await;
+        let effects = state
+            .react(
+                None,
+                &EventPayload::LlmCallErrored(LlmCallErrored {
+                    call_id: "call-1".into(),
+                    error: "server error".into(),
+                    retryable: true,
+                    source: None,
+                }),
+            )
+            .await;
         assert!(
             effects
                 .iter()
@@ -1313,7 +1324,6 @@ mod tests {
     async fn non_retryable_error_stops_immediately() {
         let mut state = created_state();
 
-        // Set up: user message → LLM call requested → LLM call errored (non-retryable)
         apply_events(
             &mut state,
             vec![
@@ -1345,7 +1355,6 @@ mod tests {
             ],
         );
 
-        // Verify: call is Failed with no next_at
         let call = state.agent_state.llm_calls.get("call-1").unwrap();
         assert_eq!(
             call.status,
@@ -1357,23 +1366,19 @@ mod tests {
             "non-retryable error should not set next_at"
         );
 
-        // react() should emit MarkDone for non-retryable errors
-        let error_event = Event {
-            id: Uuid::new_v4(),
-            tenant_id: "t".into(),
-            session_id: state.agent_state.session_id,
-            sequence: 999,
-            span: SpanContext::root(),
-            occurred_at: chrono::Utc::now(),
-            payload: EventPayload::LlmCallErrored(LlmCallErrored {
-                call_id: "call-1".into(),
-                error: "400 Bad Request".into(),
-                retryable: false,
-                source: Some(serde_json::json!({ "kind": "openai", "detail": { "status": 400 } })),
-            }),
-            derived: None,
-        };
-        let effects = state.react(None, &error_event).await;
+        let effects = state
+            .react(
+                None,
+                &EventPayload::LlmCallErrored(LlmCallErrored {
+                    call_id: "call-1".into(),
+                    error: "400 Bad Request".into(),
+                    retryable: false,
+                    source: Some(
+                        serde_json::json!({ "kind": "openai", "detail": { "status": 400 } }),
+                    ),
+                }),
+            )
+            .await;
         assert!(
             effects
                 .iter()

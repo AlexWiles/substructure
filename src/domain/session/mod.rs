@@ -6,8 +6,8 @@ pub mod strategy;
 
 pub use agent_session::AgentSession;
 pub use agent_state::{
-    AgentState, CompletionTokensDetails, LlmCallStatus, PromptTokensDetails, SessionStatus,
-    StrategySlot, TokenBudget, TokenUsage, ToolCallStatus,
+    AgentState, CompletionTokensDetails, DerivedState, LlmCallStatus, PromptTokensDetails,
+    SessionStatus, StrategySlot, TokenBudget, TokenUsage, ToolCallStatus,
 };
 pub use command_handler::{CommandPayload, IncomingMessage, SessionCommand, SessionError};
 pub use event_handler::{extract_assistant_message, Effect};
