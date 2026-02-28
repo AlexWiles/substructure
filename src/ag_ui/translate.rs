@@ -51,11 +51,7 @@ impl EventTranslator {
     /// Translate a transient notification into AG-UI events.
     pub fn translate_notification(&mut self, notification: &Notification) -> TranslateOutput {
         match notification {
-            Notification::LlmStreamChunk {
-                call_id,
-                text,
-                ..
-            } => {
+            Notification::LlmStreamChunk { call_id, text, .. } => {
                 if text.is_empty() {
                     return TranslateOutput::Events(vec![]);
                 }
@@ -331,8 +327,8 @@ mod tests {
         let call_id = "call-1".to_string();
 
         // LlmCallRequested -> StepStarted
-        let events = assert_events(translator.translate_event(
-            &EventPayload::LlmCallRequested(LlmCallRequested {
+        let events = assert_events(translator.translate_event(&EventPayload::LlmCallRequested(
+            LlmCallRequested {
                 call_id: call_id.clone(),
                 request: LlmRequest::OpenAi(crate::domain::openai::ChatCompletionRequest {
                     model: "test".into(),
@@ -344,8 +340,8 @@ mod tests {
                 }),
                 stream: true,
                 deadline: Utc::now() + chrono::Duration::hours(1),
-            }),
-        ));
+            },
+        )));
         assert_eq!(events.len(), 1);
         assert_eq!(event_type(&events[0]), "StepStarted");
 
@@ -373,8 +369,8 @@ mod tests {
         assert_eq!(event_type(&events[0]), "TextMessageContent");
 
         // LlmCallCompleted -> TextMessageEnd + StepFinished
-        let events = assert_events(translator.translate_event(
-            &EventPayload::LlmCallCompleted(LlmCallCompleted {
+        let events = assert_events(translator.translate_event(&EventPayload::LlmCallCompleted(
+            LlmCallCompleted {
                 call_id: call_id.clone(),
                 response: LlmResponse::OpenAi(crate::domain::openai::ChatCompletionResponse {
                     id: "resp-1".into(),
@@ -382,15 +378,15 @@ mod tests {
                     choices: vec![],
                     usage: None,
                 }),
-            }),
-        ));
+            },
+        )));
         assert_eq!(events.len(), 2);
         assert_eq!(event_type(&events[0]), "TextMessageEnd");
         assert_eq!(event_type(&events[1]), "StepFinished");
 
         // MessageAssistant with text (already streamed) -> terminal with no text events
-        let events = assert_terminal(translator.translate_event(
-            &EventPayload::MessageAssistant(MessageAssistant {
+        let events = assert_terminal(translator.translate_event(&EventPayload::MessageAssistant(
+            MessageAssistant {
                 call_id: call_id.clone(),
                 message: Message {
                     role: Role::Assistant,
@@ -400,8 +396,8 @@ mod tests {
                     call_id: None,
                     token_count: None,
                 },
-            }),
-        ));
+            },
+        )));
         // The text was already streamed (tracked in streamed_text_messages),
         // so MessageAssistant emits no duplicate text events.
         assert_eq!(events.len(), 0);
@@ -413,8 +409,8 @@ mod tests {
         let call_id = "call-1".to_string();
 
         // MessageAssistant with text, no tool calls -> terminal
-        let events = assert_terminal(translator.translate_event(
-            &EventPayload::MessageAssistant(MessageAssistant {
+        let events = assert_terminal(translator.translate_event(&EventPayload::MessageAssistant(
+            MessageAssistant {
                 call_id: call_id.clone(),
                 message: Message {
                     role: Role::Assistant,
@@ -424,8 +420,8 @@ mod tests {
                     call_id: None,
                     token_count: None,
                 },
-            }),
-        ));
+            },
+        )));
         assert_eq!(events.len(), 3);
         assert_eq!(event_type(&events[0]), "TextMessageStart");
         assert_eq!(event_type(&events[1]), "TextMessageContent");
@@ -447,8 +443,8 @@ mod tests {
 
         // MessageAssistant with tool calls — no longer emits ToolCallStart
         // (deferred to ToolCallRequested which carries meta)
-        let events = assert_events(translator.translate_event(
-            &EventPayload::MessageAssistant(MessageAssistant {
+        let events = assert_events(translator.translate_event(&EventPayload::MessageAssistant(
+            MessageAssistant {
                 call_id: call_id.clone(),
                 message: Message {
                     role: Role::Assistant,
@@ -462,21 +458,21 @@ mod tests {
                     call_id: None,
                     token_count: None,
                 },
-            }),
-        ));
+            },
+        )));
         assert_eq!(events.len(), 0);
 
         // ToolCallRequested emits ToolCallStart/Args/End
-        let events = assert_events(translator.translate_event(
-            &EventPayload::ToolCallRequested(ToolCallRequested {
+        let events = assert_events(translator.translate_event(&EventPayload::ToolCallRequested(
+            ToolCallRequested {
                 tool_call_id: tc_id.clone(),
                 name: "get_weather".into(),
                 arguments: r#"{"city":"NYC"}"#.into(),
                 deadline: Utc::now() + chrono::Duration::hours(1),
                 handler: Default::default(),
                 meta: None,
-            }),
-        ));
+            },
+        )));
         assert_eq!(events.len(), 3);
         assert_eq!(event_type(&events[0]), "ToolCallStart");
         assert_eq!(event_type(&events[1]), "ToolCallArgs");
@@ -489,13 +485,13 @@ mod tests {
         let tc_id = "tc-1".to_string();
 
         // ToolCallCompleted -> ToolCallResult
-        let events = assert_events(translator.translate_event(
-            &EventPayload::ToolCallCompleted(ToolCallCompleted {
+        let events = assert_events(translator.translate_event(&EventPayload::ToolCallCompleted(
+            ToolCallCompleted {
                 tool_call_id: tc_id.clone(),
                 name: "get_weather".into(),
                 result: "Sunny, 72F".into(),
-            }),
-        ));
+            },
+        )));
         assert_eq!(events.len(), 1);
         assert_eq!(event_type(&events[0]), "ToolCallResult");
 
@@ -520,13 +516,13 @@ mod tests {
         let mut translator = EventTranslator::new();
         let tc_id = "tc-err".to_string();
 
-        let events = assert_events(translator.translate_event(
-            &EventPayload::ToolCallErrored(ToolCallErrored {
+        let events = assert_events(translator.translate_event(&EventPayload::ToolCallErrored(
+            ToolCallErrored {
                 tool_call_id: tc_id.clone(),
                 name: "bad_tool".into(),
                 error: "tool not found".into(),
-            }),
-        ));
+            },
+        )));
         assert_eq!(events.len(), 1);
         assert_eq!(event_type(&events[0]), "ToolCallResult");
         if let AgUiEvent::ToolCallResult { error, content, .. } = &events[0] {
@@ -542,8 +538,8 @@ mod tests {
         let mut translator = EventTranslator::new();
 
         // MessageAssistant with text and NO tool calls -> terminal
-        let output = translator.translate_event(&EventPayload::MessageAssistant(
-            MessageAssistant {
+        let output =
+            translator.translate_event(&EventPayload::MessageAssistant(MessageAssistant {
                 call_id: "call-1".into(),
                 message: Message {
                     role: Role::Assistant,
@@ -553,14 +549,13 @@ mod tests {
                     call_id: None,
                     token_count: None,
                 },
-            },
-        ));
+            }));
         assert!(matches!(output, TranslateOutput::Terminal(_)));
 
         // MessageAssistant with tool calls -> NOT terminal
         let mut translator2 = EventTranslator::new();
-        let output = translator2.translate_event(&EventPayload::MessageAssistant(
-            MessageAssistant {
+        let output =
+            translator2.translate_event(&EventPayload::MessageAssistant(MessageAssistant {
                 call_id: "call-2".into(),
                 message: Message {
                     role: Role::Assistant,
@@ -574,8 +569,7 @@ mod tests {
                     call_id: None,
                     token_count: None,
                 },
-            },
-        ));
+            }));
         assert!(matches!(output, TranslateOutput::Events(_)));
     }
 
@@ -583,13 +577,12 @@ mod tests {
     fn test_llm_error_is_terminal() {
         let mut translator = EventTranslator::new();
 
-        let output =
-            translator.translate_event(&EventPayload::LlmCallErrored(LlmCallErrored {
-                call_id: "call-1".into(),
-                error: "API rate limit".into(),
-                retryable: true,
-                source: None,
-            }));
+        let output = translator.translate_event(&EventPayload::LlmCallErrored(LlmCallErrored {
+            call_id: "call-1".into(),
+            error: "API rate limit".into(),
+            retryable: true,
+            source: None,
+        }));
         let events = assert_terminal(output);
         assert_eq!(events.len(), 2); // StepFinished + RunError
         assert_eq!(event_type(&events[0]), "StepFinished");
@@ -600,8 +593,8 @@ mod tests {
     fn test_session_created_and_user_message_skipped() {
         let mut translator = EventTranslator::new();
 
-        let events = assert_events(translator.translate_event(
-            &EventPayload::SessionCreated(SessionCreated {
+        let events = assert_events(translator.translate_event(&EventPayload::SessionCreated(
+            SessionCreated {
                 agent: crate::domain::agent::AgentConfig {
                     id: Uuid::new_v4(),
                     name: "test".into(),
@@ -623,8 +616,8 @@ mod tests {
                     attrs: Default::default(),
                 },
                 on_done: None,
-            }),
-        ));
+            },
+        )));
         assert_eq!(events.len(), 0);
 
         let events = assert_events(translator.translate_event(&EventPayload::MessageUser(

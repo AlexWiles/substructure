@@ -14,8 +14,7 @@ use super::event_store::{EventBatch, EventStore};
 // ---------------------------------------------------------------------------
 
 /// Routing closure: receives aggregate_id + typed events, delivers to actors.
-pub type RouteTypedEvents<A> =
-    Arc<dyn Fn(Uuid, Vec<Arc<DomainEvent<A>>>) + Send + Sync>;
+pub type RouteTypedEvents<A> = Arc<dyn Fn(Uuid, Vec<Arc<DomainEvent<A>>>) + Send + Sync>;
 
 pub enum AggregateDispatcherMsg {
     Events(EventBatch),
@@ -91,9 +90,9 @@ pub async fn spawn_aggregate_dispatcher<A: Reducer>(
     )
     .await?;
 
-    store
-        .events()
-        .subscribe(actor_ref, |batch| Some(AggregateDispatcherMsg::Events(batch)));
+    store.events().subscribe(actor_ref, |batch| {
+        Some(AggregateDispatcherMsg::Events(batch))
+    });
 
     Ok(())
 }

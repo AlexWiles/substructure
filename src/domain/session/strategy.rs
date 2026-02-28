@@ -664,13 +664,11 @@ mod tests {
 
     fn make_session(agent: &AgentConfig) -> AgentState {
         let mut state = AgentState::new(Uuid::new_v4());
-        state.apply_core(
-            &EventPayload::SessionCreated(SessionCreated {
-                agent: agent.clone(),
-                auth: test_auth(),
-                on_done: None,
-            }),
-        );
+        state.apply_core(&EventPayload::SessionCreated(SessionCreated {
+            agent: agent.clone(),
+            auth: test_auth(),
+            on_done: None,
+        }));
         state
     }
 

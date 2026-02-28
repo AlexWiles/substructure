@@ -7,13 +7,13 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 use substructure::domain::config::{LoggingConfig, SystemConfig};
-use substructure::domain::event::{EventPayload, ClientIdentity, SpanContext};
+use substructure::domain::event::{ClientIdentity, EventPayload, SpanContext};
 use substructure::domain::secret::resolve_secrets;
 use substructure::domain::session::{CommandPayload, IncomingMessage, SessionCommand};
-use substructure::runtime::SessionUpdate;
 #[cfg(feature = "http")]
 use substructure::http::start_server;
 use substructure::runtime::Runtime;
+use substructure::runtime::SessionUpdate;
 
 #[derive(Parser)]
 #[command(name = "substructure", about = "Substructure agent runtime CLI")]
@@ -53,14 +53,29 @@ enum Command {
 }
 
 fn init_tracing(config: &LoggingConfig) {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&config.level));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.level));
 
     match config.format.as_str() {
-        "json" => tracing_subscriber::fmt().json().with_span_events(FmtSpan::CLOSE).with_env_filter(filter).init(),
-        "pretty" => tracing_subscriber::fmt().pretty().with_span_events(FmtSpan::CLOSE).with_env_filter(filter).init(),
-        "full" => tracing_subscriber::fmt().with_span_events(FmtSpan::CLOSE).with_env_filter(filter).init(),
-        _ => tracing_subscriber::fmt().compact().with_span_events(FmtSpan::CLOSE).with_env_filter(filter).init(),
+        "json" => tracing_subscriber::fmt()
+            .json()
+            .with_span_events(FmtSpan::CLOSE)
+            .with_env_filter(filter)
+            .init(),
+        "pretty" => tracing_subscriber::fmt()
+            .pretty()
+            .with_span_events(FmtSpan::CLOSE)
+            .with_env_filter(filter)
+            .init(),
+        "full" => tracing_subscriber::fmt()
+            .with_span_events(FmtSpan::CLOSE)
+            .with_env_filter(filter)
+            .init(),
+        _ => tracing_subscriber::fmt()
+            .compact()
+            .with_span_events(FmtSpan::CLOSE)
+            .with_env_filter(filter)
+            .init(),
     }
 }
 

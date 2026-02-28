@@ -119,7 +119,7 @@ pub enum SessionError {
 
 impl AgentSession {
     pub fn handle(&self, cmd: CommandPayload) -> Result<Vec<EventPayload>, SessionError> {
-        match (&self.snapshot.state.agent, cmd) {
+        match (&self.state.agent, cmd) {
             (
                 None,
                 CommandPayload::CreateSession {
@@ -143,7 +143,7 @@ impl AgentSession {
 
     /// Command validation using AgentState for idempotency guards.
     fn handle_active(&self, cmd: CommandPayload) -> Result<Vec<EventPayload>, SessionError> {
-        let state = &self.snapshot.state;
+        let state = &self.state;
         match cmd {
             CommandPayload::CreateSession { .. } => {
                 unreachable!("CreateSession is handled by SessionState::handle")
@@ -425,7 +425,7 @@ impl AgentSession {
 
     fn handle_wake(&self) -> Result<Vec<EventPayload>, SessionError> {
         let now = Utc::now();
-        let state = &self.snapshot.state;
+        let state = &self.state;
 
         // 1. Timed-out pending LLM calls → fail
         for call in state.llm_calls.values() {
@@ -564,7 +564,7 @@ impl AgentSession {
         incoming: Vec<Message>,
         stream: bool,
     ) -> Result<Vec<EventPayload>, SessionError> {
-        let state = &self.snapshot.state;
+        let state = &self.state;
 
         // Verify prefix matches current state
         let prefix_len = state.messages.len();
@@ -679,6 +679,7 @@ mod tests {
     use super::super::strategy::DefaultStrategy;
     use super::*;
     use crate::domain::agent::{AgentConfig, LlmConfig};
+    use crate::domain::aggregate::Aggregate;
     use crate::domain::openai;
     use chrono::Utc;
     use uuid::Uuid;
@@ -742,9 +743,12 @@ mod tests {
         })
     }
 
-    fn created_state() -> AgentSession {
-        let mut state = AgentSession::new(Uuid::new_v4(), Arc::new(DefaultStrategy::default()));
-        state.snapshot.apply(
+    fn created_state() -> Aggregate<AgentSession> {
+        let mut state = Aggregate::new(AgentSession::new(
+            Uuid::new_v4(),
+            Arc::new(DefaultStrategy::default()),
+        ));
+        state.apply(
             &EventPayload::SessionCreated(SessionCreated {
                 agent: test_agent(),
                 auth: test_auth(),
@@ -756,10 +760,10 @@ mod tests {
         state
     }
 
-    fn apply_events(state: &mut AgentSession, payloads: Vec<EventPayload>) {
-        let seq = state.snapshot.last_applied.unwrap_or(0);
+    fn apply_events(state: &mut Aggregate<AgentSession>, payloads: Vec<EventPayload>) {
+        let seq = state.last_applied.unwrap_or(0);
         for (i, payload) in payloads.iter().enumerate() {
-            state.snapshot.apply(payload, seq + 1 + i as u64, Utc::now());
+            state.apply(payload, seq + 1 + i as u64, Utc::now());
         }
     }
 
@@ -770,6 +774,7 @@ mod tests {
 
         // Request an LLM call
         let payloads = state
+            .state
             .handle(CommandPayload::RequestLlmCall {
                 call_id: call_id.clone(),
                 request: mock_llm_request(),
@@ -804,6 +809,7 @@ mod tests {
         });
 
         let payloads = state
+            .state
             .handle(CommandPayload::CompleteLlmCall {
                 call_id: call_id.clone(),
                 response,
@@ -832,6 +838,7 @@ mod tests {
 
         // Set up: LLM call -> complete (emits assistant message + tool call requested)
         let payloads = state
+            .state
             .handle(CommandPayload::RequestLlmCall {
                 call_id: call_id.clone(),
                 request: mock_llm_request(),
@@ -865,6 +872,7 @@ mod tests {
         });
 
         let payloads = state
+            .state
             .handle(CommandPayload::CompleteLlmCall {
                 call_id: call_id.clone(),
                 response,
@@ -874,6 +882,7 @@ mod tests {
 
         // Complete the tool call
         let payloads = state
+            .state
             .handle(CommandPayload::CompleteToolCall {
                 tool_call_id: tool_call_id.clone(),
                 name: "test".into(),
@@ -899,6 +908,7 @@ mod tests {
         let state = created_state();
 
         let payloads = state
+            .state
             .handle(CommandPayload::Interrupt {
                 interrupt_id: "int-1".into(),
                 reason: "approval_needed".into(),
@@ -917,6 +927,7 @@ mod tests {
 
         // Interrupt first
         let payloads = state
+            .state
             .handle(CommandPayload::Interrupt {
                 interrupt_id: "int-1".into(),
                 reason: "approval_needed".into(),
@@ -927,6 +938,7 @@ mod tests {
 
         // Resume with matching ID
         let payloads = state
+            .state
             .handle(CommandPayload::ResumeInterrupt {
                 interrupt_id: "int-1".into(),
                 payload: serde_json::json!({"approved": true}),
@@ -944,6 +956,7 @@ mod tests {
 
         // Interrupt first
         let payloads = state
+            .state
             .handle(CommandPayload::Interrupt {
                 interrupt_id: "int-1".into(),
                 reason: "approval_needed".into(),
@@ -954,6 +967,7 @@ mod tests {
 
         // Resume with wrong ID
         let payloads = state
+            .state
             .handle(CommandPayload::ResumeInterrupt {
                 interrupt_id: "int-WRONG".into(),
                 payload: serde_json::json!({}),
@@ -970,8 +984,11 @@ mod tests {
         let mut agent = test_agent();
         agent.token_budget = Some(100);
 
-        let mut state = AgentSession::new(Uuid::new_v4(), Arc::new(DefaultStrategy::default()));
-        state.snapshot.apply(
+        let mut state = Aggregate::new(AgentSession::new(
+            Uuid::new_v4(),
+            Arc::new(DefaultStrategy::default()),
+        ));
+        state.apply(
             &EventPayload::SessionCreated(SessionCreated {
                 agent,
                 auth: test_auth(),
@@ -982,9 +999,10 @@ mod tests {
         );
 
         // Simulate token usage exceeding budget
-        state.snapshot.state.token_usage.total_tokens = 200;
+        state.state.set_token_usage_total(200);
 
         let payloads = state
+            .state
             .handle(CommandPayload::RequestLlmCall {
                 call_id: "call-1".into(),
                 request: mock_llm_request(),
@@ -1007,6 +1025,7 @@ mod tests {
 
         // Interrupt first
         let payloads = state
+            .state
             .handle(CommandPayload::Interrupt {
                 interrupt_id: "int-1".into(),
                 reason: "approval_needed".into(),
@@ -1016,7 +1035,7 @@ mod tests {
         apply_events(&mut state, payloads);
 
         // SendMessage with user content should fail
-        let result = state.handle(CommandPayload::SendMessage {
+        let result = state.state.handle(CommandPayload::SendMessage {
             message: IncomingMessage::User {
                 content: "hello".into(),
             },

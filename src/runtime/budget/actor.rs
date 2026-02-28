@@ -7,8 +7,8 @@ use uuid::Uuid;
 
 use crate::domain::aggregate::DomainEvent;
 use crate::domain::budget::{
-    budget_aggregate_id, BudgetContext, BudgetDerived, BudgetEvent, BudgetLedger,
-    ReservationEntry, ReservationResult, UsageRecorded,
+    budget_aggregate_id, BudgetContext, BudgetDerived, BudgetEvent, BudgetLedger, ReservationEntry,
+    ReservationResult, UsageRecorded,
 };
 use crate::domain::config::BudgetPolicyConfig;
 use crate::domain::event::{EventPayload, LlmCallCompleted, LlmResponse};
@@ -133,15 +133,12 @@ async fn handle_events(state: &mut BudgetActorState, batch: &[Arc<Event>]) {
 
         match raw.event_type.as_str() {
             "llm.call.completed" => {
-                let Ok(payload) =
-                    serde_json::from_value::<EventPayload>(raw.payload.clone())
+                let Ok(payload) = serde_json::from_value::<EventPayload>(raw.payload.clone())
                 else {
                     continue;
                 };
-                let EventPayload::LlmCallCompleted(LlmCallCompleted {
-                    call_id,
-                    response,
-                }) = payload
+                let EventPayload::LlmCallCompleted(LlmCallCompleted { call_id, response }) =
+                    payload
                 else {
                     continue;
                 };
@@ -155,8 +152,14 @@ async fn handle_events(state: &mut BudgetActorState, batch: &[Arc<Event>]) {
                     .unwrap_or_default();
 
                 if total_tokens > 0 {
-                    settle_usage(state, session_id, &call_id, total_tokens, &reservation_entries)
-                        .await;
+                    settle_usage(
+                        state,
+                        session_id,
+                        &call_id,
+                        total_tokens,
+                        &reservation_entries,
+                    )
+                    .await;
                 }
             }
             "llm.call.errored" => {
@@ -169,9 +172,7 @@ async fn handle_events(state: &mut BudgetActorState, batch: &[Arc<Event>]) {
             }
             "session.cancelled" | "session.done" => {
                 // Remove all reservations for this session
-                state
-                    .reservations
-                    .retain(|(sid, _), _| *sid != session_id);
+                state.reservations.retain(|(sid, _), _| *sid != session_id);
             }
             _ => {}
         }
@@ -313,9 +314,9 @@ pub async fn spawn_budget_actor(
     )
     .await?;
 
-    store
-        .events()
-        .subscribe(actor_ref.clone(), |batch| Some(BudgetMessage::Events(batch)));
+    store.events().subscribe(actor_ref.clone(), |batch| {
+        Some(BudgetMessage::Events(batch))
+    });
 
     Ok(actor_ref)
 }

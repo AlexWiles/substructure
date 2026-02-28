@@ -7,7 +7,7 @@ use super::event_store::EventStore;
 use super::session_actor::SessionMessage;
 use crate::domain::aggregate::{Aggregate, DomainEvent};
 use crate::domain::event::ClientIdentity;
-use crate::domain::session::AgentState;
+use crate::domain::session::{AgentSession, DefaultStrategy};
 
 // ---------------------------------------------------------------------------
 // Notification — transient signals, never persisted
@@ -30,7 +30,7 @@ pub enum Notification {
 /// Distinguishes persisted domain events from ephemeral notifications.
 pub enum SessionUpdate {
     /// A persisted, replayable domain event.
-    Event(DomainEvent<AgentState>),
+    Event(DomainEvent<AgentSession>),
     /// A transient notification — never persisted, for real-time observers only.
     Notification(Arc<Notification>),
 }
@@ -46,7 +46,7 @@ pub struct SessionClientActor;
 
 pub struct SessionClientState {
     session_id: Uuid,
-    core: Aggregate<AgentState>,
+    core: Aggregate<AgentSession>,
     session_actor: ActorRef<SessionMessage>,
     on_event: Option<OnSessionUpdate>,
 }
@@ -70,9 +70,16 @@ impl Actor for SessionClientActor {
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         let core = match args.store.load(args.session_id, &args.auth.tenant_id).await {
-            Ok(load) => serde_json::from_value(load.snapshot)
-                .unwrap_or_else(|_| Aggregate::new(AgentState::new(args.session_id))),
-            Err(_) => Aggregate::new(AgentState::new(args.session_id)),
+            Ok(load) => serde_json::from_value(load.snapshot).unwrap_or_else(|_| {
+                Aggregate::new(AgentSession::new(
+                    args.session_id,
+                    Arc::new(DefaultStrategy::default()),
+                ))
+            }),
+            Err(_) => Aggregate::new(AgentSession::new(
+                args.session_id,
+                Arc::new(DefaultStrategy::default()),
+            )),
         };
 
         let group = super::session_group(args.session_id);
@@ -109,7 +116,9 @@ impl Actor for SessionClientActor {
             }
             SessionMessage::Events(typed_events) => {
                 for typed in &typed_events {
-                    state.core.apply(&typed.payload, typed.sequence, typed.occurred_at);
+                    state
+                        .core
+                        .apply(&typed.payload, typed.sequence, typed.occurred_at);
                     if let Some(f) = &state.on_event {
                         f(&SessionUpdate::Event(typed.as_ref().clone()));
                     }
@@ -121,7 +130,7 @@ impl Actor for SessionClientActor {
                 }
             }
             SessionMessage::GetState(reply) => {
-                let _ = reply.send(state.core.state.clone());
+                let _ = reply.send(state.core.state.cloned_state());
             }
             _ => {} // Wake, Cancel, Cast, SetClientTools — not for clients
         }

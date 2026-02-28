@@ -7,10 +7,12 @@ use uuid::Uuid;
 use chrono::Utc;
 
 use crate::domain::agent::AgentConfig;
-use crate::domain::config::{BudgetPolicyConfig, EventStoreConfig, SystemConfig};
-use crate::domain::event::{CompletionDelivery, ClientIdentity, SpanContext};
-use crate::domain::session::{AgentState, CommandPayload, IncomingMessage, SessionCommand};
 use crate::domain::aggregate::DomainEvent;
+use crate::domain::config::{BudgetPolicyConfig, EventStoreConfig, SystemConfig};
+use crate::domain::event::{ClientIdentity, CompletionDelivery, SpanContext};
+use crate::domain::session::{
+    AgentSession, AgentState, CommandPayload, IncomingMessage, SessionCommand,
+};
 use dispatcher::spawn_aggregate_dispatcher;
 use event_store::Event;
 use wake_scheduler::spawn_wake_scheduler;
@@ -33,11 +35,11 @@ pub use event_store::{
 };
 pub use llm::{LlmClient, MockLlmClient, OpenAiClient, StreamDelta};
 pub use llm::{LlmClientFactory, LlmClientProvider, ProviderError, StaticLlmClientProvider};
+pub use mcp::{mcp_actor_name, spawn_mcp_actor, McpActorClient, McpMessage};
 pub use mcp::{
     CallToolResult, Content, McpClient, McpError, ServerCapabilities, ServerInfo, StdioMcpClient,
     ToolAnnotations, ToolDefinition,
 };
-pub use mcp::{McpActorClient, McpMessage, mcp_actor_name, spawn_mcp_actor};
 pub use session_actor::SessionActorArgs;
 pub use session_actor::{
     RuntimeError, SessionActor, SessionActorState, SessionInit, SessionMessage,
@@ -65,7 +67,7 @@ pub fn session_observer_group(session_id: Uuid) -> String {
 
 /// Routing closure for the session aggregate dispatcher.
 /// Broadcasts typed events to the session process group.
-fn session_route(aggregate_id: Uuid, events: Vec<Arc<DomainEvent<AgentState>>>) {
+fn session_route(aggregate_id: Uuid, events: Vec<Arc<DomainEvent<AgentSession>>>) {
     let group = session_group(aggregate_id);
     for cell in ractor::pg::get_members(&group) {
         let actor: ActorRef<SessionMessage> = cell.into();
@@ -186,9 +188,7 @@ impl RuntimeState {
                 } else {
                     mcp::spawn_mcp_actor(&agent.name, config.clone(), self.myself.get_cell())
                         .await
-                        .map_err(|e| {
-                            RuntimeError::ActorCall(format!("mcp {}: {e}", config.name))
-                        })?
+                        .map_err(|e| RuntimeError::ActorCall(format!("mcp {}: {e}", config.name)))?
                 };
             let client = mcp::McpActorClient::from_actor(actor_ref)
                 .await
@@ -406,7 +406,7 @@ impl Actor for RuntimeActor {
 
         // Spawn infrastructure actors (linked to RuntimeActor)
         tracing::debug!("spawning event dispatcher");
-        spawn_aggregate_dispatcher::<AgentState>(
+        spawn_aggregate_dispatcher::<AgentSession>(
             &args.store,
             Arc::new(session_route),
             myself.get_cell(),
@@ -414,13 +414,9 @@ impl Actor for RuntimeActor {
         .await
         .map_err(|e| format!("failed to spawn dispatcher: {e}"))?;
         tracing::debug!("spawning wake scheduler");
-        spawn_wake_scheduler(
-            args.store,
-            myself.clone(),
-            myself.get_cell(),
-        )
-        .await
-        .map_err(|e| format!("failed to spawn wake scheduler: {e}"))?;
+        spawn_wake_scheduler(args.store, myself.clone(), myself.get_cell())
+            .await
+            .map_err(|e| format!("failed to spawn wake scheduler: {e}"))?;
 
         Ok(state)
     }
@@ -441,8 +437,14 @@ impl Actor for RuntimeActor {
                     tracing::error!(error = %e, "sub-agent error");
                 }
             }
-            RuntimeMessage::WakeAggregate { aggregate_id, aggregate_type, tenant_id } => {
-                state.wake_aggregate(aggregate_id, &aggregate_type, &tenant_id).await;
+            RuntimeMessage::WakeAggregate {
+                aggregate_id,
+                aggregate_type,
+                tenant_id,
+            } => {
+                state
+                    .wake_aggregate(aggregate_id, &aggregate_type, &tenant_id)
+                    .await;
             }
         }
         Ok(())
@@ -476,7 +478,7 @@ async fn restart_infrastructure(name: Option<String>, state: &RuntimeState) {
     match name.as_deref() {
         Some("session-dispatcher") => {
             tracing::info!("restarting session-dispatcher");
-            if let Err(e) = spawn_aggregate_dispatcher::<AgentState>(
+            if let Err(e) = spawn_aggregate_dispatcher::<AgentSession>(
                 &state.store,
                 Arc::new(session_route),
                 state.myself.get_cell(),
@@ -699,13 +701,11 @@ impl SessionHandle {
 async fn create_event_store(config: &EventStoreConfig) -> Arc<dyn EventStore> {
     match config {
         #[cfg(feature = "sqlite")]
-        EventStoreConfig::Sqlite { path } => {
-            Arc::new(
-                SqliteEventStore::new(path)
-                    .await
-                    .expect("failed to open SQLite event store"),
-            )
-        }
+        EventStoreConfig::Sqlite { path } => Arc::new(
+            SqliteEventStore::new(path)
+                .await
+                .expect("failed to open SQLite event store"),
+        ),
         #[cfg(not(feature = "sqlite"))]
         EventStoreConfig::Sqlite { .. } => {
             panic!("SQLite event store requires the 'sqlite' feature flag")

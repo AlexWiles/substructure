@@ -70,9 +70,7 @@ mod token {
 
     use super::*;
     use crate::domain::config::TenantConfig;
-    use jsonwebtoken::{
-        decode, encode, DecodingKey, EncodingKey, Header, TokenData, Validation,
-    };
+    use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, TokenData, Validation};
     use sha2::{Digest, Sha256};
 
     #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -138,11 +136,7 @@ mod token {
         }
 
         /// Issue a new JWT for the given tenant and subject.
-        pub fn issue_token(
-            &self,
-            tenant_id: &str,
-            sub: Option<&str>,
-        ) -> Result<String, AuthError> {
+        pub fn issue_token(&self, tenant_id: &str, sub: Option<&str>) -> Result<String, AuthError> {
             let now = chrono::Utc::now();
             let exp = now + self.token_ttl;
 
@@ -317,12 +311,7 @@ mod tests {
         async fn rejects_bad_signature() {
             let resolver = test_resolver();
             // Token signed with a different secret
-            let other = TokenAuthResolver::new(
-                "other-secret",
-                "1h",
-                &[],
-            )
-            .unwrap();
+            let other = TokenAuthResolver::new("other-secret", "1h", &[]).unwrap();
             let token = other.issue_token("acme", Some("user_1")).unwrap();
             let err = resolver.resolve(Some(&token)).await.unwrap_err();
             assert!(matches!(err, AuthError::InvalidToken(_)));

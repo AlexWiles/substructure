@@ -65,7 +65,11 @@ pub fn extract_assistant_message(
 // ---------------------------------------------------------------------------
 
 impl AgentSession {
-    pub async fn react(&self, tools: Option<Vec<openai::Tool>>, payload: &EventPayload) -> Vec<Effect> {
+    pub async fn react(
+        &self,
+        tools: Option<Vec<openai::Tool>>,
+        payload: &EventPayload,
+    ) -> Vec<Effect> {
         let mut effects = Vec::new();
 
         // --- Mechanical work: infrastructure I/O and bookkeeping ---
@@ -78,7 +82,6 @@ impl AgentSession {
 
             EventPayload::LlmCallRequested(payload) => {
                 if self
-                    .snapshot
                     .state
                     .llm_calls
                     .get(&payload.call_id)
@@ -96,7 +99,6 @@ impl AgentSession {
 
             EventPayload::ToolCallRequested(payload) => {
                 if self
-                    .snapshot
                     .state
                     .tool_calls
                     .get(&payload.tool_call_id)
@@ -113,7 +115,7 @@ impl AgentSession {
             }
 
             EventPayload::SessionDone(_) => {
-                if let Some(ref delivery) = self.snapshot.state.on_done {
+                if let Some(ref delivery) = self.state.on_done {
                     effects.push(Effect::DeliverCompletion {
                         delivery: delivery.clone(),
                     });
@@ -135,11 +137,11 @@ impl AgentSession {
         tools: Option<Vec<openai::Tool>>,
         event: &EventPayload,
     ) -> Vec<Effect> {
-        let strategy = match self.snapshot.state.strategy.as_ref() {
+        let strategy = match self.state.strategy.as_ref() {
             Some(s) => s,
             None => return vec![],
         };
-        match strategy.on_event(&self.snapshot.state, event).await {
+        match strategy.on_event(&self.state, event).await {
             Some(turn) => self.apply_turn(turn, tools),
             None => vec![],
         }
@@ -148,7 +150,7 @@ impl AgentSession {
     /// Translate strategy Turn into Effects.
     fn apply_turn(&self, turn: Turn, tools: Option<Vec<openai::Tool>>) -> Vec<Effect> {
         let mut effects = Vec::new();
-        if turn.state != self.snapshot.state.strategy_state {
+        if turn.state != self.state.strategy_state {
             effects.push(Effect::Command(CommandPayload::UpdateStrategyState {
                 state: turn.state,
             }));
@@ -165,10 +167,9 @@ impl AgentSession {
             Action::CallLlm(params) => {
                 let stream = params.stream.unwrap_or(false);
                 let request = if let Some(ref context) = params.context {
-                    self.snapshot.state
-                        .build_llm_request_with_context(context, tools)
+                    self.state.build_llm_request_with_context(context, tools)
                 } else {
-                    self.snapshot.state.build_llm_request(tools)
+                    self.state.build_llm_request(tools)
                 };
                 match request {
                     Some(request) => vec![Effect::Command(CommandPayload::RequestLlmCall {

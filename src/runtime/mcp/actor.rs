@@ -21,7 +21,11 @@ pub fn mcp_actor_name(agent_name: &str, server_name: &str) -> String {
 // ---------------------------------------------------------------------------
 
 pub enum McpMessage {
-    CallTool(String, serde_json::Value, RpcReplyPort<Result<CallToolResult, McpError>>),
+    CallTool(
+        String,
+        serde_json::Value,
+        RpcReplyPort<Result<CallToolResult, McpError>>,
+    ),
     GetMetadata(RpcReplyPort<McpMetadata>),
 }
 

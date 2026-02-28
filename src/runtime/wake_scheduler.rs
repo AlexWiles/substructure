@@ -108,9 +108,7 @@ impl Actor for WakeScheduler {
                 // Check if any event's wake_at is sooner than our current timer.
                 for event in &events {
                     if let Some(wake_at) = event.wake_at {
-                        let sooner = state
-                            .next_tick_at
-                            .is_none_or(|next| wake_at < next);
+                        let sooner = state.next_tick_at.is_none_or(|next| wake_at < next);
                         if sooner {
                             schedule(state, wake_at);
                         }

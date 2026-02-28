@@ -343,16 +343,14 @@ mod tests {
         let now = Utc::now();
 
         // Pre-fill with 9000 tokens
-        ledger.apply(
-            &BudgetEvent::UsageRecorded(UsageRecorded {
-                policy_name: "hourly".into(),
-                bucket_key: "alice".into(),
-                session_id: Uuid::new_v4(),
-                call_id: "c1".into(),
-                amount: 9000,
-                recorded_at: now,
-            }),
-        );
+        ledger.apply(&BudgetEvent::UsageRecorded(UsageRecorded {
+            policy_name: "hourly".into(),
+            bucket_key: "alice".into(),
+            session_id: Uuid::new_v4(),
+            call_id: "c1".into(),
+            amount: 9000,
+            recorded_at: now,
+        }));
 
         let reservations = HashMap::new();
         let (result, entries) = ledger.try_reserve(&policies, &ctx, 2000, &reservations, now);
@@ -388,26 +386,22 @@ mod tests {
         let now = Utc::now();
         let old = now - Duration::hours(2);
 
-        ledger.apply(
-            &BudgetEvent::UsageRecorded(UsageRecorded {
-                policy_name: "hourly".into(),
-                bucket_key: "alice".into(),
-                session_id: Uuid::new_v4(),
-                call_id: "c1".into(),
-                amount: 5000,
-                recorded_at: old,
-            }),
-        );
-        ledger.apply(
-            &BudgetEvent::UsageRecorded(UsageRecorded {
-                policy_name: "hourly".into(),
-                bucket_key: "alice".into(),
-                session_id: Uuid::new_v4(),
-                call_id: "c2".into(),
-                amount: 3000,
-                recorded_at: now,
-            }),
-        );
+        ledger.apply(&BudgetEvent::UsageRecorded(UsageRecorded {
+            policy_name: "hourly".into(),
+            bucket_key: "alice".into(),
+            session_id: Uuid::new_v4(),
+            call_id: "c1".into(),
+            amount: 5000,
+            recorded_at: old,
+        }));
+        ledger.apply(&BudgetEvent::UsageRecorded(UsageRecorded {
+            policy_name: "hourly".into(),
+            bucket_key: "alice".into(),
+            session_id: Uuid::new_v4(),
+            call_id: "c2".into(),
+            amount: 3000,
+            recorded_at: now,
+        }));
 
         ledger.evict_expired(&policies, now);
 
@@ -423,27 +417,23 @@ mod tests {
         let now = Utc::now();
 
         // Old entry (2 hours ago)
-        ledger.apply(
-            &BudgetEvent::UsageRecorded(UsageRecorded {
-                policy_name: "hourly".into(),
-                bucket_key: "alice".into(),
-                session_id: Uuid::new_v4(),
-                call_id: "c1".into(),
-                amount: 8000,
-                recorded_at: now - Duration::hours(2),
-            }),
-        );
+        ledger.apply(&BudgetEvent::UsageRecorded(UsageRecorded {
+            policy_name: "hourly".into(),
+            bucket_key: "alice".into(),
+            session_id: Uuid::new_v4(),
+            call_id: "c1".into(),
+            amount: 8000,
+            recorded_at: now - Duration::hours(2),
+        }));
         // Recent entry
-        ledger.apply(
-            &BudgetEvent::UsageRecorded(UsageRecorded {
-                policy_name: "hourly".into(),
-                bucket_key: "alice".into(),
-                session_id: Uuid::new_v4(),
-                call_id: "c2".into(),
-                amount: 2000,
-                recorded_at: now,
-            }),
-        );
+        ledger.apply(&BudgetEvent::UsageRecorded(UsageRecorded {
+            policy_name: "hourly".into(),
+            bucket_key: "alice".into(),
+            session_id: Uuid::new_v4(),
+            call_id: "c2".into(),
+            amount: 2000,
+            recorded_at: now,
+        }));
 
         let policies = make_policies();
         let ctx = make_context("alice");
@@ -476,7 +466,10 @@ mod tests {
         // Should be granted because the policy doesn't match (model != opus)
         let (result, entries) = ledger.try_reserve(&policies, &ctx, 5000, &reservations, now);
         assert!(matches!(result, ReservationResult::Granted));
-        assert!(entries.is_empty(), "non-matching policy produces no entries");
+        assert!(
+            entries.is_empty(),
+            "non-matching policy produces no entries"
+        );
 
         // Now with matching model
         ctx.set("model", "opus");
@@ -517,7 +510,9 @@ mod tests {
 
         // 8000 exceeds tenant_total (5000) even though hourly (10000) would pass
         let (result, entries) = ledger.try_reserve(&policies, &ctx, 8000, &reservations, now);
-        assert!(matches!(result, ReservationResult::Denied { policy_name, .. } if policy_name == "tenant_total"));
+        assert!(
+            matches!(result, ReservationResult::Denied { policy_name, .. } if policy_name == "tenant_total")
+        );
         assert!(entries.is_empty(), "atomic rollback");
     }
 

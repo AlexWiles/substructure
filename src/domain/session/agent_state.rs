@@ -8,10 +8,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::domain::aggregate::{AggregateStatus, Reducer};
+use crate::domain::aggregate::AggregateStatus;
 use crate::domain::event::{
-    AgentConfig, Artifact, CompletionDelivery, EventPayload, LlmRequest, LlmResponse, Message,
-    Role, ClientIdentity, ToolCallMeta, ToolHandler,
+    AgentConfig, Artifact, ClientIdentity, CompletionDelivery, EventPayload, LlmRequest,
+    LlmResponse, Message, Role, ToolCallMeta, ToolHandler,
 };
 use crate::domain::openai;
 
@@ -151,7 +151,9 @@ pub struct ToolCallState {
 impl ToolCallState {
     pub fn child_session_id(&self) -> Option<Uuid> {
         match &self.meta {
-            Some(ToolCallMeta::SubAgent { child_session_id, .. }) => Some(*child_session_id),
+            Some(ToolCallMeta::SubAgent {
+                child_session_id, ..
+            }) => Some(*child_session_id),
             _ => None,
         }
     }
@@ -588,32 +590,13 @@ impl AgentState {
     }
 }
 
-impl Reducer for AgentState {
-    type Event = EventPayload;
-    type Derived = DerivedState;
-
-    fn aggregate_type() -> &'static str {
-        "session"
-    }
-
-    fn apply(&mut self, event: &Self::Event) {
-        self.apply_core(event);
-    }
-
-    fn wake_at(&self) -> Option<DateTime<Utc>> {
-        AgentState::wake_at(self)
-    }
-
-    fn status(&self) -> AggregateStatus {
+impl AgentState {
+    pub fn aggregate_status(&self) -> AggregateStatus {
         match self.status {
             SessionStatus::Active => AggregateStatus::Active,
             SessionStatus::Idle | SessionStatus::Interrupted { .. } => AggregateStatus::Idle,
             SessionStatus::Done => AggregateStatus::Done,
         }
-    }
-
-    fn label(&self) -> Option<String> {
-        self.agent.as_ref().map(|a| a.name.clone())
     }
 }
 

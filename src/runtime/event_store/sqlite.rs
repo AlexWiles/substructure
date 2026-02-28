@@ -88,8 +88,8 @@ impl Actor for ConnectionPoolActor {
     ) -> Result<Self::State, ActorProcessingErr> {
         let mut available = Vec::with_capacity(args.pool_size);
         for _ in 0..args.pool_size {
-            let conn = open_reader(&args.path)
-                .map_err(|e| format!("reader pool connection: {e}"))?;
+            let conn =
+                open_reader(&args.path).map_err(|e| format!("reader pool connection: {e}"))?;
             available.push(conn);
         }
         Ok(PoolState {
@@ -152,7 +152,11 @@ impl Deref for PooledConnection {
 // Free functions — query logic shared by read paths
 // ---------------------------------------------------------------------------
 
-fn do_load(conn: &Connection, aggregate_id: Uuid, tenant_id: &str) -> Result<StreamLoad, StoreError> {
+fn do_load(
+    conn: &Connection,
+    aggregate_id: Uuid,
+    tenant_id: &str,
+) -> Result<StreamLoad, StoreError> {
     let aid = aggregate_id.to_string();
 
     let (stored_tenant, snapshot_data, stream_version) = conn
@@ -176,8 +180,8 @@ fn do_load(conn: &Connection, aggregate_id: Uuid, tenant_id: &str) -> Result<Str
         return Err(StoreError::TenantMismatch);
     }
 
-    let snapshot: serde_json::Value = serde_json::from_str(&snapshot_data)
-        .map_err(|e| StoreError::Internal(e.to_string()))?;
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&snapshot_data).map_err(|e| StoreError::Internal(e.to_string()))?;
 
     Ok(StreamLoad {
         snapshot,
@@ -293,19 +297,18 @@ fn do_list_aggregates(
         .prepare(&sql)
         .map_err(|e| StoreError::Internal(e.to_string()))?;
 
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-        params.iter().map(|p| p.as_ref()).collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
 
     let rows = stmt
         .query_map(param_refs.as_slice(), |row| {
             Ok((
-                row.get::<_, String>(0)?,  // aggregate_id
-                row.get::<_, String>(1)?,  // aggregate_type
-                row.get::<_, String>(2)?,  // tenant_id
+                row.get::<_, String>(0)?,         // aggregate_id
+                row.get::<_, String>(1)?,         // aggregate_type
+                row.get::<_, String>(2)?,         // tenant_id
                 row.get::<_, Option<String>>(3)?, // status
                 row.get::<_, Option<String>>(4)?, // agent_name (label)
                 row.get::<_, Option<String>>(5)?, // wake_at
-                row.get::<_, u64>(6)?,     // stream_version
+                row.get::<_, u64>(6)?,            // stream_version
                 row.get::<_, Option<String>>(7)?, // first_event_at
                 row.get::<_, Option<String>>(8)?, // last_event_at
             ))
@@ -321,10 +324,7 @@ fn do_list_aggregates(
                 aggregate_id,
                 aggregate_type: agg_type,
                 tenant_id: tenant,
-                status: status_str
-                    .as_deref()
-                    .map(parse_status)
-                    .unwrap_or_default(),
+                status: status_str.as_deref().map(parse_status).unwrap_or_default(),
                 label,
                 wake_at: wake_at_str.as_deref().and_then(parse_dt),
                 stream_version: version,
@@ -513,10 +513,7 @@ impl EventStore for SqliteEventStore {
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
 
             // Stamp wake_at from snapshot onto broadcast events.
-            let wake_at = idx
-                .wake_at
-                .as_deref()
-                .and_then(parse_dt);
+            let wake_at = idx.wake_at.as_deref().and_then(parse_dt);
             let batch: EventBatch = events
                 .into_iter()
                 .map(|mut e| {
@@ -622,8 +619,9 @@ mod tests {
     use super::*;
     use crate::domain::agent::{AgentConfig, LlmConfig};
     use crate::domain::aggregate::{Aggregate, DomainEvent};
-    use crate::domain::event::{EventPayload, ClientIdentity, SessionCreated, SpanContext};
-    use crate::domain::session::AgentState;
+    use crate::domain::event::{ClientIdentity, EventPayload, SessionCreated, SpanContext};
+    use crate::domain::session::{AgentSession, DefaultStrategy};
+    use std::sync::Arc;
 
     fn test_auth(tenant: &str) -> ClientIdentity {
         ClientIdentity {
@@ -655,10 +653,10 @@ mod tests {
         session_id: Uuid,
         tenant: &str,
         agent_name: &str,
-    ) -> (Vec<Event>, Aggregate<AgentState>) {
+    ) -> (Vec<Event>, Aggregate<AgentSession>) {
         let auth = test_auth(tenant);
         let agent = test_agent(agent_name);
-        let domain_event: DomainEvent<AgentState> = DomainEvent {
+        let domain_event: DomainEvent<AgentSession> = DomainEvent {
             id: Uuid::new_v4(),
             tenant_id: tenant.into(),
             aggregate_id: session_id,
@@ -672,13 +670,22 @@ mod tests {
             }),
             derived: None,
         };
-        let mut snapshot = Aggregate::new(AgentState::new(session_id));
-        snapshot.apply(&domain_event.payload, domain_event.sequence, domain_event.occurred_at);
+        let mut snapshot = Aggregate::new(AgentSession::new(
+            session_id,
+            Arc::new(DefaultStrategy::default()),
+        ));
+        snapshot.apply(
+            &domain_event.payload,
+            domain_event.sequence,
+            domain_event.occurred_at,
+        );
         (vec![domain_event.into_raw()], snapshot)
     }
 
     async fn temp_store() -> SqliteEventStore {
-        SqliteEventStore::new(":memory:").await.expect("open in-memory sqlite")
+        SqliteEventStore::new(":memory:")
+            .await
+            .expect("open in-memory sqlite")
     }
 
     /// Smoke test: append events, load them back, list via list_aggregates.
@@ -690,14 +697,22 @@ mod tests {
         let snap_val = serde_json::to_value(&snap).unwrap();
 
         store
-            .append(id, "acme", "session", events, snap_val, 0, snap.stream_version)
+            .append(
+                id,
+                "acme",
+                "session",
+                events,
+                snap_val,
+                0,
+                snap.stream_version,
+            )
             .await
             .unwrap();
 
         // Load returns correct state
         let loaded = store.load(id, "acme").await.unwrap();
-        let state: Aggregate<AgentState> = serde_json::from_value(loaded.snapshot).unwrap();
-        assert_eq!(state.state.session_id, id);
+        let state: Aggregate<AgentSession> = serde_json::from_value(loaded.snapshot).unwrap();
+        assert_eq!(state.state.cloned_state().session_id, id);
         assert_eq!(loaded.stream_version, snap.stream_version);
 
         // Shows up in list_aggregates
@@ -727,7 +742,15 @@ mod tests {
         let snap_val = serde_json::to_value(&snap).unwrap();
 
         store
-            .append(id, "tenant-a", "session", events, snap_val, 0, snap.stream_version)
+            .append(
+                id,
+                "tenant-a",
+                "session",
+                events,
+                snap_val,
+                0,
+                snap.stream_version,
+            )
             .await
             .unwrap();
 
@@ -761,7 +784,15 @@ mod tests {
         // Same expected_version=0 again → conflict
         let (ev2, snap2) = session_created_event(id, "t", "bot");
         let result = store
-            .append(id, "t", "session", ev2, serde_json::to_value(&snap2).unwrap(), 0, snap2.stream_version)
+            .append(
+                id,
+                "t",
+                "session",
+                ev2,
+                serde_json::to_value(&snap2).unwrap(),
+                0,
+                snap2.stream_version,
+            )
             .await;
         assert!(matches!(result, Err(StoreError::VersionConflict { .. })));
     }

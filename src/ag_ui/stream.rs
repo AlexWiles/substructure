@@ -6,10 +6,15 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream;
 use uuid::Uuid;
 
-use crate::domain::event::{Message as DomainMessage, Role, ClientIdentity, SpanContext, ToolCall as DomainToolCall};
+use crate::domain::event::{
+    ClientIdentity, Message as DomainMessage, Role, SpanContext, ToolCall as DomainToolCall,
+};
 use crate::domain::openai;
-use crate::domain::session::{AgentState, CommandPayload, SessionCommand};
+use crate::domain::session::{
+    AgentSession, AgentState, CommandPayload, DefaultStrategy, SessionCommand,
+};
 use crate::runtime::{OnSessionUpdate, Runtime, RuntimeError, SessionMessage, SessionUpdate};
+use std::sync::Arc;
 
 use super::translate::{EventTranslator, TranslateOutput};
 use super::types::{AgUiEvent, Message, RunAgentInput};
@@ -312,14 +317,22 @@ pub async fn observe_session(
 // Helpers
 // ---------------------------------------------------------------------------
 
-async fn load_state(runtime: &Runtime, session_id: Uuid, auth: &ClientIdentity) -> (AgentState, u64) {
+async fn load_state(
+    runtime: &Runtime,
+    session_id: Uuid,
+    auth: &ClientIdentity,
+) -> (AgentState, u64) {
     match runtime.store().load(session_id, &auth.tenant_id).await {
         Ok(load) => {
-            let snapshot: crate::domain::aggregate::Aggregate<AgentState> =
-                serde_json::from_value(load.snapshot)
-                    .unwrap_or_else(|_| crate::domain::aggregate::Aggregate::new(AgentState::new(session_id)));
+            let snapshot: crate::domain::aggregate::Aggregate<AgentSession> =
+                serde_json::from_value(load.snapshot).unwrap_or_else(|_| {
+                    crate::domain::aggregate::Aggregate::new(AgentSession::new(
+                        session_id,
+                        Arc::new(DefaultStrategy::default()),
+                    ))
+                });
             let last_applied = snapshot.last_applied.unwrap_or(0);
-            (snapshot.state, last_applied)
+            (snapshot.state.cloned_state(), last_applied)
         }
         Err(_) => (AgentState::new(session_id), 0),
     }
@@ -443,17 +456,25 @@ pub(super) fn ag_ui_to_domain_message(msg: &Message) -> DomainMessage {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::types::*;
+    use super::*;
 
     #[test]
     fn user_message_with_parts_joins_text() {
         let msg = Message::User {
             id: None,
             content: MessageContent::Parts(vec![
-                InputContent::Text { text: "hello ".into() },
-                InputContent::ImageUrl { image_url: ImageUrl { url: "http://img".into() } },
-                InputContent::Text { text: "world".into() },
+                InputContent::Text {
+                    text: "hello ".into(),
+                },
+                InputContent::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "http://img".into(),
+                    },
+                },
+                InputContent::Text {
+                    text: "world".into(),
+                },
             ]),
         };
         let domain = ag_ui_to_domain_message(&msg);
@@ -469,11 +490,17 @@ mod tests {
             tool_calls: vec![
                 ToolCallInfo {
                     id: "tc-1".into(),
-                    function: FunctionCall { name: "read".into(), arguments: "{}".into() },
+                    function: FunctionCall {
+                        name: "read".into(),
+                        arguments: "{}".into(),
+                    },
                 },
                 ToolCallInfo {
                     id: "tc-2".into(),
-                    function: FunctionCall { name: "write".into(), arguments: r#"{"x":1}"#.into() },
+                    function: FunctionCall {
+                        name: "write".into(),
+                        arguments: r#"{"x":1}"#.into(),
+                    },
                 },
             ],
         };

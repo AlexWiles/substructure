@@ -44,10 +44,7 @@ impl FromRequestParts<HttpState> for AdminAuth {
         parts: &mut Parts,
         state: &HttpState,
     ) -> Result<Self, Self::Rejection> {
-        let api_key = parts
-            .headers
-            .get("x-api-key")
-            .and_then(|v| v.to_str().ok());
+        let api_key = parts.headers.get("x-api-key").and_then(|v| v.to_str().ok());
         let ctx = state.auth.resolve_admin(api_key)?;
         Ok(AdminAuth(ctx))
     }
@@ -172,8 +169,7 @@ pub async fn start_server(config: SystemConfig, addr: std::net::SocketAddr) -> a
         auth,
     };
 
-    let admin_routes = Router::new()
-        .route("/auth/token", post(issue_token));
+    let admin_routes = Router::new().route("/auth/token", post(issue_token));
 
     let client_routes = Router::new()
         .route("/agents", get(list_agents))
@@ -240,7 +236,10 @@ async fn list_agents(
         .agent_names()
         .into_iter()
         .map(|name| {
-            let description = state.runtime.agent(name).and_then(|a| a.description.clone());
+            let description = state
+                .runtime
+                .agent(name)
+                .and_then(|a| a.description.clone());
             AgentInfoResponse {
                 name: name.to_string(),
                 description,

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 
 use super::client::{McpClient, McpError};
 use super::stdio::StdioMcpClient;
-use crate::domain::event::{McpServerConfig, McpTransportConfig, ClientIdentity};
+use crate::domain::event::{ClientIdentity, McpServerConfig, McpTransportConfig};
 
 #[async_trait]
 pub trait McpClientProvider: Send + Sync + 'static {
