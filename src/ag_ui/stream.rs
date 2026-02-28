@@ -310,10 +310,11 @@ pub async fn observe_session(
 async fn load_state(runtime: &Runtime, session_id: Uuid, auth: &ClientIdentity) -> (AgentState, u64) {
     match runtime.store().load(session_id, &auth.tenant_id).await {
         Ok(load) => {
-            let state: AgentState = serde_json::from_value(load.snapshot)
-                .unwrap_or_else(|_| AgentState::new(session_id));
-            let last_applied = state.last_applied.unwrap_or(0);
-            (state, last_applied)
+            let snapshot: crate::domain::aggregate::Aggregate<AgentState> =
+                serde_json::from_value(load.snapshot)
+                    .unwrap_or_else(|_| crate::domain::aggregate::Aggregate::new(AgentState::new(session_id)));
+            let last_applied = snapshot.last_applied.unwrap_or(0);
+            (snapshot.state, last_applied)
         }
         Err(_) => (AgentState::new(session_id), 0),
     }

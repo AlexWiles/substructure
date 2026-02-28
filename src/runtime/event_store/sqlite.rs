@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::domain::session::AgentState;
 
-use super::session_index::{SessionFilter, SessionIndex, SessionSummary};
+use super::session_index::{SessionFilter, SessionIndex, SessionSort, SessionSummary};
 use super::store::{Event, EventBatch, EventStore, StoreError, StreamLoad, Version};
 
 const SCHEMA_SQL: &str = r#"
@@ -33,10 +33,14 @@ const SCHEMA_SQL: &str = r#"
         data             TEXT NOT NULL,
         status           TEXT,
         agent_name       TEXT,
-        wake_at          TEXT
+        wake_at          TEXT,
+        first_event_at   TEXT,
+        last_event_at    TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_snapshots_tenant ON snapshots (tenant_id);
     CREATE INDEX IF NOT EXISTS idx_snapshots_type ON snapshots (aggregate_type);
+    CREATE INDEX IF NOT EXISTS idx_snapshots_first_event ON snapshots (first_event_at);
+    CREATE INDEX IF NOT EXISTS idx_snapshots_last_event ON snapshots (last_event_at);
 "#;
 
 // ---------------------------------------------------------------------------
@@ -222,9 +226,16 @@ fn do_list_sessions(conn: &Connection, filter: &SessionFilter) -> Vec<SessionSum
         clauses.push(clause);
     }
 
+    let order_by = match filter.sort {
+        SessionSort::LastEventDesc => "last_event_at DESC NULLS LAST",
+        SessionSort::FirstEventDesc => "first_event_at DESC NULLS LAST",
+        SessionSort::FirstEventAsc => "first_event_at ASC NULLS LAST",
+    };
+
     let sql = format!(
-        "SELECT data, stream_version FROM snapshots WHERE {}",
-        clauses.join(" AND ")
+        "SELECT data, stream_version, first_event_at, last_event_at FROM snapshots WHERE {} ORDER BY {}",
+        clauses.join(" AND "),
+        order_by,
     );
     let mut stmt = conn.prepare(&sql).expect("prepare list_sessions");
     let param_refs: Vec<&dyn rusqlite::types::ToSql> =
@@ -232,16 +243,30 @@ fn do_list_sessions(conn: &Connection, filter: &SessionFilter) -> Vec<SessionSum
 
     let rows = stmt
         .query_map(param_refs.as_slice(), |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u64>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
         })
         .expect("query list_sessions");
 
     rows.filter_map(|r| {
-        let (data, stream_version) = r.ok()?;
-        let state: AgentState = serde_json::from_str(&data).ok()?;
+        let (data, stream_version, first_event_at_str, last_event_at_str) = r.ok()?;
+        let snapshot: crate::domain::aggregate::Aggregate<AgentState> =
+            serde_json::from_str(&data).ok()?;
+        let state = &snapshot.state;
 
         let auth = state.auth.as_ref()?;
         let agent = state.agent.as_ref()?;
+
+        let first_event_at = first_event_at_str
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+            .map(|dt| dt.with_timezone(&chrono::Utc));
+        let last_event_at = last_event_at_str
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+            .map(|dt| dt.with_timezone(&chrono::Utc));
 
         Some(SessionSummary {
             session_id: state.session_id,
@@ -252,6 +277,8 @@ fn do_list_sessions(conn: &Connection, filter: &SessionFilter) -> Vec<SessionSum
             message_count: state.messages.len(),
             token_usage: state.token_usage.total_tokens,
             stream_version,
+            first_event_at,
+            last_event_at,
         })
     })
     .collect()
@@ -423,12 +450,12 @@ impl EventStore for SqliteEventStore {
             let snapshot_data = serde_json::to_string(&snapshot)
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
 
-            // Extract session-specific indexed fields from the snapshot (if applicable).
-            let (status, agent_name, wake_at) = extract_session_index_fields(&snapshot);
+            // Extract indexed fields from the snapshot.
+            let idx = extract_session_index_fields(&snapshot);
 
             tx.execute(
-                "INSERT INTO snapshots (aggregate_id, aggregate_type, tenant_id, stream_version, data, status, agent_name, wake_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                "INSERT INTO snapshots (aggregate_id, aggregate_type, tenant_id, stream_version, data, status, agent_name, wake_at, first_event_at, last_event_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                  ON CONFLICT(aggregate_id) DO UPDATE SET
                      aggregate_type = excluded.aggregate_type,
                      tenant_id = excluded.tenant_id,
@@ -436,8 +463,10 @@ impl EventStore for SqliteEventStore {
                      data = excluded.data,
                      status = excluded.status,
                      agent_name = excluded.agent_name,
-                     wake_at = excluded.wake_at",
-                rusqlite::params![aid, aggregate_type, tenant_id, new_version, snapshot_data, status, agent_name, wake_at],
+                     wake_at = excluded.wake_at,
+                     first_event_at = COALESCE(snapshots.first_event_at, excluded.first_event_at),
+                     last_event_at = excluded.last_event_at",
+                rusqlite::params![aid, aggregate_type, tenant_id, new_version, snapshot_data, idx.status, idx.agent_name, idx.wake_at, idx.first_event_at, idx.last_event_at],
             )
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
@@ -479,27 +508,52 @@ impl SessionIndex for SqliteEventStore {
     }
 }
 
-/// Extract session-specific indexed fields from a snapshot Value.
-/// Returns (status, agent_name, wake_at) if the snapshot is a session.
-fn extract_session_index_fields(
-    snapshot: &serde_json::Value,
-) -> (Option<String>, Option<String>, Option<String>) {
-    let status = snapshot.get("status").and_then(|v| {
+/// Indexed fields extracted from a snapshot for the session index.
+struct SnapshotIndexFields {
+    status: Option<String>,
+    agent_name: Option<String>,
+    wake_at: Option<String>,
+    first_event_at: Option<String>,
+    last_event_at: Option<String>,
+}
+
+/// Extract indexed fields from a snapshot Value.
+fn extract_session_index_fields(snapshot: &serde_json::Value) -> SnapshotIndexFields {
+    // The snapshot is Aggregate<AgentState>, so reducer fields live under "state".
+    let inner = snapshot.get("state").unwrap_or(snapshot);
+
+    let status = inner.get("status").and_then(|v| {
         // SessionStatus serializes to a JSON value; store as string for index.
         serde_json::to_string(v).ok()
     });
-    let agent_name = snapshot
+    let agent_name = inner
         .get("agent")
         .and_then(|a| a.get("name"))
         .and_then(|n| n.as_str())
         .map(|s| s.to_string());
 
     // Compute wake_at from the deserialized AgentState (if possible).
-    let wake_at = serde_json::from_value::<AgentState>(snapshot.clone())
+    let wake_at = serde_json::from_value::<AgentState>(inner.clone())
         .ok()
         .and_then(|state| state.wake_at().map(|t| t.to_rfc3339()));
 
-    (status, agent_name, wake_at)
+    // Timestamps are on the Aggregate wrapper (top-level).
+    let first_event_at = snapshot
+        .get("first_event_at")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let last_event_at = snapshot
+        .get("last_event_at")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    SnapshotIndexFields {
+        status,
+        agent_name,
+        wake_at,
+        first_event_at,
+        last_event_at,
+    }
 }
 
 /// Extension trait for optional query results.
@@ -554,14 +608,14 @@ mod tests {
         session_id: Uuid,
         tenant: &str,
         agent_name: &str,
-    ) -> (Vec<Event>, AgentState) {
+    ) -> (Vec<Event>, Aggregate<AgentState>) {
         let auth = test_auth(tenant);
         let agent = test_agent(agent_name);
         let domain_event: DomainEvent<AgentState> = DomainEvent {
             id: Uuid::new_v4(),
             tenant_id: tenant.into(),
             aggregate_id: session_id,
-            sequence: 0,
+            sequence: 1,
             span: SpanContext::root(),
             occurred_at: chrono::Utc::now(),
             payload: EventPayload::SessionCreated(SessionCreated {
@@ -571,9 +625,9 @@ mod tests {
             }),
             derived: None,
         };
-        let mut state = AgentState::new(session_id);
-        state.apply(&domain_event.payload, domain_event.sequence);
-        (vec![domain_event.into_raw()], state)
+        let mut snapshot = Aggregate::new(AgentState::new(session_id));
+        snapshot.apply(&domain_event.payload, domain_event.sequence, domain_event.occurred_at);
+        (vec![domain_event.into_raw()], snapshot)
     }
 
     async fn temp_store() -> SqliteEventStore {
@@ -595,8 +649,8 @@ mod tests {
 
         // Load returns correct state
         let loaded = store.load(id, "acme").await.unwrap();
-        let state: AgentState = serde_json::from_value(loaded.snapshot).unwrap();
-        assert_eq!(state.session_id, id);
+        let state: Aggregate<AgentState> = serde_json::from_value(loaded.snapshot).unwrap();
+        assert_eq!(state.state.session_id, id);
         assert_eq!(loaded.stream_version, snap.stream_version);
 
         // Shows up in list_sessions

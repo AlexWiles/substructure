@@ -124,7 +124,7 @@ pub enum SessionError {
 
 impl AgentSession {
     pub fn handle(&self, cmd: CommandPayload) -> Result<Vec<EventPayload>, SessionError> {
-        match (&self.agent_state.agent, cmd) {
+        match (&self.snapshot.state.agent, cmd) {
             (
                 None,
                 CommandPayload::CreateSession {
@@ -148,7 +148,7 @@ impl AgentSession {
 
     /// Command validation using AgentState for idempotency guards.
     fn handle_active(&self, cmd: CommandPayload) -> Result<Vec<EventPayload>, SessionError> {
-        let state = &self.agent_state;
+        let state = &self.snapshot.state;
         match cmd {
             CommandPayload::CreateSession { .. } => {
                 unreachable!("CreateSession is handled by SessionState::handle")
@@ -446,7 +446,7 @@ impl AgentSession {
 
     fn handle_wake(&self) -> Result<Vec<EventPayload>, SessionError> {
         let now = Utc::now();
-        let state = &self.agent_state;
+        let state = &self.snapshot.state;
 
         // 1. Timed-out pending LLM calls → fail
         for call in state.llm_calls.values() {
@@ -585,7 +585,7 @@ impl AgentSession {
         incoming: Vec<Message>,
         stream: bool,
     ) -> Result<Vec<EventPayload>, SessionError> {
-        let state = &self.agent_state;
+        let state = &self.snapshot.state;
 
         // Verify prefix matches current state
         let prefix_len = state.messages.len();
@@ -765,21 +765,22 @@ mod tests {
 
     fn created_state() -> AgentSession {
         let mut state = AgentSession::new(Uuid::new_v4(), Arc::new(DefaultStrategy::default()));
-        state.apply(
+        state.snapshot.apply(
             &EventPayload::SessionCreated(SessionCreated {
                 agent: test_agent(),
                 auth: test_auth(),
                 on_done: None,
             }),
             1,
+            Utc::now(),
         );
         state
     }
 
     fn apply_events(state: &mut AgentSession, payloads: Vec<EventPayload>) {
-        let seq = state.agent_state.last_applied.unwrap_or(0);
+        let seq = state.snapshot.last_applied.unwrap_or(0);
         for (i, payload) in payloads.iter().enumerate() {
-            state.apply(payload, seq + 1 + i as u64);
+            state.snapshot.apply(payload, seq + 1 + i as u64, Utc::now());
         }
     }
 
@@ -1029,17 +1030,18 @@ mod tests {
         agent.token_budget = Some(100);
 
         let mut state = AgentSession::new(Uuid::new_v4(), Arc::new(DefaultStrategy::default()));
-        state.apply(
+        state.snapshot.apply(
             &EventPayload::SessionCreated(SessionCreated {
                 agent,
                 auth: test_auth(),
                 on_done: None,
             }),
             1,
+            Utc::now(),
         );
 
         // Simulate token usage exceeding budget
-        state.agent_state.token_usage.total_tokens = 200;
+        state.snapshot.state.token_usage.total_tokens = 200;
 
         let payloads = state
             .handle(CommandPayload::RequestLlmCall {

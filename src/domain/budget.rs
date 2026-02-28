@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::aggregate::Aggregate;
+use super::aggregate::Reducer;
 use super::config::{parse_window, BudgetPolicyConfig, ExhaustionStrategy};
 
 /// Derive a deterministic aggregate_id from tenant_id.
@@ -84,7 +84,6 @@ impl BudgetContext {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BudgetLedger {
-    pub stream_version: u64,
     pub buckets: HashMap<String, BucketState>,
 }
 
@@ -101,7 +100,7 @@ pub struct UsageEntry {
     pub recorded_at: DateTime<Utc>,
 }
 
-impl Aggregate for BudgetLedger {
+impl Reducer for BudgetLedger {
     type Event = BudgetEvent;
     type Derived = BudgetDerived;
 
@@ -109,12 +108,7 @@ impl Aggregate for BudgetLedger {
         "budget"
     }
 
-    fn stream_version(&self) -> u64 {
-        self.stream_version
-    }
-
-    fn apply(&mut self, event: &BudgetEvent, sequence: u64) {
-        self.stream_version = sequence;
+    fn apply(&mut self, event: &BudgetEvent) {
         match event {
             BudgetEvent::UsageRecorded(e) => {
                 let key = composite_key(&e.policy_name, &e.bucket_key);
@@ -320,9 +314,8 @@ mod tests {
             recorded_at: now,
         });
 
-        ledger.apply(&event, 1);
+        ledger.apply(&event);
 
-        assert_eq!(ledger.stream_version, 1);
         let key = composite_key("hourly", "alice");
         let bucket = ledger.buckets.get(&key).unwrap();
         assert_eq!(bucket.entries.len(), 1);
@@ -359,7 +352,6 @@ mod tests {
                 amount: 9000,
                 recorded_at: now,
             }),
-            1,
         );
 
         let reservations = HashMap::new();
@@ -405,7 +397,6 @@ mod tests {
                 amount: 5000,
                 recorded_at: old,
             }),
-            1,
         );
         ledger.apply(
             &BudgetEvent::UsageRecorded(UsageRecorded {
@@ -416,7 +407,6 @@ mod tests {
                 amount: 3000,
                 recorded_at: now,
             }),
-            2,
         );
 
         ledger.evict_expired(&policies, now);
@@ -442,7 +432,6 @@ mod tests {
                 amount: 8000,
                 recorded_at: now - Duration::hours(2),
             }),
-            1,
         );
         // Recent entry
         ledger.apply(
@@ -454,7 +443,6 @@ mod tests {
                 amount: 2000,
                 recorded_at: now,
             }),
-            2,
         );
 
         let policies = make_policies();

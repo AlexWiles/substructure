@@ -21,7 +21,7 @@ use crate::domain::auth::{build_auth_resolver, AdminContext, AuthError, AuthReso
 use crate::domain::config::SystemConfig;
 use crate::domain::event::ClientIdentity;
 use crate::domain::session::SessionStatus;
-use crate::runtime::{Runtime, RuntimeError, SessionFilter, SessionSummary};
+use crate::runtime::{Runtime, RuntimeError, SessionFilter, SessionSort, SessionSummary};
 
 #[derive(Clone)]
 pub struct HttpState {
@@ -110,6 +110,8 @@ pub struct ListSessionsQuery {
     #[serde(default)]
     pub status: Vec<SessionStatus>,
     pub agent: Option<String>,
+    #[serde(default)]
+    pub sort: SessionSort,
 }
 
 #[derive(serde::Deserialize)]
@@ -246,6 +248,7 @@ async fn list_sessions(
         tenant_id: Some(auth.tenant_id),
         statuses,
         agent_name: query.agent,
+        sort: query.sort,
         ..Default::default()
     };
 

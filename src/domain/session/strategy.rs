@@ -654,15 +654,13 @@ mod tests {
                 auth: test_auth(),
                 on_done: None,
             }),
-            1,
         );
         state
     }
 
     fn apply(state: &mut AgentState, payloads: Vec<EventPayload>) {
-        let seq = state.last_applied.unwrap_or(0);
-        for (i, payload) in payloads.iter().enumerate() {
-            state.apply_core(payload, seq + 1 + i as u64);
+        for payload in payloads.iter() {
+            state.apply_core(payload);
         }
     }
 

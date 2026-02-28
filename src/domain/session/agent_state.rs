@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::domain::aggregate::Aggregate;
+use crate::domain::aggregate::Reducer;
 use crate::domain::event::{
     AgentConfig, Artifact, CompletionDelivery, EventPayload, LlmRequest, LlmResponse, Message,
     Role, ClientIdentity, ToolCallMeta, ToolHandler,
@@ -174,7 +174,7 @@ pub struct DerivedState {
 }
 
 // ---------------------------------------------------------------------------
-// AgentState — the complete aggregate projection
+// AgentState — the reducer state for session aggregates
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,11 +184,8 @@ pub struct AgentState {
     pub agent: Option<AgentConfig>,
     pub auth: Option<ClientIdentity>,
     pub messages: Vec<Message>,
-    pub started_at: Option<DateTime<Utc>>,
     pub token_usage: TokenUsage,
     pub token_budget: TokenBudget,
-    pub stream_version: u64,
-    pub last_applied: Option<u64>,
     pub last_reacted: Option<u64>,
     pub strategy_state: Value,
 
@@ -218,11 +215,8 @@ impl AgentState {
             agent: None,
             auth: None,
             messages: Vec::new(),
-            started_at: None,
             token_usage: TokenUsage::default(),
             token_budget: TokenBudget { limit: None },
-            stream_version: 0,
-            last_applied: None,
             last_reacted: None,
             strategy_state: Value::Null,
             strategy: StrategySlot(None),
@@ -233,13 +227,8 @@ impl AgentState {
         }
     }
 
-    /// Apply an event to the aggregate. Returns `true` if applied (not a duplicate).
-    pub fn apply_core(&mut self, payload: &EventPayload, sequence: u64) -> bool {
-        if self.last_applied.is_some_and(|seq| sequence <= seq) {
-            return false;
-        }
-        self.last_applied = Some(sequence);
-        self.stream_version += 1;
+    /// Apply a single event payload to the session state.
+    pub fn apply_core(&mut self, payload: &EventPayload) {
         match payload {
             EventPayload::SessionCreated(payload) => {
                 self.status = SessionStatus::Idle;
@@ -398,7 +387,6 @@ impl AgentState {
             }
             _ => {}
         }
-        true
     }
 
     // -----------------------------------------------------------------------
@@ -601,7 +589,7 @@ impl AgentState {
     }
 }
 
-impl Aggregate for AgentState {
+impl Reducer for AgentState {
     type Event = EventPayload;
     type Derived = DerivedState;
 
@@ -609,12 +597,8 @@ impl Aggregate for AgentState {
         "session"
     }
 
-    fn stream_version(&self) -> u64 {
-        self.stream_version
-    }
-
-    fn apply(&mut self, event: &Self::Event, sequence: u64) {
-        self.apply_core(event, sequence);
+    fn apply(&mut self, event: &Self::Event) {
+        self.apply_core(event);
     }
 }
 

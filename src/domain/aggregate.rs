@@ -1,45 +1,98 @@
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::span::SpanContext;
 
-/// Defines an aggregate root for event sourcing.
+// ---------------------------------------------------------------------------
+// Reducer — pure event-application trait
+// ---------------------------------------------------------------------------
+
+/// Defines how events are applied to produce aggregate state.
 ///
-/// Each aggregate has its own typed event and derived-state enums,
+/// Each reducer has its own typed event and derived-state enums,
 /// ensuring type safety while keeping the store generic.
-pub trait Aggregate: Sized + Serialize + DeserializeOwned + Clone + Send + Sync + 'static {
-    /// Typed event payload enum for this aggregate.
+/// Metadata (version, timestamps) is managed by [`Aggregate<R>`].
+pub trait Reducer: Sized + Serialize + DeserializeOwned + Clone + Send + Sync + 'static {
+    /// Typed event payload enum for this reducer.
     type Event: Serialize + DeserializeOwned + Clone + Send + Sync + 'static;
     /// Typed derived state for query optimization (stamped on events).
     type Derived: Serialize + DeserializeOwned + Clone + Send + Sync + 'static;
 
     /// Discriminator string stored alongside events and snapshots (e.g. "session").
     fn aggregate_type() -> &'static str;
-    /// Current stream version (for optimistic concurrency).
-    fn stream_version(&self) -> u64;
-    /// Apply a single event to this aggregate's state.
-    fn apply(&mut self, event: &Self::Event, sequence: u64);
+    /// Apply a single event to this state.
+    fn apply(&mut self, event: &Self::Event);
 }
 
-/// A typed domain event, parameterized by aggregate.
+// ---------------------------------------------------------------------------
+// Aggregate<R> — reducer state + shared metadata
+// ---------------------------------------------------------------------------
+
+/// The full aggregate: reducer state plus shared metadata.
 ///
-/// Domain code works with `DomainEvent<A>` for type safety.
+/// Manages stream versioning, dedup, and timestamps generically
+/// for any [`Reducer`] implementation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct Aggregate<R: Reducer> {
+    pub state: R,
+    pub stream_version: u64,
+    pub last_applied: Option<u64>,
+    pub first_event_at: Option<DateTime<Utc>>,
+    pub last_event_at: Option<DateTime<Utc>>,
+}
+
+impl<R: Reducer> Aggregate<R> {
+    pub fn new(state: R) -> Self {
+        Aggregate {
+            state,
+            stream_version: 0,
+            last_applied: None,
+            first_event_at: None,
+            last_event_at: None,
+        }
+    }
+
+    /// Apply an event with dedup, version tracking, and timestamp updates.
+    /// Returns `true` if the event was applied (not a duplicate).
+    pub fn apply(&mut self, event: &R::Event, sequence: u64, occurred_at: DateTime<Utc>) -> bool {
+        if self.last_applied.is_some_and(|seq| sequence <= seq) {
+            return false;
+        }
+        self.state.apply(event);
+        self.last_applied = Some(sequence);
+        self.stream_version += 1;
+        if self.first_event_at.is_none() {
+            self.first_event_at = Some(occurred_at);
+        }
+        self.last_event_at = Some(occurred_at);
+        true
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DomainEvent<R> — typed event envelope
+// ---------------------------------------------------------------------------
+
+/// A typed domain event, parameterized by reducer.
+///
+/// Domain code works with `DomainEvent<R>` for type safety.
 /// Converted to/from the store-level `event_store::Event` at the boundary.
 #[derive(Debug, Clone)]
-pub struct DomainEvent<A: Aggregate> {
+pub struct DomainEvent<R: Reducer> {
     pub id: Uuid,
     pub tenant_id: String,
     pub aggregate_id: Uuid,
     pub sequence: u64,
     pub span: SpanContext,
     pub occurred_at: DateTime<Utc>,
-    pub payload: A::Event,
-    pub derived: Option<A::Derived>,
+    pub payload: R::Event,
+    pub derived: Option<R::Derived>,
 }
 
-impl<A: Aggregate> DomainEvent<A> {
+impl<R: Reducer> DomainEvent<R> {
     /// Convert to a store-level raw event by serializing payload and derived to Values.
     pub fn into_raw(self) -> crate::runtime::event_store::Event {
         let payload_value =
@@ -60,7 +113,7 @@ impl<A: Aggregate> DomainEvent<A> {
         crate::runtime::event_store::Event {
             id: self.id,
             tenant_id: self.tenant_id,
-            aggregate_type: A::aggregate_type().to_string(),
+            aggregate_type: R::aggregate_type().to_string(),
             aggregate_id: self.aggregate_id,
             event_type,
             sequence: self.sequence,
@@ -73,8 +126,8 @@ impl<A: Aggregate> DomainEvent<A> {
 
     /// Deserialize from a store-level raw event.
     pub fn from_raw(raw: &crate::runtime::event_store::Event) -> Result<Self, serde_json::Error> {
-        let payload: A::Event = serde_json::from_value(raw.payload.clone())?;
-        let derived: Option<A::Derived> = raw
+        let payload: R::Event = serde_json::from_value(raw.payload.clone())?;
+        let derived: Option<R::Derived> = raw
             .derived
             .as_ref()
             .map(|v| serde_json::from_value(v.clone()))

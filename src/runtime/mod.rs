@@ -29,7 +29,7 @@ pub mod wake_scheduler;
 #[cfg(feature = "sqlite")]
 pub use event_store::SqliteEventStore;
 pub use event_store::{
-    EventStore, SessionFilter, SessionIndex, SessionSummary, StoreError,
+    EventStore, SessionFilter, SessionIndex, SessionSort, SessionSummary, StoreError,
     StreamLoad, Version,
 };
 pub use llm::{LlmClient, MockLlmClient, OpenAiClient, StreamDelta};

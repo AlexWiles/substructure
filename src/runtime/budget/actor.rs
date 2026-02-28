@@ -5,7 +5,7 @@ use chrono::Utc;
 use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef, RpcReplyPort, SpawnErr};
 use uuid::Uuid;
 
-use crate::domain::aggregate::{Aggregate, DomainEvent};
+use crate::domain::aggregate::DomainEvent;
 use crate::domain::budget::{
     budget_aggregate_id, BudgetContext, BudgetDerived, BudgetEvent, BudgetLedger,
     ReservationEntry, ReservationResult, UsageRecorded,
@@ -46,7 +46,7 @@ pub struct BudgetActorArgs {
 pub struct BudgetActorState {
     tenant_id: String,
     aggregate_id: Uuid,
-    ledger: BudgetLedger,
+    ledger: crate::domain::aggregate::Aggregate<BudgetLedger>,
     reservations: HashMap<(Uuid, String), Vec<ReservationEntry>>,
     policies: Vec<BudgetPolicyConfig>,
     store: Arc<dyn EventStore>,
@@ -67,7 +67,9 @@ impl Actor for BudgetActor {
         let ledger = match args.store.load(aggregate_id, &args.tenant_id).await {
             Ok(loaded) => serde_json::from_value(loaded.snapshot)
                 .map_err(|e| format!("budget snapshot deserialize: {e}"))?,
-            Err(StoreError::StreamNotFound) => BudgetLedger::default(),
+            Err(StoreError::StreamNotFound) => {
+                crate::domain::aggregate::Aggregate::new(BudgetLedger::default())
+            }
             Err(e) => return Err(format!("budget load: {e}").into()),
         };
 
@@ -90,7 +92,7 @@ impl Actor for BudgetActor {
         match message {
             BudgetMessage::Reserve(req, reply) => {
                 let now = Utc::now();
-                let (result, entries) = state.ledger.try_reserve(
+                let (result, entries) = state.ledger.state.try_reserve(
                     &state.policies,
                     &req.context,
                     req.estimated_tokens,
@@ -233,7 +235,7 @@ async fn settle_usage(
     for (i, event) in domain_events.iter().enumerate() {
         state
             .ledger
-            .apply(event, expected_version + 1 + i as u64);
+            .apply(event, expected_version + 1 + i as u64, now);
     }
     let new_version = state.ledger.stream_version;
 
@@ -275,7 +277,7 @@ async fn settle_usage(
     }
 
     // Lazy eviction
-    state.ledger.evict_expired(&state.policies, now);
+    state.ledger.state.evict_expired(&state.policies, now);
 }
 
 fn extract_total_tokens(response: &LlmResponse) -> u64 {

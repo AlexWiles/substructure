@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use super::event_store::EventStore;
 use super::session_actor::SessionMessage;
-use crate::domain::aggregate::DomainEvent;
+use crate::domain::aggregate::{Aggregate, DomainEvent};
 use crate::domain::event::ClientIdentity;
 use crate::domain::session::AgentState;
 
@@ -20,7 +20,7 @@ pub type OnEvent = Box<dyn Fn(&DomainEvent<AgentState>) + Send + Sync>;
 
 pub struct SessionClientState {
     session_id: Uuid,
-    core: AgentState,
+    core: Aggregate<AgentState>,
     session_actor: ActorRef<SessionMessage>,
     on_event: Option<OnEvent>,
 }
@@ -45,8 +45,8 @@ impl Actor for SessionClientActor {
     ) -> Result<Self::State, ActorProcessingErr> {
         let core = match args.store.load(args.session_id, &args.auth.tenant_id).await {
             Ok(load) => serde_json::from_value(load.snapshot)
-                .unwrap_or_else(|_| AgentState::new(args.session_id)),
-            Err(_) => AgentState::new(args.session_id),
+                .unwrap_or_else(|_| Aggregate::new(AgentState::new(args.session_id))),
+            Err(_) => Aggregate::new(AgentState::new(args.session_id)),
         };
 
         let group = super::session_group(args.session_id);
@@ -80,14 +80,14 @@ impl Actor for SessionClientActor {
             }
             SessionMessage::Events(typed_events) => {
                 for typed in &typed_events {
-                    state.core.apply_core(&typed.payload, typed.sequence);
+                    state.core.apply(&typed.payload, typed.sequence, typed.occurred_at);
                     if let Some(f) = &state.on_event {
                         f(typed);
                     }
                 }
             }
             SessionMessage::GetState(reply) => {
-                let _ = reply.send(state.core.clone());
+                let _ = reply.send(state.core.state.clone());
             }
             _ => {} // Wake, Cancel, Cast, SetClientTools — not for clients
         }
