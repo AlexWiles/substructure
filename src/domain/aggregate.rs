@@ -9,6 +9,19 @@ use super::span::SpanContext;
 // Reducer — pure event-application trait
 // ---------------------------------------------------------------------------
 
+/// Coarse lifecycle state shared across all aggregate types.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AggregateStatus {
+    /// Work in flight (LLM calls, tool calls, etc.).
+    Active,
+    /// Nothing in flight; may have a `wake_at` for scheduled retry.
+    #[default]
+    Idle,
+    /// Terminal — aggregate has completed its lifecycle.
+    Done,
+}
+
 /// Defines how events are applied to produce aggregate state.
 ///
 /// Each reducer has its own typed event and derived-state enums,
@@ -24,6 +37,20 @@ pub trait Reducer: Sized + Serialize + DeserializeOwned + Clone + Send + Sync + 
     fn aggregate_type() -> &'static str;
     /// Apply a single event to this state.
     fn apply(&mut self, event: &Self::Event);
+    /// When this aggregate next needs attention (e.g. retry deadline, pending call timeout).
+    /// Returning `Some(t)` causes the wake scheduler to fire at time `t`.
+    /// Default: `None` (no waking needed).
+    fn wake_at(&self) -> Option<DateTime<Utc>> {
+        None
+    }
+    /// Coarse lifecycle status for generic queries and filtering.
+    fn status(&self) -> AggregateStatus {
+        AggregateStatus::Idle
+    }
+    /// Human-readable label for this aggregate (e.g. agent name for sessions).
+    fn label(&self) -> Option<String> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -42,6 +69,12 @@ pub struct Aggregate<R: Reducer> {
     pub last_applied: Option<u64>,
     pub first_event_at: Option<DateTime<Utc>>,
     pub last_event_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub wake_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub status: AggregateStatus,
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 impl<R: Reducer> Aggregate<R> {
@@ -52,6 +85,9 @@ impl<R: Reducer> Aggregate<R> {
             last_applied: None,
             first_event_at: None,
             last_event_at: None,
+            wake_at: None,
+            status: AggregateStatus::default(),
+            label: None,
         }
     }
 
@@ -68,6 +104,9 @@ impl<R: Reducer> Aggregate<R> {
             self.first_event_at = Some(occurred_at);
         }
         self.last_event_at = Some(occurred_at);
+        self.wake_at = self.state.wake_at();
+        self.status = self.state.status();
+        self.label = self.state.label();
         true
     }
 }
@@ -121,6 +160,7 @@ impl<R: Reducer> DomainEvent<R> {
             occurred_at: self.occurred_at,
             payload: payload_value,
             derived: derived_value,
+            wake_at: None,
         }
     }
 

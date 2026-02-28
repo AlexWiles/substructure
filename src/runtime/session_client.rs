@@ -10,19 +10,45 @@ use crate::domain::event::ClientIdentity;
 use crate::domain::session::AgentState;
 
 // ---------------------------------------------------------------------------
+// Notification — transient signals, never persisted
+// ---------------------------------------------------------------------------
+
+/// Transient signals broadcast to observers but never persisted.
+#[derive(Debug, Clone)]
+pub enum Notification {
+    LlmStreamChunk {
+        call_id: String,
+        chunk_index: u32,
+        text: String,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// SessionUpdate — what observers receive
+// ---------------------------------------------------------------------------
+
+/// Distinguishes persisted domain events from ephemeral notifications.
+pub enum SessionUpdate {
+    /// A persisted, replayable domain event.
+    Event(DomainEvent<AgentState>),
+    /// A transient notification — never persisted, for real-time observers only.
+    Notification(Arc<Notification>),
+}
+
+/// Callback invoked for each update (event or notification).
+pub type OnSessionUpdate = Box<dyn Fn(&SessionUpdate) + Send + Sync>;
+
+// ---------------------------------------------------------------------------
 // SessionClientActor
 // ---------------------------------------------------------------------------
 
 pub struct SessionClientActor;
 
-/// Callback invoked for each typed event after it is applied.
-pub type OnEvent = Box<dyn Fn(&DomainEvent<AgentState>) + Send + Sync>;
-
 pub struct SessionClientState {
     session_id: Uuid,
     core: Aggregate<AgentState>,
     session_actor: ActorRef<SessionMessage>,
-    on_event: Option<OnEvent>,
+    on_event: Option<OnSessionUpdate>,
 }
 
 pub struct SessionClientArgs {
@@ -30,7 +56,7 @@ pub struct SessionClientArgs {
     pub auth: ClientIdentity,
     pub session_actor: ActorRef<SessionMessage>,
     pub store: Arc<dyn EventStore>,
-    pub on_event: Option<OnEvent>,
+    pub on_event: Option<OnSessionUpdate>,
 }
 
 impl Actor for SessionClientActor {
@@ -51,6 +77,9 @@ impl Actor for SessionClientActor {
 
         let group = super::session_group(args.session_id);
         ractor::pg::join(group, vec![myself.get_cell()]);
+
+        let observer_group = super::session_observer_group(args.session_id);
+        ractor::pg::join(observer_group, vec![myself.get_cell()]);
 
         Ok(SessionClientState {
             session_id: args.session_id,
@@ -82,8 +111,13 @@ impl Actor for SessionClientActor {
                 for typed in &typed_events {
                     state.core.apply(&typed.payload, typed.sequence, typed.occurred_at);
                     if let Some(f) = &state.on_event {
-                        f(typed);
+                        f(&SessionUpdate::Event(typed.as_ref().clone()));
                     }
+                }
+            }
+            SessionMessage::Notify(notification) => {
+                if let Some(f) = &state.on_event {
+                    f(&SessionUpdate::Notification(notification));
                 }
             }
             SessionMessage::GetState(reply) => {

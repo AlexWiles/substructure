@@ -4,11 +4,8 @@ use chrono::{DateTime, Utc};
 use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef, SpawnErr};
 use tokio::task::AbortHandle;
 
-use crate::domain::session::DerivedState;
-
-use super::event_store::session_index::{SessionFilter, SessionIndex};
-use super::event_store::{EventBatch, EventStore};
-use super::session_actor::SessionMessage;
+use super::event_store::{AggregateFilter, AggregateSort, EventBatch, EventStore};
+use super::RuntimeMessage;
 
 // ---------------------------------------------------------------------------
 // Messages
@@ -17,7 +14,7 @@ use super::session_actor::SessionMessage;
 pub enum WakeSchedulerMessage {
     /// New events from the store — may require rescheduling.
     Events(EventBatch),
-    /// Timer tick — fire due sessions and reschedule.
+    /// Timer tick — fire due aggregates and reschedule.
     Tick,
 }
 
@@ -28,14 +25,16 @@ pub enum WakeSchedulerMessage {
 pub struct WakeScheduler;
 
 pub struct WakeSchedulerState {
-    session_index: Arc<dyn SessionIndex>,
+    store: Arc<dyn EventStore>,
+    runtime: ActorRef<RuntimeMessage>,
     myself: ActorRef<WakeSchedulerMessage>,
     next_tick_at: Option<DateTime<Utc>>,
     timer_handle: Option<AbortHandle>,
 }
 
 pub struct WakeSchedulerArgs {
-    pub session_index: Arc<dyn SessionIndex>,
+    pub store: Arc<dyn EventStore>,
+    pub runtime: ActorRef<RuntimeMessage>,
 }
 
 fn schedule(state: &mut WakeSchedulerState, at: DateTime<Utc>) {
@@ -57,14 +56,21 @@ fn schedule(state: &mut WakeSchedulerState, at: DateTime<Utc>) {
     state.timer_handle = Some(handle.abort_handle());
 }
 
-/// Query the session index for the next wake time and schedule a timer.
+/// Query the store for the next wake time and schedule a timer.
 async fn reschedule(state: &mut WakeSchedulerState) {
     if let Some(handle) = state.timer_handle.take() {
         handle.abort();
     }
     state.next_tick_at = None;
 
-    if let Some(next) = state.session_index.next_wake_at().await {
+    let filter = AggregateFilter {
+        wake_at_not_null: true,
+        sort: AggregateSort::WakeAtAsc,
+        limit: Some(1),
+        ..Default::default()
+    };
+    let results = state.store.list_aggregates(&filter).await;
+    if let Some(next) = results.first().and_then(|s| s.wake_at) {
         schedule(state, next);
     }
 }
@@ -79,11 +85,12 @@ impl Actor for WakeScheduler {
         myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        // Send an initial Tick to catch up on any due sessions.
+        // Send an initial Tick to catch up on any due aggregates at startup.
         let _ = myself.send_message(WakeSchedulerMessage::Tick);
 
         Ok(WakeSchedulerState {
-            session_index: args.session_index,
+            store: args.store,
+            runtime: args.runtime,
             myself,
             next_tick_at: None,
             timer_handle: None,
@@ -98,35 +105,35 @@ impl Actor for WakeScheduler {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             WakeSchedulerMessage::Events(events) => {
-                // Check if any event sets a wake_at sooner than our current timer.
+                // Check if any event's wake_at is sooner than our current timer.
                 for event in &events {
-                    if let Some(derived_value) = &event.derived {
-                        if let Ok(derived) =
-                            serde_json::from_value::<DerivedState>(derived_value.clone())
-                        {
-                            if let Some(wake_at) = derived.wake_at {
-                                let sooner = state
-                                    .next_tick_at
-                                    .is_none_or(|next| wake_at < next);
-                                if sooner {
-                                    schedule(state, wake_at);
-                                }
-                            }
+                    if let Some(wake_at) = event.wake_at {
+                        let sooner = state
+                            .next_tick_at
+                            .is_none_or(|next| wake_at < next);
+                        if sooner {
+                            schedule(state, wake_at);
                         }
                     }
                 }
             }
             WakeSchedulerMessage::Tick => {
-                // Fire all due sessions.
-                let due = state.session_index.list_sessions(&SessionFilter {
-                    needs_wake: Some(true),
+                // Fire all due aggregates.
+                let filter = AggregateFilter {
+                    wake_at_before: Some(Utc::now()),
+                    wake_at_not_null: true,
                     ..Default::default()
-                }).await;
-                for session in due {
-                    super::send_to_session(session.session_id, SessionMessage::Wake);
+                };
+                let due = state.store.list_aggregates(&filter).await;
+                for agg in due {
+                    let _ = state.runtime.send_message(RuntimeMessage::WakeAggregate {
+                        aggregate_id: agg.aggregate_id,
+                        aggregate_type: agg.aggregate_type,
+                        tenant_id: agg.tenant_id,
+                    });
                 }
 
-                // Schedule next tick from the index.
+                // Schedule next tick from the store.
                 reschedule(state).await;
             }
         }
@@ -136,13 +143,16 @@ impl Actor for WakeScheduler {
 
 pub async fn spawn_wake_scheduler(
     store: Arc<dyn EventStore>,
-    session_index: Arc<dyn SessionIndex>,
+    runtime: ActorRef<RuntimeMessage>,
     supervisor: ActorCell,
 ) -> Result<ActorRef<WakeSchedulerMessage>, SpawnErr> {
     let (actor_ref, _handle) = Actor::spawn_linked(
         Some("wake-scheduler".to_string()),
         WakeScheduler,
-        WakeSchedulerArgs { session_index },
+        WakeSchedulerArgs {
+            store: store.clone(),
+            runtime,
+        },
         supervisor,
     )
     .await?;

@@ -3,14 +3,17 @@ use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use ractor::{call_t, Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort};
 use rusqlite::Connection;
 use uuid::Uuid;
 
-use crate::domain::session::AgentState;
+use crate::domain::aggregate::AggregateStatus;
 
-use super::session_index::{SessionFilter, SessionIndex, SessionSort, SessionSummary};
-use super::store::{Event, EventBatch, EventStore, StoreError, StreamLoad, Version};
+use super::store::{
+    AggregateFilter, AggregateSort, AggregateSummary, Event, EventBatch, EventStore, StoreError,
+    StreamLoad, Version,
+};
 
 const SCHEMA_SQL: &str = r#"
     CREATE TABLE IF NOT EXISTS events (
@@ -41,6 +44,7 @@ const SCHEMA_SQL: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_snapshots_type ON snapshots (aggregate_type);
     CREATE INDEX IF NOT EXISTS idx_snapshots_first_event ON snapshots (first_event_at);
     CREATE INDEX IF NOT EXISTS idx_snapshots_last_event ON snapshots (last_event_at);
+    CREATE INDEX IF NOT EXISTS idx_snapshots_wake_at ON snapshots (wake_at);
 "#;
 
 // ---------------------------------------------------------------------------
@@ -181,119 +185,156 @@ fn do_load(conn: &Connection, aggregate_id: Uuid, tenant_id: &str) -> Result<Str
     })
 }
 
-fn do_list_sessions(conn: &Connection, filter: &SessionFilter) -> Vec<SessionSummary> {
-    let mut clauses: Vec<&str> = vec!["aggregate_type = 'session'"];
+fn parse_dt(s: &str) -> Option<DateTime<Utc>> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+fn parse_status(s: &str) -> AggregateStatus {
+    match s {
+        "active" => AggregateStatus::Active,
+        "idle" => AggregateStatus::Idle,
+        "done" => AggregateStatus::Done,
+        _ => AggregateStatus::Idle,
+    }
+}
+
+fn status_to_str(s: &AggregateStatus) -> &'static str {
+    match s {
+        AggregateStatus::Active => "active",
+        AggregateStatus::Idle => "idle",
+        AggregateStatus::Done => "done",
+    }
+}
+
+fn do_list_aggregates(
+    conn: &Connection,
+    filter: &AggregateFilter,
+) -> Result<Vec<AggregateSummary>, StoreError> {
+    let mut clauses: Vec<String> = Vec::new();
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
-    if filter.tenant_id.is_some() {
-        clauses.push("tenant_id = ?");
-        params.push(Box::new(filter.tenant_id.clone().unwrap()));
-    }
-    if filter.agent_name.is_some() {
-        clauses.push("agent_name = ?");
-        params.push(Box::new(filter.agent_name.clone().unwrap()));
-    }
-    match filter.needs_wake {
-        Some(true) => {
-            clauses.push("wake_at IS NOT NULL AND wake_at <= ?");
-            params.push(Box::new(chrono::Utc::now().to_rfc3339()));
-        }
-        Some(false) => {
-            clauses.push("(wake_at IS NULL OR wake_at > ?)");
-            params.push(Box::new(chrono::Utc::now().to_rfc3339()));
-        }
-        None => {}
+    if let Some(ref agg_type) = filter.aggregate_type {
+        clauses.push("aggregate_type = ?".into());
+        params.push(Box::new(agg_type.clone()));
     }
 
-    // Status filter uses the indexed column populated by extract_session_index_fields.
-    let status_clause = if let Some(ref statuses) = filter.statuses {
-        if !statuses.is_empty() {
-            let ph: Vec<&str> = statuses.iter().map(|s| {
-                let serialized = serde_json::to_value(s)
-                    .and_then(|v| serde_json::to_string(&v))
-                    .unwrap_or_default();
-                params.push(Box::new(serialized));
-                "?"
-            }).collect();
-            Some(format!("status IN ({})", ph.join(", ")))
-        } else {
-            None
+    if let Some(ref ids) = filter.aggregate_ids {
+        if !ids.is_empty() {
+            let placeholders: Vec<&str> = ids
+                .iter()
+                .map(|id| {
+                    params.push(Box::new(id.to_string()));
+                    "?"
+                })
+                .collect();
+            clauses.push(format!("aggregate_id IN ({})", placeholders.join(", ")));
         }
-    } else {
-        None
-    };
-    if let Some(ref clause) = status_clause {
-        clauses.push(clause);
     }
+
+    if let Some(ref tenant) = filter.tenant_id {
+        clauses.push("tenant_id = ?".into());
+        params.push(Box::new(tenant.clone()));
+    }
+
+    if let Some(ref statuses) = filter.status {
+        if !statuses.is_empty() {
+            let placeholders: Vec<&str> = statuses
+                .iter()
+                .map(|s| {
+                    params.push(Box::new(status_to_str(s).to_string()));
+                    "?"
+                })
+                .collect();
+            clauses.push(format!("status IN ({})", placeholders.join(", ")));
+        }
+    }
+
+    if let Some(ref label) = filter.label {
+        clauses.push("agent_name = ?".into());
+        params.push(Box::new(label.clone()));
+    }
+
+    if filter.wake_at_not_null {
+        clauses.push("wake_at IS NOT NULL".into());
+    }
+
+    if let Some(ref before) = filter.wake_at_before {
+        clauses.push("wake_at IS NOT NULL AND wake_at <= ?".into());
+        params.push(Box::new(before.to_rfc3339()));
+    }
+
+    let where_clause = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", clauses.join(" AND "))
+    };
 
     let order_by = match filter.sort {
-        SessionSort::LastEventDesc => "last_event_at DESC NULLS LAST",
-        SessionSort::FirstEventDesc => "first_event_at DESC NULLS LAST",
-        SessionSort::FirstEventAsc => "first_event_at ASC NULLS LAST",
+        AggregateSort::LastEventDesc => "last_event_at DESC NULLS LAST",
+        AggregateSort::FirstEventDesc => "first_event_at DESC NULLS LAST",
+        AggregateSort::FirstEventAsc => "first_event_at ASC NULLS LAST",
+        AggregateSort::WakeAtAsc => "wake_at ASC NULLS LAST",
     };
 
+    let limit_clause = filter
+        .limit
+        .map(|n| format!(" LIMIT {n}"))
+        .unwrap_or_default();
+
     let sql = format!(
-        "SELECT data, stream_version, first_event_at, last_event_at FROM snapshots WHERE {} ORDER BY {}",
-        clauses.join(" AND "),
-        order_by,
+        "SELECT aggregate_id, aggregate_type, tenant_id, status, agent_name, wake_at, \
+         stream_version, first_event_at, last_event_at \
+         FROM snapshots{where_clause} ORDER BY {order_by}{limit_clause}"
     );
-    let mut stmt = conn.prepare(&sql).expect("prepare list_sessions");
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| StoreError::Internal(e.to_string()))?;
+
     let param_refs: Vec<&dyn rusqlite::types::ToSql> =
         params.iter().map(|p| p.as_ref()).collect();
 
     let rows = stmt
         .query_map(param_refs.as_slice(), |row| {
             Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, u64>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(0)?,  // aggregate_id
+                row.get::<_, String>(1)?,  // aggregate_type
+                row.get::<_, String>(2)?,  // tenant_id
+                row.get::<_, Option<String>>(3)?, // status
+                row.get::<_, Option<String>>(4)?, // agent_name (label)
+                row.get::<_, Option<String>>(5)?, // wake_at
+                row.get::<_, u64>(6)?,     // stream_version
+                row.get::<_, Option<String>>(7)?, // first_event_at
+                row.get::<_, Option<String>>(8)?, // last_event_at
             ))
         })
-        .expect("query list_sessions");
+        .map_err(|e| StoreError::Internal(e.to_string()))?;
 
-    rows.filter_map(|r| {
-        let (data, stream_version, first_event_at_str, last_event_at_str) = r.ok()?;
-        let snapshot: crate::domain::aggregate::Aggregate<AgentState> =
-            serde_json::from_str(&data).ok()?;
-        let state = &snapshot.state;
-
-        let auth = state.auth.as_ref()?;
-        let agent = state.agent.as_ref()?;
-
-        let first_event_at = first_event_at_str
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-            .map(|dt| dt.with_timezone(&chrono::Utc));
-        let last_event_at = last_event_at_str
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-            .map(|dt| dt.with_timezone(&chrono::Utc));
-
-        Some(SessionSummary {
-            session_id: state.session_id,
-            tenant_id: auth.tenant_id.clone(),
-            status: state.status.clone(),
-            wake_at: state.wake_at(),
-            agent_name: agent.name.clone(),
-            message_count: state.messages.len(),
-            token_usage: state.token_usage.total_tokens,
-            stream_version,
-            first_event_at,
-            last_event_at,
+    let results = rows
+        .filter_map(|r| {
+            let (aid, agg_type, tenant, status_str, label, wake_at_str, version, first, last) =
+                r.ok()?;
+            let aggregate_id: Uuid = aid.parse().ok()?;
+            Some(AggregateSummary {
+                aggregate_id,
+                aggregate_type: agg_type,
+                tenant_id: tenant,
+                status: status_str
+                    .as_deref()
+                    .map(parse_status)
+                    .unwrap_or_default(),
+                label,
+                wake_at: wake_at_str.as_deref().and_then(parse_dt),
+                stream_version: version,
+                first_event_at: first.as_deref().and_then(parse_dt),
+                last_event_at: last.as_deref().and_then(parse_dt),
+            })
         })
-    })
-    .collect()
-}
+        .collect();
 
-fn do_next_wake_at(conn: &Connection) -> Option<chrono::DateTime<chrono::Utc>> {
-    conn.query_row(
-        "SELECT MIN(wake_at) FROM snapshots WHERE aggregate_type = 'session' AND wake_at IS NOT NULL",
-        [],
-        |row| row.get::<_, Option<String>>(0),
-    )
-    .ok()
-    .flatten()
-    .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-    .map(|dt| dt.with_timezone(&chrono::Utc))
+    Ok(results)
 }
 
 // ---------------------------------------------------------------------------
@@ -444,14 +485,12 @@ impl EventStore for SqliteEventStore {
                 }
             }
 
-            let batch: EventBatch = events.into_iter().map(Arc::new).collect();
-
             // Upsert snapshot
             let snapshot_data = serde_json::to_string(&snapshot)
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
 
-            // Extract indexed fields from the snapshot.
-            let idx = extract_session_index_fields(&snapshot);
+            // Extract indexed fields from the top-level aggregate snapshot.
+            let idx = extract_index_fields(&snapshot);
 
             tx.execute(
                 "INSERT INTO snapshots (aggregate_id, aggregate_type, tenant_id, stream_version, data, status, agent_name, wake_at, first_event_at, last_event_at)
@@ -466,12 +505,25 @@ impl EventStore for SqliteEventStore {
                      wake_at = excluded.wake_at,
                      first_event_at = COALESCE(snapshots.first_event_at, excluded.first_event_at),
                      last_event_at = excluded.last_event_at",
-                rusqlite::params![aid, aggregate_type, tenant_id, new_version, snapshot_data, idx.status, idx.agent_name, idx.wake_at, idx.first_event_at, idx.last_event_at],
+                rusqlite::params![aid, aggregate_type, tenant_id, new_version, snapshot_data, idx.status, idx.label, idx.wake_at, idx.first_event_at, idx.last_event_at],
             )
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
             tx.commit()
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
+
+            // Stamp wake_at from snapshot onto broadcast events.
+            let wake_at = idx
+                .wake_at
+                .as_deref()
+                .and_then(parse_dt);
+            let batch: EventBatch = events
+                .into_iter()
+                .map(|mut e| {
+                    e.wake_at = wake_at;
+                    Arc::new(e)
+                })
+                .collect();
 
             batch
         };
@@ -488,60 +540,54 @@ impl EventStore for SqliteEventStore {
     fn events(&self) -> &OutputPort<EventBatch> {
         &self.events
     }
-}
 
-#[async_trait]
-impl SessionIndex for SqliteEventStore {
-    async fn list_sessions(&self, filter: &SessionFilter) -> Vec<SessionSummary> {
+    async fn list_aggregates(&self, filter: &AggregateFilter) -> Vec<AggregateSummary> {
         match self.checkout().await {
-            Ok(conn) => do_list_sessions(&conn, filter),
+            Ok(conn) => do_list_aggregates(&conn, filter).unwrap_or_else(|e| {
+                tracing::error!(error = %e, "list_aggregates failed");
+                Vec::new()
+            }),
             Err(e) => {
-                tracing::error!(error = %e, "failed to checkout reader for list_sessions");
+                tracing::error!(error = %e, "failed to checkout reader for list_aggregates");
                 Vec::new()
             }
         }
     }
-
-    async fn next_wake_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
-        let conn = self.checkout().await.ok()?;
-        do_next_wake_at(&conn)
-    }
 }
 
-/// Indexed fields extracted from a snapshot for the session index.
+/// Indexed fields extracted from a snapshot for query columns.
 struct SnapshotIndexFields {
     status: Option<String>,
-    agent_name: Option<String>,
+    label: Option<String>,
     wake_at: Option<String>,
     first_event_at: Option<String>,
     last_event_at: Option<String>,
 }
 
-/// Extract indexed fields from a snapshot Value.
-fn extract_session_index_fields(snapshot: &serde_json::Value) -> SnapshotIndexFields {
-    // The snapshot is Aggregate<AgentState>, so reducer fields live under "state".
-    let inner = snapshot.get("state").unwrap_or(snapshot);
-
-    let status = inner.get("status").and_then(|v| {
-        // SessionStatus serializes to a JSON value; store as string for index.
-        serde_json::to_string(v).ok()
-    });
-    let agent_name = inner
-        .get("agent")
-        .and_then(|a| a.get("name"))
-        .and_then(|n| n.as_str())
+/// Extract indexed fields from a top-level Aggregate snapshot Value.
+/// All fields are read from the Aggregate wrapper (top-level JSON), not from
+/// the reducer state. This keeps the store fully generic.
+fn extract_index_fields(snapshot: &serde_json::Value) -> SnapshotIndexFields {
+    let status = snapshot
+        .get("status")
+        .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    // Compute wake_at from the deserialized AgentState (if possible).
-    let wake_at = serde_json::from_value::<AgentState>(inner.clone())
-        .ok()
-        .and_then(|state| state.wake_at().map(|t| t.to_rfc3339()));
+    let label = snapshot
+        .get("label")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
-    // Timestamps are on the Aggregate wrapper (top-level).
+    let wake_at = snapshot
+        .get("wake_at")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     let first_event_at = snapshot
         .get("first_event_at")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+
     let last_event_at = snapshot
         .get("last_event_at")
         .and_then(|v| v.as_str())
@@ -549,7 +595,7 @@ fn extract_session_index_fields(snapshot: &serde_json::Value) -> SnapshotIndexFi
 
     SnapshotIndexFields {
         status,
-        agent_name,
+        label,
         wake_at,
         first_event_at,
         last_event_at,
@@ -577,6 +623,7 @@ mod tests {
     use crate::domain::agent::{AgentConfig, LlmConfig};
     use crate::domain::aggregate::{Aggregate, DomainEvent};
     use crate::domain::event::{EventPayload, ClientIdentity, SessionCreated, SpanContext};
+    use crate::domain::session::AgentState;
 
     fn test_auth(tenant: &str) -> ClientIdentity {
         ClientIdentity {
@@ -634,7 +681,7 @@ mod tests {
         SqliteEventStore::new(":memory:").await.expect("open in-memory sqlite")
     }
 
-    /// Smoke test: append events, load them back, list via index.
+    /// Smoke test: append events, load them back, list via list_aggregates.
     #[tokio::test]
     async fn append_load_and_list() {
         let store = temp_store().await;
@@ -653,11 +700,16 @@ mod tests {
         assert_eq!(state.state.session_id, id);
         assert_eq!(loaded.stream_version, snap.stream_version);
 
-        // Shows up in list_sessions
-        let sessions = store.list_sessions(&SessionFilter::default()).await;
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].session_id, id);
-        assert_eq!(sessions[0].agent_name, "bot");
+        // Shows up in list_aggregates
+        let results = store
+            .list_aggregates(&AggregateFilter {
+                aggregate_type: Some("session".into()),
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].aggregate_id, id);
+        assert_eq!(results[0].label.as_deref(), Some("bot"));
 
         // Stream not found for unknown id
         assert!(matches!(
@@ -685,12 +737,12 @@ mod tests {
             Err(StoreError::TenantMismatch)
         ));
 
-        // list_sessions filters by tenant
-        let filter = SessionFilter {
+        // list_aggregates filters by tenant
+        let filter = AggregateFilter {
             tenant_id: Some("tenant-b".into()),
             ..Default::default()
         };
-        assert!(store.list_sessions(&filter).await.is_empty());
+        assert!(store.list_aggregates(&filter).await.is_empty());
     }
 
     /// Concurrency boundary: stale expected_version is rejected.

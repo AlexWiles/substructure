@@ -58,11 +58,6 @@ pub enum CommandPayload {
         retryable: bool,
         source: Option<serde_json::Value>,
     },
-    StreamLlmChunk {
-        call_id: String,
-        chunk_index: u32,
-        text: String,
-    },
     RequestToolCall {
         tool_call_id: String,
         name: String,
@@ -299,22 +294,6 @@ impl AgentSession {
                         error,
                         retryable,
                         source,
-                    })])
-                }
-                // Not pending or unknown — skip
-                _ => Ok(vec![]),
-            },
-            CommandPayload::StreamLlmChunk {
-                call_id,
-                chunk_index,
-                text,
-            } => match state.llm_calls.get(&call_id).map(|c| &c.status) {
-                // Pending call — forward chunk
-                Some(&LlmCallStatus::Pending) => {
-                    Ok(vec![EventPayload::LlmStreamChunk(LlmStreamChunk {
-                        call_id,
-                        chunk_index,
-                        text,
                     })])
                 }
                 // Not pending or unknown — skip
@@ -912,44 +891,6 @@ mod tests {
         );
         assert!(
             matches!(&payloads[1], EventPayload::MessageTool(m) if m.message.content == Some("ok".into()))
-        );
-    }
-
-    #[test]
-    fn stream_chunk_for_completed_call_is_skipped() {
-        let mut state = created_state();
-        let call_id = "call-1".to_string();
-
-        // Request and complete an LLM call
-        let payloads = state
-            .handle(CommandPayload::RequestLlmCall {
-                call_id: call_id.clone(),
-                request: mock_llm_request(),
-                stream: true,
-                deadline: far_future(),
-            })
-            .unwrap();
-        apply_events(&mut state, payloads);
-
-        let payloads = state
-            .handle(CommandPayload::CompleteLlmCall {
-                call_id: call_id.clone(),
-                response: mock_llm_response(),
-            })
-            .unwrap();
-        apply_events(&mut state, payloads);
-
-        // StreamLlmChunk for completed call is skipped
-        let payloads = state
-            .handle(CommandPayload::StreamLlmChunk {
-                call_id: call_id.clone(),
-                chunk_index: 0,
-                text: "late chunk".into(),
-            })
-            .unwrap();
-        assert!(
-            payloads.is_empty(),
-            "StreamLlmChunk for completed call should produce no events"
         );
     }
 

@@ -16,6 +16,7 @@ use crate::domain::session::{
 use super::event_store::{Event, EventStore, StoreError};
 use super::llm::{LlmClientProvider, StreamDelta};
 use super::mcp::{Content, McpClient};
+use super::session_client::Notification;
 use super::strategy::StrategyProvider;
 use super::{RuntimeMessage, SubAgentRequest};
 
@@ -59,6 +60,8 @@ pub enum SessionMessage {
     Cancel,
     /// Set client-provided tools (from AG-UI RunAgentInput).
     SetClientTools(Vec<crate::domain::openai::Tool>),
+    /// Transient notification — broadcast to observers, never persisted.
+    Notify(Arc<Notification>),
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +227,38 @@ async fn execute(
 }
 
 // ---------------------------------------------------------------------------
+// StreamHandler — manages streaming lifecycle without touching the event store
+// ---------------------------------------------------------------------------
+
+struct StreamHandler {
+    call_id: String,
+    session_id: Uuid,
+    chunk_index: u32,
+}
+
+impl StreamHandler {
+    fn new(call_id: String, session_id: Uuid) -> Self {
+        Self {
+            call_id,
+            session_id,
+            chunk_index: 0,
+        }
+    }
+
+    fn on_chunk(&mut self, text: &str) {
+        super::notify_observers(
+            self.session_id,
+            Arc::new(Notification::LlmStreamChunk {
+                call_id: self.call_id.clone(),
+                chunk_index: self.chunk_index,
+                text: text.to_string(),
+            }),
+        );
+        self.chunk_index += 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Effect delivery — sends Cast to self
 // ---------------------------------------------------------------------------
 
@@ -352,28 +387,12 @@ async fn handle_effect(
             let result = if stream {
                 let (chunk_tx, mut chunk_rx) =
                     tokio::sync::mpsc::unbounded_channel::<StreamDelta>();
-
-                let call_id_fwd = call_id.clone();
-                let span_fwd = span.clone();
+                let mut handler = StreamHandler::new(call_id.clone(), state.session_id);
 
                 let (result, _) = tokio::join!(client.call_streaming(&request, chunk_tx), async {
-                    let mut chunk_index: u32 = 0;
                     while let Some(delta) = chunk_rx.recv().await {
                         if let Some(text) = delta.text {
-                            let _ = execute(
-                                state,
-                                SessionCommand {
-                                    span: span_fwd.child(),
-                                    occurred_at: Utc::now(),
-                                    payload: CommandPayload::StreamLlmChunk {
-                                        call_id: call_id_fwd.clone(),
-                                        chunk_index,
-                                        text,
-                                    },
-                                },
-                            )
-                            .await;
-                            chunk_index += 1;
+                            handler.on_chunk(&text);
                         }
                     }
                 });
@@ -783,6 +802,9 @@ impl Actor for SessionActor {
             }
             SessionMessage::SetClientTools(tools) => {
                 state.client_tools = tools;
+            }
+            SessionMessage::Notify(_) => {
+                debug_assert!(false, "SessionActor should not receive Notify messages");
             }
         }
         Ok(())

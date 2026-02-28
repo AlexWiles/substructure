@@ -6,11 +6,10 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream;
 use uuid::Uuid;
 
-use crate::domain::aggregate::DomainEvent;
 use crate::domain::event::{Message as DomainMessage, Role, ClientIdentity, SpanContext, ToolCall as DomainToolCall};
 use crate::domain::openai;
 use crate::domain::session::{AgentState, CommandPayload, SessionCommand};
-use crate::runtime::{OnEvent, Runtime, RuntimeError, SessionMessage};
+use crate::runtime::{OnSessionUpdate, Runtime, RuntimeError, SessionMessage, SessionUpdate};
 
 use super::translate::{EventTranslator, TranslateOutput};
 use super::types::{AgUiEvent, Message, RunAgentInput};
@@ -46,7 +45,7 @@ fn build_ag_ui_callback(
     thread_id: String,
     run_id: String,
     skip_until: u64,
-) -> OnEvent {
+) -> OnSessionUpdate {
     let state = Mutex::new(CallbackState {
         translator: EventTranslator::new(),
         tx: Some(tx),
@@ -55,18 +54,24 @@ fn build_ag_ui_callback(
         skip_until,
     });
 
-    Box::new(move |event: &DomainEvent<AgentState>| {
+    Box::new(move |update: &SessionUpdate| {
         let mut s = state.lock().expect("ag-ui callback lock poisoned");
 
         if s.tx.is_none() {
             return;
         }
 
-        if s.skip_until > 0 && event.sequence <= s.skip_until {
-            return;
-        }
-
-        let output = s.translator.translate(event);
+        let output = match update {
+            SessionUpdate::Event(event) => {
+                if s.skip_until > 0 && event.sequence <= s.skip_until {
+                    return;
+                }
+                s.translator.translate_event(&event.payload)
+            }
+            SessionUpdate::Notification(notification) => {
+                s.translator.translate_notification(notification)
+            }
+        };
 
         // Now borrow tx for sending
         let tx = s.tx.as_ref().unwrap();

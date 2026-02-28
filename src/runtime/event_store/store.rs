@@ -6,6 +6,7 @@ use ractor::OutputPort;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::domain::aggregate::AggregateStatus;
 use crate::domain::span::SpanContext;
 
 // ---------------------------------------------------------------------------
@@ -29,6 +30,10 @@ pub struct Event {
     pub payload: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub derived: Option<serde_json::Value>,
+    /// Snapshot-level wake_at, stamped by the store during broadcast.
+    /// Not persisted in the events table.
+    #[serde(skip)]
+    pub wake_at: Option<DateTime<Utc>>,
 }
 
 /// Events broadcast by the store after a successful append.
@@ -69,6 +74,48 @@ pub struct StreamLoad {
 }
 
 // ---------------------------------------------------------------------------
+// Aggregate query types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AggregateSort {
+    #[default]
+    LastEventDesc,
+    FirstEventAsc,
+    FirstEventDesc,
+    WakeAtAsc,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AggregateFilter {
+    pub aggregate_type: Option<String>,
+    pub aggregate_ids: Option<Vec<Uuid>>,
+    pub tenant_id: Option<String>,
+    pub status: Option<Vec<AggregateStatus>>,
+    pub label: Option<String>,
+    /// Only include aggregates with `wake_at <= t`.
+    pub wake_at_before: Option<DateTime<Utc>>,
+    /// Only include aggregates that have a non-null `wake_at`.
+    pub wake_at_not_null: bool,
+    pub sort: AggregateSort,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AggregateSummary {
+    pub aggregate_id: Uuid,
+    pub aggregate_type: String,
+    pub tenant_id: String,
+    pub status: AggregateStatus,
+    pub label: Option<String>,
+    pub wake_at: Option<DateTime<Utc>>,
+    pub stream_version: u64,
+    pub first_event_at: Option<DateTime<Utc>>,
+    pub last_event_at: Option<DateTime<Utc>>,
+}
+
+// ---------------------------------------------------------------------------
 // EventStore trait — generic, aggregate-agnostic
 // ---------------------------------------------------------------------------
 
@@ -99,4 +146,7 @@ pub trait EventStore: Send + Sync {
 
     /// Returns the port that broadcasts newly appended events.
     fn events(&self) -> &OutputPort<EventBatch>;
+
+    /// Query aggregates with filtering, sorting, and pagination.
+    async fn list_aggregates(&self, filter: &AggregateFilter) -> Vec<AggregateSummary>;
 }

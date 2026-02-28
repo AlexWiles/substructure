@@ -11,17 +11,18 @@ use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use chrono::{DateTime, Utc};
 use tokio_stream::{Stream, StreamExt};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 use crate::ag_ui::{observe_session, resume_run, run_existing_session, AgUiError, AgUiEvent};
+use crate::domain::aggregate::AggregateStatus;
 use crate::domain::auth::{build_auth_resolver, AdminContext, AuthError, AuthResolver};
 use crate::domain::config::SystemConfig;
 use crate::domain::event::ClientIdentity;
-use crate::domain::session::SessionStatus;
-use crate::runtime::{Runtime, RuntimeError, SessionFilter, SessionSort, SessionSummary};
+use crate::runtime::{AggregateFilter, AggregateSort, AggregateSummary, Runtime, RuntimeError};
 
 #[derive(Clone)]
 pub struct HttpState {
@@ -108,10 +109,10 @@ pub struct ObserveQuery {
 pub struct ListSessionsQuery {
     /// Repeated query param, e.g. ?status=active&status=idle
     #[serde(default)]
-    pub status: Vec<SessionStatus>,
+    pub status: Vec<AggregateStatus>,
     pub agent: Option<String>,
     #[serde(default)]
-    pub sort: SessionSort,
+    pub sort: AggregateSort,
 }
 
 #[derive(serde::Deserialize)]
@@ -122,6 +123,38 @@ pub struct TokenRequest {
 #[derive(serde::Serialize)]
 pub struct TokenResponse {
     pub token: String,
+}
+
+/// Session-specific HTTP response type, derived from the generic AggregateSummary.
+#[derive(serde::Serialize)]
+pub struct SessionSummary {
+    pub session_id: Uuid,
+    pub tenant_id: String,
+    pub status: AggregateStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wake_at: Option<DateTime<Utc>>,
+    pub stream_version: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_event_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_event_at: Option<DateTime<Utc>>,
+}
+
+impl From<AggregateSummary> for SessionSummary {
+    fn from(s: AggregateSummary) -> Self {
+        SessionSummary {
+            session_id: s.aggregate_id,
+            tenant_id: s.tenant_id,
+            status: s.status,
+            agent_name: s.label,
+            wake_at: s.wake_at,
+            stream_version: s.stream_version,
+            first_event_at: s.first_event_at,
+            last_event_at: s.last_event_at,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -244,16 +277,24 @@ async fn list_sessions(
         Some(query.status)
     };
 
-    let filter = SessionFilter {
+    let filter = AggregateFilter {
+        aggregate_type: Some("session".into()),
         tenant_id: Some(auth.tenant_id),
-        statuses,
-        agent_name: query.agent,
+        status: statuses,
+        label: query.agent,
         sort: query.sort,
         ..Default::default()
     };
 
-    let sessions = state.runtime.session_index().list_sessions(&filter).await;
-    Ok(Json(sessions))
+    let summaries: Vec<SessionSummary> = state
+        .runtime
+        .store()
+        .list_aggregates(&filter)
+        .await
+        .into_iter()
+        .map(SessionSummary::from)
+        .collect();
+    Ok(Json(summaries))
 }
 
 async fn get_session(
@@ -261,8 +302,8 @@ async fn get_session(
     State(state): State<HttpState>,
     Path(session_id): Path<Uuid>,
 ) -> Result<Json<SessionSummary>, AppError> {
-    let summary = find_session_summary(&state.runtime, session_id, &auth.tenant_id).await?;
-    Ok(Json(summary))
+    let summary = find_aggregate_summary(&state.runtime, session_id, &auth.tenant_id).await?;
+    Ok(Json(SessionSummary::from(summary)))
 }
 
 #[tracing::instrument(skip(auth, state, input), fields(%session_id))]
@@ -355,27 +396,32 @@ async fn ensure_session_running(
         return Ok(());
     }
 
-    let summary = find_session_summary(runtime, session_id, &auth.tenant_id).await?;
+    let summary = find_aggregate_summary(runtime, session_id, &auth.tenant_id).await?;
+    let agent_name = summary
+        .label
+        .as_deref()
+        .ok_or(AppError::Runtime(RuntimeError::SessionNotFound))?;
     let _handle = runtime
-        .start_session(session_id, &summary.agent_name, auth.clone())
+        .start_session(session_id, agent_name, auth.clone())
         .await?;
     Ok(())
 }
 
-async fn find_session_summary(
+async fn find_aggregate_summary(
     runtime: &Runtime,
     session_id: Uuid,
     tenant_id: &str,
-) -> Result<SessionSummary, AppError> {
-    let filter = SessionFilter {
+) -> Result<AggregateSummary, AppError> {
+    let filter = AggregateFilter {
+        aggregate_ids: Some(vec![session_id]),
         tenant_id: Some(tenant_id.into()),
         ..Default::default()
     };
     runtime
-        .session_index()
-        .list_sessions(&filter)
+        .store()
+        .list_aggregates(&filter)
         .await
         .into_iter()
-        .find(|summary| summary.session_id == session_id)
+        .next()
         .ok_or_else(|| AppError::Runtime(RuntimeError::SessionNotFound))
 }

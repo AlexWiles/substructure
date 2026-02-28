@@ -35,8 +35,6 @@ pub enum EventPayload {
     MessageAssistant(MessageAssistant),
     #[serde(rename = "llm.call.requested")]
     LlmCallRequested(LlmCallRequested),
-    #[serde(rename = "llm.stream.chunk")]
-    LlmStreamChunk(LlmStreamChunk),
     #[serde(rename = "llm.call.completed")]
     LlmCallCompleted(LlmCallCompleted),
     #[serde(rename = "llm.call.errored")]
@@ -259,13 +257,6 @@ pub enum LlmRequest {
 pub enum LlmResponse {
     #[serde(rename = "openai")]
     OpenAi(openai::ChatCompletionResponse),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LlmStreamChunk {
-    pub call_id: String,
-    pub chunk_index: u32,
-    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

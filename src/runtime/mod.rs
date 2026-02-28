@@ -29,8 +29,7 @@ pub mod wake_scheduler;
 #[cfg(feature = "sqlite")]
 pub use event_store::SqliteEventStore;
 pub use event_store::{
-    EventStore, SessionFilter, SessionIndex, SessionSort, SessionSummary, StoreError,
-    StreamLoad, Version,
+    AggregateFilter, AggregateSort, AggregateSummary, EventStore, StoreError, StreamLoad, Version,
 };
 pub use llm::{LlmClient, MockLlmClient, OpenAiClient, StreamDelta};
 pub use llm::{LlmClientFactory, LlmClientProvider, ProviderError, StaticLlmClientProvider};
@@ -43,7 +42,9 @@ pub use session_actor::SessionActorArgs;
 pub use session_actor::{
     RuntimeError, SessionActor, SessionActorState, SessionInit, SessionMessage,
 };
-pub use session_client::{OnEvent, SessionClientActor, SessionClientArgs};
+pub use session_client::{
+    Notification, OnSessionUpdate, SessionClientActor, SessionClientArgs, SessionUpdate,
+};
 pub use strategy::{StaticStrategyProvider, StrategyProvider, StrategyProviderError};
 
 // ---------------------------------------------------------------------------
@@ -56,6 +57,10 @@ pub fn session_actor_name(session_id: Uuid) -> String {
 
 pub fn session_group(session_id: Uuid) -> String {
     format!("session-group-{session_id}")
+}
+
+pub fn session_observer_group(session_id: Uuid) -> String {
+    format!("session-observers-{session_id}")
 }
 
 /// Routing closure for the session aggregate dispatcher.
@@ -77,6 +82,16 @@ pub fn send_to_session(session_id: Uuid, message: SessionMessage) {
     }
 }
 
+/// Broadcast a transient notification to session observers only.
+/// The session actor is not in this group, so it never receives its own notifications.
+pub fn notify_observers(session_id: Uuid, notification: Arc<Notification>) {
+    let group = session_observer_group(session_id);
+    for cell in ractor::pg::get_members(&group) {
+        let actor: ActorRef<SessionMessage> = cell.into();
+        let _ = actor.send_message(SessionMessage::Notify(Arc::clone(&notification)));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // RuntimeMessage — commands handled by the RuntimeActor
 // ---------------------------------------------------------------------------
@@ -88,7 +103,11 @@ pub enum RuntimeMessage {
         RpcReplyPort<Result<SessionHandle, RuntimeError>>,
     ),
     RunSubAgent(SubAgentRequest),
-    ResumeAll,
+    WakeAggregate {
+        aggregate_id: Uuid,
+        aggregate_type: String,
+        tenant_id: String,
+    },
 }
 
 pub struct SubAgentRequest {
@@ -111,7 +130,6 @@ struct RuntimeActor;
 struct RuntimeState {
     myself: ActorRef<RuntimeMessage>,
     store: Arc<dyn EventStore>,
-    session_index: Arc<dyn SessionIndex>,
     agents: HashMap<String, AgentConfig>,
     llm_provider: Arc<dyn LlmClientProvider>,
     strategy_provider: Arc<dyn StrategyProvider>,
@@ -120,7 +138,6 @@ struct RuntimeState {
 
 struct RuntimeArgs {
     store: Arc<dyn EventStore>,
-    session_index: Arc<dyn SessionIndex>,
     agents: HashMap<String, AgentConfig>,
     llm_provider: Arc<dyn LlmClientProvider>,
     strategy_provider: Arc<dyn StrategyProvider>,
@@ -242,36 +259,59 @@ impl RuntimeState {
         })
     }
 
-    async fn resume_all(&self) {
-        let filter = SessionFilter {
-            needs_wake: Some(true),
-            ..Default::default()
-        };
-        let sessions = self.session_index.list_sessions(&filter).await;
-        if !sessions.is_empty() {
-            tracing::info!(count = sessions.len(), "resuming sessions");
-        }
-        for summary in sessions {
-            let agent = match self.agents.get(&summary.agent_name) {
-                Some(a) => a.clone(),
-                None => {
-                    tracing::warn!(agent = %summary.agent_name, session = %summary.session_id, "unknown agent, skipping resume");
-                    continue;
+    async fn wake_aggregate(&self, aggregate_id: Uuid, aggregate_type: &str, tenant_id: &str) {
+        match aggregate_type {
+            "session" => {
+                // If the session actor is already running, just send Wake.
+                if let Some(cell) = ractor::registry::where_is(session_actor_name(aggregate_id)) {
+                    let actor: ActorRef<SessionMessage> = cell.into();
+                    let _ = actor.send_message(SessionMessage::Wake);
+                    return;
                 }
-            };
-            let auth = ClientIdentity {
-                tenant_id: summary.tenant_id,
-                sub: None,
-                attrs: Default::default(),
-            };
-            let init = SessionInit {
-                agent,
-                auth,
-                on_done: None,
-                span: SpanContext::root(),
-            };
-            if let Err(e) = self.start_session(summary.session_id, init).await {
-                tracing::warn!(session = %summary.session_id, error = %e, "failed to resume session");
+                // Not running — look up the agent name via list_aggregates and start the session.
+                let filter = AggregateFilter {
+                    aggregate_ids: Some(vec![aggregate_id]),
+                    ..Default::default()
+                };
+                let results = self.store.list_aggregates(&filter).await;
+                let summary = match results.into_iter().next() {
+                    Some(s) => s,
+                    None => {
+                        tracing::warn!(%aggregate_id, "wake: session not found in store");
+                        return;
+                    }
+                };
+                let agent_name = match summary.label {
+                    Some(name) => name,
+                    None => {
+                        tracing::warn!(%aggregate_id, "wake: session has no agent label");
+                        return;
+                    }
+                };
+                let agent = match self.agents.get(&agent_name) {
+                    Some(a) => a.clone(),
+                    None => {
+                        tracing::warn!(agent = %agent_name, session = %aggregate_id, "wake: unknown agent");
+                        return;
+                    }
+                };
+                let auth = ClientIdentity {
+                    tenant_id: tenant_id.to_string(),
+                    sub: None,
+                    attrs: Default::default(),
+                };
+                let init = SessionInit {
+                    agent,
+                    auth,
+                    on_done: None,
+                    span: SpanContext::root(),
+                };
+                if let Err(e) = self.start_session(aggregate_id, init).await {
+                    tracing::warn!(session = %aggregate_id, error = %e, "wake: failed to start session");
+                }
+            }
+            _ => {
+                tracing::debug!(aggregate_type = %aggregate_type, %aggregate_id, "wake: no handler for aggregate type");
             }
         }
     }
@@ -358,7 +398,6 @@ impl Actor for RuntimeActor {
         let state = RuntimeState {
             myself: myself.clone(),
             store: args.store.clone(),
-            session_index: args.session_index,
             agents: args.agents,
             llm_provider: args.llm_provider,
             strategy_provider: args.strategy_provider,
@@ -377,14 +416,11 @@ impl Actor for RuntimeActor {
         tracing::debug!("spawning wake scheduler");
         spawn_wake_scheduler(
             args.store,
-            state.session_index.clone(),
+            myself.clone(),
             myself.get_cell(),
         )
         .await
         .map_err(|e| format!("failed to spawn wake scheduler: {e}"))?;
-
-        // Defer session resumption so pre_start completes immediately
-        let _ = myself.send_message(RuntimeMessage::ResumeAll);
 
         Ok(state)
     }
@@ -405,8 +441,8 @@ impl Actor for RuntimeActor {
                     tracing::error!(error = %e, "sub-agent error");
                 }
             }
-            RuntimeMessage::ResumeAll => {
-                state.resume_all().await;
+            RuntimeMessage::WakeAggregate { aggregate_id, aggregate_type, tenant_id } => {
+                state.wake_aggregate(aggregate_id, &aggregate_type, &tenant_id).await;
             }
         }
         Ok(())
@@ -454,7 +490,7 @@ async fn restart_infrastructure(name: Option<String>, state: &RuntimeState) {
             tracing::info!("restarting wake-scheduler");
             if let Err(e) = spawn_wake_scheduler(
                 state.store.clone(),
-                state.session_index.clone(),
+                state.myself.clone(),
                 state.myself.get_cell(),
             )
             .await
@@ -464,7 +500,6 @@ async fn restart_infrastructure(name: Option<String>, state: &RuntimeState) {
         }
         Some(name) if name.starts_with("mcp-") => {
             tracing::info!(server = %name, "MCP actor died, will re-spawn on next use");
-            // MCP actors are lazily re-spawned by get_or_spawn_mcp_actors on next session start.
         }
         Some(name) if name.starts_with("budget-") => {
             let tenant_id = &name["budget-".len()..];
@@ -493,13 +528,12 @@ async fn restart_infrastructure(name: Option<String>, state: &RuntimeState) {
 pub struct Runtime {
     actor: ActorRef<RuntimeMessage>,
     store: Arc<dyn EventStore>,
-    session_index: Arc<dyn SessionIndex>,
     agents: HashMap<String, AgentConfig>,
 }
 
 impl Runtime {
     pub async fn start(config: &SystemConfig) -> Result<Self, RuntimeError> {
-        let (store, session_index) = create_event_store(&config.event_store).await;
+        let store = create_event_store(&config.event_store).await;
 
         let llm_provider =
             StaticLlmClientProvider::from_config(&config.llm_clients, &default_llm_factories())
@@ -510,7 +544,6 @@ impl Runtime {
             RuntimeActor,
             RuntimeArgs {
                 store: store.clone(),
-                session_index: session_index.clone(),
                 agents: config.agents.clone(),
                 llm_provider: Arc::new(llm_provider),
                 strategy_provider: Arc::new(StaticStrategyProvider),
@@ -529,7 +562,6 @@ impl Runtime {
         Ok(Runtime {
             actor,
             store,
-            session_index,
             agents: config.agents.clone(),
         })
     }
@@ -581,12 +613,12 @@ impl Runtime {
     /// Spawn a new session client for an existing session.
     /// The client joins the dispatcher's process group so it receives events
     /// and keeps its projected state up to date.
-    /// An optional `on_event` callback is invoked for each event after it is applied.
+    /// An optional callback is invoked for each update (event or notification).
     pub async fn connect(
         &self,
         session_id: Uuid,
         auth: ClientIdentity,
-        on_event: Option<OnEvent>,
+        on_event: Option<OnSessionUpdate>,
     ) -> Result<SessionHandle, RuntimeError> {
         let session_actor: ActorRef<SessionMessage> =
             ractor::registry::where_is(session_actor_name(session_id))
@@ -622,10 +654,6 @@ impl Runtime {
 
     pub fn store(&self) -> &Arc<dyn EventStore> {
         &self.store
-    }
-
-    pub fn session_index(&self) -> &Arc<dyn SessionIndex> {
-        &self.session_index
     }
 
     /// Return the names of all configured agents.
@@ -668,16 +696,15 @@ impl SessionHandle {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-async fn create_event_store(config: &EventStoreConfig) -> (Arc<dyn EventStore>, Arc<dyn SessionIndex>) {
+async fn create_event_store(config: &EventStoreConfig) -> Arc<dyn EventStore> {
     match config {
         #[cfg(feature = "sqlite")]
         EventStoreConfig::Sqlite { path } => {
-            let store = Arc::new(
+            Arc::new(
                 SqliteEventStore::new(path)
                     .await
                     .expect("failed to open SQLite event store"),
-            );
-            (store.clone(), store)
+            )
         }
         #[cfg(not(feature = "sqlite"))]
         EventStoreConfig::Sqlite { .. } => {

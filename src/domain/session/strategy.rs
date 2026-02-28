@@ -553,7 +553,15 @@ impl Strategy for DefaultStrategy {
                     };
                     let action = match pending {
                         Some(pr) => Action::CallLlm(self.llm_params(state, Some(pr.stream))),
-                        None => Action::Done { artifacts: vec![] },
+                        None => Action::Done {
+                            artifacts: vec![Artifact {
+                                name: None,
+                                description: None,
+                                parts: vec![Part::Text {
+                                    text: format!("Error: {}", payload.error),
+                                }],
+                            }],
+                        },
                     };
                     return Some(Turn {
                         action: Some(action),
@@ -561,7 +569,15 @@ impl Strategy for DefaultStrategy {
                     });
                 }
                 Some(Turn {
-                    action: Some(Action::Done { artifacts: vec![] }),
+                    action: Some(Action::Done {
+                        artifacts: vec![Artifact {
+                            name: None,
+                            description: None,
+                            parts: vec![Part::Text {
+                                text: format!("Error: {}", payload.error),
+                            }],
+                        }],
+                    }),
                     state: Self::serialize_state(&ss),
                 })
             }
