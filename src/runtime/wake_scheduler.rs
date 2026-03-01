@@ -56,13 +56,16 @@ fn schedule(state: &mut WakeSchedulerState, at: DateTime<Utc>) {
     state.timer_handle = Some(handle.abort_handle());
 }
 
-/// Query the store for the next wake time and schedule a timer.
+/// Query the store for the next *future* wake time and schedule a timer.
+/// Past-due aggregates are handled by the current Tick; scheduling them
+/// again would produce a zero-delay timer and spin in an infinite loop.
 async fn reschedule(state: &mut WakeSchedulerState) {
     if let Some(handle) = state.timer_handle.take() {
         handle.abort();
     }
     state.next_tick_at = None;
 
+    let now = Utc::now();
     let filter = AggregateFilter {
         wake_at_not_null: true,
         sort: AggregateSort::WakeAtAsc,
@@ -71,7 +74,9 @@ async fn reschedule(state: &mut WakeSchedulerState) {
     };
     let results = state.store.list_aggregates(&filter).await;
     if let Some(next) = results.first().and_then(|s| s.wake_at) {
-        schedule(state, next);
+        if next > now {
+            schedule(state, next);
+        }
     }
 }
 
@@ -106,11 +111,17 @@ impl Actor for WakeScheduler {
         match message {
             WakeSchedulerMessage::Events(events) => {
                 // Check if any event's wake_at is sooner than our current timer.
+                // Ignore past wake_at values — those are handled by the current
+                // or next Tick, not by scheduling a zero-delay timer.
+                let now = Utc::now();
                 for event in &events {
                     if let Some(wake_at) = event.wake_at {
-                        let sooner = state.next_tick_at.is_none_or(|next| wake_at < next);
-                        if sooner {
-                            schedule(state, wake_at);
+                        if wake_at > now {
+                            let sooner =
+                                state.next_tick_at.is_none_or(|next| wake_at < next);
+                            if sooner {
+                                schedule(state, wake_at);
+                            }
                         }
                     }
                 }

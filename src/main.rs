@@ -158,10 +158,14 @@ async fn run_one_shot(
             .await?
     };
 
-    // Send the user message
+    // Send the user message, continuing the session's trace
+    let span = match session.trace_id {
+        Some(tid) => SpanContext::in_trace(tid, "cli.message"),
+        None => SpanContext::root().with_name("cli.message"),
+    };
     client
         .send_command(SessionCommand {
-            span: SpanContext::root(),
+            span,
             occurred_at: chrono::Utc::now(),
             payload: CommandPayload::SendMessage {
                 message: IncomingMessage::User {

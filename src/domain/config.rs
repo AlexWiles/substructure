@@ -36,6 +36,21 @@ pub struct SystemConfig {
     pub budgets: Vec<BudgetPolicyConfig>,
     #[serde(default)]
     pub auth: AuthConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub otel: Option<OtelConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OtelConfig {
+    pub endpoint: String,
+    #[serde(default = "OtelConfig::default_service_name")]
+    pub service_name: String,
+}
+
+impl OtelConfig {
+    fn default_service_name() -> String {
+        "substructure".into()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

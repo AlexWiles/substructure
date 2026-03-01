@@ -6,6 +6,10 @@ format = "compact"
 type = "sqlite"
 path = "events.db"
 
+[otel]
+endpoint = "http://localhost:4317"
+service_name = "substructure"
+
 [secret_providers.env]
 type = "env"
 

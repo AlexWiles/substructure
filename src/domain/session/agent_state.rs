@@ -29,7 +29,7 @@ pub struct McpToolEntry {
 }
 
 /// Callback for streaming LLM chunks to observers.
-pub type NotifyChunkFn = Arc<dyn Fn(Uuid, String, u32, String) + Send + Sync>;
+pub type NotifyChunkFn = Arc<dyn Fn(Uuid, String, u32, String, crate::domain::span::SpanContext) + Send + Sync>;
 /// Callback for sending a command to a session (fire-and-forget).
 pub type SendToSessionFn = Arc<dyn Fn(Uuid, CommandPayload, crate::domain::event::SpanContext) + Send + Sync>;
 /// Callback for spawning a sub-agent.
@@ -816,6 +816,7 @@ impl AgentState {
         &self,
         p: &LlmCallRequested,
         ctx: &SessionContext,
+        span: &crate::domain::span::SpanContext,
     ) -> CommandPayload {
         let provider = match &ctx.llm_provider {
             Some(p) => p,
@@ -860,6 +861,7 @@ impl AgentState {
             let call_id = p.call_id.clone();
             let session_id = ctx.session_id;
             let notify = ctx.notify_chunk.clone();
+            let chunk_span = span.child("llm.stream");
             let mut chunk_index: u32 = 0;
 
             let (result, _) = tokio::join!(
@@ -868,7 +870,7 @@ impl AgentState {
                     while let Some(delta) = chunk_rx.recv().await {
                         if let Some(text) = delta.text {
                             if let Some(ref notify) = notify {
-                                notify(session_id, call_id.clone(), chunk_index, text);
+                                notify(session_id, call_id.clone(), chunk_index, text, chunk_span.clone());
                                 chunk_index += 1;
                             }
                         }
@@ -899,6 +901,7 @@ impl AgentState {
         &self,
         p: &ToolCallRequested,
         ctx: &SessionContext,
+        span: &crate::domain::span::SpanContext,
     ) -> Option<CommandPayload> {
         // Sub-agent tool call
         if let Some(child_session_id) = self
@@ -924,9 +927,9 @@ impl AgentState {
                         parent_session_id: ctx.session_id,
                         tool_call_id: p.tool_call_id.clone(),
                         tool_name: p.name.clone(),
-                        span: crate::domain::event::SpanContext::root(),
+                        span: span.child("sub_agent.delivery"),
                     },
-                    span: crate::domain::event::SpanContext::root(),
+                    span: span.child("sub_agent.spawn"),
                     token_budget: None,
                     stream: ctx.stream,
                 });
@@ -1112,7 +1115,7 @@ impl AggregateState for AgentState {
                     .get(&p.call_id)
                     .is_some_and(|c| c.status == LlmCallStatus::Pending)
                 {
-                    return Some(self.handle_llm_call(p, ctx).await);
+                    return Some(self.handle_llm_call(p, ctx, span).await);
                 }
             }
             EventPayload::ToolCallRequested(p) => {
@@ -1121,7 +1124,7 @@ impl AggregateState for AgentState {
                     .get(&p.tool_call_id)
                     .is_some_and(|tc| tc.status == ToolCallStatus::Pending && tc.handler == ToolHandler::Runtime)
                 {
-                    return self.handle_tool_call(p, ctx).await;
+                    return self.handle_tool_call(p, ctx, span).await;
                 }
             }
             EventPayload::SessionDone(_) => {
@@ -1135,7 +1138,7 @@ impl AggregateState for AgentState {
                                 name: delivery.tool_name.clone(),
                                 result,
                             },
-                            span.child(),
+                            span.child("session.done.deliver"),
                         );
                     }
                 }

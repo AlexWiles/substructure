@@ -25,13 +25,16 @@ pub mod aggregate_actor;
 pub mod jsonrpc;
 pub mod llm;
 pub mod mcp;
+#[cfg(feature = "otel")]
+pub mod otel;
 pub mod session_client;
 pub mod wake_scheduler;
 
 #[cfg(feature = "sqlite")]
 pub use event_store::SqliteEventStore;
 pub use event_store::{
-    AggregateFilter, AggregateSort, AggregateSummary, EventStore, StoreError, StreamLoad, Version,
+    AggregateFilter, AggregateSort, AggregateSummary, EventFilter, EventStore, StoreError,
+    StreamLoad, Version,
 };
 pub use llm::{LlmClient, MockLlmClient, OpenAiClient, StreamDelta};
 pub use llm::{LlmClientFactory, LlmClientProvider, ProviderError, StaticLlmClientProvider};
@@ -184,6 +187,8 @@ struct RuntimeState {
     agents: HashMap<String, AgentConfig>,
     llm_provider: Arc<dyn LlmClientProvider>,
     budget_policies: Vec<BudgetPolicyConfig>,
+    #[cfg(feature = "otel")]
+    otel_actor: Option<ActorRef<otel::OtelMsg>>,
 }
 
 struct RuntimeArgs {
@@ -191,6 +196,8 @@ struct RuntimeArgs {
     agents: HashMap<String, AgentConfig>,
     llm_provider: Arc<dyn LlmClientProvider>,
     budget_policies: Vec<BudgetPolicyConfig>,
+    #[cfg(feature = "otel")]
+    otel: Option<crate::domain::config::OtelConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -276,13 +283,14 @@ fn build_session_context(
 
     // Build callbacks
     let notify_chunk: crate::domain::session::NotifyChunkFn = Arc::new(
-        |session_id, call_id, chunk_index, text| {
+        |session_id, call_id, chunk_index, text, span| {
             notify_observers(
                 session_id,
                 Arc::new(Notification::LlmStreamChunk {
                     call_id,
                     chunk_index,
                     text,
+                    span,
                 }),
             );
         },
@@ -534,12 +542,13 @@ impl RuntimeState {
         Ok(clients)
     }
 
-    #[tracing::instrument(skip(self, init), fields(%session_id))]
+    #[tracing::instrument(skip(self, init), fields(%session_id, trace_id = %init.span.trace_id))]
     async fn start_session(
         &self,
         session_id: Uuid,
         init: SessionInit,
     ) -> Result<SessionHandle, RuntimeError> {
+        let trace_id = init.span.trace_id;
         let auth = init.auth.clone();
         let agent = init.agent.clone();
         let actor_name = aggregate_actor_name(session_id);
@@ -556,12 +565,25 @@ impl RuntimeState {
             let auth_for_ctx = auth.clone();
             let agent_for_ctx = agent.clone();
 
+            // Build execution recorder for OTel inline instrumentation
+            #[cfg(feature = "otel")]
+            let recorder = self.otel_actor.as_ref().map(|otel| {
+                let otel = otel.clone();
+                Arc::new(move |record| {
+                    let _ = otel.send_message(otel::OtelMsg::Record(record));
+                }) as aggregate_actor::ExecutionRecorder
+            });
+            #[cfg(not(feature = "otel"))]
+            let recorder: Option<aggregate_actor::ExecutionRecorder> = None;
+
             let aggregate_handle = aggregate_actor::spawn_aggregate_actor(
                 aggregate_actor::AggregateActorArgs {
                     aggregate_id: session_id,
                     store: self.store.clone(),
                     tenant_id: auth.tenant_id.clone(),
                     init: Box::new(AgentState::new),
+                    recorder,
+                    idle_timeout: None,
                     context_init: Box::new(move |state| {
                         let resolved_agent = state.agent.clone().unwrap_or(agent_for_ctx);
                         Box::pin(async move {
@@ -619,7 +641,7 @@ impl RuntimeState {
                             auth: auth.clone(),
                             on_done: init.on_done,
                         },
-                        init.span.child(),
+                        init.span.child("session.create"),
                         Utc::now(),
                     )
                     .await
@@ -639,7 +661,7 @@ impl RuntimeState {
                             name: delivery.tool_name.clone(),
                             result,
                         },
-                        span: init.span.child(),
+                        span: init.span.child("sub_agent.deliver"),
                     });
                 }
             }
@@ -662,10 +684,12 @@ impl RuntimeState {
 
         Ok(SessionHandle {
             session_id,
+            trace_id: Some(trace_id),
             session_client: client,
         })
     }
 
+    #[tracing::instrument(skip(self), fields(%aggregate_id, %aggregate_type))]
     async fn wake_aggregate(&self, aggregate_id: Uuid, aggregate_type: &str, tenant_id: &str) {
         match aggregate_type {
             "session" => {
@@ -675,7 +699,7 @@ impl RuntimeState {
                         cell.into();
                     let _ = actor.send_message(aggregate_actor::AggregateMessage::Cast {
                         cmd: CommandPayload::Wake,
-                        span: SpanContext::root(),
+                        span: SpanContext::root().with_name("wake"),
                         occurred_at: Utc::now(),
                     });
                     return;
@@ -716,7 +740,7 @@ impl RuntimeState {
                     agent,
                     auth,
                     on_done: None,
-                    span: SpanContext::root(),
+                    span: SpanContext::root().with_name("wake"),
                 };
                 if let Err(e) = self.start_session(aggregate_id, init).await {
                     tracing::warn!(session = %aggregate_id, error = %e, "wake: failed to start session");
@@ -728,6 +752,7 @@ impl RuntimeState {
         }
     }
 
+    #[tracing::instrument(skip_all, fields(session_id = %req.session_id, agent = %req.agent_name, trace_id = %req.span.trace_id))]
     async fn run_sub_agent(&self, req: SubAgentRequest) -> Result<(), RuntimeError> {
         let mut agent = self
             .agents
@@ -739,7 +764,7 @@ impl RuntimeState {
             agent.token_budget = Some(budget);
         }
 
-        let msg_span = req.span.child();
+        let msg_span = req.span.child("sub_agent.message");
 
         let init = SessionInit {
             agent,
@@ -779,14 +804,6 @@ impl Actor for RuntimeActor {
         myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        let state = RuntimeState {
-            myself: myself.clone(),
-            store: args.store.clone(),
-            agents: args.agents,
-            llm_provider: args.llm_provider,
-            budget_policies: args.budget_policies,
-        };
-
         // Spawn infrastructure actors (linked to RuntimeActor)
         tracing::debug!("spawning event dispatcher");
         spawn_aggregate_dispatcher::<AgentState>(
@@ -797,9 +814,39 @@ impl Actor for RuntimeActor {
         .await
         .map_err(|e| format!("failed to spawn dispatcher: {e}"))?;
         tracing::debug!("spawning wake scheduler");
-        spawn_wake_scheduler(args.store, myself.clone(), myself.get_cell())
+        spawn_wake_scheduler(args.store.clone(), myself.clone(), myself.get_cell())
             .await
             .map_err(|e| format!("failed to spawn wake scheduler: {e}"))?;
+
+        #[cfg(feature = "otel")]
+        let otel_actor = if let Some(otel_config) = args.otel {
+            tracing::debug!("spawning otel exporter");
+            match otel::spawn_otel_exporter(
+                &otel_config.endpoint,
+                otel_config.service_name,
+                myself.get_cell(),
+            )
+            .await
+            {
+                Ok(actor) => Some(actor),
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to start otel exporter, continuing without it");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let state = RuntimeState {
+            myself: myself.clone(),
+            store: args.store.clone(),
+            agents: args.agents,
+            llm_provider: args.llm_provider,
+            budget_policies: args.budget_policies,
+            #[cfg(feature = "otel")]
+            otel_actor,
+        };
 
         Ok(state)
     }
@@ -941,6 +988,8 @@ impl Runtime {
                 agents: config.agents.clone(),
                 llm_provider: Arc::new(llm_provider),
                 budget_policies: config.budgets.clone(),
+                #[cfg(feature = "otel")]
+                otel: config.otel.clone(),
             },
         )
         .await
@@ -1030,6 +1079,7 @@ impl Runtime {
 
         Ok(SessionHandle {
             session_id,
+            trace_id: None,
             session_client: client,
         })
     }
@@ -1059,6 +1109,8 @@ impl Runtime {
 
 pub struct SessionHandle {
     pub session_id: Uuid,
+    /// The trace_id assigned to this session on creation.
+    pub trace_id: Option<crate::domain::span::TraceId>,
     session_client: ActorRef<SessionMessage>,
 }
 

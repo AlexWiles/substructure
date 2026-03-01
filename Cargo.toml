@@ -31,6 +31,9 @@ reqwest = { version = "0.12", features = ["stream", "json"] }
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 axum-extra = { version = "0.12", features = ["query"], optional = true }
+opentelemetry = { version = "0.31", optional = true }
+opentelemetry_sdk = { version = "0.31", optional = true }
+opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"], optional = true }
 
 [features]
 default = ["sqlite"]
@@ -38,6 +41,7 @@ ag-ui = []
 http = ["ag-ui", "dep:axum", "dep:axum-extra", "dep:tower-http", "dep:jsonwebtoken", "dep:sha2"]
 sqlite = ["dep:rusqlite"]
 axum-extra = ["dep:axum-extra"]
+otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]
 
 [build-dependencies]
 pbjson-build = "0.7"

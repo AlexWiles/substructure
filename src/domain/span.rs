@@ -3,12 +3,20 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 macro_rules! hex_id {
     ($name:ident, $len:expr) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         pub struct $name([u8; $len]);
 
         impl $name {
             pub fn random() -> Self {
                 Self(rand::rng().random())
+            }
+
+            pub fn as_bytes(&self) -> [u8; $len] {
+                self.0
+            }
+
+            pub fn from_bytes(bytes: [u8; $len]) -> Self {
+                Self(bytes)
             }
         }
 
@@ -49,6 +57,8 @@ pub struct SpanContext {
     pub parent_span_id: Option<SpanId>,
     pub trace_flags: u8,
     pub trace_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl SpanContext {
@@ -59,16 +69,39 @@ impl SpanContext {
             parent_span_id: None,
             trace_flags: 1,
             trace_state: None,
+            name: None,
         }
     }
 
-    pub fn child(&self) -> Self {
+    pub fn child(&self, name: impl Into<String>) -> Self {
         SpanContext {
             trace_id: self.trace_id,
             span_id: SpanId::random(),
             parent_span_id: Some(self.span_id),
             trace_flags: self.trace_flags,
             trace_state: self.trace_state.clone(),
+            name: Some(name.into()),
+        }
+    }
+
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Create a new root-level span within an existing trace.
+    ///
+    /// Use this when continuing work on an aggregate whose trace_id is known
+    /// but the original parent span is not (e.g. a new HTTP request to an
+    /// existing session).
+    pub fn in_trace(trace_id: TraceId, name: impl Into<String>) -> Self {
+        SpanContext {
+            trace_id,
+            span_id: SpanId::random(),
+            parent_span_id: None,
+            trace_flags: 1,
+            trace_state: None,
+            name: Some(name.into()),
         }
     }
 }

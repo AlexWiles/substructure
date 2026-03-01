@@ -1,16 +1,36 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, Utc};
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
+use tokio::task::AbortHandle;
 use uuid::Uuid;
 
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::domain::aggregate::{Aggregate, AggregateState, DomainEvent};
+use crate::domain::aggregate::{Aggregate, AggregateState, AggregateStatus, DomainEvent};
 use crate::domain::span::SpanContext;
 use crate::runtime::event_store::{Event, EventStore, StoreError};
+
+/// Default idle timeout for aggregate actors (5 minutes).
+const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
+// ---------------------------------------------------------------------------
+// Execution recording — inline instrumentation for OTel
+// ---------------------------------------------------------------------------
+
+pub struct ExecutionRecord {
+    pub span_context: SpanContext,
+    pub start_time: SystemTime,
+    pub end_time: SystemTime,
+    pub aggregate_type: &'static str,
+    pub aggregate_id: Uuid,
+    pub produced_events: Vec<Arc<Event>>,
+}
+
+pub type ExecutionRecorder = Arc<dyn Fn(ExecutionRecord) + Send + Sync>;
 
 pub enum AggregateMessage<R: AggregateState> {
     Execute {
@@ -29,6 +49,8 @@ pub enum AggregateMessage<R: AggregateState> {
     Events(Vec<Arc<DomainEvent<R>>>),
     /// Mutate the context in-place (e.g. update client tools, stream flag).
     UpdateContext(Box<dyn FnOnce(&mut R::Context) + Send>),
+    /// Idle timeout check — carries the generation counter it was spawned with.
+    IdleCheck(u64),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -49,6 +71,10 @@ pub struct AggregateActorState<R: AggregateState> {
     pub store: Arc<dyn EventStore>,
     pub tenant_id: String,
     pub context: R::Context,
+    pub recorder: Option<ExecutionRecorder>,
+    idle_timeout: Duration,
+    idle_generation: u64,
+    idle_timer: Option<AbortHandle>,
 }
 
 pub struct AggregateActorArgs<R: AggregateState> {
@@ -57,6 +83,8 @@ pub struct AggregateActorArgs<R: AggregateState> {
     pub tenant_id: String,
     pub init: Box<dyn Fn(Uuid) -> R + Send + Sync>,
     pub context_init: Box<dyn FnOnce(&R) -> Pin<Box<dyn Future<Output = R::Context> + Send>> + Send>,
+    pub recorder: Option<ExecutionRecorder>,
+    pub idle_timeout: Option<Duration>,
 }
 
 pub async fn spawn_aggregate_actor<R: AggregateState>(
@@ -129,6 +157,27 @@ impl<R: AggregateState> AggregateActor<R> {
     }
 }
 
+/// Reset (or start) the idle shutdown timer. Each call increments the
+/// generation counter so that stale timers are ignored when they fire.
+fn reset_idle_timer<R: AggregateState>(
+    myself: &ActorRef<AggregateMessage<R>>,
+    state: &mut AggregateActorState<R>,
+) {
+    if let Some(handle) = state.idle_timer.take() {
+        handle.abort();
+    }
+    state.idle_generation += 1;
+    let gen = state.idle_generation;
+    let timeout = state.idle_timeout;
+    let actor = myself.clone();
+    let handle = tokio::spawn(async move {
+        tokio::time::sleep(timeout).await;
+        let _ = actor.send_message(AggregateMessage::IdleCheck(gen));
+    });
+    state.idle_timer = Some(handle.abort_handle());
+}
+
+#[tracing::instrument(skip_all, fields(trace_id = %span.trace_id))]
 async fn execute<R: AggregateState>(
     state: &mut AggregateActorState<R>,
     cmd: R::Command,
@@ -189,7 +238,7 @@ impl<R: AggregateState> Actor for AggregateActor<R> {
 
     async fn pre_start(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         let aggregate_id = args.aggregate_id;
@@ -202,29 +251,63 @@ impl<R: AggregateState> Actor for AggregateActor<R> {
 
         let context = (args.context_init)(&aggregate.state).await;
 
-        Ok(AggregateActorState {
+        let mut state = AggregateActorState {
             aggregate_id,
             aggregate,
             store: args.store,
             tenant_id: args.tenant_id,
             context,
-        })
+            recorder: args.recorder,
+            idle_timeout: args.idle_timeout.unwrap_or(DEFAULT_IDLE_TIMEOUT),
+            idle_generation: 0,
+            idle_timer: None,
+        };
+
+        reset_idle_timer(&myself, &mut state);
+
+        Ok(state)
     }
 
     async fn handle(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            AggregateMessage::IdleCheck(gen) => {
+                if gen == state.idle_generation
+                    && state.aggregate.status != AggregateStatus::Active
+                {
+                    tracing::debug!(
+                        aggregate_id = %state.aggregate_id,
+                        "idle timeout — stopping aggregate actor"
+                    );
+                    myself.stop(None);
+                }
+                return Ok(());
+            }
             AggregateMessage::Execute {
                 cmd,
                 span,
                 occurred_at,
                 reply,
             } => {
+                let start = SystemTime::now();
+                let span_copy = span.clone();
                 let result = execute(state, cmd, span, occurred_at).await;
+                if let (Some(recorder), Ok(produced)) = (&state.recorder, &result) {
+                    if !produced.is_empty() {
+                        recorder(ExecutionRecord {
+                            span_context: span_copy,
+                            start_time: start,
+                            end_time: SystemTime::now(),
+                            aggregate_type: R::aggregate_type(),
+                            aggregate_id: state.aggregate_id,
+                            produced_events: produced.clone(),
+                        });
+                    }
+                }
                 let _ = reply.send(result);
             }
             AggregateMessage::Cast {
@@ -232,7 +315,21 @@ impl<R: AggregateState> Actor for AggregateActor<R> {
                 span,
                 occurred_at,
             } => {
-                let _ = execute(state, cmd, span, occurred_at).await;
+                let start = SystemTime::now();
+                let span_copy = span.clone();
+                let result = execute(state, cmd, span, occurred_at).await;
+                if let (Some(recorder), Ok(produced)) = (&state.recorder, &result) {
+                    if !produced.is_empty() {
+                        recorder(ExecutionRecord {
+                            span_context: span_copy,
+                            start_time: start,
+                            end_time: SystemTime::now(),
+                            aggregate_type: R::aggregate_type(),
+                            aggregate_id: state.aggregate_id,
+                            produced_events: produced.clone(),
+                        });
+                    }
+                }
             }
             AggregateMessage::GetState(reply) => {
                 let _ = reply.send(state.aggregate.state.clone());
@@ -242,8 +339,28 @@ impl<R: AggregateState> Actor for AggregateActor<R> {
             }
             AggregateMessage::Events(typed_events) => {
                 for event in &typed_events {
+                    // Start timing before on_event — it does the actual I/O
+                    let start = SystemTime::now();
                     if let Some(cmd) = state.aggregate.state.on_event(&event.payload, &state.context, &event.span).await {
-                        let _ = execute(state, cmd, event.span.child(), event.occurred_at).await;
+                        // Use triggering event's serde type tag as span name
+                        let event_type = serde_json::to_value(&event.payload)
+                            .ok()
+                            .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(String::from))
+                            .unwrap_or_else(|| "reaction".to_string());
+                        let child_span = event.span.child(&event_type);
+                        let result = execute(state, cmd, child_span.clone(), Utc::now()).await;
+
+                        // Record the full on_event + execute cycle for OTel
+                        if let (Some(recorder), Ok(produced)) = (&state.recorder, &result) {
+                            recorder(ExecutionRecord {
+                                span_context: child_span,
+                                start_time: start,
+                                end_time: SystemTime::now(),
+                                aggregate_type: R::aggregate_type(),
+                                aggregate_id: state.aggregate_id,
+                                produced_events: produced.clone(),
+                            });
+                        }
                     }
                 }
             }
@@ -251,6 +368,10 @@ impl<R: AggregateState> Actor for AggregateActor<R> {
                 f(&mut state.context);
             }
         }
+
+        // Any real activity resets the idle timer.
+        reset_idle_timer(&myself, state);
+
         Ok(())
     }
 }

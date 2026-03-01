@@ -23,10 +23,12 @@ const SCHEMA_SQL: &str = r#"
         event_type       TEXT NOT NULL,
         tenant_id        TEXT NOT NULL,
         sequence         INTEGER NOT NULL,
-        data             TEXT NOT NULL
+        data             TEXT NOT NULL,
+        trace_id         TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_events_aggregate ON events (aggregate_id);
     CREATE INDEX IF NOT EXISTS idx_events_type ON events (aggregate_type);
+    CREATE INDEX IF NOT EXISTS idx_events_trace_id ON events (trace_id);
 
     CREATE TABLE IF NOT EXISTS snapshots (
         aggregate_id     TEXT PRIMARY KEY,
@@ -46,6 +48,13 @@ const SCHEMA_SQL: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_snapshots_last_event ON snapshots (last_event_at);
     CREATE INDEX IF NOT EXISTS idx_snapshots_wake_at ON snapshots (wake_at);
 "#;
+
+/// Migrations applied after initial schema creation.
+/// Each migration is idempotent (safe to re-run).
+const MIGRATIONS: &[&str] = &[
+    // Migration 1: Add trace_id column to events (for pre-existing databases)
+    "ALTER TABLE events ADD COLUMN trace_id TEXT;",
+];
 
 // ---------------------------------------------------------------------------
 // ConnectionPoolActor — Elixir DBConnection-style checkout/checkin pool
@@ -337,6 +346,96 @@ fn do_list_aggregates(
     Ok(results)
 }
 
+fn do_query_events(
+    conn: &Connection,
+    filter: &super::store::EventFilter,
+) -> Result<Vec<Event>, StoreError> {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    if let Some(ref aid) = filter.aggregate_id {
+        clauses.push("aggregate_id = ?".into());
+        params.push(Box::new(aid.to_string()));
+    }
+
+    if let Some(ref agg_type) = filter.aggregate_type {
+        clauses.push("aggregate_type = ?".into());
+        params.push(Box::new(agg_type.clone()));
+    }
+
+    if let Some(ref tenant) = filter.tenant_id {
+        clauses.push("tenant_id = ?".into());
+        params.push(Box::new(tenant.clone()));
+    }
+
+    if let Some(ref trace_id) = filter.trace_id {
+        clauses.push("trace_id = ?".into());
+        params.push(Box::new(trace_id.clone()));
+    }
+
+    if let Some(ref event_type) = filter.event_type {
+        clauses.push("event_type = ?".into());
+        params.push(Box::new(event_type.clone()));
+    }
+
+    if let Some(seq) = filter.sequence_after {
+        clauses.push("global_sequence > ?".into());
+        params.push(Box::new(seq as i64));
+    }
+
+    // occurred_after/occurred_before filter against the JSON data field
+    // since occurred_at is stored inside the JSON blob.
+    // For efficiency, these are best used in combination with other indexed filters.
+
+    let where_clause = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", clauses.join(" AND "))
+    };
+
+    let limit_clause = filter
+        .limit
+        .map(|n| format!(" LIMIT {n}"))
+        .unwrap_or_default();
+
+    let sql = format!(
+        "SELECT data FROM events{where_clause} ORDER BY global_sequence ASC{limit_clause}"
+    );
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| StoreError::Internal(e.to_string()))?;
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|e| StoreError::Internal(e.to_string()))?;
+
+    let mut events = Vec::new();
+    for row in rows {
+        let data = row.map_err(|e| StoreError::Internal(e.to_string()))?;
+        let event: Event =
+            serde_json::from_str(&data).map_err(|e| StoreError::Internal(e.to_string()))?;
+        // Apply in-memory time filters if specified
+        if let Some(ref after) = filter.occurred_after {
+            if event.occurred_at <= *after {
+                continue;
+            }
+        }
+        if let Some(ref before) = filter.occurred_before {
+            if event.occurred_at >= *before {
+                continue;
+            }
+        }
+        events.push(event);
+    }
+
+    Ok(events)
+}
+
 // ---------------------------------------------------------------------------
 // SqliteEventStore
 // ---------------------------------------------------------------------------
@@ -379,6 +478,11 @@ impl SqliteEventStore {
         writer
             .execute_batch(SCHEMA_SQL)
             .map_err(|e| StoreError::Internal(e.to_string()))?;
+
+        // Apply idempotent migrations for pre-existing databases.
+        for migration in MIGRATIONS {
+            let _ = writer.execute_batch(migration); // Ignore errors (e.g. column already exists)
+        }
 
         let (pool_actor, _) = Actor::spawn(
             None,
@@ -433,8 +537,8 @@ impl EventStore for SqliteEventStore {
             {
                 let mut stmt = tx
                     .prepare(
-                        "INSERT INTO events (aggregate_type, aggregate_id, event_type, tenant_id, sequence, data)
-                         SELECT ?1, ?2, ?3, ?4, ?5, ?6
+                        "INSERT INTO events (aggregate_type, aggregate_id, event_type, tenant_id, sequence, data, trace_id)
+                         SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?9
                          WHERE (
                              (?7 = 0 AND NOT EXISTS (SELECT 1 FROM snapshots WHERE aggregate_id = ?2))
                              OR EXISTS (
@@ -448,6 +552,7 @@ impl EventStore for SqliteEventStore {
                 for event in &events {
                     let data = serde_json::to_string(event)
                         .map_err(|e| StoreError::Internal(e.to_string()))?;
+                    let trace_id = event.span.trace_id.to_string();
                     let rows = stmt
                         .execute(rusqlite::params![
                             aggregate_type,
@@ -457,7 +562,8 @@ impl EventStore for SqliteEventStore {
                             event.sequence,
                             data,
                             expected_version as i64,
-                            tenant_id
+                            tenant_id,
+                            trace_id
                         ])
                         .map_err(|e| StoreError::Internal(e.to_string()))?;
 
@@ -549,6 +655,14 @@ impl EventStore for SqliteEventStore {
                 Vec::new()
             }
         }
+    }
+
+    async fn query_events(
+        &self,
+        filter: &super::store::EventFilter,
+    ) -> Result<Vec<Event>, StoreError> {
+        let conn = self.checkout().await?;
+        do_query_events(&conn, filter)
     }
 }
 

@@ -158,7 +158,7 @@ pub async fn run_session(
 
     client
         .send_command(SessionCommand {
-            span: SpanContext::root(),
+            span: SpanContext::root().with_name("ag_ui.run"),
             occurred_at: Utc::now(),
             payload: CommandPayload::SyncConversation {
                 messages,
@@ -190,7 +190,12 @@ pub async fn run_existing_session(
     let thread_id = input.thread_id.unwrap_or_else(|| session_id.to_string());
     let run_id = input.run_id.unwrap_or_else(|| Uuid::new_v4().to_string());
 
-    let skip_until = load_state(runtime, session_id, &auth).await.1;
+    let (_state, skip_until, trace_id) = load_state(runtime, session_id, &auth).await;
+
+    let span = match trace_id {
+        Some(tid) => SpanContext::in_trace(tid, "ag_ui.run"),
+        None => SpanContext::root().with_name("ag_ui.run"),
+    };
 
     let (tx, rx) = mpsc::channel(256);
     let _ = tx.try_send(AgUiEvent::RunStarted {
@@ -213,7 +218,7 @@ pub async fn run_existing_session(
 
     client
         .send_command(SessionCommand {
-            span: SpanContext::root(),
+            span,
             occurred_at: Utc::now(),
             payload: CommandPayload::SyncConversation {
                 messages,
@@ -240,6 +245,13 @@ pub async fn resume_run(
     let thread_id = input.thread_id.unwrap_or_else(|| session_id.to_string());
     let run_id = input.run_id.unwrap_or_else(|| Uuid::new_v4().to_string());
 
+    let (_state, _last_applied, trace_id) = load_state(runtime, session_id, &auth).await;
+
+    let span = match trace_id {
+        Some(tid) => SpanContext::in_trace(tid, "ag_ui.resume"),
+        None => SpanContext::root().with_name("ag_ui.resume"),
+    };
+
     let (tx, rx) = mpsc::channel(256);
     let _ = tx.try_send(AgUiEvent::RunStarted {
         thread_id: thread_id.clone(),
@@ -261,7 +273,7 @@ pub async fn resume_run(
 
     client
         .send_command(SessionCommand {
-            span: SpanContext::root(),
+            span,
             occurred_at: Utc::now(),
             payload: CommandPayload::ResumeInterrupt {
                 interrupt_id: resume.interrupt_id,
@@ -286,7 +298,7 @@ pub async fn observe_session(
 ) -> Result<impl Stream<Item = AgUiEvent> + Send, AgUiError> {
     let thread_id = session_id.to_string();
 
-    let (state, last_applied) = load_state(runtime, session_id, &auth).await;
+    let (state, last_applied, _trace_id) = load_state(runtime, session_id, &auth).await;
 
     let messages = state
         .messages
@@ -320,7 +332,7 @@ async fn load_state(
     runtime: &Runtime,
     session_id: Uuid,
     auth: &ClientIdentity,
-) -> (AgentState, u64) {
+) -> (AgentState, u64, Option<crate::domain::span::TraceId>) {
     match runtime.store().load(session_id, &auth.tenant_id).await {
         Ok(load) => {
             let snapshot: crate::domain::aggregate::Aggregate<AgentState> =
@@ -328,9 +340,10 @@ async fn load_state(
                     crate::domain::aggregate::Aggregate::new(AgentState::new(session_id))
                 });
             let last_applied = snapshot.last_applied.unwrap_or(0);
-            (snapshot.state.clone(), last_applied)
+            let trace_id = snapshot.trace_id;
+            (snapshot.state.clone(), last_applied, trace_id)
         }
-        Err(_) => (AgentState::new(session_id), 0),
+        Err(_) => (AgentState::new(session_id), 0, None),
     }
 }
 

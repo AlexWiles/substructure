@@ -23,6 +23,7 @@ pub enum Notification {
         call_id: String,
         chunk_index: u32,
         text: String,
+        span: crate::domain::span::SpanContext,
     },
 }
 

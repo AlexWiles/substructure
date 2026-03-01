@@ -4,7 +4,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::span::SpanContext;
+use super::span::{SpanContext, TraceId};
 
 // ---------------------------------------------------------------------------
 // AggregateState — unified trait for event sourced aggregates
@@ -63,6 +63,9 @@ pub struct Aggregate<R: AggregateState> {
     pub status: AggregateStatus,
     #[serde(default)]
     pub label: Option<String>,
+    /// The trace_id of the session's origin span, set on first commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<TraceId>,
 }
 
 impl<R: AggregateState> Aggregate<R> {
@@ -76,6 +79,7 @@ impl<R: AggregateState> Aggregate<R> {
             wake_at: None,
             status: AggregateStatus::default(),
             label: None,
+            trace_id: None,
         }
     }
 
@@ -112,6 +116,11 @@ impl<R: AggregateState> Aggregate<R> {
     ) -> Vec<DomainEvent<R>> {
         if payloads.is_empty() {
             return vec![];
+        }
+
+        // Capture the trace_id from the first commit
+        if self.trace_id.is_none() {
+            self.trace_id = Some(span.trace_id);
         }
 
         let base_seq = self.stream_version + 1;

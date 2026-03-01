@@ -22,7 +22,9 @@ use crate::domain::aggregate::AggregateStatus;
 use crate::domain::auth::{build_auth_resolver, AdminContext, AuthError, AuthResolver};
 use crate::domain::config::SystemConfig;
 use crate::domain::event::ClientIdentity;
-use crate::runtime::{AggregateFilter, AggregateSort, AggregateSummary, Runtime, RuntimeError};
+use crate::runtime::{
+    AggregateFilter, AggregateSort, AggregateSummary, EventFilter, Runtime, RuntimeError,
+};
 
 #[derive(Clone)]
 pub struct HttpState {
@@ -169,7 +171,10 @@ pub async fn start_server(config: SystemConfig, addr: std::net::SocketAddr) -> a
         auth,
     };
 
-    let admin_routes = Router::new().route("/auth/token", post(issue_token));
+    let admin_routes = Router::new()
+        .route("/auth/token", post(issue_token))
+        .route("/sessions/{session_id}/events", get(session_events))
+        .route("/traces/{trace_id}", get(trace_events));
 
     let client_routes = Router::new()
         .route("/agents", get(list_agents))
@@ -221,6 +226,60 @@ async fn issue_token(
         .issue_token(&admin.tenant_id, payload.sub.as_deref())?;
 
     Ok(Json(TokenResponse { token }))
+}
+
+// ---------------------------------------------------------------------------
+// Admin: introspection
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize, Default)]
+pub struct EventsQuery {
+    pub event_type: Option<String>,
+    pub sequence_after: Option<u64>,
+    pub limit: Option<usize>,
+}
+
+async fn session_events(
+    AdminAuth(_admin): AdminAuth,
+    State(state): State<HttpState>,
+    Path(session_id): Path<Uuid>,
+    axum_extra::extract::Query(query): axum_extra::extract::Query<EventsQuery>,
+) -> Result<Json<Vec<crate::runtime::event_store::Event>>, AppError> {
+    let filter = EventFilter {
+        aggregate_id: Some(session_id),
+        event_type: query.event_type,
+        sequence_after: query.sequence_after,
+        limit: query.limit,
+        ..Default::default()
+    };
+    let events = state
+        .runtime
+        .store()
+        .query_events(&filter)
+        .await
+        .map_err(|e| AppError::Runtime(RuntimeError::from(e)))?;
+    Ok(Json(events))
+}
+
+async fn trace_events(
+    AdminAuth(_admin): AdminAuth,
+    State(state): State<HttpState>,
+    Path(trace_id): Path<String>,
+    axum_extra::extract::Query(query): axum_extra::extract::Query<EventsQuery>,
+) -> Result<Json<Vec<crate::runtime::event_store::Event>>, AppError> {
+    let filter = EventFilter {
+        trace_id: Some(trace_id),
+        event_type: query.event_type,
+        limit: query.limit,
+        ..Default::default()
+    };
+    let events = state
+        .runtime
+        .store()
+        .query_events(&filter)
+        .await
+        .map_err(|e| AppError::Runtime(RuntimeError::from(e)))?;
+    Ok(Json(events))
 }
 
 // ---------------------------------------------------------------------------

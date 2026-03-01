@@ -116,6 +116,23 @@ pub struct AggregateSummary {
 }
 
 // ---------------------------------------------------------------------------
+// Event query types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct EventFilter {
+    pub aggregate_id: Option<Uuid>,
+    pub aggregate_type: Option<String>,
+    pub tenant_id: Option<String>,
+    pub trace_id: Option<String>,
+    pub event_type: Option<String>,
+    pub sequence_after: Option<u64>,
+    pub occurred_after: Option<DateTime<Utc>>,
+    pub occurred_before: Option<DateTime<Utc>>,
+    pub limit: Option<usize>,
+}
+
+// ---------------------------------------------------------------------------
 // EventStore trait — generic, aggregate-agnostic
 // ---------------------------------------------------------------------------
 
@@ -149,4 +166,7 @@ pub trait EventStore: Send + Sync {
 
     /// Query aggregates with filtering, sorting, and pagination.
     async fn list_aggregates(&self, filter: &AggregateFilter) -> Vec<AggregateSummary>;
+
+    /// Query events with filtering and pagination.
+    async fn query_events(&self, filter: &EventFilter) -> Result<Vec<Event>, StoreError>;
 }
