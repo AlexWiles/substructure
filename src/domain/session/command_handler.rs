@@ -3,8 +3,7 @@ use chrono::{DateTime, Utc};
 use crate::domain::event::*;
 use crate::domain::session::agent_state::ToolCallState;
 
-use super::agent_session::{new_call_id, AgentSession};
-use super::agent_state::{LlmCallStatus, SessionStatus, ToolCallStatus};
+use super::agent_state::{new_call_id, AgentState, LlmCallStatus, SessionContext, SessionStatus, ToolCallStatus};
 use super::event_handler::extract_assistant_message;
 
 // ---------------------------------------------------------------------------
@@ -117,9 +116,9 @@ pub enum SessionError {
 // Command handling
 // ---------------------------------------------------------------------------
 
-impl AgentSession {
-    pub fn handle(&self, cmd: CommandPayload) -> Result<Vec<EventPayload>, SessionError> {
-        match (&self.state.agent, cmd) {
+impl AgentState {
+    pub fn handle(&self, cmd: CommandPayload, ctx: &SessionContext) -> Result<Vec<EventPayload>, SessionError> {
+        match (&self.agent, cmd) {
             (
                 None,
                 CommandPayload::CreateSession {
@@ -137,13 +136,13 @@ impl AgentSession {
             }
             (None, _) => Err(SessionError::SessionNotCreated),
             // Active session
-            (Some(_), cmd) => self.handle_active(cmd),
+            (Some(_), cmd) => self.handle_active(cmd, ctx),
         }
     }
 
     /// Command validation using AgentState for idempotency guards.
-    fn handle_active(&self, cmd: CommandPayload) -> Result<Vec<EventPayload>, SessionError> {
-        let state = &self.state;
+    fn handle_active(&self, cmd: CommandPayload, ctx: &SessionContext) -> Result<Vec<EventPayload>, SessionError> {
+        let state = self;
         match cmd {
             CommandPayload::CreateSession { .. } => {
                 unreachable!("CreateSession is handled by SessionState::handle")
@@ -272,7 +271,7 @@ impl AgentSession {
                                 arguments: tc.arguments.clone(),
                                 deadline: self.tool_deadline(),
                                 handler: Default::default(),
-                                meta: self.tool_call_meta(&tc.name, &tc.id),
+                                meta: self.tool_call_meta(&tc.name, &tc.id, &ctx.mcp_tools),
                             }));
                         }
                         Ok(events)
@@ -310,7 +309,7 @@ impl AgentSession {
                 Some(_) => Ok(vec![]),
                 // New tool call
                 None => {
-                    let meta = self.tool_call_meta(&name, &tool_call_id);
+                    let meta = self.tool_call_meta(&name, &tool_call_id, &ctx.mcp_tools);
                     Ok(vec![EventPayload::ToolCallRequested(ToolCallRequested {
                         tool_call_id,
                         name,
@@ -409,13 +408,13 @@ impl AgentSession {
                 )])
             }
             CommandPayload::SyncConversation { messages, stream } => {
-                self.handle_sync_conversation(messages, stream)
+                self.handle_sync_conversation(messages, stream, ctx)
             }
             CommandPayload::CancelSession => Ok(vec![EventPayload::SessionCancelled]),
             CommandPayload::MarkDone { artifacts } => {
                 Ok(vec![EventPayload::SessionDone(SessionDone { artifacts })])
             }
-            CommandPayload::Wake => self.handle_wake(),
+            CommandPayload::Wake => self.handle_wake(ctx),
         }
     }
 
@@ -423,9 +422,9 @@ impl AgentSession {
     // Wake — inspects state and emits events for timeouts, retries, recovery
     // -----------------------------------------------------------------------
 
-    fn handle_wake(&self) -> Result<Vec<EventPayload>, SessionError> {
+    fn handle_wake(&self, _ctx: &SessionContext) -> Result<Vec<EventPayload>, SessionError> {
         let now = Utc::now();
-        let state = &self.state;
+        let state = self;
 
         // 1. Timed-out pending LLM calls → fail
         for call in state.llm_calls.values() {
@@ -563,8 +562,9 @@ impl AgentSession {
         &self,
         incoming: Vec<Message>,
         stream: bool,
+        ctx: &SessionContext,
     ) -> Result<Vec<EventPayload>, SessionError> {
-        let state = &self.state;
+        let state = self;
 
         // Verify prefix matches current state
         let prefix_len = state.messages.len();
@@ -605,7 +605,7 @@ impl AgentSession {
                             arguments: tc.arguments.clone(),
                             deadline: self.tool_deadline(),
                             handler: Default::default(),
-                            meta: self.tool_call_meta(&tc.name, &tc.id),
+                            meta: self.tool_call_meta(&tc.name, &tc.id, &ctx.mcp_tools),
                         }));
                     }
                 }
@@ -673,10 +673,6 @@ fn messages_match(a: &Message, b: &Message) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use super::super::agent_session::AgentSession;
-    use super::super::strategy::DefaultStrategy;
     use super::*;
     use crate::domain::agent::{AgentConfig, LlmConfig};
     use crate::domain::aggregate::Aggregate;
@@ -725,29 +721,8 @@ mod tests {
         })
     }
 
-    fn mock_llm_response() -> LlmResponse {
-        LlmResponse::OpenAi(openai::ChatCompletionResponse {
-            id: "resp-1".into(),
-            model: "mock".into(),
-            choices: vec![openai::Choice {
-                index: 0,
-                message: openai::ChatMessage {
-                    role: openai::Role::Assistant,
-                    content: Some("hello".into()),
-                    tool_calls: None,
-                    tool_call_id: None,
-                },
-                finish_reason: Some("stop".into()),
-            }],
-            usage: None,
-        })
-    }
-
-    fn created_state() -> Aggregate<AgentSession> {
-        let mut state = Aggregate::new(AgentSession::new(
-            Uuid::new_v4(),
-            Arc::new(DefaultStrategy::default()),
-        ));
+    fn created_state() -> Aggregate<AgentState> {
+        let mut state = Aggregate::new(AgentState::new(Uuid::new_v4()));
         state.apply(
             &EventPayload::SessionCreated(SessionCreated {
                 agent: test_agent(),
@@ -760,11 +735,15 @@ mod tests {
         state
     }
 
-    fn apply_events(state: &mut Aggregate<AgentSession>, payloads: Vec<EventPayload>) {
+    fn apply_events(state: &mut Aggregate<AgentState>, payloads: Vec<EventPayload>) {
         let seq = state.last_applied.unwrap_or(0);
         for (i, payload) in payloads.iter().enumerate() {
             state.apply(payload, seq + 1 + i as u64, Utc::now());
         }
+    }
+
+    fn default_ctx() -> SessionContext {
+        SessionContext::default()
     }
 
     #[test]
@@ -780,7 +759,7 @@ mod tests {
                 request: mock_llm_request(),
                 stream: false,
                 deadline: far_future(),
-            })
+            }, &default_ctx())
             .unwrap();
         apply_events(&mut state, payloads);
 
@@ -813,7 +792,7 @@ mod tests {
             .handle(CommandPayload::CompleteLlmCall {
                 call_id: call_id.clone(),
                 response,
-            })
+            }, &default_ctx())
             .unwrap();
 
         assert_eq!(
@@ -844,7 +823,7 @@ mod tests {
                 request: mock_llm_request(),
                 stream: false,
                 deadline: far_future(),
-            })
+            }, &default_ctx())
             .unwrap();
         apply_events(&mut state, payloads);
 
@@ -876,7 +855,7 @@ mod tests {
             .handle(CommandPayload::CompleteLlmCall {
                 call_id: call_id.clone(),
                 response,
-            })
+            }, &default_ctx())
             .unwrap();
         apply_events(&mut state, payloads);
 
@@ -887,7 +866,7 @@ mod tests {
                 tool_call_id: tool_call_id.clone(),
                 name: "test".into(),
                 result: "ok".into(),
-            })
+            }, &default_ctx())
             .unwrap();
 
         assert_eq!(
@@ -913,7 +892,7 @@ mod tests {
                 interrupt_id: "int-1".into(),
                 reason: "approval_needed".into(),
                 payload: serde_json::json!({"tool": "delete_file"}),
-            })
+            }, &default_ctx())
             .unwrap();
         assert_eq!(payloads.len(), 1);
         assert!(
@@ -932,7 +911,7 @@ mod tests {
                 interrupt_id: "int-1".into(),
                 reason: "approval_needed".into(),
                 payload: serde_json::json!({}),
-            })
+            }, &default_ctx())
             .unwrap();
         apply_events(&mut state, payloads);
 
@@ -942,7 +921,7 @@ mod tests {
             .handle(CommandPayload::ResumeInterrupt {
                 interrupt_id: "int-1".into(),
                 payload: serde_json::json!({"approved": true}),
-            })
+            }, &default_ctx())
             .unwrap();
         assert_eq!(payloads.len(), 1);
         assert!(
@@ -961,7 +940,7 @@ mod tests {
                 interrupt_id: "int-1".into(),
                 reason: "approval_needed".into(),
                 payload: serde_json::json!({}),
-            })
+            }, &default_ctx())
             .unwrap();
         apply_events(&mut state, payloads);
 
@@ -971,7 +950,7 @@ mod tests {
             .handle(CommandPayload::ResumeInterrupt {
                 interrupt_id: "int-WRONG".into(),
                 payload: serde_json::json!({}),
-            })
+            }, &default_ctx())
             .unwrap();
         assert!(
             payloads.is_empty(),
@@ -984,10 +963,7 @@ mod tests {
         let mut agent = test_agent();
         agent.token_budget = Some(100);
 
-        let mut state = Aggregate::new(AgentSession::new(
-            Uuid::new_v4(),
-            Arc::new(DefaultStrategy::default()),
-        ));
+        let mut state = Aggregate::new(AgentState::new(Uuid::new_v4()));
         state.apply(
             &EventPayload::SessionCreated(SessionCreated {
                 agent,
@@ -1008,7 +984,7 @@ mod tests {
                 request: mock_llm_request(),
                 stream: false,
                 deadline: far_future(),
-            })
+            }, &default_ctx())
             .unwrap();
 
         assert_eq!(payloads.len(), 1);
@@ -1030,7 +1006,7 @@ mod tests {
                 interrupt_id: "int-1".into(),
                 reason: "approval_needed".into(),
                 payload: serde_json::json!({}),
-            })
+            }, &default_ctx())
             .unwrap();
         apply_events(&mut state, payloads);
 
@@ -1040,7 +1016,7 @@ mod tests {
                 content: "hello".into(),
             },
             stream: true,
-        });
+        }, &default_ctx());
         assert!(matches!(result, Err(SessionError::SessionInterrupted)));
     }
 }

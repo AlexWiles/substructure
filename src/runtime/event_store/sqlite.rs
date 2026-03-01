@@ -620,8 +620,7 @@ mod tests {
     use crate::domain::agent::{AgentConfig, LlmConfig};
     use crate::domain::aggregate::{Aggregate, DomainEvent};
     use crate::domain::event::{ClientIdentity, EventPayload, SessionCreated, SpanContext};
-    use crate::domain::session::{AgentSession, DefaultStrategy};
-    use std::sync::Arc;
+    use crate::domain::session::AgentState;
 
     fn test_auth(tenant: &str) -> ClientIdentity {
         ClientIdentity {
@@ -653,10 +652,10 @@ mod tests {
         session_id: Uuid,
         tenant: &str,
         agent_name: &str,
-    ) -> (Vec<Event>, Aggregate<AgentSession>) {
+    ) -> (Vec<Event>, Aggregate<AgentState>) {
         let auth = test_auth(tenant);
         let agent = test_agent(agent_name);
-        let domain_event: DomainEvent<AgentSession> = DomainEvent {
+        let domain_event: DomainEvent<AgentState> = DomainEvent {
             id: Uuid::new_v4(),
             tenant_id: tenant.into(),
             aggregate_id: session_id,
@@ -670,10 +669,7 @@ mod tests {
             }),
             derived: None,
         };
-        let mut snapshot = Aggregate::new(AgentSession::new(
-            session_id,
-            Arc::new(DefaultStrategy::default()),
-        ));
+        let mut snapshot = Aggregate::new(AgentState::new(session_id));
         snapshot.apply(
             &domain_event.payload,
             domain_event.sequence,
@@ -711,8 +707,8 @@ mod tests {
 
         // Load returns correct state
         let loaded = store.load(id, "acme").await.unwrap();
-        let state: Aggregate<AgentSession> = serde_json::from_value(loaded.snapshot).unwrap();
-        assert_eq!(state.state.cloned_state().session_id, id);
+        let state: Aggregate<AgentState> = serde_json::from_value(loaded.snapshot).unwrap();
+        assert_eq!(state.state.session_id, id);
         assert_eq!(loaded.stream_version, snap.stream_version);
 
         // Shows up in list_aggregates

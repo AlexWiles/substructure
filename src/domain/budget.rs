@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::aggregate::Reducer;
+use super::aggregate::AggregateState;
 use super::config::{parse_window, BudgetPolicyConfig, ExhaustionStrategy};
 
 /// Derive a deterministic aggregate_id from tenant_id.
@@ -100,8 +100,12 @@ pub struct UsageEntry {
     pub recorded_at: DateTime<Utc>,
 }
 
-impl Reducer for BudgetLedger {
+#[async_trait::async_trait]
+impl AggregateState for BudgetLedger {
     type Event = BudgetEvent;
+    type Command = ();
+    type Error = std::convert::Infallible;
+    type Context = ();
     type Derived = BudgetDerived;
 
     fn aggregate_type() -> &'static str {
@@ -121,6 +125,18 @@ impl Reducer for BudgetLedger {
                 });
             }
         }
+    }
+
+    fn handle_command(&self, _cmd: Self::Command, _ctx: &Self::Context) -> Result<Vec<Self::Event>, Self::Error> {
+        Ok(vec![])
+    }
+
+    async fn on_event(&self, _event: &Self::Event, _ctx: &Self::Context, _span: &crate::domain::span::SpanContext) -> Option<Self::Command> {
+        None
+    }
+
+    fn derived_state(&self) -> BudgetDerived {
+        BudgetDerived {}
     }
 }
 

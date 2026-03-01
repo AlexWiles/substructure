@@ -11,7 +11,8 @@ use crate::domain::aggregate::DomainEvent;
 use crate::domain::config::{BudgetPolicyConfig, EventStoreConfig, SystemConfig};
 use crate::domain::event::{ClientIdentity, CompletionDelivery, SpanContext};
 use crate::domain::session::{
-    AgentSession, AgentState, CommandPayload, IncomingMessage, SessionCommand,
+    AgentState, BudgetActorRef, CommandPayload, IncomingMessage, McpToolEntry, SessionCommand,
+    SessionContext, SessionStatus,
 };
 use dispatcher::spawn_aggregate_dispatcher;
 use event_store::Event;
@@ -20,12 +21,11 @@ use wake_scheduler::spawn_wake_scheduler;
 pub mod budget;
 pub mod dispatcher;
 pub mod event_store;
+pub mod aggregate_actor;
 pub mod jsonrpc;
 pub mod llm;
 pub mod mcp;
-mod session_actor;
 pub mod session_client;
-mod strategy;
 pub mod wake_scheduler;
 
 #[cfg(feature = "sqlite")]
@@ -40,20 +40,68 @@ pub use mcp::{
     CallToolResult, Content, McpClient, McpError, ServerCapabilities, ServerInfo, StdioMcpClient,
     ToolAnnotations, ToolDefinition,
 };
-pub use session_actor::SessionActorArgs;
-pub use session_actor::{
-    RuntimeError, SessionActor, SessionActorState, SessionInit, SessionMessage,
-};
 pub use session_client::{
     Notification, OnSessionUpdate, SessionClientActor, SessionClientArgs, SessionUpdate,
 };
-pub use strategy::{StaticStrategyProvider, StrategyProvider, StrategyProviderError};
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, thiserror::Error)]
+pub enum RuntimeError {
+    #[error(transparent)]
+    Session(#[from] crate::domain::session::SessionError),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error("actor call failed: {0}")]
+    ActorCall(String),
+    #[error("unknown LLM client: {0}")]
+    UnknownLlmClient(String),
+    #[error("unknown agent: {0}")]
+    UnknownAgent(String),
+    #[error("session not found")]
+    SessionNotFound,
+}
+
+// ---------------------------------------------------------------------------
+// SessionMessage — used by session clients and process group routing
+// ---------------------------------------------------------------------------
+
+pub enum SessionMessage {
+    Execute(
+        SessionCommand,
+        RpcReplyPort<Result<Vec<Arc<Event>>, RuntimeError>>,
+    ),
+    Cast(SessionCommand),
+    GetState(RpcReplyPort<AgentState>),
+    Events(Vec<Arc<DomainEvent<AgentState>>>),
+    /// Timer-triggered or scheduler-triggered wake.
+    Wake,
+    /// Cancel this session (used by parent to cancel sub-agent).
+    Cancel,
+    /// Set client-provided tools (from AG-UI RunAgentInput).
+    SetClientTools(Vec<crate::domain::openai::Tool>),
+    /// Transient notification — broadcast to observers, never persisted.
+    Notify(Arc<Notification>),
+}
+
+// ---------------------------------------------------------------------------
+// SessionInit — what the runtime needs to start a session
+// ---------------------------------------------------------------------------
+
+pub struct SessionInit {
+    pub agent: AgentConfig,
+    pub auth: ClientIdentity,
+    pub on_done: Option<CompletionDelivery>,
+    pub span: SpanContext,
+}
 
 // ---------------------------------------------------------------------------
 // Naming conventions for ractor registry / process groups
 // ---------------------------------------------------------------------------
 
-pub fn session_actor_name(session_id: Uuid) -> String {
+pub fn aggregate_actor_name(session_id: Uuid) -> String {
     format!("session-{session_id}")
 }
 
@@ -66,26 +114,21 @@ pub fn session_observer_group(session_id: Uuid) -> String {
 }
 
 /// Routing closure for the session aggregate dispatcher.
-/// Broadcasts typed events to the session process group.
-fn session_route(aggregate_id: Uuid, events: Vec<Arc<DomainEvent<AgentSession>>>) {
+/// Broadcasts typed events to the session process group and aggregate actor.
+fn session_route(aggregate_id: Uuid, events: Vec<Arc<DomainEvent<AgentState>>>) {
     let group = session_group(aggregate_id);
     for cell in ractor::pg::get_members(&group) {
         let actor: ActorRef<SessionMessage> = cell.into();
         let _ = actor.send_message(SessionMessage::Events(events.clone()));
     }
-}
 
-/// Look up a running session actor by ID and send it a message.
-/// Silently no-ops if the actor is not running.
-pub fn send_to_session(session_id: Uuid, message: SessionMessage) {
-    if let Some(cell) = ractor::registry::where_is(session_actor_name(session_id)) {
-        let actor: ActorRef<SessionMessage> = cell.into();
-        let _ = actor.send_message(message);
+    if let Some(cell) = ractor::registry::where_is(aggregate_actor_name(aggregate_id)) {
+        let actor: ActorRef<aggregate_actor::AggregateMessage<AgentState>> = cell.into();
+        let _ = actor.send_message(aggregate_actor::AggregateMessage::Events(events));
     }
 }
 
 /// Broadcast a transient notification to session observers only.
-/// The session actor is not in this group, so it never receives its own notifications.
 pub fn notify_observers(session_id: Uuid, notification: Arc<Notification>) {
     let group = session_observer_group(session_id);
     for cell in ractor::pg::get_members(&group) {
@@ -110,6 +153,12 @@ pub enum RuntimeMessage {
         aggregate_type: String,
         tenant_id: String,
     },
+    /// Find-or-start the aggregate actor, then deliver a command.
+    DeliverToSession {
+        session_id: Uuid,
+        payload: CommandPayload,
+        span: SpanContext,
+    },
 }
 
 pub struct SubAgentRequest {
@@ -124,7 +173,7 @@ pub struct SubAgentRequest {
 }
 
 // ---------------------------------------------------------------------------
-// RuntimeActor — owns providers, spawns session actors
+// RuntimeActor — owns providers, spawns aggregate actors directly
 // ---------------------------------------------------------------------------
 
 struct RuntimeActor;
@@ -134,7 +183,6 @@ struct RuntimeState {
     store: Arc<dyn EventStore>,
     agents: HashMap<String, AgentConfig>,
     llm_provider: Arc<dyn LlmClientProvider>,
-    strategy_provider: Arc<dyn StrategyProvider>,
     budget_policies: Vec<BudgetPolicyConfig>,
 }
 
@@ -142,13 +190,301 @@ struct RuntimeArgs {
     store: Arc<dyn EventStore>,
     agents: HashMap<String, AgentConfig>,
     llm_provider: Arc<dyn LlmClientProvider>,
-    strategy_provider: Arc<dyn StrategyProvider>,
     budget_policies: Vec<BudgetPolicyConfig>,
 }
 
+// ---------------------------------------------------------------------------
+// Build SessionContext — wires runtime resources into the domain context
+// ---------------------------------------------------------------------------
+
+fn build_session_context(
+    session_id: Uuid,
+    auth: &ClientIdentity,
+    mcp_clients: &[Arc<dyn McpClient>],
+    llm_provider: &Arc<dyn LlmClientProvider>,
+    agents: &HashMap<String, AgentConfig>,
+    agent: Option<&AgentConfig>,
+    budget_actor: Option<ActorRef<budget::BudgetMessage>>,
+    stream: bool,
+) -> SessionContext {
+    let mcp_tools: HashMap<String, McpToolEntry> = mcp_clients
+        .iter()
+        .flat_map(|c| {
+            let info = c.server_info();
+            let server_name = info.name.clone();
+            let server_version = info.version.clone();
+            c.tools().iter().map(move |t| {
+                (
+                    t.name.clone(),
+                    McpToolEntry {
+                        server_name: server_name.clone(),
+                        server_version: server_version.clone(),
+                    },
+                )
+            })
+        })
+        .collect();
+
+    // Build all_tools from MCP + sub-agents + client tools (client tools added later via UpdateContext)
+    let mut tools: Vec<crate::domain::openai::Tool> = mcp_clients
+        .iter()
+        .flat_map(|c| c.tools().iter().map(|t| t.to_openai_tool()))
+        .collect();
+
+    // Add sub-agent tools
+    if let Some(agent) = agent {
+        for name in &agent.sub_agents {
+            if let Some(sub) = agents.get(name) {
+                let tool_name = mcp::ToolDefinition::sanitized_name(name);
+                tools.push(crate::domain::openai::Tool {
+                    tool_type: "function".to_string(),
+                    function: crate::domain::openai::ToolFunction {
+                        name: tool_name,
+                        description: sub.description.clone().unwrap_or_else(|| sub.name.clone()),
+                        parameters: serde_json::json!({
+                            "type": "object",
+                            "properties": {
+                                "message": {
+                                    "type": "string",
+                                    "description": "The message to send to the sub-agent"
+                                }
+                            },
+                            "required": ["message"]
+                        }),
+                    },
+                });
+            }
+        }
+    }
+
+    let all_tools = if tools.is_empty() { None } else { Some(tools) };
+
+    // Wrap the LlmClientProvider in our domain-level trait
+    let llm_adapter: Arc<dyn crate::domain::session::LlmClientTrait> =
+        Arc::new(LlmProviderAdapter(llm_provider.clone()));
+
+    // Wrap MCP clients
+    let mcp_adapters: Vec<Arc<dyn crate::domain::session::McpClientTrait>> = mcp_clients
+        .iter()
+        .map(|c| Arc::new(McpClientAdapter(c.clone())) as Arc<dyn crate::domain::session::McpClientTrait>)
+        .collect();
+
+    // Wrap budget actor
+    let budget_ref = budget_actor.map(|a| BudgetActorRef {
+        inner: Box::new(a),
+    });
+
+    // Build callbacks
+    let notify_chunk: crate::domain::session::NotifyChunkFn = Arc::new(
+        |session_id, call_id, chunk_index, text| {
+            notify_observers(
+                session_id,
+                Arc::new(Notification::LlmStreamChunk {
+                    call_id,
+                    chunk_index,
+                    text,
+                }),
+            );
+        },
+    );
+
+    // send_to_session is set below after we have the runtime ref
+
+    SessionContext {
+        mcp_tools,
+        all_tools,
+        session_id,
+        auth: auth.clone(),
+        stream,
+        llm_provider: Some(llm_adapter),
+        mcp_clients: mcp_adapters,
+        agents: agents.clone(),
+        client_tools: Vec::new(),
+        budget_actor: budget_ref,
+        notify_chunk: Some(notify_chunk),
+        send_to_session: None, // set below after we have runtime ref
+        spawn_sub_agent: None, // set below after we have runtime ref
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Adapter: LlmClientProvider → domain LlmClientTrait
+// ---------------------------------------------------------------------------
+
+struct LlmProviderAdapter(Arc<dyn LlmClientProvider>);
+
+impl crate::domain::session::LlmClientTrait for LlmProviderAdapter {
+    fn resolve<'a>(
+        &'a self,
+        client_id: &'a str,
+        auth: &'a ClientIdentity,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<Arc<dyn crate::domain::session::LlmCallable>, String>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let client = self
+                .0
+                .resolve(client_id, auth)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(Arc::new(LlmClientAdapter(client)) as Arc<dyn crate::domain::session::LlmCallable>)
+        })
+    }
+}
+
+struct LlmClientAdapter(Arc<dyn LlmClient>);
+
+impl crate::domain::session::LlmCallable for LlmClientAdapter {
+    fn call<'a>(
+        &'a self,
+        request: &'a crate::domain::event::LlmRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        crate::domain::event::LlmResponse,
+                        crate::domain::session::LlmCallError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            self.0.call(request).await.map_err(|e| {
+                crate::domain::session::LlmCallError {
+                    message: e.message,
+                    retryable: e.retryable,
+                    source: serde_json::to_value(&e.source).ok(),
+                }
+            })
+        })
+    }
+
+    fn call_streaming<'a>(
+        &'a self,
+        request: &'a crate::domain::event::LlmRequest,
+        tx: tokio::sync::mpsc::UnboundedSender<crate::domain::session::StreamDelta>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        crate::domain::event::LlmResponse,
+                        crate::domain::session::LlmCallError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        // Bridge the runtime StreamDelta to domain StreamDelta
+        let (bridge_tx, mut bridge_rx) =
+            tokio::sync::mpsc::unbounded_channel::<llm::StreamDelta>();
+
+        Box::pin(async move {
+            let forward = tokio::spawn(async move {
+                while let Some(delta) = bridge_rx.recv().await {
+                    let _ = tx.send(crate::domain::session::StreamDelta {
+                        text: delta.text,
+                    });
+                }
+            });
+
+            let result = self.0.call_streaming(request, bridge_tx).await.map_err(|e| {
+                crate::domain::session::LlmCallError {
+                    message: e.message,
+                    retryable: e.retryable,
+                    source: serde_json::to_value(&e.source).ok(),
+                }
+            });
+
+            forward.abort();
+            result
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Adapter: McpClient → domain McpClientTrait
+// ---------------------------------------------------------------------------
+
+struct McpClientAdapter(Arc<dyn McpClient>);
+
+impl crate::domain::session::McpClientTrait for McpClientAdapter {
+    fn server_info(&self) -> crate::domain::session::McpServerInfo {
+        let info = self.0.server_info();
+        crate::domain::session::McpServerInfo {
+            name: info.name.clone(),
+            version: info.version.clone(),
+        }
+    }
+
+    fn tools(&self) -> Vec<crate::domain::session::McpToolDefinition> {
+        self.0
+            .tools()
+            .iter()
+            .map(|t| crate::domain::session::McpToolDefinition {
+                name: t.name.clone(),
+            })
+            .collect()
+    }
+
+    fn call_tool<'a>(
+        &'a self,
+        name: &'a str,
+        arguments: serde_json::Value,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<crate::domain::session::McpToolResult, String>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let result = self.0.call_tool(name, arguments).await.map_err(|e| e.to_string())?;
+            Ok(crate::domain::session::McpToolResult {
+                content: result
+                    .content
+                    .iter()
+                    .map(|c| match c {
+                        Content::Text { text } => {
+                            crate::domain::session::McpToolContent::Text { text: text.clone() }
+                        }
+                        _ => crate::domain::session::McpToolContent::Other,
+                    })
+                    .collect(),
+                is_error: result.is_error,
+            })
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RuntimeState methods
+// ---------------------------------------------------------------------------
+
 impl RuntimeState {
+    /// Look up a running aggregate actor by session ID and send a command.
+    /// Returns `true` if the actor was found and the message was sent.
+    fn try_send_to_aggregate(&self, session_id: Uuid, payload: CommandPayload, span: SpanContext) -> bool {
+        if let Some(cell) = ractor::registry::where_is(aggregate_actor_name(session_id)) {
+            let actor: ActorRef<aggregate_actor::AggregateMessage<AgentState>> = cell.into();
+            let _ = actor.send_message(aggregate_actor::AggregateMessage::Cast {
+                cmd: payload,
+                span,
+                occurred_at: Utc::now(),
+            });
+            true
+        } else {
+            false
+        }
+    }
+
     /// Get or spawn a budget actor for the given tenant.
-    /// Returns `None` if no budget policies are configured.
     async fn get_or_spawn_budget_actor(
         &self,
         tenant_id: &str,
@@ -205,53 +541,124 @@ impl RuntimeState {
         init: SessionInit,
     ) -> Result<SessionHandle, RuntimeError> {
         let auth = init.auth.clone();
-        let actor_name = session_actor_name(session_id);
+        let agent = init.agent.clone();
+        let actor_name = aggregate_actor_name(session_id);
+        let already_running = ractor::registry::where_is(actor_name).is_some();
 
-        // Reuse existing actor if already running, otherwise spawn a new one.
-        let actor: ActorRef<SessionMessage> =
-            if let Some(cell) = ractor::registry::where_is(actor_name.clone()) {
-                cell.into()
-            } else {
-                let budget_actor = self.get_or_spawn_budget_actor(&auth.tenant_id).await?;
-                let mcp_clients = self.get_or_spawn_mcp_actors(&init.agent).await?;
-                let (actor, _actor_handle) = Actor::spawn_linked(
-                    Some(actor_name),
-                    SessionActor,
-                    SessionActorArgs {
-                        session_id,
-                        init,
-                        store: self.store.clone(),
-                        llm_provider: self.llm_provider.clone(),
-                        mcp_clients,
-                        strategy_provider: self.strategy_provider.clone(),
-                        agents: self.agents.clone(),
-                        runtime: self.myself.clone(),
-                        budget_actor,
-                    },
-                    self.myself.get_cell(),
-                )
-                .await
-                .map_err(|e| RuntimeError::ActorCall(format!("session startup failed: {e}")))?;
-                actor
-            };
+        if !already_running {
+            let budget_actor = self.get_or_spawn_budget_actor(&auth.tenant_id).await?;
+            let mcp_clients = self.get_or_spawn_mcp_actors(&init.agent).await?;
 
-        // SessionClientActor spawned standalone, then linked to SessionActor
-        // so it dies automatically when the session dies
+            let llm_provider = self.llm_provider.clone();
+            let agents = self.agents.clone();
+            let runtime_ref = self.myself.clone();
+            let mcp_for_ctx = mcp_clients.clone();
+            let auth_for_ctx = auth.clone();
+            let agent_for_ctx = agent.clone();
+
+            let aggregate_handle = aggregate_actor::spawn_aggregate_actor(
+                aggregate_actor::AggregateActorArgs {
+                    aggregate_id: session_id,
+                    store: self.store.clone(),
+                    tenant_id: auth.tenant_id.clone(),
+                    init: Box::new(AgentState::new),
+                    context_init: Box::new(move |state| {
+                        let resolved_agent = state.agent.clone().unwrap_or(agent_for_ctx);
+                        Box::pin(async move {
+                            let mut ctx = build_session_context(
+                                session_id,
+                                &auth_for_ctx,
+                                &mcp_for_ctx,
+                                &llm_provider,
+                                &agents,
+                                Some(&resolved_agent),
+                                budget_actor,
+                                false,
+                            );
+                            // Wire up send_to_session (find-or-start via runtime)
+                            let runtime_for_send = runtime_ref.clone();
+                            ctx.send_to_session = Some(Arc::new(move |session_id, payload, span| {
+                                let _ = runtime_for_send.send_message(
+                                    RuntimeMessage::DeliverToSession { session_id, payload, span },
+                                );
+                            }));
+                            // Wire up sub-agent spawning
+                            let runtime = runtime_ref.clone();
+                            ctx.spawn_sub_agent = Some(Arc::new(move |params| {
+                                let _ = runtime.send_message(RuntimeMessage::RunSubAgent(
+                                    SubAgentRequest {
+                                        session_id: params.session_id,
+                                        agent_name: params.agent_name,
+                                        message: params.message,
+                                        auth: params.auth,
+                                        delivery: params.delivery,
+                                        span: params.span,
+                                        token_budget: params.token_budget,
+                                        stream: params.stream,
+                                    },
+                                ));
+                            }));
+                            ctx
+                        })
+                    }),
+                },
+                self.myself.get_cell(),
+            )
+            .await
+            .map_err(|e| RuntimeError::ActorCall(format!("aggregate actor spawn: {e}")))?;
+
+            // Check if session needs creation
+            let session = aggregate_handle.get_aggregate().await;
+            let is_new = session.state.agent.is_none();
+
+            if is_new {
+                aggregate_handle
+                    .send_command(
+                        CommandPayload::CreateSession {
+                            agent: init.agent,
+                            auth: auth.clone(),
+                            on_done: init.on_done,
+                        },
+                        init.span.child(),
+                        Utc::now(),
+                    )
+                    .await
+                    .map_err(|e| RuntimeError::ActorCall(format!("create session: {e}")))?;
+            }
+
+            // If resuming a completed sub-agent, deliver result to parent.
+            // Deferred via message queue to avoid start_session ↔ wake_aggregate recursion.
+            if session.state.status == SessionStatus::Done {
+                if let Some(ref delivery) = session.state.on_done {
+                    let result =
+                        serde_json::to_string(&session.state.artifacts).unwrap_or_default();
+                    let _ = self.myself.send_message(RuntimeMessage::DeliverToSession {
+                        session_id: delivery.parent_session_id,
+                        payload: CommandPayload::CompleteToolCall {
+                            tool_call_id: delivery.tool_call_id.clone(),
+                            name: delivery.tool_name.clone(),
+                            result,
+                        },
+                        span: init.span.child(),
+                    });
+                }
+            }
+        }
+
+        // Spawn a SessionClientActor for the caller
         let (client, _client_handle) = Actor::spawn(
             None,
             SessionClientActor,
             SessionClientArgs {
                 session_id,
                 auth,
-                session_actor: actor.clone(),
+                aggregate_actor_id: session_id,
                 store: self.store.clone(),
                 on_event: None,
             },
         )
         .await
         .map_err(|e| RuntimeError::ActorCall(format!("session client startup failed: {e}")))?;
-
-        client.get_cell().link(actor.get_cell());
 
         Ok(SessionHandle {
             session_id,
@@ -262,10 +669,15 @@ impl RuntimeState {
     async fn wake_aggregate(&self, aggregate_id: Uuid, aggregate_type: &str, tenant_id: &str) {
         match aggregate_type {
             "session" => {
-                // If the session actor is already running, just send Wake.
-                if let Some(cell) = ractor::registry::where_is(session_actor_name(aggregate_id)) {
-                    let actor: ActorRef<SessionMessage> = cell.into();
-                    let _ = actor.send_message(SessionMessage::Wake);
+                // If the aggregate actor is already running, send Wake command
+                if let Some(cell) = ractor::registry::where_is(aggregate_actor_name(aggregate_id)) {
+                    let actor: ActorRef<aggregate_actor::AggregateMessage<AgentState>> =
+                        cell.into();
+                    let _ = actor.send_message(aggregate_actor::AggregateMessage::Cast {
+                        cmd: CommandPayload::Wake,
+                        span: SpanContext::root(),
+                        occurred_at: Utc::now(),
+                    });
                     return;
                 }
                 // Not running — look up the agent name via list_aggregates and start the session.
@@ -327,8 +739,6 @@ impl RuntimeState {
             agent.token_budget = Some(budget);
         }
 
-        let budget_actor = self.get_or_spawn_budget_actor(&req.auth.tenant_id).await?;
-        let mcp_clients = self.get_or_spawn_mcp_actors(&agent).await?;
         let msg_span = req.span.child();
 
         let init = SessionInit {
@@ -338,38 +748,12 @@ impl RuntimeState {
             span: req.span,
         };
 
-        let actor_name = session_actor_name(req.session_id);
-        let session_actor: ActorRef<SessionMessage> =
-            if let Some(cell) = ractor::registry::where_is(actor_name.clone()) {
-                cell.into()
-            } else {
-                let (actor, _) = Actor::spawn_linked(
-                    Some(actor_name),
-                    SessionActor,
-                    SessionActorArgs {
-                        session_id: req.session_id,
-                        init,
-                        store: self.store.clone(),
-                        llm_provider: self.llm_provider.clone(),
-                        mcp_clients,
-                        strategy_provider: self.strategy_provider.clone(),
-                        agents: self.agents.clone(),
-                        runtime: self.myself.clone(),
-                        budget_actor,
-                    },
-                    self.myself.get_cell(),
-                )
-                .await
-                .map_err(|e| RuntimeError::ActorCall(format!("sub-agent: {e}")))?;
-                actor
-            };
+        // start_session spawns the aggregate actor and creates the session
+        let handle = self.start_session(req.session_id, init).await?;
 
         // Send user message to the sub-agent
-        let _ = call_t!(
-            session_actor,
-            SessionMessage::Execute,
-            5000,
-            SessionCommand {
+        let _ = handle
+            .send_command(SessionCommand {
                 span: msg_span,
                 occurred_at: Utc::now(),
                 payload: CommandPayload::SendMessage {
@@ -378,8 +762,8 @@ impl RuntimeState {
                     },
                     stream: req.stream,
                 },
-            }
-        );
+            })
+            .await;
 
         Ok(())
     }
@@ -400,13 +784,12 @@ impl Actor for RuntimeActor {
             store: args.store.clone(),
             agents: args.agents,
             llm_provider: args.llm_provider,
-            strategy_provider: args.strategy_provider,
             budget_policies: args.budget_policies,
         };
 
         // Spawn infrastructure actors (linked to RuntimeActor)
         tracing::debug!("spawning event dispatcher");
-        spawn_aggregate_dispatcher::<AgentSession>(
+        spawn_aggregate_dispatcher::<AgentState>(
             &args.store,
             Arc::new(session_route),
             myself.get_cell(),
@@ -446,6 +829,15 @@ impl Actor for RuntimeActor {
                     .wake_aggregate(aggregate_id, &aggregate_type, &tenant_id)
                     .await;
             }
+            RuntimeMessage::DeliverToSession {
+                session_id,
+                payload,
+                span,
+            } => {
+                // Find-or-start: wake the aggregate if needed, then deliver
+                state.wake_aggregate(session_id, "session", "").await;
+                state.try_send_to_aggregate(session_id, payload, span);
+            }
         }
         Ok(())
     }
@@ -473,12 +865,12 @@ impl Actor for RuntimeActor {
     }
 }
 
-/// Restart dispatcher, wake-scheduler, or budget actors if they died; sessions just get logged.
+/// Restart dispatcher, wake-scheduler, or budget actors if they died.
 async fn restart_infrastructure(name: Option<String>, state: &RuntimeState) {
     match name.as_deref() {
         Some("session-dispatcher") => {
             tracing::info!("restarting session-dispatcher");
-            if let Err(e) = spawn_aggregate_dispatcher::<AgentSession>(
+            if let Err(e) = spawn_aggregate_dispatcher::<AgentState>(
                 &state.store,
                 Arc::new(session_route),
                 state.myself.get_cell(),
@@ -518,7 +910,7 @@ async fn restart_infrastructure(name: Option<String>, state: &RuntimeState) {
             }
         }
         _ => {
-            // SessionActor death — children auto-terminated, just log
+            // Aggregate actor death — just log
         }
     }
 }
@@ -548,7 +940,6 @@ impl Runtime {
                 store: store.clone(),
                 agents: config.agents.clone(),
                 llm_provider: Arc::new(llm_provider),
-                strategy_provider: Arc::new(StaticStrategyProvider),
                 budget_policies: config.budgets.clone(),
             },
         )
@@ -574,7 +965,6 @@ impl Runtime {
     }
 
     /// Create a new session for a named agent from the config.
-    /// Generates a fresh session ID.
     pub async fn create_session_for(
         &self,
         agent_name: &str,
@@ -613,19 +1003,16 @@ impl Runtime {
     }
 
     /// Spawn a new session client for an existing session.
-    /// The client joins the dispatcher's process group so it receives events
-    /// and keeps its projected state up to date.
-    /// An optional callback is invoked for each update (event or notification).
     pub async fn connect(
         &self,
         session_id: Uuid,
         auth: ClientIdentity,
         on_event: Option<OnSessionUpdate>,
     ) -> Result<SessionHandle, RuntimeError> {
-        let session_actor: ActorRef<SessionMessage> =
-            ractor::registry::where_is(session_actor_name(session_id))
-                .ok_or(RuntimeError::SessionNotFound)?
-                .into();
+        // Verify aggregate actor is running
+        if ractor::registry::where_is(aggregate_actor_name(session_id)).is_none() {
+            return Err(RuntimeError::SessionNotFound);
+        }
 
         let (client, _handle) = Actor::spawn(
             None,
@@ -633,7 +1020,7 @@ impl Runtime {
             SessionClientArgs {
                 session_id,
                 auth,
-                session_actor: session_actor.clone(),
+                aggregate_actor_id: session_id,
                 store: self.store.clone(),
                 on_event,
             },
@@ -641,17 +1028,15 @@ impl Runtime {
         .await
         .map_err(|e| RuntimeError::ActorCall(format!("session client spawn failed: {e}")))?;
 
-        client.get_cell().link(session_actor.get_cell());
-
         Ok(SessionHandle {
             session_id,
             session_client: client,
         })
     }
 
-    /// Check whether a session actor is currently running.
+    /// Check whether a session is currently running.
     pub fn session_is_running(&self, session_id: Uuid) -> bool {
-        ractor::registry::where_is(session_actor_name(session_id)).is_some()
+        ractor::registry::where_is(aggregate_actor_name(session_id)).is_some()
     }
 
     pub fn store(&self) -> &Arc<dyn EventStore> {

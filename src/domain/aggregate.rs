@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -6,10 +7,9 @@ use uuid::Uuid;
 use super::span::SpanContext;
 
 // ---------------------------------------------------------------------------
-// Reducer — pure event-application trait
+// AggregateState — unified trait for event sourced aggregates
 // ---------------------------------------------------------------------------
 
-/// Coarse lifecycle state shared across all aggregate types.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AggregateStatus {
@@ -22,28 +22,24 @@ pub enum AggregateStatus {
     Done,
 }
 
-/// Defines how events are applied to produce aggregate state.
-///
-/// Each reducer has its own typed event and derived-state enums,
-/// ensuring type safety while keeping the store generic.
-/// Metadata (version, timestamps) is managed by [`Aggregate<R>`].
-pub trait Reducer: Sized + Serialize + DeserializeOwned + Clone + Send + Sync + 'static {
-    /// Typed event payload enum for this reducer.
+#[async_trait]
+pub trait AggregateState: Sized + Serialize + DeserializeOwned + Clone + Send + Sync + 'static {
     type Event: Serialize + DeserializeOwned + Clone + Send + Sync + 'static;
-    /// Typed derived state for query optimization (stamped on events).
+    type Command: Send + Sync + 'static;
+    type Error: Send + Sync + 'static;
+    type Context: Send + Sync + 'static;
     type Derived: Serialize + DeserializeOwned + Clone + Send + Sync + 'static;
 
-    /// Discriminator string stored alongside events and snapshots (e.g. "session").
     fn aggregate_type() -> &'static str;
-    /// Apply a single event to this state.
     fn apply(&mut self, event: &Self::Event);
-    /// When this aggregate next needs attention (e.g. retry deadline, pending call timeout).
-    /// Returning `Some(t)` causes the wake scheduler to fire at time `t`.
-    /// Default: `None` (no waking needed).
+    fn handle_command(&self, cmd: Self::Command, ctx: &Self::Context) -> Result<Vec<Self::Event>, Self::Error>;
+    async fn on_event(&self, event: &Self::Event, ctx: &Self::Context, span: &SpanContext) -> Option<Self::Command>;
+    /// Compute a derived-state snapshot (stamped on events for query optimization).
+    fn derived_state(&self) -> Self::Derived;
+
     fn wake_at(&self) -> Option<DateTime<Utc>> {
         None
     }
-    /// Coarse lifecycle status for generic queries and filtering.
     fn status(&self) -> AggregateStatus {
         AggregateStatus::Idle
     }
@@ -53,17 +49,9 @@ pub trait Reducer: Sized + Serialize + DeserializeOwned + Clone + Send + Sync + 
     }
 }
 
-// ---------------------------------------------------------------------------
-// Aggregate<R> — reducer state + shared metadata
-// ---------------------------------------------------------------------------
-
-/// The full aggregate: reducer state plus shared metadata.
-///
-/// Manages stream versioning, dedup, and timestamps generically
-/// for any [`Reducer`] implementation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct Aggregate<R: Reducer> {
+pub struct Aggregate<R: AggregateState> {
     pub state: R,
     pub stream_version: u64,
     pub last_applied: Option<u64>,
@@ -77,7 +65,7 @@ pub struct Aggregate<R: Reducer> {
     pub label: Option<String>,
 }
 
-impl<R: Reducer> Aggregate<R> {
+impl<R: AggregateState> Aggregate<R> {
     pub fn new(state: R) -> Self {
         Aggregate {
             state,
@@ -109,6 +97,49 @@ impl<R: Reducer> Aggregate<R> {
         self.label = self.state.label();
         true
     }
+
+    /// Apply event payloads to the aggregate and wrap them as domain events.
+    ///
+    /// This is the mutation step — call it after the pure decision
+    /// (`handle_command`) has produced payloads.
+    pub fn commit(
+        &mut self,
+        payloads: Vec<R::Event>,
+        aggregate_id: Uuid,
+        span: SpanContext,
+        occurred_at: DateTime<Utc>,
+        tenant_id: &str,
+    ) -> Vec<DomainEvent<R>> {
+        if payloads.is_empty() {
+            return vec![];
+        }
+
+        let base_seq = self.stream_version + 1;
+
+        // Apply each payload to the state
+        for (i, payload) in payloads.iter().enumerate() {
+            self.apply(payload, base_seq + i as u64, occurred_at);
+        }
+
+        // Compute derived state after all events applied
+        let derived = self.state.derived_state();
+
+        // Wrap payloads as domain events
+        payloads
+            .into_iter()
+            .enumerate()
+            .map(|(i, payload)| DomainEvent {
+                id: Uuid::new_v4(),
+                tenant_id: tenant_id.to_string(),
+                aggregate_id,
+                sequence: base_seq + i as u64,
+                span: span.clone(),
+                occurred_at,
+                payload,
+                derived: Some(derived.clone()),
+            })
+            .collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -120,7 +151,7 @@ impl<R: Reducer> Aggregate<R> {
 /// Domain code works with `DomainEvent<R>` for type safety.
 /// Converted to/from the store-level `event_store::Event` at the boundary.
 #[derive(Debug, Clone)]
-pub struct DomainEvent<R: Reducer> {
+pub struct DomainEvent<R: AggregateState> {
     pub id: Uuid,
     pub tenant_id: String,
     pub aggregate_id: Uuid,
@@ -131,7 +162,7 @@ pub struct DomainEvent<R: Reducer> {
     pub derived: Option<R::Derived>,
 }
 
-impl<R: Reducer> DomainEvent<R> {
+impl<R: AggregateState> DomainEvent<R> {
     /// Convert to a store-level raw event by serializing payload and derived to Values.
     pub fn into_raw(self) -> crate::runtime::event_store::Event {
         let payload_value =

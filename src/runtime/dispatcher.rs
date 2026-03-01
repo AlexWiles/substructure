@@ -5,7 +5,7 @@ use std::sync::Arc;
 use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef, SpawnErr};
 use uuid::Uuid;
 
-use crate::domain::aggregate::{DomainEvent, Reducer};
+use crate::domain::aggregate::{AggregateState, DomainEvent};
 
 use super::event_store::{EventBatch, EventStore};
 
@@ -20,19 +20,19 @@ pub enum AggregateDispatcherMsg {
     Events(EventBatch),
 }
 
-pub struct AggregateDispatcher<A: Reducer> {
+pub struct AggregateDispatcher<A: AggregateState> {
     _phantom: PhantomData<A>,
 }
 
-pub struct AggregateDispatcherState<A: Reducer> {
+pub struct AggregateDispatcherState<A: AggregateState> {
     route: RouteTypedEvents<A>,
 }
 
-pub struct AggregateDispatcherArgs<A: Reducer> {
+pub struct AggregateDispatcherArgs<A: AggregateState> {
     pub route: RouteTypedEvents<A>,
 }
 
-impl<A: Reducer> Actor for AggregateDispatcher<A> {
+impl<A: AggregateState> Actor for AggregateDispatcher<A> {
     type Msg = AggregateDispatcherMsg;
     type State = AggregateDispatcherState<A>;
     type Arguments = AggregateDispatcherArgs<A>;
@@ -74,7 +74,7 @@ impl<A: Reducer> Actor for AggregateDispatcher<A> {
     }
 }
 
-pub async fn spawn_aggregate_dispatcher<A: Reducer>(
+pub async fn spawn_aggregate_dispatcher<A: AggregateState>(
     store: &Arc<dyn EventStore>,
     route: RouteTypedEvents<A>,
     supervisor: ActorCell,

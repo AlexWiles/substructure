@@ -11,10 +11,9 @@ use crate::domain::event::{
 };
 use crate::domain::openai;
 use crate::domain::session::{
-    AgentSession, AgentState, CommandPayload, DefaultStrategy, SessionCommand,
+    AgentState, CommandPayload, SessionCommand, SessionContext,
 };
-use crate::runtime::{OnSessionUpdate, Runtime, RuntimeError, SessionMessage, SessionUpdate};
-use std::sync::Arc;
+use crate::runtime::{OnSessionUpdate, Runtime, RuntimeError, SessionUpdate};
 
 use super::translate::{EventTranslator, TranslateOutput};
 use super::types::{AgUiEvent, Message, RunAgentInput};
@@ -324,15 +323,12 @@ async fn load_state(
 ) -> (AgentState, u64) {
     match runtime.store().load(session_id, &auth.tenant_id).await {
         Ok(load) => {
-            let snapshot: crate::domain::aggregate::Aggregate<AgentSession> =
+            let snapshot: crate::domain::aggregate::Aggregate<AgentState> =
                 serde_json::from_value(load.snapshot).unwrap_or_else(|_| {
-                    crate::domain::aggregate::Aggregate::new(AgentSession::new(
-                        session_id,
-                        Arc::new(DefaultStrategy::default()),
-                    ))
+                    crate::domain::aggregate::Aggregate::new(AgentState::new(session_id))
                 });
             let last_applied = snapshot.last_applied.unwrap_or(0);
-            (snapshot.state.cloned_state(), last_applied)
+            (snapshot.state.clone(), last_applied)
         }
         Err(_) => (AgentState::new(session_id), 0),
     }
@@ -385,7 +381,27 @@ fn send_client_tools(session_id: Uuid, tools: Vec<super::types::Tool>) {
             },
         })
         .collect();
-    crate::runtime::send_to_session(session_id, SessionMessage::SetClientTools(oai_tools));
+
+    // Update the aggregate actor's context with client tools
+    let name = crate::runtime::aggregate_actor_name(session_id);
+    if let Some(cell) = ractor::registry::where_is(name) {
+        let actor: ractor::ActorRef<
+            crate::runtime::aggregate_actor::AggregateMessage<AgentState>,
+        > = cell.into();
+        let _ = actor.send_message(
+            crate::runtime::aggregate_actor::AggregateMessage::UpdateContext(Box::new(
+                move |ctx: &mut SessionContext| {
+                    // Add client tools to context and update all_tools
+                    ctx.client_tools = oai_tools.clone();
+                    if let Some(ref mut all) = ctx.all_tools {
+                        all.extend(oai_tools);
+                    } else {
+                        ctx.all_tools = Some(oai_tools);
+                    }
+                },
+            )),
+        );
+    }
 }
 
 /// Convert an AG-UI `Message` to a domain `Message`.

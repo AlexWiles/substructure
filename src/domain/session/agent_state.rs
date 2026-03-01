@@ -1,6 +1,5 @@
 use std::cmp::min;
 use std::collections::HashMap;
-use std::fmt;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -8,36 +7,195 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::domain::aggregate::AggregateStatus;
+use async_trait::async_trait;
+use crate::domain::aggregate::{AggregateState, AggregateStatus};
 use crate::domain::event::{
-    AgentConfig, Artifact, ClientIdentity, CompletionDelivery, EventPayload, LlmRequest,
-    LlmResponse, Message, Role, ToolCallMeta, ToolHandler,
+    AgentConfig, Artifact, ClientIdentity, CompletionDelivery, EventPayload, LlmCallRequested,
+    LlmRequest, LlmResponse, Message, Role, ToolCallMeta, ToolCallRequested, ToolHandler,
 };
 use crate::domain::openai;
 
-use super::strategy::{Strategy, ToolResult};
+use super::command_handler::{CommandPayload, SessionError};
 
 // ---------------------------------------------------------------------------
-// StrategySlot — Arc<dyn Strategy> wrapper with Debug + Clone + Default
+// SessionContext — transient state passed through handle_command/on_event
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Default)]
-pub struct StrategySlot(pub Option<Arc<dyn Strategy>>);
+/// MCP server info associated with a tool name (transient, populated by runtime).
+#[derive(Debug, Clone)]
+pub struct McpToolEntry {
+    pub server_name: String,
+    pub server_version: String,
+}
 
-impl fmt::Debug for StrategySlot {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.0 {
-            Some(_) => f.write_str("Some(<strategy>)"),
-            None => f.write_str("None"),
+/// Callback for streaming LLM chunks to observers.
+pub type NotifyChunkFn = Arc<dyn Fn(Uuid, String, u32, String) + Send + Sync>;
+/// Callback for sending a command to a session (fire-and-forget).
+pub type SendToSessionFn = Arc<dyn Fn(Uuid, CommandPayload, crate::domain::event::SpanContext) + Send + Sync>;
+/// Callback for spawning a sub-agent.
+pub type SpawnSubAgentFn = Arc<
+    dyn Fn(SubAgentParams) + Send + Sync,
+>;
+
+/// Parameters for spawning a sub-agent.
+pub struct SubAgentParams {
+    pub session_id: Uuid,
+    pub agent_name: String,
+    pub message: String,
+    pub auth: ClientIdentity,
+    pub delivery: CompletionDelivery,
+    pub span: crate::domain::event::SpanContext,
+    pub token_budget: Option<u64>,
+    pub stream: bool,
+}
+
+/// Transient context for command handling and event reactions — not persisted.
+pub struct SessionContext {
+    pub mcp_tools: HashMap<String, McpToolEntry>,
+    /// All tools (MCP + sub-agents + client), injected into LLM requests.
+    pub all_tools: Option<Vec<openai::Tool>>,
+    pub session_id: Uuid,
+    pub auth: ClientIdentity,
+    pub stream: bool,
+    // Runtime resources for I/O in on_event
+    pub llm_provider: Option<Arc<dyn LlmClientTrait>>,
+    pub mcp_clients: Vec<Arc<dyn McpClientTrait>>,
+    pub agents: HashMap<String, AgentConfig>,
+    pub client_tools: Vec<openai::Tool>,
+    pub budget_actor: Option<BudgetActorRef>,
+    // Callbacks for side-effects
+    pub notify_chunk: Option<NotifyChunkFn>,
+    pub send_to_session: Option<SendToSessionFn>,
+    pub spawn_sub_agent: Option<SpawnSubAgentFn>,
+}
+
+impl Default for SessionContext {
+    fn default() -> Self {
+        Self {
+            mcp_tools: HashMap::new(),
+            all_tools: None,
+            session_id: Uuid::nil(),
+            auth: ClientIdentity {
+                tenant_id: String::new(),
+                sub: None,
+                attrs: Default::default(),
+            },
+            stream: false,
+            llm_provider: None,
+            mcp_clients: Vec::new(),
+            agents: HashMap::new(),
+            client_tools: Vec::new(),
+            budget_actor: None,
+            notify_chunk: None,
+            send_to_session: None,
+            spawn_sub_agent: None,
         }
     }
 }
 
-impl std::ops::Deref for StrategySlot {
-    type Target = Option<Arc<dyn Strategy>>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
+// Trait aliases for runtime types used by SessionContext.
+// These avoid pulling runtime crate types directly into the domain.
+// The runtime module provides the concrete implementations.
+
+/// Trait for LLM client providers (resolved by the runtime).
+pub trait LlmClientTrait: Send + Sync {
+    fn resolve<'a>(
+        &'a self,
+        client_id: &'a str,
+        auth: &'a ClientIdentity,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Arc<dyn LlmCallable>, String>> + Send + 'a>>;
+}
+
+/// Trait for calling an LLM (single call or streaming).
+pub trait LlmCallable: Send + Sync {
+    fn call<'a>(
+        &'a self,
+        request: &'a LlmRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<LlmResponse, LlmCallError>> + Send + 'a>>;
+
+    fn call_streaming<'a>(
+        &'a self,
+        request: &'a LlmRequest,
+        tx: tokio::sync::mpsc::UnboundedSender<StreamDelta>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<LlmResponse, LlmCallError>> + Send + 'a>>;
+}
+
+#[derive(Debug, Clone)]
+pub struct LlmCallError {
+    pub message: String,
+    pub retryable: bool,
+    pub source: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamDelta {
+    pub text: Option<String>,
+}
+
+/// Trait for MCP tool clients.
+pub trait McpClientTrait: Send + Sync {
+    fn server_info(&self) -> McpServerInfo;
+    fn tools(&self) -> Vec<McpToolDefinition>;
+    fn call_tool<'a>(
+        &'a self,
+        name: &'a str,
+        arguments: serde_json::Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<McpToolResult, String>> + Send + 'a>>;
+}
+
+#[derive(Debug, Clone)]
+pub struct McpServerInfo {
+    pub name: String,
+    pub version: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct McpToolDefinition {
+    pub name: String,
+}
+
+impl McpToolDefinition {
+    pub fn to_openai_tool(&self) -> openai::Tool {
+        openai::Tool {
+            tool_type: "function".to_string(),
+            function: openai::ToolFunction {
+                name: self.name.clone(),
+                description: String::new(),
+                parameters: serde_json::json!({}),
+            },
+        }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct McpToolResult {
+    pub content: Vec<McpToolContent>,
+    pub is_error: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum McpToolContent {
+    Text { text: String },
+    Other,
+}
+
+/// Opaque handle to the budget actor — avoids leaking ractor types into the domain.
+/// Opaque handle to the budget actor — avoids leaking ractor types into the domain.
+#[allow(dead_code)]
+pub struct BudgetActorRef {
+    pub(crate) inner: Box<dyn std::any::Any + Send + Sync>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolResult {
+    pub tool_call_id: String,
+    pub name: String,
+    pub content: String,
+    pub is_error: bool,
+}
+
+pub(super) fn new_call_id() -> String {
+    Uuid::new_v4().to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -188,13 +346,7 @@ pub struct AgentState {
     pub messages: Vec<Message>,
     pub token_usage: TokenUsage,
     pub token_budget: TokenBudget,
-    pub last_reacted: Option<u64>,
     pub strategy_state: Value,
-
-    /// The strategy driving this session. Skipped during serialization;
-    /// must be re-attached after deserialization (e.g. via `from_snapshot`).
-    #[serde(skip)]
-    pub strategy: StrategySlot,
 
     /// Sub-agent completion delivery target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -219,9 +371,7 @@ impl AgentState {
             messages: Vec::new(),
             token_usage: TokenUsage::default(),
             token_budget: TokenBudget { limit: None },
-            last_reacted: None,
             strategy_state: Value::Null,
-            strategy: StrategySlot(None),
             on_done: None,
             artifacts: vec![],
             llm_calls: HashMap::new(),
@@ -597,6 +747,421 @@ impl AgentState {
             SessionStatus::Idle | SessionStatus::Interrupted { .. } => AggregateStatus::Idle,
             SessionStatus::Done => AggregateStatus::Done,
         }
+    }
+
+    /// Compute tool call metadata based on the tool name.
+    pub(super) fn tool_call_meta(
+        &self,
+        name: &str,
+        tool_call_id: &str,
+        mcp_tools: &HashMap<String, McpToolEntry>,
+    ) -> Option<ToolCallMeta> {
+        // Check sub-agents
+        if let Some(agent_name) = self
+            .agent
+            .as_ref()
+            .and_then(|a| a.sub_agents.iter().find(|s| s.as_str() == name))
+        {
+            return Some(ToolCallMeta::SubAgent {
+                child_session_id: Uuid::new_v5(&self.session_id, tool_call_id.as_bytes()),
+                agent_name: agent_name.clone(),
+            });
+        }
+        // Check MCP tools
+        if let Some(entry) = mcp_tools.get(name) {
+            return Some(ToolCallMeta::Mcp {
+                server_name: entry.server_name.clone(),
+                server_version: entry.server_version.clone(),
+            });
+        }
+        None
+    }
+
+    /// Compute LLM call deadline from agent config.
+    pub(super) fn llm_deadline(&self) -> DateTime<Utc> {
+        let timeout = self
+            .agent
+            .as_ref()
+            .map(|a| a.retry.llm_timeout_secs)
+            .unwrap_or(60);
+        Utc::now() + chrono::Duration::seconds(timeout as i64)
+    }
+
+    /// Compute tool call deadline from agent config.
+    pub(super) fn tool_deadline(&self) -> DateTime<Utc> {
+        let timeout = self
+            .agent
+            .as_ref()
+            .map(|a| a.retry.tool_timeout_secs)
+            .unwrap_or(120);
+        Utc::now() + chrono::Duration::seconds(timeout as i64)
+    }
+
+    pub fn label(&self) -> Option<String> {
+        self.agent.as_ref().map(|a| a.name.clone())
+    }
+
+    pub fn set_token_usage_total(&mut self, total: u64) {
+        self.token_usage.total_tokens = total;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// on_event helpers — I/O dispatch and strategy decisions
+// ---------------------------------------------------------------------------
+
+impl AgentState {
+    /// Handle an LLM call: resolve client, call API (streaming or not), return command.
+    async fn handle_llm_call(
+        &self,
+        p: &LlmCallRequested,
+        ctx: &SessionContext,
+    ) -> CommandPayload {
+        let provider = match &ctx.llm_provider {
+            Some(p) => p,
+            None => {
+                return CommandPayload::FailLlmCall {
+                    call_id: p.call_id.clone(),
+                    error: "no LLM provider configured".into(),
+                    retryable: false,
+                    source: None,
+                };
+            }
+        };
+
+        let client_id = self
+            .agent
+            .as_ref()
+            .map(|a| a.llm.client.clone())
+            .unwrap_or_default();
+
+        let client = match provider.resolve(&client_id, &ctx.auth).await {
+            Ok(c) => c,
+            Err(e) => {
+                return CommandPayload::FailLlmCall {
+                    call_id: p.call_id.clone(),
+                    error: e,
+                    retryable: true,
+                    source: None,
+                };
+            }
+        };
+
+        // Inject tools into the request
+        let LlmRequest::OpenAi(mut oai_req) = p.request.clone();
+        oai_req.tools = ctx.all_tools.clone();
+
+        let request = LlmRequest::OpenAi(oai_req);
+
+        let result = if p.stream {
+            let (chunk_tx, mut chunk_rx) =
+                tokio::sync::mpsc::unbounded_channel::<StreamDelta>();
+
+            let call_id = p.call_id.clone();
+            let session_id = ctx.session_id;
+            let notify = ctx.notify_chunk.clone();
+            let mut chunk_index: u32 = 0;
+
+            let (result, _) = tokio::join!(
+                client.call_streaming(&request, chunk_tx),
+                async {
+                    while let Some(delta) = chunk_rx.recv().await {
+                        if let Some(text) = delta.text {
+                            if let Some(ref notify) = notify {
+                                notify(session_id, call_id.clone(), chunk_index, text);
+                                chunk_index += 1;
+                            }
+                        }
+                    }
+                }
+            );
+            result
+        } else {
+            client.call(&request).await
+        };
+
+        match result {
+            Ok(response) => CommandPayload::CompleteLlmCall {
+                call_id: p.call_id.clone(),
+                response,
+            },
+            Err(e) => CommandPayload::FailLlmCall {
+                call_id: p.call_id.clone(),
+                error: e.message,
+                retryable: e.retryable,
+                source: e.source,
+            },
+        }
+    }
+
+    /// Handle a tool call: sub-agent spawn, MCP call, or client tool (no-op).
+    async fn handle_tool_call(
+        &self,
+        p: &ToolCallRequested,
+        ctx: &SessionContext,
+    ) -> Option<CommandPayload> {
+        // Sub-agent tool call
+        if let Some(child_session_id) = self
+            .tool_calls
+            .get(&p.tool_call_id)
+            .and_then(|tc| tc.child_session_id())
+        {
+            let args: serde_json::Value =
+                serde_json::from_str(&p.arguments).unwrap_or_default();
+            let message = args
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            if let Some(ref spawn) = ctx.spawn_sub_agent {
+                spawn(SubAgentParams {
+                    session_id: child_session_id,
+                    agent_name: p.name.clone(),
+                    message,
+                    auth: ctx.auth.clone(),
+                    delivery: CompletionDelivery {
+                        parent_session_id: ctx.session_id,
+                        tool_call_id: p.tool_call_id.clone(),
+                        tool_name: p.name.clone(),
+                        span: crate::domain::event::SpanContext::root(),
+                    },
+                    span: crate::domain::event::SpanContext::root(),
+                    token_budget: None,
+                    stream: ctx.stream,
+                });
+            }
+            return None; // Sub-agent runs async, result arrives via CompleteToolCall command
+        }
+
+        // MCP tool call
+        let mcp = ctx
+            .mcp_clients
+            .iter()
+            .find(|c| c.tools().iter().any(|t| t.name == p.name))
+            .cloned();
+
+        if let Some(mcp) = mcp {
+            let args: serde_json::Value =
+                serde_json::from_str(&p.arguments).unwrap_or_default();
+
+            match mcp.call_tool(&p.name, args).await {
+                Ok(result) => {
+                    let text = result
+                        .content
+                        .iter()
+                        .filter_map(|c| match c {
+                            McpToolContent::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if result.is_error {
+                        return Some(CommandPayload::FailToolCall {
+                            tool_call_id: p.tool_call_id.clone(),
+                            name: p.name.clone(),
+                            error: text,
+                        });
+                    } else {
+                        return Some(CommandPayload::CompleteToolCall {
+                            tool_call_id: p.tool_call_id.clone(),
+                            name: p.name.clone(),
+                            result: text,
+                        });
+                    }
+                }
+                Err(e) => {
+                    return Some(CommandPayload::FailToolCall {
+                        tool_call_id: p.tool_call_id.clone(),
+                        name: p.name.clone(),
+                        error: e,
+                    });
+                }
+            }
+        }
+
+        // Client tool — no-op, session is Idle and waits for external result
+        None
+    }
+
+    /// Inlined strategy decisions (replaces DefaultStrategy).
+    fn strategy_decision(
+        &self,
+        event: &EventPayload,
+        ctx: &SessionContext,
+    ) -> Option<CommandPayload> {
+        match event {
+            EventPayload::MessageUser(p) => {
+                let stream = p.stream;
+                let request = self.build_llm_request(ctx.all_tools.clone())?;
+                Some(CommandPayload::RequestLlmCall {
+                    call_id: new_call_id(),
+                    request,
+                    stream,
+                    deadline: self.llm_deadline(),
+                })
+            }
+            EventPayload::LlmCallCompleted(p) => {
+                let (content, tool_calls, _token_count) =
+                    super::event_handler::extract_assistant_message(&p.response);
+                if tool_calls.is_empty() {
+                    // No tool calls → done
+                    let artifacts = match content {
+                        Some(ref text) if !text.is_empty() => vec![Artifact {
+                            name: None,
+                            description: None,
+                            parts: vec![crate::domain::event::Part::Text {
+                                text: text.clone(),
+                            }],
+                        }],
+                        _ => vec![],
+                    };
+                    Some(CommandPayload::MarkDone { artifacts })
+                } else {
+                    // Has tool calls → execute them (they're already emitted by command_handler)
+                    None
+                }
+            }
+            EventPayload::LlmCallErrored(p) => {
+                // Only act when retries are exhausted (status == Failed)
+                let call = self.llm_calls.get(&p.call_id)?;
+                if call.status != LlmCallStatus::Failed {
+                    return None;
+                }
+                Some(CommandPayload::MarkDone {
+                    artifacts: vec![Artifact {
+                        name: None,
+                        description: None,
+                        parts: vec![crate::domain::event::Part::Text {
+                            text: format!("Error: {}", p.error),
+                        }],
+                    }],
+                })
+            }
+            EventPayload::MessageTool(_) => {
+                // Wait until all tool calls are done
+                if self.tool_calls.values().any(|tc| tc.status == ToolCallStatus::Pending) {
+                    return None;
+                }
+                let request = self.build_llm_request(ctx.all_tools.clone())?;
+                Some(CommandPayload::RequestLlmCall {
+                    call_id: new_call_id(),
+                    request,
+                    stream: ctx.stream,
+                    deadline: self.llm_deadline(),
+                })
+            }
+            EventPayload::InterruptResumed(_) => {
+                let request = self.build_llm_request(ctx.all_tools.clone())?;
+                Some(CommandPayload::RequestLlmCall {
+                    call_id: new_call_id(),
+                    request,
+                    stream: ctx.stream,
+                    deadline: self.llm_deadline(),
+                })
+            }
+            EventPayload::BudgetExceeded => {
+                Some(CommandPayload::Interrupt {
+                    interrupt_id: Uuid::new_v4().to_string(),
+                    reason: "token_budget_exceeded".to_string(),
+                    payload: serde_json::json!({
+                        "total_tokens": self.token_usage.total_tokens,
+                        "limit": self.token_budget.limit,
+                    }),
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AggregateState impl — makes AgentState the aggregate directly
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl AggregateState for AgentState {
+    type Event = EventPayload;
+    type Command = CommandPayload;
+    type Error = SessionError;
+    type Context = SessionContext;
+    type Derived = DerivedState;
+
+    fn aggregate_type() -> &'static str {
+        "session"
+    }
+
+    fn apply(&mut self, event: &Self::Event) {
+        self.apply_core(event);
+    }
+
+    fn handle_command(
+        &self,
+        cmd: Self::Command,
+        ctx: &Self::Context,
+    ) -> Result<Vec<Self::Event>, Self::Error> {
+        self.handle(cmd, ctx)
+    }
+
+    async fn on_event(&self, event: &Self::Event, ctx: &Self::Context, span: &crate::domain::span::SpanContext) -> Option<Self::Command> {
+        // --- Mechanical I/O dispatch ---
+        match event {
+            EventPayload::LlmCallRequested(p) => {
+                if self
+                    .llm_calls
+                    .get(&p.call_id)
+                    .is_some_and(|c| c.status == LlmCallStatus::Pending)
+                {
+                    return Some(self.handle_llm_call(p, ctx).await);
+                }
+            }
+            EventPayload::ToolCallRequested(p) => {
+                if self
+                    .tool_calls
+                    .get(&p.tool_call_id)
+                    .is_some_and(|tc| tc.status == ToolCallStatus::Pending && tc.handler == ToolHandler::Runtime)
+                {
+                    return self.handle_tool_call(p, ctx).await;
+                }
+            }
+            EventPayload::SessionDone(_) => {
+                if let Some(ref delivery) = self.on_done {
+                    let result = serde_json::to_string(&self.artifacts).unwrap_or_default();
+                    if let Some(ref send) = ctx.send_to_session {
+                        send(
+                            delivery.parent_session_id,
+                            CommandPayload::CompleteToolCall {
+                                tool_call_id: delivery.tool_call_id.clone(),
+                                name: delivery.tool_name.clone(),
+                                result,
+                            },
+                            span.child(),
+                        );
+                    }
+                }
+                return None;
+            }
+            _ => {}
+        }
+
+        // --- Inlined strategy decisions ---
+        self.strategy_decision(event, ctx)
+    }
+
+    fn derived_state(&self) -> Self::Derived {
+        self.derived_state()
+    }
+
+    fn wake_at(&self) -> Option<DateTime<Utc>> {
+        self.wake_at()
+    }
+
+    fn status(&self) -> AggregateStatus {
+        self.aggregate_status()
+    }
+
+    fn label(&self) -> Option<String> {
+        self.label()
     }
 }
 

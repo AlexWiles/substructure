@@ -1,13 +1,16 @@
 use std::sync::Arc;
 
-use ractor::{call_t, Actor, ActorProcessingErr, ActorRef};
+use ractor::{Actor, ActorProcessingErr, ActorRef};
 use uuid::Uuid;
 
+use super::aggregate_actor::{AggregateError, AggregateMessage};
 use super::event_store::EventStore;
-use super::session_actor::SessionMessage;
+use super::RuntimeError;
 use crate::domain::aggregate::{Aggregate, DomainEvent};
 use crate::domain::event::ClientIdentity;
-use crate::domain::session::{AgentSession, DefaultStrategy};
+use crate::domain::session::AgentState;
+
+use super::SessionMessage;
 
 // ---------------------------------------------------------------------------
 // Notification — transient signals, never persisted
@@ -30,7 +33,7 @@ pub enum Notification {
 /// Distinguishes persisted domain events from ephemeral notifications.
 pub enum SessionUpdate {
     /// A persisted, replayable domain event.
-    Event(DomainEvent<AgentSession>),
+    Event(DomainEvent<AgentState>),
     /// A transient notification — never persisted, for real-time observers only.
     Notification(Arc<Notification>),
 }
@@ -46,15 +49,14 @@ pub struct SessionClientActor;
 
 pub struct SessionClientState {
     session_id: Uuid,
-    core: Aggregate<AgentSession>,
-    session_actor: ActorRef<SessionMessage>,
+    core: Aggregate<AgentState>,
     on_event: Option<OnSessionUpdate>,
 }
 
 pub struct SessionClientArgs {
     pub session_id: Uuid,
     pub auth: ClientIdentity,
-    pub session_actor: ActorRef<SessionMessage>,
+    pub aggregate_actor_id: Uuid,
     pub store: Arc<dyn EventStore>,
     pub on_event: Option<OnSessionUpdate>,
 }
@@ -71,15 +73,9 @@ impl Actor for SessionClientActor {
     ) -> Result<Self::State, ActorProcessingErr> {
         let core = match args.store.load(args.session_id, &args.auth.tenant_id).await {
             Ok(load) => serde_json::from_value(load.snapshot).unwrap_or_else(|_| {
-                Aggregate::new(AgentSession::new(
-                    args.session_id,
-                    Arc::new(DefaultStrategy::default()),
-                ))
+                Aggregate::new(AgentState::new(args.session_id))
             }),
-            Err(_) => Aggregate::new(AgentSession::new(
-                args.session_id,
-                Arc::new(DefaultStrategy::default()),
-            )),
+            Err(_) => Aggregate::new(AgentState::new(args.session_id)),
         };
 
         let group = super::session_group(args.session_id);
@@ -91,7 +87,6 @@ impl Actor for SessionClientActor {
         Ok(SessionClientState {
             session_id: args.session_id,
             core,
-            session_actor: args.session_actor,
             on_event: args.on_event,
         })
     }
@@ -104,14 +99,47 @@ impl Actor for SessionClientActor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SessionMessage::Execute(cmd, reply) => {
-                let result = call_t!(state.session_actor, SessionMessage::Execute, 5000, cmd);
-                match result {
-                    Ok(inner) => {
-                        let _ = reply.send(inner);
+                // Forward command to aggregate actor via registry
+                let name = super::aggregate_actor_name(state.session_id);
+                if let Some(cell) = ractor::registry::where_is(name) {
+                    let actor: ActorRef<AggregateMessage<AgentState>> = cell.into();
+                    let result = actor
+                        .call(
+                            |rpc_reply| AggregateMessage::Execute {
+                                cmd: cmd.payload,
+                                span: cmd.span,
+                                occurred_at: cmd.occurred_at,
+                                reply: rpc_reply,
+                            },
+                            Some(ractor::concurrency::Duration::from_millis(5000)),
+                        )
+                        .await;
+
+                    match result {
+                        Ok(ractor::rpc::CallResult::Success(inner)) => {
+                            let mapped = inner.map_err(|e| match e {
+                                AggregateError::Command(err) => RuntimeError::Session(err),
+                                AggregateError::Store(err) => RuntimeError::Store(err),
+                            });
+                            let _ = reply.send(mapped);
+                        }
+                        Ok(ractor::rpc::CallResult::Timeout) => {
+                            let _ = reply.send(Err(RuntimeError::ActorCall(
+                                "aggregate actor call timed out".into(),
+                            )));
+                        }
+                        Ok(ractor::rpc::CallResult::SenderError) => {
+                            let _ = reply.send(Err(RuntimeError::ActorCall(
+                                "aggregate actor sender error".into(),
+                            )));
+                        }
+                        Err(e) => {
+                            tracing::error!(session = %state.session_id, error = %e, "call to aggregate actor failed");
+                            let _ = reply.send(Err(RuntimeError::ActorCall(e.to_string())));
+                        }
                     }
-                    Err(e) => {
-                        tracing::error!(session = %state.session_id, error = %e, "call to session actor failed");
-                    }
+                } else {
+                    let _ = reply.send(Err(RuntimeError::SessionNotFound));
                 }
             }
             SessionMessage::Events(typed_events) => {
@@ -130,7 +158,7 @@ impl Actor for SessionClientActor {
                 }
             }
             SessionMessage::GetState(reply) => {
-                let _ = reply.send(state.core.state.cloned_state());
+                let _ = reply.send(state.core.state.clone());
             }
             _ => {} // Wake, Cancel, Cast, SetClientTools — not for clients
         }
