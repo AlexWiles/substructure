@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
@@ -11,26 +11,11 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::domain::aggregate::{Aggregate, AggregateState, AggregateStatus, DomainEvent};
-use crate::domain::span::SpanContext;
+use crate::domain::span::{SpanContext, TraceId};
 use crate::runtime::event_store::{Event, EventStore, StoreError};
 
 /// Default idle timeout for aggregate actors (5 minutes).
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
-
-// ---------------------------------------------------------------------------
-// Execution recording — inline instrumentation for OTel
-// ---------------------------------------------------------------------------
-
-pub struct ExecutionRecord {
-    pub span_context: SpanContext,
-    pub start_time: SystemTime,
-    pub end_time: SystemTime,
-    pub aggregate_type: &'static str,
-    pub aggregate_id: Uuid,
-    pub produced_events: Vec<Arc<Event>>,
-}
-
-pub type ExecutionRecorder = Arc<dyn Fn(ExecutionRecord) + Send + Sync>;
 
 pub enum AggregateMessage<R: AggregateState> {
     Execute {
@@ -71,7 +56,6 @@ pub struct AggregateActorState<R: AggregateState> {
     pub store: Arc<dyn EventStore>,
     pub tenant_id: String,
     pub context: R::Context,
-    pub recorder: Option<ExecutionRecorder>,
     idle_timeout: Duration,
     idle_generation: u64,
     idle_timer: Option<AbortHandle>,
@@ -83,7 +67,6 @@ pub struct AggregateActorArgs<R: AggregateState> {
     pub tenant_id: String,
     pub init: Box<dyn Fn(Uuid) -> R + Send + Sync>,
     pub context_init: Box<dyn FnOnce(&R) -> Pin<Box<dyn Future<Output = R::Context> + Send>> + Send>,
-    pub recorder: Option<ExecutionRecorder>,
     pub idle_timeout: Option<Duration>,
 }
 
@@ -157,6 +140,18 @@ impl<R: AggregateState> AggregateActor<R> {
     }
 }
 
+/// If the aggregate already has a trace_id and the incoming span is a
+/// parentless root (e.g. a wake), adopt it into the aggregate's trace so
+/// that wake-triggered work appears in the session's existing trace.
+fn adopt_trace(mut span: SpanContext, aggregate_trace_id: Option<TraceId>) -> SpanContext {
+    if let Some(tid) = aggregate_trace_id {
+        if span.parent_span_id.is_none() {
+            span.trace_id = tid;
+        }
+    }
+    span
+}
+
 /// Reset (or start) the idle shutdown timer. Each call increments the
 /// generation counter so that stale timers are ignored when they fire.
 fn reset_idle_timer<R: AggregateState>(
@@ -183,15 +178,16 @@ async fn execute<R: AggregateState>(
     cmd: R::Command,
     span: SpanContext,
     occurred_at: DateTime<Utc>,
+    start_time: DateTime<Utc>,
 ) -> Result<Vec<Arc<Event>>, AggregateError<R::Error>> {
     // Pure decision — no mutation
-    let payloads = state
+    let emits = state
         .aggregate
         .state
         .handle_command(cmd, &state.context)
         .map_err(AggregateError::Command)?;
 
-    if payloads.is_empty() {
+    if emits.is_empty() {
         return Ok(vec![]);
     }
 
@@ -199,7 +195,7 @@ async fn execute<R: AggregateState>(
 
     // Mutation: apply events and wrap as domain events
     let domain_events = state.aggregate.commit(
-        payloads,
+        emits,
         state.aggregate_id,
         span,
         occurred_at,
@@ -207,9 +203,10 @@ async fn execute<R: AggregateState>(
     );
 
     let new_version = state.aggregate.stream_version;
+    let end_time = Utc::now();
     let raw_events: Vec<Event> = domain_events
         .into_iter()
-        .map(|e| e.into_raw())
+        .map(|e| e.into_raw(start_time, end_time))
         .collect();
 
     let snapshot_value = serde_json::to_value(&state.aggregate)
@@ -257,7 +254,6 @@ impl<R: AggregateState> Actor for AggregateActor<R> {
             store: args.store,
             tenant_id: args.tenant_id,
             context,
-            recorder: args.recorder,
             idle_timeout: args.idle_timeout.unwrap_or(DEFAULT_IDLE_TIMEOUT),
             idle_generation: 0,
             idle_timer: None,
@@ -293,21 +289,9 @@ impl<R: AggregateState> Actor for AggregateActor<R> {
                 occurred_at,
                 reply,
             } => {
-                let start = SystemTime::now();
-                let span_copy = span.clone();
-                let result = execute(state, cmd, span, occurred_at).await;
-                if let (Some(recorder), Ok(produced)) = (&state.recorder, &result) {
-                    if !produced.is_empty() {
-                        recorder(ExecutionRecord {
-                            span_context: span_copy,
-                            start_time: start,
-                            end_time: SystemTime::now(),
-                            aggregate_type: R::aggregate_type(),
-                            aggregate_id: state.aggregate_id,
-                            produced_events: produced.clone(),
-                        });
-                    }
-                }
+                let span = adopt_trace(span, state.aggregate.trace_id);
+                let start = Utc::now();
+                let result = execute(state, cmd, span, occurred_at, start).await;
                 let _ = reply.send(result);
             }
             AggregateMessage::Cast {
@@ -315,21 +299,9 @@ impl<R: AggregateState> Actor for AggregateActor<R> {
                 span,
                 occurred_at,
             } => {
-                let start = SystemTime::now();
-                let span_copy = span.clone();
-                let result = execute(state, cmd, span, occurred_at).await;
-                if let (Some(recorder), Ok(produced)) = (&state.recorder, &result) {
-                    if !produced.is_empty() {
-                        recorder(ExecutionRecord {
-                            span_context: span_copy,
-                            start_time: start,
-                            end_time: SystemTime::now(),
-                            aggregate_type: R::aggregate_type(),
-                            aggregate_id: state.aggregate_id,
-                            produced_events: produced.clone(),
-                        });
-                    }
-                }
+                let span = adopt_trace(span, state.aggregate.trace_id);
+                let start = Utc::now();
+                let _ = execute(state, cmd, span, occurred_at, start).await;
             }
             AggregateMessage::GetState(reply) => {
                 let _ = reply.send(state.aggregate.state.clone());
@@ -339,8 +311,7 @@ impl<R: AggregateState> Actor for AggregateActor<R> {
             }
             AggregateMessage::Events(typed_events) => {
                 for event in &typed_events {
-                    // Start timing before on_event — it does the actual I/O
-                    let start = SystemTime::now();
+                    let start = Utc::now();
                     if let Some(cmd) = state.aggregate.state.on_event(&event.payload, &state.context, &event.span).await {
                         // Use triggering event's serde type tag as span name
                         let event_type = serde_json::to_value(&event.payload)
@@ -348,19 +319,7 @@ impl<R: AggregateState> Actor for AggregateActor<R> {
                             .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(String::from))
                             .unwrap_or_else(|| "reaction".to_string());
                         let child_span = event.span.child(&event_type);
-                        let result = execute(state, cmd, child_span.clone(), Utc::now()).await;
-
-                        // Record the full on_event + execute cycle for OTel
-                        if let (Some(recorder), Ok(produced)) = (&state.recorder, &result) {
-                            recorder(ExecutionRecord {
-                                span_context: child_span,
-                                start_time: start,
-                                end_time: SystemTime::now(),
-                                aggregate_type: R::aggregate_type(),
-                                aggregate_id: state.aggregate_id,
-                                produced_events: produced.clone(),
-                            });
-                        }
+                        let _ = execute(state, cmd, child_span, Utc::now(), start).await;
                     }
                 }
             }

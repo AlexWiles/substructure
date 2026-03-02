@@ -279,6 +279,7 @@ impl EventTranslator {
 mod tests {
     use super::*;
     use crate::domain::event::*;
+    use crate::domain::span::SpanContext;
     use chrono::Utc;
     use uuid::Uuid;
 
@@ -351,6 +352,7 @@ mod tests {
                 call_id: call_id.clone(),
                 chunk_index: 0,
                 text: "Hello".into(),
+                span: SpanContext::root(),
             },
         ));
         assert_eq!(events.len(), 2);
@@ -363,6 +365,7 @@ mod tests {
                 call_id: call_id.clone(),
                 chunk_index: 1,
                 text: " world".into(),
+                span: SpanContext::root(),
             },
         ));
         assert_eq!(events.len(), 1);

@@ -782,6 +782,7 @@ mod tests {
                 on_done: None,
             }),
             derived: None,
+            metadata: Default::default(),
         };
         let mut snapshot = Aggregate::new(AgentState::new(session_id));
         snapshot.apply(
@@ -789,7 +790,8 @@ mod tests {
             domain_event.sequence,
             domain_event.occurred_at,
         );
-        (vec![domain_event.into_raw()], snapshot)
+        let now = chrono::Utc::now();
+        (vec![domain_event.into_raw(now, now)], snapshot)
     }
 
     async fn temp_store() -> SqliteEventStore {

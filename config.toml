@@ -38,3 +38,5 @@ name = "filesystem"
 transport.type = "stdio"
 transport.command = "npx"
 transport.args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+
+

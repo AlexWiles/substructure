@@ -1102,7 +1102,7 @@ impl AggregateState for AgentState {
         &self,
         cmd: Self::Command,
         ctx: &Self::Context,
-    ) -> Result<Vec<Self::Event>, Self::Error> {
+    ) -> Result<Vec<crate::domain::aggregate::Emit<Self::Event>>, Self::Error> {
         self.handle(cmd, ctx)
     }
 

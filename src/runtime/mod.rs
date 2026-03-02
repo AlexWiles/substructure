@@ -187,8 +187,6 @@ struct RuntimeState {
     agents: HashMap<String, AgentConfig>,
     llm_provider: Arc<dyn LlmClientProvider>,
     budget_policies: Vec<BudgetPolicyConfig>,
-    #[cfg(feature = "otel")]
-    otel_actor: Option<ActorRef<otel::OtelMsg>>,
 }
 
 struct RuntimeArgs {
@@ -565,24 +563,12 @@ impl RuntimeState {
             let auth_for_ctx = auth.clone();
             let agent_for_ctx = agent.clone();
 
-            // Build execution recorder for OTel inline instrumentation
-            #[cfg(feature = "otel")]
-            let recorder = self.otel_actor.as_ref().map(|otel| {
-                let otel = otel.clone();
-                Arc::new(move |record| {
-                    let _ = otel.send_message(otel::OtelMsg::Record(record));
-                }) as aggregate_actor::ExecutionRecorder
-            });
-            #[cfg(not(feature = "otel"))]
-            let recorder: Option<aggregate_actor::ExecutionRecorder> = None;
-
             let aggregate_handle = aggregate_actor::spawn_aggregate_actor(
                 aggregate_actor::AggregateActorArgs {
                     aggregate_id: session_id,
                     store: self.store.clone(),
                     tenant_id: auth.tenant_id.clone(),
                     init: Box::new(AgentState::new),
-                    recorder,
                     idle_timeout: None,
                     context_init: Box::new(move |state| {
                         let resolved_agent = state.agent.clone().unwrap_or(agent_for_ctx);
@@ -819,24 +805,19 @@ impl Actor for RuntimeActor {
             .map_err(|e| format!("failed to spawn wake scheduler: {e}"))?;
 
         #[cfg(feature = "otel")]
-        let otel_actor = if let Some(otel_config) = args.otel {
+        if let Some(otel_config) = args.otel {
             tracing::debug!("spawning otel exporter");
-            match otel::spawn_otel_exporter(
+            if let Err(e) = otel::spawn_otel_exporter(
                 &otel_config.endpoint,
                 otel_config.service_name,
                 myself.get_cell(),
+                &*args.store,
             )
             .await
             {
-                Ok(actor) => Some(actor),
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to start otel exporter, continuing without it");
-                    None
-                }
+                tracing::warn!(error = %e, "failed to start otel exporter, continuing without it");
             }
-        } else {
-            None
-        };
+        }
 
         let state = RuntimeState {
             myself: myself.clone(),
@@ -844,8 +825,6 @@ impl Actor for RuntimeActor {
             agents: args.agents,
             llm_provider: args.llm_provider,
             budget_policies: args.budget_policies,
-            #[cfg(feature = "otel")]
-            otel_actor,
         };
 
         Ok(state)

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
@@ -5,6 +7,58 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::span::{SpanContext, TraceId};
+
+// ---------------------------------------------------------------------------
+// Emit<E> — event payload wrapper with optional metadata
+// ---------------------------------------------------------------------------
+
+/// Wraps an event payload with optional key-value metadata for observability.
+///
+/// Metadata flows through the event pipeline and is persisted with events.
+/// The OTel exporter copies metadata to span attributes generically.
+///
+/// Structured fields (`error`, `label`) map to OTel span-level properties
+/// and are serialized into well-known metadata keys for persistence.
+pub struct Emit<E> {
+    pub event: E,
+    pub meta: HashMap<String, String>,
+    /// Error message — sets OTel span status to Error (red in Jaeger).
+    pub error: Option<String>,
+    /// Human-readable label appended to span name (e.g. tool name, model).
+    pub label: Option<String>,
+}
+
+impl<E> Emit<E> {
+    pub fn new(event: E) -> Self {
+        Self {
+            event,
+            meta: HashMap::new(),
+            error: None,
+            label: None,
+        }
+    }
+
+    pub fn with(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.meta.insert(key.into(), value.into());
+        self
+    }
+
+    pub fn error(mut self, message: impl Into<String>) -> Self {
+        self.error = Some(message.into());
+        self
+    }
+
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+}
+
+impl<E> From<E> for Emit<E> {
+    fn from(event: E) -> Self {
+        Self::new(event)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // AggregateState — unified trait for event sourced aggregates
@@ -32,7 +86,7 @@ pub trait AggregateState: Sized + Serialize + DeserializeOwned + Clone + Send + 
 
     fn aggregate_type() -> &'static str;
     fn apply(&mut self, event: &Self::Event);
-    fn handle_command(&self, cmd: Self::Command, ctx: &Self::Context) -> Result<Vec<Self::Event>, Self::Error>;
+    fn handle_command(&self, cmd: Self::Command, ctx: &Self::Context) -> Result<Vec<Emit<Self::Event>>, Self::Error>;
     async fn on_event(&self, event: &Self::Event, ctx: &Self::Context, span: &SpanContext) -> Option<Self::Command>;
     /// Compute a derived-state snapshot (stamped on events for query optimization).
     fn derived_state(&self) -> Self::Derived;
@@ -105,16 +159,16 @@ impl<R: AggregateState> Aggregate<R> {
     /// Apply event payloads to the aggregate and wrap them as domain events.
     ///
     /// This is the mutation step — call it after the pure decision
-    /// (`handle_command`) has produced payloads.
+    /// (`handle_command`) has produced emits.
     pub fn commit(
         &mut self,
-        payloads: Vec<R::Event>,
+        emits: Vec<Emit<R::Event>>,
         aggregate_id: Uuid,
         span: SpanContext,
         occurred_at: DateTime<Utc>,
         tenant_id: &str,
     ) -> Vec<DomainEvent<R>> {
-        if payloads.is_empty() {
+        if emits.is_empty() {
             return vec![];
         }
 
@@ -126,26 +180,36 @@ impl<R: AggregateState> Aggregate<R> {
         let base_seq = self.stream_version + 1;
 
         // Apply each payload to the state
-        for (i, payload) in payloads.iter().enumerate() {
-            self.apply(payload, base_seq + i as u64, occurred_at);
+        for (i, emit) in emits.iter().enumerate() {
+            self.apply(&emit.event, base_seq + i as u64, occurred_at);
         }
 
         // Compute derived state after all events applied
         let derived = self.state.derived_state();
 
-        // Wrap payloads as domain events
-        payloads
+        // Wrap emits as domain events, merging structured fields into metadata
+        emits
             .into_iter()
             .enumerate()
-            .map(|(i, payload)| DomainEvent {
-                id: Uuid::new_v4(),
-                tenant_id: tenant_id.to_string(),
-                aggregate_id,
-                sequence: base_seq + i as u64,
-                span: span.clone(),
-                occurred_at,
-                payload,
-                derived: Some(derived.clone()),
+            .map(|(i, emit)| {
+                let mut metadata = emit.meta;
+                if let Some(error) = emit.error {
+                    metadata.insert("span.error".into(), error);
+                }
+                if let Some(label) = emit.label {
+                    metadata.insert("span.label".into(), label);
+                }
+                DomainEvent {
+                    id: Uuid::new_v4(),
+                    tenant_id: tenant_id.to_string(),
+                    aggregate_id,
+                    sequence: base_seq + i as u64,
+                    span: span.clone(),
+                    occurred_at,
+                    payload: emit.event,
+                    derived: Some(derived.clone()),
+                    metadata,
+                }
             })
             .collect()
     }
@@ -169,11 +233,15 @@ pub struct DomainEvent<R: AggregateState> {
     pub occurred_at: DateTime<Utc>,
     pub payload: R::Event,
     pub derived: Option<R::Derived>,
+    pub metadata: HashMap<String, String>,
 }
 
 impl<R: AggregateState> DomainEvent<R> {
     /// Convert to a store-level raw event by serializing payload and derived to Values.
-    pub fn into_raw(self) -> crate::runtime::event_store::Event {
+    ///
+    /// `start_time`/`end_time` are the wall-clock bounds of the `execute()` call
+    /// that produced this event, used for OTel trace reconstruction.
+    pub fn into_raw(self, start_time: DateTime<Utc>, end_time: DateTime<Utc>) -> crate::runtime::event_store::Event {
         let payload_value =
             serde_json::to_value(&self.payload).expect("event payload serialization");
 
@@ -200,6 +268,9 @@ impl<R: AggregateState> DomainEvent<R> {
             occurred_at: self.occurred_at,
             payload: payload_value,
             derived: derived_value,
+            metadata: self.metadata,
+            start_time,
+            end_time,
             wake_at: None,
         }
     }
@@ -222,6 +293,7 @@ impl<R: AggregateState> DomainEvent<R> {
             occurred_at: raw.occurred_at,
             payload,
             derived,
+            metadata: raw.metadata.clone(),
         })
     }
 }

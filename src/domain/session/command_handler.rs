@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 
+use crate::domain::aggregate::Emit;
 use crate::domain::event::*;
 use crate::domain::session::agent_state::ToolCallState;
 
@@ -117,7 +118,7 @@ pub enum SessionError {
 // ---------------------------------------------------------------------------
 
 impl AgentState {
-    pub fn handle(&self, cmd: CommandPayload, ctx: &SessionContext) -> Result<Vec<EventPayload>, SessionError> {
+    pub fn handle(&self, cmd: CommandPayload, ctx: &SessionContext) -> Result<Vec<Emit<EventPayload>>, SessionError> {
         match (&self.agent, cmd) {
             (
                 None,
@@ -126,11 +127,12 @@ impl AgentState {
                     auth,
                     on_done,
                 },
-            ) => Ok(vec![EventPayload::SessionCreated(SessionCreated {
-                agent,
+            ) => Ok(vec![Emit::new(EventPayload::SessionCreated(SessionCreated {
+                agent: agent.clone(),
                 auth,
                 on_done,
-            })]),
+            }))
+            .label(&agent.name)]),
             (Some(_), CommandPayload::CreateSession { .. }) => {
                 Err(SessionError::SessionAlreadyCreated)
             }
@@ -141,7 +143,7 @@ impl AgentState {
     }
 
     /// Command validation using AgentState for idempotency guards.
-    fn handle_active(&self, cmd: CommandPayload, ctx: &SessionContext) -> Result<Vec<EventPayload>, SessionError> {
+    fn handle_active(&self, cmd: CommandPayload, ctx: &SessionContext) -> Result<Vec<Emit<EventPayload>>, SessionError> {
         let state = self;
         match cmd {
             CommandPayload::CreateSession { .. } => {
@@ -151,17 +153,21 @@ impl AgentState {
                 IncomingMessage::User { content } => match state.status {
                     SessionStatus::Interrupted { .. } => Err(SessionError::SessionInterrupted),
                     SessionStatus::Active => Err(SessionError::SessionBusy),
-                    _ => Ok(vec![EventPayload::MessageUser(MessageUser {
-                        message: Message {
-                            role: Role::User,
-                            content: Some(content),
-                            tool_calls: Vec::new(),
-                            tool_call_id: None,
-                            call_id: None,
-                            token_count: None,
-                        },
-                        stream,
-                    })]),
+                    _ => {
+                        let agent_name = state.agent.as_ref().map(|a| a.name.as_str()).unwrap_or("unknown");
+                        Ok(vec![Emit::new(EventPayload::MessageUser(MessageUser {
+                            message: Message {
+                                role: Role::User,
+                                content: Some(content),
+                                tool_calls: Vec::new(),
+                                tool_call_id: None,
+                                call_id: None,
+                                token_count: None,
+                            },
+                            stream,
+                        }))
+                        .label(agent_name)])
+                    },
                 },
                 IncomingMessage::ToolResult {
                     tool_call_id,
@@ -185,17 +191,26 @@ impl AgentState {
                             ..
                         }) => {
                             if let Some(err) = error {
-                                Ok(vec![EventPayload::ToolCallErrored(ToolCallErrored {
-                                    tool_call_id,
-                                    name: name.clone(),
-                                    error: err,
-                                })])
+                                Ok(vec![Emit::new(EventPayload::ToolCallErrored(
+                                    ToolCallErrored {
+                                        tool_call_id,
+                                        name: name.clone(),
+                                        error: err.clone(),
+                                    },
+                                ))
+                                .with("tool.name", name.as_str())
+                                .label(name.as_str())
+                                .error(err)])
                             } else {
-                                Ok(vec![EventPayload::ToolCallCompleted(ToolCallCompleted {
-                                    tool_call_id,
-                                    name: name.clone(),
-                                    result: content,
-                                })])
+                                Ok(vec![Emit::new(EventPayload::ToolCallCompleted(
+                                    ToolCallCompleted {
+                                        tool_call_id,
+                                        name: name.clone(),
+                                        result: content,
+                                    },
+                                ))
+                                .with("tool.name", name.as_str())
+                                .label(name.as_str())])
                             }
                         }
                     }
@@ -208,7 +223,7 @@ impl AgentState {
                 deadline,
             } => {
                 if state.is_over_budget() {
-                    return Ok(vec![EventPayload::BudgetExceeded]);
+                    return Ok(vec![EventPayload::BudgetExceeded.into()]);
                 }
                 let has_pending = state
                     .llm_calls
@@ -235,7 +250,8 @@ impl AgentState {
                         request,
                         stream,
                         deadline,
-                    })])
+                    })
+                    .into()])
                 } else {
                     Ok(vec![])
                 }
@@ -247,11 +263,33 @@ impl AgentState {
                         let (content, tool_calls, token_count) =
                             extract_assistant_message(&response);
 
-                        let mut events = vec![
-                            EventPayload::LlmCallCompleted(LlmCallCompleted {
+                        // Extract metadata before moving response
+                        let model = match &response {
+                            LlmResponse::OpenAi(r) => r.model.clone(),
+                        };
+                        let usage = match &response {
+                            LlmResponse::OpenAi(r) => r.usage.clone(),
+                        };
+
+                        let mut completed = Emit::new(EventPayload::LlmCallCompleted(
+                            LlmCallCompleted {
                                 call_id: call_id.clone(),
                                 response,
-                            }),
+                            },
+                        ))
+                        .with("llm.model", &model)
+                        .label(&model);
+                        if let Some(u) = usage {
+                            completed = completed
+                                .with("llm.tokens.prompt", u.prompt_tokens.to_string())
+                                .with(
+                                    "llm.tokens.completion",
+                                    u.completion_tokens.to_string(),
+                                );
+                        }
+
+                        let mut events = vec![
+                            completed,
                             EventPayload::MessageAssistant(MessageAssistant {
                                 call_id: call_id.clone(),
                                 message: Message {
@@ -262,17 +300,26 @@ impl AgentState {
                                     call_id: Some(call_id),
                                     token_count,
                                 },
-                            }),
+                            })
+                            .into(),
                         ];
                         for tc in &tool_calls {
-                            events.push(EventPayload::ToolCallRequested(ToolCallRequested {
-                                tool_call_id: tc.id.clone(),
-                                name: tc.name.clone(),
-                                arguments: tc.arguments.clone(),
-                                deadline: self.tool_deadline(),
-                                handler: Default::default(),
-                                meta: self.tool_call_meta(&tc.name, &tc.id, &ctx.mcp_tools),
-                            }));
+                            events.push(
+                                Emit::new(EventPayload::ToolCallRequested(ToolCallRequested {
+                                    tool_call_id: tc.id.clone(),
+                                    name: tc.name.clone(),
+                                    arguments: tc.arguments.clone(),
+                                    deadline: self.tool_deadline(),
+                                    handler: Default::default(),
+                                    meta: self.tool_call_meta(
+                                        &tc.name,
+                                        &tc.id,
+                                        &ctx.mcp_tools,
+                                    ),
+                                }))
+                                .with("tool.name", &tc.name)
+                                .label(&tc.name),
+                            );
                         }
                         Ok(events)
                     }
@@ -288,12 +335,15 @@ impl AgentState {
             } => match state.llm_calls.get(&call_id).map(|c| &c.status) {
                 // Pending call — fail it
                 Some(&LlmCallStatus::Pending) => {
-                    Ok(vec![EventPayload::LlmCallErrored(LlmCallErrored {
-                        call_id,
-                        error,
-                        retryable,
-                        source,
-                    })])
+                    Ok(vec![Emit::new(EventPayload::LlmCallErrored(
+                        LlmCallErrored {
+                            call_id,
+                            error: error.clone(),
+                            retryable,
+                            source,
+                        },
+                    ))
+                    .error(error)])
                 }
                 // Not pending or unknown — skip
                 _ => Ok(vec![]),
@@ -310,14 +360,18 @@ impl AgentState {
                 // New tool call
                 None => {
                     let meta = self.tool_call_meta(&name, &tool_call_id, &ctx.mcp_tools);
-                    Ok(vec![EventPayload::ToolCallRequested(ToolCallRequested {
-                        tool_call_id,
-                        name,
-                        arguments,
-                        deadline,
-                        handler,
-                        meta,
-                    })])
+                    Ok(vec![Emit::new(EventPayload::ToolCallRequested(
+                        ToolCallRequested {
+                            tool_call_id,
+                            name: name.clone(),
+                            arguments,
+                            deadline,
+                            handler,
+                            meta,
+                        },
+                    ))
+                    .with("tool.name", &name)
+                    .label(name)])
                 }
             },
             CommandPayload::CompleteToolCall {
@@ -327,11 +381,13 @@ impl AgentState {
             } => match state.tool_calls.get(&tool_call_id).map(|tc| &tc.status) {
                 // Pending — complete and emit tool message
                 Some(&ToolCallStatus::Pending) => Ok(vec![
-                    EventPayload::ToolCallCompleted(ToolCallCompleted {
+                    Emit::new(EventPayload::ToolCallCompleted(ToolCallCompleted {
                         tool_call_id: tool_call_id.clone(),
-                        name,
+                        name: name.clone(),
                         result: result.clone(),
-                    }),
+                    }))
+                    .with("tool.name", &name)
+                    .label(&name),
                     EventPayload::MessageTool(MessageTool {
                         message: Message {
                             role: Role::Tool,
@@ -341,7 +397,8 @@ impl AgentState {
                             call_id: None,
                             token_count: None,
                         },
-                    }),
+                    })
+                    .into(),
                 ]),
                 // Not pending or unknown — skip
                 _ => Ok(vec![]),
@@ -355,11 +412,14 @@ impl AgentState {
                 Some(&ToolCallStatus::Pending) => {
                     let error_content = format!("Error: {}", error);
                     Ok(vec![
-                        EventPayload::ToolCallErrored(ToolCallErrored {
+                        Emit::new(EventPayload::ToolCallErrored(ToolCallErrored {
                             tool_call_id: tool_call_id.clone(),
-                            name,
-                            error,
-                        }),
+                            name: name.clone(),
+                            error: error.clone(),
+                        }))
+                        .with("tool.name", &name)
+                        .label(&name)
+                        .error(error),
                         EventPayload::MessageTool(MessageTool {
                             message: Message {
                                 role: Role::Tool,
@@ -369,7 +429,8 @@ impl AgentState {
                                 call_id: None,
                                 token_count: None,
                             },
-                        }),
+                        })
+                        .into(),
                     ])
                 }
                 // Not pending or unknown — skip
@@ -386,7 +447,8 @@ impl AgentState {
                     interrupt_id,
                     reason,
                     payload,
-                })]),
+                })
+                .into()]),
             },
             CommandPayload::ResumeInterrupt {
                 interrupt_id,
@@ -397,7 +459,8 @@ impl AgentState {
                     Ok(vec![EventPayload::InterruptResumed(InterruptResumed {
                         interrupt_id,
                         payload,
-                    })])
+                    })
+                    .into()])
                 }
                 // No active interrupt or wrong ID — skip
                 _ => Ok(vec![]),
@@ -405,14 +468,17 @@ impl AgentState {
             CommandPayload::UpdateStrategyState { state } => {
                 Ok(vec![EventPayload::StrategyStateChanged(
                     StrategyStateChanged { state },
-                )])
+                )
+                .into()])
             }
             CommandPayload::SyncConversation { messages, stream } => {
                 self.handle_sync_conversation(messages, stream, ctx)
             }
-            CommandPayload::CancelSession => Ok(vec![EventPayload::SessionCancelled]),
+            CommandPayload::CancelSession => Ok(vec![EventPayload::SessionCancelled.into()]),
             CommandPayload::MarkDone { artifacts } => {
-                Ok(vec![EventPayload::SessionDone(SessionDone { artifacts })])
+                Ok(vec![
+                    EventPayload::SessionDone(SessionDone { artifacts }).into(),
+                ])
             }
             CommandPayload::Wake => self.handle_wake(ctx),
         }
@@ -422,19 +488,22 @@ impl AgentState {
     // Wake — inspects state and emits events for timeouts, retries, recovery
     // -----------------------------------------------------------------------
 
-    fn handle_wake(&self, _ctx: &SessionContext) -> Result<Vec<EventPayload>, SessionError> {
+    fn handle_wake(&self, _ctx: &SessionContext) -> Result<Vec<Emit<EventPayload>>, SessionError> {
         let now = Utc::now();
         let state = self;
 
         // 1. Timed-out pending LLM calls → fail
         for call in state.llm_calls.values() {
             if call.status == LlmCallStatus::Pending && call.deadline <= now {
-                return Ok(vec![EventPayload::LlmCallErrored(LlmCallErrored {
-                    call_id: call.call_id.clone(),
-                    error: "deadline exceeded".to_string(),
-                    retryable: true,
-                    source: None,
-                })]);
+                return Ok(vec![Emit::new(EventPayload::LlmCallErrored(
+                    LlmCallErrored {
+                        call_id: call.call_id.clone(),
+                        error: "deadline exceeded".to_string(),
+                        retryable: true,
+                        source: None,
+                    },
+                ))
+                .error("deadline exceeded")]);
             }
         }
 
@@ -453,20 +522,29 @@ impl AgentState {
                         .find(|t| t.id == tc.tool_call_id)
                         .map(|t| t.arguments.clone())
                         .unwrap_or_default();
-                    return Ok(vec![EventPayload::ToolCallRequested(ToolCallRequested {
+                    return Ok(vec![Emit::new(EventPayload::ToolCallRequested(
+                        ToolCallRequested {
+                            tool_call_id: tc.tool_call_id.clone(),
+                            name: tc.name.clone(),
+                            arguments,
+                            deadline: self.tool_deadline(),
+                            handler: tc.handler.clone(),
+                            meta: tc.meta.clone(),
+                        },
+                    ))
+                    .with("tool.name", &tc.name)
+                    .label(&tc.name)]);
+                }
+                return Ok(vec![Emit::new(EventPayload::ToolCallErrored(
+                    ToolCallErrored {
                         tool_call_id: tc.tool_call_id.clone(),
                         name: tc.name.clone(),
-                        arguments,
-                        deadline: self.tool_deadline(),
-                        handler: tc.handler.clone(),
-                        meta: tc.meta.clone(),
-                    })]);
-                }
-                return Ok(vec![EventPayload::ToolCallErrored(ToolCallErrored {
-                    tool_call_id: tc.tool_call_id.clone(),
-                    name: tc.name.clone(),
-                    error: "deadline exceeded".to_string(),
-                })]);
+                        error: "deadline exceeded".to_string(),
+                    },
+                ))
+                .with("tool.name", &tc.name)
+                .label(&tc.name)
+                .error("deadline exceeded")]);
             }
         }
 
@@ -476,15 +554,18 @@ impl AgentState {
                 if let Some(next_at) = call.retry.next_at {
                     if next_at <= now {
                         if state.is_over_budget() {
-                            return Ok(vec![EventPayload::BudgetExceeded]);
+                            return Ok(vec![EventPayload::BudgetExceeded.into()]);
                         }
                         if let Some(request) = state.build_llm_request(None) {
-                            return Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {
-                                call_id: call.call_id.clone(),
-                                request,
-                                stream: true,
-                                deadline: self.llm_deadline(),
-                            })]);
+                            return Ok(vec![EventPayload::LlmCallRequested(
+                                LlmCallRequested {
+                                    call_id: call.call_id.clone(),
+                                    request,
+                                    stream: true,
+                                    deadline: self.llm_deadline(),
+                                },
+                            )
+                            .into()]);
                         }
                     }
                 }
@@ -497,20 +578,24 @@ impl AgentState {
                 && tc.deadline > now
                 && tc.handler != ToolHandler::Client
             {
-                return Ok(vec![EventPayload::ToolCallRequested(ToolCallRequested {
-                    tool_call_id: tc.tool_call_id.clone(),
-                    name: tc.name.clone(),
-                    arguments: state
-                        .messages
-                        .iter()
-                        .flat_map(|m| m.tool_calls.iter())
-                        .find(|t| t.id == tc.tool_call_id)
-                        .map(|t| t.arguments.clone())
-                        .unwrap_or_default(),
-                    deadline: tc.deadline,
-                    handler: tc.handler.clone(),
-                    meta: tc.meta.clone(),
-                })]);
+                return Ok(vec![Emit::new(EventPayload::ToolCallRequested(
+                    ToolCallRequested {
+                        tool_call_id: tc.tool_call_id.clone(),
+                        name: tc.name.clone(),
+                        arguments: state
+                            .messages
+                            .iter()
+                            .flat_map(|m| m.tool_calls.iter())
+                            .find(|t| t.id == tc.tool_call_id)
+                            .map(|t| t.arguments.clone())
+                            .unwrap_or_default(),
+                        deadline: tc.deadline,
+                        handler: tc.handler.clone(),
+                        meta: tc.meta.clone(),
+                    },
+                ))
+                .with("tool.name", &tc.name)
+                .label(&tc.name)]);
             }
         }
 
@@ -518,14 +603,15 @@ impl AgentState {
         for call in state.llm_calls.values() {
             if call.status == LlmCallStatus::Pending && call.deadline > now {
                 if state.is_over_budget() {
-                    return Ok(vec![EventPayload::BudgetExceeded]);
+                    return Ok(vec![EventPayload::BudgetExceeded.into()]);
                 }
                 return Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {
                     call_id: call.call_id.clone(),
                     request: call.request.clone(),
                     stream: true,
                     deadline: call.deadline,
-                })]);
+                })
+                .into()]);
             }
         }
 
@@ -539,7 +625,7 @@ impl AgentState {
                 .any(|c| c.status == LlmCallStatus::Pending)
         {
             if state.is_over_budget() {
-                return Ok(vec![EventPayload::BudgetExceeded]);
+                return Ok(vec![EventPayload::BudgetExceeded.into()]);
             }
             if let Some(request) = state.build_llm_request(None) {
                 return Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {
@@ -547,7 +633,8 @@ impl AgentState {
                     request,
                     stream: true,
                     deadline: self.llm_deadline(),
-                })]);
+                })
+                .into()]);
             }
         }
 
@@ -563,7 +650,7 @@ impl AgentState {
         incoming: Vec<Message>,
         stream: bool,
         ctx: &SessionContext,
-    ) -> Result<Vec<EventPayload>, SessionError> {
+    ) -> Result<Vec<Emit<EventPayload>>, SessionError> {
         let state = self;
 
         // Verify prefix matches current state
@@ -587,26 +674,36 @@ impl AgentState {
         for msg in delta {
             match msg.role {
                 Role::User => {
-                    events.push(EventPayload::MessageUser(MessageUser {
-                        message: msg.clone(),
-                        stream,
-                    }));
+                    events.push(
+                        EventPayload::MessageUser(MessageUser {
+                            message: msg.clone(),
+                            stream,
+                        })
+                        .into(),
+                    );
                 }
                 Role::Assistant => {
                     let call_id = new_call_id();
-                    events.push(EventPayload::MessageAssistant(MessageAssistant {
-                        call_id: call_id.clone(),
-                        message: msg.clone(),
-                    }));
+                    events.push(
+                        EventPayload::MessageAssistant(MessageAssistant {
+                            call_id: call_id.clone(),
+                            message: msg.clone(),
+                        })
+                        .into(),
+                    );
                     for tc in &msg.tool_calls {
-                        events.push(EventPayload::ToolCallRequested(ToolCallRequested {
-                            tool_call_id: tc.id.clone(),
-                            name: tc.name.clone(),
-                            arguments: tc.arguments.clone(),
-                            deadline: self.tool_deadline(),
-                            handler: Default::default(),
-                            meta: self.tool_call_meta(&tc.name, &tc.id, &ctx.mcp_tools),
-                        }));
+                        events.push(
+                            Emit::new(EventPayload::ToolCallRequested(ToolCallRequested {
+                                tool_call_id: tc.id.clone(),
+                                name: tc.name.clone(),
+                                arguments: tc.arguments.clone(),
+                                deadline: self.tool_deadline(),
+                                handler: Default::default(),
+                                meta: self.tool_call_meta(&tc.name, &tc.id, &ctx.mcp_tools),
+                            }))
+                            .with("tool.name", &tc.name)
+                            .label(&tc.name),
+                        );
                     }
                 }
                 Role::Tool => {
@@ -624,15 +721,22 @@ impl AgentState {
                             })
                             .unwrap_or_default();
 
-                        events.push(EventPayload::ToolCallCompleted(ToolCallCompleted {
-                            tool_call_id: tc_id.clone(),
-                            name,
-                            result: msg.content.clone().unwrap_or_default(),
-                        }));
+                        events.push(
+                            Emit::new(EventPayload::ToolCallCompleted(ToolCallCompleted {
+                                tool_call_id: tc_id.clone(),
+                                name: name.clone(),
+                                result: msg.content.clone().unwrap_or_default(),
+                            }))
+                            .with("tool.name", &name)
+                            .label(name),
+                        );
                     }
-                    events.push(EventPayload::MessageTool(MessageTool {
-                        message: msg.clone(),
-                    }));
+                    events.push(
+                        EventPayload::MessageTool(MessageTool {
+                            message: msg.clone(),
+                        })
+                        .into(),
+                    );
                 }
                 Role::System => {}
             }
@@ -735,10 +839,10 @@ mod tests {
         state
     }
 
-    fn apply_events(state: &mut Aggregate<AgentState>, payloads: Vec<EventPayload>) {
+    fn apply_events(state: &mut Aggregate<AgentState>, emits: Vec<Emit<EventPayload>>) {
         let seq = state.last_applied.unwrap_or(0);
-        for (i, payload) in payloads.iter().enumerate() {
-            state.apply(payload, seq + 1 + i as u64, Utc::now());
+        for (i, emit) in emits.iter().enumerate() {
+            state.apply(&emit.event, seq + 1 + i as u64, Utc::now());
         }
     }
 
@@ -752,7 +856,7 @@ mod tests {
         let call_id = "call-1".to_string();
 
         // Request an LLM call
-        let payloads = state
+        let emits = state
             .state
             .handle(CommandPayload::RequestLlmCall {
                 call_id: call_id.clone(),
@@ -761,7 +865,7 @@ mod tests {
                 deadline: far_future(),
             }, &default_ctx())
             .unwrap();
-        apply_events(&mut state, payloads);
+        apply_events(&mut state, emits);
 
         // Complete with a response that has tool calls
         let response = LlmResponse::OpenAi(openai::ChatCompletionResponse {
@@ -787,7 +891,7 @@ mod tests {
             usage: None,
         });
 
-        let payloads = state
+        let emits = state
             .state
             .handle(CommandPayload::CompleteLlmCall {
                 call_id: call_id.clone(),
@@ -796,16 +900,16 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            payloads.len(),
+            emits.len(),
             3,
             "expected LlmCallCompleted + MessageAssistant + ToolCallRequested"
         );
-        assert!(matches!(&payloads[0], EventPayload::LlmCallCompleted(_)));
+        assert!(matches!(&emits[0].event, EventPayload::LlmCallCompleted(_)));
         assert!(
-            matches!(&payloads[1], EventPayload::MessageAssistant(m) if m.message.content == Some("thinking...".into()))
+            matches!(&emits[1].event, EventPayload::MessageAssistant(m) if m.message.content == Some("thinking...".into()))
         );
         assert!(
-            matches!(&payloads[2], EventPayload::ToolCallRequested(t) if t.tool_call_id == "tc-1" && t.name == "read_file")
+            matches!(&emits[2].event, EventPayload::ToolCallRequested(t) if t.tool_call_id == "tc-1" && t.name == "read_file")
         );
     }
 
@@ -816,7 +920,7 @@ mod tests {
         let tool_call_id = "tc-1".to_string();
 
         // Set up: LLM call -> complete (emits assistant message + tool call requested)
-        let payloads = state
+        let emits = state
             .state
             .handle(CommandPayload::RequestLlmCall {
                 call_id: call_id.clone(),
@@ -825,7 +929,7 @@ mod tests {
                 deadline: far_future(),
             }, &default_ctx())
             .unwrap();
-        apply_events(&mut state, payloads);
+        apply_events(&mut state, emits);
 
         let response = LlmResponse::OpenAi(openai::ChatCompletionResponse {
             id: "resp-1".into(),
@@ -850,17 +954,17 @@ mod tests {
             usage: None,
         });
 
-        let payloads = state
+        let emits = state
             .state
             .handle(CommandPayload::CompleteLlmCall {
                 call_id: call_id.clone(),
                 response,
             }, &default_ctx())
             .unwrap();
-        apply_events(&mut state, payloads);
+        apply_events(&mut state, emits);
 
         // Complete the tool call
-        let payloads = state
+        let emits = state
             .state
             .handle(CommandPayload::CompleteToolCall {
                 tool_call_id: tool_call_id.clone(),
@@ -870,15 +974,15 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            payloads.len(),
+            emits.len(),
             2,
             "expected ToolCallCompleted + MessageTool"
         );
         assert!(
-            matches!(&payloads[0], EventPayload::ToolCallCompleted(t) if t.tool_call_id == "tc-1")
+            matches!(&emits[0].event, EventPayload::ToolCallCompleted(t) if t.tool_call_id == "tc-1")
         );
         assert!(
-            matches!(&payloads[1], EventPayload::MessageTool(m) if m.message.content == Some("ok".into()))
+            matches!(&emits[1].event, EventPayload::MessageTool(m) if m.message.content == Some("ok".into()))
         );
     }
 
@@ -886,7 +990,7 @@ mod tests {
     fn interrupt_command_produces_session_interrupted_event() {
         let state = created_state();
 
-        let payloads = state
+        let emits = state
             .state
             .handle(CommandPayload::Interrupt {
                 interrupt_id: "int-1".into(),
@@ -894,9 +998,9 @@ mod tests {
                 payload: serde_json::json!({"tool": "delete_file"}),
             }, &default_ctx())
             .unwrap();
-        assert_eq!(payloads.len(), 1);
+        assert_eq!(emits.len(), 1);
         assert!(
-            matches!(&payloads[0], EventPayload::SessionInterrupted(p) if p.interrupt_id == "int-1")
+            matches!(&emits[0].event, EventPayload::SessionInterrupted(p) if p.interrupt_id == "int-1")
         );
     }
 
@@ -905,7 +1009,7 @@ mod tests {
         let mut state = created_state();
 
         // Interrupt first
-        let payloads = state
+        let emits = state
             .state
             .handle(CommandPayload::Interrupt {
                 interrupt_id: "int-1".into(),
@@ -913,19 +1017,19 @@ mod tests {
                 payload: serde_json::json!({}),
             }, &default_ctx())
             .unwrap();
-        apply_events(&mut state, payloads);
+        apply_events(&mut state, emits);
 
         // Resume with matching ID
-        let payloads = state
+        let emits = state
             .state
             .handle(CommandPayload::ResumeInterrupt {
                 interrupt_id: "int-1".into(),
                 payload: serde_json::json!({"approved": true}),
             }, &default_ctx())
             .unwrap();
-        assert_eq!(payloads.len(), 1);
+        assert_eq!(emits.len(), 1);
         assert!(
-            matches!(&payloads[0], EventPayload::InterruptResumed(p) if p.interrupt_id == "int-1")
+            matches!(&emits[0].event, EventPayload::InterruptResumed(p) if p.interrupt_id == "int-1")
         );
     }
 
@@ -934,7 +1038,7 @@ mod tests {
         let mut state = created_state();
 
         // Interrupt first
-        let payloads = state
+        let emits = state
             .state
             .handle(CommandPayload::Interrupt {
                 interrupt_id: "int-1".into(),
@@ -942,10 +1046,10 @@ mod tests {
                 payload: serde_json::json!({}),
             }, &default_ctx())
             .unwrap();
-        apply_events(&mut state, payloads);
+        apply_events(&mut state, emits);
 
         // Resume with wrong ID
-        let payloads = state
+        let emits = state
             .state
             .handle(CommandPayload::ResumeInterrupt {
                 interrupt_id: "int-WRONG".into(),
@@ -953,7 +1057,7 @@ mod tests {
             }, &default_ctx())
             .unwrap();
         assert!(
-            payloads.is_empty(),
+            emits.is_empty(),
             "ResumeInterrupt with wrong ID should produce no events"
         );
     }
@@ -977,7 +1081,7 @@ mod tests {
         // Simulate token usage exceeding budget
         state.state.set_token_usage_total(200);
 
-        let payloads = state
+        let emits = state
             .state
             .handle(CommandPayload::RequestLlmCall {
                 call_id: "call-1".into(),
@@ -987,11 +1091,11 @@ mod tests {
             }, &default_ctx())
             .unwrap();
 
-        assert_eq!(payloads.len(), 1);
+        assert_eq!(emits.len(), 1);
         assert!(
-            matches!(&payloads[0], EventPayload::BudgetExceeded),
+            matches!(&emits[0].event, EventPayload::BudgetExceeded),
             "expected BudgetExceeded, got {:?}",
-            payloads[0],
+            emits[0].event,
         );
     }
 
@@ -1000,7 +1104,7 @@ mod tests {
         let mut state = created_state();
 
         // Interrupt first
-        let payloads = state
+        let emits = state
             .state
             .handle(CommandPayload::Interrupt {
                 interrupt_id: "int-1".into(),
@@ -1008,7 +1112,7 @@ mod tests {
                 payload: serde_json::json!({}),
             }, &default_ctx())
             .unwrap();
-        apply_events(&mut state, payloads);
+        apply_events(&mut state, emits);
 
         // SendMessage with user content should fail
         let result = state.state.handle(CommandPayload::SendMessage {

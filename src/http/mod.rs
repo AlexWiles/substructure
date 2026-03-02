@@ -174,7 +174,8 @@ pub async fn start_server(config: SystemConfig, addr: std::net::SocketAddr) -> a
     let admin_routes = Router::new()
         .route("/auth/token", post(issue_token))
         .route("/sessions/{session_id}/events", get(session_events))
-        .route("/traces/{trace_id}", get(trace_events));
+        .route("/traces/{trace_id}", get(trace_events))
+        .route("/traces/{trace_id}/otel", get(trace_otel));
 
     let client_routes = Router::new()
         .route("/agents", get(list_agents))
@@ -280,6 +281,31 @@ async fn trace_events(
         .await
         .map_err(|e| AppError::Runtime(RuntimeError::from(e)))?;
     Ok(Json(events))
+}
+
+// ---------------------------------------------------------------------------
+// Admin: trace reconstruction
+// ---------------------------------------------------------------------------
+
+async fn trace_otel(
+    AdminAuth(_admin): AdminAuth,
+    State(state): State<HttpState>,
+    Path(trace_id): Path<String>,
+) -> Result<Json<Vec<crate::runtime::event_store::SpanSummary>>, AppError> {
+    let filter = EventFilter {
+        trace_id: Some(trace_id),
+        ..Default::default()
+    };
+    let events = state
+        .runtime
+        .store()
+        .query_events(&filter)
+        .await
+        .map_err(|e| AppError::Runtime(RuntimeError::from(e)))?;
+
+    let event_refs: Vec<&crate::runtime::event_store::Event> = events.iter().collect();
+    let spans = crate::runtime::event_store::reconstruct_span_summaries(&event_refs);
+    Ok(Json(spans))
 }
 
 // ---------------------------------------------------------------------------

@@ -127,7 +127,7 @@ impl AggregateState for BudgetLedger {
         }
     }
 
-    fn handle_command(&self, _cmd: Self::Command, _ctx: &Self::Context) -> Result<Vec<Self::Event>, Self::Error> {
+    fn handle_command(&self, _cmd: Self::Command, _ctx: &Self::Context) -> Result<Vec<crate::domain::aggregate::Emit<Self::Event>>, Self::Error> {
         Ok(vec![])
     }
 

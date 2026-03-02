@@ -253,8 +253,9 @@ async fn settle_usage(
                 occurred_at: now,
                 payload,
                 derived: Some(BudgetDerived {}),
+                metadata: Default::default(),
             };
-            domain_event.into_raw()
+            domain_event.into_raw(now, now)
         })
         .collect();
 

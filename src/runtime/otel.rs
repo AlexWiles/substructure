@@ -1,12 +1,13 @@
 //! OpenTelemetry exporter actor.
 //!
-//! Receives `ExecutionRecord`s from aggregate actors (inline instrumentation)
-//! and exports them as OTel spans via OTLP. Each record maps 1:1 to an OTel
-//! span with real wall-clock start/end times.
+//! Subscribes to the event store broadcast and exports persisted events as
+//! OTel spans via OTLP. Events from a single `execute()` call share a span_id
+//! and carry wall-clock `start_time`/`end_time` for accurate trace timing.
 
 use std::borrow::Cow;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
+use chrono::{DateTime, Utc};
 use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef};
 use tokio::task::AbortHandle;
 
@@ -14,7 +15,9 @@ use opentelemetry::trace::{SpanKind, Status, TraceFlags, TraceState};
 use opentelemetry::{InstrumentationScope, KeyValue};
 use opentelemetry_sdk::trace::{SpanData, SpanEvents, SpanExporter, SpanLinks};
 
-use crate::runtime::aggregate_actor::ExecutionRecord;
+use crate::runtime::event_store::{
+    reconstruct_span_summaries, Event, EventBatch, EventStore, SpanSummary,
+};
 
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -23,7 +26,7 @@ const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 // ---------------------------------------------------------------------------
 
 pub enum OtelMsg {
-    Record(ExecutionRecord),
+    Events(EventBatch),
     Tick,
 }
 
@@ -35,7 +38,7 @@ pub struct OtelExporterActor;
 
 pub struct OtelExporterState {
     exporter: opentelemetry_otlp::SpanExporter,
-    pending: Vec<ExecutionRecord>,
+    pending: Vec<SpanData>,
     scope: InstrumentationScope,
     timer_handle: Option<AbortHandle>,
     myself: ActorRef<OtelMsg>,
@@ -64,12 +67,7 @@ impl OtelExporterState {
             return;
         }
 
-        let records: Vec<ExecutionRecord> = self.pending.drain(..).collect();
-        let otel_spans: Vec<SpanData> = records
-            .into_iter()
-            .map(|r| to_span_data(r, &self.scope))
-            .collect();
-
+        let otel_spans: Vec<SpanData> = self.pending.drain(..).collect();
         tracing::debug!(count = otel_spans.len(), "exporting otel spans");
         if let Err(e) = self.exporter.export(otel_spans).await {
             tracing::warn!(error = ?e, "otel export failed");
@@ -78,14 +76,24 @@ impl OtelExporterState {
 }
 
 // ---------------------------------------------------------------------------
-// Conversion
+// Span building
 // ---------------------------------------------------------------------------
 
-fn to_span_data(record: ExecutionRecord, scope: &InstrumentationScope) -> SpanData {
-    let ctx = &record.span_context;
-    let trace_id = opentelemetry::trace::TraceId::from_bytes(ctx.trace_id.as_bytes());
-    let span_id = opentelemetry::trace::SpanId::from_bytes(ctx.span_id.as_bytes());
-    let parent_span_id = ctx
+fn datetime_to_system_time(dt: DateTime<Utc>) -> SystemTime {
+    let duration = dt.signed_duration_since(DateTime::UNIX_EPOCH);
+    if let Ok(std_duration) = duration.to_std() {
+        SystemTime::UNIX_EPOCH + std_duration
+    } else {
+        SystemTime::UNIX_EPOCH
+    }
+}
+
+/// Convert a `SpanSummary` into OTel `SpanData`.
+fn span_summary_to_otel(summary: &SpanSummary, scope: &InstrumentationScope) -> SpanData {
+    let trace_id = opentelemetry::trace::TraceId::from_bytes(summary.span.trace_id.as_bytes());
+    let span_id = opentelemetry::trace::SpanId::from_bytes(summary.span.span_id.as_bytes());
+    let parent_span_id = summary
+        .span
         .parent_span_id
         .map(|id| opentelemetry::trace::SpanId::from_bytes(id.as_bytes()))
         .unwrap_or(opentelemetry::trace::SpanId::INVALID);
@@ -98,42 +106,33 @@ fn to_span_data(record: ExecutionRecord, scope: &InstrumentationScope) -> SpanDa
         TraceState::NONE,
     );
 
-    // Name: span context name (set to triggering event type), or first produced event type
-    let name = ctx
-        .name
-        .clone()
-        .or_else(|| {
-            record
-                .produced_events
-                .first()
-                .map(|e| e.event_type.clone())
-        })
-        .unwrap_or_else(|| "execute".to_string());
+    let mut attributes: Vec<KeyValue> = summary
+        .attributes
+        .iter()
+        .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
+        .collect();
 
-    let mut attributes = vec![
-        KeyValue::new("aggregate.type", record.aggregate_type.to_string()),
-        KeyValue::new("aggregate.id", record.aggregate_id.to_string()),
-    ];
-    for (i, event) in record.produced_events.iter().enumerate() {
-        attributes.push(KeyValue::new(
-            format!("event.{i}.type"),
-            event.event_type.clone(),
-        ));
-    }
+    let status = match &summary.error {
+        Some(msg) => {
+            attributes.push(KeyValue::new("error.message", msg.clone()));
+            Status::error(msg.clone())
+        }
+        None => Status::Ok,
+    };
 
     SpanData {
         span_context,
         parent_span_id,
         parent_span_is_remote: false,
         span_kind: SpanKind::Internal,
-        name: Cow::Owned(name),
-        start_time: record.start_time,
-        end_time: record.end_time,
+        name: Cow::Owned(summary.name.clone()),
+        start_time: datetime_to_system_time(summary.start_time),
+        end_time: datetime_to_system_time(summary.end_time),
         attributes,
         dropped_attributes_count: 0,
         events: SpanEvents::default(),
         links: SpanLinks::default(),
-        status: Status::Ok,
+        status,
         instrumentation_scope: scope.clone(),
     }
 }
@@ -170,8 +169,11 @@ impl Actor for OtelExporterActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            OtelMsg::Record(record) => {
-                state.pending.push(record);
+            OtelMsg::Events(batch) => {
+                let event_refs: Vec<&Event> = batch.iter().map(|e| e.as_ref()).collect();
+                let summaries = reconstruct_span_summaries(&event_refs);
+                let spans = summaries.iter().map(|s| span_summary_to_otel(s, &state.scope));
+                state.pending.extend(spans);
             }
             OtelMsg::Tick => {
                 state.flush().await;
@@ -190,6 +192,7 @@ pub async fn spawn_otel_exporter(
     endpoint: &str,
     service_name: String,
     supervisor: ActorCell,
+    store: &dyn EventStore,
 ) -> Result<ActorRef<OtelMsg>, Box<dyn std::error::Error>> {
     use opentelemetry_otlp::WithExportConfig;
 
@@ -214,6 +217,10 @@ pub async fn spawn_otel_exporter(
         supervisor,
     )
     .await?;
+
+    store.events().subscribe(actor_ref.clone(), |batch| {
+        Some(OtelMsg::Events(batch))
+    });
 
     Ok(actor_ref)
 }

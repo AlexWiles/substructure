@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -30,6 +31,12 @@ pub struct Event {
     pub payload: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub derived: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub metadata: HashMap<String, String>,
+    /// Wall-clock start of the execute() call that produced this event.
+    pub start_time: DateTime<Utc>,
+    /// Wall-clock end of the execute() call that produced this event.
+    pub end_time: DateTime<Utc>,
     /// Snapshot-level wake_at, stamped by the store during broadcast.
     /// Not persisted in the events table.
     #[serde(skip)]
@@ -130,6 +137,92 @@ pub struct EventFilter {
     pub occurred_after: Option<DateTime<Utc>>,
     pub occurred_before: Option<DateTime<Utc>>,
     pub limit: Option<usize>,
+}
+
+// ---------------------------------------------------------------------------
+// Span reconstruction from persisted events
+// ---------------------------------------------------------------------------
+
+/// A reconstructed span summary built from persisted events.
+///
+/// Groups events that share a `span_id` (all events from one `execute()` call)
+/// and extracts timing, naming, attributes, and error status.
+#[derive(Debug, Clone, Serialize)]
+pub struct SpanSummary {
+    pub span: SpanContext,
+    pub name: String,
+    pub start_time: DateTime<Utc>,
+    pub end_time: DateTime<Utc>,
+    pub aggregate_type: String,
+    pub aggregate_id: Uuid,
+    pub error: Option<String>,
+    pub attributes: Vec<(String, String)>,
+    pub event_types: Vec<String>,
+}
+
+/// Reconstruct span summaries from persisted events.
+///
+/// Groups events by `span_id`, then builds one `SpanSummary` per group using
+/// persisted `start_time`/`end_time` and metadata.
+pub fn reconstruct_span_summaries(events: &[&Event]) -> Vec<SpanSummary> {
+    use crate::domain::span::SpanId;
+    use std::collections::BTreeMap;
+
+    let mut groups: BTreeMap<SpanId, Vec<&Event>> = BTreeMap::new();
+    for event in events {
+        groups.entry(event.span.span_id).or_default().push(event);
+    }
+
+    groups
+        .into_values()
+        .map(|group| {
+            let first = group[0];
+
+            let base_name = first
+                .span
+                .name
+                .clone()
+                .or_else(|| group.first().map(|e| e.event_type.clone()))
+                .unwrap_or_else(|| "execute".to_string());
+
+            let mut span_label: Option<String> = None;
+            let mut span_error: Option<String> = None;
+            let mut attributes = vec![
+                ("aggregate.type".into(), first.aggregate_type.clone()),
+                ("aggregate.id".into(), first.aggregate_id.to_string()),
+            ];
+            let mut event_types = Vec::new();
+
+            for (i, event) in group.iter().enumerate() {
+                event_types.push(event.event_type.clone());
+                attributes.push((format!("event.{i}.type"), event.event_type.clone()));
+                for (k, v) in &event.metadata {
+                    match k.as_str() {
+                        "span.label" if span_label.is_none() => span_label = Some(v.clone()),
+                        "span.error" => span_error = Some(v.clone()),
+                        _ => attributes.push((k.clone(), v.clone())),
+                    }
+                }
+            }
+
+            let name = match span_label {
+                Some(label) => format!("{base_name}: {label}"),
+                None => base_name,
+            };
+
+            SpanSummary {
+                span: first.span.clone(),
+                name,
+                start_time: first.start_time,
+                end_time: first.end_time,
+                aggregate_type: first.aggregate_type.clone(),
+                aggregate_id: first.aggregate_id,
+                error: span_error,
+                attributes,
+                event_types,
+            }
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
