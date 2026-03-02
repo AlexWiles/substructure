@@ -4,8 +4,9 @@ use crate::domain::aggregate::Emit;
 use crate::domain::event::*;
 use crate::domain::session::agent_state::ToolCallState;
 
-use super::agent_state::{new_call_id, AgentState, LlmCallStatus, SessionContext, SessionStatus, ToolCallStatus};
-use super::event_handler::extract_assistant_message;
+use super::agent_state::{
+    new_call_id, AgentState, LlmCallStatus, SessionContext, SessionStatus, ToolCallStatus,
+};
 
 // ---------------------------------------------------------------------------
 // Command types
@@ -118,7 +119,11 @@ pub enum SessionError {
 // ---------------------------------------------------------------------------
 
 impl AgentState {
-    pub fn handle(&self, cmd: CommandPayload, ctx: &SessionContext) -> Result<Vec<Emit<EventPayload>>, SessionError> {
+    pub fn handle(
+        &self,
+        cmd: CommandPayload,
+        ctx: &SessionContext,
+    ) -> Result<Vec<Emit<EventPayload>>, SessionError> {
         match (&self.agent, cmd) {
             (
                 None,
@@ -127,11 +132,13 @@ impl AgentState {
                     auth,
                     on_done,
                 },
-            ) => Ok(vec![Emit::new(EventPayload::SessionCreated(SessionCreated {
-                agent: agent.clone(),
-                auth,
-                on_done,
-            }))
+            ) => Ok(vec![Emit::new(EventPayload::SessionCreated(
+                SessionCreated {
+                    agent: agent.clone(),
+                    auth,
+                    on_done,
+                },
+            ))
             .label(&agent.name)]),
             (Some(_), CommandPayload::CreateSession { .. }) => {
                 Err(SessionError::SessionAlreadyCreated)
@@ -143,7 +150,11 @@ impl AgentState {
     }
 
     /// Command validation using AgentState for idempotency guards.
-    fn handle_active(&self, cmd: CommandPayload, ctx: &SessionContext) -> Result<Vec<Emit<EventPayload>>, SessionError> {
+    fn handle_active(
+        &self,
+        cmd: CommandPayload,
+        ctx: &SessionContext,
+    ) -> Result<Vec<Emit<EventPayload>>, SessionError> {
         let state = self;
         match cmd {
             CommandPayload::CreateSession { .. } => {
@@ -154,7 +165,11 @@ impl AgentState {
                     SessionStatus::Interrupted { .. } => Err(SessionError::SessionInterrupted),
                     SessionStatus::Active => Err(SessionError::SessionBusy),
                     _ => {
-                        let agent_name = state.agent.as_ref().map(|a| a.name.as_str()).unwrap_or("unknown");
+                        let agent_name = state
+                            .agent
+                            .as_ref()
+                            .map(|a| a.name.as_str())
+                            .unwrap_or("unknown");
                         Ok(vec![Emit::new(EventPayload::MessageUser(MessageUser {
                             message: Message {
                                 role: Role::User,
@@ -167,7 +182,7 @@ impl AgentState {
                             stream,
                         }))
                         .label(agent_name)])
-                    },
+                    }
                 },
                 IncomingMessage::ToolResult {
                     tool_call_id,
@@ -260,8 +275,7 @@ impl AgentState {
                 match state.llm_calls.get(&call_id).map(|c| &c.status) {
                     // Pending call — complete it
                     Some(&LlmCallStatus::Pending) => {
-                        let (content, tool_calls, token_count) =
-                            extract_assistant_message(&response);
+                        let (content, tool_calls, token_count) = response.as_parts();
 
                         // Extract metadata before moving response
                         let model = match &response {
@@ -271,21 +285,17 @@ impl AgentState {
                             LlmResponse::OpenAi(r) => r.usage.clone(),
                         };
 
-                        let mut completed = Emit::new(EventPayload::LlmCallCompleted(
-                            LlmCallCompleted {
+                        let mut completed =
+                            Emit::new(EventPayload::LlmCallCompleted(LlmCallCompleted {
                                 call_id: call_id.clone(),
                                 response,
-                            },
-                        ))
-                        .with("llm.model", &model)
-                        .label(&model);
+                            }))
+                            .with("llm.model", &model)
+                            .label(&model);
                         if let Some(u) = usage {
                             completed = completed
                                 .with("llm.tokens.prompt", u.prompt_tokens.to_string())
-                                .with(
-                                    "llm.tokens.completion",
-                                    u.completion_tokens.to_string(),
-                                );
+                                .with("llm.tokens.completion", u.completion_tokens.to_string());
                         }
 
                         let mut events = vec![
@@ -311,11 +321,7 @@ impl AgentState {
                                     arguments: tc.arguments.clone(),
                                     deadline: self.tool_deadline(),
                                     handler: Default::default(),
-                                    meta: self.tool_call_meta(
-                                        &tc.name,
-                                        &tc.id,
-                                        &ctx.mcp_tools,
-                                    ),
+                                    meta: self.tool_call_meta(&tc.name, &tc.id, &ctx.mcp_tools),
                                 }))
                                 .with("tool.name", &tc.name)
                                 .label(&tc.name),
@@ -334,17 +340,15 @@ impl AgentState {
                 source,
             } => match state.llm_calls.get(&call_id).map(|c| &c.status) {
                 // Pending call — fail it
-                Some(&LlmCallStatus::Pending) => {
-                    Ok(vec![Emit::new(EventPayload::LlmCallErrored(
-                        LlmCallErrored {
-                            call_id,
-                            error: error.clone(),
-                            retryable,
-                            source,
-                        },
-                    ))
-                    .error(error)])
-                }
+                Some(&LlmCallStatus::Pending) => Ok(vec![Emit::new(EventPayload::LlmCallErrored(
+                    LlmCallErrored {
+                        call_id,
+                        error: error.clone(),
+                        retryable,
+                        source,
+                    },
+                ))
+                .error(error)]),
                 // Not pending or unknown — skip
                 _ => Ok(vec![]),
             },
@@ -477,7 +481,7 @@ impl AgentState {
             CommandPayload::CancelSession => Ok(vec![EventPayload::SessionCancelled.into()]),
             CommandPayload::MarkDone { artifacts } => {
                 Ok(vec![
-                    EventPayload::SessionDone(SessionDone { artifacts }).into(),
+                    EventPayload::SessionDone(SessionDone { artifacts }).into()
                 ])
             }
             CommandPayload::Wake => self.handle_wake(ctx),
@@ -557,14 +561,12 @@ impl AgentState {
                             return Ok(vec![EventPayload::BudgetExceeded.into()]);
                         }
                         if let Some(request) = state.build_llm_request(None) {
-                            return Ok(vec![EventPayload::LlmCallRequested(
-                                LlmCallRequested {
-                                    call_id: call.call_id.clone(),
-                                    request,
-                                    stream: true,
-                                    deadline: self.llm_deadline(),
-                                },
-                            )
+                            return Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {
+                                call_id: call.call_id.clone(),
+                                request,
+                                stream: true,
+                                deadline: self.llm_deadline(),
+                            })
                             .into()]);
                         }
                     }
@@ -860,12 +862,15 @@ mod tests {
         // Request an LLM call
         let emits = state
             .state
-            .handle(CommandPayload::RequestLlmCall {
-                call_id: call_id.clone(),
-                request: mock_llm_request(),
-                stream: false,
-                deadline: far_future(),
-            }, &default_ctx())
+            .handle(
+                CommandPayload::RequestLlmCall {
+                    call_id: call_id.clone(),
+                    request: mock_llm_request(),
+                    stream: false,
+                    deadline: far_future(),
+                },
+                &default_ctx(),
+            )
             .unwrap();
         apply_events(&mut state, emits);
 
@@ -895,10 +900,13 @@ mod tests {
 
         let emits = state
             .state
-            .handle(CommandPayload::CompleteLlmCall {
-                call_id: call_id.clone(),
-                response,
-            }, &default_ctx())
+            .handle(
+                CommandPayload::CompleteLlmCall {
+                    call_id: call_id.clone(),
+                    response,
+                },
+                &default_ctx(),
+            )
             .unwrap();
 
         assert_eq!(
@@ -924,12 +932,15 @@ mod tests {
         // Set up: LLM call -> complete (emits assistant message + tool call requested)
         let emits = state
             .state
-            .handle(CommandPayload::RequestLlmCall {
-                call_id: call_id.clone(),
-                request: mock_llm_request(),
-                stream: false,
-                deadline: far_future(),
-            }, &default_ctx())
+            .handle(
+                CommandPayload::RequestLlmCall {
+                    call_id: call_id.clone(),
+                    request: mock_llm_request(),
+                    stream: false,
+                    deadline: far_future(),
+                },
+                &default_ctx(),
+            )
             .unwrap();
         apply_events(&mut state, emits);
 
@@ -958,28 +969,30 @@ mod tests {
 
         let emits = state
             .state
-            .handle(CommandPayload::CompleteLlmCall {
-                call_id: call_id.clone(),
-                response,
-            }, &default_ctx())
+            .handle(
+                CommandPayload::CompleteLlmCall {
+                    call_id: call_id.clone(),
+                    response,
+                },
+                &default_ctx(),
+            )
             .unwrap();
         apply_events(&mut state, emits);
 
         // Complete the tool call
         let emits = state
             .state
-            .handle(CommandPayload::CompleteToolCall {
-                tool_call_id: tool_call_id.clone(),
-                name: "test".into(),
-                result: "ok".into(),
-            }, &default_ctx())
+            .handle(
+                CommandPayload::CompleteToolCall {
+                    tool_call_id: tool_call_id.clone(),
+                    name: "test".into(),
+                    result: "ok".into(),
+                },
+                &default_ctx(),
+            )
             .unwrap();
 
-        assert_eq!(
-            emits.len(),
-            2,
-            "expected ToolCallCompleted + MessageTool"
-        );
+        assert_eq!(emits.len(), 2, "expected ToolCallCompleted + MessageTool");
         assert!(
             matches!(&emits[0].event, EventPayload::ToolCallCompleted(t) if t.tool_call_id == "tc-1")
         );
@@ -994,11 +1007,14 @@ mod tests {
 
         let emits = state
             .state
-            .handle(CommandPayload::Interrupt {
-                interrupt_id: "int-1".into(),
-                reason: "approval_needed".into(),
-                payload: serde_json::json!({"tool": "delete_file"}),
-            }, &default_ctx())
+            .handle(
+                CommandPayload::Interrupt {
+                    interrupt_id: "int-1".into(),
+                    reason: "approval_needed".into(),
+                    payload: serde_json::json!({"tool": "delete_file"}),
+                },
+                &default_ctx(),
+            )
             .unwrap();
         assert_eq!(emits.len(), 1);
         assert!(
@@ -1013,21 +1029,27 @@ mod tests {
         // Interrupt first
         let emits = state
             .state
-            .handle(CommandPayload::Interrupt {
-                interrupt_id: "int-1".into(),
-                reason: "approval_needed".into(),
-                payload: serde_json::json!({}),
-            }, &default_ctx())
+            .handle(
+                CommandPayload::Interrupt {
+                    interrupt_id: "int-1".into(),
+                    reason: "approval_needed".into(),
+                    payload: serde_json::json!({}),
+                },
+                &default_ctx(),
+            )
             .unwrap();
         apply_events(&mut state, emits);
 
         // Resume with matching ID
         let emits = state
             .state
-            .handle(CommandPayload::ResumeInterrupt {
-                interrupt_id: "int-1".into(),
-                payload: serde_json::json!({"approved": true}),
-            }, &default_ctx())
+            .handle(
+                CommandPayload::ResumeInterrupt {
+                    interrupt_id: "int-1".into(),
+                    payload: serde_json::json!({"approved": true}),
+                },
+                &default_ctx(),
+            )
             .unwrap();
         assert_eq!(emits.len(), 1);
         assert!(
@@ -1042,21 +1064,27 @@ mod tests {
         // Interrupt first
         let emits = state
             .state
-            .handle(CommandPayload::Interrupt {
-                interrupt_id: "int-1".into(),
-                reason: "approval_needed".into(),
-                payload: serde_json::json!({}),
-            }, &default_ctx())
+            .handle(
+                CommandPayload::Interrupt {
+                    interrupt_id: "int-1".into(),
+                    reason: "approval_needed".into(),
+                    payload: serde_json::json!({}),
+                },
+                &default_ctx(),
+            )
             .unwrap();
         apply_events(&mut state, emits);
 
         // Resume with wrong ID
         let emits = state
             .state
-            .handle(CommandPayload::ResumeInterrupt {
-                interrupt_id: "int-WRONG".into(),
-                payload: serde_json::json!({}),
-            }, &default_ctx())
+            .handle(
+                CommandPayload::ResumeInterrupt {
+                    interrupt_id: "int-WRONG".into(),
+                    payload: serde_json::json!({}),
+                },
+                &default_ctx(),
+            )
             .unwrap();
         assert!(
             emits.is_empty(),
@@ -1085,12 +1113,15 @@ mod tests {
 
         let emits = state
             .state
-            .handle(CommandPayload::RequestLlmCall {
-                call_id: "call-1".into(),
-                request: mock_llm_request(),
-                stream: false,
-                deadline: far_future(),
-            }, &default_ctx())
+            .handle(
+                CommandPayload::RequestLlmCall {
+                    call_id: "call-1".into(),
+                    request: mock_llm_request(),
+                    stream: false,
+                    deadline: far_future(),
+                },
+                &default_ctx(),
+            )
             .unwrap();
 
         assert_eq!(emits.len(), 1);
@@ -1108,21 +1139,27 @@ mod tests {
         // Interrupt first
         let emits = state
             .state
-            .handle(CommandPayload::Interrupt {
-                interrupt_id: "int-1".into(),
-                reason: "approval_needed".into(),
-                payload: serde_json::json!({}),
-            }, &default_ctx())
+            .handle(
+                CommandPayload::Interrupt {
+                    interrupt_id: "int-1".into(),
+                    reason: "approval_needed".into(),
+                    payload: serde_json::json!({}),
+                },
+                &default_ctx(),
+            )
             .unwrap();
         apply_events(&mut state, emits);
 
         // SendMessage with user content should fail
-        let result = state.state.handle(CommandPayload::SendMessage {
-            message: IncomingMessage::User {
-                content: "hello".into(),
+        let result = state.state.handle(
+            CommandPayload::SendMessage {
+                message: IncomingMessage::User {
+                    content: "hello".into(),
+                },
+                stream: true,
             },
-            stream: true,
-        }, &default_ctx());
+            &default_ctx(),
+        );
         assert!(matches!(result, Err(SessionError::SessionInterrupted)));
     }
 }

@@ -956,8 +956,7 @@ impl AgentState {
                 })
             }
             EventPayload::LlmCallCompleted(p) => {
-                let (content, tool_calls, _token_count) =
-                    super::event_handler::extract_assistant_message(&p.response);
+                let (content, tool_calls, _token_count) = p.response.as_parts();
                 if tool_calls.is_empty() {
                     // No tool calls → done
                     let artifacts = match content {

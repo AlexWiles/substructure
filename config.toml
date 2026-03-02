@@ -21,7 +21,7 @@ api_key = { provider = "env", key = "OPENROUTER_API_KEY" }
 [agents.alex]
 name = "alex"
 description = """A helpful assistant named Alex"""
-system_prompt = """You are a helpful assistant named Alex."""
+system_prompt = """You are an intelligent analyst."""
 llm = { client = "openrouter", model = "stepfun/step-3.5-flash:free" }
 sub_agents = ["file-system"]
 
@@ -30,7 +30,11 @@ name = "file-system"
 description = "Explores the filesystem — reads files, lists directories, and searches for content. Returns a summary of findings."
 system_prompt = """You are a filesystem research assistant. \
 Use the filesystem tools to explore files and directories, then return a clear summary of what you found. \
-Be concise and factual."""
+Be concise and factual.
+
+Be careful of large directory trees. If you list a tree that is too large you will stop working.
+
+"""
 llm = { client = "openrouter", model = "stepfun/step-3.5-flash:free" }
 
 [[agents.file-system.mcp_servers]]

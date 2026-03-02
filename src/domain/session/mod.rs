@@ -1,6 +1,5 @@
 mod agent_state;
 mod command_handler;
-mod event_handler;
 
 pub use agent_state::{
     AgentState, BudgetActorRef, CompletionTokensDetails, DerivedState, LlmCallError, LlmCallStatus,
@@ -10,4 +9,3 @@ pub use agent_state::{
     TokenUsage, ToolCallStatus, ToolResult,
 };
 pub use command_handler::{CommandPayload, IncomingMessage, SessionCommand, SessionError};
-pub use event_handler::extract_assistant_message;
