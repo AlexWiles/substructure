@@ -274,9 +274,7 @@ pub enum LlmCallStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmCallState {
     pub call_id: String,
-    pub request: LlmRequest,
     pub status: LlmCallStatus,
-    pub response: Option<LlmResponse>,
     pub retry: RetryState,
     pub deadline: DateTime<Utc>,
 }
@@ -297,7 +295,6 @@ pub struct ToolCallState {
     pub tool_call_id: String,
     pub name: String,
     pub status: ToolCallStatus,
-    pub result: Option<ToolCallResult>,
     pub retry: RetryState,
     pub deadline: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -315,12 +312,6 @@ impl ToolCallState {
             _ => None,
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCallResult {
-    pub content: String,
-    pub is_error: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -404,8 +395,6 @@ impl AgentState {
                 if let Some(existing) = self.llm_calls.get_mut(&payload.call_id) {
                     // Re-request (retry): preserve retry count, reset call state
                     existing.status = LlmCallStatus::Pending;
-                    existing.request = payload.request.clone();
-                    existing.response = None;
                     existing.deadline = payload.deadline;
                     existing.retry.next_at = None;
                 } else {
@@ -414,9 +403,7 @@ impl AgentState {
                         payload.call_id.clone(),
                         LlmCallState {
                             call_id: payload.call_id.clone(),
-                            request: payload.request.clone(),
                             status: LlmCallStatus::Pending,
-                            response: None,
                             retry: RetryState::default(),
                             deadline: payload.deadline,
                         },
@@ -427,7 +414,6 @@ impl AgentState {
                 self.track_usage(&payload.response);
                 if let Some(call) = self.llm_calls.get_mut(&payload.call_id) {
                     call.status = LlmCallStatus::Completed;
-                    call.response = Some(payload.response.clone());
                 }
                 self.status = SessionStatus::Idle;
             }
@@ -468,7 +454,6 @@ impl AgentState {
                             tool_call_id: payload.tool_call_id.clone(),
                             name: payload.name.clone(),
                             status: ToolCallStatus::Pending,
-                            result: None,
                             retry: RetryState::default(),
                             deadline: payload.deadline,
                             meta: payload.meta.clone(),
@@ -490,10 +475,6 @@ impl AgentState {
             EventPayload::ToolCallCompleted(payload) => {
                 if let Some(tc) = self.tool_calls.get_mut(&payload.tool_call_id) {
                     tc.status = ToolCallStatus::Completed;
-                    tc.result = Some(ToolCallResult {
-                        content: payload.result.clone(),
-                        is_error: false,
-                    });
                 }
                 if self.pending_tool_results() == 0 {
                     self.status = SessionStatus::Idle;
@@ -502,10 +483,6 @@ impl AgentState {
             EventPayload::ToolCallErrored(payload) => {
                 if let Some(tc) = self.tool_calls.get_mut(&payload.tool_call_id) {
                     tc.status = ToolCallStatus::Failed;
-                    tc.result = Some(ToolCallResult {
-                        content: payload.error.clone(),
-                        is_error: true,
-                    });
                     tc.retry.attempts += 1;
                 }
                 if self.pending_tool_results() == 0 {
@@ -571,32 +548,6 @@ impl AgentState {
             }
         }
         0
-    }
-
-    /// Build the tool result batch from completed/errored tool calls
-    /// belonging to the most recent assistant message.
-    pub fn collect_tool_results(&self) -> Vec<ToolResult> {
-        let tool_call_ids: Vec<&str> = self
-            .messages
-            .iter()
-            .rev()
-            .find(|m| m.role == Role::Assistant && !m.tool_calls.is_empty())
-            .map(|m| m.tool_calls.iter().map(|tc| tc.id.as_str()).collect())
-            .unwrap_or_default();
-
-        tool_call_ids
-            .iter()
-            .filter_map(|id| {
-                let tc = self.tool_calls.get(*id)?;
-                let result = tc.result.as_ref()?;
-                Some(ToolResult {
-                    tool_call_id: tc.tool_call_id.clone(),
-                    name: tc.name.clone(),
-                    content: result.content.clone(),
-                    is_error: result.is_error,
-                })
-            })
-            .collect()
     }
 
     // -----------------------------------------------------------------------

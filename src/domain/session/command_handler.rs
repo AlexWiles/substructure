@@ -605,13 +605,15 @@ impl AgentState {
                 if state.is_over_budget() {
                     return Ok(vec![EventPayload::BudgetExceeded.into()]);
                 }
-                return Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {
-                    call_id: call.call_id.clone(),
-                    request: call.request.clone(),
-                    stream: true,
-                    deadline: call.deadline,
-                })
-                .into()]);
+                if let Some(request) = state.build_llm_request(None) {
+                    return Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {
+                        call_id: call.call_id.clone(),
+                        request,
+                        stream: true,
+                        deadline: call.deadline,
+                    })
+                    .into()]);
+                }
             }
         }
 
