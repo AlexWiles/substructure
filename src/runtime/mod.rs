@@ -8,6 +8,7 @@ use uuid::Uuid;
 pub mod aggregate;
 pub mod auth;
 pub mod config;
+pub mod defaults;
 pub mod event;
 pub mod secret;
 pub mod span;
@@ -89,6 +90,7 @@ impl Runtime {
                 budget_policies: config.budgets.clone(),
                 #[cfg(feature = "otel")]
                 otel: config.otel.clone(),
+                max_tool_result_bytes: config.max_tool_result_bytes,
             },
         )
         .await

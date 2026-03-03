@@ -67,6 +67,9 @@ pub enum EventPayload {
 pub struct McpServerConfig {
     pub name: String,
     pub transport: McpTransportConfig,
+    /// Maximum tool result size in bytes. `None` = inherit, `Some(0)` = no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tool_result_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,6 +198,8 @@ pub struct ToolCallErrored {
     pub tool_call_id: String,
     pub name: String,
     pub error: String,
+    #[serde(default)]
+    pub retryable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

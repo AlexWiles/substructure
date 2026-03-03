@@ -1,10 +1,40 @@
+use std::fmt::Write;
+
 use chrono::{DateTime, Utc};
 
-use crate::runtime::aggregate::Emit;
-use crate::runtime::event::*;
 use super::state::{
-    new_call_id, SessionState, LlmCallStatus, SessionContext, SessionStatus, ToolCallState, ToolCallStatus,
+    new_call_id, LlmCallStatus, SessionContext, SessionState, SessionStatus, ToolCallState,
+    ToolCallStatus,
 };
+use crate::runtime::aggregate::Emit;
+use crate::runtime::defaults;
+use crate::runtime::event::*;
+
+// ---------------------------------------------------------------------------
+// Tool result truncation
+// ---------------------------------------------------------------------------
+
+/// Truncate a tool result string if it exceeds the limit.
+///
+/// `max_bytes = None` means no limit (disabled). Truncation respects UTF-8
+/// char boundaries and appends a note with the original and limit sizes.
+pub(super) fn truncate_tool_result(s: String, max_bytes: Option<usize>) -> String {
+    let Some(max_bytes) = max_bytes else {
+        return s;
+    };
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let total = s.len();
+    let cut = s.floor_char_boundary(max_bytes);
+    let mut out = s;
+    out.truncate(cut);
+    let _ = write!(
+        out,
+        "\n\n--- Output truncated ({total} bytes, limit: {max_bytes} bytes) ---"
+    );
+    out
+}
 
 // ---------------------------------------------------------------------------
 // Command types
@@ -192,9 +222,9 @@ impl SessionState {
                     match tc {
                         // Case where we havent seen the tool call before. We ignore it.
                         None => Ok(vec![]),
-                        // Have seen a terminal state for this toolcall already
+                        // Have seen a terminal/retry state for this toolcall already
                         Some(ToolCallState {
-                            status: ToolCallStatus::Completed | ToolCallStatus::Failed,
+                            status: ToolCallStatus::Completed | ToolCallStatus::Failed | ToolCallStatus::RetryScheduled,
                             ..
                         }) => Ok(vec![]),
                         // We are expecting a result
@@ -203,18 +233,22 @@ impl SessionState {
                             name,
                             ..
                         }) => {
+                            let max = state.max_tool_result_bytes(name, ctx);
                             if let Some(err) = error {
+                                let err = truncate_tool_result(err, max);
                                 Ok(vec![Emit::new(EventPayload::ToolCallErrored(
                                     ToolCallErrored {
                                         tool_call_id,
                                         name: name.clone(),
                                         error: err.clone(),
+                                        retryable: false,
                                     },
                                 ))
                                 .with("tool.name", name.as_str())
                                 .label(name.as_str())
                                 .error(err)])
                             } else {
+                                let content = truncate_tool_result(content, max);
                                 Ok(vec![Emit::new(EventPayload::ToolCallCompleted(
                                     ToolCallCompleted {
                                         tool_call_id,
@@ -382,26 +416,30 @@ impl SessionState {
                 result,
             } => match state.tool_calls.get(&tool_call_id).map(|tc| &tc.status) {
                 // Pending — complete and emit tool message
-                Some(&ToolCallStatus::Pending) => Ok(vec![
-                    Emit::new(EventPayload::ToolCallCompleted(ToolCallCompleted {
-                        tool_call_id: tool_call_id.clone(),
-                        name: name.clone(),
-                        result: result.clone(),
-                    }))
-                    .with("tool.name", &name)
-                    .label(&name),
-                    EventPayload::MessageTool(MessageTool {
-                        message: Message {
-                            role: Role::Tool,
-                            content: Some(result),
-                            tool_calls: Vec::new(),
-                            tool_call_id: Some(tool_call_id),
-                            call_id: None,
-                            token_count: None,
-                        },
-                    })
-                    .into(),
-                ]),
+                Some(&ToolCallStatus::Pending) => {
+                    let max = state.max_tool_result_bytes(&name, ctx);
+                    let result = truncate_tool_result(result, max);
+                    Ok(vec![
+                        Emit::new(EventPayload::ToolCallCompleted(ToolCallCompleted {
+                            tool_call_id: tool_call_id.clone(),
+                            name: name.clone(),
+                            result: result.clone(),
+                        }))
+                        .with("tool.name", &name)
+                        .label(&name),
+                        EventPayload::MessageTool(MessageTool {
+                            message: Message {
+                                role: Role::Tool,
+                                content: Some(result),
+                                tool_calls: Vec::new(),
+                                tool_call_id: Some(tool_call_id),
+                                call_id: None,
+                                token_count: None,
+                            },
+                        })
+                        .into(),
+                    ])
+                }
                 // Not pending or unknown — skip
                 _ => Ok(vec![]),
             },
@@ -412,12 +450,15 @@ impl SessionState {
             } => match state.tool_calls.get(&tool_call_id).map(|tc| &tc.status) {
                 // Pending — fail and emit error tool message
                 Some(&ToolCallStatus::Pending) => {
+                    let max = state.max_tool_result_bytes(&name, ctx);
+                    let error = truncate_tool_result(error, max);
                     let error_content = format!("Error: {}", error);
                     Ok(vec![
                         Emit::new(EventPayload::ToolCallErrored(ToolCallErrored {
                             tool_call_id: tool_call_id.clone(),
                             name: name.clone(),
                             error: error.clone(),
+                            retryable: false,
                         }))
                         .with("tool.name", &name)
                         .label(&name)
@@ -537,16 +578,52 @@ impl SessionState {
                     .with("tool.name", &tc.name)
                     .label(&tc.name)]);
                 }
-                return Ok(vec![Emit::new(EventPayload::ToolCallErrored(
-                    ToolCallErrored {
-                        tool_call_id: tc.tool_call_id.clone(),
-                        name: tc.name.clone(),
-                        error: "deadline exceeded".to_string(),
-                    },
-                ))
-                .with("tool.name", &tc.name)
-                .label(&tc.name)
-                .error("deadline exceeded")]);
+                // Check if retries remain
+                let max_retries = state
+                    .agent
+                    .as_ref()
+                    .map(|a| a.retry.max_retries)
+                    .unwrap_or(defaults::MAX_RETRIES);
+                if tc.retry.attempts < max_retries {
+                    // Retryable — emit only ToolCallErrored, apply_core will schedule retry
+                    return Ok(vec![Emit::new(EventPayload::ToolCallErrored(
+                        ToolCallErrored {
+                            tool_call_id: tc.tool_call_id.clone(),
+                            name: tc.name.clone(),
+                            error: "deadline exceeded".to_string(),
+                            retryable: true,
+                        },
+                    ))
+                    .with("tool.name", &tc.name)
+                    .label(&tc.name)
+                    .error("deadline exceeded")]);
+                } else {
+                    // Retries exhausted — fail with MessageTool so LLM sees the error
+                    let error = "deadline exceeded".to_string();
+                    let error_content = format!("Error: {}", error);
+                    return Ok(vec![
+                        Emit::new(EventPayload::ToolCallErrored(ToolCallErrored {
+                            tool_call_id: tc.tool_call_id.clone(),
+                            name: tc.name.clone(),
+                            error: error.clone(),
+                            retryable: false,
+                        }))
+                        .with("tool.name", &tc.name)
+                        .label(&tc.name)
+                        .error(&error),
+                        EventPayload::MessageTool(MessageTool {
+                            message: Message {
+                                role: Role::Tool,
+                                content: Some(error_content),
+                                tool_calls: Vec::new(),
+                                tool_call_id: Some(tc.tool_call_id.clone()),
+                                call_id: None,
+                                token_count: None,
+                            },
+                        })
+                        .into(),
+                    ]);
+                }
             }
         }
 
@@ -567,6 +644,35 @@ impl SessionState {
                             })
                             .into()]);
                         }
+                    }
+                }
+            }
+        }
+
+        // 3b. RetryScheduled tool call with next_at passed → re-issue
+        for tc in state.tool_calls.values() {
+            if tc.status == ToolCallStatus::RetryScheduled {
+                if let Some(next_at) = tc.retry.next_at {
+                    if next_at <= now {
+                        let arguments = state
+                            .messages
+                            .iter()
+                            .flat_map(|m| m.tool_calls.iter())
+                            .find(|t| t.id == tc.tool_call_id)
+                            .map(|t| t.arguments.clone())
+                            .unwrap_or_default();
+                        return Ok(vec![Emit::new(EventPayload::ToolCallRequested(
+                            ToolCallRequested {
+                                tool_call_id: tc.tool_call_id.clone(),
+                                name: tc.name.clone(),
+                                arguments,
+                                deadline: self.tool_deadline(),
+                                handler: tc.handler.clone(),
+                                meta: tc.meta.clone(),
+                            },
+                        ))
+                        .with("tool.name", &tc.name)
+                        .label(&tc.name)]);
                     }
                 }
             }
@@ -780,8 +886,8 @@ fn messages_match(a: &Message, b: &Message) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::config::{AgentConfig, LlmConfig};
     use crate::runtime::aggregate::Aggregate;
+    use crate::runtime::config::{AgentConfig, LlmConfig};
     use crate::runtime::llm::types as openai;
     use chrono::Utc;
     use uuid::Uuid;
@@ -805,6 +911,7 @@ mod tests {
             retry: Default::default(),
             token_budget: None,
             sub_agents: vec![],
+            max_tool_result_bytes: None,
         }
     }
 
@@ -1159,5 +1266,143 @@ mod tests {
             &default_ctx(),
         );
         assert!(matches!(result, Err(SessionError::SessionInterrupted)));
+    }
+
+    // -----------------------------------------------------------------------
+    // truncate_tool_result tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn truncate_none_limit_returns_unchanged() {
+        let input = "x".repeat(1_000_000);
+        let result = truncate_tool_result(input.clone(), None);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn truncate_under_limit_returns_unchanged() {
+        let input = "hello world".to_string();
+        let result = truncate_tool_result(input.clone(), Some(100));
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn truncate_at_limit_returns_unchanged() {
+        let input = "x".repeat(100);
+        let result = truncate_tool_result(input.clone(), Some(100));
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn truncate_over_limit() {
+        let input = "x".repeat(200);
+        let result = truncate_tool_result(input, Some(100));
+        assert!(result.starts_with(&"x".repeat(100)));
+        assert!(result.contains("Output truncated"));
+        assert!(result.contains("200 bytes"));
+        assert!(result.contains("limit: 100 bytes"));
+    }
+
+    #[test]
+    fn truncate_respects_utf8_boundary() {
+        // Each emoji is 4 bytes; 3 emojis = 12 bytes
+        let input = "\u{1F600}\u{1F600}\u{1F600}".to_string();
+        assert_eq!(input.len(), 12);
+        // Limit at 5 — should cut to 4 bytes (1 complete emoji)
+        let result = truncate_tool_result(input, Some(5));
+        assert!(result.starts_with("\u{1F600}"));
+        assert!(result.contains("Output truncated"));
+    }
+
+    #[test]
+    fn complete_tool_call_truncates_large_result() {
+        let mut agent = test_agent();
+        agent.max_tool_result_bytes = Some(50);
+
+        let mut state = Aggregate::new(SessionState::new(Uuid::new_v4()));
+        state.apply(
+            &EventPayload::SessionCreated(Box::new(SessionCreated {
+                agent,
+                auth: test_auth(),
+                on_done: None,
+            })),
+            1,
+            Utc::now(),
+        );
+
+        let call_id = "call-1".to_string();
+        let tool_call_id = "tc-1".to_string();
+
+        // Request LLM call
+        let emits = state
+            .state
+            .handle(
+                CommandPayload::RequestLlmCall {
+                    call_id: call_id.clone(),
+                    request: mock_llm_request(),
+                    stream: false,
+                    deadline: far_future(),
+                },
+                &default_ctx(),
+            )
+            .unwrap();
+        apply_events(&mut state, emits);
+
+        // Complete LLM call with a tool call
+        let response = LlmResponse::OpenAi(openai::ChatCompletionResponse {
+            id: "resp-1".into(),
+            model: "mock".into(),
+            choices: vec![openai::Choice {
+                index: 0,
+                message: openai::ChatMessage {
+                    role: openai::Role::Assistant,
+                    content: None,
+                    tool_calls: Some(vec![openai::ToolCall {
+                        id: tool_call_id.clone(),
+                        call_type: "function".into(),
+                        function: openai::FunctionCall {
+                            name: "test_tool".into(),
+                            arguments: "{}".into(),
+                        },
+                    }]),
+                    tool_call_id: None,
+                },
+                finish_reason: Some("tool_calls".into()),
+            }],
+            usage: None,
+        });
+        let emits = state
+            .state
+            .handle(
+                CommandPayload::CompleteLlmCall { call_id, response },
+                &default_ctx(),
+            )
+            .unwrap();
+        apply_events(&mut state, emits);
+
+        // Complete tool call with a large result
+        let large_result = "x".repeat(200);
+        let emits = state
+            .state
+            .handle(
+                CommandPayload::CompleteToolCall {
+                    tool_call_id: tool_call_id.clone(),
+                    name: "test_tool".into(),
+                    result: large_result,
+                },
+                &default_ctx(),
+            )
+            .unwrap();
+
+        // Verify the MessageTool content is truncated
+        let tool_msg = emits
+            .iter()
+            .find(|e| matches!(&e.event, EventPayload::MessageTool(_)));
+        assert!(tool_msg.is_some(), "expected MessageTool event");
+        if let EventPayload::MessageTool(m) = &tool_msg.unwrap().event {
+            let content = m.message.content.as_ref().unwrap();
+            assert!(content.len() < 200);
+            assert!(content.contains("Output truncated"));
+        }
     }
 }

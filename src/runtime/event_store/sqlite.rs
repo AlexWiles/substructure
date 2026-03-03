@@ -764,6 +764,7 @@ mod tests {
             retry: Default::default(),
             token_budget: None,
             sub_agents: vec![],
+            max_tool_result_bytes: None,
         }
     }
 

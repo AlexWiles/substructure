@@ -524,6 +524,7 @@ mod tests {
                 tool_call_id: tc_id.clone(),
                 name: "bad_tool".into(),
                 error: "tool not found".into(),
+                retryable: false,
             },
         )));
         assert_eq!(events.len(), 1);

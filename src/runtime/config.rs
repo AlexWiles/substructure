@@ -4,6 +4,7 @@ use chrono::Duration;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::defaults;
 use super::event::McpServerConfig;
 
 // ---------------------------------------------------------------------------
@@ -57,30 +58,30 @@ pub struct RetryConfig {
 impl Default for RetryConfig {
     fn default() -> Self {
         RetryConfig {
-            llm_timeout_secs: 60,
-            tool_timeout_secs: 120,
-            max_retries: 3,
-            backoff_base_secs: 2,
-            backoff_max_secs: 60,
+            llm_timeout_secs: defaults::LLM_TIMEOUT_SECS,
+            tool_timeout_secs: defaults::TOOL_TIMEOUT_SECS,
+            max_retries: defaults::MAX_RETRIES,
+            backoff_base_secs: defaults::BACKOFF_BASE_SECS,
+            backoff_max_secs: defaults::BACKOFF_MAX_SECS,
         }
     }
 }
 
 impl RetryConfig {
     fn default_llm_timeout_secs() -> u32 {
-        60
+        defaults::LLM_TIMEOUT_SECS
     }
     fn default_tool_timeout_secs() -> u32 {
-        120
+        defaults::TOOL_TIMEOUT_SECS
     }
     fn default_max_retries() -> u32 {
-        3
+        defaults::MAX_RETRIES
     }
     fn default_backoff_base_secs() -> u32 {
-        2
+        defaults::BACKOFF_BASE_SECS
     }
     fn default_backoff_max_secs() -> u32 {
-        60
+        defaults::BACKOFF_MAX_SECS
     }
 }
 
@@ -103,6 +104,9 @@ pub struct AgentConfig {
     pub token_budget: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sub_agents: Vec<String>,
+    /// Maximum tool result size in bytes. `None` = inherit, `Some(0)` = no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tool_result_bytes: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +146,9 @@ pub struct SystemConfig {
     pub auth: AuthConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub otel: Option<OtelConfig>,
+    /// Maximum tool result size in bytes. `None` = inherit, `Some(0)` = no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tool_result_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
