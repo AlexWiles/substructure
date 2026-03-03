@@ -42,6 +42,7 @@ retry.max_retries = 10
 [[agents.file-system.mcp_servers]]
 name = "filesystem"
 max_tool_result_bytes = 50_000
+retry.timeout_secs = 2
 transport.type = "stdio"
 transport.command = "npx"
 transport.args = ["-y", "@modelcontextprotocol/server-filesystem", "."]

@@ -14,6 +14,8 @@ use super::event::McpServerConfig;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
     pub client: String,
+    #[serde(default, skip_serializing_if = "RetryConfig::is_empty")]
+    pub retry: RetryConfig,
     #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub params: serde_json::Map<String, serde_json::Value>,
 }
@@ -43,7 +45,7 @@ impl StrategyConfig {
 
 /// Retry/timeout overrides — all fields optional (inherit from parent layer).
 ///
-/// Used on `AgentConfig` (as `llm_retry` / `tool_retry`) and `McpServerConfig`.
+/// Used on `LlmConfig` and `McpServerConfig`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RetryConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -75,27 +77,6 @@ impl RetryConfig {
         }
     }
 
-    /// Resolve self over `base`, filling remaining gaps from `defaults`.
-    pub fn resolve_over(&self, base: &RetryConfig, defaults: &RetryPolicy) -> RetryPolicy {
-        RetryPolicy {
-            timeout_secs: self
-                .timeout_secs
-                .or(base.timeout_secs)
-                .unwrap_or(defaults.timeout_secs),
-            max_retries: self
-                .max_retries
-                .or(base.max_retries)
-                .unwrap_or(defaults.max_retries),
-            backoff_base_secs: self
-                .backoff_base_secs
-                .or(base.backoff_base_secs)
-                .unwrap_or(defaults.backoff_base_secs),
-            backoff_max_secs: self
-                .backoff_max_secs
-                .or(base.backoff_max_secs)
-                .unwrap_or(defaults.backoff_max_secs),
-        }
-    }
 }
 
 /// Fully-resolved retry policy — no optional fields. Stored on call state and
@@ -137,10 +118,6 @@ pub struct AgentConfig {
     pub mcp_servers: Vec<McpServerConfig>,
     #[serde(default)]
     pub strategy: StrategyConfig,
-    #[serde(default, skip_serializing_if = "RetryConfig::is_empty")]
-    pub llm_retry: RetryConfig,
-    #[serde(default, skip_serializing_if = "RetryConfig::is_empty")]
-    pub tool_retry: RetryConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

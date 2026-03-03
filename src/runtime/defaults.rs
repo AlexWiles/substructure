@@ -1,7 +1,7 @@
 //! Centralized defaults for user-configurable runtime behavior.
 
 /// LLM call timeout in seconds.
-pub const LLM_TIMEOUT_SECS: u32 = 60;
+pub const LLM_TIMEOUT_SECS: u32 = 300;
 /// Tool call timeout in seconds.
 pub const TOOL_TIMEOUT_SECS: u32 = 120;
 /// Maximum retry attempts for failed LLM calls.

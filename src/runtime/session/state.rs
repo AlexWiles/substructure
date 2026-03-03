@@ -672,33 +672,29 @@ impl SessionState {
         None
     }
 
-    /// Resolve LLM retry policy: agent.llm_retry → defaults.
+    /// Resolve LLM retry policy: agent.llm.retry → defaults.
     pub(super) fn resolve_llm_retry(&self) -> RetryPolicy {
         self.agent
             .as_ref()
-            .map(|a| a.llm_retry.resolve(&RetryPolicy::LLM_DEFAULTS))
+            .map(|a| a.llm.retry.resolve(&RetryPolicy::LLM_DEFAULTS))
             .unwrap_or(RetryPolicy::LLM_DEFAULTS)
     }
 
-    /// Resolve tool retry policy: MCP server → agent.tool_retry → defaults.
+    /// Resolve tool retry policy: MCP server → defaults.
     pub(super) fn resolve_tool_retry(&self, meta: Option<&ToolCallMeta>) -> RetryPolicy {
         let server_name = match meta {
             Some(ToolCallMeta::Mcp { server_name, .. }) => Some(server_name.as_str()),
             _ => None,
         };
-        let agent_retry = self.agent.as_ref().map(|a| &a.tool_retry);
         let mcp_retry = server_name.and_then(|sn| {
             self.agent
                 .as_ref()
                 .and_then(|a| a.mcp_servers.iter().find(|s| s.name == sn))
                 .map(|s| &s.retry)
         });
-        match (mcp_retry, agent_retry) {
-            (Some(mcp), Some(agent)) => mcp.resolve_over(agent, &RetryPolicy::TOOL_DEFAULTS),
-            (None, Some(agent)) => agent.resolve(&RetryPolicy::TOOL_DEFAULTS),
-            (Some(mcp), None) => mcp.resolve(&RetryPolicy::TOOL_DEFAULTS),
-            (None, None) => RetryPolicy::TOOL_DEFAULTS,
-        }
+        mcp_retry
+            .map(|r| r.resolve(&RetryPolicy::TOOL_DEFAULTS))
+            .unwrap_or(RetryPolicy::TOOL_DEFAULTS)
     }
 
     /// Compute LLM call deadline from agent config.
