@@ -610,9 +610,11 @@ mod tests {
                     system_prompt: "You are helpful.".into(),
                     mcp_servers: vec![],
                     strategy: Default::default(),
-                    retry: Default::default(),
+                    llm_retry: Default::default(),
+                    tool_retry: Default::default(),
                     token_budget: None,
                     sub_agents: vec![],
+                    tool_result_max_bytes: None,
                 },
                 auth: ClientIdentity {
                     tenant_id: "t".into(),

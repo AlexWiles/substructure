@@ -37,7 +37,7 @@ pub(super) struct RuntimeState {
     pub(super) agents: HashMap<String, AgentConfig>,
     pub(super) llm_provider: Arc<dyn LlmProviderTrait>,
     pub(super) budget_policies: Vec<BudgetPolicyConfig>,
-    pub(super) max_tool_result_bytes: Option<usize>,
+    pub(super) tool_result_max_bytes: Option<usize>,
 }
 
 pub(super) struct RuntimeArgs {
@@ -47,7 +47,7 @@ pub(super) struct RuntimeArgs {
     pub(super) budget_policies: Vec<BudgetPolicyConfig>,
     #[cfg(feature = "otel")]
     pub(super) otel: Option<crate::runtime::config::OtelConfig>,
-    pub(super) max_tool_result_bytes: Option<usize>,
+    pub(super) tool_result_max_bytes: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -143,7 +143,7 @@ impl RuntimeState {
             let mcp_for_ctx = mcp_clients.clone();
             let auth_for_ctx = auth.clone();
             let agent_for_ctx = agent.clone();
-            let max_tool_result_bytes = self.max_tool_result_bytes;
+            let tool_result_max_bytes = self.tool_result_max_bytes;
 
             let aggregate_handle = aggregate_actor::spawn_aggregate_actor(
                 aggregate_actor::AggregateActorArgs {
@@ -164,7 +164,7 @@ impl RuntimeState {
                                 Some(&resolved_agent),
                                 budget_actor,
                                 false,
-                                max_tool_result_bytes,
+                                tool_result_max_bytes,
                             );
                             // Wire up send_to_session (find-or-start via runtime)
                             let runtime_for_send = runtime_ref.clone();
@@ -412,7 +412,7 @@ impl Actor for RuntimeActor {
             agents: args.agents,
             llm_provider: args.llm_provider,
             budget_policies: args.budget_policies,
-            max_tool_result_bytes: args.max_tool_result_bytes,
+            tool_result_max_bytes: args.tool_result_max_bytes,
         };
 
         Ok(state)
@@ -494,7 +494,7 @@ fn build_session_context(
     agent: Option<&AgentConfig>,
     budget_actor: Option<AggregateActorHandle<budget::BudgetLedger>>,
     stream: bool,
-    max_tool_result_bytes: Option<usize>,
+    tool_result_max_bytes: Option<usize>,
 ) -> SessionContext {
     let mcp_tools: HashMap<String, McpToolEntry> = mcp_clients
         .iter()
@@ -578,6 +578,6 @@ fn build_session_context(
         notify_chunk: Some(notify_chunk),
         send_to_session: None,
         spawn_sub_agent: None,
-        max_tool_result_bytes,
+        tool_result_max_bytes,
     }
 }

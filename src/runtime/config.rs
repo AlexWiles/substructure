@@ -41,48 +41,87 @@ impl StrategyConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Retry/timeout overrides — all fields optional (inherit from parent layer).
+///
+/// Used on `AgentConfig` (as `llm_retry` / `tool_retry`) and `McpServerConfig`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RetryConfig {
-    #[serde(default = "RetryConfig::default_llm_timeout_secs")]
-    pub llm_timeout_secs: u32,
-    #[serde(default = "RetryConfig::default_tool_timeout_secs")]
-    pub tool_timeout_secs: u32,
-    #[serde(default = "RetryConfig::default_max_retries")]
-    pub max_retries: u32,
-    #[serde(default = "RetryConfig::default_backoff_base_secs")]
-    pub backoff_base_secs: u32,
-    #[serde(default = "RetryConfig::default_backoff_max_secs")]
-    pub backoff_max_secs: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backoff_base_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backoff_max_secs: Option<u32>,
 }
 
-impl Default for RetryConfig {
-    fn default() -> Self {
-        RetryConfig {
-            llm_timeout_secs: defaults::LLM_TIMEOUT_SECS,
-            tool_timeout_secs: defaults::TOOL_TIMEOUT_SECS,
-            max_retries: defaults::MAX_RETRIES,
-            backoff_base_secs: defaults::BACKOFF_BASE_SECS,
-            backoff_max_secs: defaults::BACKOFF_MAX_SECS,
+impl RetryConfig {
+    /// True when all fields are `None` (for `skip_serializing_if`).
+    pub fn is_empty(&self) -> bool {
+        self.timeout_secs.is_none()
+            && self.max_retries.is_none()
+            && self.backoff_base_secs.is_none()
+            && self.backoff_max_secs.is_none()
+    }
+
+    /// Resolve against a single base layer, filling gaps from `defaults`.
+    pub fn resolve(&self, defaults: &RetryPolicy) -> RetryPolicy {
+        RetryPolicy {
+            timeout_secs: self.timeout_secs.unwrap_or(defaults.timeout_secs),
+            max_retries: self.max_retries.unwrap_or(defaults.max_retries),
+            backoff_base_secs: self.backoff_base_secs.unwrap_or(defaults.backoff_base_secs),
+            backoff_max_secs: self.backoff_max_secs.unwrap_or(defaults.backoff_max_secs),
+        }
+    }
+
+    /// Resolve self over `base`, filling remaining gaps from `defaults`.
+    pub fn resolve_over(&self, base: &RetryConfig, defaults: &RetryPolicy) -> RetryPolicy {
+        RetryPolicy {
+            timeout_secs: self
+                .timeout_secs
+                .or(base.timeout_secs)
+                .unwrap_or(defaults.timeout_secs),
+            max_retries: self
+                .max_retries
+                .or(base.max_retries)
+                .unwrap_or(defaults.max_retries),
+            backoff_base_secs: self
+                .backoff_base_secs
+                .or(base.backoff_base_secs)
+                .unwrap_or(defaults.backoff_base_secs),
+            backoff_max_secs: self
+                .backoff_max_secs
+                .or(base.backoff_max_secs)
+                .unwrap_or(defaults.backoff_max_secs),
         }
     }
 }
 
-impl RetryConfig {
-    fn default_llm_timeout_secs() -> u32 {
-        defaults::LLM_TIMEOUT_SECS
-    }
-    fn default_tool_timeout_secs() -> u32 {
-        defaults::TOOL_TIMEOUT_SECS
-    }
-    fn default_max_retries() -> u32 {
-        defaults::MAX_RETRIES
-    }
-    fn default_backoff_base_secs() -> u32 {
-        defaults::BACKOFF_BASE_SECS
-    }
-    fn default_backoff_max_secs() -> u32 {
-        defaults::BACKOFF_MAX_SECS
-    }
+/// Fully-resolved retry policy — no optional fields. Stored on call state and
+/// read directly by retry logic.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryPolicy {
+    pub timeout_secs: u32,
+    pub max_retries: u32,
+    pub backoff_base_secs: u32,
+    pub backoff_max_secs: u32,
+}
+
+impl RetryPolicy {
+    pub const LLM_DEFAULTS: RetryPolicy = RetryPolicy {
+        timeout_secs: defaults::LLM_TIMEOUT_SECS,
+        max_retries: defaults::MAX_RETRIES,
+        backoff_base_secs: defaults::BACKOFF_BASE_SECS,
+        backoff_max_secs: defaults::BACKOFF_MAX_SECS,
+    };
+
+    pub const TOOL_DEFAULTS: RetryPolicy = RetryPolicy {
+        timeout_secs: defaults::TOOL_TIMEOUT_SECS,
+        max_retries: defaults::MAX_RETRIES,
+        backoff_base_secs: defaults::BACKOFF_BASE_SECS,
+        backoff_max_secs: defaults::BACKOFF_MAX_SECS,
+    };
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,15 +137,17 @@ pub struct AgentConfig {
     pub mcp_servers: Vec<McpServerConfig>,
     #[serde(default)]
     pub strategy: StrategyConfig,
-    #[serde(default)]
-    pub retry: RetryConfig,
+    #[serde(default, skip_serializing_if = "RetryConfig::is_empty")]
+    pub llm_retry: RetryConfig,
+    #[serde(default, skip_serializing_if = "RetryConfig::is_empty")]
+    pub tool_retry: RetryConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sub_agents: Vec<String>,
     /// Maximum tool result size in bytes. `None` = inherit, `Some(0)` = no limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_tool_result_bytes: Option<usize>,
+    pub tool_result_max_bytes: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -148,7 +189,7 @@ pub struct SystemConfig {
     pub otel: Option<OtelConfig>,
     /// Maximum tool result size in bytes. `None` = inherit, `Some(0)` = no limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_tool_result_bytes: Option<usize>,
+    pub tool_result_max_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

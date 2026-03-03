@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use async_trait::async_trait;
 use crate::runtime::aggregate::{AggregateState, AggregateStatus};
+use crate::runtime::config::RetryPolicy;
 use crate::runtime::event::{
     AgentConfig, Artifact, ClientIdentity, CompletionDelivery, EventPayload, LlmCallRequested,
     LlmRequest, LlmResponse, Message, Role, ToolCallMeta, ToolCallRequested, ToolHandler,
@@ -70,7 +71,7 @@ pub struct SessionContext {
     pub send_to_session: Option<SendToSessionFn>,
     pub spawn_sub_agent: Option<SpawnSubAgentFn>,
     /// System-wide max tool result bytes (from SystemConfig).
-    pub max_tool_result_bytes: Option<usize>,
+    pub tool_result_max_bytes: Option<usize>,
 }
 
 impl Default for SessionContext {
@@ -93,7 +94,7 @@ impl Default for SessionContext {
             notify_chunk: None,
             send_to_session: None,
             spawn_sub_agent: None,
-            max_tool_result_bytes: None,
+            tool_result_max_bytes: None,
         }
     }
 }
@@ -198,6 +199,7 @@ pub struct LlmCallState {
     pub status: LlmCallStatus,
     pub retry: RetryState,
     pub deadline: DateTime<Utc>,
+    pub retry_policy: RetryPolicy,
 }
 
 // ---------------------------------------------------------------------------
@@ -218,6 +220,7 @@ pub struct ToolCallState {
     pub name: String,
     pub status: ToolCallStatus,
     pub retry: RetryState,
+    pub retry_policy: RetryPolicy,
     pub deadline: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta: Option<ToolCallMeta>,
@@ -328,6 +331,7 @@ impl SessionState {
                             status: LlmCallStatus::Pending,
                             retry: RetryState::default(),
                             deadline: payload.deadline,
+                            retry_policy: self.resolve_llm_retry(),
                         },
                     );
                 }
@@ -342,24 +346,13 @@ impl SessionState {
             EventPayload::LlmCallErrored(payload) => {
                 if let Some(call) = self.llm_calls.get_mut(&payload.call_id) {
                     call.retry.attempts += 1;
-                    let max_retries = self
-                        .agent
-                        .as_ref()
-                        .map(|a| a.retry.max_retries)
-                        .unwrap_or(defaults::MAX_RETRIES);
-                    if payload.retryable && call.retry.attempts < max_retries {
+                    let policy = &call.retry_policy;
+                    if payload.retryable && call.retry.attempts < policy.max_retries {
                         call.status = LlmCallStatus::RetryScheduled;
-                        let backoff_max = self
-                            .agent
-                            .as_ref()
-                            .map(|a| a.retry.backoff_max_secs)
-                            .unwrap_or(defaults::BACKOFF_MAX_SECS);
-                        let backoff_base = self
-                            .agent
-                            .as_ref()
-                            .map(|a| a.retry.backoff_base_secs)
-                            .unwrap_or(defaults::BACKOFF_BASE_SECS);
-                        let backoff = min(backoff_base.saturating_pow(call.retry.attempts), backoff_max);
+                        let backoff = min(
+                            policy.backoff_base_secs.saturating_pow(call.retry.attempts),
+                            policy.backoff_max_secs,
+                        );
                         call.retry.next_at =
                             Some(Utc::now() + chrono::Duration::seconds(i64::from(backoff)));
                     } else {
@@ -382,6 +375,7 @@ impl SessionState {
                             name: payload.name.clone(),
                             status: ToolCallStatus::Pending,
                             retry: RetryState::default(),
+                            retry_policy: self.resolve_tool_retry(payload.meta.as_ref()),
                             deadline: payload.deadline,
                             meta: payload.meta.clone(),
                             handler: payload.handler.clone(),
@@ -410,24 +404,13 @@ impl SessionState {
             EventPayload::ToolCallErrored(payload) => {
                 if let Some(tc) = self.tool_calls.get_mut(&payload.tool_call_id) {
                     tc.retry.attempts += 1;
-                    let max_retries = self
-                        .agent
-                        .as_ref()
-                        .map(|a| a.retry.max_retries)
-                        .unwrap_or(defaults::MAX_RETRIES);
-                    if payload.retryable && tc.retry.attempts < max_retries {
+                    let policy = &tc.retry_policy;
+                    if payload.retryable && tc.retry.attempts < policy.max_retries {
                         tc.status = ToolCallStatus::RetryScheduled;
-                        let backoff_max = self
-                            .agent
-                            .as_ref()
-                            .map(|a| a.retry.backoff_max_secs)
-                            .unwrap_or(defaults::BACKOFF_MAX_SECS);
-                        let backoff_base = self
-                            .agent
-                            .as_ref()
-                            .map(|a| a.retry.backoff_base_secs)
-                            .unwrap_or(defaults::BACKOFF_BASE_SECS);
-                        let backoff = min(backoff_base.saturating_pow(tc.retry.attempts), backoff_max);
+                        let backoff = min(
+                            policy.backoff_base_secs.saturating_pow(tc.retry.attempts),
+                            policy.backoff_max_secs,
+                        );
                         tc.retry.next_at =
                             Some(Utc::now() + chrono::Duration::seconds(i64::from(backoff)));
                     } else {
@@ -689,31 +672,52 @@ impl SessionState {
         None
     }
 
-    /// Compute LLM call deadline from agent config.
-    pub(super) fn llm_deadline(&self) -> DateTime<Utc> {
-        let timeout = self
-            .agent
+    /// Resolve LLM retry policy: agent.llm_retry → defaults.
+    pub(super) fn resolve_llm_retry(&self) -> RetryPolicy {
+        self.agent
             .as_ref()
-            .map(|a| a.retry.llm_timeout_secs)
-            .unwrap_or(defaults::LLM_TIMEOUT_SECS);
-        Utc::now() + chrono::Duration::seconds(i64::from(timeout))
+            .map(|a| a.llm_retry.resolve(&RetryPolicy::LLM_DEFAULTS))
+            .unwrap_or(RetryPolicy::LLM_DEFAULTS)
     }
 
-    /// Compute tool call deadline from agent config.
-    pub(super) fn tool_deadline(&self) -> DateTime<Utc> {
-        let timeout = self
-            .agent
-            .as_ref()
-            .map(|a| a.retry.tool_timeout_secs)
-            .unwrap_or(defaults::TOOL_TIMEOUT_SECS);
-        Utc::now() + chrono::Duration::seconds(i64::from(timeout))
+    /// Resolve tool retry policy: MCP server → agent.tool_retry → defaults.
+    pub(super) fn resolve_tool_retry(&self, meta: Option<&ToolCallMeta>) -> RetryPolicy {
+        let server_name = match meta {
+            Some(ToolCallMeta::Mcp { server_name, .. }) => Some(server_name.as_str()),
+            _ => None,
+        };
+        let agent_retry = self.agent.as_ref().map(|a| &a.tool_retry);
+        let mcp_retry = server_name.and_then(|sn| {
+            self.agent
+                .as_ref()
+                .and_then(|a| a.mcp_servers.iter().find(|s| s.name == sn))
+                .map(|s| &s.retry)
+        });
+        match (mcp_retry, agent_retry) {
+            (Some(mcp), Some(agent)) => mcp.resolve_over(agent, &RetryPolicy::TOOL_DEFAULTS),
+            (None, Some(agent)) => agent.resolve(&RetryPolicy::TOOL_DEFAULTS),
+            (Some(mcp), None) => mcp.resolve(&RetryPolicy::TOOL_DEFAULTS),
+            (None, None) => RetryPolicy::TOOL_DEFAULTS,
+        }
+    }
+
+    /// Compute LLM call deadline from agent config.
+    pub(super) fn llm_deadline(&self) -> DateTime<Utc> {
+        let policy = self.resolve_llm_retry();
+        Utc::now() + chrono::Duration::seconds(i64::from(policy.timeout_secs))
+    }
+
+    /// Compute tool call deadline, resolved per MCP server.
+    pub(super) fn tool_deadline(&self, meta: Option<&ToolCallMeta>) -> DateTime<Utc> {
+        let policy = self.resolve_tool_retry(meta);
+        Utc::now() + chrono::Duration::seconds(i64::from(policy.timeout_secs))
     }
 
     /// Resolve the max tool result size for a given tool.
     ///
     /// Resolution: MCP server → agent → system → hardcoded default.
     /// `Some(0)` at any level means "no limit" (returns `None`).
-    pub(super) fn max_tool_result_bytes(
+    pub(super) fn tool_result_max_bytes(
         &self,
         tool_name: &str,
         ctx: &SessionContext,
@@ -728,21 +732,21 @@ impl SessionState {
                         .iter()
                         .find(|s| s.name == entry.server_name)
                 })
-                .and_then(|s| s.max_tool_result_bytes)
+                .and_then(|s| s.tool_result_max_bytes)
             {
                 return if limit == 0 { None } else { Some(limit) };
             }
         }
         // 2. Per-agent
-        if let Some(limit) = self.agent.as_ref().and_then(|a| a.max_tool_result_bytes) {
+        if let Some(limit) = self.agent.as_ref().and_then(|a| a.tool_result_max_bytes) {
             return if limit == 0 { None } else { Some(limit) };
         }
         // 3. System-wide
-        if let Some(limit) = ctx.max_tool_result_bytes {
+        if let Some(limit) = ctx.tool_result_max_bytes {
             return if limit == 0 { None } else { Some(limit) };
         }
         // 4. Hardcoded default
-        Some(defaults::MAX_TOOL_RESULT_BYTES)
+        Some(defaults::TOOL_RESULT_MAX_BYTES)
     }
 
     pub fn label(&self) -> Option<String> {
@@ -907,7 +911,7 @@ impl SessionState {
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
-                    let max = self.max_tool_result_bytes(&p.name, ctx);
+                    let max = self.tool_result_max_bytes(&p.name, ctx);
                     let text = truncate_tool_result(text, max);
                     if result.is_error {
                         return Some(CommandPayload::FailToolCall {

@@ -37,9 +37,7 @@ opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"], optional = t
 
 [features]
 default = []
-ag-ui = []
-http = ["ag-ui", "dep:axum", "dep:axum-extra", "dep:tower-http", "dep:jsonwebtoken", "dep:sha2"]
-axum-extra = ["dep:axum-extra"]
+http = ["dep:axum", "dep:axum-extra", "dep:tower-http", "dep:jsonwebtoken", "dep:sha2"]
 otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]
 
 [build-dependencies]

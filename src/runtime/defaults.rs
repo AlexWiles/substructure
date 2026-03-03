@@ -11,4 +11,4 @@ pub const BACKOFF_BASE_SECS: u32 = 2;
 /// Maximum backoff delay in seconds.
 pub const BACKOFF_MAX_SECS: u32 = 60;
 /// Maximum tool result size in bytes.
-pub const MAX_TOOL_RESULT_BYTES: usize = 100_000;
+pub const TOOL_RESULT_MAX_BYTES: usize = 100_000;

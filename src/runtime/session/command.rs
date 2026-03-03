@@ -7,7 +7,6 @@ use super::state::{
     ToolCallStatus,
 };
 use crate::runtime::aggregate::Emit;
-use crate::runtime::defaults;
 use crate::runtime::event::*;
 
 // ---------------------------------------------------------------------------
@@ -233,7 +232,7 @@ impl SessionState {
                             name,
                             ..
                         }) => {
-                            let max = state.max_tool_result_bytes(name, ctx);
+                            let max = state.tool_result_max_bytes(name, ctx);
                             if let Some(err) = error {
                                 let err = truncate_tool_result(err, max);
                                 Ok(vec![Emit::new(EventPayload::ToolCallErrored(
@@ -346,14 +345,15 @@ impl SessionState {
                             .into(),
                         ];
                         for tc in &tool_calls {
+                            let meta = self.tool_call_meta(&tc.name, &tc.id, &ctx.mcp_tools);
                             events.push(
                                 Emit::new(EventPayload::ToolCallRequested(ToolCallRequested {
                                     tool_call_id: tc.id.clone(),
                                     name: tc.name.clone(),
                                     arguments: tc.arguments.clone(),
-                                    deadline: self.tool_deadline(),
+                                    deadline: self.tool_deadline(meta.as_ref()),
                                     handler: Default::default(),
-                                    meta: self.tool_call_meta(&tc.name, &tc.id, &ctx.mcp_tools),
+                                    meta,
                                 }))
                                 .with("tool.name", &tc.name)
                                 .label(&tc.name),
@@ -417,7 +417,7 @@ impl SessionState {
             } => match state.tool_calls.get(&tool_call_id).map(|tc| &tc.status) {
                 // Pending — complete and emit tool message
                 Some(&ToolCallStatus::Pending) => {
-                    let max = state.max_tool_result_bytes(&name, ctx);
+                    let max = state.tool_result_max_bytes(&name, ctx);
                     let result = truncate_tool_result(result, max);
                     Ok(vec![
                         Emit::new(EventPayload::ToolCallCompleted(ToolCallCompleted {
@@ -450,7 +450,7 @@ impl SessionState {
             } => match state.tool_calls.get(&tool_call_id).map(|tc| &tc.status) {
                 // Pending — fail and emit error tool message
                 Some(&ToolCallStatus::Pending) => {
-                    let max = state.max_tool_result_bytes(&name, ctx);
+                    let max = state.tool_result_max_bytes(&name, ctx);
                     let error = truncate_tool_result(error, max);
                     let error_content = format!("Error: {}", error);
                     Ok(vec![
@@ -570,7 +570,7 @@ impl SessionState {
                             tool_call_id: tc.tool_call_id.clone(),
                             name: tc.name.clone(),
                             arguments,
-                            deadline: self.tool_deadline(),
+                            deadline: self.tool_deadline(tc.meta.as_ref()),
                             handler: tc.handler.clone(),
                             meta: tc.meta.clone(),
                         },
@@ -579,12 +579,7 @@ impl SessionState {
                     .label(&tc.name)]);
                 }
                 // Check if retries remain
-                let max_retries = state
-                    .agent
-                    .as_ref()
-                    .map(|a| a.retry.max_retries)
-                    .unwrap_or(defaults::MAX_RETRIES);
-                if tc.retry.attempts < max_retries {
+                if tc.retry.attempts < tc.retry_policy.max_retries {
                     // Retryable — emit only ToolCallErrored, apply_core will schedule retry
                     return Ok(vec![Emit::new(EventPayload::ToolCallErrored(
                         ToolCallErrored {
@@ -666,7 +661,7 @@ impl SessionState {
                                 tool_call_id: tc.tool_call_id.clone(),
                                 name: tc.name.clone(),
                                 arguments,
-                                deadline: self.tool_deadline(),
+                                deadline: self.tool_deadline(tc.meta.as_ref()),
                                 handler: tc.handler.clone(),
                                 meta: tc.meta.clone(),
                             },
@@ -800,14 +795,15 @@ impl SessionState {
                         .into(),
                     );
                     for tc in &msg.tool_calls {
+                        let meta = self.tool_call_meta(&tc.name, &tc.id, &ctx.mcp_tools);
                         events.push(
                             Emit::new(EventPayload::ToolCallRequested(ToolCallRequested {
                                 tool_call_id: tc.id.clone(),
                                 name: tc.name.clone(),
                                 arguments: tc.arguments.clone(),
-                                deadline: self.tool_deadline(),
+                                deadline: self.tool_deadline(meta.as_ref()),
                                 handler: Default::default(),
-                                meta: self.tool_call_meta(&tc.name, &tc.id, &ctx.mcp_tools),
+                                meta,
                             }))
                             .with("tool.name", &tc.name)
                             .label(&tc.name),
@@ -908,10 +904,11 @@ mod tests {
             system_prompt: "test".into(),
             mcp_servers: vec![],
             strategy: Default::default(),
-            retry: Default::default(),
+            llm_retry: Default::default(),
+            tool_retry: Default::default(),
             token_budget: None,
             sub_agents: vec![],
-            max_tool_result_bytes: None,
+            tool_result_max_bytes: None,
         }
     }
 
@@ -1317,7 +1314,7 @@ mod tests {
     #[test]
     fn complete_tool_call_truncates_large_result() {
         let mut agent = test_agent();
-        agent.max_tool_result_bytes = Some(50);
+        agent.tool_result_max_bytes = Some(50);
 
         let mut state = Aggregate::new(SessionState::new(Uuid::new_v4()));
         state.apply(

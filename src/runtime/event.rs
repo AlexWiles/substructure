@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub use super::config::{AgentConfig, LlmConfig};
+pub use super::config::{AgentConfig, LlmConfig, RetryConfig, RetryPolicy};
 use super::llm::types as openai;
 pub use super::span::{SpanContext, SpanId, TraceId};
 
@@ -69,7 +69,10 @@ pub struct McpServerConfig {
     pub transport: McpTransportConfig,
     /// Maximum tool result size in bytes. `None` = inherit, `Some(0)` = no limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_tool_result_bytes: Option<usize>,
+    pub tool_result_max_bytes: Option<usize>,
+    /// Per-server retry/timeout overrides (inherits from agent when `None`).
+    #[serde(default, skip_serializing_if = "RetryConfig::is_empty")]
+    pub retry: RetryConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

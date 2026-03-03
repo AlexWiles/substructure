@@ -761,10 +761,11 @@ mod tests {
             system_prompt: "test".into(),
             mcp_servers: vec![],
             strategy: Default::default(),
-            retry: Default::default(),
+            llm_retry: Default::default(),
+            tool_retry: Default::default(),
             token_budget: None,
             sub_agents: vec![],
-            max_tool_result_bytes: None,
+            tool_result_max_bytes: None,
         }
     }
 

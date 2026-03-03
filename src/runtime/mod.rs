@@ -95,7 +95,7 @@ impl Runtime {
                 budget_policies: config.budgets.clone(),
                 #[cfg(feature = "otel")]
                 otel: config.otel.clone(),
-                max_tool_result_bytes: config.max_tool_result_bytes,
+                tool_result_max_bytes: config.tool_result_max_bytes,
             },
         )
         .await
