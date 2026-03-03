@@ -1,6 +1,6 @@
-mod actor;
+pub(crate) mod actor;
 
-pub use actor::{budget_actor_name, spawn_budget_actor, BudgetMessage, ReserveRequest};
+pub use actor::{budget_actor_name, spawn_budget_actor};
 
 use std::collections::{HashMap, VecDeque};
 
@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::aggregate::AggregateState;
+use super::aggregate::{AggregateState, Emit};
 use super::config::{parse_window, BudgetPolicyConfig, ExhaustionStrategy};
 
 /// Derive a deterministic aggregate_id from tenant_id.
@@ -25,6 +25,10 @@ pub fn budget_aggregate_id(tenant_id: &str) -> Uuid {
 pub enum BudgetEvent {
     #[serde(rename = "budget.usage_recorded")]
     UsageRecorded(UsageRecorded),
+    #[serde(rename = "budget.reservation_created")]
+    ReservationCreated(ReservationCreated),
+    #[serde(rename = "budget.reservation_released")]
+    ReservationReleased(ReservationReleased),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +39,21 @@ pub struct UsageRecorded {
     pub call_id: String,
     pub amount: u64,
     pub recorded_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReservationCreated {
+    pub session_id: Uuid,
+    pub call_id: String,
+    pub estimated_tokens: u64,
+    pub reserved_at: DateTime<Utc>,
+    pub entries: Vec<ReservationEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReservationReleased {
+    pub session_id: Uuid,
+    pub call_id: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -83,12 +102,70 @@ impl BudgetContext {
 }
 
 // ---------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------
+
+pub enum BudgetCommand {
+    Reserve {
+        session_id: Uuid,
+        call_id: String,
+        context: BudgetContext,
+        estimated_tokens: u64,
+        reserved_at: DateTime<Utc>,
+    },
+    RecordUsage {
+        session_id: Uuid,
+        call_id: String,
+        total_tokens: u64,
+        recorded_at: DateTime<Utc>,
+    },
+    ReleaseReservation {
+        session_id: Uuid,
+        call_id: String,
+    },
+    ReleaseSessionReservations {
+        session_id: Uuid,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub enum BudgetError {
+    Denied {
+        policy_name: String,
+        strategy: ExhaustionStrategy,
+        current: u64,
+        limit: u64,
+    },
+}
+
+impl std::fmt::Display for BudgetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BudgetError::Denied {
+                policy_name,
+                current,
+                limit,
+                ..
+            } => write!(f, "budget denied by {policy_name}: {current}/{limit}"),
+        }
+    }
+}
+
+impl std::error::Error for BudgetError {}
+
+// ---------------------------------------------------------------------------
 // Aggregate state
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BudgetLedger {
     pub buckets: HashMap<String, BucketState>,
+    #[serde(default)]
+    pub reservations: HashMap<String, Vec<ReservationEntry>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -107,9 +184,9 @@ pub struct UsageEntry {
 #[async_trait::async_trait]
 impl AggregateState for BudgetLedger {
     type Event = BudgetEvent;
-    type Command = ();
-    type Error = std::convert::Infallible;
-    type Context = ();
+    type Command = BudgetCommand;
+    type Error = BudgetError;
+    type Context = Vec<BudgetPolicyConfig>;
     type Derived = BudgetDerived;
 
     fn aggregate_type() -> &'static str {
@@ -128,14 +205,179 @@ impl AggregateState for BudgetLedger {
                     recorded_at: e.recorded_at,
                 });
             }
+            BudgetEvent::ReservationCreated(e) => {
+                let key = reservation_key(e.session_id, &e.call_id);
+                self.reservations.insert(key, e.entries.clone());
+            }
+            BudgetEvent::ReservationReleased(e) => {
+                let key = reservation_key(e.session_id, &e.call_id);
+                self.reservations.remove(&key);
+            }
         }
     }
 
-    fn handle_command(&self, _cmd: Self::Command, _ctx: &Self::Context) -> Result<Vec<crate::runtime::aggregate::Emit<Self::Event>>, Self::Error> {
-        Ok(vec![])
+    fn handle_command(
+        &self,
+        cmd: Self::Command,
+        ctx: &Self::Context,
+    ) -> Result<Vec<Emit<Self::Event>>, Self::Error> {
+        let policies = ctx;
+
+        match cmd {
+            BudgetCommand::Reserve {
+                session_id,
+                call_id,
+                context,
+                estimated_tokens,
+                reserved_at,
+            } => {
+                let mut pending_entries = Vec::new();
+
+                for policy in policies {
+                    if let Some(ref conditions) = policy.match_conditions {
+                        if !context.matches(conditions) {
+                            continue;
+                        }
+                    }
+
+                    let bucket_key = match context.bucket_key(&policy.group_by) {
+                        Some(k) => k,
+                        None => continue,
+                    };
+
+                    let ck = composite_key(&policy.name, &bucket_key);
+
+                    let settled = self
+                        .buckets
+                        .get(&ck)
+                        .map(|b| usage_in_window(b, &policy.window, reserved_at))
+                        .unwrap_or(0);
+
+                    let reserved: u64 = self
+                        .reservations
+                        .values()
+                        .flat_map(|entries| entries.iter())
+                        .filter(|e| e.composite_key == ck)
+                        .map(|e| e.amount)
+                        .sum();
+
+                    let current = settled + reserved;
+                    if current + estimated_tokens > policy.limit {
+                        return Err(BudgetError::Denied {
+                            policy_name: policy.name.clone(),
+                            strategy: policy.strategy.clone(),
+                            current,
+                            limit: policy.limit,
+                        });
+                    }
+
+                    pending_entries.push(ReservationEntry {
+                        composite_key: ck,
+                        amount: estimated_tokens,
+                    });
+                }
+
+                if pending_entries.is_empty() {
+                    return Ok(vec![]);
+                }
+
+                Ok(vec![Emit::new(BudgetEvent::ReservationCreated(
+                    ReservationCreated {
+                        session_id,
+                        call_id,
+                        estimated_tokens,
+                        reserved_at,
+                        entries: pending_entries,
+                    },
+                ))])
+            }
+
+            BudgetCommand::RecordUsage {
+                session_id,
+                call_id,
+                total_tokens,
+                recorded_at,
+            } => {
+                let rkey = reservation_key(session_id, &call_id);
+                let mut emits: Vec<Emit<BudgetEvent>> = Vec::new();
+
+                if let Some(entries) = self.reservations.get(&rkey) {
+                    if total_tokens > 0 {
+                        let mut seen = HashMap::new();
+                        for entry in entries {
+                            seen.entry(entry.composite_key.as_str()).or_insert(());
+                        }
+                        for ck in seen.keys() {
+                            if let Some((policy_name, bucket_key)) = ck.split_once('|') {
+                                emits.push(Emit::new(BudgetEvent::UsageRecorded(
+                                    UsageRecorded {
+                                        policy_name: policy_name.to_string(),
+                                        bucket_key: bucket_key.to_string(),
+                                        session_id,
+                                        call_id: call_id.clone(),
+                                        amount: total_tokens,
+                                        recorded_at,
+                                    },
+                                )));
+                            }
+                        }
+                    }
+
+                    emits.push(Emit::new(BudgetEvent::ReservationReleased(
+                        ReservationReleased {
+                            session_id,
+                            call_id,
+                        },
+                    )));
+                }
+
+                Ok(emits)
+            }
+
+            BudgetCommand::ReleaseReservation {
+                session_id,
+                call_id,
+            } => {
+                let rkey = reservation_key(session_id, &call_id);
+                if self.reservations.contains_key(&rkey) {
+                    Ok(vec![Emit::new(BudgetEvent::ReservationReleased(
+                        ReservationReleased {
+                            session_id,
+                            call_id,
+                        },
+                    ))])
+                } else {
+                    Ok(vec![])
+                }
+            }
+
+            BudgetCommand::ReleaseSessionReservations { session_id } => {
+                let prefix = format!("{session_id}:");
+                let emits: Vec<Emit<BudgetEvent>> = self
+                    .reservations
+                    .keys()
+                    .filter(|k| k.starts_with(&prefix))
+                    .filter_map(|k| {
+                        let call_id = k.strip_prefix(&prefix)?.to_string();
+                        Some(Emit::new(BudgetEvent::ReservationReleased(
+                            ReservationReleased {
+                                session_id,
+                                call_id,
+                            },
+                        )))
+                    })
+                    .collect();
+                Ok(emits)
+            }
+        }
     }
 
-    async fn on_event(&self, _event: &Self::Event, _ctx: &Self::Context, _span: &crate::runtime::span::SpanContext) -> Option<Self::Command> {
+    async fn on_event(
+        &self,
+        _event: &Self::Event,
+        _ctx: &Self::Context,
+        _span: &crate::runtime::span::SpanContext,
+    ) -> Option<Self::Command> {
         None
     }
 
@@ -149,10 +391,16 @@ pub fn composite_key(policy_name: &str, bucket_key: &str) -> String {
     format!("{policy_name}|{bucket_key}")
 }
 
+/// Build the reservations HashMap key: "session_id:call_id".
+pub fn reservation_key(session_id: Uuid, call_id: &str) -> String {
+    format!("{session_id}:{call_id}")
+}
+
 // ---------------------------------------------------------------------------
-// Reservation types (runtime-only, not persisted)
+// Reservation types
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReservationEntry {
     pub composite_key: String,
     pub amount: u64,
@@ -169,77 +417,10 @@ pub enum ReservationResult {
 }
 
 // ---------------------------------------------------------------------------
-// BudgetLedger query methods
+// BudgetLedger helper methods
 // ---------------------------------------------------------------------------
 
 impl BudgetLedger {
-    /// Check all matching policies and determine if a reservation can be granted.
-    ///
-    /// Pure query — does NOT mutate the ledger. On success, returns the
-    /// reservation entries that the caller should add to runtime state.
-    pub fn try_reserve(
-        &self,
-        policies: &[BudgetPolicyConfig],
-        ctx: &BudgetContext,
-        estimated_tokens: u64,
-        reservations: &HashMap<(Uuid, String), Vec<ReservationEntry>>,
-        now: DateTime<Utc>,
-    ) -> (ReservationResult, Vec<ReservationEntry>) {
-        let mut pending_entries = Vec::new();
-
-        for policy in policies {
-            // Check match conditions
-            if let Some(ref conditions) = policy.match_conditions {
-                if !ctx.matches(conditions) {
-                    continue;
-                }
-            }
-
-            // Build bucket key; skip if context is missing required fields
-            let bucket_key = match ctx.bucket_key(&policy.group_by) {
-                Some(k) => k,
-                None => continue,
-            };
-
-            let ck = composite_key(&policy.name, &bucket_key);
-
-            // Settled usage
-            let settled = self
-                .buckets
-                .get(&ck)
-                .map(|b| usage_in_window(b, &policy.window, now))
-                .unwrap_or(0);
-
-            // Active reservations for this composite key
-            let reserved: u64 = reservations
-                .values()
-                .flat_map(|entries| entries.iter())
-                .filter(|e| e.composite_key == ck)
-                .map(|e| e.amount)
-                .sum();
-
-            let current = settled + reserved;
-            if current + estimated_tokens > policy.limit {
-                return (
-                    ReservationResult::Denied {
-                        policy_name: policy.name.clone(),
-                        strategy: policy.strategy.clone(),
-                        current,
-                        limit: policy.limit,
-                    },
-                    vec![], // atomic rollback — no entries returned
-                );
-            }
-
-            pending_entries.push(ReservationEntry {
-                composite_key: ck,
-                amount: estimated_tokens,
-            });
-        }
-
-        (ReservationResult::Granted, pending_entries)
-    }
-
     /// Remove entries older than each policy's window.
     pub fn evict_expired(&mut self, policies: &[BudgetPolicyConfig], now: DateTime<Utc>) {
         for policy in policies {
@@ -319,6 +500,19 @@ mod tests {
         ctx
     }
 
+    /// Helper: run a command through handle_command and apply all emitted events.
+    fn execute(
+        ledger: &mut BudgetLedger,
+        cmd: BudgetCommand,
+        policies: &[BudgetPolicyConfig],
+    ) -> Result<Vec<Emit<BudgetEvent>>, BudgetError> {
+        let emits = ledger.handle_command(cmd, &policies.to_vec())?;
+        for emit in &emits {
+            ledger.apply(&emit.event);
+        }
+        Ok(emits)
+    }
+
     #[test]
     fn apply_usage_recorded() {
         let mut ledger = BudgetLedger::default();
@@ -343,23 +537,60 @@ mod tests {
     }
 
     #[test]
-    fn try_reserve_within_limit() {
-        let policies = make_policies();
-        let ledger = BudgetLedger::default();
-        let ctx = make_context("alice");
-        let reservations = HashMap::new();
+    fn apply_reservation_lifecycle() {
+        let mut ledger = BudgetLedger::default();
+        let sid = Uuid::new_v4();
         let now = Utc::now();
 
-        let (result, entries) = ledger.try_reserve(&policies, &ctx, 5000, &reservations, now);
-        assert!(matches!(result, ReservationResult::Granted));
-        assert_eq!(entries.len(), 2); // one for each matching policy
+        // Create
+        ledger.apply(&BudgetEvent::ReservationCreated(ReservationCreated {
+            session_id: sid,
+            call_id: "c1".into(),
+            estimated_tokens: 500,
+            reserved_at: now,
+            entries: vec![ReservationEntry {
+                composite_key: "hourly|alice".into(),
+                amount: 500,
+            }],
+        }));
+        assert_eq!(ledger.reservations.len(), 1);
+
+        // Release
+        ledger.apply(&BudgetEvent::ReservationReleased(ReservationReleased {
+            session_id: sid,
+            call_id: "c1".into(),
+        }));
+        assert!(ledger.reservations.is_empty());
     }
 
     #[test]
-    fn try_reserve_exceeds_limit() {
+    fn reserve_within_limit() {
         let policies = make_policies();
         let mut ledger = BudgetLedger::default();
-        let ctx = make_context("alice");
+        let now = Utc::now();
+
+        let cmd = BudgetCommand::Reserve {
+            session_id: Uuid::new_v4(),
+            call_id: "c1".into(),
+            context: make_context("alice"),
+            estimated_tokens: 5000,
+            reserved_at: now,
+        };
+        let emits = execute(&mut ledger, cmd, &policies).unwrap();
+        assert_eq!(emits.len(), 1);
+        match &emits[0].event {
+            BudgetEvent::ReservationCreated(e) => {
+                assert_eq!(e.entries.len(), 2); // one per matching policy
+            }
+            _ => panic!("expected ReservationCreated"),
+        }
+        assert_eq!(ledger.reservations.len(), 1);
+    }
+
+    #[test]
+    fn reserve_exceeds_limit() {
+        let policies = make_policies();
+        let mut ledger = BudgetLedger::default();
         let now = Utc::now();
 
         // Pre-fill with 9000 tokens
@@ -372,31 +603,197 @@ mod tests {
             recorded_at: now,
         }));
 
-        let reservations = HashMap::new();
-        let (result, entries) = ledger.try_reserve(&policies, &ctx, 2000, &reservations, now);
-        assert!(matches!(result, ReservationResult::Denied { .. }));
-        assert!(entries.is_empty(), "atomic rollback on deny");
+        let cmd = BudgetCommand::Reserve {
+            session_id: Uuid::new_v4(),
+            call_id: "c2".into(),
+            context: make_context("alice"),
+            estimated_tokens: 2000,
+            reserved_at: now,
+        };
+        let result = ledger.handle_command(cmd, &policies.to_vec());
+        assert!(matches!(result, Err(BudgetError::Denied { .. })));
     }
 
     #[test]
-    fn try_reserve_counts_active_reservations() {
+    fn reserve_counts_active_reservations() {
         let policies = make_policies();
-        let ledger = BudgetLedger::default();
-        let ctx = make_context("alice");
+        let mut ledger = BudgetLedger::default();
         let now = Utc::now();
 
-        // Simulate existing reservation of 9000
-        let mut reservations: HashMap<(Uuid, String), Vec<ReservationEntry>> = HashMap::new();
-        reservations.insert(
-            (Uuid::new_v4(), "prev-call".into()),
-            vec![ReservationEntry {
+        // Create an existing reservation of 9000
+        ledger.apply(&BudgetEvent::ReservationCreated(ReservationCreated {
+            session_id: Uuid::new_v4(),
+            call_id: "prev".into(),
+            estimated_tokens: 9000,
+            reserved_at: now,
+            entries: vec![ReservationEntry {
                 composite_key: composite_key("hourly", "alice"),
                 amount: 9000,
             }],
-        );
+        }));
 
-        let (result, _) = ledger.try_reserve(&policies, &ctx, 2000, &reservations, now);
-        assert!(matches!(result, ReservationResult::Denied { .. }));
+        let cmd = BudgetCommand::Reserve {
+            session_id: Uuid::new_v4(),
+            call_id: "c2".into(),
+            context: make_context("alice"),
+            estimated_tokens: 2000,
+            reserved_at: now,
+        };
+        let result = ledger.handle_command(cmd, &policies.to_vec());
+        assert!(matches!(result, Err(BudgetError::Denied { .. })));
+    }
+
+    #[test]
+    fn record_usage_settles_and_releases() {
+        let policies = make_policies();
+        let mut ledger = BudgetLedger::default();
+        let now = Utc::now();
+        let sid = Uuid::new_v4();
+
+        // Reserve
+        let cmd = BudgetCommand::Reserve {
+            session_id: sid,
+            call_id: "c1".into(),
+            context: make_context("alice"),
+            estimated_tokens: 500,
+            reserved_at: now,
+        };
+        execute(&mut ledger, cmd, &policies).unwrap();
+        assert_eq!(ledger.reservations.len(), 1);
+
+        // Record actual usage
+        let cmd = BudgetCommand::RecordUsage {
+            session_id: sid,
+            call_id: "c1".into(),
+            total_tokens: 300,
+            recorded_at: now,
+        };
+        let emits = execute(&mut ledger, cmd, &policies).unwrap();
+
+        // Should have UsageRecorded events + ReservationReleased
+        assert!(emits.iter().any(|e| matches!(e.event, BudgetEvent::UsageRecorded(_))));
+        assert!(emits.iter().any(|e| matches!(e.event, BudgetEvent::ReservationReleased(_))));
+        assert!(ledger.reservations.is_empty());
+        assert!(!ledger.buckets.is_empty());
+    }
+
+    #[test]
+    fn record_usage_zero_tokens_still_releases() {
+        let policies = make_policies();
+        let mut ledger = BudgetLedger::default();
+        let now = Utc::now();
+        let sid = Uuid::new_v4();
+
+        // Reserve
+        execute(
+            &mut ledger,
+            BudgetCommand::Reserve {
+                session_id: sid,
+                call_id: "c1".into(),
+                context: make_context("alice"),
+                estimated_tokens: 500,
+                reserved_at: now,
+            },
+            &policies,
+        )
+        .unwrap();
+
+        // Record 0 tokens
+        let emits = execute(
+            &mut ledger,
+            BudgetCommand::RecordUsage {
+                session_id: sid,
+                call_id: "c1".into(),
+                total_tokens: 0,
+                recorded_at: now,
+            },
+            &policies,
+        )
+        .unwrap();
+
+        // Should release but not record usage
+        assert_eq!(emits.len(), 1);
+        assert!(matches!(emits[0].event, BudgetEvent::ReservationReleased(_)));
+        assert!(ledger.reservations.is_empty());
+        assert!(ledger.buckets.is_empty());
+    }
+
+    #[test]
+    fn release_reservation_on_error() {
+        let policies = make_policies();
+        let mut ledger = BudgetLedger::default();
+        let now = Utc::now();
+        let sid = Uuid::new_v4();
+
+        execute(
+            &mut ledger,
+            BudgetCommand::Reserve {
+                session_id: sid,
+                call_id: "c1".into(),
+                context: make_context("alice"),
+                estimated_tokens: 500,
+                reserved_at: now,
+            },
+            &policies,
+        )
+        .unwrap();
+        assert_eq!(ledger.reservations.len(), 1);
+
+        execute(
+            &mut ledger,
+            BudgetCommand::ReleaseReservation {
+                session_id: sid,
+                call_id: "c1".into(),
+            },
+            &policies,
+        )
+        .unwrap();
+        assert!(ledger.reservations.is_empty());
+    }
+
+    #[test]
+    fn release_reservation_idempotent() {
+        let policies = make_policies();
+        let ledger = BudgetLedger::default();
+
+        let cmd = BudgetCommand::ReleaseReservation {
+            session_id: Uuid::new_v4(),
+            call_id: "nonexistent".into(),
+        };
+        let emits = ledger.handle_command(cmd, &policies.to_vec()).unwrap();
+        assert!(emits.is_empty());
+    }
+
+    #[test]
+    fn release_session_reservations() {
+        let policies = make_policies();
+        let mut ledger = BudgetLedger::default();
+        let now = Utc::now();
+        let sid = Uuid::new_v4();
+
+        for call_id in ["c1", "c2"] {
+            execute(
+                &mut ledger,
+                BudgetCommand::Reserve {
+                    session_id: sid,
+                    call_id: call_id.into(),
+                    context: make_context("alice"),
+                    estimated_tokens: 100,
+                    reserved_at: now,
+                },
+                &policies,
+            )
+            .unwrap();
+        }
+        assert_eq!(ledger.reservations.len(), 2);
+
+        execute(
+            &mut ledger,
+            BudgetCommand::ReleaseSessionReservations { session_id: sid },
+            &policies,
+        )
+        .unwrap();
+        assert!(ledger.reservations.is_empty());
     }
 
     #[test]
@@ -435,6 +832,7 @@ mod tests {
     fn usage_in_window_excludes_old() {
         let mut ledger = BudgetLedger::default();
         let now = Utc::now();
+        let policies = make_policies();
 
         // Old entry (2 hours ago)
         ledger.apply(&BudgetEvent::UsageRecorded(UsageRecorded {
@@ -455,13 +853,16 @@ mod tests {
             recorded_at: now,
         }));
 
-        let policies = make_policies();
-        let ctx = make_context("alice");
-        let reservations = HashMap::new();
-
         // Should be allowed because old entry is outside window
-        let (result, _) = ledger.try_reserve(&policies, &ctx, 5000, &reservations, now);
-        assert!(matches!(result, ReservationResult::Granted));
+        let cmd = BudgetCommand::Reserve {
+            session_id: Uuid::new_v4(),
+            call_id: "c3".into(),
+            context: make_context("alice"),
+            estimated_tokens: 5000,
+            reserved_at: now,
+        };
+        let result = ledger.handle_command(cmd, &policies.to_vec());
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -480,28 +881,36 @@ mod tests {
         ctx.set("model", "sonnet"); // does NOT match
 
         let ledger = BudgetLedger::default();
-        let reservations = HashMap::new();
         let now = Utc::now();
 
         // Should be granted because the policy doesn't match (model != opus)
-        let (result, entries) = ledger.try_reserve(&policies, &ctx, 5000, &reservations, now);
-        assert!(matches!(result, ReservationResult::Granted));
-        assert!(
-            entries.is_empty(),
-            "non-matching policy produces no entries"
-        );
+        let cmd = BudgetCommand::Reserve {
+            session_id: Uuid::new_v4(),
+            call_id: "c1".into(),
+            context: ctx,
+            estimated_tokens: 5000,
+            reserved_at: now,
+        };
+        let result = ledger.handle_command(cmd, &policies.to_vec());
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty(), "non-matching policy produces no events");
 
         // Now with matching model
-        ctx.set("model", "opus");
-        let (result, _) = ledger.try_reserve(&policies, &ctx, 5000, &reservations, now);
-        assert!(matches!(result, ReservationResult::Denied { .. }));
+        let mut ctx2 = make_context("alice");
+        ctx2.set("model", "opus");
+        let cmd = BudgetCommand::Reserve {
+            session_id: Uuid::new_v4(),
+            call_id: "c2".into(),
+            context: ctx2,
+            estimated_tokens: 5000,
+            reserved_at: now,
+        };
+        let result = ledger.handle_command(cmd, &policies.to_vec());
+        assert!(matches!(result, Err(BudgetError::Denied { .. })));
     }
 
     #[test]
     fn multi_policy_atomic_rollback() {
-        // Policy 1: hourly limit 10k (passes)
-        // Policy 2: tenant total 5k (fails)
-        // Both should fail atomically
         let policies = vec![
             BudgetPolicyConfig {
                 name: "hourly".into(),
@@ -524,16 +933,20 @@ mod tests {
         ];
 
         let ledger = BudgetLedger::default();
-        let ctx = make_context("alice");
-        let reservations = HashMap::new();
         let now = Utc::now();
 
         // 8000 exceeds tenant_total (5000) even though hourly (10000) would pass
-        let (result, entries) = ledger.try_reserve(&policies, &ctx, 8000, &reservations, now);
+        let cmd = BudgetCommand::Reserve {
+            session_id: Uuid::new_v4(),
+            call_id: "c1".into(),
+            context: make_context("alice"),
+            estimated_tokens: 8000,
+            reserved_at: now,
+        };
+        let result = ledger.handle_command(cmd, &policies.to_vec());
         assert!(
-            matches!(result, ReservationResult::Denied { policy_name, .. } if policy_name == "tenant_total")
+            matches!(&result, Err(BudgetError::Denied { policy_name, .. }) if policy_name == "tenant_total")
         );
-        assert!(entries.is_empty(), "atomic rollback");
     }
 
     #[test]

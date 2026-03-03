@@ -830,11 +830,11 @@ mod tests {
     fn created_state() -> Aggregate<SessionState> {
         let mut state = Aggregate::new(SessionState::new(Uuid::new_v4()));
         state.apply(
-            &EventPayload::SessionCreated(SessionCreated {
+            &EventPayload::SessionCreated(Box::new(SessionCreated {
                 agent: test_agent(),
                 auth: test_auth(),
                 on_done: None,
-            }),
+            })),
             1,
             Utc::now(),
         );
@@ -1097,11 +1097,11 @@ mod tests {
 
         let mut state = Aggregate::new(SessionState::new(Uuid::new_v4()));
         state.apply(
-            &EventPayload::SessionCreated(SessionCreated {
+            &EventPayload::SessionCreated(Box::new(SessionCreated {
                 agent,
                 auth: test_auth(),
                 on_done: None,
-            }),
+            })),
             1,
             Utc::now(),
         );

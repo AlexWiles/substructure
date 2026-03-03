@@ -11,7 +11,7 @@ use crate::runtime::session::{
     SessionState, CommandPayload, IncomingMessage, SessionCommand, SessionStatus,
 };
 
-use super::aggregate::actor::{self as aggregate_actor, AggregateMessage};
+use super::aggregate::actor::{self as aggregate_actor, AggregateActorHandle, AggregateMessage};
 use super::aggregate::dispatcher::spawn_aggregate_dispatcher;
 use super::budget;
 use super::event_store::{AggregateFilter, EventStore};
@@ -73,15 +73,15 @@ impl RuntimeState {
     async fn get_or_spawn_budget_actor(
         &self,
         tenant_id: &str,
-    ) -> Result<Option<ActorRef<budget::BudgetMessage>>, RuntimeError> {
+    ) -> Result<Option<AggregateActorHandle<budget::BudgetLedger>>, RuntimeError> {
         if self.budget_policies.is_empty() {
             return Ok(None);
         }
         let actor_name = budget::budget_actor_name(tenant_id);
         if let Some(cell) = ractor::registry::where_is(actor_name) {
-            return Ok(Some(cell.into()));
+            return Ok(Some(AggregateActorHandle { actor: cell.into() }));
         }
-        let actor = budget::spawn_budget_actor(
+        let handle = budget::spawn_budget_actor(
             tenant_id.to_string(),
             self.budget_policies.clone(),
             self.store.clone(),
@@ -89,7 +89,7 @@ impl RuntimeState {
         )
         .await
         .map_err(|e| RuntimeError::ActorCall(format!("budget: {e}")))?;
-        Ok(Some(actor))
+        Ok(Some(handle))
     }
 
     #[tracing::instrument(skip(self, agent), fields(agent = %agent.name))]
@@ -536,7 +536,7 @@ fn build_session_context(
     llm_provider: &Arc<dyn LlmProviderTrait>,
     agents: &HashMap<String, AgentConfig>,
     agent: Option<&AgentConfig>,
-    budget_actor: Option<ActorRef<budget::BudgetMessage>>,
+    budget_actor: Option<AggregateActorHandle<budget::BudgetLedger>>,
     stream: bool,
 ) -> SessionContext {
     let mcp_tools: HashMap<String, McpToolEntry> = mcp_clients

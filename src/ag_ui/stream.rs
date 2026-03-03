@@ -399,10 +399,10 @@ fn send_client_tools(session_id: Uuid, tools: Vec<super::types::Tool>) {
     let name = crate::runtime::aggregate_actor_name(session_id);
     if let Some(cell) = ractor::registry::where_is(name) {
         let actor: ractor::ActorRef<
-            crate::runtime::aggregate_actor::AggregateMessage<SessionState>,
+            crate::runtime::aggregate::actor::AggregateMessage<SessionState>,
         > = cell.into();
         let _ = actor.send_message(
-            crate::runtime::aggregate_actor::AggregateMessage::UpdateContext(Box::new(
+            crate::runtime::aggregate::actor::AggregateMessage::UpdateContext(Box::new(
                 move |ctx: &mut SessionContext| {
                     // Add client tools to context and update all_tools
                     ctx.client_tools = oai_tools.clone();
