@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use ractor::{call_t, Actor, ActorCell, ActorProcessingErr, ActorRef, RpcReplyPort, SpawnErr};
 
-use crate::domain::event::{McpServerConfig, McpTransportConfig};
+use crate::runtime::event::{McpServerConfig, McpTransportConfig};
 
-use super::client::{
+use super::{
     CallToolResult, McpClient, McpError, ServerCapabilities, ServerInfo, ToolDefinition,
 };
 use super::stdio::StdioMcpClient;

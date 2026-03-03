@@ -1,11 +1,9 @@
 use chrono::{DateTime, Utc};
 
-use crate::domain::aggregate::Emit;
-use crate::domain::event::*;
-use crate::domain::session::agent_state::ToolCallState;
-
-use super::agent_state::{
-    new_call_id, AgentState, LlmCallStatus, SessionContext, SessionStatus, ToolCallStatus,
+use crate::runtime::aggregate::Emit;
+use crate::runtime::event::*;
+use super::state::{
+    new_call_id, AgentState, LlmCallStatus, SessionContext, SessionStatus, ToolCallState, ToolCallStatus,
 };
 
 // ---------------------------------------------------------------------------
@@ -782,9 +780,9 @@ fn messages_match(a: &Message, b: &Message) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::agent::{AgentConfig, LlmConfig};
-    use crate::domain::aggregate::Aggregate;
-    use crate::domain::openai;
+    use crate::runtime::config::{AgentConfig, LlmConfig};
+    use crate::runtime::aggregate::Aggregate;
+    use crate::runtime::llm::types as openai;
     use chrono::Utc;
     use uuid::Uuid;
 

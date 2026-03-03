@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub use super::agent::{AgentConfig, LlmConfig};
-use super::openai;
+pub use super::config::{AgentConfig, LlmConfig};
+use super::llm::types as openai;
 pub use super::span::{SpanContext, SpanId, TraceId};
 
 // ---------------------------------------------------------------------------

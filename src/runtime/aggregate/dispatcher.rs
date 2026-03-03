@@ -5,9 +5,9 @@ use std::sync::Arc;
 use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef, SpawnErr};
 use uuid::Uuid;
 
-use crate::domain::aggregate::{AggregateState, DomainEvent};
+use crate::runtime::aggregate::{AggregateState, DomainEvent};
 
-use super::event_store::{EventBatch, EventStore};
+use crate::runtime::event_store::{EventBatch, EventStore};
 
 // ---------------------------------------------------------------------------
 // AggregateDispatcher<A> — generic, per-aggregate-type event dispatcher

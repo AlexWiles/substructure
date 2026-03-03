@@ -3,13 +3,13 @@ use std::sync::Arc;
 use ractor::{ActorRef, RpcReplyPort};
 use uuid::Uuid;
 
-use crate::domain::agent::AgentConfig;
-use crate::domain::aggregate::DomainEvent;
-use crate::domain::event::{ClientIdentity, CompletionDelivery, SpanContext};
-use crate::domain::session::{AgentState, CommandPayload, SessionCommand};
+use crate::runtime::config::AgentConfig;
+use crate::runtime::aggregate::DomainEvent;
+use crate::runtime::event::{ClientIdentity, CompletionDelivery, SpanContext};
+use crate::runtime::session::{AgentState, CommandPayload, SessionCommand};
 
 use super::event_store::{Event, StoreError};
-use super::session_client::Notification;
+use super::session::client::Notification;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -18,7 +18,7 @@ use super::session_client::Notification;
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
     #[error(transparent)]
-    Session(#[from] crate::domain::session::SessionError),
+    Session(#[from] crate::runtime::session::SessionError),
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error("actor call failed: {0}")]
@@ -48,7 +48,7 @@ pub enum SessionMessage {
     /// Cancel this session (used by parent to cancel sub-agent).
     Cancel,
     /// Set client-provided tools (from AG-UI RunAgentInput).
-    SetClientTools(Vec<crate::domain::openai::Tool>),
+    SetClientTools(Vec<crate::runtime::llm::types::Tool>),
     /// Transient notification — broadcast to observers, never persisted.
     Notify(Arc<Notification>),
 }
@@ -106,7 +106,7 @@ pub struct SubAgentRequest {
 pub struct SessionHandle {
     pub session_id: Uuid,
     /// The trace_id assigned to this session on creation.
-    pub trace_id: Option<crate::domain::span::TraceId>,
+    pub trace_id: Option<crate::runtime::span::TraceId>,
     pub(super) session_client: ActorRef<SessionMessage>,
 }
 

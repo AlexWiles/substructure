@@ -5,22 +5,21 @@ use chrono::Utc;
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use uuid::Uuid;
 
-use crate::domain::agent::AgentConfig;
-use crate::domain::config::BudgetPolicyConfig;
-use crate::domain::event::{ClientIdentity, SpanContext};
-use crate::domain::session::{
+use crate::runtime::config::{AgentConfig, BudgetPolicyConfig};
+use crate::runtime::event::{ClientIdentity, SpanContext};
+use crate::runtime::session::{
     AgentState, CommandPayload, IncomingMessage, SessionCommand, SessionStatus,
 };
 
-use super::adapters::build_session_context;
-use super::aggregate_actor::{self, AggregateMessage};
+use super::aggregate::actor::{self as aggregate_actor, AggregateMessage};
+use super::aggregate::dispatcher::spawn_aggregate_dispatcher;
 use super::budget;
-use super::dispatcher::spawn_aggregate_dispatcher;
 use super::event_store::{AggregateFilter, EventStore};
-use super::llm::LlmClientProvider;
-use super::mcp::{self, McpClient};
-use super::routing::{aggregate_actor_name, session_route};
-use super::session_client::{SessionClientActor, SessionClientArgs};
+use super::llm::LlmProviderTrait;
+use super::mcp::{self, McpClient, ToolDefinition};
+use super::session::client::{Notification, SessionClientActor, SessionClientArgs};
+use super::session::routing::{aggregate_actor_name, notify_observers, session_route};
+use super::session::{BudgetActorRef, McpToolEntry, NotifyChunkFn, SessionContext};
 use super::types::{
     RuntimeError, RuntimeMessage, SessionHandle, SessionInit, SubAgentRequest,
 };
@@ -36,17 +35,17 @@ pub(super) struct RuntimeState {
     pub(super) myself: ActorRef<RuntimeMessage>,
     pub(super) store: Arc<dyn EventStore>,
     pub(super) agents: HashMap<String, AgentConfig>,
-    pub(super) llm_provider: Arc<dyn LlmClientProvider>,
+    pub(super) llm_provider: Arc<dyn LlmProviderTrait>,
     pub(super) budget_policies: Vec<BudgetPolicyConfig>,
 }
 
 pub(super) struct RuntimeArgs {
     pub(super) store: Arc<dyn EventStore>,
     pub(super) agents: HashMap<String, AgentConfig>,
-    pub(super) llm_provider: Arc<dyn LlmClientProvider>,
+    pub(super) llm_provider: Arc<dyn LlmProviderTrait>,
     pub(super) budget_policies: Vec<BudgetPolicyConfig>,
     #[cfg(feature = "otel")]
-    pub(super) otel: Option<crate::domain::config::OtelConfig>,
+    pub(super) otel: Option<crate::runtime::config::OtelConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -522,5 +521,105 @@ async fn restart_infrastructure(name: Option<String>, state: &RuntimeState) {
         _ => {
             // Aggregate actor death — just log
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Build SessionContext — wires runtime resources into the domain context
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+fn build_session_context(
+    session_id: Uuid,
+    auth: &ClientIdentity,
+    mcp_clients: &[Arc<dyn McpClient>],
+    llm_provider: &Arc<dyn LlmProviderTrait>,
+    agents: &HashMap<String, AgentConfig>,
+    agent: Option<&AgentConfig>,
+    budget_actor: Option<ActorRef<budget::BudgetMessage>>,
+    stream: bool,
+) -> SessionContext {
+    let mcp_tools: HashMap<String, McpToolEntry> = mcp_clients
+        .iter()
+        .flat_map(|c| {
+            let info = c.server_info();
+            let server_name = info.name.clone();
+            let server_version = info.version.clone();
+            c.tools().iter().map(move |t| {
+                (
+                    t.name.clone(),
+                    McpToolEntry {
+                        server_name: server_name.clone(),
+                        server_version: server_version.clone(),
+                    },
+                )
+            })
+        })
+        .collect();
+
+    let mut tools: Vec<crate::runtime::llm::types::Tool> = mcp_clients
+        .iter()
+        .flat_map(|c| c.tools().iter().map(|t| t.to_openai_tool()))
+        .collect();
+
+    if let Some(agent) = agent {
+        for name in &agent.sub_agents {
+            if let Some(sub) = agents.get(name) {
+                let tool_name = ToolDefinition::sanitized_name(name);
+                tools.push(crate::runtime::llm::types::Tool {
+                    tool_type: "function".to_string(),
+                    function: crate::runtime::llm::types::ToolFunction {
+                        name: tool_name,
+                        description: sub.description.clone().unwrap_or_else(|| sub.name.clone()),
+                        parameters: serde_json::json!({
+                            "type": "object",
+                            "properties": {
+                                "message": {
+                                    "type": "string",
+                                    "description": "The message to send to the sub-agent"
+                                }
+                            },
+                            "required": ["message"]
+                        }),
+                    },
+                });
+            }
+        }
+    }
+
+    let all_tools = if tools.is_empty() { None } else { Some(tools) };
+
+    let budget_ref = budget_actor.map(|a| BudgetActorRef {
+        inner: Box::new(a),
+    });
+
+    let notify_chunk: NotifyChunkFn = Arc::new(
+        |session_id, call_id, chunk_index, text, span| {
+            notify_observers(
+                session_id,
+                Arc::new(Notification::LlmStreamChunk {
+                    call_id,
+                    chunk_index,
+                    text,
+                    span,
+                }),
+            );
+        },
+    );
+
+    SessionContext {
+        mcp_tools,
+        all_tools,
+        session_id,
+        auth: auth.clone(),
+        stream,
+        llm_provider: Some(llm_provider.clone()),
+        mcp_clients: mcp_clients.to_vec(),
+        agents: agents.clone(),
+        client_tools: Vec::new(),
+        budget_actor: budget_ref,
+        notify_chunk: Some(notify_chunk),
+        send_to_session: None,
+        spawn_sub_agent: None,
     }
 }

@@ -1,11 +1,11 @@
 use async_trait::async_trait;
 
-use crate::domain::event::{LlmRequest, LlmResponse};
-use crate::domain::openai;
+use crate::runtime::event::{LlmRequest, LlmResponse};
+use super::types as openai;
 
 use std::sync::Arc;
 
-use super::client::{LlmClient, LlmError};
+use super::{LlmCallError, LlmCallable};
 
 /// A mock LLM client that returns a static text response.
 pub struct MockLlmClient {
@@ -27,14 +27,14 @@ impl MockLlmClient {
 
     pub fn from_config(
         _settings: &serde_json::Map<String, serde_json::Value>,
-    ) -> Result<Arc<dyn LlmClient>, String> {
+    ) -> Result<Arc<dyn LlmCallable>, String> {
         Ok(Arc::new(Self::new()))
     }
 }
 
 #[async_trait]
-impl LlmClient for MockLlmClient {
-    async fn call(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+impl LlmCallable for MockLlmClient {
+    async fn call(&self, request: &LlmRequest) -> Result<LlmResponse, LlmCallError> {
         let n = self
             .call_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 
 use crate::runtime::jsonrpc;
 
-use super::client::{
+use super::{
     CallToolResult, InitializeResult, McpClient, McpError, ServerCapabilities, ServerInfo,
     ToolDefinition,
 };

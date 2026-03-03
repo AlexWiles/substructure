@@ -18,10 +18,10 @@ use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 use crate::ag_ui::{observe_session, resume_run, run_existing_session, AgUiError, AgUiEvent};
-use crate::domain::aggregate::AggregateStatus;
-use crate::domain::auth::{build_auth_resolver, AdminContext, AuthError, AuthResolver};
-use crate::domain::config::SystemConfig;
-use crate::domain::event::ClientIdentity;
+use crate::runtime::aggregate::AggregateStatus;
+use crate::runtime::auth::{build_auth_resolver, AdminContext, AuthError, AuthResolver};
+use crate::runtime::config::SystemConfig;
+use crate::runtime::event::ClientIdentity;
 use crate::runtime::{
     AggregateFilter, AggregateSort, AggregateSummary, EventFilter, Runtime, RuntimeError,
 };

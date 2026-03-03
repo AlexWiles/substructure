@@ -5,14 +5,14 @@ use chrono::Utc;
 use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef, RpcReplyPort, SpawnErr};
 use uuid::Uuid;
 
-use crate::domain::aggregate::DomainEvent;
-use crate::domain::budget::{
+use crate::runtime::aggregate::DomainEvent;
+use crate::runtime::budget::{
     budget_aggregate_id, BudgetContext, BudgetDerived, BudgetEvent, BudgetLedger, ReservationEntry,
     ReservationResult, UsageRecorded,
 };
-use crate::domain::config::BudgetPolicyConfig;
-use crate::domain::event::{EventPayload, LlmCallCompleted, LlmResponse};
-use crate::domain::span::SpanContext;
+use crate::runtime::config::BudgetPolicyConfig;
+use crate::runtime::event::{EventPayload, LlmCallCompleted, LlmResponse};
+use crate::runtime::span::SpanContext;
 use crate::runtime::event_store::{Event, EventBatch, EventStore, StoreError};
 
 // ---------------------------------------------------------------------------
@@ -46,7 +46,7 @@ pub struct BudgetActorArgs {
 pub struct BudgetActorState {
     tenant_id: String,
     aggregate_id: Uuid,
-    ledger: crate::domain::aggregate::Aggregate<BudgetLedger>,
+    ledger: crate::runtime::aggregate::Aggregate<BudgetLedger>,
     reservations: HashMap<(Uuid, String), Vec<ReservationEntry>>,
     policies: Vec<BudgetPolicyConfig>,
     store: Arc<dyn EventStore>,
@@ -68,7 +68,7 @@ impl Actor for BudgetActor {
             Ok(loaded) => serde_json::from_value(loaded.snapshot)
                 .map_err(|e| format!("budget snapshot deserialize: {e}"))?,
             Err(StoreError::StreamNotFound) => {
-                crate::domain::aggregate::Aggregate::new(BudgetLedger::default())
+                crate::runtime::aggregate::Aggregate::new(BudgetLedger::default())
             }
             Err(e) => return Err(format!("budget load: {e}").into()),
         };

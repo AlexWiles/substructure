@@ -6,11 +6,11 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream;
 use uuid::Uuid;
 
-use crate::domain::event::{
+use crate::runtime::event::{
     ClientIdentity, Message as DomainMessage, Role, SpanContext, ToolCall as DomainToolCall,
 };
-use crate::domain::openai;
-use crate::domain::session::{
+use crate::runtime::llm::types as openai;
+use crate::runtime::session::{
     AgentState, CommandPayload, SessionCommand, SessionContext,
 };
 use crate::runtime::{OnSessionUpdate, Runtime, RuntimeError, SessionUpdate};
@@ -332,12 +332,12 @@ async fn load_state(
     runtime: &Runtime,
     session_id: Uuid,
     auth: &ClientIdentity,
-) -> (AgentState, u64, Option<crate::domain::span::TraceId>) {
+) -> (AgentState, u64, Option<crate::runtime::span::TraceId>) {
     match runtime.store().load(session_id, &auth.tenant_id).await {
         Ok(load) => {
-            let snapshot: crate::domain::aggregate::Aggregate<AgentState> =
+            let snapshot: crate::runtime::aggregate::Aggregate<AgentState> =
                 serde_json::from_value(load.snapshot).unwrap_or_else(|_| {
-                    crate::domain::aggregate::Aggregate::new(AgentState::new(session_id))
+                    crate::runtime::aggregate::Aggregate::new(AgentState::new(session_id))
                 });
             let last_applied = snapshot.last_applied.unwrap_or(0);
             let trace_id = snapshot.trace_id;
@@ -348,7 +348,7 @@ async fn load_state(
 }
 
 /// Convert a domain `Message` to an AG-UI `Message`.
-fn domain_message_to_ag_ui(msg: &crate::domain::event::Message) -> Message {
+fn domain_message_to_ag_ui(msg: &crate::runtime::event::Message) -> Message {
     match msg.role {
         Role::User => Message::User {
             id: None,

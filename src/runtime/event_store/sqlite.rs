@@ -8,7 +8,7 @@ use ractor::{call_t, Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPo
 use rusqlite::Connection;
 use uuid::Uuid;
 
-use crate::domain::aggregate::AggregateStatus;
+use crate::runtime::aggregate::AggregateStatus;
 
 use super::store::{
     AggregateFilter, AggregateSort, AggregateSummary, Event, EventBatch, EventStore, StoreError,
@@ -736,10 +736,10 @@ impl<T> OptionalExt<T> for Result<T, rusqlite::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::agent::{AgentConfig, LlmConfig};
-    use crate::domain::aggregate::{Aggregate, DomainEvent};
-    use crate::domain::event::{ClientIdentity, EventPayload, SessionCreated, SpanContext};
-    use crate::domain::session::AgentState;
+    use crate::runtime::config::{AgentConfig, LlmConfig};
+    use crate::runtime::aggregate::{Aggregate, DomainEvent};
+    use crate::runtime::event::{ClientIdentity, EventPayload, SessionCreated, SpanContext};
+    use crate::runtime::session::AgentState;
 
     fn test_auth(tenant: &str) -> ClientIdentity {
         ClientIdentity {

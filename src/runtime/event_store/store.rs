@@ -7,8 +7,8 @@ use ractor::OutputPort;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::domain::aggregate::AggregateStatus;
-use crate::domain::span::SpanContext;
+use crate::runtime::aggregate::AggregateStatus;
+use crate::runtime::span::SpanContext;
 
 // ---------------------------------------------------------------------------
 // Store-level Event — aggregate-agnostic raw envelope
@@ -165,7 +165,7 @@ pub struct SpanSummary {
 /// Groups events by `span_id`, then builds one `SpanSummary` per group using
 /// persisted `start_time`/`end_time` and metadata.
 pub fn reconstruct_span_summaries(events: &[&Event]) -> Vec<SpanSummary> {
-    use crate::domain::span::SpanId;
+    use crate::runtime::span::SpanId;
     use std::collections::BTreeMap;
 
     let mut groups: BTreeMap<SpanId, Vec<&Event>> = BTreeMap::new();

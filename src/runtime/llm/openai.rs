@@ -6,13 +6,13 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_stream::StreamExt;
 
-use crate::domain::event::{LlmRequest, LlmResponse};
-use crate::domain::openai::{
+use crate::runtime::event::{LlmRequest, LlmResponse};
+use super::types::{
     ChatCompletionRequest, ChatCompletionResponse, ChatMessage, Choice, FunctionCall, Role,
     ToolCall, Usage,
 };
 
-use super::client::{ErrorSource, LlmClient, LlmError, StreamDelta};
+use super::{LlmCallError, LlmCallable, StreamDelta};
 
 // ---------------------------------------------------------------------------
 // Client
@@ -42,7 +42,7 @@ impl OpenAiClient {
 
     pub fn from_config(
         settings: &serde_json::Map<String, serde_json::Value>,
-    ) -> Result<Arc<dyn LlmClient>, String> {
+    ) -> Result<Arc<dyn LlmCallable>, String> {
         let config: OpenAiClientConfig =
             serde_json::from_value(serde_json::Value::Object(settings.clone()))
                 .map_err(|e| format!("openai_compatible config: {e}"))?;
@@ -57,7 +57,7 @@ impl OpenAiClient {
         &self,
         request: &ChatCompletionRequest,
         stream: bool,
-    ) -> Result<reqwest::Response, LlmError> {
+    ) -> Result<reqwest::Response, LlmCallError> {
         #[derive(Serialize)]
         struct Body<'a> {
             #[serde(flatten)]
@@ -78,57 +78,45 @@ impl OpenAiClient {
             })
             .send()
             .await
-            .map_err(|e| LlmError {
+            .map_err(|e| LlmCallError {
                 message: format!("HTTP request failed: {e}"),
                 retryable: true,
-                source: ErrorSource {
-                    kind: "network".into(),
-                    detail: serde_json::Value::Null,
-                },
+                source: Some(serde_json::json!({"kind": "network"})),
             })
     }
 }
 
 // ---------------------------------------------------------------------------
-// LlmClient impl
+// LlmCallable impl
 // ---------------------------------------------------------------------------
 
 #[async_trait]
-impl LlmClient for OpenAiClient {
+impl LlmCallable for OpenAiClient {
     #[tracing::instrument(skip(self, request), fields(base_url = %self.config.base_url))]
-    async fn call(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+    async fn call(&self, request: &LlmRequest) -> Result<LlmResponse, LlmCallError> {
         let LlmRequest::OpenAi(req) = request;
         let resp = self.post_chat_completion(req, false).await?;
         let status = resp.status();
-        let body = resp.text().await.map_err(|e| LlmError {
+        let body = resp.text().await.map_err(|e| LlmCallError {
             message: format!("read body: {e}"),
             retryable: true,
-            source: ErrorSource {
-                kind: "network".into(),
-                detail: serde_json::Value::Null,
-            },
+            source: Some(serde_json::json!({"kind": "network"})),
         })?;
         if !status.is_success() {
             let status_code = status.as_u16();
             let body_json =
                 serde_json::from_str(&body).unwrap_or(serde_json::Value::String(body.clone()));
             let retryable = status.is_server_error() || status_code == 408 || status_code == 429;
-            return Err(LlmError {
+            return Err(LlmCallError {
                 message: format!("OpenAI API error {status}: {body}"),
                 retryable,
-                source: ErrorSource {
-                    kind: "openai".into(),
-                    detail: serde_json::json!({ "status": status_code, "body": body_json }),
-                },
+                source: Some(serde_json::json!({"kind": "openai", "status": status_code, "body": body_json})),
             });
         }
-        let parsed: ChatCompletionResponse = serde_json::from_str(&body).map_err(|e| LlmError {
+        let parsed: ChatCompletionResponse = serde_json::from_str(&body).map_err(|e| LlmCallError {
             message: format!("parse response: {e}"),
             retryable: false,
-            source: ErrorSource {
-                kind: "openai".into(),
-                detail: serde_json::Value::Null,
-            },
+            source: Some(serde_json::json!({"kind": "openai"})),
         })?;
         Ok(LlmResponse::OpenAi(parsed))
     }
@@ -138,30 +126,24 @@ impl LlmClient for OpenAiClient {
         &self,
         request: &LlmRequest,
         chunk_tx: UnboundedSender<StreamDelta>,
-    ) -> Result<LlmResponse, LlmError> {
+    ) -> Result<LlmResponse, LlmCallError> {
         let LlmRequest::OpenAi(req) = request;
         let resp = self.post_chat_completion(req, true).await?;
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.map_err(|e| LlmError {
+            let body = resp.text().await.map_err(|e| LlmCallError {
                 message: format!("read body: {e}"),
                 retryable: true,
-                source: ErrorSource {
-                    kind: "network".into(),
-                    detail: serde_json::Value::Null,
-                },
+                source: Some(serde_json::json!({"kind": "network"})),
             })?;
             let status_code = status.as_u16();
             let body_json =
                 serde_json::from_str(&body).unwrap_or(serde_json::Value::String(body.clone()));
             let retryable = status.is_server_error() || status_code == 408 || status_code == 429;
-            return Err(LlmError {
+            return Err(LlmCallError {
                 message: format!("OpenAI API error {status}: {body}"),
                 retryable,
-                source: ErrorSource {
-                    kind: "openai".into(),
-                    detail: serde_json::json!({ "status": status_code, "body": body_json }),
-                },
+                source: Some(serde_json::json!({"kind": "openai", "status": status_code, "body": body_json})),
             });
         }
 
@@ -181,13 +163,10 @@ impl LlmClient for OpenAiClient {
         let mut line_buf = String::new();
 
         while let Some(chunk_result) = stream.next().await {
-            let bytes = chunk_result.map_err(|e| LlmError {
+            let bytes = chunk_result.map_err(|e| LlmCallError {
                 message: format!("stream read: {e}"),
                 retryable: true,
-                source: ErrorSource {
-                    kind: "network".into(),
-                    detail: serde_json::Value::Null,
-                },
+                source: Some(serde_json::json!({"kind": "network"})),
             })?;
             let text = String::from_utf8_lossy(&bytes);
             line_buf.push_str(&text);

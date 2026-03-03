@@ -3,12 +3,11 @@ use std::sync::Arc;
 use ractor::ActorRef;
 use uuid::Uuid;
 
-use crate::domain::aggregate::DomainEvent;
-use crate::domain::session::AgentState;
-
-use super::aggregate_actor::AggregateMessage;
-use super::session_client::Notification;
-use super::types::SessionMessage;
+use crate::runtime::aggregate::DomainEvent;
+use crate::runtime::aggregate::actor::AggregateMessage;
+use crate::runtime::types::SessionMessage;
+use super::client::Notification;
+use super::state::AgentState;
 
 // ---------------------------------------------------------------------------
 // Naming conventions for ractor registry / process groups

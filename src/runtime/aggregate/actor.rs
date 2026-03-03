@@ -10,8 +10,8 @@ use uuid::Uuid;
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::domain::aggregate::{Aggregate, AggregateState, AggregateStatus, DomainEvent};
-use crate::domain::span::{SpanContext, TraceId};
+use crate::runtime::aggregate::{Aggregate, AggregateState, AggregateStatus, DomainEvent};
+use crate::runtime::span::{SpanContext, TraceId};
 use crate::runtime::event_store::{Event, EventStore, StoreError};
 
 /// Default idle timeout for aggregate actors (5 minutes).

@@ -3,14 +3,12 @@ use std::sync::Arc;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use uuid::Uuid;
 
-use super::aggregate_actor::{AggregateError, AggregateMessage};
-use super::event_store::EventStore;
-use super::RuntimeError;
-use crate::domain::aggregate::{Aggregate, DomainEvent};
-use crate::domain::event::ClientIdentity;
-use crate::domain::session::AgentState;
-
-use super::SessionMessage;
+use crate::runtime::aggregate::{Aggregate, DomainEvent};
+use crate::runtime::aggregate::actor::{AggregateError, AggregateMessage};
+use crate::runtime::event::ClientIdentity;
+use crate::runtime::event_store::EventStore;
+use crate::runtime::types::{RuntimeError, SessionMessage};
+use super::state::AgentState;
 
 // ---------------------------------------------------------------------------
 // Notification — transient signals, never persisted
@@ -23,7 +21,7 @@ pub enum Notification {
         call_id: String,
         chunk_index: u32,
         text: String,
-        span: crate::domain::span::SpanContext,
+        span: crate::runtime::span::SpanContext,
     },
 }
 
@@ -77,10 +75,10 @@ impl Actor for SessionClientActor {
             Err(_) => Aggregate::new(AgentState::new(args.session_id)),
         };
 
-        let group = super::session_group(args.session_id);
+        let group = super::routing::session_group(args.session_id);
         ractor::pg::join(group, vec![myself.get_cell()]);
 
-        let observer_group = super::session_observer_group(args.session_id);
+        let observer_group = super::routing::session_observer_group(args.session_id);
         ractor::pg::join(observer_group, vec![myself.get_cell()]);
 
         Ok(SessionClientState {
@@ -99,7 +97,7 @@ impl Actor for SessionClientActor {
         match message {
             SessionMessage::Execute(cmd, reply) => {
                 // Forward command to aggregate actor via registry
-                let name = super::aggregate_actor_name(state.session_id);
+                let name = super::routing::aggregate_actor_name(state.session_id);
                 if let Some(cell) = ractor::registry::where_is(name) {
                     let actor: ActorRef<AggregateMessage<AgentState>> = cell.into();
                     let result = actor

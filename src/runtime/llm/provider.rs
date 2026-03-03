@@ -3,37 +3,22 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use super::client::LlmClient;
-use crate::domain::config::LlmClientConfig;
-use crate::domain::event::ClientIdentity;
+use super::{LlmCallable, LlmProviderTrait};
+use crate::runtime::config::LlmClientConfig;
+use crate::runtime::event::ClientIdentity;
 
 pub type LlmClientFactory = Box<
-    dyn Fn(&serde_json::Map<String, serde_json::Value>) -> Result<Arc<dyn LlmClient>, String>
+    dyn Fn(&serde_json::Map<String, serde_json::Value>) -> Result<Arc<dyn LlmCallable>, String>
         + Send
         + Sync,
 >;
 
-#[derive(Debug, thiserror::Error)]
-pub enum ProviderError {
-    #[error("unknown LLM client: {0}")]
-    UnknownClient(String),
-}
-
-#[async_trait]
-pub trait LlmClientProvider: Send + Sync + 'static {
-    async fn resolve(
-        &self,
-        client_id: &str,
-        auth: &ClientIdentity,
-    ) -> Result<Arc<dyn LlmClient>, ProviderError>;
-}
-
 pub struct StaticLlmClientProvider {
-    clients: HashMap<String, Arc<dyn LlmClient>>,
+    clients: HashMap<String, Arc<dyn LlmCallable>>,
 }
 
 impl StaticLlmClientProvider {
-    pub fn new(clients: HashMap<String, Arc<dyn LlmClient>>) -> Self {
+    pub fn new(clients: HashMap<String, Arc<dyn LlmCallable>>) -> Self {
         Self { clients }
     }
 
@@ -53,15 +38,15 @@ impl StaticLlmClientProvider {
 }
 
 #[async_trait]
-impl LlmClientProvider for StaticLlmClientProvider {
+impl LlmProviderTrait for StaticLlmClientProvider {
     async fn resolve(
         &self,
         client_id: &str,
         _auth: &ClientIdentity,
-    ) -> Result<Arc<dyn LlmClient>, ProviderError> {
+    ) -> Result<Arc<dyn LlmCallable>, String> {
         self.clients
             .get(client_id)
             .cloned()
-            .ok_or_else(|| ProviderError::UnknownClient(client_id.to_string()))
+            .ok_or_else(|| format!("unknown LLM client: {client_id}"))
     }
 }

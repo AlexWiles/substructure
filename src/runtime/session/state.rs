@@ -8,14 +8,15 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use async_trait::async_trait;
-use crate::domain::aggregate::{AggregateState, AggregateStatus};
-use crate::domain::event::{
+use crate::runtime::aggregate::{AggregateState, AggregateStatus};
+use crate::runtime::event::{
     AgentConfig, Artifact, ClientIdentity, CompletionDelivery, EventPayload, LlmCallRequested,
     LlmRequest, LlmResponse, Message, Role, ToolCallMeta, ToolCallRequested, ToolHandler,
 };
-use crate::domain::openai;
+use crate::runtime::mcp::{Content, McpClient};
+use crate::runtime::llm::types as openai;
 
-use super::command_handler::{CommandPayload, SessionError};
+use super::command::{CommandPayload, SessionError};
 
 // ---------------------------------------------------------------------------
 // SessionContext — transient state passed through handle_command/on_event
@@ -29,9 +30,9 @@ pub struct McpToolEntry {
 }
 
 /// Callback for streaming LLM chunks to observers.
-pub type NotifyChunkFn = Arc<dyn Fn(Uuid, String, u32, String, crate::domain::span::SpanContext) + Send + Sync>;
+pub type NotifyChunkFn = Arc<dyn Fn(Uuid, String, u32, String, crate::runtime::span::SpanContext) + Send + Sync>;
 /// Callback for sending a command to a session (fire-and-forget).
-pub type SendToSessionFn = Arc<dyn Fn(Uuid, CommandPayload, crate::domain::event::SpanContext) + Send + Sync>;
+pub type SendToSessionFn = Arc<dyn Fn(Uuid, CommandPayload, crate::runtime::event::SpanContext) + Send + Sync>;
 /// Callback for spawning a sub-agent.
 pub type SpawnSubAgentFn = Arc<
     dyn Fn(SubAgentParams) + Send + Sync,
@@ -44,7 +45,7 @@ pub struct SubAgentParams {
     pub message: String,
     pub auth: ClientIdentity,
     pub delivery: CompletionDelivery,
-    pub span: crate::domain::event::SpanContext,
+    pub span: crate::runtime::event::SpanContext,
     pub token_budget: Option<u64>,
     pub stream: bool,
 }
@@ -58,8 +59,8 @@ pub struct SessionContext {
     pub auth: ClientIdentity,
     pub stream: bool,
     // Runtime resources for I/O in on_event
-    pub llm_provider: Option<Arc<dyn LlmClientTrait>>,
-    pub mcp_clients: Vec<Arc<dyn McpClientTrait>>,
+    pub llm_provider: Option<Arc<dyn LlmProviderTrait>>,
+    pub mcp_clients: Vec<Arc<dyn McpClient>>,
     pub agents: HashMap<String, AgentConfig>,
     pub client_tools: Vec<openai::Tool>,
     pub budget_actor: Option<BudgetActorRef>,
@@ -93,83 +94,7 @@ impl Default for SessionContext {
     }
 }
 
-// Trait aliases for runtime types used by SessionContext.
-// These avoid pulling runtime crate types directly into the domain.
-// The runtime module provides the concrete implementations.
-
-#[async_trait]
-/// Trait for LLM client providers (resolved by the runtime).
-pub trait LlmClientTrait: Send + Sync {
-    async fn resolve(&self, client_id: &str, auth: &ClientIdentity) -> Result<Arc<dyn LlmCallable>, String>;
-}
-
-#[async_trait]
-/// Trait for calling an LLM (single call or streaming).
-pub trait LlmCallable: Send + Sync {
-    async fn call(&self, request: &LlmRequest) -> Result<LlmResponse, LlmCallError>;
-
-    async fn call_streaming(
-        &self,
-        request: &LlmRequest,
-        tx: tokio::sync::mpsc::UnboundedSender<StreamDelta>,
-    ) -> Result<LlmResponse, LlmCallError>;
-}
-
-#[derive(Debug, Clone)]
-pub struct LlmCallError {
-    pub message: String,
-    pub retryable: bool,
-    pub source: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone)]
-pub struct StreamDelta {
-    pub text: Option<String>,
-}
-
-/// Trait for MCP tool clients.
-#[async_trait]
-pub trait McpClientTrait: Send + Sync {
-    async fn call_tool(&self, name: &str, arguments: serde_json::Value) -> Result<McpToolResult, String>;
-    fn server_info(&self) -> McpServerInfo;
-    fn tools(&self) -> Vec<McpToolDefinition>;
-}
-
-#[derive(Debug, Clone)]
-pub struct McpServerInfo {
-    pub name: String,
-    pub version: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct McpToolDefinition {
-    pub name: String,
-}
-
-impl McpToolDefinition {
-    pub fn to_openai_tool(&self) -> openai::Tool {
-        openai::Tool {
-            tool_type: "function".to_string(),
-            function: openai::ToolFunction {
-                name: self.name.clone(),
-                description: String::new(),
-                parameters: serde_json::json!({}),
-            },
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct McpToolResult {
-    pub content: Vec<McpToolContent>,
-    pub is_error: bool,
-}
-
-#[derive(Debug, Clone)]
-pub enum McpToolContent {
-    Text { text: String },
-    Other,
-}
+use crate::runtime::llm::{LlmProviderTrait, StreamDelta};
 
 /// Opaque handle to the budget actor — avoids leaking ractor types into the domain.
 /// Opaque handle to the budget actor — avoids leaking ractor types into the domain.
@@ -757,7 +682,7 @@ impl AgentState {
         &self,
         p: &LlmCallRequested,
         ctx: &SessionContext,
-        span: &crate::domain::span::SpanContext,
+        span: &crate::runtime::span::SpanContext,
     ) -> CommandPayload {
         let provider = match &ctx.llm_provider {
             Some(p) => p,
@@ -842,7 +767,7 @@ impl AgentState {
         &self,
         p: &ToolCallRequested,
         ctx: &SessionContext,
-        span: &crate::domain::span::SpanContext,
+        span: &crate::runtime::span::SpanContext,
     ) -> Option<CommandPayload> {
         // Sub-agent tool call
         if let Some(child_session_id) = self
@@ -895,7 +820,7 @@ impl AgentState {
                         .content
                         .iter()
                         .filter_map(|c| match c {
-                            McpToolContent::Text { text } => Some(text.as_str()),
+                            Content::Text { text } => Some(text.as_str()),
                             _ => None,
                         })
                         .collect::<Vec<_>>()
@@ -918,7 +843,7 @@ impl AgentState {
                     return Some(CommandPayload::FailToolCall {
                         tool_call_id: p.tool_call_id.clone(),
                         name: p.name.clone(),
-                        error: e,
+                        error: e.to_string(),
                     });
                 }
             }
@@ -953,7 +878,7 @@ impl AgentState {
                         Some(ref text) if !text.is_empty() => vec![Artifact {
                             name: None,
                             description: None,
-                            parts: vec![crate::domain::event::Part::Text {
+                            parts: vec![crate::runtime::event::Part::Text {
                                 text: text.clone(),
                             }],
                         }],
@@ -975,7 +900,7 @@ impl AgentState {
                     artifacts: vec![Artifact {
                         name: None,
                         description: None,
-                        parts: vec![crate::domain::event::Part::Text {
+                        parts: vec![crate::runtime::event::Part::Text {
                             text: format!("Error: {}", p.error),
                         }],
                     }],
@@ -1042,11 +967,11 @@ impl AggregateState for AgentState {
         &self,
         cmd: Self::Command,
         ctx: &Self::Context,
-    ) -> Result<Vec<crate::domain::aggregate::Emit<Self::Event>>, Self::Error> {
+    ) -> Result<Vec<crate::runtime::aggregate::Emit<Self::Event>>, Self::Error> {
         self.handle(cmd, ctx)
     }
 
-    async fn on_event(&self, event: &Self::Event, ctx: &Self::Context, span: &crate::domain::span::SpanContext) -> Option<Self::Command> {
+    async fn on_event(&self, event: &Self::Event, ctx: &Self::Context, span: &crate::runtime::span::SpanContext) -> Option<Self::Command> {
         // --- Mechanical I/O dispatch ---
         match event {
             EventPayload::LlmCallRequested(p) => {

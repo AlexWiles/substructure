@@ -4,32 +4,36 @@ use std::sync::Arc;
 use ractor::{call_t, Actor, ActorRef};
 use uuid::Uuid;
 
-use crate::domain::agent::AgentConfig;
-use crate::domain::config::{EventStoreConfig, SystemConfig};
-use crate::domain::event::{ClientIdentity, SpanContext};
+// --- Modules (types, traits, config) ---
+pub mod aggregate;
+pub mod auth;
+pub mod config;
+pub mod event;
+pub mod secret;
+pub mod span;
 
+// --- Runtime modules ---
 pub mod budget;
-pub mod dispatcher;
 pub mod event_store;
-pub mod aggregate_actor;
 pub mod jsonrpc;
 pub mod llm;
 pub mod mcp;
 #[cfg(feature = "otel")]
 pub mod otel;
-pub mod session_client;
+pub mod session;
 pub mod wake_scheduler;
 
-mod adapters;
 mod actor;
-mod routing;
 mod types;
+
+use self::config::{AgentConfig, EventStoreConfig, SystemConfig};
+use self::event::{ClientIdentity, SpanContext};
 
 // Re-export shared types
 pub use types::{RuntimeError, RuntimeMessage, SessionHandle, SessionInit, SessionMessage, SubAgentRequest};
 
 // Re-export routing utilities
-pub use routing::{aggregate_actor_name, notify_observers, session_group, session_observer_group};
+pub use session::routing::{aggregate_actor_name, notify_observers, session_group, session_observer_group};
 
 // Re-export event store types
 #[cfg(feature = "sqlite")]
@@ -40,8 +44,8 @@ pub use event_store::{
 };
 
 // Re-export LLM types
-pub use llm::{LlmClient, MockLlmClient, OpenAiClient, StreamDelta as LlmStreamDelta};
-pub use llm::{LlmClientFactory, LlmClientProvider, ProviderError, StaticLlmClientProvider};
+pub use llm::{LlmCallError, LlmCallable, LlmProviderTrait, MockLlmClient, OpenAiClient, StreamDelta};
+pub use llm::{LlmClientFactory, StaticLlmClientProvider};
 
 // Re-export MCP types
 pub use mcp::{mcp_actor_name, spawn_mcp_actor, McpActorClient, McpMessage};
@@ -50,8 +54,8 @@ pub use mcp::{
     ToolAnnotations, ToolDefinition,
 };
 
-// Re-export session client types
-pub use session_client::{
+// Re-export session types
+pub use session::client::{
     Notification, OnSessionUpdate, SessionClientActor, SessionClientArgs, SessionUpdate,
 };
 

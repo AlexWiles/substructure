@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::domain::event::{EventPayload, ToolCallMeta};
+use crate::runtime::event::{EventPayload, ToolCallMeta};
 use crate::runtime::Notification;
 
 use super::types::{AgUiEvent, InterruptInfo};
@@ -278,8 +278,8 @@ impl EventTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::event::*;
-    use crate::domain::span::SpanContext;
+    use crate::runtime::event::*;
+    use crate::runtime::span::SpanContext;
     use chrono::Utc;
     use uuid::Uuid;
 
@@ -331,7 +331,7 @@ mod tests {
         let events = assert_events(translator.translate_event(&EventPayload::LlmCallRequested(
             LlmCallRequested {
                 call_id: call_id.clone(),
-                request: LlmRequest::OpenAi(crate::domain::openai::ChatCompletionRequest {
+                request: LlmRequest::OpenAi(crate::runtime::llm::types::ChatCompletionRequest {
                     model: "test".into(),
                     messages: vec![],
                     tools: None,
@@ -375,7 +375,7 @@ mod tests {
         let events = assert_events(translator.translate_event(&EventPayload::LlmCallCompleted(
             LlmCallCompleted {
                 call_id: call_id.clone(),
-                response: LlmResponse::OpenAi(crate::domain::openai::ChatCompletionResponse {
+                response: LlmResponse::OpenAi(crate::runtime::llm::types::ChatCompletionResponse {
                     id: "resp-1".into(),
                     model: "test".into(),
                     choices: vec![],
@@ -598,11 +598,11 @@ mod tests {
 
         let events = assert_events(translator.translate_event(&EventPayload::SessionCreated(
             Box::new(SessionCreated {
-                agent: crate::domain::agent::AgentConfig {
+                agent: crate::runtime::config::AgentConfig {
                     id: Uuid::new_v4(),
                     name: "test".into(),
                     description: None,
-                    llm: crate::domain::agent::LlmConfig {
+                    llm: crate::runtime::config::LlmConfig {
                         client: "mock".into(),
                         params: Default::default(),
                     },
