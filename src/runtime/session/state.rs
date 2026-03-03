@@ -349,7 +349,12 @@ impl SessionState {
                             .as_ref()
                             .map(|a| a.retry.backoff_max_secs)
                             .unwrap_or(60);
-                        let backoff = min(2u32.saturating_pow(call.retry.attempts), backoff_max);
+                        let backoff_base = self
+                            .agent
+                            .as_ref()
+                            .map(|a| a.retry.backoff_base_secs)
+                            .unwrap_or(2);
+                        let backoff = min(backoff_base.saturating_pow(call.retry.attempts), backoff_max);
                         call.retry.next_at =
                             Some(Utc::now() + chrono::Duration::seconds(i64::from(backoff)));
                     } else {

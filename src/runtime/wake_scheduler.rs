@@ -49,7 +49,9 @@ fn schedule(state: &mut WakeSchedulerState, at: DateTime<Utc>) {
     let myself = state.myself.clone();
     let handle = tokio::spawn(async move {
         tokio::time::sleep(delay).await;
-        let _ = myself.send_message(WakeSchedulerMessage::Tick);
+        if let Err(e) = myself.send_message(WakeSchedulerMessage::Tick) {
+            tracing::warn!(error = %e, "failed to send scheduled tick");
+        }
     });
 
     state.next_tick_at = Some(at);
@@ -91,7 +93,9 @@ impl Actor for WakeScheduler {
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         // Send an initial Tick to catch up on any due aggregates at startup.
-        let _ = myself.send_message(WakeSchedulerMessage::Tick);
+        if let Err(e) = myself.send_message(WakeSchedulerMessage::Tick) {
+            tracing::warn!(error = %e, "failed to send initial tick");
+        }
 
         Ok(WakeSchedulerState {
             store: args.store,
@@ -135,11 +139,11 @@ impl Actor for WakeScheduler {
                 };
                 let due = state.store.list_aggregates(&filter).await;
                 for agg in due {
-                    let _ = state.runtime.send_message(RuntimeMessage::WakeAggregate {
+                    state.runtime.send_message(RuntimeMessage::WakeAggregate {
                         aggregate_id: agg.aggregate_id,
                         aggregate_type: agg.aggregate_type,
                         tenant_id: agg.tenant_id,
-                    });
+                    })?;
                 }
 
                 // Schedule next tick from the store.

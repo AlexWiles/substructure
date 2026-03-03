@@ -10,8 +10,8 @@ path = "events.db"
 endpoint = "http://localhost:4317"
 service_name = "substructure"
 
-[secret_providers.env]
-type = "env"
+[secret_providers]
+env = { type = "env" }
 
 [llm_clients.openrouter]
 type = "openai_compatible"
@@ -24,6 +24,7 @@ description = """A helpful assistant named Alex"""
 system_prompt = """You are an intelligent analyst."""
 llm = { client = "openrouter", model = "stepfun/step-3.5-flash:free" }
 sub_agents = ["file-system"]
+retry.max_retries = 10
 
 [agents.file-system]
 name = "file-system"
@@ -33,9 +34,10 @@ Use the filesystem tools to explore files and directories, then return a clear s
 Be concise and factual.
 
 Be careful of large directory trees. If you list a tree that is too large you will stop working.
-
 """
 llm = { client = "openrouter", model = "stepfun/step-3.5-flash:free" }
+retry.max_retries = 10
+
 
 [[agents.file-system.mcp_servers]]
 name = "filesystem"

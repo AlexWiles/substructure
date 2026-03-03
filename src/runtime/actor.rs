@@ -455,18 +455,18 @@ impl Actor for RuntimeActor {
         &self,
         _myself: ActorRef<Self::Msg>,
         message: SupervisionEvent,
-        state: &mut Self::State,
+        _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match &message {
             SupervisionEvent::ActorFailed(who, err) => {
-                let name = who.get_name();
-                tracing::error!(actor = ?name, error = %err, "child actor failed");
-                restart_infrastructure(name, state).await;
+                tracing::error!(actor = ?who.get_name(), error = %err, "child actor failed");
             }
             SupervisionEvent::ActorTerminated(who, _, reason) => {
-                let name = who.get_name();
-                tracing::error!(actor = ?name, reason = ?reason, "child actor terminated");
-                restart_infrastructure(name, state).await;
+                if reason.is_some() {
+                    tracing::error!(actor = ?who.get_name(), reason = ?reason, "child actor terminated unexpectedly");
+                } else {
+                    tracing::debug!(actor = ?who.get_name(), "child actor stopped");
+                }
             }
             _ => {}
         }
@@ -474,55 +474,6 @@ impl Actor for RuntimeActor {
     }
 }
 
-/// Restart dispatcher, wake-scheduler, or budget actors if they died.
-async fn restart_infrastructure(name: Option<String>, state: &RuntimeState) {
-    match name.as_deref() {
-        Some("session-dispatcher") => {
-            tracing::info!("restarting session-dispatcher");
-            if let Err(e) = spawn_aggregate_dispatcher::<SessionState>(
-                &state.store,
-                Arc::new(session_route),
-                state.myself.get_cell(),
-            )
-            .await
-            {
-                tracing::error!(error = %e, "failed to restart session-dispatcher");
-            }
-        }
-        Some("wake-scheduler") => {
-            tracing::info!("restarting wake-scheduler");
-            if let Err(e) = spawn_wake_scheduler(
-                state.store.clone(),
-                state.myself.clone(),
-                state.myself.get_cell(),
-            )
-            .await
-            {
-                tracing::error!(error = %e, "failed to restart wake-scheduler");
-            }
-        }
-        Some(name) if name.starts_with("mcp-") => {
-            tracing::info!(server = %name, "MCP actor died, will re-spawn on next use");
-        }
-        Some(name) if name.starts_with("budget-") => {
-            let tenant_id = &name["budget-".len()..];
-            tracing::info!(tenant = %tenant_id, "restarting budget actor");
-            if let Err(e) = budget::spawn_budget_actor(
-                tenant_id.to_string(),
-                state.budget_policies.clone(),
-                state.store.clone(),
-                state.myself.get_cell(),
-            )
-            .await
-            {
-                tracing::error!(error = %e, "failed to restart budget actor");
-            }
-        }
-        _ => {
-            // Aggregate actor death — just log
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Build SessionContext — wires runtime resources into the domain context
