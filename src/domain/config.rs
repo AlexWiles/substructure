@@ -82,9 +82,10 @@ impl LoggingConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(tag = "type")]
 pub enum AuthConfig {
+    #[default]
     #[serde(rename = "none")]
     None,
     #[serde(rename = "token")]
@@ -95,12 +96,6 @@ pub enum AuthConfig {
         #[serde(default)]
         tenants: Vec<TenantConfig>,
     },
-}
-
-impl Default for AuthConfig {
-    fn default() -> Self {
-        AuthConfig::None
-    }
 }
 
 fn default_token_ttl() -> String {

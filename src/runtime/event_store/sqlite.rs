@@ -776,11 +776,11 @@ mod tests {
             sequence: 1,
             span: SpanContext::root(),
             occurred_at: chrono::Utc::now(),
-            payload: EventPayload::SessionCreated(SessionCreated {
+            payload: EventPayload::SessionCreated(Box::new(SessionCreated {
                 agent: agent.clone(),
                 auth: auth.clone(),
                 on_done: None,
-            }),
+            })),
             derived: None,
             metadata: Default::default(),
         };

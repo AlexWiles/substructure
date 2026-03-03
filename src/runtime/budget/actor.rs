@@ -207,7 +207,7 @@ async fn settle_usage(
         *by_key.entry(&entry.composite_key).or_default() += entry.amount;
     }
 
-    for (ck, _reserved) in &by_key {
+    for ck in by_key.keys() {
         // Parse composite key back into policy_name and bucket_key
         let (policy_name, bucket_key) = match ck.split_once('|') {
             Some((p, b)) => (p, b),

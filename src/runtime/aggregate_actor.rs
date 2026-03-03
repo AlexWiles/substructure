@@ -17,12 +17,16 @@ use crate::runtime::event_store::{Event, EventStore, StoreError};
 /// Default idle timeout for aggregate actors (5 minutes).
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
+type AggregateResult<E> = Result<Vec<Arc<Event>>, AggregateError<E>>;
+type ContextUpdateFn<C> = Box<dyn FnOnce(&mut C) + Send>;
+type ContextInitFn<R> = Box<dyn FnOnce(&R) -> Pin<Box<dyn Future<Output = <R as AggregateState>::Context> + Send>> + Send>;
+
 pub enum AggregateMessage<R: AggregateState> {
     Execute {
         cmd: R::Command,
         span: SpanContext,
         occurred_at: DateTime<Utc>,
-        reply: RpcReplyPort<Result<Vec<Arc<Event>>, AggregateError<R::Error>>>,
+        reply: RpcReplyPort<AggregateResult<R::Error>>,
     },
     Cast {
         cmd: R::Command,
@@ -32,8 +36,7 @@ pub enum AggregateMessage<R: AggregateState> {
     GetState(RpcReplyPort<R>),
     GetAggregate(RpcReplyPort<Aggregate<R>>),
     Events(Vec<Arc<DomainEvent<R>>>),
-    /// Mutate the context in-place (e.g. update client tools, stream flag).
-    UpdateContext(Box<dyn FnOnce(&mut R::Context) + Send>),
+    UpdateContext(ContextUpdateFn<R::Context>),
     /// Idle timeout check — carries the generation counter it was spawned with.
     IdleCheck(u64),
 }
@@ -66,7 +69,7 @@ pub struct AggregateActorArgs<R: AggregateState> {
     pub store: Arc<dyn EventStore>,
     pub tenant_id: String,
     pub init: Box<dyn Fn(Uuid) -> R + Send + Sync>,
-    pub context_init: Box<dyn FnOnce(&R) -> Pin<Box<dyn Future<Output = R::Context> + Send>> + Send>,
+    pub context_init: ContextInitFn<R>,
     pub idle_timeout: Option<Duration>,
 }
 
@@ -137,6 +140,12 @@ impl<R: AggregateState> AggregateActor<R> {
         AggregateActor {
             _phantom: PhantomData,
         }
+    }
+}
+
+impl<R: AggregateState> Default for AggregateActor<R> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

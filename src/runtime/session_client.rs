@@ -33,9 +33,7 @@ pub enum Notification {
 
 /// Distinguishes persisted domain events from ephemeral notifications.
 pub enum SessionUpdate {
-    /// A persisted, replayable domain event.
-    Event(DomainEvent<AgentState>),
-    /// A transient notification — never persisted, for real-time observers only.
+    Event(Box<DomainEvent<AgentState>>),
     Notification(Arc<Notification>),
 }
 
@@ -149,7 +147,7 @@ impl Actor for SessionClientActor {
                         .core
                         .apply(&typed.payload, typed.sequence, typed.occurred_at);
                     if let Some(f) = &state.on_event {
-                        f(&SessionUpdate::Event(typed.as_ref().clone()));
+                        f(&SessionUpdate::Event(Box::new(typed.as_ref().clone())));
                     }
                 }
             }

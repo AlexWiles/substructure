@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use ractor::{call_t, Actor, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent};
 use uuid::Uuid;
 
@@ -9,10 +10,10 @@ use chrono::Utc;
 use crate::domain::agent::AgentConfig;
 use crate::domain::aggregate::DomainEvent;
 use crate::domain::config::{BudgetPolicyConfig, EventStoreConfig, SystemConfig};
-use crate::domain::event::{ClientIdentity, CompletionDelivery, SpanContext};
+use crate::domain::event::{ClientIdentity, CompletionDelivery, LlmRequest, LlmResponse, SpanContext};
 use crate::domain::session::{
-    AgentState, BudgetActorRef, CommandPayload, IncomingMessage, McpToolEntry, SessionCommand,
-    SessionContext, SessionStatus,
+    AgentState, BudgetActorRef, CommandPayload, IncomingMessage, LlmCallError, McpToolEntry,
+    SessionCommand, SessionContext, SessionStatus, StreamDelta,
 };
 use dispatcher::spawn_aggregate_dispatcher;
 use event_store::Event;
@@ -36,7 +37,7 @@ pub use event_store::{
     AggregateFilter, AggregateSort, AggregateSummary, EventFilter, EventStore, StoreError,
     StreamLoad, Version,
 };
-pub use llm::{LlmClient, MockLlmClient, OpenAiClient, StreamDelta};
+pub use llm::{LlmClient, MockLlmClient, OpenAiClient, StreamDelta as LlmStreamDelta};
 pub use llm::{LlmClientFactory, LlmClientProvider, ProviderError, StaticLlmClientProvider};
 pub use mcp::{mcp_actor_name, spawn_mcp_actor, McpActorClient, McpMessage};
 pub use mcp::{
@@ -147,7 +148,7 @@ pub fn notify_observers(session_id: Uuid, notification: Arc<Notification>) {
 pub enum RuntimeMessage {
     StartSession(
         Uuid,
-        SessionInit,
+        Box<SessionInit>,
         RpcReplyPort<Result<SessionHandle, RuntimeError>>,
     ),
     RunSubAgent(SubAgentRequest),
@@ -202,6 +203,7 @@ struct RuntimeArgs {
 // Build SessionContext — wires runtime resources into the domain context
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn build_session_context(
     session_id: Uuid,
     auth: &ClientIdentity,
@@ -319,97 +321,54 @@ fn build_session_context(
 
 struct LlmProviderAdapter(Arc<dyn LlmClientProvider>);
 
+#[async_trait]
 impl crate::domain::session::LlmClientTrait for LlmProviderAdapter {
-    fn resolve<'a>(
-        &'a self,
-        client_id: &'a str,
-        auth: &'a ClientIdentity,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<Arc<dyn crate::domain::session::LlmCallable>, String>,
-                > + Send
-                + 'a,
-        >,
-    > {
-        Box::pin(async move {
-            let client = self
-                .0
-                .resolve(client_id, auth)
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(Arc::new(LlmClientAdapter(client)) as Arc<dyn crate::domain::session::LlmCallable>)
-        })
+    async fn resolve(&self, client_id: &str, auth: &ClientIdentity) -> Result<Arc<dyn crate::domain::session::LlmCallable>, String> {
+        let client = self
+            .0
+            .resolve(client_id, auth)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(Arc::new(LlmClientAdapter(client)) as Arc<dyn crate::domain::session::LlmCallable>)
     }
 }
 
 struct LlmClientAdapter(Arc<dyn LlmClient>);
 
+#[async_trait]
 impl crate::domain::session::LlmCallable for LlmClientAdapter {
-    fn call<'a>(
-        &'a self,
-        request: &'a crate::domain::event::LlmRequest,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<
-                        crate::domain::event::LlmResponse,
-                        crate::domain::session::LlmCallError,
-                    >,
-                > + Send
-                + 'a,
-        >,
-    > {
-        Box::pin(async move {
-            self.0.call(request).await.map_err(|e| {
-                crate::domain::session::LlmCallError {
-                    message: e.message,
-                    retryable: e.retryable,
-                    source: serde_json::to_value(&e.source).ok(),
-                }
-            })
+    async fn call(&self, request: &LlmRequest) -> Result<LlmResponse, LlmCallError> {
+        self.0.call(request).await.map_err(|e| {
+            LlmCallError {
+                message: e.message,
+                retryable: e.retryable,
+                source: serde_json::to_value(&e.source).ok(),
+            }
         })
     }
 
-    fn call_streaming<'a>(
-        &'a self,
-        request: &'a crate::domain::event::LlmRequest,
-        tx: tokio::sync::mpsc::UnboundedSender<crate::domain::session::StreamDelta>,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<
-                        crate::domain::event::LlmResponse,
-                        crate::domain::session::LlmCallError,
-                    >,
-                > + Send
-                + 'a,
-        >,
-    > {
-        // Bridge the runtime StreamDelta to domain StreamDelta
+    async fn call_streaming(&self, request: &LlmRequest, tx: tokio::sync::mpsc::UnboundedSender<StreamDelta>) -> Result<LlmResponse, LlmCallError> {
         let (bridge_tx, mut bridge_rx) =
-            tokio::sync::mpsc::unbounded_channel::<llm::StreamDelta>();
+            tokio::sync::mpsc::unbounded_channel::<LlmStreamDelta>();
 
-        Box::pin(async move {
-            let forward = tokio::spawn(async move {
-                while let Some(delta) = bridge_rx.recv().await {
-                    let _ = tx.send(crate::domain::session::StreamDelta {
-                        text: delta.text,
-                    });
-                }
-            });
+        let forward = tokio::spawn(async move {
+            while let Some(delta) = bridge_rx.recv().await {
+                let _ = tx.send(StreamDelta {
+                    text: delta.text,
+                });
+            }
+        });
 
-            let result = self.0.call_streaming(request, bridge_tx).await.map_err(|e| {
-                crate::domain::session::LlmCallError {
-                    message: e.message,
-                    retryable: e.retryable,
-                    source: serde_json::to_value(&e.source).ok(),
-                }
-            });
+        let result = self.0.call_streaming(request, bridge_tx).await.map_err(|e| {
+            LlmCallError {
+                message: e.message,
+                retryable: e.retryable,
+                source: serde_json::to_value(&e.source).ok(),
+            }
+        });
 
-            forward.abort();
-            result
-        })
+        forward.abort();
+        result
     }
 }
 
@@ -419,6 +378,7 @@ impl crate::domain::session::LlmCallable for LlmClientAdapter {
 
 struct McpClientAdapter(Arc<dyn McpClient>);
 
+#[async_trait]
 impl crate::domain::session::McpClientTrait for McpClientAdapter {
     fn server_info(&self) -> crate::domain::session::McpServerInfo {
         let info = self.0.server_info();
@@ -438,33 +398,20 @@ impl crate::domain::session::McpClientTrait for McpClientAdapter {
             .collect()
     }
 
-    fn call_tool<'a>(
-        &'a self,
-        name: &'a str,
-        arguments: serde_json::Value,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<crate::domain::session::McpToolResult, String>,
-                > + Send
-                + 'a,
-        >,
-    > {
-        Box::pin(async move {
-            let result = self.0.call_tool(name, arguments).await.map_err(|e| e.to_string())?;
-            Ok(crate::domain::session::McpToolResult {
-                content: result
-                    .content
-                    .iter()
-                    .map(|c| match c {
-                        Content::Text { text } => {
-                            crate::domain::session::McpToolContent::Text { text: text.clone() }
-                        }
-                        _ => crate::domain::session::McpToolContent::Other,
-                    })
-                    .collect(),
-                is_error: result.is_error,
-            })
+    async fn call_tool(&self, name: &str, arguments: serde_json::Value) -> Result<crate::domain::session::McpToolResult, String> {
+        let result = self.0.call_tool(name, arguments).await.map_err(|e| e.to_string())?;
+        Ok(crate::domain::session::McpToolResult {
+            content: result
+                .content
+                .iter()
+                .map(|c| match c {
+                    Content::Text { text } => {
+                        crate::domain::session::McpToolContent::Text { text: text.clone() }
+                    }
+                    _ => crate::domain::session::McpToolContent::Other,
+                })
+                .collect(),
+            is_error: result.is_error,
         })
     }
 }
@@ -623,7 +570,7 @@ impl RuntimeState {
                 aggregate_handle
                     .send_command(
                         CommandPayload::CreateSession {
-                            agent: init.agent,
+                            agent: Box::new(init.agent),
                             auth: auth.clone(),
                             on_done: init.on_done,
                         },
@@ -838,7 +785,7 @@ impl Actor for RuntimeActor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             RuntimeMessage::StartSession(session_id, init, reply) => {
-                let result = state.start_session(session_id, init).await;
+                let result = state.start_session(session_id, *init).await;
                 let _ = reply.send(result);
             }
             RuntimeMessage::RunSubAgent(req) => {
@@ -1025,7 +972,7 @@ impl Runtime {
             RuntimeMessage::StartSession,
             30_000,
             session_id,
-            init
+            Box::new(init)
         )
         .map_err(|e| RuntimeError::ActorCall(e.to_string()))?
     }

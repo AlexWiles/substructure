@@ -597,7 +597,7 @@ mod tests {
         let mut translator = EventTranslator::new();
 
         let events = assert_events(translator.translate_event(&EventPayload::SessionCreated(
-            SessionCreated {
+            Box::new(SessionCreated {
                 agent: crate::domain::agent::AgentConfig {
                     id: Uuid::new_v4(),
                     name: "test".into(),
@@ -619,7 +619,7 @@ mod tests {
                     attrs: Default::default(),
                 },
                 on_done: None,
-            },
+            }),
         )));
         assert_eq!(events.len(), 0);
 

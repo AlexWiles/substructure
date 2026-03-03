@@ -28,7 +28,7 @@ pub struct CompletionDelivery {
 #[serde(tag = "type")]
 pub enum EventPayload {
     #[serde(rename = "session.created")]
-    SessionCreated(SessionCreated),
+    SessionCreated(Box<SessionCreated>),
     #[serde(rename = "message.user")]
     MessageUser(MessageUser),
     #[serde(rename = "message.assistant")]

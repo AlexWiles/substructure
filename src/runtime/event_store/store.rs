@@ -229,6 +229,7 @@ pub fn reconstruct_span_summaries(events: &[&Event]) -> Vec<SpanSummary> {
 // EventStore trait — generic, aggregate-agnostic
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait EventStore: Send + Sync {
     /// Persist events + snapshot atomically.

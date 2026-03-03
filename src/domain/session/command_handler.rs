@@ -35,7 +35,7 @@ pub struct SessionCommand {
 #[derive(Debug, Clone)]
 pub enum CommandPayload {
     CreateSession {
-        agent: AgentConfig,
+        agent: Box<AgentConfig>,
         auth: ClientIdentity,
         on_done: Option<CompletionDelivery>,
     },
@@ -132,13 +132,13 @@ impl AgentState {
                     auth,
                     on_done,
                 },
-            ) => Ok(vec![Emit::new(EventPayload::SessionCreated(
+            ) => Ok(vec![Emit::new(EventPayload::SessionCreated(Box::new(
                 SessionCreated {
-                    agent: agent.clone(),
+                    agent: (*agent).clone(),
                     auth,
                     on_done,
                 },
-            ))
+            )))
             .label(&agent.name)]),
             (Some(_), CommandPayload::CreateSession { .. }) => {
                 Err(SessionError::SessionAlreadyCreated)

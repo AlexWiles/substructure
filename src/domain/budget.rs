@@ -74,7 +74,7 @@ impl BudgetContext {
     pub fn matches(&self, conditions: &HashMap<String, String>) -> bool {
         conditions
             .iter()
-            .all(|(k, v)| self.values.get(k).map_or(false, |actual| actual == v))
+            .all(|(k, v)| self.values.get(k) == Some(v))
     }
 }
 
@@ -272,7 +272,7 @@ fn usage_in_window(bucket: &BucketState, window: &Option<String>, now: DateTime<
     bucket
         .entries
         .iter()
-        .filter(|e| cutoff.map_or(true, |c| e.recorded_at >= c))
+        .filter(|e| cutoff.is_none_or(|c| e.recorded_at >= c))
         .map(|e| e.amount)
         .sum()
 }

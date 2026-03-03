@@ -97,27 +97,22 @@ impl Default for SessionContext {
 // These avoid pulling runtime crate types directly into the domain.
 // The runtime module provides the concrete implementations.
 
+#[async_trait]
 /// Trait for LLM client providers (resolved by the runtime).
 pub trait LlmClientTrait: Send + Sync {
-    fn resolve<'a>(
-        &'a self,
-        client_id: &'a str,
-        auth: &'a ClientIdentity,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Arc<dyn LlmCallable>, String>> + Send + 'a>>;
+    async fn resolve(&self, client_id: &str, auth: &ClientIdentity) -> Result<Arc<dyn LlmCallable>, String>;
 }
 
+#[async_trait]
 /// Trait for calling an LLM (single call or streaming).
 pub trait LlmCallable: Send + Sync {
-    fn call<'a>(
-        &'a self,
-        request: &'a LlmRequest,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<LlmResponse, LlmCallError>> + Send + 'a>>;
+    async fn call(&self, request: &LlmRequest) -> Result<LlmResponse, LlmCallError>;
 
-    fn call_streaming<'a>(
-        &'a self,
-        request: &'a LlmRequest,
+    async fn call_streaming(
+        &self,
+        request: &LlmRequest,
         tx: tokio::sync::mpsc::UnboundedSender<StreamDelta>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<LlmResponse, LlmCallError>> + Send + 'a>>;
+    ) -> Result<LlmResponse, LlmCallError>;
 }
 
 #[derive(Debug, Clone)]
@@ -133,14 +128,11 @@ pub struct StreamDelta {
 }
 
 /// Trait for MCP tool clients.
+#[async_trait]
 pub trait McpClientTrait: Send + Sync {
+    async fn call_tool(&self, name: &str, arguments: serde_json::Value) -> Result<McpToolResult, String>;
     fn server_info(&self) -> McpServerInfo;
     fn tools(&self) -> Vec<McpToolDefinition>;
-    fn call_tool<'a>(
-        &'a self,
-        name: &'a str,
-        arguments: serde_json::Value,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<McpToolResult, String>> + Send + 'a>>;
 }
 
 #[derive(Debug, Clone)]
