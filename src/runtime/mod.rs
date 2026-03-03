@@ -31,13 +31,16 @@ use self::config::{AgentConfig, EventStoreConfig, SystemConfig};
 use self::event::{ClientIdentity, SpanContext};
 
 // Re-export shared types
-pub use types::{RuntimeError, RuntimeMessage, SessionHandle, SessionInit, SessionMessage, SubAgentRequest};
+pub use types::{
+    RuntimeError, RuntimeMessage, SessionHandle, SessionInit, SessionMessage, SubAgentRequest,
+};
 
 // Re-export routing utilities
-pub use session::routing::{aggregate_actor_name, notify_observers, session_group, session_observer_group};
+pub use session::routing::{
+    aggregate_actor_name, notify_observers, session_group, session_observer_group,
+};
 
 // Re-export event store types
-#[cfg(feature = "sqlite")]
 pub use event_store::SqliteEventStore;
 pub use event_store::{
     AggregateFilter, AggregateSort, AggregateSummary, EventFilter, EventStore, StoreError,
@@ -45,7 +48,9 @@ pub use event_store::{
 };
 
 // Re-export LLM types
-pub use llm::{LlmCallError, LlmCallable, LlmProviderTrait, MockLlmClient, OpenAiClient, StreamDelta};
+pub use llm::{
+    LlmCallError, LlmCallable, LlmProviderTrait, MockLlmClient, OpenAiClient, StreamDelta,
+};
 pub use llm::{LlmClientFactory, StaticLlmClientProvider};
 
 // Re-export MCP types
@@ -210,16 +215,11 @@ impl Runtime {
 
 async fn create_event_store(config: &EventStoreConfig) -> Arc<dyn EventStore> {
     match config {
-        #[cfg(feature = "sqlite")]
         EventStoreConfig::Sqlite { path } => Arc::new(
             SqliteEventStore::new(path)
                 .await
                 .expect("failed to open SQLite event store"),
         ),
-        #[cfg(not(feature = "sqlite"))]
-        EventStoreConfig::Sqlite { .. } => {
-            panic!("SQLite event store requires the 'sqlite' feature flag")
-        }
     }
 }
 
