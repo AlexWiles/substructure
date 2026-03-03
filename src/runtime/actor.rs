@@ -1,0 +1,526 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use chrono::Utc;
+use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
+use uuid::Uuid;
+
+use crate::domain::agent::AgentConfig;
+use crate::domain::config::BudgetPolicyConfig;
+use crate::domain::event::{ClientIdentity, SpanContext};
+use crate::domain::session::{
+    AgentState, CommandPayload, IncomingMessage, SessionCommand, SessionStatus,
+};
+
+use super::adapters::build_session_context;
+use super::aggregate_actor::{self, AggregateMessage};
+use super::budget;
+use super::dispatcher::spawn_aggregate_dispatcher;
+use super::event_store::{AggregateFilter, EventStore};
+use super::llm::LlmClientProvider;
+use super::mcp::{self, McpClient};
+use super::routing::{aggregate_actor_name, session_route};
+use super::session_client::{SessionClientActor, SessionClientArgs};
+use super::types::{
+    RuntimeError, RuntimeMessage, SessionHandle, SessionInit, SubAgentRequest,
+};
+use super::wake_scheduler::spawn_wake_scheduler;
+
+// ---------------------------------------------------------------------------
+// RuntimeActor — owns providers, spawns aggregate actors directly
+// ---------------------------------------------------------------------------
+
+pub(super) struct RuntimeActor;
+
+pub(super) struct RuntimeState {
+    pub(super) myself: ActorRef<RuntimeMessage>,
+    pub(super) store: Arc<dyn EventStore>,
+    pub(super) agents: HashMap<String, AgentConfig>,
+    pub(super) llm_provider: Arc<dyn LlmClientProvider>,
+    pub(super) budget_policies: Vec<BudgetPolicyConfig>,
+}
+
+pub(super) struct RuntimeArgs {
+    pub(super) store: Arc<dyn EventStore>,
+    pub(super) agents: HashMap<String, AgentConfig>,
+    pub(super) llm_provider: Arc<dyn LlmClientProvider>,
+    pub(super) budget_policies: Vec<BudgetPolicyConfig>,
+    #[cfg(feature = "otel")]
+    pub(super) otel: Option<crate::domain::config::OtelConfig>,
+}
+
+// ---------------------------------------------------------------------------
+// RuntimeState methods
+// ---------------------------------------------------------------------------
+
+impl RuntimeState {
+    /// Look up a running aggregate actor by session ID and send a command.
+    /// Returns `true` if the actor was found and the message was sent.
+    fn try_send_to_aggregate(&self, session_id: Uuid, payload: CommandPayload, span: SpanContext) -> bool {
+        if let Some(cell) = ractor::registry::where_is(aggregate_actor_name(session_id)) {
+            let actor: ActorRef<AggregateMessage<AgentState>> = cell.into();
+            let _ = actor.send_message(AggregateMessage::Cast {
+                cmd: payload,
+                span,
+                occurred_at: Utc::now(),
+            });
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get or spawn a budget actor for the given tenant.
+    async fn get_or_spawn_budget_actor(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<ActorRef<budget::BudgetMessage>>, RuntimeError> {
+        if self.budget_policies.is_empty() {
+            return Ok(None);
+        }
+        let actor_name = budget::budget_actor_name(tenant_id);
+        if let Some(cell) = ractor::registry::where_is(actor_name) {
+            return Ok(Some(cell.into()));
+        }
+        let actor = budget::spawn_budget_actor(
+            tenant_id.to_string(),
+            self.budget_policies.clone(),
+            self.store.clone(),
+            self.myself.get_cell(),
+        )
+        .await
+        .map_err(|e| RuntimeError::ActorCall(format!("budget: {e}")))?;
+        Ok(Some(actor))
+    }
+
+    #[tracing::instrument(skip(self, agent), fields(agent = %agent.name))]
+    async fn get_or_spawn_mcp_actors(
+        &self,
+        agent: &AgentConfig,
+    ) -> Result<Vec<Arc<dyn McpClient>>, RuntimeError> {
+        if agent.mcp_servers.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut clients: Vec<Arc<dyn McpClient>> = Vec::with_capacity(agent.mcp_servers.len());
+        for config in &agent.mcp_servers {
+            let name = mcp::mcp_actor_name(&agent.name, &config.name);
+            let actor_ref: ActorRef<mcp::McpMessage> =
+                if let Some(cell) = ractor::registry::where_is(name) {
+                    cell.into()
+                } else {
+                    mcp::spawn_mcp_actor(&agent.name, config.clone(), self.myself.get_cell())
+                        .await
+                        .map_err(|e| RuntimeError::ActorCall(format!("mcp {}: {e}", config.name)))?
+                };
+            let client = mcp::McpActorClient::from_actor(actor_ref)
+                .await
+                .map_err(|e| RuntimeError::ActorCall(format!("mcp {}: {e}", config.name)))?;
+            clients.push(Arc::new(client));
+        }
+        Ok(clients)
+    }
+
+    #[tracing::instrument(skip(self, init), fields(%session_id, trace_id = %init.span.trace_id))]
+    pub(super) async fn start_session(
+        &self,
+        session_id: Uuid,
+        init: SessionInit,
+    ) -> Result<SessionHandle, RuntimeError> {
+        let trace_id = init.span.trace_id;
+        let auth = init.auth.clone();
+        let agent = init.agent.clone();
+        let actor_name = aggregate_actor_name(session_id);
+        let already_running = ractor::registry::where_is(actor_name).is_some();
+
+        if !already_running {
+            let budget_actor = self.get_or_spawn_budget_actor(&auth.tenant_id).await?;
+            let mcp_clients = self.get_or_spawn_mcp_actors(&init.agent).await?;
+
+            let llm_provider = self.llm_provider.clone();
+            let agents = self.agents.clone();
+            let runtime_ref = self.myself.clone();
+            let mcp_for_ctx = mcp_clients.clone();
+            let auth_for_ctx = auth.clone();
+            let agent_for_ctx = agent.clone();
+
+            let aggregate_handle = aggregate_actor::spawn_aggregate_actor(
+                aggregate_actor::AggregateActorArgs {
+                    aggregate_id: session_id,
+                    store: self.store.clone(),
+                    tenant_id: auth.tenant_id.clone(),
+                    init: Box::new(AgentState::new),
+                    idle_timeout: None,
+                    context_init: Box::new(move |state| {
+                        let resolved_agent = state.agent.clone().unwrap_or(agent_for_ctx);
+                        Box::pin(async move {
+                            let mut ctx = build_session_context(
+                                session_id,
+                                &auth_for_ctx,
+                                &mcp_for_ctx,
+                                &llm_provider,
+                                &agents,
+                                Some(&resolved_agent),
+                                budget_actor,
+                                false,
+                            );
+                            // Wire up send_to_session (find-or-start via runtime)
+                            let runtime_for_send = runtime_ref.clone();
+                            ctx.send_to_session = Some(Arc::new(move |session_id, payload, span| {
+                                let _ = runtime_for_send.send_message(
+                                    RuntimeMessage::DeliverToSession { session_id, payload, span },
+                                );
+                            }));
+                            // Wire up sub-agent spawning
+                            let runtime = runtime_ref.clone();
+                            ctx.spawn_sub_agent = Some(Arc::new(move |params| {
+                                let _ = runtime.send_message(RuntimeMessage::RunSubAgent(
+                                    SubAgentRequest {
+                                        session_id: params.session_id,
+                                        agent_name: params.agent_name,
+                                        message: params.message,
+                                        auth: params.auth,
+                                        delivery: params.delivery,
+                                        span: params.span,
+                                        token_budget: params.token_budget,
+                                        stream: params.stream,
+                                    },
+                                ));
+                            }));
+                            ctx
+                        })
+                    }),
+                },
+                self.myself.get_cell(),
+            )
+            .await
+            .map_err(|e| RuntimeError::ActorCall(format!("aggregate actor spawn: {e}")))?;
+
+            // Check if session needs creation
+            let session = aggregate_handle.get_aggregate().await;
+            let is_new = session.state.agent.is_none();
+
+            if is_new {
+                aggregate_handle
+                    .send_command(
+                        CommandPayload::CreateSession {
+                            agent: Box::new(init.agent),
+                            auth: auth.clone(),
+                            on_done: init.on_done,
+                        },
+                        init.span.child("session.create"),
+                        Utc::now(),
+                    )
+                    .await
+                    .map_err(|e| RuntimeError::ActorCall(format!("create session: {e}")))?;
+            }
+
+            // If resuming a completed sub-agent, deliver result to parent.
+            // Deferred via message queue to avoid start_session ↔ wake_aggregate recursion.
+            if session.state.status == SessionStatus::Done {
+                if let Some(ref delivery) = session.state.on_done {
+                    let result =
+                        serde_json::to_string(&session.state.artifacts).unwrap_or_default();
+                    let _ = self.myself.send_message(RuntimeMessage::DeliverToSession {
+                        session_id: delivery.parent_session_id,
+                        payload: CommandPayload::CompleteToolCall {
+                            tool_call_id: delivery.tool_call_id.clone(),
+                            name: delivery.tool_name.clone(),
+                            result,
+                        },
+                        span: init.span.child("sub_agent.deliver"),
+                    });
+                }
+            }
+        }
+
+        // Spawn a SessionClientActor for the caller
+        let (client, _client_handle) = Actor::spawn(
+            None,
+            SessionClientActor,
+            SessionClientArgs {
+                session_id,
+                auth,
+                aggregate_actor_id: session_id,
+                store: self.store.clone(),
+                on_event: None,
+            },
+        )
+        .await
+        .map_err(|e| RuntimeError::ActorCall(format!("session client startup failed: {e}")))?;
+
+        Ok(SessionHandle {
+            session_id,
+            trace_id: Some(trace_id),
+            session_client: client,
+        })
+    }
+
+    #[tracing::instrument(skip(self), fields(%aggregate_id, %aggregate_type))]
+    async fn wake_aggregate(&self, aggregate_id: Uuid, aggregate_type: &str, tenant_id: &str) {
+        match aggregate_type {
+            "session" => {
+                // If the aggregate actor is already running, send Wake command
+                if let Some(cell) = ractor::registry::where_is(aggregate_actor_name(aggregate_id)) {
+                    let actor: ActorRef<AggregateMessage<AgentState>> =
+                        cell.into();
+                    let _ = actor.send_message(AggregateMessage::Cast {
+                        cmd: CommandPayload::Wake,
+                        span: SpanContext::root().with_name("wake"),
+                        occurred_at: Utc::now(),
+                    });
+                    return;
+                }
+                // Not running — look up the agent name via list_aggregates and start the session.
+                let filter = AggregateFilter {
+                    aggregate_ids: Some(vec![aggregate_id]),
+                    ..Default::default()
+                };
+                let results = self.store.list_aggregates(&filter).await;
+                let summary = match results.into_iter().next() {
+                    Some(s) => s,
+                    None => {
+                        tracing::warn!(%aggregate_id, "wake: session not found in store");
+                        return;
+                    }
+                };
+                let agent_name = match summary.label {
+                    Some(name) => name,
+                    None => {
+                        tracing::warn!(%aggregate_id, "wake: session has no agent label");
+                        return;
+                    }
+                };
+                let agent = match self.agents.get(&agent_name) {
+                    Some(a) => a.clone(),
+                    None => {
+                        tracing::warn!(agent = %agent_name, session = %aggregate_id, "wake: unknown agent");
+                        return;
+                    }
+                };
+                let auth = ClientIdentity {
+                    tenant_id: tenant_id.to_string(),
+                    sub: None,
+                    attrs: Default::default(),
+                };
+                let init = SessionInit {
+                    agent,
+                    auth,
+                    on_done: None,
+                    span: SpanContext::root().with_name("wake"),
+                };
+                if let Err(e) = self.start_session(aggregate_id, init).await {
+                    tracing::warn!(session = %aggregate_id, error = %e, "wake: failed to start session");
+                }
+            }
+            _ => {
+                tracing::debug!(aggregate_type = %aggregate_type, %aggregate_id, "wake: no handler for aggregate type");
+            }
+        }
+    }
+
+    #[tracing::instrument(skip_all, fields(session_id = %req.session_id, agent = %req.agent_name, trace_id = %req.span.trace_id))]
+    async fn run_sub_agent(&self, req: SubAgentRequest) -> Result<(), RuntimeError> {
+        let mut agent = self
+            .agents
+            .get(&req.agent_name)
+            .cloned()
+            .ok_or_else(|| RuntimeError::UnknownAgent(req.agent_name.clone()))?;
+
+        if let Some(budget) = req.token_budget {
+            agent.token_budget = Some(budget);
+        }
+
+        let msg_span = req.span.child("sub_agent.message");
+
+        let init = SessionInit {
+            agent,
+            auth: req.auth,
+            on_done: Some(req.delivery),
+            span: req.span,
+        };
+
+        // start_session spawns the aggregate actor and creates the session
+        let handle = self.start_session(req.session_id, init).await?;
+
+        // Send user message to the sub-agent
+        let _ = handle
+            .send_command(SessionCommand {
+                span: msg_span,
+                occurred_at: Utc::now(),
+                payload: CommandPayload::SendMessage {
+                    message: IncomingMessage::User {
+                        content: req.message,
+                    },
+                    stream: req.stream,
+                },
+            })
+            .await;
+
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Actor trait implementation
+// ---------------------------------------------------------------------------
+
+impl Actor for RuntimeActor {
+    type Msg = RuntimeMessage;
+    type State = RuntimeState;
+    type Arguments = RuntimeArgs;
+
+    async fn pre_start(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        // Spawn infrastructure actors (linked to RuntimeActor)
+        tracing::debug!("spawning event dispatcher");
+        spawn_aggregate_dispatcher::<AgentState>(
+            &args.store,
+            Arc::new(session_route),
+            myself.get_cell(),
+        )
+        .await
+        .map_err(|e| format!("failed to spawn dispatcher: {e}"))?;
+        tracing::debug!("spawning wake scheduler");
+        spawn_wake_scheduler(args.store.clone(), myself.clone(), myself.get_cell())
+            .await
+            .map_err(|e| format!("failed to spawn wake scheduler: {e}"))?;
+
+        #[cfg(feature = "otel")]
+        if let Some(otel_config) = args.otel {
+            tracing::debug!("spawning otel exporter");
+            if let Err(e) = super::otel::spawn_otel_exporter(
+                &otel_config.endpoint,
+                otel_config.service_name,
+                myself.get_cell(),
+                &*args.store,
+            )
+            .await
+            {
+                tracing::warn!(error = %e, "failed to start otel exporter, continuing without it");
+            }
+        }
+
+        let state = RuntimeState {
+            myself: myself.clone(),
+            store: args.store.clone(),
+            agents: args.agents,
+            llm_provider: args.llm_provider,
+            budget_policies: args.budget_policies,
+        };
+
+        Ok(state)
+    }
+
+    async fn handle(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match message {
+            RuntimeMessage::StartSession(session_id, init, reply) => {
+                let result = state.start_session(session_id, *init).await;
+                let _ = reply.send(result);
+            }
+            RuntimeMessage::RunSubAgent(req) => {
+                if let Err(e) = state.run_sub_agent(req).await {
+                    tracing::error!(error = %e, "sub-agent error");
+                }
+            }
+            RuntimeMessage::WakeAggregate {
+                aggregate_id,
+                aggregate_type,
+                tenant_id,
+            } => {
+                state
+                    .wake_aggregate(aggregate_id, &aggregate_type, &tenant_id)
+                    .await;
+            }
+            RuntimeMessage::DeliverToSession {
+                session_id,
+                payload,
+                span,
+            } => {
+                // Find-or-start: wake the aggregate if needed, then deliver
+                state.wake_aggregate(session_id, "session", "").await;
+                state.try_send_to_aggregate(session_id, payload, span);
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_supervisor_evt(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        message: SupervisionEvent,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match &message {
+            SupervisionEvent::ActorFailed(who, err) => {
+                let name = who.get_name();
+                tracing::error!(actor = ?name, error = %err, "child actor failed");
+                restart_infrastructure(name, state).await;
+            }
+            SupervisionEvent::ActorTerminated(who, _, reason) => {
+                let name = who.get_name();
+                tracing::error!(actor = ?name, reason = ?reason, "child actor terminated");
+                restart_infrastructure(name, state).await;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+/// Restart dispatcher, wake-scheduler, or budget actors if they died.
+async fn restart_infrastructure(name: Option<String>, state: &RuntimeState) {
+    match name.as_deref() {
+        Some("session-dispatcher") => {
+            tracing::info!("restarting session-dispatcher");
+            if let Err(e) = spawn_aggregate_dispatcher::<AgentState>(
+                &state.store,
+                Arc::new(session_route),
+                state.myself.get_cell(),
+            )
+            .await
+            {
+                tracing::error!(error = %e, "failed to restart session-dispatcher");
+            }
+        }
+        Some("wake-scheduler") => {
+            tracing::info!("restarting wake-scheduler");
+            if let Err(e) = spawn_wake_scheduler(
+                state.store.clone(),
+                state.myself.clone(),
+                state.myself.get_cell(),
+            )
+            .await
+            {
+                tracing::error!(error = %e, "failed to restart wake-scheduler");
+            }
+        }
+        Some(name) if name.starts_with("mcp-") => {
+            tracing::info!(server = %name, "MCP actor died, will re-spawn on next use");
+        }
+        Some(name) if name.starts_with("budget-") => {
+            let tenant_id = &name["budget-".len()..];
+            tracing::info!(tenant = %tenant_id, "restarting budget actor");
+            if let Err(e) = budget::spawn_budget_actor(
+                tenant_id.to_string(),
+                state.budget_policies.clone(),
+                state.store.clone(),
+                state.myself.get_cell(),
+            )
+            .await
+            {
+                tracing::error!(error = %e, "failed to restart budget actor");
+            }
+        }
+        _ => {
+            // Aggregate actor death — just log
+        }
+    }
+}
