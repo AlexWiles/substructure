@@ -845,8 +845,8 @@ mod tests {
 
     fn apply_events(state: &mut Aggregate<AgentState>, emits: Vec<Emit<EventPayload>>) {
         let seq = state.last_applied.unwrap_or(0);
-        for (i, emit) in emits.iter().enumerate() {
-            state.apply(&emit.event, seq + 1 + i as u64, Utc::now());
+        for (s, emit) in (seq + 1..).zip(emits.iter()) {
+            state.apply(&emit.event, s, Utc::now());
         }
     }
 

@@ -424,9 +424,9 @@ impl AgentState {
                             .as_ref()
                             .map(|a| a.retry.backoff_max_secs)
                             .unwrap_or(60);
-                        let backoff = min(2u64.pow(call.retry.attempts), backoff_max);
+                        let backoff = min(2u32.saturating_pow(call.retry.attempts), backoff_max);
                         call.retry.next_at =
-                            Some(Utc::now() + chrono::Duration::seconds(backoff as i64));
+                            Some(Utc::now() + chrono::Duration::seconds(i64::from(backoff)));
                     } else {
                         call.status = LlmCallStatus::Failed;
                         call.retry.next_at = None;
@@ -622,14 +622,12 @@ impl AgentState {
             .llm
             .params
             .get("temperature")
-            .and_then(|v| v.as_f64())
-            .map(|v| v as f32);
+            .and_then(|v| v.as_f64());
         let max_tokens = agent
             .llm
             .params
             .get("max_tokens")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
+            .and_then(|v| v.as_u64());
 
         LlmRequest::OpenAi(openai::ChatCompletionRequest {
             model,
@@ -656,29 +654,29 @@ impl AgentState {
                 None => return,
             },
         };
-        self.token_usage.prompt_tokens += usage.prompt_tokens as u64;
-        self.token_usage.completion_tokens += usage.completion_tokens as u64;
-        self.token_usage.total_tokens += usage.total_tokens as u64;
+        self.token_usage.prompt_tokens += usage.prompt_tokens;
+        self.token_usage.completion_tokens += usage.completion_tokens;
+        self.token_usage.total_tokens += usage.total_tokens;
         if let Some(details) = &usage.prompt_tokens_details {
-            self.token_usage.prompt_tokens_details.cached_tokens += details.cached_tokens as u64;
+            self.token_usage.prompt_tokens_details.cached_tokens += details.cached_tokens;
             self.token_usage.prompt_tokens_details.cache_write_tokens +=
-                details.cache_write_tokens as u64;
-            self.token_usage.prompt_tokens_details.audio_tokens += details.audio_tokens as u64;
-            self.token_usage.prompt_tokens_details.video_tokens += details.video_tokens as u64;
+                details.cache_write_tokens;
+            self.token_usage.prompt_tokens_details.audio_tokens += details.audio_tokens;
+            self.token_usage.prompt_tokens_details.video_tokens += details.video_tokens;
         }
         if let Some(details) = &usage.completion_tokens_details {
             self.token_usage.completion_tokens_details.reasoning_tokens +=
-                details.reasoning_tokens.unwrap_or(0) as u64;
+                details.reasoning_tokens.unwrap_or(0);
             self.token_usage.completion_tokens_details.audio_tokens +=
-                details.audio_tokens.unwrap_or(0) as u64;
+                details.audio_tokens.unwrap_or(0);
             self.token_usage
                 .completion_tokens_details
                 .accepted_prediction_tokens +=
-                details.accepted_prediction_tokens.unwrap_or(0) as u64;
+                details.accepted_prediction_tokens.unwrap_or(0);
             self.token_usage
                 .completion_tokens_details
                 .rejected_prediction_tokens +=
-                details.rejected_prediction_tokens.unwrap_or(0) as u64;
+                details.rejected_prediction_tokens.unwrap_or(0);
         }
     }
 }
@@ -727,7 +725,7 @@ impl AgentState {
             .as_ref()
             .map(|a| a.retry.llm_timeout_secs)
             .unwrap_or(60);
-        Utc::now() + chrono::Duration::seconds(timeout as i64)
+        Utc::now() + chrono::Duration::seconds(i64::from(timeout))
     }
 
     /// Compute tool call deadline from agent config.
@@ -737,7 +735,7 @@ impl AgentState {
             .as_ref()
             .map(|a| a.retry.tool_timeout_secs)
             .unwrap_or(120);
-        Utc::now() + chrono::Duration::seconds(timeout as i64)
+        Utc::now() + chrono::Duration::seconds(i64::from(timeout))
     }
 
     pub fn label(&self) -> Option<String> {

@@ -380,7 +380,10 @@ fn do_query_events(
 
     if let Some(seq) = filter.sequence_after {
         clauses.push("global_sequence > ?".into());
-        params.push(Box::new(seq as i64));
+        params.push(Box::new(
+            i64::try_from(seq)
+                .map_err(|_| StoreError::Internal("sequence exceeds i64".into()))?,
+        ));
     }
 
     // occurred_after/occurred_before filter against the JSON data field
@@ -553,6 +556,8 @@ impl EventStore for SqliteEventStore {
                     let data = serde_json::to_string(event)
                         .map_err(|e| StoreError::Internal(e.to_string()))?;
                     let trace_id = event.span.trace_id.to_string();
+                    let expected_ver_i64 = i64::try_from(expected_version)
+                        .map_err(|_| StoreError::Internal("expected_version exceeds i64".into()))?;
                     let rows = stmt
                         .execute(rusqlite::params![
                             aggregate_type,
@@ -561,7 +566,7 @@ impl EventStore for SqliteEventStore {
                             event.tenant_id,
                             event.sequence,
                             data,
-                            expected_version as i64,
+                            expected_ver_i64,
                             tenant_id,
                             trace_id
                         ])

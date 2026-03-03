@@ -143,8 +143,10 @@ mod token {
             let claims = Claims {
                 sub: sub.map(|s| s.to_string()),
                 tenant_id: tenant_id.to_string(),
-                exp: exp.timestamp() as usize,
-                iat: now.timestamp() as usize,
+                exp: usize::try_from(exp.timestamp())
+                    .map_err(|_| AuthError::InvalidToken("timestamp out of range".into()))?,
+                iat: usize::try_from(now.timestamp())
+                    .map_err(|_| AuthError::InvalidToken("timestamp out of range".into()))?,
             };
 
             encode(&Header::default(), &claims, &self.encoding_key)

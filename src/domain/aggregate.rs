@@ -180,8 +180,8 @@ impl<R: AggregateState> Aggregate<R> {
         let base_seq = self.stream_version + 1;
 
         // Apply each payload to the state
-        for (i, emit) in emits.iter().enumerate() {
-            self.apply(&emit.event, base_seq + i as u64, occurred_at);
+        for (seq, emit) in (base_seq..).zip(emits.iter()) {
+            self.apply(&emit.event, seq, occurred_at);
         }
 
         // Compute derived state after all events applied
@@ -190,8 +190,8 @@ impl<R: AggregateState> Aggregate<R> {
         // Wrap emits as domain events, merging structured fields into metadata
         emits
             .into_iter()
-            .enumerate()
-            .map(|(i, emit)| {
+            .zip(base_seq..)
+            .map(|(emit, seq)| {
                 let mut metadata = emit.meta;
                 if let Some(error) = emit.error {
                     metadata.insert("span.error".into(), error);
@@ -203,7 +203,7 @@ impl<R: AggregateState> Aggregate<R> {
                     id: Uuid::new_v4(),
                     tenant_id: tenant_id.to_string(),
                     aggregate_id,
-                    sequence: base_seq + i as u64,
+                    sequence: seq,
                     span: span.clone(),
                     occurred_at,
                     payload: emit.event,

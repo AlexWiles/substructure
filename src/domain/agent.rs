@@ -36,15 +36,15 @@ impl StrategyConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryConfig {
     #[serde(default = "RetryConfig::default_llm_timeout_secs")]
-    pub llm_timeout_secs: u64,
+    pub llm_timeout_secs: u32,
     #[serde(default = "RetryConfig::default_tool_timeout_secs")]
-    pub tool_timeout_secs: u64,
+    pub tool_timeout_secs: u32,
     #[serde(default = "RetryConfig::default_max_retries")]
     pub max_retries: u32,
     #[serde(default = "RetryConfig::default_backoff_base_secs")]
-    pub backoff_base_secs: u64,
+    pub backoff_base_secs: u32,
     #[serde(default = "RetryConfig::default_backoff_max_secs")]
-    pub backoff_max_secs: u64,
+    pub backoff_max_secs: u32,
 }
 
 impl Default for RetryConfig {
@@ -60,19 +60,19 @@ impl Default for RetryConfig {
 }
 
 impl RetryConfig {
-    fn default_llm_timeout_secs() -> u64 {
+    fn default_llm_timeout_secs() -> u32 {
         60
     }
-    fn default_tool_timeout_secs() -> u64 {
+    fn default_tool_timeout_secs() -> u32 {
         120
     }
     fn default_max_retries() -> u32 {
         3
     }
-    fn default_backoff_base_secs() -> u64 {
+    fn default_backoff_base_secs() -> u32 {
         2
     }
-    fn default_backoff_max_secs() -> u64 {
+    fn default_backoff_max_secs() -> u32 {
         60
     }
 }

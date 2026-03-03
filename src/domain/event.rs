@@ -122,7 +122,7 @@ pub struct Message {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub token_count: Option<u32>,
+    pub token_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -260,7 +260,7 @@ pub enum LlmResponse {
 }
 
 impl LlmResponse {
-    pub fn as_parts(&self) -> (Option<String>, Vec<ToolCall>, Option<u32>) {
+    pub fn as_parts(&self) -> (Option<String>, Vec<ToolCall>, Option<u64>) {
         match self {
             LlmResponse::OpenAi(resp) => {
                 let choice = &resp.choices[0];

@@ -233,22 +233,21 @@ async fn settle_usage(
 
     // Apply events to ledger and persist
     let expected_version = state.ledger.stream_version;
-    for (i, event) in domain_events.iter().enumerate() {
-        state
-            .ledger
-            .apply(event, expected_version + 1 + i as u64, now);
+    let base_seq = expected_version + 1;
+    for (seq, event) in (base_seq..).zip(domain_events.iter()) {
+        state.ledger.apply(event, seq, now);
     }
     let new_version = state.ledger.stream_version;
 
     let raw_events: Vec<Event> = domain_events
         .into_iter()
-        .enumerate()
-        .map(|(i, payload)| {
+        .zip(base_seq..)
+        .map(|(payload, seq)| {
             let domain_event = DomainEvent::<BudgetLedger> {
                 id: Uuid::new_v4(),
                 tenant_id: state.tenant_id.clone(),
                 aggregate_id: state.aggregate_id,
-                sequence: expected_version + 1 + i as u64,
+                sequence: seq,
                 span: SpanContext::root(),
                 occurred_at: now,
                 payload,
@@ -284,7 +283,7 @@ async fn settle_usage(
 
 fn extract_total_tokens(response: &LlmResponse) -> u64 {
     match response {
-        LlmResponse::OpenAi(r) => r.usage.as_ref().map_or(0, |u| u.total_tokens as u64),
+        LlmResponse::OpenAi(r) => r.usage.as_ref().map_or(0, |u| u.total_tokens),
     }
 }
 

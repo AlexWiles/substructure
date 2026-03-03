@@ -240,7 +240,7 @@ impl LlmClient for OpenAiClient {
                     // Tool call deltas — accumulate fragments
                     if let Some(tc_deltas) = delta.tool_calls {
                         for tc_delta in tc_deltas {
-                            let idx = tc_delta.index as usize;
+                            let idx = tc_delta.index;
                             // Grow the vec if needed
                             while tool_calls.len() <= idx {
                                 tool_calls.push(ToolCallAccum::default());
@@ -355,7 +355,7 @@ struct StreamChunkDelta {
 
 #[derive(Debug, Deserialize)]
 struct ToolCallDelta {
-    index: u32,
+    index: usize,
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]

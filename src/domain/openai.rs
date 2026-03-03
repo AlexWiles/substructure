@@ -60,9 +60,9 @@ pub struct ChatCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f32>,
+    pub temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u32>,
+    pub max_tokens: Option<u64>,
 }
 
 // --- Response ---
@@ -77,32 +77,32 @@ pub struct Choice {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptTokensDetails {
     #[serde(default)]
-    pub cached_tokens: u32,
+    pub cached_tokens: u64,
     #[serde(default)]
-    pub cache_write_tokens: u32,
+    pub cache_write_tokens: u64,
     #[serde(default)]
-    pub audio_tokens: u32,
+    pub audio_tokens: u64,
     #[serde(default)]
-    pub video_tokens: u32,
+    pub video_tokens: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionTokensDetails {
     #[serde(default)]
-    pub reasoning_tokens: Option<u32>,
+    pub reasoning_tokens: Option<u64>,
     #[serde(default)]
-    pub audio_tokens: Option<u32>,
+    pub audio_tokens: Option<u64>,
     #[serde(default)]
-    pub accepted_prediction_tokens: Option<u32>,
+    pub accepted_prediction_tokens: Option<u64>,
     #[serde(default)]
-    pub rejected_prediction_tokens: Option<u32>,
+    pub rejected_prediction_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Usage {
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
-    pub total_tokens: u32,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
     #[serde(default)]
     pub prompt_tokens_details: Option<PromptTokensDetails>,
     #[serde(default)]
