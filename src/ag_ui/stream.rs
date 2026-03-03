@@ -11,7 +11,7 @@ use crate::runtime::event::{
 };
 use crate::runtime::llm::types as openai;
 use crate::runtime::session::{
-    AgentState, CommandPayload, SessionCommand, SessionContext,
+    SessionState, CommandPayload, SessionCommand, SessionContext,
 };
 use crate::runtime::{OnSessionUpdate, Runtime, RuntimeError, SessionUpdate};
 
@@ -332,18 +332,18 @@ async fn load_state(
     runtime: &Runtime,
     session_id: Uuid,
     auth: &ClientIdentity,
-) -> (AgentState, u64, Option<crate::runtime::span::TraceId>) {
+) -> (SessionState, u64, Option<crate::runtime::span::TraceId>) {
     match runtime.store().load(session_id, &auth.tenant_id).await {
         Ok(load) => {
-            let snapshot: crate::runtime::aggregate::Aggregate<AgentState> =
+            let snapshot: crate::runtime::aggregate::Aggregate<SessionState> =
                 serde_json::from_value(load.snapshot).unwrap_or_else(|_| {
-                    crate::runtime::aggregate::Aggregate::new(AgentState::new(session_id))
+                    crate::runtime::aggregate::Aggregate::new(SessionState::new(session_id))
                 });
             let last_applied = snapshot.last_applied.unwrap_or(0);
             let trace_id = snapshot.trace_id;
             (snapshot.state.clone(), last_applied, trace_id)
         }
-        Err(_) => (AgentState::new(session_id), 0, None),
+        Err(_) => (SessionState::new(session_id), 0, None),
     }
 }
 
@@ -399,7 +399,7 @@ fn send_client_tools(session_id: Uuid, tools: Vec<super::types::Tool>) {
     let name = crate::runtime::aggregate_actor_name(session_id);
     if let Some(cell) = ractor::registry::where_is(name) {
         let actor: ractor::ActorRef<
-            crate::runtime::aggregate_actor::AggregateMessage<AgentState>,
+            crate::runtime::aggregate_actor::AggregateMessage<SessionState>,
         > = cell.into();
         let _ = actor.send_message(
             crate::runtime::aggregate_actor::AggregateMessage::UpdateContext(Box::new(

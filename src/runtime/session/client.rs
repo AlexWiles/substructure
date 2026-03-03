@@ -8,7 +8,7 @@ use crate::runtime::aggregate::actor::{AggregateError, AggregateMessage};
 use crate::runtime::event::ClientIdentity;
 use crate::runtime::event_store::EventStore;
 use crate::runtime::types::{RuntimeError, SessionMessage};
-use super::state::AgentState;
+use super::state::SessionState;
 
 // ---------------------------------------------------------------------------
 // Notification — transient signals, never persisted
@@ -31,7 +31,7 @@ pub enum Notification {
 
 /// Distinguishes persisted domain events from ephemeral notifications.
 pub enum SessionUpdate {
-    Event(Box<DomainEvent<AgentState>>),
+    Event(Box<DomainEvent<SessionState>>),
     Notification(Arc<Notification>),
 }
 
@@ -46,7 +46,7 @@ pub struct SessionClientActor;
 
 pub struct SessionClientState {
     session_id: Uuid,
-    core: Aggregate<AgentState>,
+    core: Aggregate<SessionState>,
     on_event: Option<OnSessionUpdate>,
 }
 
@@ -70,9 +70,9 @@ impl Actor for SessionClientActor {
     ) -> Result<Self::State, ActorProcessingErr> {
         let core = match args.store.load(args.session_id, &args.auth.tenant_id).await {
             Ok(load) => serde_json::from_value(load.snapshot).unwrap_or_else(|_| {
-                Aggregate::new(AgentState::new(args.session_id))
+                Aggregate::new(SessionState::new(args.session_id))
             }),
-            Err(_) => Aggregate::new(AgentState::new(args.session_id)),
+            Err(_) => Aggregate::new(SessionState::new(args.session_id)),
         };
 
         let group = super::routing::session_group(args.session_id);
@@ -99,7 +99,7 @@ impl Actor for SessionClientActor {
                 // Forward command to aggregate actor via registry
                 let name = super::routing::aggregate_actor_name(state.session_id);
                 if let Some(cell) = ractor::registry::where_is(name) {
-                    let actor: ActorRef<AggregateMessage<AgentState>> = cell.into();
+                    let actor: ActorRef<AggregateMessage<SessionState>> = cell.into();
                     let result = actor
                         .call(
                             |rpc_reply| AggregateMessage::Execute {

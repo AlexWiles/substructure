@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::runtime::config::AgentConfig;
 use crate::runtime::aggregate::DomainEvent;
 use crate::runtime::event::{ClientIdentity, CompletionDelivery, SpanContext};
-use crate::runtime::session::{AgentState, CommandPayload, SessionCommand};
+use crate::runtime::session::{SessionState, CommandPayload, SessionCommand};
 
 use super::event_store::{Event, StoreError};
 use super::session::client::Notification;
@@ -41,8 +41,8 @@ pub enum SessionMessage {
         RpcReplyPort<Result<Vec<Arc<Event>>, RuntimeError>>,
     ),
     Cast(SessionCommand),
-    GetState(RpcReplyPort<AgentState>),
-    Events(Vec<Arc<DomainEvent<AgentState>>>),
+    GetState(RpcReplyPort<SessionState>),
+    Events(Vec<Arc<DomainEvent<SessionState>>>),
     /// Timer-triggered or scheduler-triggered wake.
     Wake,
     /// Cancel this session (used by parent to cancel sub-agent).
@@ -118,7 +118,7 @@ impl SessionHandle {
         result
     }
 
-    pub async fn get_state(&self) -> AgentState {
+    pub async fn get_state(&self) -> SessionState {
         ractor::call_t!(self.session_client, SessionMessage::GetState, 5000)
             .expect("failed to query session state")
     }

@@ -7,7 +7,7 @@ use crate::runtime::aggregate::DomainEvent;
 use crate::runtime::aggregate::actor::AggregateMessage;
 use crate::runtime::types::SessionMessage;
 use super::client::Notification;
-use super::state::AgentState;
+use super::state::SessionState;
 
 // ---------------------------------------------------------------------------
 // Naming conventions for ractor registry / process groups
@@ -27,7 +27,7 @@ pub fn session_observer_group(session_id: Uuid) -> String {
 
 /// Routing closure for the session aggregate dispatcher.
 /// Broadcasts typed events to the session process group and aggregate actor.
-pub(crate) fn session_route(aggregate_id: Uuid, events: Vec<Arc<DomainEvent<AgentState>>>) {
+pub(crate) fn session_route(aggregate_id: Uuid, events: Vec<Arc<DomainEvent<SessionState>>>) {
     let group = session_group(aggregate_id);
     for cell in ractor::pg::get_members(&group) {
         let actor: ActorRef<SessionMessage> = cell.into();
@@ -35,7 +35,7 @@ pub(crate) fn session_route(aggregate_id: Uuid, events: Vec<Arc<DomainEvent<Agen
     }
 
     if let Some(cell) = ractor::registry::where_is(aggregate_actor_name(aggregate_id)) {
-        let actor: ActorRef<AggregateMessage<AgentState>> = cell.into();
+        let actor: ActorRef<AggregateMessage<SessionState>> = cell.into();
         let _ = actor.send_message(AggregateMessage::Events(events));
     }
 }

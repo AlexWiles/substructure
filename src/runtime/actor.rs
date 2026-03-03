@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::runtime::config::{AgentConfig, BudgetPolicyConfig};
 use crate::runtime::event::{ClientIdentity, SpanContext};
 use crate::runtime::session::{
-    AgentState, CommandPayload, IncomingMessage, SessionCommand, SessionStatus,
+    SessionState, CommandPayload, IncomingMessage, SessionCommand, SessionStatus,
 };
 
 use super::aggregate::actor::{self as aggregate_actor, AggregateMessage};
@@ -57,7 +57,7 @@ impl RuntimeState {
     /// Returns `true` if the actor was found and the message was sent.
     fn try_send_to_aggregate(&self, session_id: Uuid, payload: CommandPayload, span: SpanContext) -> bool {
         if let Some(cell) = ractor::registry::where_is(aggregate_actor_name(session_id)) {
-            let actor: ActorRef<AggregateMessage<AgentState>> = cell.into();
+            let actor: ActorRef<AggregateMessage<SessionState>> = cell.into();
             let _ = actor.send_message(AggregateMessage::Cast {
                 cmd: payload,
                 span,
@@ -147,7 +147,7 @@ impl RuntimeState {
                     aggregate_id: session_id,
                     store: self.store.clone(),
                     tenant_id: auth.tenant_id.clone(),
-                    init: Box::new(AgentState::new),
+                    init: Box::new(SessionState::new),
                     idle_timeout: None,
                     context_init: Box::new(move |state| {
                         let resolved_agent = state.agent.clone().unwrap_or(agent_for_ctx);
@@ -260,7 +260,7 @@ impl RuntimeState {
             "session" => {
                 // If the aggregate actor is already running, send Wake command
                 if let Some(cell) = ractor::registry::where_is(aggregate_actor_name(aggregate_id)) {
-                    let actor: ActorRef<AggregateMessage<AgentState>> =
+                    let actor: ActorRef<AggregateMessage<SessionState>> =
                         cell.into();
                     let _ = actor.send_message(AggregateMessage::Cast {
                         cmd: CommandPayload::Wake,
@@ -375,7 +375,7 @@ impl Actor for RuntimeActor {
     ) -> Result<Self::State, ActorProcessingErr> {
         // Spawn infrastructure actors (linked to RuntimeActor)
         tracing::debug!("spawning event dispatcher");
-        spawn_aggregate_dispatcher::<AgentState>(
+        spawn_aggregate_dispatcher::<SessionState>(
             &args.store,
             Arc::new(session_route),
             myself.get_cell(),
@@ -479,7 +479,7 @@ async fn restart_infrastructure(name: Option<String>, state: &RuntimeState) {
     match name.as_deref() {
         Some("session-dispatcher") => {
             tracing::info!("restarting session-dispatcher");
-            if let Err(e) = spawn_aggregate_dispatcher::<AgentState>(
+            if let Err(e) = spawn_aggregate_dispatcher::<SessionState>(
                 &state.store,
                 Arc::new(session_route),
                 state.myself.get_cell(),

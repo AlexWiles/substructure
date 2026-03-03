@@ -242,11 +242,11 @@ pub struct DerivedState {
 }
 
 // ---------------------------------------------------------------------------
-// AgentState — the reducer state for session aggregates
+// SessionState — the reducer state for session aggregates
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentState {
+pub struct SessionState {
     pub session_id: Uuid,
     pub status: SessionStatus,
     pub agent: Option<AgentConfig>,
@@ -269,9 +269,9 @@ pub struct AgentState {
     pub tool_calls: HashMap<String, ToolCallState>,
 }
 
-impl AgentState {
+impl SessionState {
     pub fn new(session_id: Uuid) -> Self {
-        AgentState {
+        SessionState {
             session_id,
             status: SessionStatus::Done,
             agent: None,
@@ -606,7 +606,7 @@ impl AgentState {
     }
 }
 
-impl AgentState {
+impl SessionState {
     pub fn aggregate_status(&self) -> AggregateStatus {
         match self.status {
             SessionStatus::Active => AggregateStatus::Active,
@@ -676,7 +676,7 @@ impl AgentState {
 // on_event helpers — I/O dispatch and strategy decisions
 // ---------------------------------------------------------------------------
 
-impl AgentState {
+impl SessionState {
     /// Handle an LLM call: resolve client, call API (streaming or not), return command.
     async fn handle_llm_call(
         &self,
@@ -944,11 +944,11 @@ impl AgentState {
 }
 
 // ---------------------------------------------------------------------------
-// AggregateState impl — makes AgentState the aggregate directly
+// AggregateState impl — makes SessionState the aggregate directly
 // ---------------------------------------------------------------------------
 
 #[async_trait]
-impl AggregateState for AgentState {
+impl AggregateState for SessionState {
     type Event = EventPayload;
     type Command = CommandPayload;
     type Error = SessionError;

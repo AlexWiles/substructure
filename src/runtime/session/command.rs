@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use crate::runtime::aggregate::Emit;
 use crate::runtime::event::*;
 use super::state::{
-    new_call_id, AgentState, LlmCallStatus, SessionContext, SessionStatus, ToolCallState, ToolCallStatus,
+    new_call_id, SessionState, LlmCallStatus, SessionContext, SessionStatus, ToolCallState, ToolCallStatus,
 };
 
 // ---------------------------------------------------------------------------
@@ -116,7 +116,7 @@ pub enum SessionError {
 // Command handling
 // ---------------------------------------------------------------------------
 
-impl AgentState {
+impl SessionState {
     pub fn handle(
         &self,
         cmd: CommandPayload,
@@ -147,7 +147,7 @@ impl AgentState {
         }
     }
 
-    /// Command validation using AgentState for idempotency guards.
+    /// Command validation using SessionState for idempotency guards.
     fn handle_active(
         &self,
         cmd: CommandPayload,
@@ -827,8 +827,8 @@ mod tests {
         })
     }
 
-    fn created_state() -> Aggregate<AgentState> {
-        let mut state = Aggregate::new(AgentState::new(Uuid::new_v4()));
+    fn created_state() -> Aggregate<SessionState> {
+        let mut state = Aggregate::new(SessionState::new(Uuid::new_v4()));
         state.apply(
             &EventPayload::SessionCreated(SessionCreated {
                 agent: test_agent(),
@@ -841,7 +841,7 @@ mod tests {
         state
     }
 
-    fn apply_events(state: &mut Aggregate<AgentState>, emits: Vec<Emit<EventPayload>>) {
+    fn apply_events(state: &mut Aggregate<SessionState>, emits: Vec<Emit<EventPayload>>) {
         let seq = state.last_applied.unwrap_or(0);
         for (s, emit) in (seq + 1..).zip(emits.iter()) {
             state.apply(&emit.event, s, Utc::now());
@@ -1095,7 +1095,7 @@ mod tests {
         let mut agent = test_agent();
         agent.token_budget = Some(100);
 
-        let mut state = Aggregate::new(AgentState::new(Uuid::new_v4()));
+        let mut state = Aggregate::new(SessionState::new(Uuid::new_v4()));
         state.apply(
             &EventPayload::SessionCreated(SessionCreated {
                 agent,
