@@ -17,11 +17,13 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
-use crate::ag_ui::{observe_session, resume_run, run_existing_session, AgUiError, AgUiEvent, RunAgentInput};
+use crate::ag_ui::{
+    observe_session, resume_run, run_existing_session, AgUiError, AgUiEvent, RunAgentInput,
+};
 use crate::runtime::aggregate::AggregateStatus;
 use crate::runtime::auth::{build_auth_resolver, AdminContext, AuthError, AuthResolver};
-use crate::runtime::config::SystemConfig;
 use crate::runtime::config::ClientIdentity;
+use crate::runtime::config::SystemConfig;
 use crate::runtime::event_store::{self, Event as StoreEvent, SpanSummary};
 use crate::runtime::{
     AggregateFilter, AggregateSort, AggregateSummary, EventFilter, Runtime, RuntimeError,

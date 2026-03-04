@@ -3,14 +3,14 @@ use std::sync::Arc;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use uuid::Uuid;
 
-use crate::runtime::aggregate::{Aggregate, DomainEvent};
+use super::state::SessionState;
 use crate::runtime::aggregate::actor::{AggregateError, AggregateMessage};
+use crate::runtime::aggregate::{Aggregate, DomainEvent};
 use crate::runtime::config::ClientIdentity;
 use crate::runtime::event_store::EventStore;
 use crate::runtime::span::SpanContext;
 use crate::runtime::types::{RuntimeError, RuntimeMessage, SessionMessage};
 use crate::runtime::Runtime;
-use super::state::SessionState;
 
 // ---------------------------------------------------------------------------
 // Notification — transient signals, never persisted
@@ -74,9 +74,8 @@ impl Actor for SessionClientActor {
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         let core = match args.store.load(args.session_id, &args.auth.tenant_id).await {
-            Ok(load) => serde_json::from_value(load.snapshot).unwrap_or_else(|_| {
-                Aggregate::new(SessionState::new(args.session_id))
-            }),
+            Ok(load) => serde_json::from_value(load.snapshot)
+                .unwrap_or_else(|_| Aggregate::new(SessionState::new(args.session_id))),
             Err(_) => Aggregate::new(SessionState::new(args.session_id)),
         };
 

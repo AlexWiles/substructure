@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_stream::StreamExt;
 
-use crate::runtime::message::{Message, Role as DomainRole};
 use super::{LlmCallError, LlmCallable, LlmRequest, LlmResponse, LlmTool, StreamDelta};
+use crate::runtime::message::{Message, Role as DomainRole};
 
 // ---------------------------------------------------------------------------
 // OpenAI wire types
@@ -206,14 +206,17 @@ impl LlmCallable for OpenAiClient {
             return Err(LlmCallError {
                 message: format!("OpenAI API error {status}: {body}"),
                 retryable,
-                source: Some(serde_json::json!({"kind": "openai", "status": status_code, "body": body_json})),
+                source: Some(
+                    serde_json::json!({"kind": "openai", "status": status_code, "body": body_json}),
+                ),
             });
         }
-        let parsed: ChatCompletionResponse = serde_json::from_str(&body).map_err(|e| LlmCallError {
-            message: format!("parse response: {e}"),
-            retryable: false,
-            source: Some(serde_json::json!({"kind": "openai"})),
-        })?;
+        let parsed: ChatCompletionResponse =
+            serde_json::from_str(&body).map_err(|e| LlmCallError {
+                message: format!("parse response: {e}"),
+                retryable: false,
+                source: Some(serde_json::json!({"kind": "openai"})),
+            })?;
         Ok(LlmResponse::OpenAi(parsed))
     }
 
@@ -238,7 +241,9 @@ impl LlmCallable for OpenAiClient {
             return Err(LlmCallError {
                 message: format!("OpenAI API error {status}: {body}"),
                 retryable,
-                source: Some(serde_json::json!({"kind": "openai", "status": status_code, "body": body_json})),
+                source: Some(
+                    serde_json::json!({"kind": "openai", "status": status_code, "body": body_json}),
+                ),
             });
         }
 

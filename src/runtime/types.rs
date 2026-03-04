@@ -7,7 +7,7 @@ use crate::runtime::aggregate::DomainEvent;
 use crate::runtime::config::{AgentConfig, ClientIdentity};
 use crate::runtime::llm::LlmTool;
 use crate::runtime::session::types::CompletionDelivery;
-use crate::runtime::session::{SessionError, SessionState, CommandPayload, SessionCommand};
+use crate::runtime::session::{CommandPayload, SessionCommand, SessionError, SessionState};
 use crate::runtime::span::{SpanContext, TraceId};
 
 use super::event_store::{Event, StoreError};
@@ -120,9 +120,8 @@ pub struct SessionHandle {
 
 impl SessionHandle {
     pub async fn send_command(&self, cmd: SessionCommand) -> Result<Vec<Arc<Event>>, RuntimeError> {
-        let result =
-            ractor::call_t!(self.session_client, SessionMessage::Execute, 5000, cmd)
-                .map_err(|e| RuntimeError::ActorCall(e.to_string()))?;
+        let result = ractor::call_t!(self.session_client, SessionMessage::Execute, 5000, cmd)
+            .map_err(|e| RuntimeError::ActorCall(e.to_string()))?;
         result
     }
 

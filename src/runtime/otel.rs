@@ -172,7 +172,9 @@ impl Actor for OtelExporterActor {
             OtelMsg::Events(batch) => {
                 let event_refs: Vec<&Event> = batch.iter().map(|e| e.as_ref()).collect();
                 let summaries = reconstruct_span_summaries(&event_refs);
-                let spans = summaries.iter().map(|s| span_summary_to_otel(s, &state.scope));
+                let spans = summaries
+                    .iter()
+                    .map(|s| span_summary_to_otel(s, &state.scope));
                 state.pending.extend(spans);
             }
             OtelMsg::Tick => {
@@ -218,9 +220,9 @@ pub async fn spawn_otel_exporter(
     )
     .await?;
 
-    store.events().subscribe(actor_ref.clone(), |batch| {
-        Some(OtelMsg::Events(batch))
-    });
+    store
+        .events()
+        .subscribe(actor_ref.clone(), |batch| Some(OtelMsg::Events(batch)));
 
     Ok(actor_ref)
 }

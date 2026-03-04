@@ -92,7 +92,6 @@ impl RetryConfig {
             backoff_max_secs: self.backoff_max_secs.unwrap_or(defaults.backoff_max_secs),
         }
     }
-
 }
 
 /// Fully-resolved retry policy — no optional fields. Stored on call state and

@@ -4,8 +4,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use super::{LlmCallable, LlmProviderTrait};
-use crate::runtime::config::LlmClientConfig;
 use crate::runtime::config::ClientIdentity;
+use crate::runtime::config::LlmClientConfig;
 
 pub type LlmClientFactory = Box<
     dyn Fn(&serde_json::Map<String, serde_json::Value>) -> Result<Arc<dyn LlmCallable>, String>

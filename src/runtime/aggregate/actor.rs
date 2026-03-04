@@ -11,15 +11,17 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::runtime::aggregate::{Aggregate, AggregateState, AggregateStatus, DomainEvent};
-use crate::runtime::span::{SpanContext, TraceId};
 use crate::runtime::event_store::{Event, EventStore, StoreError};
+use crate::runtime::span::{SpanContext, TraceId};
 
 /// Default idle timeout for aggregate actors (5 minutes).
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 type AggregateResult<E> = Result<Vec<Arc<Event>>, AggregateError<E>>;
 type ContextUpdateFn<C> = Box<dyn FnOnce(&mut C) + Send>;
-type ContextInitFn<R> = Box<dyn FnOnce(&R) -> Pin<Box<dyn Future<Output = <R as AggregateState>::Context> + Send>> + Send>;
+type ContextInitFn<R> = Box<
+    dyn FnOnce(&R) -> Pin<Box<dyn Future<Output = <R as AggregateState>::Context> + Send>> + Send,
+>;
 
 pub enum AggregateMessage<R: AggregateState> {
     Execute {
@@ -78,13 +80,8 @@ pub async fn spawn_aggregate_actor<R: AggregateState>(
     supervisor: ractor::ActorCell,
 ) -> Result<AggregateActorHandle<R>, ractor::SpawnErr> {
     let name = format!("{}-{}", R::aggregate_type(), args.aggregate_id);
-    let (actor, _) = Actor::spawn_linked(
-        Some(name),
-        AggregateActor::<R>::new(),
-        args,
-        supervisor,
-    )
-    .await?;
+    let (actor, _) =
+        Actor::spawn_linked(Some(name), AggregateActor::<R>::new(), args, supervisor).await?;
 
     Ok(AggregateActorHandle { actor })
 }
@@ -115,9 +112,9 @@ impl<R: AggregateState> AggregateActorHandle<R> {
             .map_err(|e| AggregateError::Store(StoreError::Internal(e.to_string())))?;
         match result {
             ractor::rpc::CallResult::Success(v) => v,
-            ractor::rpc::CallResult::Timeout => Err(AggregateError::Store(
-                StoreError::Internal("rpc timeout".into()),
-            )),
+            ractor::rpc::CallResult::Timeout => Err(AggregateError::Store(StoreError::Internal(
+                "rpc timeout".into(),
+            ))),
             ractor::rpc::CallResult::SenderError => Err(AggregateError::Store(
                 StoreError::Internal("rpc sender error".into()),
             )),
@@ -218,8 +215,8 @@ async fn execute<R: AggregateState>(
         .map(|e| e.into_raw(start_time, end_time))
         .collect();
 
-    let snapshot_value = serde_json::to_value(&state.aggregate)
-        .map_err(|e| StoreError::Internal(e.to_string()))?;
+    let snapshot_value =
+        serde_json::to_value(&state.aggregate).map_err(|e| StoreError::Internal(e.to_string()))?;
 
     state
         .store
@@ -281,8 +278,7 @@ impl<R: AggregateState> Actor for AggregateActor<R> {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             AggregateMessage::IdleCheck(gen) => {
-                if gen == state.idle_generation
-                    && state.aggregate.status != AggregateStatus::Active
+                if gen == state.idle_generation && state.aggregate.status != AggregateStatus::Active
                 {
                     tracing::debug!(
                         aggregate_id = %state.aggregate_id,
@@ -321,7 +317,12 @@ impl<R: AggregateState> Actor for AggregateActor<R> {
             AggregateMessage::Events(typed_events) => {
                 for event in &typed_events {
                     let start = Utc::now();
-                    if let Some(cmd) = state.aggregate.state.on_event(&event.payload, &state.context, &event.span).await {
+                    if let Some(cmd) = state
+                        .aggregate
+                        .state
+                        .on_event(&event.payload, &state.context, &event.span)
+                        .await
+                    {
                         // Use triggering event's serde type tag as span name
                         let event_type = serde_json::to_value(&event.payload)
                             .ok()

@@ -7,21 +7,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use async_trait::async_trait;
+use super::types::{Artifact, CompletionDelivery, ToolCallMeta, ToolCallRequested, ToolHandler};
 use crate::runtime::aggregate::{AggregateState, AggregateStatus, Emit};
 use crate::runtime::budget::{self, BudgetContext, BudgetError};
-use crate::runtime::config::{AgentConfig, ClientIdentity, ExhaustionStrategy, LlmRequestParams, RetryPolicy};
+use crate::runtime::config::{
+    AgentConfig, ClientIdentity, ExhaustionStrategy, LlmRequestParams, RetryPolicy,
+};
 use crate::runtime::event::EventPayload;
 use crate::runtime::llm::{LlmCallRequested, LlmRequest, LlmResponse, LlmTool};
-use crate::runtime::message::{Message, Role};
 use crate::runtime::mcp::{Content, McpClient};
+use crate::runtime::message::{Message, Role};
 use crate::runtime::span::SpanContext;
-use super::types::{
-    Artifact, CompletionDelivery, ToolCallMeta, ToolCallRequested, ToolHandler,
-};
+use async_trait::async_trait;
 
-use crate::runtime::defaults;
 use super::command::{truncate_tool_result, CommandPayload, SessionError};
+use crate::runtime::defaults;
 
 // ---------------------------------------------------------------------------
 // SessionContext — transient state passed through handle_command/on_event
@@ -39,9 +39,7 @@ pub type NotifyChunkFn = Arc<dyn Fn(Uuid, String, u32, String, SpanContext) + Se
 /// Callback for sending a command to a session (fire-and-forget).
 pub type SendToSessionFn = Arc<dyn Fn(Uuid, CommandPayload, SpanContext) + Send + Sync>;
 /// Callback for spawning a sub-agent.
-pub type SpawnSubAgentFn = Arc<
-    dyn Fn(SubAgentParams) + Send + Sync,
->;
+pub type SpawnSubAgentFn = Arc<dyn Fn(SubAgentParams) + Send + Sync>;
 
 /// Parameters for spawning a sub-agent.
 pub struct SubAgentParams {
@@ -120,7 +118,6 @@ pub struct ToolResult {
 pub(super) fn new_call_id() -> String {
     Uuid::new_v4().to_string()
 }
-
 
 // ---------------------------------------------------------------------------
 // Session status
@@ -385,7 +382,8 @@ impl SessionState {
                 }
                 // Stay Active while any tool call is pending or retrying
                 let has_inflight = self.tool_calls.values().any(|tc| {
-                    tc.status == ToolCallStatus::Pending || tc.status == ToolCallStatus::RetryScheduled
+                    tc.status == ToolCallStatus::Pending
+                        || tc.status == ToolCallStatus::RetryScheduled
                 });
                 if !has_inflight && self.pending_tool_results() == 0 {
                     self.status = SessionStatus::Idle;
@@ -651,11 +649,7 @@ impl SessionState {
             if let Some(limit) = self
                 .agent
                 .as_ref()
-                .and_then(|a| {
-                    a.mcp_servers
-                        .iter()
-                        .find(|s| s.name == entry.server_name)
-                })
+                .and_then(|a| a.mcp_servers.iter().find(|s| s.name == entry.server_name))
                 .and_then(|s| s.tool_result_max_bytes)
             {
                 return if limit == 0 { None } else { Some(limit) };
@@ -676,7 +670,6 @@ impl SessionState {
     pub fn label(&self) -> Option<String> {
         self.agent.as_ref().map(|a| a.name.clone())
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -704,12 +697,7 @@ impl SessionState {
         let client_id = &agent.llm.client;
         let model = &agent.llm.model;
 
-        let context = BudgetContext::for_llm_call(
-            ctx.session_id,
-            auth,
-            client_id,
-            model,
-        );
+        let context = BudgetContext::for_llm_call(ctx.session_id, auth, client_id, model);
 
         let mut breakdown = BTreeMap::new();
         if let Some(max_completion_tokens) = agent.llm.max_completion_tokens {
@@ -788,8 +776,7 @@ impl SessionState {
         let request = p.request.clone().with_tools(ctx.all_tools.clone());
 
         let result = if p.stream {
-            let (chunk_tx, mut chunk_rx) =
-                tokio::sync::mpsc::unbounded_channel::<StreamDelta>();
+            let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel::<StreamDelta>();
 
             let call_id = p.call_id.clone();
             let session_id = ctx.session_id;
@@ -797,19 +784,22 @@ impl SessionState {
             let chunk_span = span.child("llm.stream");
             let mut chunk_index: u32 = 0;
 
-            let (result, _) = tokio::join!(
-                client.call_streaming(&request, chunk_tx),
-                async {
-                    while let Some(delta) = chunk_rx.recv().await {
-                        if let Some(text) = delta.text {
-                            if let Some(ref notify) = notify {
-                                notify(session_id, call_id.clone(), chunk_index, text, chunk_span.clone());
-                                chunk_index += 1;
-                            }
+            let (result, _) = tokio::join!(client.call_streaming(&request, chunk_tx), async {
+                while let Some(delta) = chunk_rx.recv().await {
+                    if let Some(text) = delta.text {
+                        if let Some(ref notify) = notify {
+                            notify(
+                                session_id,
+                                call_id.clone(),
+                                chunk_index,
+                                text,
+                                chunk_span.clone(),
+                            );
+                            chunk_index += 1;
                         }
                     }
                 }
-            );
+            });
             result
         } else {
             client.call(&request).await
@@ -842,8 +832,7 @@ impl SessionState {
             .get(&p.tool_call_id)
             .and_then(|tc| tc.child_session_id())
         {
-            let args: serde_json::Value =
-                serde_json::from_str(&p.arguments).unwrap_or_default();
+            let args: serde_json::Value = serde_json::from_str(&p.arguments).unwrap_or_default();
             let message = args
                 .get("message")
                 .and_then(|v| v.as_str())
@@ -877,8 +866,7 @@ impl SessionState {
             .cloned();
 
         if let Some(mcp) = mcp {
-            let args: serde_json::Value =
-                serde_json::from_str(&p.arguments).unwrap_or_default();
+            let args: serde_json::Value = serde_json::from_str(&p.arguments).unwrap_or_default();
 
             match mcp.call_tool(&p.name, args).await {
                 Ok(result) => {
@@ -946,9 +934,7 @@ impl SessionState {
                         Some(ref text) if !text.is_empty() => vec![Artifact {
                             name: None,
                             description: None,
-                            parts: vec![super::types::Part::Text {
-                                text: text.clone(),
-                            }],
+                            parts: vec![super::types::Part::Text { text: text.clone() }],
                         }],
                         _ => vec![],
                     };
@@ -977,7 +963,8 @@ impl SessionState {
             EventPayload::MessageTool(_) => {
                 // Wait until all tool calls are done (including retries in flight)
                 if self.tool_calls.values().any(|tc| {
-                    tc.status == ToolCallStatus::Pending || tc.status == ToolCallStatus::RetryScheduled
+                    tc.status == ToolCallStatus::Pending
+                        || tc.status == ToolCallStatus::RetryScheduled
                 }) {
                     return None;
                 }
@@ -1031,7 +1018,12 @@ impl AggregateState for SessionState {
         self.handle(cmd, ctx)
     }
 
-    async fn on_event(&self, event: &Self::Event, ctx: &Self::Context, span: &SpanContext) -> Option<Self::Command> {
+    async fn on_event(
+        &self,
+        event: &Self::Event,
+        ctx: &Self::Context,
+        span: &SpanContext,
+    ) -> Option<Self::Command> {
         // --- Mechanical I/O dispatch ---
         match event {
             EventPayload::LlmCallRequested(p) => {
@@ -1044,11 +1036,9 @@ impl AggregateState for SessionState {
                 }
             }
             EventPayload::ToolCallRequested(p) => {
-                if self
-                    .tool_calls
-                    .get(&p.tool_call_id)
-                    .is_some_and(|tc| tc.status == ToolCallStatus::Pending && tc.handler == ToolHandler::Runtime)
-                {
+                if self.tool_calls.get(&p.tool_call_id).is_some_and(|tc| {
+                    tc.status == ToolCallStatus::Pending && tc.handler == ToolHandler::Runtime
+                }) {
                     return self.handle_tool_call(p, ctx, span).await;
                 }
             }
@@ -1092,4 +1082,3 @@ impl AggregateState for SessionState {
         self.label()
     }
 }
-

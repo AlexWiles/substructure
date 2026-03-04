@@ -379,16 +379,14 @@ impl AggregateState for BudgetLedger {
                         }
                         for ck in seen.keys() {
                             if let Some((policy_name, bucket_key)) = ck.split_once('|') {
-                                emits.push(Emit::new(BudgetEvent::UsageRecorded(
-                                    UsageRecorded {
-                                        policy_name: policy_name.to_string(),
-                                        bucket_key: bucket_key.to_string(),
-                                        session_id,
-                                        call_id: call_id.clone(),
-                                        breakdown: breakdown.clone(),
-                                        recorded_at,
-                                    },
-                                )));
+                                emits.push(Emit::new(BudgetEvent::UsageRecorded(UsageRecorded {
+                                    policy_name: policy_name.to_string(),
+                                    bucket_key: bucket_key.to_string(),
+                                    session_id,
+                                    call_id: call_id.clone(),
+                                    breakdown: breakdown.clone(),
+                                    recorded_at,
+                                })));
                             }
                         }
                     }
@@ -558,7 +556,10 @@ impl BudgetActorRef {
         breakdown: UsageBreakdown,
         span: &SpanContext,
     ) -> Result<(), BudgetError> {
-        let Some(handle) = self.inner.downcast_ref::<AggregateActorHandle<BudgetLedger>>() else {
+        let Some(handle) = self
+            .inner
+            .downcast_ref::<AggregateActorHandle<BudgetLedger>>()
+        else {
             tracing::error!("BudgetActorRef contains unexpected type — skipping reservation");
             return Ok(());
         };
@@ -801,8 +802,12 @@ mod tests {
         let emits = execute(&mut ledger, cmd, &policies).unwrap();
 
         // Should have UsageRecorded events + ReservationReleased
-        assert!(emits.iter().any(|e| matches!(e.event, BudgetEvent::UsageRecorded(_))));
-        assert!(emits.iter().any(|e| matches!(e.event, BudgetEvent::ReservationReleased(_))));
+        assert!(emits
+            .iter()
+            .any(|e| matches!(e.event, BudgetEvent::UsageRecorded(_))));
+        assert!(emits
+            .iter()
+            .any(|e| matches!(e.event, BudgetEvent::ReservationReleased(_))));
         assert!(ledger.reservations.is_empty());
         assert!(!ledger.buckets.is_empty());
     }
@@ -843,7 +848,10 @@ mod tests {
 
         // Should release but not record usage
         assert_eq!(emits.len(), 1);
-        assert!(matches!(emits[0].event, BudgetEvent::ReservationReleased(_)));
+        assert!(matches!(
+            emits[0].event,
+            BudgetEvent::ReservationReleased(_)
+        ));
         assert!(ledger.reservations.is_empty());
         assert!(ledger.buckets.is_empty());
     }
@@ -1024,7 +1032,10 @@ mod tests {
         };
         let result = ledger.handle_command(cmd, &policies.to_vec());
         assert!(result.is_ok());
-        assert!(result.unwrap().is_empty(), "non-matching policy produces no events");
+        assert!(
+            result.unwrap().is_empty(),
+            "non-matching policy produces no events"
+        );
 
         // Now with matching model
         let mut ctx2 = make_context("alice");
@@ -1197,7 +1208,10 @@ mod tests {
         let flat = flatten_usage(&json);
         assert_eq!(flat.get("prompt_tokens"), Some(&100));
         assert_eq!(flat.get("prompt_tokens_details.cached_tokens"), Some(&50));
-        assert_eq!(flat.get("prompt_tokens_details.cache_write_tokens"), Some(&10));
+        assert_eq!(
+            flat.get("prompt_tokens_details.cache_write_tokens"),
+            Some(&10)
+        );
     }
 
     #[test]

@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use super::{McpClient, McpError};
 use super::stdio::StdioMcpClient;
+use super::{McpClient, McpError};
 use crate::runtime::config::{ClientIdentity, McpServerConfig, McpTransportConfig};
 
 #[async_trait]

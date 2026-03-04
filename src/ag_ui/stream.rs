@@ -12,10 +12,8 @@ use crate::runtime::config::ClientIdentity;
 use crate::runtime::llm::{LlmTool, LlmToolFunction};
 use crate::runtime::message::{Message as DomainMessage, Role, ToolCall as DomainToolCall};
 use crate::runtime::session::routing::aggregate_actor_name;
+use crate::runtime::session::{CommandPayload, SessionCommand, SessionContext, SessionState};
 use crate::runtime::span::{SpanContext, TraceId};
-use crate::runtime::session::{
-    SessionState, CommandPayload, SessionCommand, SessionContext,
-};
 use crate::runtime::{OnSessionUpdate, Runtime, RuntimeError, SessionUpdate};
 
 use super::translate::{EventTranslator, TranslateOutput};
@@ -338,10 +336,8 @@ async fn load_state(
 ) -> (SessionState, u64, Option<TraceId>) {
     match runtime.store().load(session_id, &auth.tenant_id).await {
         Ok(load) => {
-            let snapshot: Aggregate<SessionState> =
-                serde_json::from_value(load.snapshot).unwrap_or_else(|_| {
-                    Aggregate::new(SessionState::new(session_id))
-                });
+            let snapshot: Aggregate<SessionState> = serde_json::from_value(load.snapshot)
+                .unwrap_or_else(|_| Aggregate::new(SessionState::new(session_id)));
             let last_applied = snapshot.last_applied.unwrap_or(0);
             let trace_id = snapshot.trace_id;
             (snapshot.state.clone(), last_applied, trace_id)
@@ -402,19 +398,17 @@ fn send_client_tools(session_id: Uuid, tools: Vec<super::types::Tool>) {
     let name = aggregate_actor_name(session_id);
     if let Some(cell) = ractor::registry::where_is(name) {
         let actor: ractor::ActorRef<AggregateMessage<SessionState>> = cell.into();
-        let _ = actor.send_message(
-            AggregateMessage::UpdateContext(Box::new(
-                move |ctx: &mut SessionContext| {
-                    // Add client tools to context and update all_tools
-                    ctx.client_tools = llm_tools.clone();
-                    if let Some(ref mut all) = ctx.all_tools {
-                        all.extend(llm_tools);
-                    } else {
-                        ctx.all_tools = Some(llm_tools);
-                    }
-                },
-            )),
-        );
+        let _ = actor.send_message(AggregateMessage::UpdateContext(Box::new(
+            move |ctx: &mut SessionContext| {
+                // Add client tools to context and update all_tools
+                ctx.client_tools = llm_tools.clone();
+                if let Some(ref mut all) = ctx.all_tools {
+                    all.extend(llm_tools);
+                } else {
+                    ctx.all_tools = Some(llm_tools);
+                }
+            },
+        )));
     }
 }
 

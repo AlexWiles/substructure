@@ -6,14 +6,14 @@ use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
-use substructure::runtime::config::{LoggingConfig, SystemConfig};
-use substructure::runtime::config::ClientIdentity;
-use substructure::runtime::event::EventPayload;
-use substructure::runtime::span::SpanContext;
-use substructure::runtime::secret::resolve_secrets;
-use substructure::runtime::session::{CommandPayload, IncomingMessage, SessionCommand};
 #[cfg(feature = "http")]
 use substructure::http::start_server;
+use substructure::runtime::config::ClientIdentity;
+use substructure::runtime::config::{LoggingConfig, SystemConfig};
+use substructure::runtime::event::EventPayload;
+use substructure::runtime::secret::resolve_secrets;
+use substructure::runtime::session::{CommandPayload, IncomingMessage, SessionCommand};
+use substructure::runtime::span::SpanContext;
 use substructure::runtime::Runtime;
 use substructure::runtime::SessionUpdate;
 

@@ -5,12 +5,12 @@ use chrono::Utc;
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use uuid::Uuid;
 
-use crate::runtime::config::{AgentConfig, BudgetPolicyConfig};
 use crate::runtime::config::ClientIdentity;
-use crate::runtime::span::SpanContext;
+use crate::runtime::config::{AgentConfig, BudgetPolicyConfig};
 use crate::runtime::session::{
-    SessionState, CommandPayload, IncomingMessage, SessionCommand, SessionStatus,
+    CommandPayload, IncomingMessage, SessionCommand, SessionState, SessionStatus,
 };
+use crate::runtime::span::SpanContext;
 
 use super::aggregate::actor::{self as aggregate_actor, AggregateActorHandle, AggregateMessage};
 use super::aggregate::dispatcher::spawn_aggregate_dispatcher;
@@ -21,9 +21,7 @@ use super::mcp::{self, McpClient, ToolDefinition};
 use super::session::client::{Notification, SessionClientActor, SessionClientArgs};
 use super::session::routing::{aggregate_actor_name, notify_observers, session_route};
 use super::session::{BudgetActorRef, McpToolEntry, NotifyChunkFn, SessionContext};
-use super::types::{
-    RuntimeError, RuntimeMessage, SessionHandle, SessionInit, SubAgentRequest,
-};
+use super::types::{RuntimeError, RuntimeMessage, SessionHandle, SessionInit, SubAgentRequest};
 use super::wake_scheduler::spawn_wake_scheduler;
 
 // ---------------------------------------------------------------------------
@@ -58,7 +56,12 @@ pub(super) struct RuntimeArgs {
 impl RuntimeState {
     /// Look up a running aggregate actor by session ID and send a command.
     /// Returns `true` if the actor was found and the message was sent.
-    fn try_send_to_aggregate(&self, session_id: Uuid, payload: CommandPayload, span: SpanContext) -> bool {
+    fn try_send_to_aggregate(
+        &self,
+        session_id: Uuid,
+        payload: CommandPayload,
+        span: SpanContext,
+    ) -> bool {
         if let Some(cell) = ractor::registry::where_is(aggregate_actor_name(session_id)) {
             let actor: ActorRef<AggregateMessage<SessionState>> = cell.into();
             let _ = actor.send_message(AggregateMessage::Cast {
@@ -169,11 +172,16 @@ impl RuntimeState {
                             );
                             // Wire up send_to_session (find-or-start via runtime)
                             let runtime_for_send = runtime_ref.clone();
-                            ctx.send_to_session = Some(Arc::new(move |session_id, payload, span| {
-                                let _ = runtime_for_send.send_message(
-                                    RuntimeMessage::DeliverToSession { session_id, payload, span },
-                                );
-                            }));
+                            ctx.send_to_session =
+                                Some(Arc::new(move |session_id, payload, span| {
+                                    let _ = runtime_for_send.send_message(
+                                        RuntimeMessage::DeliverToSession {
+                                            session_id,
+                                            payload,
+                                            span,
+                                        },
+                                    );
+                                }));
                             // Wire up sub-agent spawning
                             let runtime = runtime_ref.clone();
                             ctx.spawn_sub_agent = Some(Arc::new(move |params| {
@@ -265,8 +273,7 @@ impl RuntimeState {
             "session" => {
                 // If the aggregate actor is already running, send Wake command
                 if let Some(cell) = ractor::registry::where_is(aggregate_actor_name(aggregate_id)) {
-                    let actor: ActorRef<AggregateMessage<SessionState>> =
-                        cell.into();
+                    let actor: ActorRef<AggregateMessage<SessionState>> = cell.into();
                     let _ = actor.send_message(AggregateMessage::Cast {
                         cmd: CommandPayload::Wake,
                         span: SpanContext::root().with_name("wake"),
@@ -489,7 +496,6 @@ impl Actor for RuntimeActor {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Build SessionContext — wires runtime resources into the domain context
 // ---------------------------------------------------------------------------
@@ -556,23 +562,19 @@ fn build_session_context(
 
     let all_tools = if tools.is_empty() { None } else { Some(tools) };
 
-    let budget_ref = budget_actor.map(|a| BudgetActorRef {
-        inner: Box::new(a),
-    });
+    let budget_ref = budget_actor.map(|a| BudgetActorRef { inner: Box::new(a) });
 
-    let notify_chunk: NotifyChunkFn = Arc::new(
-        |session_id, call_id, chunk_index, text, span| {
-            notify_observers(
-                session_id,
-                Arc::new(Notification::LlmStreamChunk {
-                    call_id,
-                    chunk_index,
-                    text,
-                    span,
-                }),
-            );
-        },
-    );
+    let notify_chunk: NotifyChunkFn = Arc::new(|session_id, call_id, chunk_index, text, span| {
+        notify_observers(
+            session_id,
+            Arc::new(Notification::LlmStreamChunk {
+                call_id,
+                chunk_index,
+                text,
+                span,
+            }),
+        );
+    });
 
     SessionContext {
         mcp_tools,

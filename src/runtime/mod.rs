@@ -239,7 +239,9 @@ impl Runtime {
                 return Err(RuntimeError::ActorCall("ensure aggregate timed out".into()));
             }
             ractor::rpc::CallResult::SenderError => {
-                return Err(RuntimeError::ActorCall("ensure aggregate sender error".into()));
+                return Err(RuntimeError::ActorCall(
+                    "ensure aggregate sender error".into(),
+                ));
             }
         }
 
@@ -267,10 +269,7 @@ async fn create_event_store(config: &EventStoreConfig) -> Arc<dyn EventStore> {
 
 fn default_llm_factories() -> HashMap<String, LlmClientFactory> {
     let mut m: HashMap<String, LlmClientFactory> = HashMap::new();
-    m.insert(
-        "openrouter".into(),
-        Box::new(OpenAiClient::from_config),
-    );
+    m.insert("openrouter".into(), Box::new(OpenAiClient::from_config));
     m.insert("mock".into(), Box::new(MockLlmClient::from_config));
     m
 }

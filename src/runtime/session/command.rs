@@ -6,6 +6,7 @@ use super::state::{
     new_call_id, LlmCallStatus, SessionContext, SessionState, SessionStatus, ToolCallState,
     ToolCallStatus,
 };
+use super::types::*;
 use crate::runtime::aggregate::Emit;
 use crate::runtime::budget;
 use crate::runtime::config::{AgentConfig, ClientIdentity};
@@ -15,7 +16,6 @@ use crate::runtime::llm::{
 };
 use crate::runtime::message::{Message, Role};
 use crate::runtime::span::SpanContext;
-use super::types::*;
 
 // ---------------------------------------------------------------------------
 // Tool result truncation
@@ -231,7 +231,10 @@ impl SessionState {
                         None => Ok(vec![]),
                         // Have seen a terminal/retry state for this toolcall already
                         Some(ToolCallState {
-                            status: ToolCallStatus::Completed | ToolCallStatus::Failed | ToolCallStatus::RetryScheduled,
+                            status:
+                                ToolCallStatus::Completed
+                                | ToolCallStatus::Failed
+                                | ToolCallStatus::RetryScheduled,
                             ..
                         }) => Ok(vec![]),
                         // We are expecting a result

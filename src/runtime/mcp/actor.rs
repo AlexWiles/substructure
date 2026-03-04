@@ -3,10 +3,8 @@ use ractor::{call_t, Actor, ActorCell, ActorProcessingErr, ActorRef, RpcReplyPor
 
 use crate::runtime::config::{McpServerConfig, McpTransportConfig};
 
-use super::{
-    CallToolResult, McpClient, McpError, ServerCapabilities, ServerInfo, ToolDefinition,
-};
 use super::stdio::StdioMcpClient;
+use super::{CallToolResult, McpClient, McpError, ServerCapabilities, ServerInfo, ToolDefinition};
 
 // ---------------------------------------------------------------------------
 // Actor naming

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
-use super::{LlmRequest, LlmResponse};
 use super::openai;
+use super::{LlmRequest, LlmResponse};
 
 use std::sync::Arc;
 

@@ -3,13 +3,17 @@ use std::sync::Arc;
 use chrono::Utc;
 use ractor::ActorCell;
 
-use crate::runtime::aggregate::actor::{spawn_aggregate_actor, AggregateActorArgs, AggregateActorHandle, AggregateMessage};
+use crate::runtime::aggregate::actor::{
+    spawn_aggregate_actor, AggregateActorArgs, AggregateActorHandle, AggregateMessage,
+};
 use crate::runtime::aggregate::{AggregateState, DomainEvent};
-use crate::runtime::budget::{budget_aggregate_id, flatten_usage, BudgetCommand, BudgetLedger, UsageBreakdown};
+use crate::runtime::budget::{
+    budget_aggregate_id, flatten_usage, BudgetCommand, BudgetLedger, UsageBreakdown,
+};
 use crate::runtime::config::BudgetPolicyConfig;
 use crate::runtime::event::EventPayload;
-use crate::runtime::llm::{LlmCallCompleted, LlmCallErrored, LlmResponse};
 use crate::runtime::event_store::EventStore;
+use crate::runtime::llm::{LlmCallCompleted, LlmCallErrored, LlmResponse};
 use crate::runtime::session::SessionState;
 
 pub fn budget_actor_name(tenant_id: &str) -> String {
@@ -17,10 +21,7 @@ pub fn budget_actor_name(tenant_id: &str) -> String {
 }
 
 fn extract_usage_breakdown(response: &LlmResponse) -> UsageBreakdown {
-    response
-        .usage()
-        .map(flatten_usage)
-        .unwrap_or_default()
+    response.usage().map(flatten_usage).unwrap_or_default()
 }
 
 pub async fn spawn_budget_actor(

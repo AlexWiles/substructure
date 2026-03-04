@@ -137,7 +137,11 @@ pub struct LlmCallErrored {
 #[async_trait]
 /// Trait for LLM client providers (resolved by the runtime).
 pub trait LlmProviderTrait: Send + Sync {
-    async fn resolve(&self, client_id: &str, auth: &ClientIdentity) -> Result<Arc<dyn LlmCallable>, String>;
+    async fn resolve(
+        &self,
+        client_id: &str,
+        auth: &ClientIdentity,
+    ) -> Result<Arc<dyn LlmCallable>, String>;
 }
 
 #[async_trait]

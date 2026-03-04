@@ -381,8 +381,7 @@ fn do_query_events(
     if let Some(seq) = filter.sequence_after {
         clauses.push("global_sequence > ?".into());
         params.push(Box::new(
-            i64::try_from(seq)
-                .map_err(|_| StoreError::Internal("sequence exceeds i64".into()))?,
+            i64::try_from(seq).map_err(|_| StoreError::Internal("sequence exceeds i64".into()))?,
         ));
     }
 
@@ -401,9 +400,8 @@ fn do_query_events(
         .map(|n| format!(" LIMIT {n}"))
         .unwrap_or_default();
 
-    let sql = format!(
-        "SELECT data FROM events{where_clause} ORDER BY global_sequence ASC{limit_clause}"
-    );
+    let sql =
+        format!("SELECT data FROM events{where_clause} ORDER BY global_sequence ASC{limit_clause}");
 
     let mut stmt = conn
         .prepare(&sql)
@@ -412,9 +410,7 @@ fn do_query_events(
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
 
     let rows = stmt
-        .query_map(param_refs.as_slice(), |row| {
-            row.get::<_, String>(0)
-        })
+        .query_map(param_refs.as_slice(), |row| row.get::<_, String>(0))
         .map_err(|e| StoreError::Internal(e.to_string()))?;
 
     let mut events = Vec::new();
@@ -736,13 +732,13 @@ impl<T> OptionalExt<T> for Result<T, rusqlite::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::config::{AgentConfig, LlmConfig};
     use crate::runtime::aggregate::{Aggregate, DomainEvent};
     use crate::runtime::config::ClientIdentity;
+    use crate::runtime::config::{AgentConfig, LlmConfig};
     use crate::runtime::event::EventPayload;
     use crate::runtime::session::types::SessionCreated;
-    use crate::runtime::span::SpanContext;
     use crate::runtime::session::SessionState;
+    use crate::runtime::span::SpanContext;
 
     fn test_auth(tenant: &str) -> ClientIdentity {
         ClientIdentity {

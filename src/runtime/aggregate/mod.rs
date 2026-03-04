@@ -81,7 +81,9 @@ pub enum AggregateStatus {
 }
 
 #[async_trait]
-pub trait AggregateState: Sized + Serialize + DeserializeOwned + Clone + Send + Sync + 'static {
+pub trait AggregateState:
+    Sized + Serialize + DeserializeOwned + Clone + Send + Sync + 'static
+{
     type Event: Serialize + DeserializeOwned + Clone + Send + Sync + 'static;
     type Command: Send + Sync + 'static;
     type Error: Send + Sync + 'static;
@@ -90,8 +92,17 @@ pub trait AggregateState: Sized + Serialize + DeserializeOwned + Clone + Send + 
 
     fn aggregate_type() -> &'static str;
     fn apply(&mut self, event: &Self::Event);
-    fn handle_command(&self, cmd: Self::Command, ctx: &Self::Context) -> Result<Vec<Emit<Self::Event>>, Self::Error>;
-    async fn on_event(&self, event: &Self::Event, ctx: &Self::Context, span: &SpanContext) -> Option<Self::Command>;
+    fn handle_command(
+        &self,
+        cmd: Self::Command,
+        ctx: &Self::Context,
+    ) -> Result<Vec<Emit<Self::Event>>, Self::Error>;
+    async fn on_event(
+        &self,
+        event: &Self::Event,
+        ctx: &Self::Context,
+        span: &SpanContext,
+    ) -> Option<Self::Command>;
     /// Compute a derived-state snapshot (stamped on events for query optimization).
     fn derived_state(&self) -> Self::Derived;
 

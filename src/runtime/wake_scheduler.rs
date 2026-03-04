@@ -121,8 +121,7 @@ impl Actor for WakeScheduler {
                 for event in &events {
                     if let Some(wake_at) = event.wake_at {
                         if wake_at > now {
-                            let sooner =
-                                state.next_tick_at.is_none_or(|next| wake_at < next);
+                            let sooner = state.next_tick_at.is_none_or(|next| wake_at < next);
                             if sooner {
                                 schedule(state, wake_at);
                             }
