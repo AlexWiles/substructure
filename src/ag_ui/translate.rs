@@ -39,6 +39,12 @@ pub struct EventTranslator {
     emitted_tool_results: HashSet<String>,
 }
 
+impl Default for EventTranslator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EventTranslator {
     pub fn new() -> Self {
         Self {

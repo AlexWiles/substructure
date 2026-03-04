@@ -19,7 +19,7 @@ pub fn budget_actor_name(tenant_id: &str) -> String {
 fn extract_usage_breakdown(response: &LlmResponse) -> UsageBreakdown {
     response
         .usage()
-        .map(|v| flatten_usage(v))
+        .map(flatten_usage)
         .unwrap_or_default()
 }
 
