@@ -7,7 +7,9 @@ use crate::runtime::aggregate::{Aggregate, DomainEvent};
 use crate::runtime::aggregate::actor::{AggregateError, AggregateMessage};
 use crate::runtime::config::ClientIdentity;
 use crate::runtime::event_store::EventStore;
+use crate::runtime::span::SpanContext;
 use crate::runtime::types::{RuntimeError, RuntimeMessage, SessionMessage};
+use crate::runtime::Runtime;
 use super::state::SessionState;
 
 // ---------------------------------------------------------------------------
@@ -21,7 +23,7 @@ pub enum Notification {
         call_id: String,
         chunk_index: u32,
         text: String,
-        span: crate::runtime::span::SpanContext,
+        span: SpanContext,
     },
 }
 
@@ -102,7 +104,7 @@ impl Actor for SessionClientActor {
         match message {
             SessionMessage::Execute(cmd, reply) => {
                 // Find or create the aggregate actor
-                let cell = match crate::runtime::Runtime::ensure_aggregate(
+                let cell = match Runtime::ensure_aggregate(
                     &state.runtime,
                     state.session_id,
                     "session",

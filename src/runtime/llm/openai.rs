@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_stream::StreamExt;
 
-use crate::runtime::message::Message;
+use crate::runtime::message::{Message, Role as DomainRole};
 use super::{LlmCallError, LlmCallable, LlmRequest, LlmResponse, LlmTool, StreamDelta};
 
 // ---------------------------------------------------------------------------
@@ -71,10 +71,10 @@ pub struct ChatCompletionResponse {
 fn to_wire_message(msg: &Message) -> ChatMessage {
     ChatMessage {
         role: match msg.role {
-            crate::runtime::message::Role::System => Role::System,
-            crate::runtime::message::Role::User => Role::User,
-            crate::runtime::message::Role::Assistant => Role::Assistant,
-            crate::runtime::message::Role::Tool => Role::Tool,
+            DomainRole::System => Role::System,
+            DomainRole::User => Role::User,
+            DomainRole::Assistant => Role::Assistant,
+            DomainRole::Tool => Role::Tool,
         },
         content: msg.content.clone(),
         tool_calls: if msg.tool_calls.is_empty() {

@@ -8,16 +8,17 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use async_trait::async_trait;
-use crate::runtime::aggregate::{AggregateState, AggregateStatus};
-use crate::runtime::config::{LlmRequestParams, RetryPolicy};
-use crate::runtime::config::{AgentConfig, ClientIdentity};
+use crate::runtime::aggregate::{AggregateState, AggregateStatus, Emit};
+use crate::runtime::budget::{self, BudgetContext, BudgetError};
+use crate::runtime::config::{AgentConfig, ClientIdentity, ExhaustionStrategy, LlmRequestParams, RetryPolicy};
 use crate::runtime::event::EventPayload;
 use crate::runtime::llm::{LlmCallRequested, LlmRequest, LlmResponse, LlmTool};
 use crate::runtime::message::{Message, Role};
+use crate::runtime::mcp::{Content, McpClient};
+use crate::runtime::span::SpanContext;
 use super::types::{
     Artifact, CompletionDelivery, ToolCallMeta, ToolCallRequested, ToolHandler,
 };
-use crate::runtime::mcp::{Content, McpClient};
 
 use crate::runtime::defaults;
 use super::command::{truncate_tool_result, CommandPayload, SessionError};
@@ -34,9 +35,9 @@ pub struct McpToolEntry {
 }
 
 /// Callback for streaming LLM chunks to observers.
-pub type NotifyChunkFn = Arc<dyn Fn(Uuid, String, u32, String, crate::runtime::span::SpanContext) + Send + Sync>;
+pub type NotifyChunkFn = Arc<dyn Fn(Uuid, String, u32, String, SpanContext) + Send + Sync>;
 /// Callback for sending a command to a session (fire-and-forget).
-pub type SendToSessionFn = Arc<dyn Fn(Uuid, CommandPayload, crate::runtime::span::SpanContext) + Send + Sync>;
+pub type SendToSessionFn = Arc<dyn Fn(Uuid, CommandPayload, SpanContext) + Send + Sync>;
 /// Callback for spawning a sub-agent.
 pub type SpawnSubAgentFn = Arc<
     dyn Fn(SubAgentParams) + Send + Sync,
@@ -49,7 +50,7 @@ pub struct SubAgentParams {
     pub message: String,
     pub auth: ClientIdentity,
     pub delivery: CompletionDelivery,
-    pub span: crate::runtime::span::SpanContext,
+    pub span: SpanContext,
     pub stream: bool,
 }
 
@@ -555,7 +556,7 @@ impl SessionState {
             Some(v) => v,
             None => return,
         };
-        let breakdown = crate::runtime::budget::flatten_usage(raw);
+        let breakdown = budget::flatten_usage(raw);
         for (k, v) in &breakdown {
             *self.token_usage.entry(k.clone()).or_insert(0) += v;
         }
@@ -688,7 +689,7 @@ impl SessionState {
         &self,
         call_id: &str,
         ctx: &SessionContext,
-        span: &crate::runtime::span::SpanContext,
+        span: &SpanContext,
     ) -> Result<(), CommandPayload> {
         let Some(ref budget) = ctx.budget_actor else {
             return Ok(());
@@ -703,7 +704,7 @@ impl SessionState {
         let client_id = &agent.llm.client;
         let model = &agent.llm.model;
 
-        let context = crate::runtime::budget::BudgetContext::for_llm_call(
+        let context = BudgetContext::for_llm_call(
             ctx.session_id,
             auth,
             client_id,
@@ -720,8 +721,8 @@ impl SessionState {
             .await
         {
             Ok(()) => Ok(()),
-            Err(crate::runtime::budget::BudgetError::Denied {
-                strategy: crate::runtime::config::ExhaustionStrategy::Reject,
+            Err(BudgetError::Denied {
+                strategy: ExhaustionStrategy::Reject,
                 ref policy_name,
                 current,
                 limit,
@@ -731,8 +732,8 @@ impl SessionState {
                 retryable: false,
                 source: None,
             }),
-            Err(crate::runtime::budget::BudgetError::Denied {
-                strategy: crate::runtime::config::ExhaustionStrategy::Interrupt,
+            Err(BudgetError::Denied {
+                strategy: ExhaustionStrategy::Interrupt,
                 ..
             }) => {
                 // Interrupt strategy: allow the call to proceed. The session
@@ -747,7 +748,7 @@ impl SessionState {
         &self,
         p: &LlmCallRequested,
         ctx: &SessionContext,
-        span: &crate::runtime::span::SpanContext,
+        span: &SpanContext,
     ) -> CommandPayload {
         let provider = match &ctx.llm_provider {
             Some(p) => p,
@@ -833,7 +834,7 @@ impl SessionState {
         &self,
         p: &ToolCallRequested,
         ctx: &SessionContext,
-        span: &crate::runtime::span::SpanContext,
+        span: &SpanContext,
     ) -> Option<CommandPayload> {
         // Sub-agent tool call
         if let Some(child_session_id) = self
@@ -1026,11 +1027,11 @@ impl AggregateState for SessionState {
         &self,
         cmd: Self::Command,
         ctx: &Self::Context,
-    ) -> Result<Vec<crate::runtime::aggregate::Emit<Self::Event>>, Self::Error> {
+    ) -> Result<Vec<Emit<Self::Event>>, Self::Error> {
         self.handle(cmd, ctx)
     }
 
-    async fn on_event(&self, event: &Self::Event, ctx: &Self::Context, span: &crate::runtime::span::SpanContext) -> Option<Self::Command> {
+    async fn on_event(&self, event: &Self::Event, ctx: &Self::Context, span: &SpanContext) -> Option<Self::Command> {
         // --- Mechanical I/O dispatch ---
         match event {
             EventPayload::LlmCallRequested(p) => {

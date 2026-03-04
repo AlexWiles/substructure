@@ -278,8 +278,9 @@ impl EventTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::config::ClientIdentity;
+    use crate::runtime::config::{AgentConfig, ClientIdentity, LlmConfig};
     use crate::runtime::event::EventPayload;
+    use crate::runtime::llm::openai::ChatCompletionResponse;
     use crate::runtime::llm::*;
     use crate::runtime::message::*;
     use crate::runtime::session::types::*;
@@ -378,7 +379,7 @@ mod tests {
         let events = assert_events(translator.translate_event(&EventPayload::LlmCallCompleted(
             LlmCallCompleted {
                 call_id: call_id.clone(),
-                response: LlmResponse::OpenAi(crate::runtime::llm::openai::ChatCompletionResponse {
+                response: LlmResponse::OpenAi(ChatCompletionResponse {
                     id: "resp-1".into(),
                     model: "test".into(),
                     choices: vec![],
@@ -602,11 +603,11 @@ mod tests {
 
         let events = assert_events(translator.translate_event(&EventPayload::SessionCreated(
             Box::new(SessionCreated {
-                agent: crate::runtime::config::AgentConfig {
+                agent: AgentConfig {
                     id: Uuid::new_v4(),
                     name: "test".into(),
                     description: None,
-                    llm: crate::runtime::config::LlmConfig {
+                    llm: LlmConfig {
                         client: "mock".into(),
                         model: "mock-model".into(),
                         max_completion_tokens: None,

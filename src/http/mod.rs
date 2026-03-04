@@ -17,11 +17,12 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
-use crate::ag_ui::{observe_session, resume_run, run_existing_session, AgUiError, AgUiEvent};
+use crate::ag_ui::{observe_session, resume_run, run_existing_session, AgUiError, AgUiEvent, RunAgentInput};
 use crate::runtime::aggregate::AggregateStatus;
 use crate::runtime::auth::{build_auth_resolver, AdminContext, AuthError, AuthResolver};
 use crate::runtime::config::SystemConfig;
 use crate::runtime::config::ClientIdentity;
+use crate::runtime::event_store::{self, Event as StoreEvent, SpanSummary};
 use crate::runtime::{
     AggregateFilter, AggregateSort, AggregateSummary, EventFilter, Runtime, RuntimeError,
 };
@@ -245,7 +246,7 @@ async fn session_events(
     State(state): State<HttpState>,
     Path(session_id): Path<Uuid>,
     axum_extra::extract::Query(query): axum_extra::extract::Query<EventsQuery>,
-) -> Result<Json<Vec<crate::runtime::event_store::Event>>, AppError> {
+) -> Result<Json<Vec<StoreEvent>>, AppError> {
     let filter = EventFilter {
         aggregate_id: Some(session_id),
         event_type: query.event_type,
@@ -267,7 +268,7 @@ async fn trace_events(
     State(state): State<HttpState>,
     Path(trace_id): Path<String>,
     axum_extra::extract::Query(query): axum_extra::extract::Query<EventsQuery>,
-) -> Result<Json<Vec<crate::runtime::event_store::Event>>, AppError> {
+) -> Result<Json<Vec<StoreEvent>>, AppError> {
     let filter = EventFilter {
         trace_id: Some(trace_id),
         event_type: query.event_type,
@@ -291,7 +292,7 @@ async fn trace_otel(
     AdminAuth(_admin): AdminAuth,
     State(state): State<HttpState>,
     Path(trace_id): Path<String>,
-) -> Result<Json<Vec<crate::runtime::event_store::SpanSummary>>, AppError> {
+) -> Result<Json<Vec<SpanSummary>>, AppError> {
     let filter = EventFilter {
         trace_id: Some(trace_id),
         ..Default::default()
@@ -303,8 +304,8 @@ async fn trace_otel(
         .await
         .map_err(|e| AppError::Runtime(RuntimeError::from(e)))?;
 
-    let event_refs: Vec<&crate::runtime::event_store::Event> = events.iter().collect();
-    let spans = crate::runtime::event_store::reconstruct_span_summaries(&event_refs);
+    let event_refs: Vec<&StoreEvent> = events.iter().collect();
+    let spans = event_store::reconstruct_span_summaries(&event_refs);
     Ok(Json(spans))
 }
 
@@ -395,7 +396,7 @@ async fn run_ag_ui(
     ClientAuth(auth): ClientAuth,
     State(state): State<HttpState>,
     Path(session_id): Path<Uuid>,
-    Json(input): Json<crate::ag_ui::RunAgentInput>,
+    Json(input): Json<RunAgentInput>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
     ensure_session_running(&state.runtime, session_id, &auth).await?;
 

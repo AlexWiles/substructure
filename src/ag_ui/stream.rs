@@ -6,10 +6,13 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream;
 use uuid::Uuid;
 
+use crate::runtime::aggregate::actor::AggregateMessage;
+use crate::runtime::aggregate::Aggregate;
 use crate::runtime::config::ClientIdentity;
 use crate::runtime::llm::{LlmTool, LlmToolFunction};
 use crate::runtime::message::{Message as DomainMessage, Role, ToolCall as DomainToolCall};
-use crate::runtime::span::SpanContext;
+use crate::runtime::session::routing::aggregate_actor_name;
+use crate::runtime::span::{SpanContext, TraceId};
 use crate::runtime::session::{
     SessionState, CommandPayload, SessionCommand, SessionContext,
 };
@@ -332,12 +335,12 @@ async fn load_state(
     runtime: &Runtime,
     session_id: Uuid,
     auth: &ClientIdentity,
-) -> (SessionState, u64, Option<crate::runtime::span::TraceId>) {
+) -> (SessionState, u64, Option<TraceId>) {
     match runtime.store().load(session_id, &auth.tenant_id).await {
         Ok(load) => {
-            let snapshot: crate::runtime::aggregate::Aggregate<SessionState> =
+            let snapshot: Aggregate<SessionState> =
                 serde_json::from_value(load.snapshot).unwrap_or_else(|_| {
-                    crate::runtime::aggregate::Aggregate::new(SessionState::new(session_id))
+                    Aggregate::new(SessionState::new(session_id))
                 });
             let last_applied = snapshot.last_applied.unwrap_or(0);
             let trace_id = snapshot.trace_id;
@@ -348,7 +351,7 @@ async fn load_state(
 }
 
 /// Convert a domain `Message` to an AG-UI `Message`.
-fn domain_message_to_ag_ui(msg: &crate::runtime::message::Message) -> Message {
+fn domain_message_to_ag_ui(msg: &DomainMessage) -> Message {
     match msg.role {
         Role::User => Message::User {
             id: None,
@@ -396,13 +399,11 @@ fn send_client_tools(session_id: Uuid, tools: Vec<super::types::Tool>) {
         .collect();
 
     // Update the aggregate actor's context with client tools
-    let name = crate::runtime::aggregate_actor_name(session_id);
+    let name = aggregate_actor_name(session_id);
     if let Some(cell) = ractor::registry::where_is(name) {
-        let actor: ractor::ActorRef<
-            crate::runtime::aggregate::actor::AggregateMessage<SessionState>,
-        > = cell.into();
+        let actor: ractor::ActorRef<AggregateMessage<SessionState>> = cell.into();
         let _ = actor.send_message(
-            crate::runtime::aggregate::actor::AggregateMessage::UpdateContext(Box::new(
+            AggregateMessage::UpdateContext(Box::new(
                 move |ctx: &mut SessionContext| {
                     // Add client tools to context and update all_tools
                     ctx.client_tools = llm_tools.clone();

@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use super::aggregate::{AggregateState, Emit};
 use super::config::{parse_window, BudgetPolicyConfig, ExhaustionStrategy};
+use super::span::SpanContext;
 
 /// A bag of named usage scalars. Keys are dimension names like
 /// "prompt_tokens", "completion_tokens", "cost".
@@ -445,7 +446,7 @@ impl AggregateState for BudgetLedger {
         &self,
         _event: &Self::Event,
         _ctx: &Self::Context,
-        _span: &crate::runtime::span::SpanContext,
+        _span: &SpanContext,
     ) -> Option<Self::Command> {
         None
     }
@@ -542,7 +543,6 @@ fn usage_in_window(
 
 use super::aggregate::actor::{AggregateActorHandle, AggregateError};
 use super::session::BudgetActorRef;
-use super::span::SpanContext;
 
 impl BudgetActorRef {
     /// Attempt to reserve budget against policies before an LLM call.

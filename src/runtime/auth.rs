@@ -69,7 +69,7 @@ mod token {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::runtime::config::TenantConfig;
+    use crate::runtime::config::{parse_window, TenantConfig};
     use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, TokenData, Validation};
     use sha2::{Digest, Sha256};
 
@@ -95,7 +95,7 @@ mod token {
             token_ttl_str: &str,
             tenants: &[TenantConfig],
         ) -> Result<Self, AuthError> {
-            let token_ttl = crate::runtime::config::parse_window(token_ttl_str)
+            let token_ttl = parse_window(token_ttl_str)
                 .ok_or_else(|| AuthError::Config(format!("invalid token_ttl: {token_ttl_str}")))?;
 
             let mut tenant_map = HashMap::new();

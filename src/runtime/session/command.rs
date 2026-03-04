@@ -7,6 +7,7 @@ use super::state::{
     ToolCallStatus,
 };
 use crate::runtime::aggregate::Emit;
+use crate::runtime::budget;
 use crate::runtime::config::{AgentConfig, ClientIdentity};
 use crate::runtime::event::EventPayload;
 use crate::runtime::llm::{
@@ -325,7 +326,7 @@ impl SessionState {
                             .with("llm.model", &model)
                             .label(&model);
                         if let Some(ref u) = usage {
-                            for (k, v) in crate::runtime::budget::flatten_usage(u) {
+                            for (k, v) in budget::flatten_usage(u) {
                                 completed = completed.with(format!("llm.usage.{k}"), v.to_string());
                             }
                         }

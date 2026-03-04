@@ -16,7 +16,7 @@ use super::aggregate::actor::{self as aggregate_actor, AggregateActorHandle, Agg
 use super::aggregate::dispatcher::spawn_aggregate_dispatcher;
 use super::budget;
 use super::event_store::{AggregateFilter, EventStore};
-use super::llm::LlmProviderTrait;
+use super::llm::{LlmProviderTrait, LlmTool, LlmToolFunction};
 use super::mcp::{self, McpClient, ToolDefinition};
 use super::session::client::{Notification, SessionClientActor, SessionClientArgs};
 use super::session::routing::{aggregate_actor_name, notify_observers, session_route};
@@ -47,7 +47,7 @@ pub(super) struct RuntimeArgs {
     pub(super) llm_provider: Arc<dyn LlmProviderTrait>,
     pub(super) budget_policies: Vec<BudgetPolicyConfig>,
     #[cfg(feature = "otel")]
-    pub(super) otel: Option<crate::runtime::config::OtelConfig>,
+    pub(super) otel: Option<super::config::OtelConfig>,
     pub(super) tool_result_max_bytes: Option<usize>,
 }
 
@@ -524,7 +524,7 @@ fn build_session_context(
         })
         .collect();
 
-    let mut tools: Vec<crate::runtime::llm::LlmTool> = mcp_clients
+    let mut tools: Vec<LlmTool> = mcp_clients
         .iter()
         .flat_map(|c| c.tools().iter().map(|t| t.to_tool()))
         .collect();
@@ -533,9 +533,9 @@ fn build_session_context(
         for name in &agent.sub_agents {
             if let Some(sub) = agents.get(name) {
                 let tool_name = ToolDefinition::sanitized_name(name);
-                tools.push(crate::runtime::llm::LlmTool {
+                tools.push(LlmTool {
                     tool_type: "function".to_string(),
-                    function: crate::runtime::llm::LlmToolFunction {
+                    function: LlmToolFunction {
                         name: tool_name,
                         description: sub.description.clone().unwrap_or_else(|| sub.name.clone()),
                         parameters: serde_json::json!({

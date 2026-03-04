@@ -9,6 +9,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::event_store::Event as StoreEvent;
 use super::span::{SpanContext, TraceId};
 
 // ---------------------------------------------------------------------------
@@ -244,7 +245,7 @@ impl<R: AggregateState> DomainEvent<R> {
     ///
     /// `start_time`/`end_time` are the wall-clock bounds of the `execute()` call
     /// that produced this event, used for OTel trace reconstruction.
-    pub fn into_raw(self, start_time: DateTime<Utc>, end_time: DateTime<Utc>) -> crate::runtime::event_store::Event {
+    pub fn into_raw(self, start_time: DateTime<Utc>, end_time: DateTime<Utc>) -> StoreEvent {
         let payload_value =
             serde_json::to_value(&self.payload).expect("event payload serialization");
 
@@ -260,7 +261,7 @@ impl<R: AggregateState> DomainEvent<R> {
             .as_ref()
             .map(|d| serde_json::to_value(d).expect("derived state serialization"));
 
-        crate::runtime::event_store::Event {
+        StoreEvent {
             id: self.id,
             tenant_id: self.tenant_id,
             aggregate_type: R::aggregate_type().to_string(),
@@ -279,7 +280,7 @@ impl<R: AggregateState> DomainEvent<R> {
     }
 
     /// Deserialize from a store-level raw event.
-    pub fn from_raw(raw: &crate::runtime::event_store::Event) -> Result<Self, serde_json::Error> {
+    pub fn from_raw(raw: &StoreEvent) -> Result<Self, serde_json::Error> {
         let payload: R::Event = serde_json::from_value(raw.payload.clone())?;
         let derived: Option<R::Derived> = raw
             .derived
