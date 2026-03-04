@@ -630,7 +630,7 @@ impl SessionState {
                         if state.is_over_budget() {
                             return Ok(vec![EventPayload::BudgetExceeded.into()]);
                         }
-                        if let Some(request) = state.build_llm_request(None) {
+                        if let Some(request) = state.build_llm_request(None, None) {
                             return Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {
                                 call_id: call.call_id.clone(),
                                 request,
@@ -706,7 +706,7 @@ impl SessionState {
                 if state.is_over_budget() {
                     return Ok(vec![EventPayload::BudgetExceeded.into()]);
                 }
-                if let Some(request) = state.build_llm_request(None) {
+                if let Some(request) = state.build_llm_request(None, None) {
                     return Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {
                         call_id: call.call_id.clone(),
                         request,
@@ -730,7 +730,7 @@ impl SessionState {
             if state.is_over_budget() {
                 return Ok(vec![EventPayload::BudgetExceeded.into()]);
             }
-            if let Some(request) = state.build_llm_request(None) {
+            if let Some(request) = state.build_llm_request(None, None) {
                 return Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {
                     call_id: new_call_id(),
                     request,
@@ -899,6 +899,9 @@ mod tests {
             description: None,
             llm: LlmConfig {
                 client: "mock".into(),
+                model: "mock-model".into(),
+                max_tokens: None,
+                temperature: None,
                 retry: Default::default(),
                 params: Default::default(),
             },
@@ -906,6 +909,7 @@ mod tests {
             mcp_servers: vec![],
             strategy: Default::default(),
             token_budget: None,
+            max_context_tokens: None,
             sub_agents: vec![],
             tool_result_max_bytes: None,
         }

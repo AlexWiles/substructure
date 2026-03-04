@@ -86,6 +86,13 @@ pub enum RuntimeMessage {
         payload: CommandPayload,
         span: SpanContext,
     },
+    /// Ensure the aggregate actor is running, waking it if needed.
+    EnsureAggregate {
+        aggregate_id: Uuid,
+        aggregate_type: String,
+        tenant_id: String,
+        reply: RpcReplyPort<Result<(), RuntimeError>>,
+    },
 }
 
 pub struct SubAgentRequest {

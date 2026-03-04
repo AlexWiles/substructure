@@ -22,9 +22,8 @@ api_key = { provider = "env", key = "OPENROUTER_API_KEY" }
 name = "alex"
 description = """A helpful assistant named Alex"""
 system_prompt = """You are an intelligent analyst."""
-llm = { client = "openrouter", model = "stepfun/step-3.5-flash:free" }
+llm = { client = "openrouter", model = "stepfun/step-3.5-flash:free", retry = { max_retries = 5 } }
 sub_agents = ["file-system"]
-retry.max_retries = 10
 
 [agents.file-system]
 name = "file-system"
@@ -35,8 +34,7 @@ Be concise and factual.
 
 Be careful of large directory trees. If you list a tree that is too large you will stop working.
 """
-llm = { client = "openrouter", model = "stepfun/step-3.5-flash:free" }
-retry.max_retries = 10
+llm = { client = "openrouter", model = "stepfun/step-3.5-flash:free", retry = { max_retries = 5 } }
 
 
 [[agents.file-system.mcp_servers]]

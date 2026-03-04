@@ -7,7 +7,7 @@ use crate::runtime::aggregate::{Aggregate, DomainEvent};
 use crate::runtime::aggregate::actor::{AggregateError, AggregateMessage};
 use crate::runtime::event::ClientIdentity;
 use crate::runtime::event_store::EventStore;
-use crate::runtime::types::{RuntimeError, SessionMessage};
+use crate::runtime::types::{RuntimeError, RuntimeMessage, SessionMessage};
 use super::state::SessionState;
 
 // ---------------------------------------------------------------------------
@@ -46,8 +46,10 @@ pub struct SessionClientActor;
 
 pub struct SessionClientState {
     session_id: Uuid,
+    tenant_id: String,
     core: Aggregate<SessionState>,
     on_event: Option<OnSessionUpdate>,
+    runtime: ActorRef<RuntimeMessage>,
 }
 
 pub struct SessionClientArgs {
@@ -56,6 +58,7 @@ pub struct SessionClientArgs {
     pub aggregate_actor_id: Uuid,
     pub store: Arc<dyn EventStore>,
     pub on_event: Option<OnSessionUpdate>,
+    pub runtime: ActorRef<RuntimeMessage>,
 }
 
 impl Actor for SessionClientActor {
@@ -83,8 +86,10 @@ impl Actor for SessionClientActor {
 
         Ok(SessionClientState {
             session_id: args.session_id,
+            tenant_id: args.auth.tenant_id.clone(),
             core,
             on_event: args.on_event,
+            runtime: args.runtime,
         })
     }
 
@@ -96,47 +101,57 @@ impl Actor for SessionClientActor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SessionMessage::Execute(cmd, reply) => {
-                // Forward command to aggregate actor via registry
-                let name = super::routing::aggregate_actor_name(state.session_id);
-                if let Some(cell) = ractor::registry::where_is(name) {
-                    let actor: ActorRef<AggregateMessage<SessionState>> = cell.into();
-                    let result = actor
-                        .call(
-                            |rpc_reply| AggregateMessage::Execute {
-                                cmd: cmd.payload,
-                                span: cmd.span,
-                                occurred_at: cmd.occurred_at,
-                                reply: rpc_reply,
-                            },
-                            Some(ractor::concurrency::Duration::from_millis(5000)),
-                        )
-                        .await;
-
-                    match result {
-                        Ok(ractor::rpc::CallResult::Success(inner)) => {
-                            let mapped = inner.map_err(|e| match e {
-                                AggregateError::Command(err) => RuntimeError::Session(err),
-                                AggregateError::Store(err) => RuntimeError::Store(err),
-                            });
-                            let _ = reply.send(mapped);
-                        }
-                        Ok(ractor::rpc::CallResult::Timeout) => {
-                            let _ = reply.send(Err(RuntimeError::ActorCall(
-                                "aggregate actor call timed out".into(),
-                            )));
-                        }
-                        Ok(ractor::rpc::CallResult::SenderError) => {
-                            let _ = reply.send(Err(RuntimeError::ActorCall(
-                                "aggregate actor sender error".into(),
-                            )));
-                        }
-                        Err(e) => {
-                            tracing::error!(session = %state.session_id, error = %e, "call to aggregate actor failed");
-                            let _ = reply.send(Err(RuntimeError::ActorCall(e.to_string())));
-                        }
+                // Find or create the aggregate actor
+                let cell = match crate::runtime::Runtime::ensure_aggregate(
+                    &state.runtime,
+                    state.session_id,
+                    "session",
+                    &state.tenant_id,
+                )
+                .await
+                {
+                    Ok(cell) => cell,
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                        return Ok(());
                     }
-                } else {
-                    let _ = reply.send(Err(RuntimeError::SessionNotFound));
+                };
+
+                let actor: ActorRef<AggregateMessage<SessionState>> = cell.into();
+                let result = actor
+                    .call(
+                        |rpc_reply| AggregateMessage::Execute {
+                            cmd: cmd.payload,
+                            span: cmd.span,
+                            occurred_at: cmd.occurred_at,
+                            reply: rpc_reply,
+                        },
+                        Some(ractor::concurrency::Duration::from_millis(5000)),
+                    )
+                    .await;
+
+                match result {
+                    Ok(ractor::rpc::CallResult::Success(inner)) => {
+                        let mapped = inner.map_err(|e| match e {
+                            AggregateError::Command(err) => RuntimeError::Session(err),
+                            AggregateError::Store(err) => RuntimeError::Store(err),
+                        });
+                        let _ = reply.send(mapped);
+                    }
+                    Ok(ractor::rpc::CallResult::Timeout) => {
+                        let _ = reply.send(Err(RuntimeError::ActorCall(
+                            "aggregate actor call timed out".into(),
+                        )));
+                    }
+                    Ok(ractor::rpc::CallResult::SenderError) => {
+                        let _ = reply.send(Err(RuntimeError::ActorCall(
+                            "aggregate actor sender error".into(),
+                        )));
+                    }
+                    Err(e) => {
+                        tracing::error!(session = %state.session_id, error = %e, "call to aggregate actor failed");
+                        let _ = reply.send(Err(RuntimeError::ActorCall(e.to_string())));
+                    }
                 }
             }
             SessionMessage::Events(typed_events) => {

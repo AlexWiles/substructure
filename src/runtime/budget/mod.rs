@@ -99,6 +99,29 @@ impl BudgetContext {
             .iter()
             .all(|(k, v)| self.values.get(k) == Some(v))
     }
+
+    /// Build a context for an LLM call from session fields.
+    ///
+    /// Populates the standard keys that budget policies can reference in
+    /// `group_by` and `match` conditions: `tenant_id`, `user_id` (if present),
+    /// `session_id`, `model`, plus any custom `auth.attrs`.
+    pub fn for_llm_call(
+        session_id: Uuid,
+        auth: &super::event::ClientIdentity,
+        model: &str,
+    ) -> Self {
+        let mut ctx = Self::default();
+        ctx.set("tenant_id", &auth.tenant_id);
+        if let Some(ref sub) = auth.sub {
+            ctx.set("user_id", sub);
+        }
+        for (k, v) in &auth.attrs {
+            ctx.set(k.as_str(), v.as_str());
+        }
+        ctx.set("session_id", session_id.to_string());
+        ctx.set("model", model);
+        ctx
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -460,6 +483,57 @@ fn usage_in_window(bucket: &BucketState, window: &Option<String>, now: DateTime<
         .filter(|e| cutoff.is_none_or(|c| e.recorded_at >= c))
         .map(|e| e.amount)
         .sum()
+}
+
+// ---------------------------------------------------------------------------
+// BudgetActorRef — async reserve method (impl here to keep ractor out of session)
+// ---------------------------------------------------------------------------
+
+use super::aggregate::actor::{AggregateActorHandle, AggregateError};
+use super::session::BudgetActorRef;
+use super::span::SpanContext;
+
+impl BudgetActorRef {
+    /// Attempt to reserve tokens against budget policies before an LLM call.
+    ///
+    /// Returns `Ok(())` if granted or if no matching policies exist.
+    /// Returns `Err(BudgetError::Denied { .. })` when a policy rejects.
+    /// Fails open on infrastructure errors (timeouts, actor crashes).
+    pub(crate) async fn reserve(
+        &self,
+        session_id: Uuid,
+        call_id: &str,
+        context: BudgetContext,
+        estimated_tokens: u64,
+        span: &SpanContext,
+    ) -> Result<(), BudgetError> {
+        let Some(handle) = self.inner.downcast_ref::<AggregateActorHandle<BudgetLedger>>() else {
+            tracing::error!("BudgetActorRef contains unexpected type — skipping reservation");
+            return Ok(());
+        };
+
+        match handle
+            .send_command(
+                BudgetCommand::Reserve {
+                    session_id,
+                    call_id: call_id.to_string(),
+                    context,
+                    estimated_tokens,
+                    reserved_at: Utc::now(),
+                },
+                span.clone(),
+                Utc::now(),
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(AggregateError::Command(e)) => Err(e),
+            Err(other) => {
+                tracing::warn!(error = %other, "budget reserve failed — proceeding without reservation");
+                Ok(())
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use async_trait::async_trait;
 use crate::runtime::aggregate::{AggregateState, AggregateStatus};
-use crate::runtime::config::RetryPolicy;
+use crate::runtime::config::{LlmRequestParams, RetryPolicy};
 use crate::runtime::event::{
     AgentConfig, Artifact, ClientIdentity, CompletionDelivery, EventPayload, LlmCallRequested,
     LlmRequest, LlmResponse, Message, Role, ToolCallMeta, ToolCallRequested, ToolHandler,
@@ -102,8 +102,7 @@ impl Default for SessionContext {
 use crate::runtime::llm::{LlmProviderTrait, StreamDelta};
 
 /// Opaque handle to the budget actor — avoids leaking ractor types into the domain.
-/// Opaque handle to the budget actor — avoids leaking ractor types into the domain.
-#[allow(dead_code)]
+/// Reserve method is implemented in `budget/mod.rs` where the concrete types are known.
 pub struct BudgetActorRef {
     pub(crate) inner: Box<dyn std::any::Any + Send + Sync>,
 }
@@ -262,6 +261,10 @@ pub struct SessionState {
     pub messages: Vec<Message>,
     pub token_usage: TokenUsage,
     pub token_budget: TokenBudget,
+    /// Prompt tokens from the most recent LLM response.
+    /// Used for budget reservation: the next call's prompt will be >= this.
+    #[serde(default)]
+    pub last_prompt_tokens: u64,
     pub strategy_state: Value,
 
     /// Sub-agent completion delivery target.
@@ -287,6 +290,7 @@ impl SessionState {
             messages: Vec::new(),
             token_usage: TokenUsage::default(),
             token_budget: TokenBudget { limit: None },
+            last_prompt_tokens: 0,
             strategy_state: Value::Null,
             on_done: None,
             artifacts: vec![],
@@ -530,7 +534,11 @@ impl SessionState {
     // LLM request building
     // -----------------------------------------------------------------------
 
-    pub fn build_llm_request(&self, tools: Option<Vec<openai::Tool>>) -> Option<LlmRequest> {
+    pub fn build_llm_request(
+        &self,
+        tools: Option<Vec<openai::Tool>>,
+        overrides: Option<&LlmRequestParams>,
+    ) -> Option<LlmRequest> {
         let agent = self.agent.as_ref()?;
 
         let mut messages = vec![openai::ChatMessage {
@@ -544,7 +552,7 @@ impl SessionState {
             messages.push(to_openai_message(msg));
         }
 
-        Some(self.make_llm_request(messages, tools))
+        Some(self.make_llm_request(messages, tools, overrides))
     }
 
     /// Build an LLM request using a custom context (e.g. compacted history).
@@ -553,35 +561,27 @@ impl SessionState {
         &self,
         context: &[Message],
         tools: Option<Vec<openai::Tool>>,
+        overrides: Option<&LlmRequestParams>,
     ) -> Option<LlmRequest> {
         self.agent.as_ref()?;
         let messages = context.iter().map(to_openai_message).collect();
-        Some(self.make_llm_request(messages, tools))
+        Some(self.make_llm_request(messages, tools, overrides))
     }
 
     fn make_llm_request(
         &self,
         messages: Vec<openai::ChatMessage>,
         tools: Option<Vec<openai::Tool>>,
+        overrides: Option<&LlmRequestParams>,
     ) -> LlmRequest {
         let agent = self.agent.as_ref().expect("agent must be set");
-        let model = agent
-            .llm
-            .params
-            .get("model")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let temperature = agent
-            .llm
-            .params
-            .get("temperature")
-            .and_then(|v| v.as_f64());
-        let max_tokens = agent
-            .llm
-            .params
-            .get("max_tokens")
-            .and_then(|v| v.as_u64());
+        let model = agent.llm.model.clone();
+        let temperature = overrides
+            .and_then(|o| o.temperature)
+            .or(agent.llm.temperature);
+        let max_tokens = overrides
+            .and_then(|o| o.max_tokens)
+            .or(agent.llm.max_tokens);
 
         LlmRequest::OpenAi(openai::ChatCompletionRequest {
             model,
@@ -632,6 +632,7 @@ impl SessionState {
                 .rejected_prediction_tokens +=
                 details.rejected_prediction_tokens.unwrap_or(0);
         }
+        self.last_prompt_tokens = usage.prompt_tokens;
     }
 }
 
@@ -759,6 +760,63 @@ impl SessionState {
 // ---------------------------------------------------------------------------
 
 impl SessionState {
+    /// Reserve budget for an LLM call. Returns the failing command if a policy rejects.
+    async fn reserve_budget(
+        &self,
+        call_id: &str,
+        ctx: &SessionContext,
+        span: &crate::runtime::span::SpanContext,
+    ) -> Result<(), CommandPayload> {
+        let Some(ref budget) = ctx.budget_actor else {
+            return Ok(());
+        };
+
+        let agent = match self.agent.as_ref() {
+            Some(a) => a,
+            None => return Ok(()),
+        };
+
+        let auth = self.auth.as_ref().unwrap_or(&ctx.auth);
+        let model = &agent.llm.model;
+
+        let context =
+            crate::runtime::budget::BudgetContext::for_llm_call(ctx.session_id, auth, model);
+
+        let max_output = agent
+            .llm
+            .max_tokens
+            .or(agent.max_context_tokens)
+            .unwrap_or(defaults::ESTIMATED_TOKENS_PER_CALL);
+
+        let estimated = self.last_prompt_tokens + max_output;
+
+        match budget
+            .reserve(ctx.session_id, call_id, context, estimated, span)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(crate::runtime::budget::BudgetError::Denied {
+                strategy: crate::runtime::config::ExhaustionStrategy::Reject,
+                ref policy_name,
+                current,
+                limit,
+            }) => Err(CommandPayload::FailLlmCall {
+                call_id: call_id.to_string(),
+                error: format!("budget denied by {policy_name}: {current}/{limit}"),
+                retryable: false,
+                source: None,
+            }),
+            Err(crate::runtime::budget::BudgetError::Denied {
+                strategy: crate::runtime::config::ExhaustionStrategy::Interrupt,
+                ..
+            }) => {
+                // Interrupt strategy: allow the call to proceed. The session
+                // will be interrupted after it completes.
+                Ok(())
+            }
+        }
+    }
+
     /// Handle an LLM call: resolve client, call API (streaming or not), return command.
     async fn handle_llm_call(
         &self,
@@ -795,6 +853,10 @@ impl SessionState {
                 };
             }
         };
+
+        if let Err(cmd) = self.reserve_budget(&p.call_id, ctx, span).await {
+            return cmd;
+        }
 
         // Inject tools into the request
         let LlmRequest::OpenAi(mut oai_req) = p.request.clone();
@@ -946,7 +1008,7 @@ impl SessionState {
         match event {
             EventPayload::MessageUser(p) => {
                 let stream = p.stream;
-                let request = self.build_llm_request(ctx.all_tools.clone())?;
+                let request = self.build_llm_request(ctx.all_tools.clone(), None)?;
                 Some(CommandPayload::RequestLlmCall {
                     call_id: new_call_id(),
                     request,
@@ -997,7 +1059,7 @@ impl SessionState {
                 }) {
                     return None;
                 }
-                let request = self.build_llm_request(ctx.all_tools.clone())?;
+                let request = self.build_llm_request(ctx.all_tools.clone(), None)?;
                 Some(CommandPayload::RequestLlmCall {
                     call_id: new_call_id(),
                     request,
@@ -1006,7 +1068,7 @@ impl SessionState {
                 })
             }
             EventPayload::InterruptResumed(_) => {
-                let request = self.build_llm_request(ctx.all_tools.clone())?;
+                let request = self.build_llm_request(ctx.all_tools.clone(), None)?;
                 Some(CommandPayload::RequestLlmCall {
                     call_id: new_call_id(),
                     request,

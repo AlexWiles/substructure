@@ -8,12 +8,29 @@ use super::defaults;
 use super::event::McpServerConfig;
 
 // ---------------------------------------------------------------------------
+// Per-call LLM request parameters
+// ---------------------------------------------------------------------------
+
+/// Per-call overrides for LLM request parameters.
+/// Fields set here take precedence over `LlmConfig` agent defaults.
+#[derive(Debug, Clone, Default)]
+pub struct LlmRequestParams {
+    pub max_tokens: Option<u64>,
+    pub temperature: Option<f64>,
+}
+
+// ---------------------------------------------------------------------------
 // Agent configuration
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
     pub client: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
     #[serde(default, skip_serializing_if = "RetryConfig::is_empty")]
     pub retry: RetryConfig,
     #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
@@ -120,6 +137,10 @@ pub struct AgentConfig {
     pub strategy: StrategyConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<u64>,
+    /// Maximum context window size in tokens. Used for budget reservation
+    /// estimates and context utilization tracking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_context_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sub_agents: Vec<String>,
     /// Maximum tool result size in bytes. `None` = inherit, `Some(0)` = no limit.

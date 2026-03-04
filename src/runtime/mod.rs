@@ -178,6 +178,7 @@ impl Runtime {
                 aggregate_actor_id: session_id,
                 store: self.store.clone(),
                 on_event,
+                runtime: self.actor.clone(),
             },
         )
         .await
@@ -202,6 +203,46 @@ impl Runtime {
     /// Return the names of all configured agents.
     pub fn agent_names(&self) -> Vec<&str> {
         self.agents.keys().map(|s| s.as_str()).collect()
+    }
+
+    /// Ensure an aggregate actor is running, waking it from the store if needed.
+    /// Returns the actor cell from the registry.
+    pub async fn ensure_aggregate(
+        runtime: &ActorRef<RuntimeMessage>,
+        aggregate_id: Uuid,
+        aggregate_type: &str,
+        tenant_id: &str,
+    ) -> Result<ractor::ActorCell, RuntimeError> {
+        let name = format!("{aggregate_type}-{aggregate_id}");
+
+        if let Some(cell) = ractor::registry::where_is(name.clone()) {
+            return Ok(cell);
+        }
+
+        let result = runtime
+            .call(
+                |reply| RuntimeMessage::EnsureAggregate {
+                    aggregate_id,
+                    aggregate_type: aggregate_type.into(),
+                    tenant_id: tenant_id.into(),
+                    reply,
+                },
+                Some(ractor::concurrency::Duration::from_millis(10_000)),
+            )
+            .await
+            .map_err(|e| RuntimeError::ActorCall(e.to_string()))?;
+
+        match result {
+            ractor::rpc::CallResult::Success(inner) => inner?,
+            ractor::rpc::CallResult::Timeout => {
+                return Err(RuntimeError::ActorCall("ensure aggregate timed out".into()));
+            }
+            ractor::rpc::CallResult::SenderError => {
+                return Err(RuntimeError::ActorCall("ensure aggregate sender error".into()));
+            }
+        }
+
+        ractor::registry::where_is(name).ok_or(RuntimeError::SessionNotFound)
     }
 
     pub fn shutdown(self) {

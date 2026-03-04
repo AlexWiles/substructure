@@ -246,6 +246,7 @@ impl RuntimeState {
                 aggregate_actor_id: session_id,
                 store: self.store.clone(),
                 on_event: None,
+                runtime: self.myself.clone(),
             },
         )
         .await
@@ -451,6 +452,19 @@ impl Actor for RuntimeActor {
                 // Find-or-start: wake the aggregate if needed, then deliver
                 state.wake_aggregate(session_id, "session", "").await;
                 state.try_send_to_aggregate(session_id, payload, span);
+            }
+            RuntimeMessage::EnsureAggregate {
+                aggregate_id,
+                aggregate_type,
+                tenant_id,
+                reply,
+            } => {
+                if ractor::registry::where_is(aggregate_actor_name(aggregate_id)).is_none() {
+                    state
+                        .wake_aggregate(aggregate_id, &aggregate_type, &tenant_id)
+                        .await;
+                }
+                let _ = reply.send(Ok(()));
             }
         }
         Ok(())
