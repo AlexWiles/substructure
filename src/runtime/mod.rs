@@ -267,7 +267,7 @@ async fn create_event_store(config: &EventStoreConfig) -> Arc<dyn EventStore> {
 fn default_llm_factories() -> HashMap<String, LlmClientFactory> {
     let mut m: HashMap<String, LlmClientFactory> = HashMap::new();
     m.insert(
-        "openai_compatible".into(),
+        "openrouter".into(),
         Box::new(OpenAiClient::from_config),
     );
     m.insert("mock".into(), Box::new(MockLlmClient::from_config));

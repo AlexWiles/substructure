@@ -244,7 +244,6 @@ impl EventTranslator {
             EventPayload::InterruptResumed(_) => TranslateOutput::Events(vec![]),
 
             EventPayload::StrategyStateChanged(_) => TranslateOutput::Events(vec![]),
-            EventPayload::BudgetExceeded => TranslateOutput::Events(vec![]),
             EventPayload::SessionCancelled => TranslateOutput::Events(vec![]),
             EventPayload::SessionDone(_) => TranslateOutput::Events(vec![]),
 
@@ -331,14 +330,13 @@ mod tests {
         let events = assert_events(translator.translate_event(&EventPayload::LlmCallRequested(
             LlmCallRequested {
                 call_id: call_id.clone(),
-                request: LlmRequest::OpenAi(crate::runtime::llm::types::ChatCompletionRequest {
+                request: LlmRequest {
                     model: "test".into(),
                     messages: vec![],
                     tools: None,
-                    tool_choice: None,
                     temperature: None,
-                    max_tokens: None,
-                }),
+                    max_completion_tokens: None,
+                },
                 stream: true,
                 deadline: Utc::now() + chrono::Duration::hours(1),
             },
@@ -397,7 +395,7 @@ mod tests {
                     tool_calls: vec![],
                     tool_call_id: None,
                     call_id: None,
-                    token_count: None,
+                    usage: None,
                 },
             },
         )));
@@ -421,7 +419,7 @@ mod tests {
                     tool_calls: vec![],
                     tool_call_id: None,
                     call_id: None,
-                    token_count: None,
+                    usage: None,
                 },
             },
         )));
@@ -459,7 +457,7 @@ mod tests {
                     }],
                     tool_call_id: None,
                     call_id: None,
-                    token_count: None,
+                    usage: None,
                 },
             },
         )));
@@ -507,7 +505,7 @@ mod tests {
                     tool_calls: vec![],
                     tool_call_id: Some(tc_id.clone()),
                     call_id: None,
-                    token_count: None,
+                    usage: None,
                 },
             },
         )));
@@ -551,7 +549,7 @@ mod tests {
                     tool_calls: vec![],
                     tool_call_id: None,
                     call_id: None,
-                    token_count: None,
+                    usage: None,
                 },
             }));
         assert!(matches!(output, TranslateOutput::Terminal(_)));
@@ -571,7 +569,7 @@ mod tests {
                     }],
                     tool_call_id: None,
                     call_id: None,
-                    token_count: None,
+                    usage: None,
                 },
             }));
         assert!(matches!(output, TranslateOutput::Events(_)));
@@ -606,7 +604,7 @@ mod tests {
                     llm: crate::runtime::config::LlmConfig {
                         client: "mock".into(),
                         model: "mock-model".into(),
-                        max_tokens: None,
+                        max_completion_tokens: None,
                         temperature: None,
                         retry: Default::default(),
                         params: Default::default(),
@@ -614,7 +612,6 @@ mod tests {
                     system_prompt: "You are helpful.".into(),
                     mcp_servers: vec![],
                     strategy: Default::default(),
-                    token_budget: None,
                     max_context_tokens: None,
                     sub_agents: vec![],
                     tool_result_max_bytes: None,
@@ -637,7 +634,7 @@ mod tests {
                     tool_calls: vec![],
                     tool_call_id: None,
                     call_id: None,
-                    token_count: None,
+                    usage: None,
                 },
                 stream: true,
             },

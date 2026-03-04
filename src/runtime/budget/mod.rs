@@ -2,7 +2,7 @@ pub(crate) mod actor;
 
 pub use actor::{budget_actor_name, spawn_budget_actor};
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -10,6 +10,50 @@ use uuid::Uuid;
 
 use super::aggregate::{AggregateState, Emit};
 use super::config::{parse_window, BudgetPolicyConfig, ExhaustionStrategy};
+
+/// A bag of named usage scalars. Keys are dimension names like
+/// "prompt_tokens", "completion_tokens", "cost".
+/// Extensible — new dimensions require no code changes.
+pub type UsageBreakdown = BTreeMap<String, u64>;
+
+/// Extract a single dimension's value from a breakdown, defaulting to 0.
+fn extract(breakdown: &UsageBreakdown, dimension: &str) -> u64 {
+    breakdown.get(dimension).copied().unwrap_or(0)
+}
+
+/// Recursively flatten a JSON value into named scalars.
+/// Nested objects use dot-separated keys.
+/// Integers stored as-is. Floats stored as micro-units (x 1_000_000)
+/// to avoid floating point in the budget ledger.
+pub fn flatten_usage(value: &serde_json::Value) -> UsageBreakdown {
+    let mut out = BTreeMap::new();
+    flatten_recursive(value, "", &mut out);
+    out
+}
+
+fn flatten_recursive(v: &serde_json::Value, prefix: &str, out: &mut BTreeMap<String, u64>) {
+    match v {
+        serde_json::Value::Number(n) => {
+            if let Some(n) = n.as_u64() {
+                out.insert(prefix.into(), n);
+            } else if let Some(f) = n.as_f64() {
+                // Cost fields: store as micro-units (6 decimal places)
+                out.insert(prefix.into(), (f * 1_000_000.0) as u64);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                let key = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{prefix}.{k}")
+                };
+                flatten_recursive(v, &key, out);
+            }
+        }
+        _ => {}
+    }
+}
 
 /// Derive a deterministic aggregate_id from tenant_id.
 pub fn budget_aggregate_id(tenant_id: &str) -> Uuid {
@@ -37,7 +81,7 @@ pub struct UsageRecorded {
     pub bucket_key: String,
     pub session_id: Uuid,
     pub call_id: String,
-    pub amount: u64,
+    pub breakdown: UsageBreakdown,
     pub recorded_at: DateTime<Utc>,
 }
 
@@ -45,7 +89,6 @@ pub struct UsageRecorded {
 pub struct ReservationCreated {
     pub session_id: Uuid,
     pub call_id: String,
-    pub estimated_tokens: u64,
     pub reserved_at: DateTime<Utc>,
     pub entries: Vec<ReservationEntry>,
 }
@@ -104,10 +147,11 @@ impl BudgetContext {
     ///
     /// Populates the standard keys that budget policies can reference in
     /// `group_by` and `match` conditions: `tenant_id`, `user_id` (if present),
-    /// `session_id`, `model`, plus any custom `auth.attrs`.
+    /// `session_id`, `client_id`, `model`, plus any custom `auth.attrs`.
     pub fn for_llm_call(
         session_id: Uuid,
         auth: &super::event::ClientIdentity,
+        client_id: &str,
         model: &str,
     ) -> Self {
         let mut ctx = Self::default();
@@ -119,6 +163,7 @@ impl BudgetContext {
             ctx.set(k.as_str(), v.as_str());
         }
         ctx.set("session_id", session_id.to_string());
+        ctx.set("client_id", client_id);
         ctx.set("model", model);
         ctx
     }
@@ -133,13 +178,13 @@ pub enum BudgetCommand {
         session_id: Uuid,
         call_id: String,
         context: BudgetContext,
-        estimated_tokens: u64,
+        breakdown: UsageBreakdown,
         reserved_at: DateTime<Utc>,
     },
     RecordUsage {
         session_id: Uuid,
         call_id: String,
-        total_tokens: u64,
+        breakdown: UsageBreakdown,
         recorded_at: DateTime<Utc>,
     },
     ReleaseReservation {
@@ -200,7 +245,7 @@ pub struct BucketState {
 pub struct UsageEntry {
     pub session_id: Uuid,
     pub call_id: String,
-    pub amount: u64,
+    pub breakdown: UsageBreakdown,
     pub recorded_at: DateTime<Utc>,
 }
 
@@ -224,7 +269,7 @@ impl AggregateState for BudgetLedger {
                 bucket.entries.push_back(UsageEntry {
                     session_id: e.session_id,
                     call_id: e.call_id.clone(),
-                    amount: e.amount,
+                    breakdown: e.breakdown.clone(),
                     recorded_at: e.recorded_at,
                 });
             }
@@ -251,7 +296,7 @@ impl AggregateState for BudgetLedger {
                 session_id,
                 call_id,
                 context,
-                estimated_tokens,
+                breakdown,
                 reserved_at,
             } => {
                 let mut pending_entries = Vec::new();
@@ -273,7 +318,7 @@ impl AggregateState for BudgetLedger {
                     let settled = self
                         .buckets
                         .get(&ck)
-                        .map(|b| usage_in_window(b, &policy.window, reserved_at))
+                        .map(|b| usage_in_window(b, &policy.dimension, &policy.window, reserved_at))
                         .unwrap_or(0);
 
                     let reserved: u64 = self
@@ -281,11 +326,12 @@ impl AggregateState for BudgetLedger {
                         .values()
                         .flat_map(|entries| entries.iter())
                         .filter(|e| e.composite_key == ck)
-                        .map(|e| e.amount)
+                        .map(|e| extract(&e.breakdown, &policy.dimension))
                         .sum();
 
+                    let estimated = extract(&breakdown, &policy.dimension);
                     let current = settled + reserved;
-                    if current + estimated_tokens > policy.limit {
+                    if current + estimated > policy.limit {
                         return Err(BudgetError::Denied {
                             policy_name: policy.name.clone(),
                             strategy: policy.strategy.clone(),
@@ -296,7 +342,7 @@ impl AggregateState for BudgetLedger {
 
                     pending_entries.push(ReservationEntry {
                         composite_key: ck,
-                        amount: estimated_tokens,
+                        breakdown: breakdown.clone(),
                     });
                 }
 
@@ -308,7 +354,6 @@ impl AggregateState for BudgetLedger {
                     ReservationCreated {
                         session_id,
                         call_id,
-                        estimated_tokens,
                         reserved_at,
                         entries: pending_entries,
                     },
@@ -318,14 +363,15 @@ impl AggregateState for BudgetLedger {
             BudgetCommand::RecordUsage {
                 session_id,
                 call_id,
-                total_tokens,
+                breakdown,
                 recorded_at,
             } => {
                 let rkey = reservation_key(session_id, &call_id);
                 let mut emits: Vec<Emit<BudgetEvent>> = Vec::new();
 
                 if let Some(entries) = self.reservations.get(&rkey) {
-                    if total_tokens > 0 {
+                    let has_usage = breakdown.values().any(|&v| v > 0);
+                    if has_usage {
                         let mut seen = HashMap::new();
                         for entry in entries {
                             seen.entry(entry.composite_key.as_str()).or_insert(());
@@ -338,7 +384,7 @@ impl AggregateState for BudgetLedger {
                                         bucket_key: bucket_key.to_string(),
                                         session_id,
                                         call_id: call_id.clone(),
-                                        amount: total_tokens,
+                                        breakdown: breakdown.clone(),
                                         recorded_at,
                                     },
                                 )));
@@ -426,7 +472,7 @@ pub fn reservation_key(session_id: Uuid, call_id: &str) -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReservationEntry {
     pub composite_key: String,
-    pub amount: u64,
+    pub breakdown: UsageBreakdown,
 }
 
 pub enum ReservationResult {
@@ -470,8 +516,13 @@ impl BudgetLedger {
     }
 }
 
-/// Sum usage entries within the policy's window.
-fn usage_in_window(bucket: &BucketState, window: &Option<String>, now: DateTime<Utc>) -> u64 {
+/// Sum usage entries within the policy's window for a specific dimension.
+fn usage_in_window(
+    bucket: &BucketState,
+    dimension: &str,
+    window: &Option<String>,
+    now: DateTime<Utc>,
+) -> u64 {
     let cutoff = window
         .as_ref()
         .and_then(|w| parse_window(w))
@@ -481,7 +532,7 @@ fn usage_in_window(bucket: &BucketState, window: &Option<String>, now: DateTime<
         .entries
         .iter()
         .filter(|e| cutoff.is_none_or(|c| e.recorded_at >= c))
-        .map(|e| e.amount)
+        .map(|e| extract(&e.breakdown, dimension))
         .sum()
 }
 
@@ -494,7 +545,7 @@ use super::session::BudgetActorRef;
 use super::span::SpanContext;
 
 impl BudgetActorRef {
-    /// Attempt to reserve tokens against budget policies before an LLM call.
+    /// Attempt to reserve budget against policies before an LLM call.
     ///
     /// Returns `Ok(())` if granted or if no matching policies exist.
     /// Returns `Err(BudgetError::Denied { .. })` when a policy rejects.
@@ -504,7 +555,7 @@ impl BudgetActorRef {
         session_id: Uuid,
         call_id: &str,
         context: BudgetContext,
-        estimated_tokens: u64,
+        breakdown: UsageBreakdown,
         span: &SpanContext,
     ) -> Result<(), BudgetError> {
         let Some(handle) = self.inner.downcast_ref::<AggregateActorHandle<BudgetLedger>>() else {
@@ -518,7 +569,7 @@ impl BudgetActorRef {
                     session_id,
                     call_id: call_id.to_string(),
                     context,
-                    estimated_tokens,
+                    breakdown,
                     reserved_at: Utc::now(),
                 },
                 span.clone(),
@@ -545,21 +596,28 @@ mod tests {
     use super::*;
     use chrono::Duration;
 
+    /// Helper to build a UsageBreakdown with a single "total_tokens" key.
+    fn tokens(n: u64) -> UsageBreakdown {
+        BTreeMap::from([("total_tokens".into(), n)])
+    }
+
     fn make_policies() -> Vec<BudgetPolicyConfig> {
         vec![
             BudgetPolicyConfig {
                 name: "hourly".into(),
                 group_by: vec!["user_id".into()],
-                dimension: crate::runtime::config::BudgetDimension::TotalTokens,
+                dimension: "total_tokens".into(),
                 limit: 10_000,
                 window: Some("1h".into()),
                 strategy: ExhaustionStrategy::Reject,
                 match_conditions: None,
+                value_type: Default::default(),
             },
             BudgetPolicyConfig {
                 name: "tenant_total".into(),
                 group_by: vec![],
-                dimension: crate::runtime::config::BudgetDimension::TotalTokens,
+                dimension: "total_tokens".into(),
+                value_type: Default::default(),
                 limit: 100_000,
                 window: None,
                 strategy: ExhaustionStrategy::Reject,
@@ -598,7 +656,7 @@ mod tests {
             bucket_key: "alice".into(),
             session_id: sid,
             call_id: "c1".into(),
-            amount: 500,
+            breakdown: tokens(500),
             recorded_at: now,
         });
 
@@ -607,7 +665,7 @@ mod tests {
         let key = composite_key("hourly", "alice");
         let bucket = ledger.buckets.get(&key).unwrap();
         assert_eq!(bucket.entries.len(), 1);
-        assert_eq!(bucket.entries[0].amount, 500);
+        assert_eq!(extract(&bucket.entries[0].breakdown, "total_tokens"), 500);
     }
 
     #[test]
@@ -620,11 +678,10 @@ mod tests {
         ledger.apply(&BudgetEvent::ReservationCreated(ReservationCreated {
             session_id: sid,
             call_id: "c1".into(),
-            estimated_tokens: 500,
             reserved_at: now,
             entries: vec![ReservationEntry {
                 composite_key: "hourly|alice".into(),
-                amount: 500,
+                breakdown: tokens(500),
             }],
         }));
         assert_eq!(ledger.reservations.len(), 1);
@@ -647,7 +704,7 @@ mod tests {
             session_id: Uuid::new_v4(),
             call_id: "c1".into(),
             context: make_context("alice"),
-            estimated_tokens: 5000,
+            breakdown: tokens(5000),
             reserved_at: now,
         };
         let emits = execute(&mut ledger, cmd, &policies).unwrap();
@@ -673,7 +730,7 @@ mod tests {
             bucket_key: "alice".into(),
             session_id: Uuid::new_v4(),
             call_id: "c1".into(),
-            amount: 9000,
+            breakdown: tokens(9000),
             recorded_at: now,
         }));
 
@@ -681,7 +738,7 @@ mod tests {
             session_id: Uuid::new_v4(),
             call_id: "c2".into(),
             context: make_context("alice"),
-            estimated_tokens: 2000,
+            breakdown: tokens(2000),
             reserved_at: now,
         };
         let result = ledger.handle_command(cmd, &policies.to_vec());
@@ -698,11 +755,10 @@ mod tests {
         ledger.apply(&BudgetEvent::ReservationCreated(ReservationCreated {
             session_id: Uuid::new_v4(),
             call_id: "prev".into(),
-            estimated_tokens: 9000,
             reserved_at: now,
             entries: vec![ReservationEntry {
                 composite_key: composite_key("hourly", "alice"),
-                amount: 9000,
+                breakdown: tokens(9000),
             }],
         }));
 
@@ -710,7 +766,7 @@ mod tests {
             session_id: Uuid::new_v4(),
             call_id: "c2".into(),
             context: make_context("alice"),
-            estimated_tokens: 2000,
+            breakdown: tokens(2000),
             reserved_at: now,
         };
         let result = ledger.handle_command(cmd, &policies.to_vec());
@@ -729,7 +785,7 @@ mod tests {
             session_id: sid,
             call_id: "c1".into(),
             context: make_context("alice"),
-            estimated_tokens: 500,
+            breakdown: tokens(500),
             reserved_at: now,
         };
         execute(&mut ledger, cmd, &policies).unwrap();
@@ -739,7 +795,7 @@ mod tests {
         let cmd = BudgetCommand::RecordUsage {
             session_id: sid,
             call_id: "c1".into(),
-            total_tokens: 300,
+            breakdown: tokens(300),
             recorded_at: now,
         };
         let emits = execute(&mut ledger, cmd, &policies).unwrap();
@@ -765,7 +821,7 @@ mod tests {
                 session_id: sid,
                 call_id: "c1".into(),
                 context: make_context("alice"),
-                estimated_tokens: 500,
+                breakdown: tokens(500),
                 reserved_at: now,
             },
             &policies,
@@ -778,7 +834,7 @@ mod tests {
             BudgetCommand::RecordUsage {
                 session_id: sid,
                 call_id: "c1".into(),
-                total_tokens: 0,
+                breakdown: BTreeMap::new(),
                 recorded_at: now,
             },
             &policies,
@@ -805,7 +861,7 @@ mod tests {
                 session_id: sid,
                 call_id: "c1".into(),
                 context: make_context("alice"),
-                estimated_tokens: 500,
+                breakdown: tokens(500),
                 reserved_at: now,
             },
             &policies,
@@ -852,7 +908,7 @@ mod tests {
                     session_id: sid,
                     call_id: call_id.into(),
                     context: make_context("alice"),
-                    estimated_tokens: 100,
+                    breakdown: tokens(100),
                     reserved_at: now,
                 },
                 &policies,
@@ -882,7 +938,7 @@ mod tests {
             bucket_key: "alice".into(),
             session_id: Uuid::new_v4(),
             call_id: "c1".into(),
-            amount: 5000,
+            breakdown: tokens(5000),
             recorded_at: old,
         }));
         ledger.apply(&BudgetEvent::UsageRecorded(UsageRecorded {
@@ -890,7 +946,7 @@ mod tests {
             bucket_key: "alice".into(),
             session_id: Uuid::new_v4(),
             call_id: "c2".into(),
-            amount: 3000,
+            breakdown: tokens(3000),
             recorded_at: now,
         }));
 
@@ -899,7 +955,7 @@ mod tests {
         let key = composite_key("hourly", "alice");
         let bucket = ledger.buckets.get(&key).unwrap();
         assert_eq!(bucket.entries.len(), 1, "old entry should be evicted");
-        assert_eq!(bucket.entries[0].amount, 3000);
+        assert_eq!(extract(&bucket.entries[0].breakdown, "total_tokens"), 3000);
     }
 
     #[test]
@@ -914,7 +970,7 @@ mod tests {
             bucket_key: "alice".into(),
             session_id: Uuid::new_v4(),
             call_id: "c1".into(),
-            amount: 8000,
+            breakdown: tokens(8000),
             recorded_at: now - Duration::hours(2),
         }));
         // Recent entry
@@ -923,7 +979,7 @@ mod tests {
             bucket_key: "alice".into(),
             session_id: Uuid::new_v4(),
             call_id: "c2".into(),
-            amount: 2000,
+            breakdown: tokens(2000),
             recorded_at: now,
         }));
 
@@ -932,7 +988,7 @@ mod tests {
             session_id: Uuid::new_v4(),
             call_id: "c3".into(),
             context: make_context("alice"),
-            estimated_tokens: 5000,
+            breakdown: tokens(5000),
             reserved_at: now,
         };
         let result = ledger.handle_command(cmd, &policies.to_vec());
@@ -944,7 +1000,8 @@ mod tests {
         let policies = vec![BudgetPolicyConfig {
             name: "opus_gate".into(),
             group_by: vec!["user_id".into()],
-            dimension: crate::runtime::config::BudgetDimension::TotalTokens,
+            dimension: "total_tokens".into(),
+            value_type: Default::default(),
             limit: 1000,
             window: Some("1h".into()),
             strategy: ExhaustionStrategy::Reject,
@@ -962,7 +1019,7 @@ mod tests {
             session_id: Uuid::new_v4(),
             call_id: "c1".into(),
             context: ctx,
-            estimated_tokens: 5000,
+            breakdown: tokens(5000),
             reserved_at: now,
         };
         let result = ledger.handle_command(cmd, &policies.to_vec());
@@ -976,7 +1033,7 @@ mod tests {
             session_id: Uuid::new_v4(),
             call_id: "c2".into(),
             context: ctx2,
-            estimated_tokens: 5000,
+            breakdown: tokens(5000),
             reserved_at: now,
         };
         let result = ledger.handle_command(cmd, &policies.to_vec());
@@ -989,7 +1046,8 @@ mod tests {
             BudgetPolicyConfig {
                 name: "hourly".into(),
                 group_by: vec!["user_id".into()],
-                dimension: crate::runtime::config::BudgetDimension::TotalTokens,
+                dimension: "total_tokens".into(),
+                value_type: Default::default(),
                 limit: 10_000,
                 window: Some("1h".into()),
                 strategy: ExhaustionStrategy::Reject,
@@ -998,7 +1056,8 @@ mod tests {
             BudgetPolicyConfig {
                 name: "tenant_total".into(),
                 group_by: vec![],
-                dimension: crate::runtime::config::BudgetDimension::TotalTokens,
+                dimension: "total_tokens".into(),
+                value_type: Default::default(),
                 limit: 5_000,
                 window: None,
                 strategy: ExhaustionStrategy::Reject,
@@ -1014,13 +1073,142 @@ mod tests {
             session_id: Uuid::new_v4(),
             call_id: "c1".into(),
             context: make_context("alice"),
-            estimated_tokens: 8000,
+            breakdown: tokens(8000),
             reserved_at: now,
         };
         let result = ledger.handle_command(cmd, &policies.to_vec());
         assert!(
             matches!(&result, Err(BudgetError::Denied { policy_name, .. }) if policy_name == "tenant_total")
         );
+    }
+
+    #[test]
+    fn dimension_specific_policy() {
+        // Policy on "completion_tokens" should ignore "prompt_tokens" usage
+        let policies = vec![BudgetPolicyConfig {
+            name: "output_cap".into(),
+            group_by: vec!["user_id".into()],
+            dimension: "completion_tokens".into(),
+            value_type: Default::default(),
+            limit: 1000,
+            window: None,
+            strategy: ExhaustionStrategy::Reject,
+            match_conditions: None,
+        }];
+
+        let mut ledger = BudgetLedger::default();
+        let now = Utc::now();
+
+        // Record large prompt_tokens usage — should not affect completion_tokens policy
+        ledger.apply(&BudgetEvent::UsageRecorded(UsageRecorded {
+            policy_name: "output_cap".into(),
+            bucket_key: "alice".into(),
+            session_id: Uuid::new_v4(),
+            call_id: "c1".into(),
+            breakdown: BTreeMap::from([
+                ("prompt_tokens".into(), 50_000),
+                ("completion_tokens".into(), 100),
+            ]),
+            recorded_at: now,
+        }));
+
+        // Reserve with large prompt but small completion — should pass
+        let cmd = BudgetCommand::Reserve {
+            session_id: Uuid::new_v4(),
+            call_id: "c2".into(),
+            context: make_context("alice"),
+            breakdown: BTreeMap::from([
+                ("prompt_tokens".into(), 50_000),
+                ("completion_tokens".into(), 500),
+            ]),
+            reserved_at: now,
+        };
+        let result = ledger.handle_command(cmd, &policies.to_vec());
+        assert!(result.is_ok(), "should pass: 100 + 500 = 600 < 1000");
+
+        // Reserve that would exceed completion_tokens limit
+        let cmd = BudgetCommand::Reserve {
+            session_id: Uuid::new_v4(),
+            call_id: "c3".into(),
+            context: make_context("alice"),
+            breakdown: BTreeMap::from([
+                ("prompt_tokens".into(), 50_000),
+                ("completion_tokens".into(), 1000),
+            ]),
+            reserved_at: now,
+        };
+        let result = ledger.handle_command(cmd, &policies.to_vec());
+        assert!(matches!(result, Err(BudgetError::Denied { .. })));
+    }
+
+    #[test]
+    fn missing_dimension_defaults_to_zero() {
+        let policies = vec![BudgetPolicyConfig {
+            name: "reasoning_cap".into(),
+            group_by: vec!["user_id".into()],
+            dimension: "completion_tokens_details.reasoning_tokens".into(),
+            value_type: Default::default(),
+            limit: 1000,
+            window: None,
+            strategy: ExhaustionStrategy::Reject,
+            match_conditions: None,
+        }];
+
+        let ledger = BudgetLedger::default();
+        let now = Utc::now();
+
+        // Breakdown without reasoning_tokens — should default to 0 and pass
+        let cmd = BudgetCommand::Reserve {
+            session_id: Uuid::new_v4(),
+            call_id: "c1".into(),
+            context: make_context("alice"),
+            breakdown: BTreeMap::from([
+                ("prompt_tokens".into(), 10_000),
+                ("completion_tokens".into(), 5000),
+            ]),
+            reserved_at: now,
+        };
+        let result = ledger.handle_command(cmd, &policies.to_vec());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn flatten_usage_basic() {
+        let json = serde_json::json!({
+            "prompt_tokens": 194,
+            "completion_tokens": 2,
+            "total_tokens": 196,
+        });
+        let flat = flatten_usage(&json);
+        assert_eq!(flat.get("prompt_tokens"), Some(&194));
+        assert_eq!(flat.get("completion_tokens"), Some(&2));
+        assert_eq!(flat.get("total_tokens"), Some(&196));
+    }
+
+    #[test]
+    fn flatten_usage_nested() {
+        let json = serde_json::json!({
+            "prompt_tokens": 100,
+            "prompt_tokens_details": {
+                "cached_tokens": 50,
+                "cache_write_tokens": 10,
+            }
+        });
+        let flat = flatten_usage(&json);
+        assert_eq!(flat.get("prompt_tokens"), Some(&100));
+        assert_eq!(flat.get("prompt_tokens_details.cached_tokens"), Some(&50));
+        assert_eq!(flat.get("prompt_tokens_details.cache_write_tokens"), Some(&10));
+    }
+
+    #[test]
+    fn flatten_usage_float_to_micro_units() {
+        let json = serde_json::json!({
+            "cost": 0.95,
+            "total_tokens": 100,
+        });
+        let flat = flatten_usage(&json);
+        assert_eq!(flat.get("cost"), Some(&950_000));
+        assert_eq!(flat.get("total_tokens"), Some(&100));
     }
 
     #[test]

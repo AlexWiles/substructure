@@ -1,5 +1,5 @@
 use std::cmp::min;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -12,10 +12,10 @@ use crate::runtime::aggregate::{AggregateState, AggregateStatus};
 use crate::runtime::config::{LlmRequestParams, RetryPolicy};
 use crate::runtime::event::{
     AgentConfig, Artifact, ClientIdentity, CompletionDelivery, EventPayload, LlmCallRequested,
-    LlmRequest, LlmResponse, Message, Role, ToolCallMeta, ToolCallRequested, ToolHandler,
+    LlmRequest, LlmResponse, LlmTool, Message, Role, ToolCallMeta,
+    ToolCallRequested, ToolHandler,
 };
 use crate::runtime::mcp::{Content, McpClient};
-use crate::runtime::llm::types as openai;
 
 use crate::runtime::defaults;
 use super::command::{truncate_tool_result, CommandPayload, SessionError};
@@ -48,7 +48,6 @@ pub struct SubAgentParams {
     pub auth: ClientIdentity,
     pub delivery: CompletionDelivery,
     pub span: crate::runtime::event::SpanContext,
-    pub token_budget: Option<u64>,
     pub stream: bool,
 }
 
@@ -56,7 +55,7 @@ pub struct SubAgentParams {
 pub struct SessionContext {
     pub mcp_tools: HashMap<String, McpToolEntry>,
     /// All tools (MCP + sub-agents + client), injected into LLM requests.
-    pub all_tools: Option<Vec<openai::Tool>>,
+    pub all_tools: Option<Vec<LlmTool>>,
     pub session_id: Uuid,
     pub auth: ClientIdentity,
     pub stream: bool,
@@ -64,7 +63,7 @@ pub struct SessionContext {
     pub llm_provider: Option<Arc<dyn LlmProviderTrait>>,
     pub mcp_clients: Vec<Arc<dyn McpClient>>,
     pub agents: HashMap<String, AgentConfig>,
-    pub client_tools: Vec<openai::Tool>,
+    pub client_tools: Vec<LlmTool>,
     pub budget_actor: Option<BudgetActorRef>,
     // Callbacks for side-effects
     pub notify_chunk: Option<NotifyChunkFn>,
@@ -119,39 +118,6 @@ pub(super) fn new_call_id() -> String {
     Uuid::new_v4().to_string()
 }
 
-// ---------------------------------------------------------------------------
-// Token tracking
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PromptTokensDetails {
-    pub cached_tokens: u64,
-    pub cache_write_tokens: u64,
-    pub audio_tokens: u64,
-    pub video_tokens: u64,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CompletionTokensDetails {
-    pub reasoning_tokens: u64,
-    pub audio_tokens: u64,
-    pub accepted_prediction_tokens: u64,
-    pub rejected_prediction_tokens: u64,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TokenUsage {
-    pub prompt_tokens: u64,
-    pub completion_tokens: u64,
-    pub total_tokens: u64,
-    pub prompt_tokens_details: PromptTokensDetails,
-    pub completion_tokens_details: CompletionTokensDetails,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TokenBudget {
-    pub limit: Option<u64>,
-}
 
 // ---------------------------------------------------------------------------
 // Session status
@@ -259,12 +225,7 @@ pub struct SessionState {
     pub agent: Option<AgentConfig>,
     pub auth: Option<ClientIdentity>,
     pub messages: Vec<Message>,
-    pub token_usage: TokenUsage,
-    pub token_budget: TokenBudget,
-    /// Prompt tokens from the most recent LLM response.
-    /// Used for budget reservation: the next call's prompt will be >= this.
-    #[serde(default)]
-    pub last_prompt_tokens: u64,
+    pub token_usage: BTreeMap<String, u64>,
     pub strategy_state: Value,
 
     /// Sub-agent completion delivery target.
@@ -288,9 +249,7 @@ impl SessionState {
             agent: None,
             auth: None,
             messages: Vec::new(),
-            token_usage: TokenUsage::default(),
-            token_budget: TokenBudget { limit: None },
-            last_prompt_tokens: 0,
+            token_usage: BTreeMap::new(),
             strategy_state: Value::Null,
             on_done: None,
             artifacts: vec![],
@@ -304,7 +263,6 @@ impl SessionState {
         match payload {
             EventPayload::SessionCreated(payload) => {
                 self.status = SessionStatus::Idle;
-                self.token_budget.limit = payload.agent.token_budget;
                 self.agent = Some(payload.agent.clone());
                 self.auth = Some(payload.auth.clone());
                 self.on_done = payload.on_done.clone();
@@ -438,9 +396,6 @@ impl SessionState {
             EventPayload::InterruptResumed(_) => {
                 self.status = SessionStatus::Active;
             }
-            EventPayload::BudgetExceeded => {
-                self.status = SessionStatus::Idle;
-            }
             EventPayload::StrategyStateChanged(payload) => {
                 self.strategy_state = payload.state.clone();
             }
@@ -467,12 +422,6 @@ impl SessionState {
             SessionStatus::Interrupted { interrupt_id } => Some(interrupt_id),
             _ => None,
         }
-    }
-
-    pub fn is_over_budget(&self) -> bool {
-        self.token_budget
-            .limit
-            .is_some_and(|limit| self.token_usage.total_tokens >= limit)
     }
 
     /// Derive pending tool result count from the message history.
@@ -536,21 +485,20 @@ impl SessionState {
 
     pub fn build_llm_request(
         &self,
-        tools: Option<Vec<openai::Tool>>,
+        tools: Option<Vec<LlmTool>>,
         overrides: Option<&LlmRequestParams>,
     ) -> Option<LlmRequest> {
         let agent = self.agent.as_ref()?;
 
-        let mut messages = vec![openai::ChatMessage {
-            role: openai::Role::System,
+        let mut messages = vec![Message {
+            role: Role::System,
             content: Some(agent.system_prompt.clone()),
-            tool_calls: None,
+            tool_calls: vec![],
             tool_call_id: None,
+            call_id: None,
+            usage: None,
         }];
-
-        for msg in &self.messages {
-            messages.push(to_openai_message(msg));
-        }
+        messages.extend(self.messages.iter().cloned());
 
         Some(self.make_llm_request(messages, tools, overrides))
     }
@@ -560,18 +508,18 @@ impl SessionState {
     pub fn build_llm_request_with_context(
         &self,
         context: &[Message],
-        tools: Option<Vec<openai::Tool>>,
+        tools: Option<Vec<LlmTool>>,
         overrides: Option<&LlmRequestParams>,
     ) -> Option<LlmRequest> {
         self.agent.as_ref()?;
-        let messages = context.iter().map(to_openai_message).collect();
+        let messages: Vec<Message> = context.to_vec();
         Some(self.make_llm_request(messages, tools, overrides))
     }
 
     fn make_llm_request(
         &self,
-        messages: Vec<openai::ChatMessage>,
-        tools: Option<Vec<openai::Tool>>,
+        messages: Vec<Message>,
+        tools: Option<Vec<LlmTool>>,
         overrides: Option<&LlmRequestParams>,
     ) -> LlmRequest {
         let agent = self.agent.as_ref().expect("agent must be set");
@@ -579,18 +527,17 @@ impl SessionState {
         let temperature = overrides
             .and_then(|o| o.temperature)
             .or(agent.llm.temperature);
-        let max_tokens = overrides
-            .and_then(|o| o.max_tokens)
-            .or(agent.llm.max_tokens);
+        let max_completion_tokens = overrides
+            .and_then(|o| o.max_completion_tokens)
+            .or(agent.llm.max_completion_tokens);
 
-        LlmRequest::OpenAi(openai::ChatCompletionRequest {
+        LlmRequest {
             model,
             messages,
             tools,
-            tool_choice: None,
             temperature,
-            max_tokens,
-        })
+            max_completion_tokens,
+        }
     }
 
     /// Compute the derived state envelope for the current session state.
@@ -602,37 +549,14 @@ impl SessionState {
     }
 
     fn track_usage(&mut self, response: &LlmResponse) {
-        let usage = match response {
-            LlmResponse::OpenAi(resp) => match &resp.usage {
-                Some(u) => u,
-                None => return,
-            },
+        let raw = match response.usage() {
+            Some(v) => v,
+            None => return,
         };
-        self.token_usage.prompt_tokens += usage.prompt_tokens;
-        self.token_usage.completion_tokens += usage.completion_tokens;
-        self.token_usage.total_tokens += usage.total_tokens;
-        if let Some(details) = &usage.prompt_tokens_details {
-            self.token_usage.prompt_tokens_details.cached_tokens += details.cached_tokens;
-            self.token_usage.prompt_tokens_details.cache_write_tokens +=
-                details.cache_write_tokens;
-            self.token_usage.prompt_tokens_details.audio_tokens += details.audio_tokens;
-            self.token_usage.prompt_tokens_details.video_tokens += details.video_tokens;
+        let breakdown = crate::runtime::budget::flatten_usage(raw);
+        for (k, v) in &breakdown {
+            *self.token_usage.entry(k.clone()).or_insert(0) += v;
         }
-        if let Some(details) = &usage.completion_tokens_details {
-            self.token_usage.completion_tokens_details.reasoning_tokens +=
-                details.reasoning_tokens.unwrap_or(0);
-            self.token_usage.completion_tokens_details.audio_tokens +=
-                details.audio_tokens.unwrap_or(0);
-            self.token_usage
-                .completion_tokens_details
-                .accepted_prediction_tokens +=
-                details.accepted_prediction_tokens.unwrap_or(0);
-            self.token_usage
-                .completion_tokens_details
-                .rejected_prediction_tokens +=
-                details.rejected_prediction_tokens.unwrap_or(0);
-        }
-        self.last_prompt_tokens = usage.prompt_tokens;
     }
 }
 
@@ -750,9 +674,6 @@ impl SessionState {
         self.agent.as_ref().map(|a| a.name.clone())
     }
 
-    pub fn set_token_usage_total(&mut self, total: u64) {
-        self.token_usage.total_tokens = total;
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -777,21 +698,23 @@ impl SessionState {
         };
 
         let auth = self.auth.as_ref().unwrap_or(&ctx.auth);
+        let client_id = &agent.llm.client;
         let model = &agent.llm.model;
 
-        let context =
-            crate::runtime::budget::BudgetContext::for_llm_call(ctx.session_id, auth, model);
+        let context = crate::runtime::budget::BudgetContext::for_llm_call(
+            ctx.session_id,
+            auth,
+            client_id,
+            model,
+        );
 
-        let max_output = agent
-            .llm
-            .max_tokens
-            .or(agent.max_context_tokens)
-            .unwrap_or(defaults::ESTIMATED_TOKENS_PER_CALL);
-
-        let estimated = self.last_prompt_tokens + max_output;
+        let mut breakdown = BTreeMap::new();
+        if let Some(max_completion_tokens) = agent.llm.max_completion_tokens {
+            breakdown.insert("completion_tokens".into(), max_completion_tokens);
+        }
 
         match budget
-            .reserve(ctx.session_id, call_id, context, estimated, span)
+            .reserve(ctx.session_id, call_id, context, breakdown, span)
             .await
         {
             Ok(()) => Ok(()),
@@ -859,10 +782,7 @@ impl SessionState {
         }
 
         // Inject tools into the request
-        let LlmRequest::OpenAi(mut oai_req) = p.request.clone();
-        oai_req.tools = ctx.all_tools.clone();
-
-        let request = LlmRequest::OpenAi(oai_req);
+        let request = p.request.clone().with_tools(ctx.all_tools.clone());
 
         let result = if p.stream {
             let (chunk_tx, mut chunk_rx) =
@@ -940,7 +860,6 @@ impl SessionState {
                         span: span.child("sub_agent.delivery"),
                     },
                     span: span.child("sub_agent.spawn"),
-                    token_budget: None,
                     stream: ctx.stream,
                 });
             }
@@ -1017,7 +936,7 @@ impl SessionState {
                 })
             }
             EventPayload::LlmCallCompleted(p) => {
-                let (content, tool_calls, _token_count) = p.response.as_parts();
+                let (content, tool_calls, _usage) = p.response.as_parts();
                 if tool_calls.is_empty() {
                     // No tool calls → done
                     let artifacts = match content {
@@ -1074,16 +993,6 @@ impl SessionState {
                     request,
                     stream: ctx.stream,
                     deadline: self.llm_deadline(),
-                })
-            }
-            EventPayload::BudgetExceeded => {
-                Some(CommandPayload::Interrupt {
-                    interrupt_id: Uuid::new_v4().to_string(),
-                    reason: "token_budget_exceeded".to_string(),
-                    payload: serde_json::json!({
-                        "total_tokens": self.token_usage.total_tokens,
-                        "limit": self.token_budget.limit,
-                    }),
                 })
             }
             _ => None,
@@ -1181,32 +1090,3 @@ impl AggregateState for SessionState {
     }
 }
 
-fn to_openai_message(msg: &Message) -> openai::ChatMessage {
-    openai::ChatMessage {
-        role: match msg.role {
-            Role::System => openai::Role::System,
-            Role::User => openai::Role::User,
-            Role::Assistant => openai::Role::Assistant,
-            Role::Tool => openai::Role::Tool,
-        },
-        content: msg.content.clone(),
-        tool_calls: if msg.tool_calls.is_empty() {
-            None
-        } else {
-            Some(
-                msg.tool_calls
-                    .iter()
-                    .map(|tc| openai::ToolCall {
-                        id: tc.id.clone(),
-                        call_type: "function".to_string(),
-                        function: openai::FunctionCall {
-                            name: tc.name.clone(),
-                            arguments: tc.arguments.clone(),
-                        },
-                    })
-                    .collect(),
-            )
-        },
-        tool_call_id: msg.tool_call_id.clone(),
-    }
-}

@@ -757,7 +757,7 @@ mod tests {
             llm: LlmConfig {
                 client: "mock".into(),
                 model: "mock-model".into(),
-                max_tokens: None,
+                max_completion_tokens: None,
                 temperature: None,
                 retry: Default::default(),
                 params: Default::default(),
@@ -765,7 +765,6 @@ mod tests {
             system_prompt: "test".into(),
             mcp_servers: vec![],
             strategy: Default::default(),
-            token_budget: None,
             max_context_tokens: None,
             sub_agents: vec![],
             tool_result_max_bytes: None,

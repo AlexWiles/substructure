@@ -184,7 +184,6 @@ impl RuntimeState {
                                         auth: params.auth,
                                         delivery: params.delivery,
                                         span: params.span,
-                                        token_budget: params.token_budget,
                                         stream: params.stream,
                                     },
                                 ));
@@ -324,15 +323,11 @@ impl RuntimeState {
 
     #[tracing::instrument(skip_all, fields(session_id = %req.session_id, agent = %req.agent_name, trace_id = %req.span.trace_id))]
     async fn run_sub_agent(&self, req: SubAgentRequest) -> Result<(), RuntimeError> {
-        let mut agent = self
+        let agent = self
             .agents
             .get(&req.agent_name)
             .cloned()
             .ok_or_else(|| RuntimeError::UnknownAgent(req.agent_name.clone()))?;
-
-        if let Some(budget) = req.token_budget {
-            agent.token_budget = Some(budget);
-        }
 
         let msg_span = req.span.child("sub_agent.message");
 
@@ -528,18 +523,18 @@ fn build_session_context(
         })
         .collect();
 
-    let mut tools: Vec<crate::runtime::llm::types::Tool> = mcp_clients
+    let mut tools: Vec<crate::runtime::event::LlmTool> = mcp_clients
         .iter()
-        .flat_map(|c| c.tools().iter().map(|t| t.to_openai_tool()))
+        .flat_map(|c| c.tools().iter().map(|t| t.to_tool()))
         .collect();
 
     if let Some(agent) = agent {
         for name in &agent.sub_agents {
             if let Some(sub) = agents.get(name) {
                 let tool_name = ToolDefinition::sanitized_name(name);
-                tools.push(crate::runtime::llm::types::Tool {
+                tools.push(crate::runtime::event::LlmTool {
                     tool_type: "function".to_string(),
-                    function: crate::runtime::llm::types::ToolFunction {
+                    function: crate::runtime::event::LlmToolFunction {
                         name: tool_name,
                         description: sub.description.clone().unwrap_or_else(|| sub.name.clone()),
                         parameters: serde_json::json!({

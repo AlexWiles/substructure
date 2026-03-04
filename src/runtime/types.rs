@@ -48,7 +48,7 @@ pub enum SessionMessage {
     /// Cancel this session (used by parent to cancel sub-agent).
     Cancel,
     /// Set client-provided tools (from AG-UI RunAgentInput).
-    SetClientTools(Vec<crate::runtime::llm::types::Tool>),
+    SetClientTools(Vec<crate::runtime::event::LlmTool>),
     /// Transient notification — broadcast to observers, never persisted.
     Notify(Arc<Notification>),
 }
@@ -102,7 +102,6 @@ pub struct SubAgentRequest {
     pub auth: ClientIdentity,
     pub delivery: CompletionDelivery,
     pub span: SpanContext,
-    pub token_budget: Option<u64>,
     pub stream: bool,
 }
 

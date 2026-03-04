@@ -12,5 +12,3 @@ pub const BACKOFF_BASE_SECS: u32 = 2;
 pub const BACKOFF_MAX_SECS: u32 = 60;
 /// Maximum tool result size in bytes.
 pub const TOOL_RESULT_MAX_BYTES: usize = 100_000;
-/// Default estimated tokens for budget reservation when max_tokens is not configured.
-pub const ESTIMATED_TOKENS_PER_CALL: u64 = 4096;

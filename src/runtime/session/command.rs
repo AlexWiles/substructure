@@ -204,7 +204,7 @@ impl SessionState {
                                 tool_calls: Vec::new(),
                                 tool_call_id: None,
                                 call_id: None,
-                                token_count: None,
+                                usage: None,
                             },
                             stream,
                         }))
@@ -268,9 +268,6 @@ impl SessionState {
                 stream,
                 deadline,
             } => {
-                if state.is_over_budget() {
-                    return Ok(vec![EventPayload::BudgetExceeded.into()]);
-                }
                 let has_pending = state
                     .llm_calls
                     .values()
@@ -306,14 +303,11 @@ impl SessionState {
                 match state.llm_calls.get(&call_id).map(|c| &c.status) {
                     // Pending call — complete it
                     Some(&LlmCallStatus::Pending) => {
-                        let (content, tool_calls, token_count) = response.as_parts();
+                        let (content, tool_calls, usage) = response.as_parts();
 
                         // Extract metadata before moving response
                         let model = match &response {
                             LlmResponse::OpenAi(r) => r.model.clone(),
-                        };
-                        let usage = match &response {
-                            LlmResponse::OpenAi(r) => r.usage.clone(),
                         };
 
                         let mut completed =
@@ -323,10 +317,10 @@ impl SessionState {
                             }))
                             .with("llm.model", &model)
                             .label(&model);
-                        if let Some(u) = usage {
-                            completed = completed
-                                .with("llm.tokens.prompt", u.prompt_tokens.to_string())
-                                .with("llm.tokens.completion", u.completion_tokens.to_string());
+                        if let Some(ref u) = usage {
+                            for (k, v) in crate::runtime::budget::flatten_usage(u) {
+                                completed = completed.with(format!("llm.usage.{k}"), v.to_string());
+                            }
                         }
 
                         let mut events = vec![
@@ -339,7 +333,7 @@ impl SessionState {
                                     tool_calls: tool_calls.clone(),
                                     tool_call_id: None,
                                     call_id: Some(call_id),
-                                    token_count,
+                                    usage: usage.clone(),
                                 },
                             })
                             .into(),
@@ -434,7 +428,7 @@ impl SessionState {
                                 tool_calls: Vec::new(),
                                 tool_call_id: Some(tool_call_id),
                                 call_id: None,
-                                token_count: None,
+                                usage: None,
                             },
                         })
                         .into(),
@@ -470,7 +464,7 @@ impl SessionState {
                                 tool_calls: Vec::new(),
                                 tool_call_id: Some(tool_call_id),
                                 call_id: None,
-                                token_count: None,
+                                usage: None,
                             },
                         })
                         .into(),
@@ -613,7 +607,7 @@ impl SessionState {
                                 tool_calls: Vec::new(),
                                 tool_call_id: Some(tc.tool_call_id.clone()),
                                 call_id: None,
-                                token_count: None,
+                                usage: None,
                             },
                         })
                         .into(),
@@ -627,9 +621,6 @@ impl SessionState {
             if call.status == LlmCallStatus::RetryScheduled {
                 if let Some(next_at) = call.retry.next_at {
                     if next_at <= now {
-                        if state.is_over_budget() {
-                            return Ok(vec![EventPayload::BudgetExceeded.into()]);
-                        }
                         if let Some(request) = state.build_llm_request(None, None) {
                             return Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {
                                 call_id: call.call_id.clone(),
@@ -703,9 +694,6 @@ impl SessionState {
         // 5. Pending LLM calls still in flight → re-emit (crash recovery)
         for call in state.llm_calls.values() {
             if call.status == LlmCallStatus::Pending && call.deadline > now {
-                if state.is_over_budget() {
-                    return Ok(vec![EventPayload::BudgetExceeded.into()]);
-                }
                 if let Some(request) = state.build_llm_request(None, None) {
                     return Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {
                         call_id: call.call_id.clone(),
@@ -727,9 +715,6 @@ impl SessionState {
                 .values()
                 .any(|c| c.status == LlmCallStatus::Pending)
         {
-            if state.is_over_budget() {
-                return Ok(vec![EventPayload::BudgetExceeded.into()]);
-            }
             if let Some(request) = state.build_llm_request(None, None) {
                 return Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {
                     call_id: new_call_id(),
@@ -900,7 +885,7 @@ mod tests {
             llm: LlmConfig {
                 client: "mock".into(),
                 model: "mock-model".into(),
-                max_tokens: None,
+                max_completion_tokens: None,
                 temperature: None,
                 retry: Default::default(),
                 params: Default::default(),
@@ -908,7 +893,6 @@ mod tests {
             system_prompt: "test".into(),
             mcp_servers: vec![],
             strategy: Default::default(),
-            token_budget: None,
             max_context_tokens: None,
             sub_agents: vec![],
             tool_result_max_bytes: None,
@@ -924,14 +908,13 @@ mod tests {
     }
 
     fn mock_llm_request() -> LlmRequest {
-        LlmRequest::OpenAi(openai::ChatCompletionRequest {
+        LlmRequest {
             model: "mock".into(),
             messages: vec![],
             tools: None,
-            tool_choice: None,
             temperature: None,
-            max_tokens: None,
-        })
+            max_completion_tokens: None,
+        }
     }
 
     fn created_state() -> Aggregate<SessionState> {
@@ -1194,46 +1177,6 @@ mod tests {
         assert!(
             emits.is_empty(),
             "ResumeInterrupt with wrong ID should produce no events"
-        );
-    }
-
-    #[test]
-    fn request_llm_call_over_budget_emits_budget_exceeded() {
-        let mut agent = test_agent();
-        agent.token_budget = Some(100);
-
-        let mut state = Aggregate::new(SessionState::new(Uuid::new_v4()));
-        state.apply(
-            &EventPayload::SessionCreated(Box::new(SessionCreated {
-                agent,
-                auth: test_auth(),
-                on_done: None,
-            })),
-            1,
-            Utc::now(),
-        );
-
-        // Simulate token usage exceeding budget
-        state.state.set_token_usage_total(200);
-
-        let emits = state
-            .state
-            .handle(
-                CommandPayload::RequestLlmCall {
-                    call_id: "call-1".into(),
-                    request: mock_llm_request(),
-                    stream: false,
-                    deadline: far_future(),
-                },
-                &default_ctx(),
-            )
-            .unwrap();
-
-        assert_eq!(emits.len(), 1);
-        assert!(
-            matches!(&emits[0].event, EventPayload::BudgetExceeded),
-            "expected BudgetExceeded, got {:?}",
-            emits[0].event,
         );
     }
 

@@ -9,7 +9,7 @@ pub use stdio::StdioMcpClient;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use super::llm::types as openai;
+use super::event::{LlmTool, LlmToolFunction};
 
 #[derive(Debug, thiserror::Error)]
 pub enum McpError {
@@ -204,10 +204,10 @@ impl ToolDefinition {
         cleaned
     }
 
-    pub fn to_openai_tool(&self) -> openai::Tool {
-        openai::Tool {
+    pub fn to_tool(&self) -> LlmTool {
+        LlmTool {
             tool_type: "function".to_string(),
-            function: openai::ToolFunction {
+            function: LlmToolFunction {
                 name: Self::sanitized_name(&self.name),
                 description: self.description.clone(),
                 parameters: self.input_schema.clone(),

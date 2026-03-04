@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+pub use crate::runtime::event::{LlmTool as Tool, LlmToolFunction as ToolFunction};
+use crate::runtime::event::Message;
+
 // --- Messages ---
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -38,31 +41,17 @@ pub struct ChatMessage {
 // --- Request ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolFunction {
-    pub name: String,
-    pub description: String,
-    pub parameters: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Tool {
-    #[serde(rename = "type")]
-    pub tool_type: String,
-    pub function: ToolFunction,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatCompletionRequest {
     pub model: String,
-    pub messages: Vec<ChatMessage>,
+    pub messages: Vec<Message>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<Tool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u64>,
+    #[serde(rename = "max_tokens", skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u64>,
 }
 
 // --- Response ---
@@ -75,44 +64,11 @@ pub struct Choice {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PromptTokensDetails {
-    #[serde(default)]
-    pub cached_tokens: u64,
-    #[serde(default)]
-    pub cache_write_tokens: u64,
-    #[serde(default)]
-    pub audio_tokens: u64,
-    #[serde(default)]
-    pub video_tokens: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompletionTokensDetails {
-    #[serde(default)]
-    pub reasoning_tokens: Option<u64>,
-    #[serde(default)]
-    pub audio_tokens: Option<u64>,
-    #[serde(default)]
-    pub accepted_prediction_tokens: Option<u64>,
-    #[serde(default)]
-    pub rejected_prediction_tokens: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Usage {
-    pub prompt_tokens: u64,
-    pub completion_tokens: u64,
-    pub total_tokens: u64,
-    #[serde(default)]
-    pub prompt_tokens_details: Option<PromptTokensDetails>,
-    #[serde(default)]
-    pub completion_tokens_details: Option<CompletionTokensDetails>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatCompletionResponse {
     pub id: String,
     pub model: String,
     pub choices: Vec<Choice>,
-    pub usage: Option<Usage>,
+    /// Raw usage JSON from the provider, flattened into `UsageBreakdown` by the budget system.
+    #[serde(default)]
+    pub usage: Option<serde_json::Value>,
 }

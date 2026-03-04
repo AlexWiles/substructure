@@ -7,9 +7,9 @@ use tokio_stream::Stream;
 use uuid::Uuid;
 
 use crate::runtime::event::{
-    ClientIdentity, Message as DomainMessage, Role, SpanContext, ToolCall as DomainToolCall,
+    ClientIdentity, LlmTool, LlmToolFunction, Message as DomainMessage, Role, SpanContext,
+    ToolCall as DomainToolCall,
 };
-use crate::runtime::llm::types as openai;
 use crate::runtime::session::{
     SessionState, CommandPayload, SessionCommand, SessionContext,
 };
@@ -383,11 +383,11 @@ fn domain_message_to_ag_ui(msg: &crate::runtime::event::Message) -> Message {
 }
 
 fn send_client_tools(session_id: Uuid, tools: Vec<super::types::Tool>) {
-    let oai_tools: Vec<openai::Tool> = tools
+    let llm_tools: Vec<LlmTool> = tools
         .into_iter()
-        .map(|t| openai::Tool {
+        .map(|t| LlmTool {
             tool_type: "function".to_string(),
-            function: openai::ToolFunction {
+            function: LlmToolFunction {
                 name: t.name,
                 description: t.description.unwrap_or_default(),
                 parameters: t.parameters,
@@ -405,11 +405,11 @@ fn send_client_tools(session_id: Uuid, tools: Vec<super::types::Tool>) {
             crate::runtime::aggregate::actor::AggregateMessage::UpdateContext(Box::new(
                 move |ctx: &mut SessionContext| {
                     // Add client tools to context and update all_tools
-                    ctx.client_tools = oai_tools.clone();
+                    ctx.client_tools = llm_tools.clone();
                     if let Some(ref mut all) = ctx.all_tools {
-                        all.extend(oai_tools);
+                        all.extend(llm_tools);
                     } else {
-                        ctx.all_tools = Some(oai_tools);
+                        ctx.all_tools = Some(llm_tools);
                     }
                 },
             )),
@@ -438,7 +438,7 @@ pub(super) fn ag_ui_to_domain_message(msg: &Message) -> DomainMessage {
                 tool_calls: vec![],
                 tool_call_id: None,
                 call_id: None,
-                token_count: None,
+                usage: None,
             }
         }
         Message::Assistant {
@@ -458,7 +458,7 @@ pub(super) fn ag_ui_to_domain_message(msg: &Message) -> DomainMessage {
                 .collect(),
             tool_call_id: None,
             call_id: None,
-            token_count: None,
+            usage: None,
         },
         Message::Tool {
             tool_call_id,
@@ -470,7 +470,7 @@ pub(super) fn ag_ui_to_domain_message(msg: &Message) -> DomainMessage {
             tool_calls: vec![],
             tool_call_id: Some(tool_call_id.clone()),
             call_id: None,
-            token_count: None,
+            usage: None,
         },
         Message::System { content, .. } | Message::Developer { content, .. } => DomainMessage {
             role: Role::System,
@@ -478,7 +478,7 @@ pub(super) fn ag_ui_to_domain_message(msg: &Message) -> DomainMessage {
             tool_calls: vec![],
             tool_call_id: None,
             call_id: None,
-            token_count: None,
+            usage: None,
         },
     }
 }

@@ -6,11 +6,41 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_stream::StreamExt;
 
-use crate::runtime::event::{LlmRequest, LlmResponse};
+use crate::runtime::event::{LlmRequest, LlmResponse, Message};
 use super::types::{
-    ChatCompletionRequest, ChatCompletionResponse, ChatMessage, Choice, FunctionCall, Role,
-    ToolCall, Usage,
+    ChatCompletionResponse, ChatMessage, Choice, FunctionCall, Role, ToolCall,
 };
+
+/// Convert our internal Message to the OpenAI wire format.
+fn to_wire_message(msg: &Message) -> ChatMessage {
+    ChatMessage {
+        role: match msg.role {
+            crate::runtime::event::Role::System => Role::System,
+            crate::runtime::event::Role::User => Role::User,
+            crate::runtime::event::Role::Assistant => Role::Assistant,
+            crate::runtime::event::Role::Tool => Role::Tool,
+        },
+        content: msg.content.clone(),
+        tool_calls: if msg.tool_calls.is_empty() {
+            None
+        } else {
+            Some(
+                msg.tool_calls
+                    .iter()
+                    .map(|tc| ToolCall {
+                        id: tc.id.clone(),
+                        call_type: "function".to_string(),
+                        function: FunctionCall {
+                            name: tc.name.clone(),
+                            arguments: tc.arguments.clone(),
+                        },
+                    })
+                    .collect(),
+            )
+        },
+        tool_call_id: msg.tool_call_id.clone(),
+    }
+}
 
 use super::{LlmCallError, LlmCallable, StreamDelta};
 
@@ -45,7 +75,7 @@ impl OpenAiClient {
     ) -> Result<Arc<dyn LlmCallable>, String> {
         let config: OpenAiClientConfig =
             serde_json::from_value(serde_json::Value::Object(settings.clone()))
-                .map_err(|e| format!("openai_compatible config: {e}"))?;
+                .map_err(|e| format!("openrouter config: {e}"))?;
         Ok(Arc::new(Self {
             http: Client::new(),
             config,
@@ -55,15 +85,31 @@ impl OpenAiClient {
     /// Build and send the POST to `/v1/chat/completions`.
     async fn post_chat_completion(
         &self,
-        request: &ChatCompletionRequest,
+        request: &LlmRequest,
         stream: bool,
     ) -> Result<reqwest::Response, LlmCallError> {
+        /// Wire-format body with ChatMessage (OpenAI format) instead of our internal Message.
         #[derive(Serialize)]
-        struct Body<'a> {
-            #[serde(flatten)]
-            inner: &'a ChatCompletionRequest,
+        struct WireBody {
+            model: String,
+            messages: Vec<ChatMessage>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            tools: Option<Vec<super::types::Tool>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            temperature: Option<f64>,
+            #[serde(rename = "max_tokens", skip_serializing_if = "Option::is_none")]
+            max_completion_tokens: Option<u64>,
             stream: bool,
         }
+
+        let wire = WireBody {
+            model: request.model.clone(),
+            messages: request.messages.iter().map(to_wire_message).collect(),
+            tools: request.tools.clone(),
+            temperature: request.temperature,
+            max_completion_tokens: request.max_completion_tokens,
+            stream,
+        };
 
         let url = format!(
             "{}/v1/chat/completions",
@@ -72,10 +118,7 @@ impl OpenAiClient {
         self.http
             .post(&url)
             .bearer_auth(&self.config.api_key)
-            .json(&Body {
-                inner: request,
-                stream,
-            })
+            .json(&wire)
             .send()
             .await
             .map_err(|e| LlmCallError {
@@ -94,8 +137,7 @@ impl OpenAiClient {
 impl LlmCallable for OpenAiClient {
     #[tracing::instrument(skip(self, request), fields(base_url = %self.config.base_url))]
     async fn call(&self, request: &LlmRequest) -> Result<LlmResponse, LlmCallError> {
-        let LlmRequest::OpenAi(req) = request;
-        let resp = self.post_chat_completion(req, false).await?;
+        let resp = self.post_chat_completion(request, false).await?;
         let status = resp.status();
         let body = resp.text().await.map_err(|e| LlmCallError {
             message: format!("read body: {e}"),
@@ -127,8 +169,7 @@ impl LlmCallable for OpenAiClient {
         request: &LlmRequest,
         chunk_tx: UnboundedSender<StreamDelta>,
     ) -> Result<LlmResponse, LlmCallError> {
-        let LlmRequest::OpenAi(req) = request;
-        let resp = self.post_chat_completion(req, true).await?;
+        let resp = self.post_chat_completion(request, true).await?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.map_err(|e| LlmCallError {
@@ -151,9 +192,9 @@ impl LlmCallable for OpenAiClient {
         let mut content = String::new();
         let mut tool_calls: Vec<ToolCallAccum> = Vec::new();
         let mut finish_reason: Option<String> = None;
-        let mut model = req.model.clone();
+        let mut model = request.model.clone();
         let mut id = String::new();
-        let mut usage: Option<Usage> = None;
+        let mut usage: Option<serde_json::Value> = None;
 
         // SSE line-based parser over the byte stream
         let byte_stream = resp.bytes_stream();
@@ -314,7 +355,7 @@ struct StreamChunkResponse {
     #[serde(default)]
     choices: Vec<StreamChunkChoice>,
     #[serde(default)]
-    usage: Option<Usage>,
+    usage: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]

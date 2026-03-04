@@ -15,7 +15,7 @@ use super::event::McpServerConfig;
 /// Fields set here take precedence over `LlmConfig` agent defaults.
 #[derive(Debug, Clone, Default)]
 pub struct LlmRequestParams {
-    pub max_tokens: Option<u64>,
+    pub max_completion_tokens: Option<u64>,
     pub temperature: Option<f64>,
 }
 
@@ -28,7 +28,7 @@ pub struct LlmConfig {
     pub client: String,
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u64>,
+    pub max_completion_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
     #[serde(default, skip_serializing_if = "RetryConfig::is_empty")]
@@ -135,8 +135,6 @@ pub struct AgentConfig {
     pub mcp_servers: Vec<McpServerConfig>,
     #[serde(default)]
     pub strategy: StrategyConfig,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token_budget: Option<u64>,
     /// Maximum context window size in tokens. Used for budget reservation
     /// estimates and context utilization tracking.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -179,7 +177,7 @@ pub struct SystemConfig {
     pub llm_clients: HashMap<String, LlmClientConfig>,
     #[serde(default)]
     pub agents: HashMap<String, AgentConfig>,
-    #[serde(default)]
+    #[serde(default, rename = "budget_policies")]
     pub budgets: Vec<BudgetPolicyConfig>,
     #[serde(default)]
     pub auth: AuthConfig,
@@ -273,7 +271,14 @@ pub enum EventStoreConfig {
 pub struct BudgetPolicyConfig {
     pub name: String,
     pub group_by: Vec<String>,
-    pub dimension: BudgetDimension,
+    /// The usage key to track. Dot-separated path into the provider's usage JSON,
+    /// e.g. "prompt_tokens", "cost", "completion_tokens_details.reasoning_tokens".
+    pub dimension: String,
+    /// The type of value this dimension represents. Determines how raw JSON values
+    /// are interpreted: `tokens` stores integers as-is, `micro_dollars` stores
+    /// floats as micro-units (x 1_000_000) so $10 limit = 10_000_000.
+    #[serde(default)]
+    pub value_type: BudgetValueType,
     pub limit: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<String>,
@@ -283,10 +288,15 @@ pub struct BudgetPolicyConfig {
     pub match_conditions: Option<HashMap<String, String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum BudgetDimension {
-    TotalTokens,
+pub enum BudgetValueType {
+    /// Integer token counts, stored as-is.
+    #[default]
+    Tokens,
+    /// Dollar amounts stored as micro-units (x 1_000_000).
+    /// A raw float 0.95 becomes 950_000. Limit of $10 = 10_000_000.
+    MicroDollars,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

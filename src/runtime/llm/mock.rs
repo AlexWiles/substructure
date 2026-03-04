@@ -38,9 +38,7 @@ impl LlmCallable for MockLlmClient {
         let n = self
             .call_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let model = match request {
-            LlmRequest::OpenAi(req) => req.model.clone(),
-        };
+        let model = request.model.clone();
         Ok(LlmResponse::OpenAi(openai::ChatCompletionResponse {
             id: format!("mock-{}", n + 1),
             model,
@@ -54,13 +52,11 @@ impl LlmCallable for MockLlmClient {
                 },
                 finish_reason: Some("stop".into()),
             }],
-            usage: Some(openai::Usage {
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                total_tokens: 0,
-                prompt_tokens_details: None,
-                completion_tokens_details: None,
-            }),
+            usage: Some(serde_json::json!({
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            })),
         }))
     }
 }

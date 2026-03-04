@@ -14,15 +14,24 @@ service_name = "substructure"
 env = { type = "env" }
 
 [llm_clients.openrouter]
-type = "openai_compatible"
+type = "openrouter"
 base_url = "https://openrouter.ai/api"
 api_key = { provider = "env", key = "OPENROUTER_API_KEY" }
+
+
+[[budget_policies]]
+name = "output_cap"
+dimension = "completion_tokens"
+group_by = ["session_id"]
+limit = 200
+window = "1m"
+strategy = "reject"
 
 [agents.alex]
 name = "alex"
 description = """A helpful assistant named Alex"""
 system_prompt = """You are an intelligent analyst."""
-llm = { client = "openrouter", model = "stepfun/step-3.5-flash:free", retry = { max_retries = 5 } }
+llm = { client = "openrouter", model = "stepfun/step-3.5-flash:free", retry = { max_retries = 5 }, max_completion_token = 200 }
 sub_agents = ["file-system"]
 
 [agents.file-system]
@@ -34,7 +43,7 @@ Be concise and factual.
 
 Be careful of large directory trees. If you list a tree that is too large you will stop working.
 """
-llm = { client = "openrouter", model = "stepfun/step-3.5-flash:free", retry = { max_retries = 5 } }
+llm = { client = "openrouter", model = "stepfun/step-3.5-flash:free", retry = { max_retries = 5 }  }
 
 
 [[agents.file-system.mcp_servers]]

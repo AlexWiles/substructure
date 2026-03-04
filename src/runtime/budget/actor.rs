@@ -5,7 +5,7 @@ use ractor::ActorCell;
 
 use crate::runtime::aggregate::actor::{spawn_aggregate_actor, AggregateActorArgs, AggregateActorHandle, AggregateMessage};
 use crate::runtime::aggregate::{AggregateState, DomainEvent};
-use crate::runtime::budget::{budget_aggregate_id, BudgetCommand, BudgetLedger};
+use crate::runtime::budget::{budget_aggregate_id, flatten_usage, BudgetCommand, BudgetLedger, UsageBreakdown};
 use crate::runtime::config::BudgetPolicyConfig;
 use crate::runtime::event::{EventPayload, LlmCallCompleted, LlmCallErrored, LlmResponse};
 use crate::runtime::event_store::EventStore;
@@ -15,10 +15,11 @@ pub fn budget_actor_name(tenant_id: &str) -> String {
     format!("budget-{tenant_id}")
 }
 
-fn extract_total_tokens(response: &LlmResponse) -> u64 {
-    match response {
-        LlmResponse::OpenAi(r) => r.usage.as_ref().map_or(0, |u| u.total_tokens),
-    }
+fn extract_usage_breakdown(response: &LlmResponse) -> UsageBreakdown {
+    response
+        .usage()
+        .map(|v| flatten_usage(v))
+        .unwrap_or_default()
 }
 
 pub async fn spawn_budget_actor(
@@ -63,7 +64,7 @@ pub async fn spawn_budget_actor(
                     BudgetCommand::RecordUsage {
                         session_id,
                         call_id: call_id.clone(),
-                        total_tokens: extract_total_tokens(response),
+                        breakdown: extract_usage_breakdown(response),
                         recorded_at: Utc::now(),
                     }
                 }
