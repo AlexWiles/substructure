@@ -25,13 +25,13 @@ group_by = ["session_id"]
 dimension = "completion_tokens"
 limit = 200
 window = "1m"
-strategy = "interrupt"
+strategy = "reject"
 
 [agents.alex]
 name = "alex"
 description = """A helpful assistant named Alex"""
 system_prompt = """You are an intelligent analyst."""
-llm = { client = "openrouter", model = "stepfun/step-3.5-flash:free", retry = { max_retries = 5 }, max_completion_token = 200 }
+llm = { client = "openrouter", model = "stepfun/step-3.5-flash:free", retry = { max_retries = 5 }, max_completion_tokens = 200 }
 sub_agents = ["file-system"]
 
 [agents.file-system]

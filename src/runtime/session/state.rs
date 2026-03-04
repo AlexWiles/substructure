@@ -393,6 +393,12 @@ impl SessionState {
                 self.status = SessionStatus::Interrupted {
                     interrupt_id: payload.interrupt_id.clone(),
                 };
+                // Cancel pending LLM calls so they don't block future RequestLlmCall
+                for call in self.llm_calls.values_mut() {
+                    if call.status == LlmCallStatus::Pending {
+                        call.status = LlmCallStatus::Failed;
+                    }
+                }
             }
             EventPayload::InterruptResumed(_) => {
                 self.status = SessionStatus::Active;
@@ -722,12 +728,19 @@ impl SessionState {
             }),
             Err(BudgetError::Denied {
                 strategy: ExhaustionStrategy::Interrupt,
-                ..
-            }) => {
-                // Interrupt strategy: allow the call to proceed. The session
-                // will be interrupted after it completes.
-                Ok(())
-            }
+                ref policy_name,
+                current,
+                limit,
+            }) => Err(CommandPayload::Interrupt {
+                interrupt_id: Uuid::new_v4().to_string(),
+                reason: format!("budget exhausted: {policy_name} ({current}/{limit})"),
+                payload: serde_json::json!({
+                    "source": "budget",
+                    "policy_name": policy_name,
+                    "current": current,
+                    "limit": limit,
+                }),
+            }),
         }
     }
 
