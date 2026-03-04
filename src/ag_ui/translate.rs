@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
-use crate::runtime::event::{EventPayload, ToolCallMeta};
+use crate::runtime::event::EventPayload;
+use crate::runtime::session::types::ToolCallMeta;
 use crate::runtime::Notification;
 
 use super::types::{AgUiEvent, InterruptInfo};
@@ -277,7 +278,11 @@ impl EventTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::event::*;
+    use crate::runtime::config::ClientIdentity;
+    use crate::runtime::event::EventPayload;
+    use crate::runtime::llm::*;
+    use crate::runtime::message::*;
+    use crate::runtime::session::types::*;
     use crate::runtime::span::SpanContext;
     use chrono::Utc;
     use uuid::Uuid;
@@ -373,7 +378,7 @@ mod tests {
         let events = assert_events(translator.translate_event(&EventPayload::LlmCallCompleted(
             LlmCallCompleted {
                 call_id: call_id.clone(),
-                response: LlmResponse::OpenAi(crate::runtime::llm::types::ChatCompletionResponse {
+                response: LlmResponse::OpenAi(crate::runtime::llm::openai::ChatCompletionResponse {
                     id: "resp-1".into(),
                     model: "test".into(),
                     choices: vec![],

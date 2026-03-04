@@ -10,6 +10,7 @@ pub mod auth;
 pub mod config;
 pub mod defaults;
 pub mod event;
+pub mod message;
 pub mod secret;
 pub mod span;
 
@@ -27,8 +28,8 @@ pub mod wake_scheduler;
 mod actor;
 mod types;
 
-use self::config::{AgentConfig, EventStoreConfig, SystemConfig};
-use self::event::{ClientIdentity, SpanContext};
+use self::config::{AgentConfig, ClientIdentity, EventStoreConfig, SystemConfig};
+use self::span::SpanContext;
 
 // Re-export shared types
 pub use types::{

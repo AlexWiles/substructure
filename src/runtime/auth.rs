@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use super::config::AuthConfig;
-use super::event::ClientIdentity;
+use super::config::ClientIdentity;
 
 #[derive(Debug, Error)]
 pub enum AuthError {

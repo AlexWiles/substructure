@@ -9,7 +9,7 @@ pub use stdio::StdioMcpClient;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use super::event::{LlmTool, LlmToolFunction};
+use super::llm::{LlmTool, LlmToolFunction};
 
 #[derive(Debug, thiserror::Error)]
 pub enum McpError {

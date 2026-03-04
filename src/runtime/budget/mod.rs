@@ -150,7 +150,7 @@ impl BudgetContext {
     /// `session_id`, `client_id`, `model`, plus any custom `auth.attrs`.
     pub fn for_llm_call(
         session_id: Uuid,
-        auth: &super::event::ClientIdentity,
+        auth: &super::config::ClientIdentity,
         client_id: &str,
         model: &str,
     ) -> Self {
@@ -160,7 +160,7 @@ impl BudgetContext {
             ctx.set("user_id", sub);
         }
         for (k, v) in &auth.attrs {
-            ctx.set(k.as_str(), v.as_str());
+            ctx.set(k.clone(), v.clone());
         }
         ctx.set("session_id", session_id.to_string());
         ctx.set("client_id", client_id);

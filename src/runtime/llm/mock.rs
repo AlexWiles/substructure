@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
-use crate::runtime::event::{LlmRequest, LlmResponse};
-use super::types as openai;
+use super::{LlmRequest, LlmResponse};
+use super::openai;
 
 use std::sync::Arc;
 

@@ -21,7 +21,7 @@ use crate::ag_ui::{observe_session, resume_run, run_existing_session, AgUiError,
 use crate::runtime::aggregate::AggregateStatus;
 use crate::runtime::auth::{build_auth_resolver, AdminContext, AuthError, AuthResolver};
 use crate::runtime::config::SystemConfig;
-use crate::runtime::event::ClientIdentity;
+use crate::runtime::config::ClientIdentity;
 use crate::runtime::{
     AggregateFilter, AggregateSort, AggregateSummary, EventFilter, Runtime, RuntimeError,
 };

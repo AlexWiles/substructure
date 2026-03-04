@@ -6,7 +6,8 @@ use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use uuid::Uuid;
 
 use crate::runtime::config::{AgentConfig, BudgetPolicyConfig};
-use crate::runtime::event::{ClientIdentity, SpanContext};
+use crate::runtime::config::ClientIdentity;
+use crate::runtime::span::SpanContext;
 use crate::runtime::session::{
     SessionState, CommandPayload, IncomingMessage, SessionCommand, SessionStatus,
 };
@@ -523,7 +524,7 @@ fn build_session_context(
         })
         .collect();
 
-    let mut tools: Vec<crate::runtime::event::LlmTool> = mcp_clients
+    let mut tools: Vec<crate::runtime::llm::LlmTool> = mcp_clients
         .iter()
         .flat_map(|c| c.tools().iter().map(|t| t.to_tool()))
         .collect();
@@ -532,9 +533,9 @@ fn build_session_context(
         for name in &agent.sub_agents {
             if let Some(sub) = agents.get(name) {
                 let tool_name = ToolDefinition::sanitized_name(name);
-                tools.push(crate::runtime::event::LlmTool {
+                tools.push(crate::runtime::llm::LlmTool {
                     tool_type: "function".to_string(),
-                    function: crate::runtime::event::LlmToolFunction {
+                    function: crate::runtime::llm::LlmToolFunction {
                         name: tool_name,
                         description: sub.description.clone().unwrap_or_else(|| sub.name.clone()),
                         parameters: serde_json::json!({

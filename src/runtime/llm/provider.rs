@@ -5,7 +5,7 @@ use async_trait::async_trait;
 
 use super::{LlmCallable, LlmProviderTrait};
 use crate::runtime::config::LlmClientConfig;
-use crate::runtime::event::ClientIdentity;
+use crate::runtime::config::ClientIdentity;
 
 pub type LlmClientFactory = Box<
     dyn Fn(&serde_json::Map<String, serde_json::Value>) -> Result<Arc<dyn LlmCallable>, String>

@@ -6,10 +6,10 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream;
 use uuid::Uuid;
 
-use crate::runtime::event::{
-    ClientIdentity, LlmTool, LlmToolFunction, Message as DomainMessage, Role, SpanContext,
-    ToolCall as DomainToolCall,
-};
+use crate::runtime::config::ClientIdentity;
+use crate::runtime::llm::{LlmTool, LlmToolFunction};
+use crate::runtime::message::{Message as DomainMessage, Role, ToolCall as DomainToolCall};
+use crate::runtime::span::SpanContext;
 use crate::runtime::session::{
     SessionState, CommandPayload, SessionCommand, SessionContext,
 };
@@ -348,7 +348,7 @@ async fn load_state(
 }
 
 /// Convert a domain `Message` to an AG-UI `Message`.
-fn domain_message_to_ag_ui(msg: &crate::runtime::event::Message) -> Message {
+fn domain_message_to_ag_ui(msg: &crate::runtime::message::Message) -> Message {
     match msg.role {
         Role::User => Message::User {
             id: None,

@@ -5,7 +5,9 @@ use uuid::Uuid;
 
 use crate::runtime::config::AgentConfig;
 use crate::runtime::aggregate::DomainEvent;
-use crate::runtime::event::{ClientIdentity, CompletionDelivery, SpanContext};
+use crate::runtime::config::ClientIdentity;
+use crate::runtime::session::types::CompletionDelivery;
+use crate::runtime::span::SpanContext;
 use crate::runtime::session::{SessionState, CommandPayload, SessionCommand};
 
 use super::event_store::{Event, StoreError};
@@ -48,7 +50,7 @@ pub enum SessionMessage {
     /// Cancel this session (used by parent to cancel sub-agent).
     Cancel,
     /// Set client-provided tools (from AG-UI RunAgentInput).
-    SetClientTools(Vec<crate::runtime::event::LlmTool>),
+    SetClientTools(Vec<crate::runtime::llm::LlmTool>),
     /// Transient notification — broadcast to observers, never persisted.
     Notify(Arc<Notification>),
 }

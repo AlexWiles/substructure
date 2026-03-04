@@ -6,19 +6,75 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_stream::StreamExt;
 
-use crate::runtime::event::{LlmRequest, LlmResponse, Message};
-use super::types::{
-    ChatCompletionResponse, ChatMessage, Choice, FunctionCall, Role, ToolCall,
-};
+use crate::runtime::message::Message;
+use super::{LlmCallError, LlmCallable, LlmRequest, LlmResponse, LlmTool, StreamDelta};
+
+// ---------------------------------------------------------------------------
+// OpenAI wire types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionCall {
+    pub name: String,
+    pub arguments: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub call_type: String,
+    pub function: FunctionCall,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub role: Role,
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Choice {
+    pub index: u32,
+    pub message: ChatMessage,
+    pub finish_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatCompletionResponse {
+    pub id: String,
+    pub model: String,
+    pub choices: Vec<Choice>,
+    /// Raw usage JSON from the provider, flattened into `UsageBreakdown` by the budget system.
+    #[serde(default)]
+    pub usage: Option<serde_json::Value>,
+}
+
+// ---------------------------------------------------------------------------
+// Internal → wire conversion
+// ---------------------------------------------------------------------------
 
 /// Convert our internal Message to the OpenAI wire format.
 fn to_wire_message(msg: &Message) -> ChatMessage {
     ChatMessage {
         role: match msg.role {
-            crate::runtime::event::Role::System => Role::System,
-            crate::runtime::event::Role::User => Role::User,
-            crate::runtime::event::Role::Assistant => Role::Assistant,
-            crate::runtime::event::Role::Tool => Role::Tool,
+            crate::runtime::message::Role::System => Role::System,
+            crate::runtime::message::Role::User => Role::User,
+            crate::runtime::message::Role::Assistant => Role::Assistant,
+            crate::runtime::message::Role::Tool => Role::Tool,
         },
         content: msg.content.clone(),
         tool_calls: if msg.tool_calls.is_empty() {
@@ -41,8 +97,6 @@ fn to_wire_message(msg: &Message) -> ChatMessage {
         tool_call_id: msg.tool_call_id.clone(),
     }
 }
-
-use super::{LlmCallError, LlmCallable, StreamDelta};
 
 // ---------------------------------------------------------------------------
 // Client
@@ -94,7 +148,7 @@ impl OpenAiClient {
             model: String,
             messages: Vec<ChatMessage>,
             #[serde(skip_serializing_if = "Option::is_none")]
-            tools: Option<Vec<super::types::Tool>>,
+            tools: Option<Vec<LlmTool>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             temperature: Option<f64>,
             #[serde(rename = "max_tokens", skip_serializing_if = "Option::is_none")]

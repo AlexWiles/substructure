@@ -738,7 +738,10 @@ mod tests {
     use super::*;
     use crate::runtime::config::{AgentConfig, LlmConfig};
     use crate::runtime::aggregate::{Aggregate, DomainEvent};
-    use crate::runtime::event::{ClientIdentity, EventPayload, SessionCreated, SpanContext};
+    use crate::runtime::config::ClientIdentity;
+    use crate::runtime::event::EventPayload;
+    use crate::runtime::session::types::SessionCreated;
+    use crate::runtime::span::SpanContext;
     use crate::runtime::session::SessionState;
 
     fn test_auth(tenant: &str) -> ClientIdentity {

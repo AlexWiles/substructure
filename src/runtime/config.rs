@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::defaults;
-use super::event::McpServerConfig;
 
 // ---------------------------------------------------------------------------
 // Per-call LLM request parameters
@@ -306,6 +305,46 @@ pub enum ExhaustionStrategy {
     Reject,
     Interrupt,
 }
+
+// ---------------------------------------------------------------------------
+// MCP server configuration
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    pub name: String,
+    pub transport: McpTransportConfig,
+    /// Maximum tool result size in bytes. `None` = inherit, `Some(0)` = no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_result_max_bytes: Option<usize>,
+    /// Per-server retry/timeout overrides (inherits from agent when `None`).
+    #[serde(default, skip_serializing_if = "RetryConfig::is_empty")]
+    pub retry: RetryConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum McpTransportConfig {
+    #[serde(rename = "stdio")]
+    Stdio { command: String, args: Vec<String> },
+}
+
+// ---------------------------------------------------------------------------
+// Client identity
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientIdentity {
+    pub tenant_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sub: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub attrs: HashMap<String, String>,
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 /// Parse a human-readable window string into a `chrono::Duration`.
 ///

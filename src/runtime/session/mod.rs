@@ -2,6 +2,7 @@ mod state;
 mod command;
 pub mod client;
 pub mod routing;
+pub mod types;
 
 pub use state::{
     SessionState, BudgetActorRef, DerivedState, LlmCallStatus,

@@ -7,7 +7,8 @@ use crate::runtime::aggregate::actor::{spawn_aggregate_actor, AggregateActorArgs
 use crate::runtime::aggregate::{AggregateState, DomainEvent};
 use crate::runtime::budget::{budget_aggregate_id, flatten_usage, BudgetCommand, BudgetLedger, UsageBreakdown};
 use crate::runtime::config::BudgetPolicyConfig;
-use crate::runtime::event::{EventPayload, LlmCallCompleted, LlmCallErrored, LlmResponse};
+use crate::runtime::event::EventPayload;
+use crate::runtime::llm::{LlmCallCompleted, LlmCallErrored, LlmResponse};
 use crate::runtime::event_store::EventStore;
 use crate::runtime::session::SessionState;
 

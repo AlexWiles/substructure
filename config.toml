@@ -21,11 +21,11 @@ api_key = { provider = "env", key = "OPENROUTER_API_KEY" }
 
 [[budget_policies]]
 name = "output_cap"
-dimension = "completion_tokens"
 group_by = ["session_id"]
+dimension = "completion_tokens"
 limit = 200
 window = "1m"
-strategy = "reject"
+strategy = "interrupt"
 
 [agents.alex]
 name = "alex"

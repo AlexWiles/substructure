@@ -10,10 +10,12 @@ use uuid::Uuid;
 use async_trait::async_trait;
 use crate::runtime::aggregate::{AggregateState, AggregateStatus};
 use crate::runtime::config::{LlmRequestParams, RetryPolicy};
-use crate::runtime::event::{
-    AgentConfig, Artifact, ClientIdentity, CompletionDelivery, EventPayload, LlmCallRequested,
-    LlmRequest, LlmResponse, LlmTool, Message, Role, ToolCallMeta,
-    ToolCallRequested, ToolHandler,
+use crate::runtime::config::{AgentConfig, ClientIdentity};
+use crate::runtime::event::EventPayload;
+use crate::runtime::llm::{LlmCallRequested, LlmRequest, LlmResponse, LlmTool};
+use crate::runtime::message::{Message, Role};
+use super::types::{
+    Artifact, CompletionDelivery, ToolCallMeta, ToolCallRequested, ToolHandler,
 };
 use crate::runtime::mcp::{Content, McpClient};
 
@@ -34,7 +36,7 @@ pub struct McpToolEntry {
 /// Callback for streaming LLM chunks to observers.
 pub type NotifyChunkFn = Arc<dyn Fn(Uuid, String, u32, String, crate::runtime::span::SpanContext) + Send + Sync>;
 /// Callback for sending a command to a session (fire-and-forget).
-pub type SendToSessionFn = Arc<dyn Fn(Uuid, CommandPayload, crate::runtime::event::SpanContext) + Send + Sync>;
+pub type SendToSessionFn = Arc<dyn Fn(Uuid, CommandPayload, crate::runtime::span::SpanContext) + Send + Sync>;
 /// Callback for spawning a sub-agent.
 pub type SpawnSubAgentFn = Arc<
     dyn Fn(SubAgentParams) + Send + Sync,
@@ -47,7 +49,7 @@ pub struct SubAgentParams {
     pub message: String,
     pub auth: ClientIdentity,
     pub delivery: CompletionDelivery,
-    pub span: crate::runtime::event::SpanContext,
+    pub span: crate::runtime::span::SpanContext,
     pub stream: bool,
 }
 
@@ -943,7 +945,7 @@ impl SessionState {
                         Some(ref text) if !text.is_empty() => vec![Artifact {
                             name: None,
                             description: None,
-                            parts: vec![crate::runtime::event::Part::Text {
+                            parts: vec![super::types::Part::Text {
                                 text: text.clone(),
                             }],
                         }],
@@ -965,7 +967,7 @@ impl SessionState {
                     artifacts: vec![Artifact {
                         name: None,
                         description: None,
-                        parts: vec![crate::runtime::event::Part::Text {
+                        parts: vec![super::types::Part::Text {
                             text: format!("Error: {}", p.error),
                         }],
                     }],

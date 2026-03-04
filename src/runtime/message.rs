@@ -29,20 +29,3 @@ pub struct Message {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<serde_json::Value>,
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessageUser {
-    pub message: Message,
-    pub stream: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessageAssistant {
-    pub call_id: String,
-    pub message: Message,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessageTool {
-    pub message: Message,
-}

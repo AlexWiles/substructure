@@ -7,7 +7,14 @@ use super::state::{
     ToolCallStatus,
 };
 use crate::runtime::aggregate::Emit;
-use crate::runtime::event::*;
+use crate::runtime::config::{AgentConfig, ClientIdentity};
+use crate::runtime::event::EventPayload;
+use crate::runtime::llm::{
+    LlmCallCompleted, LlmCallErrored, LlmCallRequested, LlmRequest, LlmResponse,
+};
+use crate::runtime::message::{Message, Role};
+use crate::runtime::span::SpanContext;
+use super::types::*;
 
 // ---------------------------------------------------------------------------
 // Tool result truncation
@@ -869,7 +876,7 @@ mod tests {
     use super::*;
     use crate::runtime::aggregate::Aggregate;
     use crate::runtime::config::{AgentConfig, LlmConfig};
-    use crate::runtime::llm::types as openai;
+    use crate::runtime::llm::openai;
     use chrono::Utc;
     use uuid::Uuid;
 

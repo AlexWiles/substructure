@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::runtime::aggregate::{Aggregate, DomainEvent};
 use crate::runtime::aggregate::actor::{AggregateError, AggregateMessage};
-use crate::runtime::event::ClientIdentity;
+use crate::runtime::config::ClientIdentity;
 use crate::runtime::event_store::EventStore;
 use crate::runtime::types::{RuntimeError, RuntimeMessage, SessionMessage};
 use super::state::SessionState;
