@@ -20,6 +20,7 @@ use super::llm::{LlmProviderTrait, LlmTool, LlmToolFunction};
 use super::mcp::{self, McpClient, ToolDefinition};
 use super::session::client::{Notification, SessionClientActor, SessionClientArgs};
 use super::session::routing::{aggregate_actor_name, notify_observers, session_route};
+use super::session::transport::LocalStrategyTransport;
 use super::session::{BudgetActorRef, McpToolEntry, NotifyChunkFn, SessionContext};
 use super::types::{RuntimeError, RuntimeMessage, SessionHandle, SessionInit, SubAgentRequest};
 use super::wake_scheduler::spawn_wake_scheduler;
@@ -184,7 +185,7 @@ impl RuntimeState {
                                 }));
                             // Wire up strategy transport (local execution)
                             ctx.strategy_transport = Some(Arc::new(
-                                super::session::strategy::LocalStrategyTransport {
+                                LocalStrategyTransport {
                                     runtime: runtime_ref.clone(),
                                 },
                             ));

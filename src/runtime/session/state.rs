@@ -6,7 +6,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::strategy::{DecisionTrigger, StrategyCtx, StrategyDispatch, StrategyTransport};
+use super::strategy::{DecisionTrigger, StrategyCtx, StrategyDecisionRequested};
+use super::transport::{StrategyDispatch, StrategyTransport};
 use super::types::{Artifact, CompletionDelivery, ToolCallMeta, ToolCallRequested, ToolHandler};
 use crate::runtime::aggregate::{AggregateState, AggregateStatus, Emit};
 use crate::runtime::budget::{self, BudgetContext, BudgetError};
@@ -995,7 +996,7 @@ impl SessionState {
     /// Dispatch a strategy decision via the transport (fire-and-forget).
     fn dispatch_strategy_decision(
         &self,
-        req: &super::strategy::StrategyDecisionRequested,
+        req: &StrategyDecisionRequested,
         ctx: &SessionContext,
         span: &SpanContext,
     ) {

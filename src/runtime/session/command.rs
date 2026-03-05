@@ -6,7 +6,9 @@ use super::state::{
     new_call_id, LlmCallStatus, SessionContext, SessionState, SessionStatus, ToolCallState,
     ToolCallStatus,
 };
-use super::strategy::{DecisionTrigger, StrategyAction};
+use super::strategy::{
+    DecisionTrigger, StrategyAction, StrategyDecisionCompleted, StrategyDecisionRequested,
+};
 use super::types::*;
 use crate::runtime::aggregate::Emit;
 use crate::runtime::budget;
@@ -523,7 +525,7 @@ impl SessionState {
             } => {
                 let mut events: Vec<Emit<EventPayload>> = vec![
                     EventPayload::StrategyDecisionCompleted(
-                        super::strategy::StrategyDecisionCompleted {
+                        StrategyDecisionCompleted {
                             decision_id,
                             state,
                         },
@@ -602,7 +604,7 @@ impl SessionState {
 
     /// Build a StrategyDecisionRequested emit from a trigger.
     fn strategy_decision_event(trigger: DecisionTrigger) -> Emit<EventPayload> {
-        EventPayload::StrategyDecisionRequested(super::strategy::StrategyDecisionRequested {
+        EventPayload::StrategyDecisionRequested(StrategyDecisionRequested {
             decision_id: new_call_id(),
             trigger,
         })
