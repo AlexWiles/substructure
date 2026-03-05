@@ -122,7 +122,7 @@ pub enum CommandPayload {
         payload: serde_json::Value,
     },
     UpdateStrategyState {
-        state: serde_json::Value,
+        state: Option<String>,
     },
     SyncConversation {
         messages: Vec<Message>,

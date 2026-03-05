@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use uuid::Uuid;
 
 use super::types::{Artifact, CompletionDelivery, ToolCallMeta, ToolCallRequested, ToolHandler};
@@ -226,7 +225,7 @@ pub struct SessionState {
     pub auth: Option<ClientIdentity>,
     pub messages: Vec<Message>,
     pub token_usage: BTreeMap<String, u64>,
-    pub strategy_state: Value,
+    pub strategy_state: Option<String>,
 
     /// Sub-agent completion delivery target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -250,7 +249,7 @@ impl SessionState {
             auth: None,
             messages: Vec::new(),
             token_usage: BTreeMap::new(),
-            strategy_state: Value::Null,
+            strategy_state: None,
             on_done: None,
             artifacts: vec![],
             llm_calls: HashMap::new(),

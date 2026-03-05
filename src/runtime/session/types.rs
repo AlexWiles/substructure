@@ -92,7 +92,7 @@ pub struct InterruptResumed {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrategyStateChanged {
-    pub state: serde_json::Value,
+    pub state: Option<String>,
 }
 
 // --- Tool calls ---
