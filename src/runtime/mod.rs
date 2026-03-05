@@ -61,6 +61,9 @@ pub use mcp::{
     ToolAnnotations, ToolDefinition,
 };
 
+// Re-export budget types
+pub use budget::{BudgetDenial, BudgetStatus};
+
 // Re-export session types
 pub use session::client::{
     Notification, OnSessionUpdate, SessionClientActor, SessionClientArgs, SessionUpdate,

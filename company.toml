@@ -60,13 +60,6 @@ Return well-structured, factual summaries with clear citations to sources."""
 llm = { client = "openrouter", model = "stepfun/step-3.5-flash:free", retry = { max_retries = 5 } }
 sub_agents = ["junior-researcher"]
 
-[[agents.senior-researcher.mcp_servers]]
-name = "filesystem"
-max_tool_result_bytes = 50_000
-retry.timeout_secs = 5
-transport.type = "stdio"
-transport.command = "npx"
-transport.args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
 
 [agents.junior-researcher]
 name = "junior-researcher"
@@ -77,13 +70,6 @@ Find the requested information quickly and return it verbatim or with minimal su
 If you cannot find what was asked for, say so clearly rather than guessing."""
 llm = { client = "openrouter", model = "stepfun/step-3.5-flash:free", retry = { max_retries = 5 } }
 
-[[agents.junior-researcher.mcp_servers]]
-name = "filesystem"
-max_tool_result_bytes = 30_000
-retry.timeout_secs = 3
-transport.type = "stdio"
-transport.command = "npx"
-transport.args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
 
 [agents.data-analyst]
 name = "data-analyst"
@@ -94,14 +80,6 @@ When given a data analysis task, locate the relevant files, extract key metrics,
 identify trends or anomalies, and present your findings clearly with supporting numbers. \
 Always state your methodology and any caveats."""
 llm = { client = "openrouter", model = "stepfun/step-3.5-flash:free", retry = { max_retries = 5 } }
-
-[[agents.data-analyst.mcp_servers]]
-name = "filesystem"
-max_tool_result_bytes = 100_000
-retry.timeout_secs = 5
-transport.type = "stdio"
-transport.command = "npx"
-transport.args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
 
 [agents.survey-designer]
 name = "survey-designer"
@@ -135,14 +113,6 @@ Organize raw findings chronologically or by relevance. \
 Tag each piece of information with its source and confidence level. \
 Do not editorialize; present raw intelligence for the analyst to interpret."""
 llm = { client = "openrouter", model = "stepfun/step-3.5-flash:free", retry = { max_retries = 5 } }
-
-[[agents.osint-collector.mcp_servers]]
-name = "filesystem"
-max_tool_result_bytes = 80_000
-retry.timeout_secs = 5
-transport.type = "stdio"
-transport.command = "npx"
-transport.args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
 
 [agents.trend-analyst]
 name = "trend-analyst"
@@ -201,13 +171,6 @@ Produce a verification report: mark each claim as confirmed, unconfirmed, or con
 Flag any unsupported or contradictory claims clearly with the specific issue."""
 llm = { client = "openrouter", model = "stepfun/step-3.5-flash:free", retry = { max_retries = 5 } }
 
-[[agents.fact-checker.mcp_servers]]
-name = "filesystem"
-max_tool_result_bytes = 50_000
-retry.timeout_secs = 5
-transport.type = "stdio"
-transport.command = "npx"
-transport.args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
 
 [agents.summarizer]
 name = "summarizer"

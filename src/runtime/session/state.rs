@@ -715,32 +715,19 @@ impl SessionState {
             .await
         {
             Ok(()) => Ok(()),
-            Err(BudgetError::Denied {
-                strategy: ExhaustionStrategy::Reject,
-                ref policy_name,
-                current,
-                limit,
-            }) => Err(CommandPayload::FailLlmCall {
-                call_id: call_id.to_string(),
-                error: format!("budget denied by {policy_name}: {current}/{limit}"),
-                retryable: false,
-                source: None,
-            }),
-            Err(BudgetError::Denied {
-                strategy: ExhaustionStrategy::Interrupt,
-                ref policy_name,
-                current,
-                limit,
-            }) => Err(CommandPayload::Interrupt {
-                interrupt_id: Uuid::new_v4().to_string(),
-                reason: format!("budget exhausted: {policy_name} ({current}/{limit})"),
-                payload: serde_json::json!({
-                    "source": "budget",
-                    "policy_name": policy_name,
-                    "current": current,
-                    "limit": limit,
+            Err(BudgetError::Denied(ref denial)) => match denial.status.strategy {
+                ExhaustionStrategy::Reject => Err(CommandPayload::FailLlmCall {
+                    call_id: call_id.to_string(),
+                    error: denial.to_string(),
+                    retryable: false,
+                    source: Some(serde_json::to_value(denial).unwrap()),
                 }),
-            }),
+                ExhaustionStrategy::Interrupt => Err(CommandPayload::Interrupt {
+                    interrupt_id: Uuid::new_v4().to_string(),
+                    reason: denial.to_string(),
+                    payload: serde_json::to_value(denial).unwrap(),
+                }),
+            },
         }
     }
 
@@ -918,8 +905,12 @@ impl SessionState {
             }
         }
 
-        // Client tool — no-op, session is Idle and waits for external result
-        None
+        // Unknown tool — fail immediately so the LLM gets feedback
+        Some(CommandPayload::FailToolCall {
+            tool_call_id: p.tool_call_id.clone(),
+            name: p.name.clone(),
+            error: format!("unknown tool: {}", p.name),
+        })
     }
 
     /// Inlined strategy decisions (replaces DefaultStrategy).

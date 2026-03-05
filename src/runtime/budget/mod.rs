@@ -198,28 +198,54 @@ pub enum BudgetCommand {
 }
 
 // ---------------------------------------------------------------------------
+// Budget status and denial types
+// ---------------------------------------------------------------------------
+
+/// Snapshot of a single budget policy's current state.
+/// Shared base type for status queries and denial details.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BudgetStatus {
+    pub policy_name: String,
+    pub dimension: String,
+    pub strategy: ExhaustionStrategy,
+    pub current: u64,
+    pub limit: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<String>,
+}
+
+/// A budget policy denial — a status snapshot plus the estimated usage
+/// that triggered the rejection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BudgetDenial {
+    #[serde(flatten)]
+    pub status: BudgetStatus,
+    pub estimated: u64,
+}
+
+impl std::fmt::Display for BudgetDenial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "budget denied by {}: {}/{}",
+            self.status.policy_name, self.status.current, self.status.limit
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 pub enum BudgetError {
-    Denied {
-        policy_name: String,
-        strategy: ExhaustionStrategy,
-        current: u64,
-        limit: u64,
-    },
+    Denied(BudgetDenial),
 }
 
 impl std::fmt::Display for BudgetError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BudgetError::Denied {
-                policy_name,
-                current,
-                limit,
-                ..
-            } => write!(f, "budget denied by {policy_name}: {current}/{limit}"),
+            BudgetError::Denied(d) => write!(f, "{d}"),
         }
     }
 }
@@ -333,12 +359,17 @@ impl AggregateState for BudgetLedger {
                     let estimated = extract(&breakdown, &policy.dimension);
                     let current = settled + reserved;
                     if current + estimated > policy.limit {
-                        return Err(BudgetError::Denied {
-                            policy_name: policy.name.clone(),
-                            strategy: policy.strategy.clone(),
-                            current,
-                            limit: policy.limit,
-                        });
+                        return Err(BudgetError::Denied(BudgetDenial {
+                            status: BudgetStatus {
+                                policy_name: policy.name.clone(),
+                                dimension: policy.dimension.clone(),
+                                strategy: policy.strategy.clone(),
+                                current,
+                                limit: policy.limit,
+                                window: policy.window.clone(),
+                            },
+                            estimated,
+                        }));
                     }
 
                     pending_entries.push(ReservationEntry {
@@ -546,7 +577,7 @@ impl BudgetActorRef {
     /// Attempt to reserve budget against policies before an LLM call.
     ///
     /// Returns `Ok(())` if granted or if no matching policies exist.
-    /// Returns `Err(BudgetError::Denied { .. })` when a policy rejects.
+    /// Returns `Err(BudgetError::Denied(_))` when a policy rejects.
     /// Fails open on infrastructure errors (timeouts, actor crashes).
     pub(crate) async fn reserve(
         &self,
@@ -743,7 +774,7 @@ mod tests {
             reserved_at: now,
         };
         let result = ledger.handle_command(cmd, &policies.to_vec());
-        assert!(matches!(result, Err(BudgetError::Denied { .. })));
+        assert!(matches!(result, Err(BudgetError::Denied(_))));
     }
 
     #[test]
@@ -771,7 +802,7 @@ mod tests {
             reserved_at: now,
         };
         let result = ledger.handle_command(cmd, &policies.to_vec());
-        assert!(matches!(result, Err(BudgetError::Denied { .. })));
+        assert!(matches!(result, Err(BudgetError::Denied(_))));
     }
 
     #[test]
@@ -1048,7 +1079,7 @@ mod tests {
             reserved_at: now,
         };
         let result = ledger.handle_command(cmd, &policies.to_vec());
-        assert!(matches!(result, Err(BudgetError::Denied { .. })));
+        assert!(matches!(result, Err(BudgetError::Denied(_))));
     }
 
     #[test]
@@ -1089,7 +1120,7 @@ mod tests {
         };
         let result = ledger.handle_command(cmd, &policies.to_vec());
         assert!(
-            matches!(&result, Err(BudgetError::Denied { policy_name, .. }) if policy_name == "tenant_total")
+            matches!(&result, Err(BudgetError::Denied(d)) if d.status.policy_name == "tenant_total")
         );
     }
 
@@ -1149,7 +1180,7 @@ mod tests {
             reserved_at: now,
         };
         let result = ledger.handle_command(cmd, &policies.to_vec());
-        assert!(matches!(result, Err(BudgetError::Denied { .. })));
+        assert!(matches!(result, Err(BudgetError::Denied(_))));
     }
 
     #[test]

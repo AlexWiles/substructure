@@ -134,9 +134,14 @@ impl EventTranslator {
                     step_name: "llm_call".into(),
                 });
 
+                let code = errored
+                    .source
+                    .as_ref()
+                    .and_then(|v| v.get("policy_name"))
+                    .map(|_| "budget_denied".into());
                 events.push(AgUiEvent::RunError {
                     message: errored.error.clone(),
-                    code: None,
+                    code,
                 });
 
                 TranslateOutput::Terminal(events)

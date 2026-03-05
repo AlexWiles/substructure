@@ -25,7 +25,7 @@ group_by = ["session_id"]
 dimension = "completion_tokens"
 limit = 200
 window = "1m"
-strategy = "reject"
+strategy = "interrupt"
 
 [agents.alex]
 name = "alex"
