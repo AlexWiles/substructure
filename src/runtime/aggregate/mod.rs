@@ -91,7 +91,7 @@ pub trait AggregateState:
     type Derived: Serialize + DeserializeOwned + Clone + Send + Sync + 'static;
 
     fn aggregate_type() -> &'static str;
-    fn apply(&mut self, event: &Self::Event, ctx: &Self::Context);
+    fn apply(&mut self, event: &Self::Event);
     fn handle_command(
         &self,
         cmd: Self::Command,
@@ -159,12 +159,11 @@ impl<R: AggregateState> Aggregate<R> {
         event: &R::Event,
         sequence: u64,
         occurred_at: DateTime<Utc>,
-        ctx: &R::Context,
     ) -> bool {
         if self.last_applied.is_some_and(|seq| sequence <= seq) {
             return false;
         }
-        self.state.apply(event, ctx);
+        self.state.apply(event);
         self.last_applied = Some(sequence);
         self.stream_version += 1;
         if self.first_event_at.is_none() {
@@ -188,7 +187,6 @@ impl<R: AggregateState> Aggregate<R> {
         span: SpanContext,
         occurred_at: DateTime<Utc>,
         tenant_id: &str,
-        ctx: &R::Context,
     ) -> Vec<DomainEvent<R>> {
         if emits.is_empty() {
             return vec![];
@@ -203,7 +201,7 @@ impl<R: AggregateState> Aggregate<R> {
 
         // Apply each payload to the state
         for (seq, emit) in (base_seq..).zip(emits.iter()) {
-            self.apply(&emit.event, seq, occurred_at, ctx);
+            self.apply(&emit.event, seq, occurred_at);
         }
 
         // Compute derived state after all events applied

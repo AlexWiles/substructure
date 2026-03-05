@@ -288,7 +288,7 @@ impl AggregateState for BudgetLedger {
         "budget"
     }
 
-    fn apply(&mut self, event: &BudgetEvent, _ctx: &Self::Context) {
+    fn apply(&mut self, event: &BudgetEvent) {
         match event {
             BudgetEvent::UsageRecorded(e) => {
                 let key = composite_key(&e.policy_name, &e.bucket_key);
@@ -673,7 +673,7 @@ mod tests {
         let ctx = policies.to_vec();
         let emits = ledger.handle_command(cmd, &ctx)?;
         for emit in &emits {
-            ledger.apply(&emit.event, &ctx);
+            ledger.apply(&emit.event);
         }
         Ok(emits)
     }
@@ -693,7 +693,7 @@ mod tests {
             recorded_at: now,
         });
 
-        ledger.apply(&event, &vec![]);
+        ledger.apply(&event);
 
         let key = composite_key("hourly", "alice");
         let bucket = ledger.buckets.get(&key).unwrap();
@@ -716,14 +716,14 @@ mod tests {
                 composite_key: "hourly|alice".into(),
                 breakdown: tokens(500),
             }],
-        }), &vec![]);
+        }));
         assert_eq!(ledger.reservations.len(), 1);
 
         // Release
         ledger.apply(&BudgetEvent::ReservationReleased(ReservationReleased {
             session_id: sid,
             call_id: "c1".into(),
-        }), &vec![]);
+        }));
         assert!(ledger.reservations.is_empty());
     }
 
@@ -765,7 +765,7 @@ mod tests {
             call_id: "c1".into(),
             breakdown: tokens(9000),
             recorded_at: now,
-        }), &vec![]);
+        }));
 
         let cmd = BudgetCommand::Reserve {
             session_id: Uuid::new_v4(),
@@ -793,7 +793,7 @@ mod tests {
                 composite_key: composite_key("hourly", "alice"),
                 breakdown: tokens(9000),
             }],
-        }), &vec![]);
+        }));
 
         let cmd = BudgetCommand::Reserve {
             session_id: Uuid::new_v4(),
@@ -980,7 +980,7 @@ mod tests {
             call_id: "c1".into(),
             breakdown: tokens(5000),
             recorded_at: old,
-        }), &vec![]);
+        }));
         ledger.apply(&BudgetEvent::UsageRecorded(UsageRecorded {
             policy_name: "hourly".into(),
             bucket_key: "alice".into(),
@@ -988,7 +988,7 @@ mod tests {
             call_id: "c2".into(),
             breakdown: tokens(3000),
             recorded_at: now,
-        }), &vec![]);
+        }));
 
         ledger.evict_expired(&policies, now);
 
@@ -1012,7 +1012,7 @@ mod tests {
             call_id: "c1".into(),
             breakdown: tokens(8000),
             recorded_at: now - Duration::hours(2),
-        }), &vec![]);
+        }));
         // Recent entry
         ledger.apply(&BudgetEvent::UsageRecorded(UsageRecorded {
             policy_name: "hourly".into(),
@@ -1021,7 +1021,7 @@ mod tests {
             call_id: "c2".into(),
             breakdown: tokens(2000),
             recorded_at: now,
-        }), &vec![]);
+        }));
 
         // Should be allowed because old entry is outside window
         let cmd = BudgetCommand::Reserve {
@@ -1153,7 +1153,7 @@ mod tests {
                 ("completion_tokens".into(), 100),
             ]),
             recorded_at: now,
-        }), &vec![]);
+        }));
 
         // Reserve with large prompt but small completion — should pass
         let cmd = BudgetCommand::Reserve {

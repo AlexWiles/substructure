@@ -182,6 +182,12 @@ impl RuntimeState {
                                         },
                                     );
                                 }));
+                            // Wire up strategy transport (local execution)
+                            ctx.strategy_transport = Some(Arc::new(
+                                super::session::strategy::LocalStrategyTransport {
+                                    runtime: runtime_ref.clone(),
+                                },
+                            ));
                             // Wire up sub-agent spawning
                             let runtime = runtime_ref.clone();
                             ctx.spawn_sub_agent = Some(Arc::new(move |params| {
@@ -576,10 +582,6 @@ fn build_session_context(
         );
     });
 
-    let strategy = agent.map(|a| {
-        Arc::from(super::session::strategy::resolve_strategy(&a.strategy))
-    });
-
     SessionContext {
         mcp_tools,
         all_tools,
@@ -595,6 +597,6 @@ fn build_session_context(
         send_to_session: None,
         spawn_sub_agent: None,
         tool_result_max_bytes,
-        strategy,
+        strategy_transport: None,
     }
 }

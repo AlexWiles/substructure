@@ -1,14 +1,18 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use ractor::ActorRef;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::runtime::config::{AgentConfig, StrategyConfig};
 use crate::runtime::llm::{LlmRequest, LlmTool};
 use crate::runtime::message::{Message, Role, ToolCall};
+use crate::runtime::session::command::CommandPayload;
 use crate::runtime::session::state::ToolResult;
 use crate::runtime::session::types::{Artifact, Part};
+use crate::runtime::span::SpanContext;
+use crate::runtime::types::RuntimeMessage;
 
 // ---------------------------------------------------------------------------
 // Strategy trait
@@ -89,15 +93,18 @@ pub enum StrategyAction {
 // Strategy context — curated view of runtime state for decisions
 // ---------------------------------------------------------------------------
 
-pub struct StrategyCtx<'a> {
+/// Serializable snapshot of runtime state provided to the strategy.
+/// Fully owned — can cross process/language boundaries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyCtx {
     pub session_id: Uuid,
     pub stream: bool,
-    pub agent: &'a AgentConfig,
-    pub all_tools: &'a Option<Vec<LlmTool>>,
-    pub token_usage: &'a BTreeMap<String, u64>,
+    pub agent: AgentConfig,
+    pub all_tools: Option<Vec<LlmTool>>,
+    pub token_usage: BTreeMap<String, u64>,
     pub has_inflight_tools: bool,
     pub has_pending_llm: bool,
-    pub failed_llm_calls: Vec<&'a str>,
+    pub failed_llm_calls: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -144,7 +151,7 @@ impl DefaultStrategy {
 
     /// Build an LLM request from the opaque strategy state.
     fn build_llm_request(state: &serde_json::Value, ctx: &StrategyCtx) -> Option<LlmRequest> {
-        let agent = ctx.agent;
+        let agent = &ctx.agent;
 
         // System prompt as first message
         let mut messages = vec![Message {
@@ -272,6 +279,55 @@ impl Strategy for DefaultStrategy {
                     .collect()
             })
             .unwrap_or_default()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Strategy transport — abstracts local vs remote strategy execution
+// ---------------------------------------------------------------------------
+
+/// Serializable request sent to a strategy executor (local or remote).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyDispatch {
+    pub session_id: Uuid,
+    pub decision_id: String,
+    pub trigger: DecisionTrigger,
+    pub strategy_state: serde_json::Value,
+    pub ctx: StrategyCtx,
+    pub span: SpanContext,
+}
+
+/// Transport abstraction for strategy execution.
+///
+/// The session aggregate calls `dispatch()` and returns — fire-and-forget.
+/// The transport handles execution and delivers the result back via
+/// `RuntimeMessage::DeliverToSession`.
+pub trait StrategyTransport: Send + Sync {
+    fn dispatch(&self, request: StrategyDispatch);
+}
+
+/// Executes strategies in-process and delivers results back via the runtime actor.
+pub struct LocalStrategyTransport {
+    pub runtime: ActorRef<RuntimeMessage>,
+}
+
+impl StrategyTransport for LocalStrategyTransport {
+    fn dispatch(&self, request: StrategyDispatch) {
+        let strategy = resolve_strategy(&request.ctx.agent.strategy);
+        let decision = strategy.decide(
+            &request.trigger,
+            &request.strategy_state,
+            &request.ctx,
+        );
+        let _ = self.runtime.send_message(RuntimeMessage::DeliverToSession {
+            session_id: request.session_id,
+            payload: CommandPayload::SubmitStrategyDecision {
+                decision_id: request.decision_id,
+                actions: decision.actions,
+                state: decision.state,
+            },
+            span: request.span,
+        });
     }
 }
 

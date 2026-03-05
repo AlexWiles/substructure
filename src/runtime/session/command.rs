@@ -968,7 +968,6 @@ mod tests {
     }
 
     fn created_state() -> Aggregate<SessionState> {
-        let ctx = default_ctx();
         let mut state = Aggregate::new(SessionState::new(Uuid::new_v4()));
         state.apply(
             &EventPayload::SessionCreated(Box::new(SessionCreated {
@@ -978,16 +977,14 @@ mod tests {
             })),
             1,
             Utc::now(),
-            &ctx,
         );
         state
     }
 
     fn apply_events(state: &mut Aggregate<SessionState>, emits: Vec<Emit<EventPayload>>) {
-        let ctx = default_ctx();
         let seq = state.last_applied.unwrap_or(0);
         for (s, emit) in (seq + 1..).zip(emits.iter()) {
-            state.apply(&emit.event, s, Utc::now(), &ctx);
+            state.apply(&emit.event, s, Utc::now());
         }
     }
 
@@ -1335,7 +1332,6 @@ mod tests {
         let mut agent = test_agent();
         agent.tool_result_max_bytes = Some(50);
 
-        let ctx = default_ctx();
         let mut state = Aggregate::new(SessionState::new(Uuid::new_v4()));
         state.apply(
             &EventPayload::SessionCreated(Box::new(SessionCreated {
@@ -1345,7 +1341,6 @@ mod tests {
             })),
             1,
             Utc::now(),
-            &ctx,
         );
 
         let call_id = "call-1".to_string();

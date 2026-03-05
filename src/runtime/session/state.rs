@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::strategy::{DecisionTrigger, Strategy, StrategyCtx};
+use super::strategy::{DecisionTrigger, StrategyCtx, StrategyDispatch, StrategyTransport};
 use super::types::{Artifact, CompletionDelivery, ToolCallMeta, ToolCallRequested, ToolHandler};
 use crate::runtime::aggregate::{AggregateState, AggregateStatus, Emit};
 use crate::runtime::budget::{self, BudgetContext, BudgetError};
@@ -70,8 +70,8 @@ pub struct SessionContext {
     pub spawn_sub_agent: Option<SpawnSubAgentFn>,
     /// System-wide max tool result bytes (from SystemConfig).
     pub tool_result_max_bytes: Option<usize>,
-    /// Resolved strategy implementation.
-    pub strategy: Option<Arc<dyn Strategy>>,
+    /// Strategy transport — dispatches strategy decisions (local or remote).
+    pub strategy_transport: Option<Arc<dyn StrategyTransport>>,
 }
 
 impl Default for SessionContext {
@@ -95,7 +95,7 @@ impl Default for SessionContext {
             send_to_session: None,
             spawn_sub_agent: None,
             tool_result_max_bytes: None,
-            strategy: None,
+            strategy_transport: None,
         }
     }
 }
@@ -272,7 +272,7 @@ impl SessionState {
     }
 
     /// Apply a single event payload to the session state.
-    pub fn apply_core(&mut self, payload: &EventPayload, _ctx: &SessionContext) {
+    pub fn apply_core(&mut self, payload: &EventPayload) {
         match payload {
             EventPayload::SessionCreated(payload) => {
                 self.status = SessionStatus::Idle;
@@ -660,21 +660,21 @@ impl SessionState {
     }
 
     /// Build a StrategyCtx from the current state and context.
-    pub(super) fn strategy_ctx<'a>(&'a self, ctx: &'a SessionContext) -> Option<StrategyCtx<'a>> {
+    pub(super) fn strategy_ctx(&self, ctx: &SessionContext) -> Option<StrategyCtx> {
         let agent = self.agent.as_ref()?;
         Some(StrategyCtx {
             session_id: self.session_id,
             stream: ctx.stream,
-            agent,
-            all_tools: &ctx.all_tools,
-            token_usage: &self.token_usage,
+            agent: agent.clone(),
+            all_tools: ctx.all_tools.clone(),
+            token_usage: self.token_usage.clone(),
             has_inflight_tools: self.has_inflight_tools(),
             has_pending_llm: self.has_pending_llm(),
             failed_llm_calls: self
                 .llm_calls
                 .values()
                 .filter(|c| c.status == LlmCallStatus::Failed)
-                .map(|c| c.call_id.as_str())
+                .map(|c| c.call_id.clone())
                 .collect(),
         })
     }
@@ -992,20 +992,25 @@ impl SessionState {
         }
     }
 
-    /// Execute the strategy and return a SubmitStrategyDecision command.
-    fn execute_strategy_decision(
+    /// Dispatch a strategy decision via the transport (fire-and-forget).
+    fn dispatch_strategy_decision(
         &self,
         req: &super::strategy::StrategyDecisionRequested,
         ctx: &SessionContext,
-    ) -> Option<CommandPayload> {
-        let strategy = ctx.strategy.as_ref()?;
-        let strategy_ctx = self.strategy_ctx(ctx)?;
-        let decision = strategy.decide(&req.trigger, &self.strategy_state, &strategy_ctx);
-        Some(CommandPayload::SubmitStrategyDecision {
-            decision_id: req.decision_id.clone(),
-            actions: decision.actions,
-            state: decision.state,
-        })
+        span: &SpanContext,
+    ) {
+        if let (Some(transport), Some(strategy_ctx)) =
+            (&ctx.strategy_transport, self.strategy_ctx(ctx))
+        {
+            transport.dispatch(StrategyDispatch {
+                session_id: self.session_id,
+                decision_id: req.decision_id.clone(),
+                trigger: req.trigger.clone(),
+                strategy_state: self.strategy_state.clone(),
+                ctx: strategy_ctx,
+                span: span.clone(),
+            });
+        }
     }
 }
 
@@ -1025,8 +1030,8 @@ impl AggregateState for SessionState {
         "session"
     }
 
-    fn apply(&mut self, event: &Self::Event, ctx: &Self::Context) {
-        self.apply_core(event, ctx);
+    fn apply(&mut self, event: &Self::Event) {
+        self.apply_core(event);
     }
 
     fn handle_command(
@@ -1080,9 +1085,10 @@ impl AggregateState for SessionState {
                 None
             }
 
-            // --- Strategy executor (returns early) ---
+            // --- Strategy dispatch (fire-and-forget via transport) ---
             EventPayload::StrategyDecisionRequested(req) => {
-                self.execute_strategy_decision(req, ctx)
+                self.dispatch_strategy_decision(req, ctx, span);
+                None
             }
 
             // --- Everything else: detect triggers ---

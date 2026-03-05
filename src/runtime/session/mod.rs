@@ -12,6 +12,7 @@ pub use state::{
     ToolResult,
 };
 pub use strategy::{
-    DecisionTrigger, DefaultStrategy, Strategy, StrategyAction, StrategyCtx,
-    StrategyDecisionCompleted, StrategyDecisionRequested,
+    DecisionTrigger, DefaultStrategy, LocalStrategyTransport, Strategy, StrategyAction,
+    StrategyCtx, StrategyDecisionCompleted, StrategyDecisionRequested, StrategyDispatch,
+    StrategyTransport,
 };
