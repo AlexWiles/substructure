@@ -62,7 +62,6 @@ pub struct SessionContext {
     // Runtime resources for I/O in on_event
     pub llm_provider: Option<Arc<dyn LlmProviderTrait>>,
     pub mcp_clients: Vec<Arc<dyn McpClient>>,
-    pub agents: HashMap<String, AgentConfig>,
     pub client_tools: Vec<LlmTool>,
     pub budget_actor: Option<BudgetActorRef>,
     // Callbacks for side-effects
@@ -89,7 +88,6 @@ impl Default for SessionContext {
             stream: false,
             llm_provider: None,
             mcp_clients: Vec::new(),
-            agents: HashMap::new(),
             client_tools: Vec::new(),
             budget_actor: None,
             notify_chunk: None,

@@ -591,7 +591,6 @@ fn build_session_context(
         stream,
         llm_provider: Some(llm_provider.clone()),
         mcp_clients: mcp_clients.to_vec(),
-        agents: agents.clone(),
         client_tools: Vec::new(),
         budget_actor: budget_ref,
         notify_chunk: Some(notify_chunk),
