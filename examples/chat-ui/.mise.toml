@@ -1,4 +1,0 @@
-[tools]
-node = "24"
-
-"npm:typescript-language-server" = "latest"

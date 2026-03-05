@@ -1,25 +1,17 @@
-use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::extract::connect_info::ConnectInfo;
-use axum::extract::{FromRequestParts, Path, Query, State};
+use axum::extract::{FromRequestParts, Path, State};
 use axum::http::request::Parts;
 use axum::http::StatusCode;
-use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
-use tokio_stream::{Stream, StreamExt};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
-use crate::ag_ui::{
-    observe_session, resume_run, run_existing_session, AgUiError, AgUiEvent, RunAgentInput,
-};
 use crate::runtime::aggregate::AggregateStatus;
 use crate::runtime::auth::{build_auth_resolver, AdminContext, AuthError, AuthResolver};
 use crate::runtime::config::ClientIdentity;
@@ -102,11 +94,6 @@ pub struct CreateSessionResponse {
     pub session_id: String,
 }
 
-#[derive(serde::Deserialize)]
-pub struct ObserveQuery {
-    pub run_id: Option<String>,
-}
-
 #[derive(serde::Deserialize, Default)]
 pub struct ListSessionsQuery {
     /// Repeated query param, e.g. ?status=active&status=idle
@@ -184,8 +171,7 @@ pub async fn start_server(config: SystemConfig, addr: std::net::SocketAddr) -> a
         .route("/agents", get(list_agents))
         .route("/sessions", get(list_sessions).post(create_session))
         .route("/sessions/{session_id}", get(get_session))
-        .route("/sessions/{session_id}/ag-ui", post(run_ag_ui))
-        .route("/sessions/{session_id}/ag-ui/observe", get(observe_ag_ui));
+;
 
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -393,66 +379,14 @@ async fn get_session(
     Ok(Json(SessionSummary::from(summary)))
 }
 
-#[tracing::instrument(skip(auth, state, input), fields(%session_id))]
-async fn run_ag_ui(
-    ClientAuth(auth): ClientAuth,
-    State(state): State<HttpState>,
-    Path(session_id): Path<Uuid>,
-    Json(input): Json<RunAgentInput>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
-    ensure_session_running(&state.runtime, session_id, &auth).await?;
-
-    let stream: Pin<Box<dyn Stream<Item = AgUiEvent> + Send>> = if input.resume.is_some() {
-        Box::pin(resume_run(&state.runtime, session_id, auth, input).await?)
-    } else {
-        match run_existing_session(&state.runtime, session_id, auth.clone(), input).await {
-            Ok(stream) => Box::pin(stream),
-            Err(AgUiError::NoUserMessage) => {
-                let run_id = Uuid::new_v4().to_string();
-                Box::pin(observe_session(&state.runtime, session_id, auth, run_id).await?)
-            }
-            Err(err) => return Err(err.into()),
-        }
-    };
-
-    Ok(sse_from_ag_ui(stream))
-}
-
-async fn observe_ag_ui(
-    ClientAuth(auth): ClientAuth,
-    State(state): State<HttpState>,
-    Path(session_id): Path<Uuid>,
-    Query(query): Query<ObserveQuery>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
-    ensure_session_running(&state.runtime, session_id, &auth).await?;
-
-    let run_id = query.run_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-    let stream = observe_session(&state.runtime, session_id, auth, run_id).await?;
-
-    Ok(sse_from_ag_ui(Box::pin(stream)))
-}
-
 // ---------------------------------------------------------------------------
 // Shared
 // ---------------------------------------------------------------------------
-
-fn sse_from_ag_ui(
-    stream: Pin<Box<dyn Stream<Item = AgUiEvent> + Send>>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let mapped = stream.map(|event| {
-        let json = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string());
-        Ok(Event::default().data(json))
-    });
-
-    Sse::new(mapped).keep_alive(KeepAlive::new().interval(Duration::from_secs(20)))
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("runtime error: {0}")]
     Runtime(#[from] RuntimeError),
-    #[error("ag-ui error: {0}")]
-    AgUi(#[from] AgUiError),
     #[error("auth error: {0}")]
     Auth(#[from] AuthError),
 }

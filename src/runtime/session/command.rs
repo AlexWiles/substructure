@@ -127,10 +127,6 @@ pub enum CommandPayload {
     UpdateStrategyState {
         state: Option<String>,
     },
-    SyncConversation {
-        messages: Vec<Message>,
-        stream: bool,
-    },
     TriggerStrategyDecision {
         trigger: DecisionTrigger,
     },
@@ -156,8 +152,6 @@ pub enum SessionError {
     SessionInterrupted,
     #[error("session is busy")]
     SessionBusy,
-    #[error("conversation has diverged")]
-    ConversationDiverged,
 }
 
 // ---------------------------------------------------------------------------
@@ -589,9 +583,6 @@ impl SessionState {
                 }
                 Ok(events)
             }
-            CommandPayload::SyncConversation { messages, stream } => {
-                self.handle_sync_conversation(messages, stream, ctx)
-            }
             CommandPayload::CancelSession => Ok(vec![EventPayload::SessionCancelled.into()]),
             CommandPayload::MarkDone { artifacts } => {
                 Ok(vec![
@@ -780,136 +771,6 @@ impl SessionState {
         Ok(vec![])
     }
 
-    // -----------------------------------------------------------------------
-    // SyncConversation — diff incoming history and emit events for the delta
-    // -----------------------------------------------------------------------
-
-    fn handle_sync_conversation(
-        &self,
-        incoming: Vec<Message>,
-        stream: bool,
-        ctx: &SessionContext,
-    ) -> Result<Vec<Emit<EventPayload>>, SessionError> {
-        let state = self;
-
-        // Verify prefix matches current state
-        let current_messages = state.messages();
-        let prefix_len = current_messages.len();
-        if incoming.len() < prefix_len {
-            return Err(SessionError::ConversationDiverged);
-        }
-        for (existing, incoming_msg) in current_messages.iter().zip(incoming.iter()) {
-            if !messages_match(existing, incoming_msg) {
-                return Err(SessionError::ConversationDiverged);
-            }
-        }
-
-        // Delta = incoming messages beyond what we already have
-        let delta = &incoming[prefix_len..];
-        if delta.is_empty() {
-            return Ok(vec![]);
-        }
-
-        let mut events = Vec::new();
-        for msg in delta {
-            match msg.role {
-                Role::User => {
-                    events.push(
-                        EventPayload::MessageUser(MessageUser {
-                            message: msg.clone(),
-                            stream,
-                        })
-                        .into(),
-                    );
-                }
-                Role::Assistant => {
-                    let call_id = new_call_id();
-                    events.push(
-                        EventPayload::MessageAssistant(MessageAssistant {
-                            call_id: call_id.clone(),
-                            message: msg.clone(),
-                        })
-                        .into(),
-                    );
-                    for tc in &msg.tool_calls {
-                        let meta = self.tool_call_meta(&tc.name, &tc.id, &ctx.mcp_tools);
-                        events.push(
-                            Emit::new(EventPayload::ToolCallRequested(ToolCallRequested {
-                                tool_call_id: tc.id.clone(),
-                                name: tc.name.clone(),
-                                arguments: tc.arguments.clone(),
-                                deadline: self.tool_deadline(meta.as_ref()),
-                                handler: Default::default(),
-                                meta,
-                            }))
-                            .with("tool.name", &tc.name)
-                            .label(&tc.name),
-                        );
-                    }
-                }
-                Role::Tool => {
-                    if let Some(ref tc_id) = msg.tool_call_id {
-                        let name = state
-                            .tool_calls
-                            .get(tc_id)
-                            .map(|tc| tc.name.clone())
-                            .or_else(|| {
-                                delta
-                                    .iter()
-                                    .flat_map(|m| m.tool_calls.iter())
-                                    .find(|t| t.id == *tc_id)
-                                    .map(|t| t.name.clone())
-                            })
-                            .unwrap_or_default();
-
-                        events.push(
-                            Emit::new(EventPayload::ToolCallCompleted(ToolCallCompleted {
-                                tool_call_id: tc_id.clone(),
-                                name: name.clone(),
-                                result: msg.content.clone().unwrap_or_default(),
-                            }))
-                            .with("tool.name", &name)
-                            .label(name),
-                        );
-                    }
-                    events.push(
-                        EventPayload::MessageTool(MessageTool {
-                            message: msg.clone(),
-                        })
-                        .into(),
-                    );
-                }
-                Role::System => {}
-            }
-        }
-
-        Ok(events)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Compare two messages for structural equality (role, content, tool_call_id,
-/// and tool call IDs). Used by SyncConversation to verify the prefix.
-fn messages_match(a: &Message, b: &Message) -> bool {
-    if a.role != b.role {
-        return false;
-    }
-    if a.content != b.content {
-        return false;
-    }
-    if a.tool_call_id != b.tool_call_id {
-        return false;
-    }
-    if a.tool_calls.len() != b.tool_calls.len() {
-        return false;
-    }
-    a.tool_calls
-        .iter()
-        .zip(b.tool_calls.iter())
-        .all(|(ta, tb)| ta.id == tb.id && ta.name == tb.name)
 }
 
 // ---------------------------------------------------------------------------

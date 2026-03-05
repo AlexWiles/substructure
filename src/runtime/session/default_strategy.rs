@@ -151,16 +151,4 @@ impl Strategy for DefaultStrategy {
 
         StrategyDecision { actions, state }
     }
-
-    fn messages(&self, state: &serde_json::Value) -> Vec<Message> {
-        state
-            .get("messages")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| serde_json::from_value::<Message>(v.clone()).ok())
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
 }

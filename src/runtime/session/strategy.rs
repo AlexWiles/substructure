@@ -30,9 +30,6 @@ pub trait Strategy: Send + Sync + fmt::Debug {
         state: &serde_json::Value,
         ctx: &StrategyCtx,
     ) -> StrategyDecision;
-
-    /// Extract conversation messages from opaque strategy state.
-    fn messages(&self, state: &serde_json::Value) -> Vec<Message>;
 }
 
 /// The result of a strategy decision: actions to execute and updated state.

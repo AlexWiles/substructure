@@ -456,19 +456,6 @@ impl SessionState {
         }
     }
 
-    /// Extract conversation messages from strategy state.
-    pub fn messages(&self) -> Vec<Message> {
-        self.strategy_state
-            .get("messages")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| serde_json::from_value::<Message>(v.clone()).ok())
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
     /// True when any tool call is still pending or retrying.
     pub fn has_inflight_tools(&self) -> bool {
         self.tool_calls.values().any(|tc| {
