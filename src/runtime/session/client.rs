@@ -3,7 +3,7 @@ use std::sync::Arc;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use uuid::Uuid;
 
-use super::state::SessionState;
+use super::state::{SessionContext, SessionState};
 use crate::runtime::aggregate::actor::{AggregateError, AggregateMessage};
 use crate::runtime::aggregate::{Aggregate, DomainEvent};
 use crate::runtime::config::ClientIdentity;
@@ -156,10 +156,11 @@ impl Actor for SessionClientActor {
                 }
             }
             SessionMessage::Events(typed_events) => {
+                let ctx = SessionContext::default();
                 for typed in &typed_events {
                     state
                         .core
-                        .apply(&typed.payload, typed.sequence, typed.occurred_at);
+                        .apply(&typed.payload, typed.sequence, typed.occurred_at, &ctx);
                     if let Some(f) = &state.on_event {
                         f(&SessionUpdate::Event(Box::new(typed.as_ref().clone())));
                     }

@@ -792,11 +792,13 @@ mod tests {
             derived: None,
             metadata: Default::default(),
         };
+        let ctx = crate::runtime::session::SessionContext::default();
         let mut snapshot = Aggregate::new(SessionState::new(session_id));
         snapshot.apply(
             &domain_event.payload,
             domain_event.sequence,
             domain_event.occurred_at,
+            &ctx,
         );
         let now = chrono::Utc::now();
         (vec![domain_event.into_raw(now, now)], snapshot)

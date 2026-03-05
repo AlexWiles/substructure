@@ -5,37 +5,41 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::runtime::config::{AgentConfig, StrategyConfig};
-use crate::runtime::event::EventPayload;
 use crate::runtime::llm::{LlmRequest, LlmTool};
 use crate::runtime::message::{Message, Role, ToolCall};
+use crate::runtime::session::state::ToolResult;
 use crate::runtime::session::types::{Artifact, Part};
 
 // ---------------------------------------------------------------------------
 // Strategy trait
 // ---------------------------------------------------------------------------
 
-/// A strategy is a deterministic decision-maker for a session.
+/// A strategy is a pure decision-maker for a session.
 ///
-/// The runtime handles execution mechanics (I/O, retries, timeouts).
-/// The strategy handles business logic: what to do after each event.
+/// The runtime handles execution mechanics (I/O, retries, timeouts) and stores
+/// the strategy's opaque state. The strategy handles business logic: given a
+/// trigger and its current state, produce actions and an updated state.
 ///
-/// Two methods:
-/// - `apply`: maintain opaque state from events
-/// - `decide`: given a trigger and current state, produce actions
+/// In the future, `decide` becomes an RPC call to a remote client.
 pub trait Strategy: Send + Sync + fmt::Debug {
-    /// Update opaque strategy state in response to an event.
-    fn apply(&self, event: &EventPayload, state: &mut serde_json::Value);
-
-    /// Make a decision given a trigger, current state, and runtime context.
+    /// Make a decision given a trigger, current opaque state, and runtime context.
+    /// Returns actions for the runtime to execute and the updated opaque state.
     fn decide(
         &self,
         trigger: &DecisionTrigger,
         state: &serde_json::Value,
         ctx: &StrategyCtx,
-    ) -> Vec<StrategyAction>;
+    ) -> StrategyDecision;
 
     /// Extract conversation messages from opaque strategy state.
     fn messages(&self, state: &serde_json::Value) -> Vec<Message>;
+}
+
+/// The result of a strategy decision: actions to execute and updated state.
+#[derive(Debug, Clone)]
+pub struct StrategyDecision {
+    pub actions: Vec<StrategyAction>,
+    pub state: serde_json::Value,
 }
 
 // ---------------------------------------------------------------------------
@@ -47,22 +51,21 @@ pub trait Strategy: Send + Sync + fmt::Debug {
 pub enum DecisionTrigger {
     UserMessage {
         stream: bool,
+        message: Message,
     },
     LlmCompleted {
         call_id: String,
-        content: Option<String>,
-        tool_calls: Vec<ToolCall>,
+        message: Message,
+        /// True when finish_reason was "length" (output truncated).
+        truncated: bool,
     },
     LlmFailed {
         call_id: String,
         error: String,
     },
-    ToolFailed {
-        tool_call_id: String,
-        name: String,
-        error: String,
+    ToolResolved {
+        result: ToolResult,
     },
-    AllToolsResolved,
     InterruptResumed {
         interrupt_id: String,
     },
@@ -110,6 +113,7 @@ pub struct StrategyDecisionRequested {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrategyDecisionCompleted {
     pub decision_id: String,
+    pub state: serde_json::Value,
 }
 
 // ---------------------------------------------------------------------------
@@ -119,159 +123,27 @@ pub struct StrategyDecisionCompleted {
 #[derive(Debug)]
 pub struct DefaultStrategy;
 
-impl Strategy for DefaultStrategy {
-    fn apply(&self, event: &EventPayload, state: &mut serde_json::Value) {
-        // Ensure state is an object with a messages array
+impl DefaultStrategy {
+    /// Ensure the opaque state is an object with a messages array.
+    fn ensure_state(state: &mut serde_json::Value) {
         if !state.is_object() {
             *state = serde_json::json!({"messages": []});
         }
         let obj = state.as_object_mut().unwrap();
         obj.entry("messages")
             .or_insert_with(|| serde_json::json!([]));
-        let messages = obj
-            .get_mut("messages")
-            .unwrap()
-            .as_array_mut()
-            .unwrap();
+    }
 
-        match event {
-            EventPayload::MessageUser(p) => {
-                if let Ok(v) = serde_json::to_value(&p.message) {
-                    messages.push(v);
-                }
-            }
-            EventPayload::MessageAssistant(p) => {
-                if let Ok(v) = serde_json::to_value(&p.message) {
-                    messages.push(v);
-                }
-            }
-            EventPayload::MessageTool(p) => {
-                if let Ok(v) = serde_json::to_value(&p.message) {
-                    messages.push(v);
-                }
-            }
-            EventPayload::StrategyStateChanged(p) => {
-                let obj = state.as_object_mut().unwrap();
-                match &p.state {
-                    Some(s) => {
-                        obj.insert(
-                            "user_state".to_string(),
-                            serde_json::Value::String(s.clone()),
-                        );
-                    }
-                    None => {
-                        obj.remove("user_state");
-                    }
-                }
-            }
-            _ => {}
+    /// Push a message into the opaque state's messages array.
+    fn push_message(state: &mut serde_json::Value, message: &Message) {
+        Self::ensure_state(state);
+        if let Ok(v) = serde_json::to_value(message) {
+            state["messages"].as_array_mut().unwrap().push(v);
         }
     }
 
-    fn messages(&self, state: &serde_json::Value) -> Vec<Message> {
-        state
-            .get("messages")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| serde_json::from_value::<Message>(v.clone()).ok())
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    fn decide(
-        &self,
-        trigger: &DecisionTrigger,
-        state: &serde_json::Value,
-        ctx: &StrategyCtx,
-    ) -> Vec<StrategyAction> {
-        match trigger {
-            DecisionTrigger::UserMessage { stream } => {
-                match self.build_llm_request(state, ctx, None) {
-                    Some(request) => vec![StrategyAction::RequestLlm {
-                        request,
-                        stream: *stream,
-                    }],
-                    None => vec![],
-                }
-            }
-            DecisionTrigger::LlmCompleted {
-                content,
-                tool_calls,
-                ..
-            } => {
-                if tool_calls.is_empty() {
-                    // No tool calls → done
-                    let artifacts = match content {
-                        Some(ref text) if !text.is_empty() => vec![Artifact {
-                            name: None,
-                            description: None,
-                            parts: vec![Part::Text { text: text.clone() }],
-                        }],
-                        _ => vec![],
-                    };
-                    vec![StrategyAction::Done { artifacts }]
-                } else {
-                    // Has tool calls → request them
-                    vec![StrategyAction::RequestToolCalls {
-                        tool_calls: tool_calls.clone(),
-                    }]
-                }
-            }
-            DecisionTrigger::LlmFailed { error, .. } => {
-                // Retries exhausted — give up
-                vec![StrategyAction::Done {
-                    artifacts: vec![Artifact {
-                        name: None,
-                        description: None,
-                        parts: vec![Part::Text {
-                            text: format!("Error: {error}"),
-                        }],
-                    }],
-                }]
-            }
-            DecisionTrigger::ToolFailed { .. } => {
-                // Retries exhausted — wait for all tools to resolve, then retry LLM
-                vec![]
-            }
-            DecisionTrigger::AllToolsResolved => {
-                match self.build_llm_request(state, ctx, None) {
-                    Some(request) => vec![StrategyAction::RequestLlm {
-                        request,
-                        stream: ctx.stream,
-                    }],
-                    None => vec![],
-                }
-            }
-            DecisionTrigger::InterruptResumed { .. } => {
-                match self.build_llm_request(state, ctx, None) {
-                    Some(request) => vec![StrategyAction::RequestLlm {
-                        request,
-                        stream: ctx.stream,
-                    }],
-                    None => vec![],
-                }
-            }
-            DecisionTrigger::Stall => match self.build_llm_request(state, ctx, None) {
-                Some(request) => vec![StrategyAction::RequestLlm {
-                    request,
-                    stream: ctx.stream,
-                }],
-                None => vec![],
-            },
-        }
-    }
-}
-
-impl DefaultStrategy {
     /// Build an LLM request from the opaque strategy state.
-    fn build_llm_request(
-        &self,
-        state: &serde_json::Value,
-        ctx: &StrategyCtx,
-        _overrides: Option<&crate::runtime::config::LlmRequestParams>,
-    ) -> Option<LlmRequest> {
+    fn build_llm_request(state: &serde_json::Value, ctx: &StrategyCtx) -> Option<LlmRequest> {
         let agent = ctx.agent;
 
         // System prompt as first message
@@ -303,6 +175,103 @@ impl DefaultStrategy {
             temperature,
             max_completion_tokens,
         })
+    }
+
+    /// Build an LLM request action, returning empty actions if request cannot be built.
+    fn request_llm(state: &serde_json::Value, ctx: &StrategyCtx, stream: bool) -> Vec<StrategyAction> {
+        match Self::build_llm_request(state, ctx) {
+            Some(request) => vec![StrategyAction::RequestLlm { request, stream }],
+            None => vec![],
+        }
+    }
+}
+
+impl Strategy for DefaultStrategy {
+    fn decide(
+        &self,
+        trigger: &DecisionTrigger,
+        state: &serde_json::Value,
+        ctx: &StrategyCtx,
+    ) -> StrategyDecision {
+        let mut state = state.clone();
+
+        let actions = match trigger {
+            DecisionTrigger::UserMessage { stream, message } => {
+                Self::push_message(&mut state, message);
+                Self::request_llm(&state, ctx, *stream)
+            }
+            DecisionTrigger::LlmCompleted {
+                message,
+                truncated,
+                ..
+            } => {
+                Self::push_message(&mut state, message);
+                if *truncated {
+                    Self::request_llm(&state, ctx, ctx.stream)
+                } else if message.tool_calls.is_empty() {
+                    let artifacts = match &message.content {
+                        Some(ref text) if !text.is_empty() => vec![Artifact {
+                            name: None,
+                            description: None,
+                            parts: vec![Part::Text { text: text.clone() }],
+                        }],
+                        _ => vec![],
+                    };
+                    vec![StrategyAction::Done { artifacts }]
+                } else {
+                    vec![StrategyAction::RequestToolCalls {
+                        tool_calls: message.tool_calls.clone(),
+                    }]
+                }
+            }
+            DecisionTrigger::LlmFailed { error, .. } => {
+                vec![StrategyAction::Done {
+                    artifacts: vec![Artifact {
+                        name: None,
+                        description: None,
+                        parts: vec![Part::Text {
+                            text: format!("Error: {error}"),
+                        }],
+                    }],
+                }]
+            }
+            DecisionTrigger::ToolResolved { result } => {
+                // Add tool result message to state
+                let msg = Message {
+                    role: Role::Tool,
+                    content: Some(result.content.clone()),
+                    tool_calls: vec![],
+                    tool_call_id: Some(result.tool_call_id.clone()),
+                    call_id: None,
+                    usage: None,
+                };
+                Self::push_message(&mut state, &msg);
+                // Only request next LLM call when all tools are done
+                if !ctx.has_inflight_tools {
+                    Self::request_llm(&state, ctx, ctx.stream)
+                } else {
+                    vec![]
+                }
+            }
+            DecisionTrigger::InterruptResumed { .. } => {
+                Self::request_llm(&state, ctx, ctx.stream)
+            }
+            DecisionTrigger::Stall => Self::request_llm(&state, ctx, ctx.stream),
+        };
+
+        StrategyDecision { actions, state }
+    }
+
+    fn messages(&self, state: &serde_json::Value) -> Vec<Message> {
+        state
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| serde_json::from_value::<Message>(v.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 

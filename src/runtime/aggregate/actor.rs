@@ -206,6 +206,7 @@ async fn execute<R: AggregateState>(
         span,
         occurred_at,
         &state.tenant_id,
+        &state.context,
     );
 
     let new_version = state.aggregate.stream_version;

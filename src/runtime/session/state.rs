@@ -14,7 +14,7 @@ use crate::runtime::config::{AgentConfig, ClientIdentity, ExhaustionStrategy, Re
 use crate::runtime::event::EventPayload;
 use crate::runtime::llm::{LlmCallRequested, LlmRequest, LlmResponse, LlmTool};
 use crate::runtime::mcp::{Content, McpClient};
-use crate::runtime::message::Message;
+use crate::runtime::message::{Message, Role};
 use crate::runtime::span::SpanContext;
 use async_trait::async_trait;
 
@@ -70,6 +70,8 @@ pub struct SessionContext {
     pub spawn_sub_agent: Option<SpawnSubAgentFn>,
     /// System-wide max tool result bytes (from SystemConfig).
     pub tool_result_max_bytes: Option<usize>,
+    /// Resolved strategy implementation.
+    pub strategy: Option<Arc<dyn Strategy>>,
 }
 
 impl Default for SessionContext {
@@ -93,6 +95,7 @@ impl Default for SessionContext {
             send_to_session: None,
             spawn_sub_agent: None,
             tool_result_max_bytes: None,
+            strategy: None,
         }
     }
 }
@@ -195,6 +198,11 @@ pub struct ToolCallState {
     /// Original arguments, stored for retries and crash recovery.
     #[serde(default)]
     pub arguments: String,
+    /// Result content, stored for enriching AllToolsResolved trigger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    #[serde(default)]
+    pub is_error: bool,
 }
 
 impl ToolCallState {
@@ -222,7 +230,7 @@ pub struct DerivedState {
 // SessionState — the reducer state for session aggregates
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionState {
     pub session_id: Uuid,
     pub status: SessionStatus,
@@ -245,28 +253,6 @@ pub struct SessionState {
     // Call lifecycle tracking
     pub llm_calls: HashMap<String, LlmCallState>,
     pub tool_calls: HashMap<String, ToolCallState>,
-
-    /// Resolved strategy implementation — not persisted, rebuilt from config.
-    #[serde(skip)]
-    pub(super) resolved_strategy: Option<Arc<dyn Strategy>>,
-}
-
-impl Clone for SessionState {
-    fn clone(&self) -> Self {
-        SessionState {
-            session_id: self.session_id,
-            status: self.status.clone(),
-            agent: self.agent.clone(),
-            auth: self.auth.clone(),
-            token_usage: self.token_usage.clone(),
-            strategy_state: self.strategy_state.clone(),
-            on_done: self.on_done.clone(),
-            artifacts: self.artifacts.clone(),
-            llm_calls: self.llm_calls.clone(),
-            tool_calls: self.tool_calls.clone(),
-            resolved_strategy: self.resolved_strategy.clone(),
-        }
-    }
 }
 
 impl SessionState {
@@ -282,22 +268,17 @@ impl SessionState {
             artifacts: vec![],
             llm_calls: HashMap::new(),
             tool_calls: HashMap::new(),
-            resolved_strategy: None,
         }
     }
 
     /// Apply a single event payload to the session state.
-    pub fn apply_core(&mut self, payload: &EventPayload) {
+    pub fn apply_core(&mut self, payload: &EventPayload, _ctx: &SessionContext) {
         match payload {
             EventPayload::SessionCreated(payload) => {
                 self.status = SessionStatus::Idle;
                 self.agent = Some(payload.agent.clone());
                 self.auth = Some(payload.auth.clone());
                 self.on_done = payload.on_done.clone();
-                // Resolve strategy from agent config
-                self.resolved_strategy = Some(Arc::from(super::strategy::resolve_strategy(
-                    &payload.agent.strategy,
-                )));
             }
             EventPayload::MessageUser(_) => {
                 self.status = SessionStatus::Idle;
@@ -374,6 +355,8 @@ impl SessionState {
                             meta: payload.meta.clone(),
                             handler: payload.handler.clone(),
                             arguments: payload.arguments.clone(),
+                            result: None,
+                            is_error: false,
                         },
                     );
                 }
@@ -391,6 +374,8 @@ impl SessionState {
             EventPayload::ToolCallCompleted(payload) => {
                 if let Some(tc) = self.tool_calls.get_mut(&payload.tool_call_id) {
                     tc.status = ToolCallStatus::Completed;
+                    tc.result = Some(payload.result.clone());
+                    tc.is_error = false;
                 }
                 if !self.has_inflight_tools() {
                     self.status = SessionStatus::Idle;
@@ -411,6 +396,8 @@ impl SessionState {
                     } else {
                         tc.status = ToolCallStatus::Failed;
                         tc.retry.next_at = None;
+                        tc.result = Some(payload.error.clone());
+                        tc.is_error = true;
                     }
                 }
                 if !self.has_inflight_tools() {
@@ -432,15 +419,15 @@ impl SessionState {
                 self.status = SessionStatus::Active;
             }
             EventPayload::StrategyStateChanged(_) => {
-                // Handled by strategy.apply() below
+                // Legacy: state updates now flow through StrategyDecisionCompleted.
             }
             EventPayload::StrategyDecisionRequested(_) => {
                 // Keep Active while decision is pending
                 self.status = SessionStatus::Active;
             }
-            EventPayload::StrategyDecisionCompleted(_) => {
-                // Actions from the decision are emitted as separate events
-                // and will update status accordingly.
+            EventPayload::StrategyDecisionCompleted(p) => {
+                // Persist the strategy's updated opaque state.
+                self.strategy_state = p.state.clone();
             }
             EventPayload::SessionCancelled => {
                 self.status = SessionStatus::Done;
@@ -455,10 +442,6 @@ impl SessionState {
             }
         }
 
-        // Let the strategy maintain its opaque state
-        if let Some(ref strategy) = self.resolved_strategy {
-            strategy.apply(payload, &mut self.strategy_state);
-        }
     }
 
     // -----------------------------------------------------------------------
@@ -474,20 +457,15 @@ impl SessionState {
 
     /// Extract conversation messages from strategy state.
     pub fn messages(&self) -> Vec<Message> {
-        if let Some(ref strategy) = self.resolved_strategy {
-            strategy.messages(&self.strategy_state)
-        } else {
-            // Fallback for deserialized snapshots without a resolved strategy
-            self.strategy_state
-                .get("messages")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| serde_json::from_value::<Message>(v.clone()).ok())
-                        .collect()
-                })
-                .unwrap_or_default()
-        }
+        self.strategy_state
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| serde_json::from_value::<Message>(v.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// True when any tool call is still pending or retrying.
@@ -937,16 +915,37 @@ impl SessionState {
         })
     }
 
+    /// Build a ToolResult from a resolved ToolCallState.
+    fn tool_result(tc: &ToolCallState) -> ToolResult {
+        ToolResult {
+            tool_call_id: tc.tool_call_id.clone(),
+            name: tc.name.clone(),
+            content: tc.result.clone().unwrap_or_default(),
+            is_error: tc.is_error,
+        }
+    }
+
     /// Detect whether an event should trigger a strategy decision.
     fn detect_trigger(&self, event: &EventPayload) -> Option<DecisionTrigger> {
         match event {
-            EventPayload::MessageUser(p) => Some(DecisionTrigger::UserMessage { stream: p.stream }),
+            EventPayload::MessageUser(p) => Some(DecisionTrigger::UserMessage {
+                stream: p.stream,
+                message: p.message.clone(),
+            }),
             EventPayload::LlmCallCompleted(p) => {
-                let (content, tool_calls, _usage) = p.response.as_parts();
+                let truncated = p.response.finish_reason() == Some("length");
+                let message = Message {
+                    role: Role::Assistant,
+                    content: p.response.content(),
+                    tool_calls: p.response.tool_calls(),
+                    tool_call_id: None,
+                    call_id: Some(p.call_id.clone()),
+                    usage: p.response.usage().cloned(),
+                };
                 Some(DecisionTrigger::LlmCompleted {
                     call_id: p.call_id.clone(),
-                    content,
-                    tool_calls,
+                    message,
+                    truncated,
                 })
             }
             EventPayload::LlmCallErrored(p) => {
@@ -972,22 +971,19 @@ impl SessionState {
                     .get(&p.tool_call_id)
                     .is_some_and(|tc| tc.status == ToolCallStatus::Failed);
                 if exhausted {
-                    Some(DecisionTrigger::ToolFailed {
-                        tool_call_id: p.tool_call_id.clone(),
-                        name: p.name.clone(),
-                        error: p.error.clone(),
+                    let tc = self.tool_calls.get(&p.tool_call_id)?;
+                    Some(DecisionTrigger::ToolResolved {
+                        result: Self::tool_result(tc),
                     })
                 } else {
                     None
                 }
             }
-            EventPayload::ToolCallCompleted(_) => {
-                // Check if all tool calls are resolved (lifecycle-driven, not message-driven)
-                if !self.has_inflight_tools() && self.all_tools_resolved() {
-                    Some(DecisionTrigger::AllToolsResolved)
-                } else {
-                    None
-                }
+            EventPayload::ToolCallCompleted(p) => {
+                let tc = self.tool_calls.get(&p.tool_call_id)?;
+                Some(DecisionTrigger::ToolResolved {
+                    result: Self::tool_result(tc),
+                })
             }
             EventPayload::InterruptResumed(p) => Some(DecisionTrigger::InterruptResumed {
                 interrupt_id: p.interrupt_id.clone(),
@@ -1002,12 +998,13 @@ impl SessionState {
         req: &super::strategy::StrategyDecisionRequested,
         ctx: &SessionContext,
     ) -> Option<CommandPayload> {
-        let strategy = self.resolved_strategy.as_ref()?;
+        let strategy = ctx.strategy.as_ref()?;
         let strategy_ctx = self.strategy_ctx(ctx)?;
-        let actions = strategy.decide(&req.trigger, &self.strategy_state, &strategy_ctx);
+        let decision = strategy.decide(&req.trigger, &self.strategy_state, &strategy_ctx);
         Some(CommandPayload::SubmitStrategyDecision {
             decision_id: req.decision_id.clone(),
-            actions,
+            actions: decision.actions,
+            state: decision.state,
         })
     }
 }
@@ -1028,8 +1025,8 @@ impl AggregateState for SessionState {
         "session"
     }
 
-    fn apply(&mut self, event: &Self::Event) {
-        self.apply_core(event);
+    fn apply(&mut self, event: &Self::Event, ctx: &Self::Context) {
+        self.apply_core(event, ctx);
     }
 
     fn handle_command(

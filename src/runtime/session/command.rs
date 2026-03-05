@@ -135,6 +135,7 @@ pub enum CommandPayload {
     SubmitStrategyDecision {
         decision_id: String,
         actions: Vec<StrategyAction>,
+        state: serde_json::Value,
     },
     CancelSession,
     MarkDone {
@@ -322,12 +323,10 @@ impl SessionState {
                 match state.llm_calls.get(&call_id).map(|c| &c.status) {
                     // Pending call — complete it
                     Some(&LlmCallStatus::Pending) => {
-                        let (content, tool_calls, usage) = response.as_parts();
-
-                        // Extract metadata before moving response
-                        let model = match &response {
-                            LlmResponse::OpenAi(r) => r.model.clone(),
-                        };
+                        let content = response.content();
+                        let tool_calls = response.tool_calls();
+                        let usage = response.usage().cloned();
+                        let model = response.model().to_string();
 
                         let mut completed =
                             Emit::new(EventPayload::LlmCallCompleted(LlmCallCompleted {
@@ -351,10 +350,10 @@ impl SessionState {
                                 message: Message {
                                     role: Role::Assistant,
                                     content,
-                                    tool_calls: tool_calls.clone(),
+                                    tool_calls,
                                     tool_call_id: None,
                                     call_id: Some(call_id),
-                                    usage: usage.clone(),
+                                    usage,
                                 },
                             })
                             .into(),
@@ -520,11 +519,13 @@ impl SessionState {
             CommandPayload::SubmitStrategyDecision {
                 decision_id,
                 actions,
+                state,
             } => {
                 let mut events: Vec<Emit<EventPayload>> = vec![
                     EventPayload::StrategyDecisionCompleted(
                         super::strategy::StrategyDecisionCompleted {
                             decision_id,
+                            state,
                         },
                     )
                     .into(),
@@ -967,6 +968,7 @@ mod tests {
     }
 
     fn created_state() -> Aggregate<SessionState> {
+        let ctx = default_ctx();
         let mut state = Aggregate::new(SessionState::new(Uuid::new_v4()));
         state.apply(
             &EventPayload::SessionCreated(Box::new(SessionCreated {
@@ -976,14 +978,16 @@ mod tests {
             })),
             1,
             Utc::now(),
+            &ctx,
         );
         state
     }
 
     fn apply_events(state: &mut Aggregate<SessionState>, emits: Vec<Emit<EventPayload>>) {
+        let ctx = default_ctx();
         let seq = state.last_applied.unwrap_or(0);
         for (s, emit) in (seq + 1..).zip(emits.iter()) {
-            state.apply(&emit.event, s, Utc::now());
+            state.apply(&emit.event, s, Utc::now(), &ctx);
         }
     }
 
@@ -1331,6 +1335,7 @@ mod tests {
         let mut agent = test_agent();
         agent.tool_result_max_bytes = Some(50);
 
+        let ctx = default_ctx();
         let mut state = Aggregate::new(SessionState::new(Uuid::new_v4()));
         state.apply(
             &EventPayload::SessionCreated(Box::new(SessionCreated {
@@ -1340,6 +1345,7 @@ mod tests {
             })),
             1,
             Utc::now(),
+            &ctx,
         );
 
         let call_id = "call-1".to_string();

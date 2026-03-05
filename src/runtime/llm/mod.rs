@@ -65,32 +65,43 @@ pub enum LlmResponse {
 }
 
 impl LlmResponse {
-    pub fn as_parts(&self) -> (Option<String>, Vec<ToolCall>, Option<serde_json::Value>) {
+    pub fn content(&self) -> Option<String> {
         match self {
-            LlmResponse::OpenAi(resp) => {
-                let choice = &resp.choices[0];
-                let content = choice.message.content.clone();
-                let tool_calls = choice
-                    .message
-                    .tool_calls
-                    .as_ref()
-                    .map(|tcs| {
-                        tcs.iter()
-                            .map(|tc| ToolCall {
-                                id: tc.id.clone(),
-                                name: tc.function.name.clone(),
-                                arguments: tc.function.arguments.clone(),
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let usage = resp.usage.clone();
-                (content, tool_calls, usage)
-            }
+            LlmResponse::OpenAi(r) => r.choices.first().and_then(|c| c.message.content.clone()),
         }
     }
 
-    /// Extract raw usage JSON without exposing provider internals.
+    pub fn tool_calls(&self) -> Vec<ToolCall> {
+        match self {
+            LlmResponse::OpenAi(r) => r
+                .choices
+                .first()
+                .and_then(|c| c.message.tool_calls.as_ref())
+                .map(|tcs| {
+                    tcs.iter()
+                        .map(|tc| ToolCall {
+                            id: tc.id.clone(),
+                            name: tc.function.name.clone(),
+                            arguments: tc.function.arguments.clone(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    pub fn finish_reason(&self) -> Option<&str> {
+        match self {
+            LlmResponse::OpenAi(r) => r.choices.first().and_then(|c| c.finish_reason.as_deref()),
+        }
+    }
+
+    pub fn model(&self) -> &str {
+        match self {
+            LlmResponse::OpenAi(r) => &r.model,
+        }
+    }
+
     pub fn usage(&self) -> Option<&serde_json::Value> {
         match self {
             LlmResponse::OpenAi(r) => r.usage.as_ref(),

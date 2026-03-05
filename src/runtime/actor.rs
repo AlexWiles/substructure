@@ -576,6 +576,10 @@ fn build_session_context(
         );
     });
 
+    let strategy = agent.map(|a| {
+        Arc::from(super::session::strategy::resolve_strategy(&a.strategy))
+    });
+
     SessionContext {
         mcp_tools,
         all_tools,
@@ -591,5 +595,6 @@ fn build_session_context(
         send_to_session: None,
         spawn_sub_agent: None,
         tool_result_max_bytes,
+        strategy,
     }
 }
