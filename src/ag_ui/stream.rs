@@ -302,7 +302,7 @@ pub async fn observe_session(
     let (state, last_applied, _trace_id) = load_state(runtime, session_id, &auth).await;
 
     let messages = state
-        .messages
+        .messages()
         .iter()
         .map(domain_message_to_ag_ui)
         .collect::<Vec<_>>();

@@ -6,6 +6,7 @@ use super::state::{
     new_call_id, LlmCallStatus, SessionContext, SessionState, SessionStatus, ToolCallState,
     ToolCallStatus,
 };
+use super::strategy::{DecisionTrigger, StrategyAction};
 use super::types::*;
 use crate::runtime::aggregate::Emit;
 use crate::runtime::budget;
@@ -127,6 +128,13 @@ pub enum CommandPayload {
     SyncConversation {
         messages: Vec<Message>,
         stream: bool,
+    },
+    TriggerStrategyDecision {
+        trigger: DecisionTrigger,
+    },
+    SubmitStrategyDecision {
+        decision_id: String,
+        actions: Vec<StrategyAction>,
     },
     CancelSession,
     MarkDone {
@@ -334,7 +342,9 @@ impl SessionState {
                             }
                         }
 
-                        let mut events = vec![
+                        // Tool calls are no longer emitted here — the strategy
+                        // decides which tools to execute via the decision pipeline.
+                        let events = vec![
                             completed,
                             EventPayload::MessageAssistant(MessageAssistant {
                                 call_id: call_id.clone(),
@@ -349,21 +359,6 @@ impl SessionState {
                             })
                             .into(),
                         ];
-                        for tc in &tool_calls {
-                            let meta = self.tool_call_meta(&tc.name, &tc.id, &ctx.mcp_tools);
-                            events.push(
-                                Emit::new(EventPayload::ToolCallRequested(ToolCallRequested {
-                                    tool_call_id: tc.id.clone(),
-                                    name: tc.name.clone(),
-                                    arguments: tc.arguments.clone(),
-                                    deadline: self.tool_deadline(meta.as_ref()),
-                                    handler: Default::default(),
-                                    meta,
-                                }))
-                                .with("tool.name", &tc.name)
-                                .label(&tc.name),
-                            );
-                        }
                         Ok(events)
                     }
                     // Not pending or unknown — skip
@@ -519,6 +514,78 @@ impl SessionState {
                 )
                 .into()])
             }
+            CommandPayload::TriggerStrategyDecision { trigger } => {
+                Ok(vec![Self::strategy_decision_event(trigger)])
+            }
+            CommandPayload::SubmitStrategyDecision {
+                decision_id,
+                actions,
+            } => {
+                let mut events: Vec<Emit<EventPayload>> = vec![
+                    EventPayload::StrategyDecisionCompleted(
+                        super::strategy::StrategyDecisionCompleted {
+                            decision_id,
+                        },
+                    )
+                    .into(),
+                ];
+                for action in actions {
+                    let sub_cmd = match action {
+                        StrategyAction::RequestLlm { request, stream } => {
+                            CommandPayload::RequestLlmCall {
+                                call_id: new_call_id(),
+                                request,
+                                stream,
+                                deadline: self.llm_deadline(),
+                            }
+                        }
+                        StrategyAction::RequestToolCalls { tool_calls } => {
+                            for tc in tool_calls {
+                                let handler = if ctx
+                                    .client_tools
+                                    .iter()
+                                    .any(|t| t.function.name == tc.name)
+                                {
+                                    ToolHandler::Client
+                                } else {
+                                    ToolHandler::default()
+                                };
+                                let sub = CommandPayload::RequestToolCall {
+                                    tool_call_id: tc.id.clone(),
+                                    name: tc.name.clone(),
+                                    arguments: tc.arguments.clone(),
+                                    deadline: self.tool_deadline(
+                                        self.tool_call_meta(&tc.name, &tc.id, &ctx.mcp_tools)
+                                            .as_ref(),
+                                    ),
+                                    handler,
+                                };
+                                if let Ok(sub_events) = self.handle(sub, ctx) {
+                                    events.extend(sub_events);
+                                }
+                            }
+                            continue;
+                        }
+                        StrategyAction::Done { artifacts } => {
+                            CommandPayload::MarkDone { artifacts }
+                        }
+                        StrategyAction::UpdateState { state } => {
+                            // No validation needed — emit directly
+                            events.push(
+                                EventPayload::StrategyStateChanged(StrategyStateChanged {
+                                    state,
+                                })
+                                .into(),
+                            );
+                            continue;
+                        }
+                    };
+                    if let Ok(sub_events) = self.handle(sub_cmd, ctx) {
+                        events.extend(sub_events);
+                    }
+                }
+                Ok(events)
+            }
             CommandPayload::SyncConversation { messages, stream } => {
                 self.handle_sync_conversation(messages, stream, ctx)
             }
@@ -530,6 +597,15 @@ impl SessionState {
             }
             CommandPayload::Wake => self.handle_wake(ctx),
         }
+    }
+
+    /// Build a StrategyDecisionRequested emit from a trigger.
+    fn strategy_decision_event(trigger: DecisionTrigger) -> Emit<EventPayload> {
+        EventPayload::StrategyDecisionRequested(super::strategy::StrategyDecisionRequested {
+            decision_id: new_call_id(),
+            trigger,
+        })
+        .into()
     }
 
     // -----------------------------------------------------------------------
@@ -563,18 +639,11 @@ impl SessionState {
             {
                 if tc.child_session_id().is_some() {
                     // Sub-agent: re-arm with fresh deadline (parent-driven retry)
-                    let arguments = state
-                        .messages
-                        .iter()
-                        .flat_map(|m| m.tool_calls.iter())
-                        .find(|t| t.id == tc.tool_call_id)
-                        .map(|t| t.arguments.clone())
-                        .unwrap_or_default();
                     return Ok(vec![Emit::new(EventPayload::ToolCallRequested(
                         ToolCallRequested {
                             tool_call_id: tc.tool_call_id.clone(),
                             name: tc.name.clone(),
-                            arguments,
+                            arguments: tc.arguments.clone(),
                             deadline: self.tool_deadline(tc.meta.as_ref()),
                             handler: tc.handler.clone(),
                             meta: tc.meta.clone(),
@@ -632,15 +701,13 @@ impl SessionState {
             if call.status == LlmCallStatus::RetryScheduled {
                 if let Some(next_at) = call.retry.next_at {
                     if next_at <= now {
-                        if let Some(request) = state.build_llm_request(None, None) {
-                            return Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {
-                                call_id: call.call_id.clone(),
-                                request,
-                                stream: true,
-                                deadline: self.llm_deadline(),
-                            })
-                            .into()]);
-                        }
+                        return Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {
+                            call_id: call.call_id.clone(),
+                            request: call.request.clone(),
+                            stream: call.stream,
+                            deadline: self.llm_deadline(),
+                        })
+                        .into()]);
                     }
                 }
             }
@@ -651,18 +718,11 @@ impl SessionState {
             if tc.status == ToolCallStatus::RetryScheduled {
                 if let Some(next_at) = tc.retry.next_at {
                     if next_at <= now {
-                        let arguments = state
-                            .messages
-                            .iter()
-                            .flat_map(|m| m.tool_calls.iter())
-                            .find(|t| t.id == tc.tool_call_id)
-                            .map(|t| t.arguments.clone())
-                            .unwrap_or_default();
                         return Ok(vec![Emit::new(EventPayload::ToolCallRequested(
                             ToolCallRequested {
                                 tool_call_id: tc.tool_call_id.clone(),
                                 name: tc.name.clone(),
-                                arguments,
+                                arguments: tc.arguments.clone(),
                                 deadline: self.tool_deadline(tc.meta.as_ref()),
                                 handler: tc.handler.clone(),
                                 meta: tc.meta.clone(),
@@ -685,13 +745,7 @@ impl SessionState {
                     ToolCallRequested {
                         tool_call_id: tc.tool_call_id.clone(),
                         name: tc.name.clone(),
-                        arguments: state
-                            .messages
-                            .iter()
-                            .flat_map(|m| m.tool_calls.iter())
-                            .find(|t| t.id == tc.tool_call_id)
-                            .map(|t| t.arguments.clone())
-                            .unwrap_or_default(),
+                        arguments: tc.arguments.clone(),
                         deadline: tc.deadline,
                         handler: tc.handler.clone(),
                         meta: tc.meta.clone(),
@@ -705,36 +759,19 @@ impl SessionState {
         // 5. Pending LLM calls still in flight → re-emit (crash recovery)
         for call in state.llm_calls.values() {
             if call.status == LlmCallStatus::Pending && call.deadline > now {
-                if let Some(request) = state.build_llm_request(None, None) {
-                    return Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {
-                        call_id: call.call_id.clone(),
-                        request,
-                        stream: true,
-                        deadline: call.deadline,
-                    })
-                    .into()]);
-                }
-            }
-        }
-
-        // 6. All tools done, no next step → request next LLM call
-        let last_is_tool = state.messages.last().is_some_and(|m| m.role == Role::Tool);
-        if state.pending_tool_results() == 0
-            && last_is_tool
-            && !state
-                .llm_calls
-                .values()
-                .any(|c| c.status == LlmCallStatus::Pending)
-        {
-            if let Some(request) = state.build_llm_request(None, None) {
                 return Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {
-                    call_id: new_call_id(),
-                    request,
-                    stream: true,
-                    deadline: self.llm_deadline(),
+                    call_id: call.call_id.clone(),
+                    request: call.request.clone(),
+                    stream: call.stream,
+                    deadline: call.deadline,
                 })
                 .into()]);
             }
+        }
+
+        // 6. All tools done, no next step → trigger strategy decision (stall recovery)
+        if state.all_tools_resolved() && !state.has_pending_llm() {
+            return Ok(vec![Self::strategy_decision_event(DecisionTrigger::Stall)]);
         }
 
         Ok(vec![])
@@ -753,11 +790,12 @@ impl SessionState {
         let state = self;
 
         // Verify prefix matches current state
-        let prefix_len = state.messages.len();
+        let current_messages = state.messages();
+        let prefix_len = current_messages.len();
         if incoming.len() < prefix_len {
             return Err(SessionError::ConversationDiverged);
         }
-        for (existing, incoming_msg) in state.messages.iter().zip(incoming.iter()) {
+        for (existing, incoming_msg) in current_messages.iter().zip(incoming.iter()) {
             if !messages_match(existing, incoming_msg) {
                 return Err(SessionError::ConversationDiverged);
             }
@@ -1010,16 +1048,20 @@ mod tests {
 
         assert_eq!(
             emits.len(),
-            3,
-            "expected LlmCallCompleted + MessageAssistant + ToolCallRequested"
+            2,
+            "expected LlmCallCompleted + MessageAssistant (tool calls come from strategy pipeline)"
         );
         assert!(matches!(&emits[0].event, EventPayload::LlmCallCompleted(_)));
         assert!(
             matches!(&emits[1].event, EventPayload::MessageAssistant(m) if m.message.content == Some("thinking...".into()))
         );
-        assert!(
-            matches!(&emits[2].event, EventPayload::ToolCallRequested(t) if t.tool_call_id == "tc-1" && t.name == "read_file")
-        );
+        // Tool call requests now come from SubmitStrategyDecision, not from CompleteLlmCall
+        let msg = match &emits[1].event {
+            EventPayload::MessageAssistant(m) => &m.message,
+            _ => panic!("expected MessageAssistant"),
+        };
+        assert_eq!(msg.tool_calls.len(), 1);
+        assert_eq!(msg.tool_calls[0].name, "read_file");
     }
 
     #[test]
@@ -1072,6 +1114,22 @@ mod tests {
                 CommandPayload::CompleteLlmCall {
                     call_id: call_id.clone(),
                     response,
+                },
+                &default_ctx(),
+            )
+            .unwrap();
+        apply_events(&mut state, emits);
+
+        // Register the tool call (previously done by CompleteLlmCall, now via strategy pipeline)
+        let emits = state
+            .state
+            .handle(
+                CommandPayload::RequestToolCall {
+                    tool_call_id: tool_call_id.clone(),
+                    name: "test".into(),
+                    arguments: "{}".into(),
+                    deadline: far_future(),
+                    handler: ToolHandler::Runtime,
                 },
                 &default_ctx(),
             )
@@ -1329,6 +1387,22 @@ mod tests {
             .state
             .handle(
                 CommandPayload::CompleteLlmCall { call_id, response },
+                &default_ctx(),
+            )
+            .unwrap();
+        apply_events(&mut state, emits);
+
+        // Register the tool call (previously done by CompleteLlmCall, now via strategy pipeline)
+        let emits = state
+            .state
+            .handle(
+                CommandPayload::RequestToolCall {
+                    tool_call_id: tool_call_id.clone(),
+                    name: "test_tool".into(),
+                    arguments: "{}".into(),
+                    deadline: far_future(),
+                    handler: ToolHandler::Runtime,
+                },
                 &default_ctx(),
             )
             .unwrap();

@@ -6,16 +6,15 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::strategy::{DecisionTrigger, Strategy, StrategyCtx};
 use super::types::{Artifact, CompletionDelivery, ToolCallMeta, ToolCallRequested, ToolHandler};
 use crate::runtime::aggregate::{AggregateState, AggregateStatus, Emit};
 use crate::runtime::budget::{self, BudgetContext, BudgetError};
-use crate::runtime::config::{
-    AgentConfig, ClientIdentity, ExhaustionStrategy, LlmRequestParams, RetryPolicy,
-};
+use crate::runtime::config::{AgentConfig, ClientIdentity, ExhaustionStrategy, RetryPolicy};
 use crate::runtime::event::EventPayload;
 use crate::runtime::llm::{LlmCallRequested, LlmRequest, LlmResponse, LlmTool};
 use crate::runtime::mcp::{Content, McpClient};
-use crate::runtime::message::{Message, Role};
+use crate::runtime::message::Message;
 use crate::runtime::span::SpanContext;
 use async_trait::async_trait;
 
@@ -164,6 +163,9 @@ pub struct LlmCallState {
     pub retry: RetryState,
     pub deadline: DateTime<Utc>,
     pub retry_policy: RetryPolicy,
+    /// Original request, stored for retries and crash recovery.
+    pub request: LlmRequest,
+    pub stream: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -190,6 +192,9 @@ pub struct ToolCallState {
     pub meta: Option<ToolCallMeta>,
     #[serde(default)]
     pub handler: ToolHandler,
+    /// Original arguments, stored for retries and crash recovery.
+    #[serde(default)]
+    pub arguments: String,
 }
 
 impl ToolCallState {
@@ -217,15 +222,17 @@ pub struct DerivedState {
 // SessionState — the reducer state for session aggregates
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SessionState {
     pub session_id: Uuid,
     pub status: SessionStatus,
     pub agent: Option<AgentConfig>,
     pub auth: Option<ClientIdentity>,
-    pub messages: Vec<Message>,
     pub token_usage: BTreeMap<String, u64>,
-    pub strategy_state: Option<String>,
+
+    /// Opaque strategy state — owned and managed exclusively by the strategy.
+    #[serde(default)]
+    pub strategy_state: serde_json::Value,
 
     /// Sub-agent completion delivery target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -238,6 +245,28 @@ pub struct SessionState {
     // Call lifecycle tracking
     pub llm_calls: HashMap<String, LlmCallState>,
     pub tool_calls: HashMap<String, ToolCallState>,
+
+    /// Resolved strategy implementation — not persisted, rebuilt from config.
+    #[serde(skip)]
+    pub(super) resolved_strategy: Option<Arc<dyn Strategy>>,
+}
+
+impl Clone for SessionState {
+    fn clone(&self) -> Self {
+        SessionState {
+            session_id: self.session_id,
+            status: self.status.clone(),
+            agent: self.agent.clone(),
+            auth: self.auth.clone(),
+            token_usage: self.token_usage.clone(),
+            strategy_state: self.strategy_state.clone(),
+            on_done: self.on_done.clone(),
+            artifacts: self.artifacts.clone(),
+            llm_calls: self.llm_calls.clone(),
+            tool_calls: self.tool_calls.clone(),
+            resolved_strategy: self.resolved_strategy.clone(),
+        }
+    }
 }
 
 impl SessionState {
@@ -247,13 +276,13 @@ impl SessionState {
             status: SessionStatus::Done,
             agent: None,
             auth: None,
-            messages: Vec::new(),
             token_usage: BTreeMap::new(),
-            strategy_state: None,
+            strategy_state: serde_json::Value::Null,
             on_done: None,
             artifacts: vec![],
             llm_calls: HashMap::new(),
             tool_calls: HashMap::new(),
+            resolved_strategy: None,
         }
     }
 
@@ -265,24 +294,25 @@ impl SessionState {
                 self.agent = Some(payload.agent.clone());
                 self.auth = Some(payload.auth.clone());
                 self.on_done = payload.on_done.clone();
+                // Resolve strategy from agent config
+                self.resolved_strategy = Some(Arc::from(super::strategy::resolve_strategy(
+                    &payload.agent.strategy,
+                )));
             }
-            EventPayload::MessageUser(payload) => {
-                self.messages.push(payload.message.clone());
+            EventPayload::MessageUser(_) => {
                 self.status = SessionStatus::Idle;
             }
-            EventPayload::MessageAssistant(payload) => {
-                self.messages.push(payload.message.clone());
-            }
-            EventPayload::MessageTool(payload) => {
-                self.messages.push(payload.message.clone());
-            }
+            EventPayload::MessageAssistant(_) => {}
+            EventPayload::MessageTool(_) => {}
             EventPayload::LlmCallRequested(payload) => {
                 self.status = SessionStatus::Active;
                 if let Some(existing) = self.llm_calls.get_mut(&payload.call_id) {
-                    // Re-request (retry): preserve retry count, reset call state
+                    // Re-request (retry): preserve retry count, update request
                     existing.status = LlmCallStatus::Pending;
                     existing.deadline = payload.deadline;
                     existing.retry.next_at = None;
+                    existing.request = payload.request.clone();
+                    existing.stream = payload.stream;
                 } else {
                     // New call
                     self.llm_calls.insert(
@@ -293,6 +323,8 @@ impl SessionState {
                             retry: RetryState::default(),
                             deadline: payload.deadline,
                             retry_policy: self.resolve_llm_retry(),
+                            request: payload.request.clone(),
+                            stream: payload.stream,
                         },
                     );
                 }
@@ -328,6 +360,7 @@ impl SessionState {
                     // Re-request (sub-agent retry): reset to pending with fresh deadline
                     existing.status = ToolCallStatus::Pending;
                     existing.deadline = payload.deadline;
+                    existing.arguments = payload.arguments.clone();
                 } else {
                     self.tool_calls.insert(
                         payload.tool_call_id.clone(),
@@ -340,6 +373,7 @@ impl SessionState {
                             deadline: payload.deadline,
                             meta: payload.meta.clone(),
                             handler: payload.handler.clone(),
+                            arguments: payload.arguments.clone(),
                         },
                     );
                 }
@@ -358,7 +392,7 @@ impl SessionState {
                 if let Some(tc) = self.tool_calls.get_mut(&payload.tool_call_id) {
                     tc.status = ToolCallStatus::Completed;
                 }
-                if self.pending_tool_results() == 0 {
+                if !self.has_inflight_tools() {
                     self.status = SessionStatus::Idle;
                 }
             }
@@ -379,12 +413,7 @@ impl SessionState {
                         tc.retry.next_at = None;
                     }
                 }
-                // Stay Active while any tool call is pending or retrying
-                let has_inflight = self.tool_calls.values().any(|tc| {
-                    tc.status == ToolCallStatus::Pending
-                        || tc.status == ToolCallStatus::RetryScheduled
-                });
-                if !has_inflight && self.pending_tool_results() == 0 {
+                if !self.has_inflight_tools() {
                     self.status = SessionStatus::Idle;
                 }
             }
@@ -402,8 +431,16 @@ impl SessionState {
             EventPayload::InterruptResumed(_) => {
                 self.status = SessionStatus::Active;
             }
-            EventPayload::StrategyStateChanged(payload) => {
-                self.strategy_state = payload.state.clone();
+            EventPayload::StrategyStateChanged(_) => {
+                // Handled by strategy.apply() below
+            }
+            EventPayload::StrategyDecisionRequested(_) => {
+                // Keep Active while decision is pending
+                self.status = SessionStatus::Active;
+            }
+            EventPayload::StrategyDecisionCompleted(_) => {
+                // Actions from the decision are emitted as separate events
+                // and will update status accordingly.
             }
             EventPayload::SessionCancelled => {
                 self.status = SessionStatus::Done;
@@ -416,6 +453,11 @@ impl SessionState {
                     self.status = SessionStatus::Idle;
                 }
             }
+        }
+
+        // Let the strategy maintain its opaque state
+        if let Some(ref strategy) = self.resolved_strategy {
+            strategy.apply(payload, &mut self.strategy_state);
         }
     }
 
@@ -430,20 +472,44 @@ impl SessionState {
         }
     }
 
-    /// Derive pending tool result count from the message history.
-    pub fn pending_tool_results(&self) -> usize {
-        // Walk backwards: count Tool messages, then find the Assistant message.
-        let mut tool_msgs = 0;
-        for msg in self.messages.iter().rev() {
-            match msg.role {
-                Role::Tool => tool_msgs += 1,
-                Role::Assistant => {
-                    return msg.tool_calls.len().saturating_sub(tool_msgs);
-                }
-                _ => return 0,
-            }
+    /// Extract conversation messages from strategy state.
+    pub fn messages(&self) -> Vec<Message> {
+        if let Some(ref strategy) = self.resolved_strategy {
+            strategy.messages(&self.strategy_state)
+        } else {
+            // Fallback for deserialized snapshots without a resolved strategy
+            self.strategy_state
+                .get("messages")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| serde_json::from_value::<Message>(v.clone()).ok())
+                        .collect()
+                })
+                .unwrap_or_default()
         }
-        0
+    }
+
+    /// True when any tool call is still pending or retrying.
+    pub fn has_inflight_tools(&self) -> bool {
+        self.tool_calls.values().any(|tc| {
+            tc.status == ToolCallStatus::Pending || tc.status == ToolCallStatus::RetryScheduled
+        })
+    }
+
+    /// True when all tool calls are in a terminal state (Completed or Failed).
+    pub fn all_tools_resolved(&self) -> bool {
+        !self.tool_calls.is_empty()
+            && self.tool_calls.values().all(|tc| {
+                tc.status == ToolCallStatus::Completed || tc.status == ToolCallStatus::Failed
+            })
+    }
+
+    /// True when any LLM call is pending.
+    pub fn has_pending_llm(&self) -> bool {
+        self.llm_calls
+            .values()
+            .any(|c| c.status == LlmCallStatus::Pending)
     }
 
     // -----------------------------------------------------------------------
@@ -483,67 +549,6 @@ impl SessionState {
             .chain(llm_retry_at)
             .chain(tool_retry_at)
             .min()
-    }
-
-    // -----------------------------------------------------------------------
-    // LLM request building
-    // -----------------------------------------------------------------------
-
-    pub fn build_llm_request(
-        &self,
-        tools: Option<Vec<LlmTool>>,
-        overrides: Option<&LlmRequestParams>,
-    ) -> Option<LlmRequest> {
-        let agent = self.agent.as_ref()?;
-
-        let mut messages = vec![Message {
-            role: Role::System,
-            content: Some(agent.system_prompt.clone()),
-            tool_calls: vec![],
-            tool_call_id: None,
-            call_id: None,
-            usage: None,
-        }];
-        messages.extend(self.messages.iter().cloned());
-
-        Some(self.make_llm_request(messages, tools, overrides))
-    }
-
-    /// Build an LLM request using a custom context (e.g. compacted history).
-    /// The context messages are used as-is (no system prompt prepended).
-    pub fn build_llm_request_with_context(
-        &self,
-        context: &[Message],
-        tools: Option<Vec<LlmTool>>,
-        overrides: Option<&LlmRequestParams>,
-    ) -> Option<LlmRequest> {
-        self.agent.as_ref()?;
-        let messages: Vec<Message> = context.to_vec();
-        Some(self.make_llm_request(messages, tools, overrides))
-    }
-
-    fn make_llm_request(
-        &self,
-        messages: Vec<Message>,
-        tools: Option<Vec<LlmTool>>,
-        overrides: Option<&LlmRequestParams>,
-    ) -> LlmRequest {
-        let agent = self.agent.as_ref().expect("agent must be set");
-        let model = agent.llm.model.clone();
-        let temperature = overrides
-            .and_then(|o| o.temperature)
-            .or(agent.llm.temperature);
-        let max_completion_tokens = overrides
-            .and_then(|o| o.max_completion_tokens)
-            .or(agent.llm.max_completion_tokens);
-
-        LlmRequest {
-            model,
-            messages,
-            tools,
-            temperature,
-            max_completion_tokens,
-        }
     }
 
     /// Compute the derived state envelope for the current session state.
@@ -674,6 +679,26 @@ impl SessionState {
 
     pub fn label(&self) -> Option<String> {
         self.agent.as_ref().map(|a| a.name.clone())
+    }
+
+    /// Build a StrategyCtx from the current state and context.
+    pub(super) fn strategy_ctx<'a>(&'a self, ctx: &'a SessionContext) -> Option<StrategyCtx<'a>> {
+        let agent = self.agent.as_ref()?;
+        Some(StrategyCtx {
+            session_id: self.session_id,
+            stream: ctx.stream,
+            agent,
+            all_tools: &ctx.all_tools,
+            token_usage: &self.token_usage,
+            has_inflight_tools: self.has_inflight_tools(),
+            has_pending_llm: self.has_pending_llm(),
+            failed_llm_calls: self
+                .llm_calls
+                .values()
+                .filter(|c| c.status == LlmCallStatus::Failed)
+                .map(|c| c.call_id.as_str())
+                .collect(),
+        })
     }
 }
 
@@ -912,84 +937,78 @@ impl SessionState {
         })
     }
 
-    /// Inlined strategy decisions (replaces DefaultStrategy).
-    fn strategy_decision(
-        &self,
-        event: &EventPayload,
-        ctx: &SessionContext,
-    ) -> Option<CommandPayload> {
+    /// Detect whether an event should trigger a strategy decision.
+    fn detect_trigger(&self, event: &EventPayload) -> Option<DecisionTrigger> {
         match event {
-            EventPayload::MessageUser(p) => {
-                let stream = p.stream;
-                let request = self.build_llm_request(ctx.all_tools.clone(), None)?;
-                Some(CommandPayload::RequestLlmCall {
-                    call_id: new_call_id(),
-                    request,
-                    stream,
-                    deadline: self.llm_deadline(),
-                })
-            }
+            EventPayload::MessageUser(p) => Some(DecisionTrigger::UserMessage { stream: p.stream }),
             EventPayload::LlmCallCompleted(p) => {
                 let (content, tool_calls, _usage) = p.response.as_parts();
-                if tool_calls.is_empty() {
-                    // No tool calls → done
-                    let artifacts = match content {
-                        Some(ref text) if !text.is_empty() => vec![Artifact {
-                            name: None,
-                            description: None,
-                            parts: vec![super::types::Part::Text { text: text.clone() }],
-                        }],
-                        _ => vec![],
-                    };
-                    Some(CommandPayload::MarkDone { artifacts })
+                Some(DecisionTrigger::LlmCompleted {
+                    call_id: p.call_id.clone(),
+                    content,
+                    tool_calls,
+                })
+            }
+            EventPayload::LlmCallErrored(p) => {
+                // Only consult strategy when retries are exhausted.
+                // Transient failures are retried by the runtime via wake scheduling.
+                let exhausted = self
+                    .llm_calls
+                    .get(&p.call_id)
+                    .is_some_and(|c| c.status == LlmCallStatus::Failed);
+                if exhausted {
+                    Some(DecisionTrigger::LlmFailed {
+                        call_id: p.call_id.clone(),
+                        error: p.error.clone(),
+                    })
                 } else {
-                    // Has tool calls → execute them (they're already emitted by command_handler)
                     None
                 }
             }
-            EventPayload::LlmCallErrored(p) => {
-                // Only act when retries are exhausted (status == Failed)
-                let call = self.llm_calls.get(&p.call_id)?;
-                if call.status != LlmCallStatus::Failed {
-                    return None;
+            EventPayload::ToolCallErrored(p) => {
+                // Only consult strategy when retries are exhausted.
+                let exhausted = self
+                    .tool_calls
+                    .get(&p.tool_call_id)
+                    .is_some_and(|tc| tc.status == ToolCallStatus::Failed);
+                if exhausted {
+                    Some(DecisionTrigger::ToolFailed {
+                        tool_call_id: p.tool_call_id.clone(),
+                        name: p.name.clone(),
+                        error: p.error.clone(),
+                    })
+                } else {
+                    None
                 }
-                Some(CommandPayload::MarkDone {
-                    artifacts: vec![Artifact {
-                        name: None,
-                        description: None,
-                        parts: vec![super::types::Part::Text {
-                            text: format!("Error: {}", p.error),
-                        }],
-                    }],
-                })
             }
-            EventPayload::MessageTool(_) => {
-                // Wait until all tool calls are done (including retries in flight)
-                if self.tool_calls.values().any(|tc| {
-                    tc.status == ToolCallStatus::Pending
-                        || tc.status == ToolCallStatus::RetryScheduled
-                }) {
-                    return None;
+            EventPayload::ToolCallCompleted(_) => {
+                // Check if all tool calls are resolved (lifecycle-driven, not message-driven)
+                if !self.has_inflight_tools() && self.all_tools_resolved() {
+                    Some(DecisionTrigger::AllToolsResolved)
+                } else {
+                    None
                 }
-                let request = self.build_llm_request(ctx.all_tools.clone(), None)?;
-                Some(CommandPayload::RequestLlmCall {
-                    call_id: new_call_id(),
-                    request,
-                    stream: ctx.stream,
-                    deadline: self.llm_deadline(),
-                })
             }
-            EventPayload::InterruptResumed(_) => {
-                let request = self.build_llm_request(ctx.all_tools.clone(), None)?;
-                Some(CommandPayload::RequestLlmCall {
-                    call_id: new_call_id(),
-                    request,
-                    stream: ctx.stream,
-                    deadline: self.llm_deadline(),
-                })
-            }
+            EventPayload::InterruptResumed(p) => Some(DecisionTrigger::InterruptResumed {
+                interrupt_id: p.interrupt_id.clone(),
+            }),
             _ => None,
         }
+    }
+
+    /// Execute the strategy and return a SubmitStrategyDecision command.
+    fn execute_strategy_decision(
+        &self,
+        req: &super::strategy::StrategyDecisionRequested,
+        ctx: &SessionContext,
+    ) -> Option<CommandPayload> {
+        let strategy = self.resolved_strategy.as_ref()?;
+        let strategy_ctx = self.strategy_ctx(ctx)?;
+        let actions = strategy.decide(&req.trigger, &self.strategy_state, &strategy_ctx);
+        Some(CommandPayload::SubmitStrategyDecision {
+            decision_id: req.decision_id.clone(),
+            actions,
+        })
     }
 }
 
@@ -1027,7 +1046,6 @@ impl AggregateState for SessionState {
         ctx: &Self::Context,
         span: &SpanContext,
     ) -> Option<Self::Command> {
-        // --- Mechanical I/O dispatch ---
         match event {
             EventPayload::LlmCallRequested(p) => {
                 if self
@@ -1037,6 +1055,7 @@ impl AggregateState for SessionState {
                 {
                     return Some(self.handle_llm_call(p, ctx, span).await);
                 }
+                None
             }
             EventPayload::ToolCallRequested(p) => {
                 if self.tool_calls.get(&p.tool_call_id).is_some_and(|tc| {
@@ -1044,6 +1063,7 @@ impl AggregateState for SessionState {
                 }) {
                     return self.handle_tool_call(p, ctx, span).await;
                 }
+                None
             }
             EventPayload::SessionDone(_) => {
                 if let Some(ref delivery) = self.on_done {
@@ -1060,13 +1080,19 @@ impl AggregateState for SessionState {
                         );
                     }
                 }
-                return None;
+                None
             }
-            _ => {}
-        }
 
-        // --- Inlined strategy decisions ---
-        self.strategy_decision(event, ctx)
+            // --- Strategy executor (returns early) ---
+            EventPayload::StrategyDecisionRequested(req) => {
+                self.execute_strategy_decision(req, ctx)
+            }
+
+            // --- Everything else: detect triggers ---
+            _ => self
+                .detect_trigger(event)
+                .map(|trigger| CommandPayload::TriggerStrategyDecision { trigger }),
+        }
     }
 
     fn derived_state(&self) -> Self::Derived {

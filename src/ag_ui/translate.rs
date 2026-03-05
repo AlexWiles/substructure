@@ -256,6 +256,8 @@ impl EventTranslator {
             EventPayload::InterruptResumed(_) => TranslateOutput::Events(vec![]),
 
             EventPayload::StrategyStateChanged(_) => TranslateOutput::Events(vec![]),
+            EventPayload::StrategyDecisionRequested(_) => TranslateOutput::Events(vec![]),
+            EventPayload::StrategyDecisionCompleted(_) => TranslateOutput::Events(vec![]),
             EventPayload::SessionCancelled => TranslateOutput::Events(vec![]),
             EventPayload::SessionDone(_) => TranslateOutput::Events(vec![]),
 
