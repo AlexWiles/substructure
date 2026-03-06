@@ -3,12 +3,14 @@
 //! All types are generated from `proto/worker.proto` (source of truth).
 //! Internal code converts to/from these types at the boundary.
 
-pub mod convert;
 pub mod default;
 
 // Generated proto types (prost + pbjson serde impls)
 include!(concat!(env!("OUT_DIR"), "/worker.rs"));
 include!(concat!(env!("OUT_DIR"), "/worker.serde.rs"));
+
+// Generated tonic gRPC stubs for WorkerGateway service
+include!(concat!(env!("OUT_DIR"), "/worker.WorkerGateway.rs"));
 
 // ---------------------------------------------------------------------------
 // Worker trait — the decision-maker

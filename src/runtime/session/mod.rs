@@ -8,8 +8,7 @@ pub mod types;
 
 pub use command::{truncate_tool_result, CommandPayload, IncomingMessage, SessionCommand, SessionError};
 pub use decision::{
-    DecisionTrigger, ToolCallAction, WorkerAction, WorkerDecisionCompleted,
-    WorkerDecisionRequested,
+    DecisionTrigger, WorkerDecisionCompleted, WorkerDecisionRequested, WorkerStateUpdated,
 };
 pub use dispatch::{ToolCallDispatch, WorkerDispatch, WorkerExecutor};
 pub use state::{

@@ -7,9 +7,8 @@ use super::state::{
     ToolCallStatus,
 };
 use super::types::*;
-use super::decision::{
-    DecisionTrigger, WorkerAction, WorkerDecisionCompleted, WorkerDecisionRequested,
-};
+use super::decision::{DecisionTrigger, WorkerDecisionCompleted, WorkerDecisionRequested, WorkerStateUpdated};
+use crate::worker as proto;
 use crate::runtime::aggregate::Emit;
 use crate::runtime::budget;
 use crate::runtime::config::{AgentConfig, ClientIdentity};
@@ -135,7 +134,7 @@ pub enum CommandPayload {
     },
     SubmitWorkerDecision {
         decision_id: String,
-        actions: Vec<WorkerAction>,
+        actions: Vec<proto::WorkerAction>,
         /// Opaque worker state bytes — passed through without interpretation.
         state: Vec<u8>,
     },
@@ -439,8 +438,7 @@ impl SessionState {
                     ];
                     if let Some(ws) = worker_state {
                         events.push(
-                            EventPayload::WorkerDecisionCompleted(WorkerDecisionCompleted {
-                                decision_id: String::new(),
+                            EventPayload::WorkerStateUpdated(WorkerStateUpdated {
                                 state: ws,
                             })
                             .into(),
@@ -486,8 +484,7 @@ impl SessionState {
                     ];
                     if let Some(ws) = worker_state {
                         events.push(
-                            EventPayload::WorkerDecisionCompleted(WorkerDecisionCompleted {
-                                decision_id: String::new(),
+                            EventPayload::WorkerStateUpdated(WorkerStateUpdated {
                                 state: ws,
                             })
                             .into(),
@@ -543,18 +540,29 @@ impl SessionState {
                     .into(),
                 ];
                 for action in actions {
-                    let sub_cmd = match action {
-                        WorkerAction::RequestLlm { request, stream } => {
-                            CommandPayload::RequestLlmCall {
+                    let Some(inner) = action.action else {
+                        continue;
+                    };
+                    match inner {
+                        proto::worker_action::Action::RequestLlm(r) => {
+                            let Some(ref request) = r.request else {
+                                continue;
+                            };
+                            let sub_cmd = CommandPayload::RequestLlmCall {
                                 call_id: new_call_id(),
-                                request,
-                                stream,
+                                request: request.into(),
+                                stream: r.stream,
                                 deadline: self.llm_deadline(),
+                            };
+                            if let Ok(sub_events) = self.handle(sub_cmd, ctx) {
+                                events.extend(sub_events);
                             }
                         }
-                        WorkerAction::RequestToolCalls { tool_calls } => {
-                            for tca in tool_calls {
-                                let tc = &tca.tool_call;
+                        proto::worker_action::Action::RequestToolCalls(r) => {
+                            for tca in &r.tool_calls {
+                                let Some(tc) = &tca.tool_call else {
+                                    continue;
+                                };
                                 let handler = if ctx
                                     .client_tools
                                     .iter()
@@ -564,24 +572,32 @@ impl SessionState {
                                 } else {
                                     ToolHandler::default()
                                 };
+                                let context = tca
+                                    .context
+                                    .as_ref()
+                                    .and_then(|v| serde_json::to_value(v).ok())
+                                    .unwrap_or(serde_json::Value::Null);
                                 let sub = CommandPayload::RequestToolCall {
                                     tool_call_id: tc.id.clone(),
                                     name: tc.name.clone(),
                                     arguments: tc.arguments.clone(),
                                     deadline: self.tool_deadline(),
                                     handler,
-                                    context: tca.context,
+                                    context,
                                 };
                                 if let Ok(sub_events) = self.handle(sub, ctx) {
                                     events.extend(sub_events);
                                 }
                             }
-                            continue;
                         }
-                        WorkerAction::Done { artifacts } => CommandPayload::MarkDone { artifacts },
-                    };
-                    if let Ok(sub_events) = self.handle(sub_cmd, ctx) {
-                        events.extend(sub_events);
+                        proto::worker_action::Action::Done(d) => {
+                            let sub_cmd = CommandPayload::MarkDone {
+                                artifacts: d.artifacts.iter().map(Into::into).collect(),
+                            };
+                            if let Ok(sub_events) = self.handle(sub_cmd, ctx) {
+                                events.extend(sub_events);
+                            }
+                        }
                     }
                 }
                 Ok(events)

@@ -315,40 +315,20 @@ impl From<&crate::runtime::session::decision::DecisionTrigger> for proto::Decisi
 }
 
 // ---------------------------------------------------------------------------
-// WorkerAction conversions (proto → internal)
+// WorkerCtx from WorkerDispatch (extract decision context from wire message)
 // ---------------------------------------------------------------------------
 
-impl From<&proto::WorkerAction> for crate::runtime::session::decision::WorkerAction {
-    fn from(a: &proto::WorkerAction) -> Self {
-        use crate::runtime::session::decision::{ToolCallAction, WorkerAction as WA};
-        match a.action.as_ref().expect("WorkerAction.action required") {
-            proto::worker_action::Action::RequestLlm(r) => WA::RequestLlm {
-                request: r.request.as_ref().expect("RequestLlm.request required").into(),
-                stream: r.stream,
-            },
-            proto::worker_action::Action::RequestToolCalls(r) => WA::RequestToolCalls {
-                tool_calls: r
-                    .tool_calls
-                    .iter()
-                    .map(|tca| {
-                        let tc = tca
-                            .tool_call
-                            .as_ref()
-                            .expect("ToolCallAction.tool_call required");
-                        ToolCallAction {
-                            tool_call: tc.into(),
-                            context: tca
-                                .context
-                                .as_ref()
-                                .and_then(|v| serde_json::to_value(v).ok())
-                                .unwrap_or(serde_json::Value::Null),
-                        }
-                    })
-                    .collect(),
-            },
-            proto::worker_action::Action::Done(d) => WA::Done {
-                artifacts: d.artifacts.iter().map(Into::into).collect(),
-            },
+impl From<&proto::WorkerDispatch> for proto::WorkerCtx {
+    fn from(d: &proto::WorkerDispatch) -> Self {
+        Self {
+            session_id: d.session_id.clone(),
+            stream: d.stream,
+            agent: d.agent.clone(),
+            tools: d.tools.clone(),
+            sub_agent_names: d.sub_agent_names.clone(),
+            token_usage: d.token_usage.clone(),
+            tool_call_statuses: d.tool_call_statuses.clone(),
+            llm_call_statuses: d.llm_call_statuses.clone(),
         }
     }
 }

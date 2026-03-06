@@ -35,6 +35,7 @@ opentelemetry = { version = "0.31", optional = true }
 opentelemetry_sdk = { version = "0.31", optional = true }
 opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"], optional = true }
 base64 = "0.22.1"
+tonic = "0.12"
 
 [features]
 default = []
@@ -44,3 +45,4 @@ otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]
 [build-dependencies]
 pbjson-build = "0.7"
 prost-build = "0.13"
+tonic-build = "0.12"

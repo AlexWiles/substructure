@@ -1,41 +1,48 @@
+//! Worker client — dispatches decisions and tool calls.
+//!
+//! Decisions are always enqueued into the shared DecisionQueue.
+//! Tool execution is always local (MCP + sub-agents).
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use ractor::ActorRef;
 use uuid::Uuid;
 
-use crate::runtime::config::{AgentConfig, ClientIdentity, WorkerConfig};
+use crate::runtime::config::{AgentConfig, ClientIdentity};
+use crate::runtime::decision_queue::DecisionQueue;
 use crate::runtime::llm::{LlmTool, LlmToolFunction};
 use crate::runtime::mcp::{Content, McpClient, ToolDefinition};
+use crate::runtime::session::types::CompletionDelivery;
 use crate::runtime::session::{
     truncate_tool_result, CommandPayload, ToolCallDispatch, WorkerDispatch, WorkerExecutor,
 };
-use crate::runtime::session::types::CompletionDelivery;
 use crate::runtime::types::{RuntimeMessage, SubAgentRequest};
-use crate::worker::{self as proto, Worker};
-use crate::worker::default::DefaultWorker;
+use crate::worker as proto;
 
 // ---------------------------------------------------------------------------
-// Local worker executor — in-process execution
+// WorkerClient
 // ---------------------------------------------------------------------------
 
-/// Executes worker decisions and tool calls in-process, delivering results
-/// back via the runtime actor.
-pub struct LocalWorkerExecutor {
-    pub runtime: ActorRef<RuntimeMessage>,
-    pub mcp_clients: Vec<Arc<dyn McpClient>>,
+/// Dispatches worker decisions and tool calls, delivering results back
+/// to sessions via the runtime actor.
+pub struct WorkerClient {
+    queue: Arc<DecisionQueue>,
+    runtime: ActorRef<RuntimeMessage>,
+    mcp_clients: Vec<Arc<dyn McpClient>>,
     /// Pre-computed tool definitions (MCP + sub-agent tools).
-    pub tools: Vec<LlmTool>,
+    tools: Vec<LlmTool>,
     /// Sub-agent configs keyed by sanitized tool name.
-    pub sub_agent_configs: HashMap<String, AgentConfig>,
-    pub auth: ClientIdentity,
-    pub stream: bool,
+    sub_agent_configs: HashMap<String, AgentConfig>,
+    auth: ClientIdentity,
+    stream: bool,
 }
 
-impl LocalWorkerExecutor {
-    /// Build a new executor, pre-computing tool definitions from MCP clients
+impl WorkerClient {
+    /// Build a new client, pre-computing tool definitions from MCP clients
     /// and sub-agent configs from the agents map.
     pub fn new(
+        queue: Arc<DecisionQueue>,
         runtime: ActorRef<RuntimeMessage>,
         mcp_clients: Vec<Arc<dyn McpClient>>,
         agent: &AgentConfig,
@@ -76,6 +83,7 @@ impl LocalWorkerExecutor {
         }
 
         Self {
+            queue,
             runtime,
             mcp_clients,
             tools,
@@ -85,15 +93,20 @@ impl LocalWorkerExecutor {
         }
     }
 
-    /// Build a proto WorkerCtx from the dispatch + executor's own tools/sub-agents.
-    fn build_worker_ctx(&self, request: &WorkerDispatch) -> proto::WorkerCtx {
-        proto::WorkerCtx {
+    /// Build a proto WorkerDispatch from an internal dispatch, including tools.
+    fn build_proto_dispatch(&self, request: &WorkerDispatch) -> proto::WorkerDispatch {
+        proto::WorkerDispatch {
             session_id: request.session_id.to_string(),
+            decision_id: request.decision_id.clone(),
+            trigger: Some((&request.trigger).into()),
+            worker_state: request.worker_state.clone(),
             stream: request.stream,
             agent: Some((&request.agent).into()),
-            tools: self.tools.iter().map(Into::into).collect(),
-            sub_agent_names: self.sub_agent_configs.keys().cloned().collect(),
-            token_usage: request.token_usage.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+            token_usage: request
+                .token_usage
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect(),
             tool_call_statuses: request
                 .tool_call_statuses
                 .iter()
@@ -110,31 +123,19 @@ impl LocalWorkerExecutor {
                     (id.clone(), cs as i32)
                 })
                 .collect(),
+            span_json: serde_json::to_string(&request.span).unwrap_or_default(),
+            tools: self.tools.iter().map(Into::into).collect(),
+            sub_agent_names: self.sub_agent_configs.keys().cloned().collect(),
         }
     }
 }
 
-impl WorkerExecutor for LocalWorkerExecutor {
+impl WorkerExecutor for WorkerClient {
     fn dispatch_decision(&self, request: WorkerDispatch) {
-        let worker = resolve_worker(&request.agent.worker);
-
-        // Convert internal trigger to proto; state is opaque bytes passed through
-        let proto_trigger: proto::DecisionTrigger = (&request.trigger).into();
-        let ctx = self.build_worker_ctx(&request);
-
-        let decision = worker.decide(&proto_trigger, &request.worker_state, &ctx);
-
-        // Convert proto actions back to internal types; state bytes pass through
-        let actions = decision.actions.iter().map(Into::into).collect();
-
-        let _ = self.runtime.send_message(RuntimeMessage::DeliverToSession {
-            session_id: request.session_id,
-            payload: CommandPayload::SubmitWorkerDecision {
-                decision_id: request.decision_id,
-                actions,
-                state: decision.state,
-            },
-            span: request.span,
+        let proto_dispatch = self.build_proto_dispatch(&request);
+        let queue = self.queue.clone();
+        tokio::spawn(async move {
+            queue.enqueue(proto_dispatch).await;
         });
     }
 
@@ -151,7 +152,7 @@ impl WorkerExecutor for LocalWorkerExecutor {
 
             let child_session_id =
                 Uuid::new_v5(&request.session_id, request.tool_call_id.as_bytes());
-            let _ = self
+            if let Err(e) = self
                 .runtime
                 .send_message(RuntimeMessage::RunSubAgent(SubAgentRequest {
                     session_id: child_session_id,
@@ -166,8 +167,10 @@ impl WorkerExecutor for LocalWorkerExecutor {
                     },
                     span: request.span.child("sub_agent.spawn"),
                     stream: self.stream,
-                }));
-            return; // Sub-agent runs async, result arrives via CompleteToolCall
+                })) {
+                tracing::warn!(error = %e, "failed to dispatch sub-agent request");
+            }
+            return;
         }
 
         // MCP tool call — async, so spawn a task
@@ -217,17 +220,19 @@ impl WorkerExecutor for LocalWorkerExecutor {
                         worker_state: None,
                     },
                 };
-                let _ = runtime.send_message(RuntimeMessage::DeliverToSession {
+                if let Err(e) = runtime.send_message(RuntimeMessage::DeliverToSession {
                     session_id: request.session_id,
                     payload,
                     span: request.span,
-                });
+                }) {
+                    tracing::warn!(error = %e, "failed to deliver tool call result to session");
+                }
             });
             return;
         }
 
         // Unknown tool — fail immediately
-        let _ = self.runtime.send_message(RuntimeMessage::DeliverToSession {
+        if let Err(e) = self.runtime.send_message(RuntimeMessage::DeliverToSession {
             session_id: request.session_id,
             payload: CommandPayload::FailToolCall {
                 tool_call_id: request.tool_call_id.clone(),
@@ -236,16 +241,8 @@ impl WorkerExecutor for LocalWorkerExecutor {
                 worker_state: None,
             },
             span: request.span,
-        });
+        }) {
+            tracing::warn!(error = %e, "failed to deliver unknown tool error to session");
+        }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Worker resolution
-// ---------------------------------------------------------------------------
-
-/// Resolve a worker implementation from agent config.
-pub fn resolve_worker(_config: &WorkerConfig) -> Box<dyn Worker> {
-    // V1: only the default worker. Future: match on config.kind.
-    Box::new(DefaultWorker)
 }

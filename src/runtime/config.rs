@@ -184,6 +184,16 @@ pub struct SystemConfig {
     /// Maximum tool result size in bytes. `None` = inherit, `Some(0)` = no limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_result_max_bytes: Option<usize>,
+    /// Worker gateway gRPC server config. When set, the runtime starts a gRPC
+    /// server that external workers can connect to for pulling decisions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<GatewayConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayConfig {
+    /// Address to bind the gRPC server to, e.g. "0.0.0.0:50051".
+    pub addr: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

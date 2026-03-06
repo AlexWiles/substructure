@@ -26,8 +26,10 @@ pub mod session;
 pub mod wake_scheduler;
 
 mod actor;
-mod local_executor;
 mod types;
+pub(crate) mod decision_queue;
+mod worker_client;
+pub(crate) mod worker_convert;
 
 use self::config::{AgentConfig, ClientIdentity, EventStoreConfig, SystemConfig};
 use self::span::SpanContext;
@@ -101,6 +103,7 @@ impl Runtime {
                 #[cfg(feature = "otel")]
                 otel: config.otel.clone(),
                 tool_result_max_bytes: config.tool_result_max_bytes,
+                gateway: config.gateway.clone(),
             },
         )
         .await
@@ -151,6 +154,7 @@ impl Runtime {
             auth,
             on_done: None,
             span: SpanContext::root(),
+            stream: false,
         };
         call_t!(
             self.actor,

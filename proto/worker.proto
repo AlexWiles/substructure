@@ -197,6 +197,8 @@ message WorkerDispatch {
   map<string, CallStatus> tool_call_statuses = 8;
   map<string, CallStatus> llm_call_statuses = 9;
   string span_json = 10;
+  repeated LlmTool tools = 11;
+  repeated string sub_agent_names = 12;
 }
 
 message ToolCallDispatch {
@@ -221,9 +223,31 @@ message ToolCallResult {
   optional bytes worker_state = 5;
 }
 
-// --- gRPC service ---
+// --- gRPC services ---
 
+// Worker execution service (runtime calls worker).
 service WorkerService {
   rpc Decide(WorkerDispatch) returns (WorkerDecision);
   rpc ExecuteToolCall(ToolCallDispatch) returns (ToolCallResult);
 }
+
+// Runtime's worker gateway. External workers connect here.
+// Workers pull work via GetDecision (blocks) and submit results via SubmitDecision.
+service WorkerGateway {
+  rpc GetDecision(GetDecisionRequest) returns (WorkerDispatch);
+  rpc SubmitDecision(SubmitDecisionRequest) returns (SubmitDecisionResponse);
+}
+
+message GetDecisionRequest {
+  string worker_id = 1;
+}
+
+message SubmitDecisionRequest {
+  string session_id = 1;
+  string decision_id = 2;
+  WorkerDecision decision = 3;
+  // Pass-through from WorkerDispatch.span_json for trace continuity.
+  string span_json = 4;
+}
+
+message SubmitDecisionResponse {}

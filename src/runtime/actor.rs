@@ -5,8 +5,7 @@ use chrono::Utc;
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use uuid::Uuid;
 
-use crate::runtime::config::ClientIdentity;
-use crate::runtime::config::{AgentConfig, BudgetPolicyConfig};
+use crate::runtime::config::{AgentConfig, BudgetPolicyConfig, ClientIdentity};
 use crate::runtime::session::{
     CommandPayload, IncomingMessage, SessionCommand, SessionState, SessionStatus,
 };
@@ -20,7 +19,8 @@ use super::llm::LlmProviderTrait;
 use super::mcp::{self, McpClient};
 use super::session::client::{Notification, SessionClientActor, SessionClientArgs};
 use super::session::routing::{aggregate_actor_name, notify_observers, session_route};
-use super::local_executor::LocalWorkerExecutor;
+use super::decision_queue::DecisionQueue;
+use super::worker_client::WorkerClient;
 use super::session::{BudgetActorRef, NotifyChunkFn, SessionContext};
 use super::types::{RuntimeError, RuntimeMessage, SessionHandle, SessionInit, SubAgentRequest};
 use super::wake_scheduler::spawn_wake_scheduler;
@@ -38,6 +38,7 @@ pub(super) struct RuntimeState {
     pub(super) llm_provider: Arc<dyn LlmProviderTrait>,
     pub(super) budget_policies: Vec<BudgetPolicyConfig>,
     pub(super) tool_result_max_bytes: Option<usize>,
+    pub(super) queue: Arc<DecisionQueue>,
 }
 
 pub(super) struct RuntimeArgs {
@@ -48,6 +49,7 @@ pub(super) struct RuntimeArgs {
     #[cfg(feature = "otel")]
     pub(super) otel: Option<super::config::OtelConfig>,
     pub(super) tool_result_max_bytes: Option<usize>,
+    pub(super) gateway: Option<super::config::GatewayConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -133,6 +135,7 @@ impl RuntimeState {
         init: SessionInit,
     ) -> Result<SessionHandle, RuntimeError> {
         let trace_id = init.span.trace_id;
+        let stream = init.stream;
         let auth = init.auth.clone();
         let agent = init.agent.clone();
         let actor_name = aggregate_actor_name(session_id);
@@ -149,6 +152,7 @@ impl RuntimeState {
             let auth_for_ctx = auth.clone();
             let agent_for_ctx = agent.clone();
             let tool_result_max_bytes = self.tool_result_max_bytes;
+            let queue_for_ctx = self.queue.clone();
 
             let aggregate_handle = aggregate_actor::spawn_aggregate_actor(
                 aggregate_actor::AggregateActorArgs {
@@ -165,7 +169,7 @@ impl RuntimeState {
                                 &auth_for_ctx,
                                 &llm_provider,
                                 budget_actor,
-                                false,
+                                stream,
                                 tool_result_max_bytes,
                             );
                             // Wire up send_to_session (find-or-start via runtime)
@@ -180,16 +184,16 @@ impl RuntimeState {
                                         },
                                     );
                                 }));
-                            // Wire up worker transport (local decision + tool execution)
-                            let worker_executor = Arc::new(LocalWorkerExecutor::new(
+                            // Wire up worker client
+                            ctx.worker_executor = Some(Arc::new(WorkerClient::new(
+                                queue_for_ctx.clone(),
                                 runtime_ref.clone(),
                                 mcp_for_ctx.clone(),
                                 &resolved_agent,
                                 &agents,
                                 auth_for_ctx.clone(),
-                                false,
-                            ));
-                            ctx.worker_executor = Some(worker_executor);
+                                stream,
+                            )));
                             ctx
                         })
                     }),
@@ -312,6 +316,7 @@ impl RuntimeState {
                     auth,
                     on_done: None,
                     span: SpanContext::root().with_name("wake"),
+                    stream: false,
                 };
                 if let Err(e) = self.start_session(aggregate_id, init).await {
                     tracing::warn!(session = %aggregate_id, error = %e, "wake: failed to start session");
@@ -338,6 +343,7 @@ impl RuntimeState {
             auth: req.auth,
             on_done: Some(req.delivery),
             span: req.span,
+            stream: req.stream,
         };
 
         // start_session spawns the aggregate actor and creates the session
@@ -404,6 +410,27 @@ impl Actor for RuntimeActor {
             }
         }
 
+        // Decision queue — shared by all sessions and workers
+        let queue = Arc::new(DecisionQueue::new(myself.clone()));
+
+        if let Some(gw_config) = args.gateway {
+            // Remote workers: start gRPC server, workers pull from the queue
+            let addr: std::net::SocketAddr = gw_config
+                .addr
+                .parse()
+                .map_err(|e| format!("invalid gateway addr '{}': {e}", gw_config.addr))?;
+            let gw = queue.clone();
+            tokio::spawn(async move {
+                if let Err(e) = gw.serve(addr).await {
+                    tracing::error!(error = %e, "worker gateway server failed");
+                }
+            });
+        } else {
+            // In-process worker: local loop consuming from the same queue
+            let q = queue.clone();
+            tokio::spawn(super::decision_queue::run_local_worker(q));
+        }
+
         let state = RuntimeState {
             myself: myself.clone(),
             store: args.store.clone(),
@@ -411,6 +438,7 @@ impl Actor for RuntimeActor {
             llm_provider: args.llm_provider,
             budget_policies: args.budget_policies,
             tool_result_max_bytes: args.tool_result_max_bytes,
+            queue,
         };
 
         Ok(state)

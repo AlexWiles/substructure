@@ -64,6 +64,7 @@ pub struct SessionInit {
     pub auth: ClientIdentity,
     pub on_done: Option<CompletionDelivery>,
     pub span: SpanContext,
+    pub stream: bool,
 }
 
 // ---------------------------------------------------------------------------

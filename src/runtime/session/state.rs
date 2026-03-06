@@ -383,7 +383,9 @@ impl SessionState {
                 self.status = SessionStatus::Active;
             }
             EventPayload::WorkerDecisionCompleted(p) => {
-                // Persist the worker's updated opaque state.
+                self.worker_state = p.state.clone();
+            }
+            EventPayload::WorkerStateUpdated(p) => {
                 self.worker_state = p.state.clone();
             }
             EventPayload::SessionCancelled => {

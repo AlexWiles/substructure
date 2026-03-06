@@ -23,7 +23,7 @@ api_key = { provider = "env", key = "OPENROUTER_API_KEY" }
 name = "output_cap"
 group_by = ["session_id"]
 dimension = "completion_tokens"
-limit = 200
+limit = 4096
 window = "1m"
 strategy = "interrupt"
 

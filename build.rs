@@ -33,5 +33,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .extern_path(".google.protobuf", "::pbjson_types")
         .build(&[".a2a", ".worker"])?;
 
+    // Generate tonic gRPC server/client stubs for WorkerGateway service.
+    // Uses manual builder to reference existing prost-generated types.
+    let gateway_service = tonic_build::manual::Service::builder()
+        .name("WorkerGateway")
+        .package("worker")
+        .method(
+            tonic_build::manual::Method::builder()
+                .name("get_decision")
+                .route_name("GetDecision")
+                .input_type("crate::worker::GetDecisionRequest")
+                .output_type("crate::worker::WorkerDispatch")
+                .codec_path("tonic::codec::ProstCodec")
+                .build(),
+        )
+        .method(
+            tonic_build::manual::Method::builder()
+                .name("submit_decision")
+                .route_name("SubmitDecision")
+                .input_type("crate::worker::SubmitDecisionRequest")
+                .output_type("crate::worker::SubmitDecisionResponse")
+                .codec_path("tonic::codec::ProstCodec")
+                .build(),
+        )
+        .build();
+
+    tonic_build::manual::Builder::new().compile(&[gateway_service]);
+
     Ok(())
 }

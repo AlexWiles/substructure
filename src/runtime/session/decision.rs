@@ -5,14 +5,10 @@
 //! These types support event sourcing and command handling within
 //! the session aggregate.
 
-use serde_json::Value;
-
 use serde::{Deserialize, Serialize};
 
-use crate::runtime::llm::LlmRequest;
-use crate::runtime::message::{Message, ToolCall};
+use crate::runtime::message::Message;
 use crate::runtime::session::state::ToolResult;
-use crate::runtime::session::types::Artifact;
 
 // ---------------------------------------------------------------------------
 // Decision triggers — what caused the worker to be consulted
@@ -45,27 +41,6 @@ pub enum DecisionTrigger {
 }
 
 // ---------------------------------------------------------------------------
-// Worker actions — what the worker wants the runtime to do
-// ---------------------------------------------------------------------------
-
-/// A tool call annotated with opaque worker context.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCallAction {
-    pub tool_call: ToolCall,
-    /// Opaque context from the worker, passed through to dispatch.
-    #[serde(default, skip_serializing_if = "Value::is_null")]
-    pub context: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum WorkerAction {
-    RequestLlm { request: LlmRequest, stream: bool },
-    RequestToolCalls { tool_calls: Vec<ToolCallAction> },
-    Done { artifacts: Vec<Artifact> },
-}
-
-// ---------------------------------------------------------------------------
 // Worker decision events (persisted in event store)
 // ---------------------------------------------------------------------------
 
@@ -79,6 +54,13 @@ pub struct WorkerDecisionRequested {
 pub struct WorkerDecisionCompleted {
     pub decision_id: String,
     /// Opaque worker state — session stores but never interprets.
+    #[serde(with = "base64_bytes")]
+    pub state: Vec<u8>,
+}
+
+/// Worker state update outside of a decision (e.g. alongside a tool result).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerStateUpdated {
     #[serde(with = "base64_bytes")]
     pub state: Vec<u8>,
 }

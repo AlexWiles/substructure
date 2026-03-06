@@ -5,7 +5,7 @@ use crate::runtime::session::types::{
     InterruptResumed, MessageAssistant, MessageTool, MessageUser, SessionCreated, SessionDone,
     SessionInterrupted, ToolCallCompleted, ToolCallErrored, ToolCallRequested,
 };
-use crate::runtime::session::decision::{WorkerDecisionCompleted, WorkerDecisionRequested};
+use crate::runtime::session::decision::{WorkerDecisionCompleted, WorkerDecisionRequested, WorkerStateUpdated};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -38,6 +38,8 @@ pub enum EventPayload {
     WorkerDecisionRequested(WorkerDecisionRequested),
     #[serde(rename = "worker.decision.completed")]
     WorkerDecisionCompleted(WorkerDecisionCompleted),
+    #[serde(rename = "worker.state.updated")]
+    WorkerStateUpdated(WorkerStateUpdated),
     #[serde(rename = "session.cancelled")]
     SessionCancelled,
     #[serde(rename = "session.done")]
