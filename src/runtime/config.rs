@@ -37,14 +37,14 @@ pub struct LlmConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StrategyConfig {
-    #[serde(default = "StrategyConfig::default_kind")]
+pub struct WorkerConfig {
+    #[serde(default = "WorkerConfig::default_kind")]
     pub kind: String,
     #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub params: serde_json::Map<String, serde_json::Value>,
 }
 
-impl Default for StrategyConfig {
+impl Default for WorkerConfig {
     fn default() -> Self {
         Self {
             kind: Self::default_kind(),
@@ -53,7 +53,7 @@ impl Default for StrategyConfig {
     }
 }
 
-impl StrategyConfig {
+impl WorkerConfig {
     fn default_kind() -> String {
         "default".into()
     }
@@ -132,7 +132,7 @@ pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<McpServerConfig>,
     #[serde(default)]
-    pub strategy: StrategyConfig,
+    pub worker: WorkerConfig,
     /// Maximum context window size in tokens. Used for budget reservation
     /// estimates and context utilization tracking.
     #[serde(default, skip_serializing_if = "Option::is_none")]

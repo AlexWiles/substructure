@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+use serde_json::Value;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -7,40 +8,40 @@ use uuid::Uuid;
 use crate::runtime::config::AgentConfig;
 use crate::runtime::llm::{LlmRequest, LlmTool};
 use crate::runtime::message::{Message, ToolCall};
-use crate::runtime::session::state::ToolResult;
+use crate::runtime::session::state::{LlmCallStatus, ToolCallStatus, ToolResult};
 use crate::runtime::session::types::Artifact;
 
 // ---------------------------------------------------------------------------
-// Strategy trait
+// Worker trait
 // ---------------------------------------------------------------------------
 
-/// A strategy is a pure decision-maker for a session.
+/// A worker is a pure decision-maker for a session.
 ///
 /// The runtime handles execution mechanics (I/O, retries, timeouts) and stores
-/// the strategy's opaque state. The strategy handles business logic: given a
+/// the worker's opaque state. The worker handles business logic: given a
 /// trigger and its current state, produce actions and an updated state.
 ///
-/// In the future, `decide` becomes an RPC call to a remote client.
-pub trait Strategy: Send + Sync + fmt::Debug {
+/// In the future, `decide` becomes an RPC call to a remote worker.
+pub trait Worker: Send + Sync + fmt::Debug {
     /// Make a decision given a trigger, current opaque state, and runtime context.
     /// Returns actions for the runtime to execute and the updated opaque state.
     fn decide(
         &self,
         trigger: &DecisionTrigger,
         state: &serde_json::Value,
-        ctx: &StrategyCtx,
-    ) -> StrategyDecision;
+        ctx: &WorkerCtx,
+    ) -> WorkerDecision;
 }
 
-/// The result of a strategy decision: actions to execute and updated state.
+/// The result of a worker decision: actions to execute and updated state.
 #[derive(Debug, Clone)]
-pub struct StrategyDecision {
-    pub actions: Vec<StrategyAction>,
+pub struct WorkerDecision {
+    pub actions: Vec<WorkerAction>,
     pub state: serde_json::Value,
 }
 
 // ---------------------------------------------------------------------------
-// Decision triggers — what caused the strategy to be consulted
+// Decision triggers — what caused the worker to be consulted
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,49 +71,66 @@ pub enum DecisionTrigger {
 }
 
 // ---------------------------------------------------------------------------
-// Strategy actions — what the strategy wants the runtime to do
+// Worker actions — what the worker wants the runtime to do
 // ---------------------------------------------------------------------------
+
+/// A tool call annotated with opaque worker context.
+///
+/// The worker attaches context (e.g. a sub-agent's `AgentConfig`) that flows
+/// through the runtime untouched and arrives at the transport for execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallAction {
+    pub tool_call: ToolCall,
+    /// Opaque context from the worker, passed through to transport dispatch.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub context: Value,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum StrategyAction {
+pub enum WorkerAction {
     RequestLlm { request: LlmRequest, stream: bool },
-    RequestToolCalls { tool_calls: Vec<ToolCall> },
+    RequestToolCalls { tool_calls: Vec<ToolCallAction> },
     Done { artifacts: Vec<Artifact> },
     UpdateState { state: Option<String> },
 }
 
 // ---------------------------------------------------------------------------
-// Strategy context — curated view of runtime state for decisions
+// Worker context — curated view of runtime state for decisions
 // ---------------------------------------------------------------------------
 
-/// Serializable snapshot of runtime state provided to the strategy.
+/// Serializable snapshot of runtime state provided to the worker.
 /// Fully owned — can cross process/language boundaries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StrategyCtx {
+pub struct WorkerCtx {
     pub session_id: Uuid,
     pub stream: bool,
     pub agent: AgentConfig,
     pub all_tools: Option<Vec<LlmTool>>,
+    /// Sub-agent configs available for spawning.
+    #[serde(default)]
+    pub sub_agents: HashMap<String, AgentConfig>,
     pub token_usage: BTreeMap<String, u64>,
-    pub has_inflight_tools: bool,
-    pub has_pending_llm: bool,
-    pub failed_llm_calls: Vec<String>,
+    /// Status of each tool call, keyed by tool_call_id.
+    #[serde(default)]
+    pub tool_call_statuses: HashMap<String, ToolCallStatus>,
+    /// Status of each LLM call, keyed by call_id.
+    #[serde(default)]
+    pub llm_call_statuses: HashMap<String, LlmCallStatus>,
 }
 
 // ---------------------------------------------------------------------------
-// Strategy decision events
+// Worker decision events
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StrategyDecisionRequested {
+pub struct WorkerDecisionRequested {
     pub decision_id: String,
     pub trigger: DecisionTrigger,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StrategyDecisionCompleted {
+pub struct WorkerDecisionCompleted {
     pub decision_id: String,
     pub state: serde_json::Value,
 }
-

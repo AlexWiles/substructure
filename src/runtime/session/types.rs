@@ -88,10 +88,10 @@ pub struct InterruptResumed {
     pub payload: serde_json::Value,
 }
 
-// --- Strategy ---
+// --- Worker ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StrategyStateChanged {
+pub struct WorkerStateChanged {
     pub state: Option<String>,
 }
 
@@ -101,27 +101,11 @@ pub struct StrategyStateChanged {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolHandler {
-    /// Executed by the runtime (MCP or sub-agent).
+    /// Dispatched via WorkerExecutor (local MCP/sub-agent or remote worker).
     #[default]
-    Runtime,
+    Worker,
     /// Executed by the client. Session goes Idle while waiting.
     Client,
-}
-
-/// Metadata describing the type of tool call.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ToolCallMeta {
-    /// Tool is a sub-agent invocation.
-    SubAgent {
-        child_session_id: Uuid,
-        agent_name: String,
-    },
-    /// Tool is served by an MCP server.
-    Mcp {
-        server_name: String,
-        server_version: String,
-    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,8 +116,9 @@ pub struct ToolCallRequested {
     pub deadline: DateTime<Utc>,
     #[serde(default)]
     pub handler: ToolHandler,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub meta: Option<ToolCallMeta>,
+    /// Opaque context from the worker, passed through to transport dispatch.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub context: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

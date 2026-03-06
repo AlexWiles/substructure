@@ -170,8 +170,7 @@ pub async fn start_server(config: SystemConfig, addr: std::net::SocketAddr) -> a
     let client_routes = Router::new()
         .route("/agents", get(list_agents))
         .route("/sessions", get(list_sessions).post(create_session))
-        .route("/sessions/{session_id}", get(get_session))
-;
+        .route("/sessions/{session_id}", get(get_session));
 
     let app = Router::new()
         .route("/healthz", get(healthz))

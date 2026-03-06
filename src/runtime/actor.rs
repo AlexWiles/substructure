@@ -16,12 +16,12 @@ use super::aggregate::actor::{self as aggregate_actor, AggregateActorHandle, Agg
 use super::aggregate::dispatcher::spawn_aggregate_dispatcher;
 use super::budget;
 use super::event_store::{AggregateFilter, EventStore};
-use super::llm::{LlmProviderTrait, LlmTool, LlmToolFunction};
-use super::mcp::{self, McpClient, ToolDefinition};
+use super::llm::LlmProviderTrait;
+use super::mcp::{self, McpClient};
 use super::session::client::{Notification, SessionClientActor, SessionClientArgs};
 use super::session::routing::{aggregate_actor_name, notify_observers, session_route};
-use super::session::transport::LocalStrategyTransport;
-use super::session::{BudgetActorRef, McpToolEntry, NotifyChunkFn, SessionContext};
+use super::local_worker::LocalWorkerExecutor;
+use super::session::{BudgetActorRef, NotifyChunkFn, SessionContext};
 use super::types::{RuntimeError, RuntimeMessage, SessionHandle, SessionInit, SubAgentRequest};
 use super::wake_scheduler::spawn_wake_scheduler;
 
@@ -163,10 +163,7 @@ impl RuntimeState {
                             let mut ctx = build_session_context(
                                 session_id,
                                 &auth_for_ctx,
-                                &mcp_for_ctx,
                                 &llm_provider,
-                                &agents,
-                                Some(&resolved_agent),
                                 budget_actor,
                                 false,
                                 tool_result_max_bytes,
@@ -183,27 +180,16 @@ impl RuntimeState {
                                         },
                                     );
                                 }));
-                            // Wire up strategy transport (local execution)
-                            ctx.strategy_transport = Some(Arc::new(
-                                LocalStrategyTransport {
-                                    runtime: runtime_ref.clone(),
-                                },
+                            // Wire up worker transport (local decision + tool execution)
+                            let worker_executor = Arc::new(LocalWorkerExecutor::new(
+                                runtime_ref.clone(),
+                                mcp_for_ctx.clone(),
+                                &resolved_agent,
+                                &agents,
+                                auth_for_ctx.clone(),
+                                false,
                             ));
-                            // Wire up sub-agent spawning
-                            let runtime = runtime_ref.clone();
-                            ctx.spawn_sub_agent = Some(Arc::new(move |params| {
-                                let _ = runtime.send_message(RuntimeMessage::RunSubAgent(
-                                    SubAgentRequest {
-                                        session_id: params.session_id,
-                                        agent_name: params.agent_name,
-                                        message: params.message,
-                                        auth: params.auth,
-                                        delivery: params.delivery,
-                                        span: params.span,
-                                        stream: params.stream,
-                                    },
-                                ));
-                            }));
+                            ctx.worker_executor = Some(worker_executor);
                             ctx
                         })
                     }),
@@ -244,6 +230,7 @@ impl RuntimeState {
                             tool_call_id: delivery.tool_call_id.clone(),
                             name: delivery.tool_name.clone(),
                             result,
+                            worker_state: None,
                         },
                         span: init.span.child("sub_agent.deliver"),
                     });
@@ -507,68 +494,14 @@ impl Actor for RuntimeActor {
 // Build SessionContext — wires runtime resources into the domain context
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
 fn build_session_context(
     session_id: Uuid,
     auth: &ClientIdentity,
-    mcp_clients: &[Arc<dyn McpClient>],
     llm_provider: &Arc<dyn LlmProviderTrait>,
-    agents: &HashMap<String, AgentConfig>,
-    agent: Option<&AgentConfig>,
     budget_actor: Option<AggregateActorHandle<budget::BudgetLedger>>,
     stream: bool,
     tool_result_max_bytes: Option<usize>,
 ) -> SessionContext {
-    let mcp_tools: HashMap<String, McpToolEntry> = mcp_clients
-        .iter()
-        .flat_map(|c| {
-            let info = c.server_info();
-            let server_name = info.name.clone();
-            let server_version = info.version.clone();
-            c.tools().iter().map(move |t| {
-                (
-                    t.name.clone(),
-                    McpToolEntry {
-                        server_name: server_name.clone(),
-                        server_version: server_version.clone(),
-                    },
-                )
-            })
-        })
-        .collect();
-
-    let mut tools: Vec<LlmTool> = mcp_clients
-        .iter()
-        .flat_map(|c| c.tools().iter().map(|t| t.to_tool()))
-        .collect();
-
-    if let Some(agent) = agent {
-        for name in &agent.sub_agents {
-            if let Some(sub) = agents.get(name) {
-                let tool_name = ToolDefinition::sanitized_name(name);
-                tools.push(LlmTool {
-                    tool_type: "function".to_string(),
-                    function: LlmToolFunction {
-                        name: tool_name,
-                        description: sub.description.clone().unwrap_or_else(|| sub.name.clone()),
-                        parameters: serde_json::json!({
-                            "type": "object",
-                            "properties": {
-                                "message": {
-                                    "type": "string",
-                                    "description": "The message to send to the sub-agent"
-                                }
-                            },
-                            "required": ["message"]
-                        }),
-                    },
-                });
-            }
-        }
-    }
-
-    let all_tools = if tools.is_empty() { None } else { Some(tools) };
-
     let budget_ref = budget_actor.map(|a| BudgetActorRef { inner: Box::new(a) });
 
     let notify_chunk: NotifyChunkFn = Arc::new(|session_id, call_id, chunk_index, text, span| {
@@ -584,19 +517,15 @@ fn build_session_context(
     });
 
     SessionContext {
-        mcp_tools,
-        all_tools,
         session_id,
         auth: auth.clone(),
         stream,
         llm_provider: Some(llm_provider.clone()),
-        mcp_clients: mcp_clients.to_vec(),
         client_tools: Vec::new(),
         budget_actor: budget_ref,
         notify_chunk: Some(notify_chunk),
         send_to_session: None,
-        spawn_sub_agent: None,
         tool_result_max_bytes,
-        strategy_transport: None,
+        worker_executor: None,
     }
 }

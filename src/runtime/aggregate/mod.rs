@@ -154,12 +154,7 @@ impl<R: AggregateState> Aggregate<R> {
 
     /// Apply an event with dedup, version tracking, and timestamp updates.
     /// Returns `true` if the event was applied (not a duplicate).
-    pub fn apply(
-        &mut self,
-        event: &R::Event,
-        sequence: u64,
-        occurred_at: DateTime<Utc>,
-    ) -> bool {
+    pub fn apply(&mut self, event: &R::Event, sequence: u64, occurred_at: DateTime<Utc>) -> bool {
         if self.last_applied.is_some_and(|seq| sequence <= seq) {
             return false;
         }

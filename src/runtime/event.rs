@@ -1,12 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 use crate::runtime::llm::{LlmCallCompleted, LlmCallErrored, LlmCallRequested};
-use crate::runtime::session::strategy::{StrategyDecisionCompleted, StrategyDecisionRequested};
 use crate::runtime::session::types::{
     InterruptResumed, MessageAssistant, MessageTool, MessageUser, SessionCreated, SessionDone,
-    SessionInterrupted, StrategyStateChanged, ToolCallCompleted, ToolCallErrored,
-    ToolCallRequested,
+    SessionInterrupted, ToolCallCompleted, ToolCallErrored, ToolCallRequested, WorkerStateChanged,
 };
+use crate::runtime::session::worker::{WorkerDecisionCompleted, WorkerDecisionRequested};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -35,12 +34,12 @@ pub enum EventPayload {
     SessionInterrupted(SessionInterrupted),
     #[serde(rename = "session.interrupt_resumed")]
     InterruptResumed(InterruptResumed),
-    #[serde(rename = "strategy.state_changed")]
-    StrategyStateChanged(StrategyStateChanged),
-    #[serde(rename = "strategy.decision.requested")]
-    StrategyDecisionRequested(StrategyDecisionRequested),
-    #[serde(rename = "strategy.decision.completed")]
-    StrategyDecisionCompleted(StrategyDecisionCompleted),
+    #[serde(rename = "worker.state_changed")]
+    WorkerStateChanged(WorkerStateChanged),
+    #[serde(rename = "worker.decision.requested")]
+    WorkerDecisionRequested(WorkerDecisionRequested),
+    #[serde(rename = "worker.decision.completed")]
+    WorkerDecisionCompleted(WorkerDecisionCompleted),
     #[serde(rename = "session.cancelled")]
     SessionCancelled,
     #[serde(rename = "session.done")]

@@ -6,79 +6,51 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::strategy::{DecisionTrigger, StrategyCtx, StrategyDecisionRequested};
-use super::transport::{StrategyDispatch, StrategyTransport};
-use super::types::{Artifact, CompletionDelivery, ToolCallMeta, ToolCallRequested, ToolHandler};
+use super::transport::{ToolCallDispatch, WorkerDispatch, WorkerExecutor};
+use super::types::{Artifact, CompletionDelivery, ToolHandler};
+use super::worker::{DecisionTrigger, WorkerDecisionRequested};
 use crate::runtime::aggregate::{AggregateState, AggregateStatus, Emit};
 use crate::runtime::budget::{self, BudgetContext, BudgetError};
 use crate::runtime::config::{AgentConfig, ClientIdentity, ExhaustionStrategy, RetryPolicy};
 use crate::runtime::event::EventPayload;
 use crate::runtime::llm::{LlmCallRequested, LlmRequest, LlmResponse, LlmTool};
-use crate::runtime::mcp::{Content, McpClient};
 use crate::runtime::message::{Message, Role};
 use crate::runtime::span::SpanContext;
 use async_trait::async_trait;
 
-use super::command::{truncate_tool_result, CommandPayload, SessionError};
+use super::command::{CommandPayload, SessionError};
 use crate::runtime::defaults;
 
 // ---------------------------------------------------------------------------
 // SessionContext — transient state passed through handle_command/on_event
 // ---------------------------------------------------------------------------
 
-/// MCP server info associated with a tool name (transient, populated by runtime).
-#[derive(Debug, Clone)]
-pub struct McpToolEntry {
-    pub server_name: String,
-    pub server_version: String,
-}
-
 /// Callback for streaming LLM chunks to observers.
 pub type NotifyChunkFn = Arc<dyn Fn(Uuid, String, u32, String, SpanContext) + Send + Sync>;
 /// Callback for sending a command to a session (fire-and-forget).
 pub type SendToSessionFn = Arc<dyn Fn(Uuid, CommandPayload, SpanContext) + Send + Sync>;
-/// Callback for spawning a sub-agent.
-pub type SpawnSubAgentFn = Arc<dyn Fn(SubAgentParams) + Send + Sync>;
-
-/// Parameters for spawning a sub-agent.
-pub struct SubAgentParams {
-    pub session_id: Uuid,
-    pub agent_name: String,
-    pub message: String,
-    pub auth: ClientIdentity,
-    pub delivery: CompletionDelivery,
-    pub span: SpanContext,
-    pub stream: bool,
-}
 
 /// Transient context for command handling and event reactions — not persisted.
 pub struct SessionContext {
-    pub mcp_tools: HashMap<String, McpToolEntry>,
-    /// All tools (MCP + sub-agents + client), injected into LLM requests.
-    pub all_tools: Option<Vec<LlmTool>>,
     pub session_id: Uuid,
     pub auth: ClientIdentity,
     pub stream: bool,
     // Runtime resources for I/O in on_event
     pub llm_provider: Option<Arc<dyn LlmProviderTrait>>,
-    pub mcp_clients: Vec<Arc<dyn McpClient>>,
     pub client_tools: Vec<LlmTool>,
     pub budget_actor: Option<BudgetActorRef>,
     // Callbacks for side-effects
     pub notify_chunk: Option<NotifyChunkFn>,
     pub send_to_session: Option<SendToSessionFn>,
-    pub spawn_sub_agent: Option<SpawnSubAgentFn>,
     /// System-wide max tool result bytes (from SystemConfig).
     pub tool_result_max_bytes: Option<usize>,
-    /// Strategy transport — dispatches strategy decisions (local or remote).
-    pub strategy_transport: Option<Arc<dyn StrategyTransport>>,
+    /// Worker transport — dispatches decisions and tool calls (local or remote).
+    pub worker_executor: Option<Arc<dyn WorkerExecutor>>,
 }
 
 impl Default for SessionContext {
     fn default() -> Self {
         Self {
-            mcp_tools: HashMap::new(),
-            all_tools: None,
             session_id: Uuid::nil(),
             auth: ClientIdentity {
                 tenant_id: String::new(),
@@ -87,14 +59,12 @@ impl Default for SessionContext {
             },
             stream: false,
             llm_provider: None,
-            mcp_clients: Vec::new(),
             client_tools: Vec::new(),
             budget_actor: None,
             notify_chunk: None,
             send_to_session: None,
-            spawn_sub_agent: None,
             tool_result_max_bytes: None,
-            strategy_transport: None,
+            worker_executor: None,
         }
     }
 }
@@ -126,7 +96,7 @@ pub(super) fn new_call_id() -> String {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionStatus {
-    /// Work in flight: LLM calls, tool calls, strategy decisions.
+    /// Work in flight: LLM calls, tool calls, worker decisions.
     Active,
     /// Nothing in flight. Wake scheduler will check wake_at() for retry timing.
     Idle,
@@ -190,8 +160,9 @@ pub struct ToolCallState {
     pub retry: RetryState,
     pub retry_policy: RetryPolicy,
     pub deadline: DateTime<Utc>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub meta: Option<ToolCallMeta>,
+    /// Opaque context from the worker, passed through to transport dispatch.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub context: serde_json::Value,
     #[serde(default)]
     pub handler: ToolHandler,
     /// Original arguments, stored for retries and crash recovery.
@@ -202,17 +173,6 @@ pub struct ToolCallState {
     pub result: Option<String>,
     #[serde(default)]
     pub is_error: bool,
-}
-
-impl ToolCallState {
-    pub fn child_session_id(&self) -> Option<Uuid> {
-        match &self.meta {
-            Some(ToolCallMeta::SubAgent {
-                child_session_id, ..
-            }) => Some(*child_session_id),
-            _ => None,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -237,9 +197,9 @@ pub struct SessionState {
     pub auth: Option<ClientIdentity>,
     pub token_usage: BTreeMap<String, u64>,
 
-    /// Opaque strategy state — owned and managed exclusively by the strategy.
+    /// Opaque worker state — owned and managed exclusively by the worker.
     #[serde(default)]
-    pub strategy_state: serde_json::Value,
+    pub worker_state: serde_json::Value,
 
     /// Sub-agent completion delivery target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -262,7 +222,7 @@ impl SessionState {
             agent: None,
             auth: None,
             token_usage: BTreeMap::new(),
-            strategy_state: serde_json::Value::Null,
+            worker_state: serde_json::Value::Null,
             on_done: None,
             artifacts: vec![],
             llm_calls: HashMap::new(),
@@ -349,9 +309,9 @@ impl SessionState {
                             name: payload.name.clone(),
                             status: ToolCallStatus::Pending,
                             retry: RetryState::default(),
-                            retry_policy: self.resolve_tool_retry(payload.meta.as_ref()),
+                            retry_policy: self.resolve_tool_retry(),
                             deadline: payload.deadline,
-                            meta: payload.meta.clone(),
+                            context: payload.context.clone(),
                             handler: payload.handler.clone(),
                             arguments: payload.arguments.clone(),
                             result: None,
@@ -359,12 +319,12 @@ impl SessionState {
                         },
                     );
                 }
-                // Active only if there's runtime-handled work to do;
+                // Active only if there's worker-handled work to do;
                 // Idle if all pending calls are client tools.
-                let has_runtime_work = self.tool_calls.values().any(|tc| {
-                    tc.status == ToolCallStatus::Pending && tc.handler == ToolHandler::Runtime
+                let has_worker_work = self.tool_calls.values().any(|tc| {
+                    tc.status == ToolCallStatus::Pending && tc.handler == ToolHandler::Worker
                 });
-                self.status = if has_runtime_work {
+                self.status = if has_worker_work {
                     SessionStatus::Active
                 } else {
                     SessionStatus::Idle
@@ -417,16 +377,16 @@ impl SessionState {
             EventPayload::InterruptResumed(_) => {
                 self.status = SessionStatus::Active;
             }
-            EventPayload::StrategyStateChanged(_) => {
-                // Legacy: state updates now flow through StrategyDecisionCompleted.
+            EventPayload::WorkerStateChanged(_) => {
+                // Legacy: state updates now flow through WorkerDecisionCompleted.
             }
-            EventPayload::StrategyDecisionRequested(_) => {
+            EventPayload::WorkerDecisionRequested(_) => {
                 // Keep Active while decision is pending
                 self.status = SessionStatus::Active;
             }
-            EventPayload::StrategyDecisionCompleted(p) => {
-                // Persist the strategy's updated opaque state.
-                self.strategy_state = p.state.clone();
+            EventPayload::WorkerDecisionCompleted(p) => {
+                // Persist the worker's updated opaque state.
+                self.worker_state = p.state.clone();
             }
             EventPayload::SessionCancelled => {
                 self.status = SessionStatus::Done;
@@ -440,7 +400,6 @@ impl SessionState {
                 }
             }
         }
-
     }
 
     // -----------------------------------------------------------------------
@@ -544,34 +503,6 @@ impl SessionState {
         }
     }
 
-    /// Compute tool call metadata based on the tool name.
-    pub(super) fn tool_call_meta(
-        &self,
-        name: &str,
-        tool_call_id: &str,
-        mcp_tools: &HashMap<String, McpToolEntry>,
-    ) -> Option<ToolCallMeta> {
-        // Check sub-agents
-        if let Some(agent_name) = self
-            .agent
-            .as_ref()
-            .and_then(|a| a.sub_agents.iter().find(|s| s.as_str() == name))
-        {
-            return Some(ToolCallMeta::SubAgent {
-                child_session_id: Uuid::new_v5(&self.session_id, tool_call_id.as_bytes()),
-                agent_name: agent_name.clone(),
-            });
-        }
-        // Check MCP tools
-        if let Some(entry) = mcp_tools.get(name) {
-            return Some(ToolCallMeta::Mcp {
-                server_name: entry.server_name.clone(),
-                server_version: entry.server_version.clone(),
-            });
-        }
-        None
-    }
-
     /// Resolve LLM retry policy: agent.llm.retry → defaults.
     pub(super) fn resolve_llm_retry(&self) -> RetryPolicy {
         self.agent
@@ -580,21 +511,9 @@ impl SessionState {
             .unwrap_or(RetryPolicy::LLM_DEFAULTS)
     }
 
-    /// Resolve tool retry policy: MCP server → defaults.
-    pub(super) fn resolve_tool_retry(&self, meta: Option<&ToolCallMeta>) -> RetryPolicy {
-        let server_name = match meta {
-            Some(ToolCallMeta::Mcp { server_name, .. }) => Some(server_name.as_str()),
-            _ => None,
-        };
-        let mcp_retry = server_name.and_then(|sn| {
-            self.agent
-                .as_ref()
-                .and_then(|a| a.mcp_servers.iter().find(|s| s.name == sn))
-                .map(|s| &s.retry)
-        });
-        mcp_retry
-            .map(|r| r.resolve(&RetryPolicy::TOOL_DEFAULTS))
-            .unwrap_or(RetryPolicy::TOOL_DEFAULTS)
+    /// Resolve tool retry policy.
+    pub(super) fn resolve_tool_retry(&self) -> RetryPolicy {
+        RetryPolicy::TOOL_DEFAULTS
     }
 
     /// Compute LLM call deadline from agent config.
@@ -603,41 +522,26 @@ impl SessionState {
         Utc::now() + chrono::Duration::seconds(i64::from(policy.timeout_secs))
     }
 
-    /// Compute tool call deadline, resolved per MCP server.
-    pub(super) fn tool_deadline(&self, meta: Option<&ToolCallMeta>) -> DateTime<Utc> {
-        let policy = self.resolve_tool_retry(meta);
+    /// Compute tool call deadline.
+    pub(super) fn tool_deadline(&self) -> DateTime<Utc> {
+        let policy = self.resolve_tool_retry();
         Utc::now() + chrono::Duration::seconds(i64::from(policy.timeout_secs))
     }
 
-    /// Resolve the max tool result size for a given tool.
+    /// Resolve the max tool result size.
     ///
-    /// Resolution: MCP server → agent → system → hardcoded default.
+    /// Resolution: agent → system → hardcoded default.
     /// `Some(0)` at any level means "no limit" (returns `None`).
-    pub(super) fn tool_result_max_bytes(
-        &self,
-        tool_name: &str,
-        ctx: &SessionContext,
-    ) -> Option<usize> {
-        // 1. Per-MCP server
-        if let Some(entry) = ctx.mcp_tools.get(tool_name) {
-            if let Some(limit) = self
-                .agent
-                .as_ref()
-                .and_then(|a| a.mcp_servers.iter().find(|s| s.name == entry.server_name))
-                .and_then(|s| s.tool_result_max_bytes)
-            {
-                return if limit == 0 { None } else { Some(limit) };
-            }
-        }
-        // 2. Per-agent
+    pub(super) fn tool_result_max_bytes(&self, ctx: &SessionContext) -> Option<usize> {
+        // 1. Per-agent
         if let Some(limit) = self.agent.as_ref().and_then(|a| a.tool_result_max_bytes) {
             return if limit == 0 { None } else { Some(limit) };
         }
-        // 3. System-wide
+        // 2. System-wide
         if let Some(limit) = ctx.tool_result_max_bytes {
             return if limit == 0 { None } else { Some(limit) };
         }
-        // 4. Hardcoded default
+        // 3. Hardcoded default
         Some(defaults::TOOL_RESULT_MAX_BYTES)
     }
 
@@ -645,29 +549,40 @@ impl SessionState {
         self.agent.as_ref().map(|a| a.name.clone())
     }
 
-    /// Build a StrategyCtx from the current state and context.
-    pub(super) fn strategy_ctx(&self, ctx: &SessionContext) -> Option<StrategyCtx> {
+    /// Build a WorkerDispatch from session state.
+    /// Returns None if no agent is configured.
+    pub(super) fn worker_dispatch(
+        &self,
+        ctx: &SessionContext,
+        req: &WorkerDecisionRequested,
+        span: &SpanContext,
+    ) -> Option<WorkerDispatch> {
         let agent = self.agent.as_ref()?;
-        Some(StrategyCtx {
+        Some(WorkerDispatch {
             session_id: self.session_id,
+            decision_id: req.decision_id.clone(),
+            trigger: req.trigger.clone(),
+            worker_state: self.worker_state.clone(),
             stream: ctx.stream,
             agent: agent.clone(),
-            all_tools: ctx.all_tools.clone(),
             token_usage: self.token_usage.clone(),
-            has_inflight_tools: self.has_inflight_tools(),
-            has_pending_llm: self.has_pending_llm(),
-            failed_llm_calls: self
-                .llm_calls
-                .values()
-                .filter(|c| c.status == LlmCallStatus::Failed)
-                .map(|c| c.call_id.clone())
+            tool_call_statuses: self
+                .tool_calls
+                .iter()
+                .map(|(id, tc)| (id.clone(), tc.status.clone()))
                 .collect(),
+            llm_call_statuses: self
+                .llm_calls
+                .iter()
+                .map(|(id, c)| (id.clone(), c.status.clone()))
+                .collect(),
+            span: span.clone(),
         })
     }
 }
 
 // ---------------------------------------------------------------------------
-// on_event helpers — I/O dispatch and strategy decisions
+// on_event helpers — I/O dispatch and worker decisions
 // ---------------------------------------------------------------------------
 
 impl SessionState {
@@ -760,8 +675,7 @@ impl SessionState {
             return cmd;
         }
 
-        // Inject tools into the request
-        let request = p.request.clone().with_tools(ctx.all_tools.clone());
+        let request = p.request.clone();
 
         let result = if p.stream {
             let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel::<StreamDelta>();
@@ -807,100 +721,6 @@ impl SessionState {
         }
     }
 
-    /// Handle a tool call: sub-agent spawn, MCP call, or client tool (no-op).
-    async fn handle_tool_call(
-        &self,
-        p: &ToolCallRequested,
-        ctx: &SessionContext,
-        span: &SpanContext,
-    ) -> Option<CommandPayload> {
-        // Sub-agent tool call
-        if let Some(child_session_id) = self
-            .tool_calls
-            .get(&p.tool_call_id)
-            .and_then(|tc| tc.child_session_id())
-        {
-            let args: serde_json::Value = serde_json::from_str(&p.arguments).unwrap_or_default();
-            let message = args
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            if let Some(ref spawn) = ctx.spawn_sub_agent {
-                spawn(SubAgentParams {
-                    session_id: child_session_id,
-                    agent_name: p.name.clone(),
-                    message,
-                    auth: ctx.auth.clone(),
-                    delivery: CompletionDelivery {
-                        parent_session_id: ctx.session_id,
-                        tool_call_id: p.tool_call_id.clone(),
-                        tool_name: p.name.clone(),
-                        span: span.child("sub_agent.delivery"),
-                    },
-                    span: span.child("sub_agent.spawn"),
-                    stream: ctx.stream,
-                });
-            }
-            return None; // Sub-agent runs async, result arrives via CompleteToolCall command
-        }
-
-        // MCP tool call
-        let mcp = ctx
-            .mcp_clients
-            .iter()
-            .find(|c| c.tools().iter().any(|t| t.name == p.name))
-            .cloned();
-
-        if let Some(mcp) = mcp {
-            let args: serde_json::Value = serde_json::from_str(&p.arguments).unwrap_or_default();
-
-            match mcp.call_tool(&p.name, args).await {
-                Ok(result) => {
-                    let text = result
-                        .content
-                        .iter()
-                        .filter_map(|c| match c {
-                            Content::Text { text } => Some(text.as_str()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    let max = self.tool_result_max_bytes(&p.name, ctx);
-                    let text = truncate_tool_result(text, max);
-                    if result.is_error {
-                        return Some(CommandPayload::FailToolCall {
-                            tool_call_id: p.tool_call_id.clone(),
-                            name: p.name.clone(),
-                            error: text,
-                        });
-                    } else {
-                        return Some(CommandPayload::CompleteToolCall {
-                            tool_call_id: p.tool_call_id.clone(),
-                            name: p.name.clone(),
-                            result: text,
-                        });
-                    }
-                }
-                Err(e) => {
-                    return Some(CommandPayload::FailToolCall {
-                        tool_call_id: p.tool_call_id.clone(),
-                        name: p.name.clone(),
-                        error: e.to_string(),
-                    });
-                }
-            }
-        }
-
-        // Unknown tool — fail immediately so the LLM gets feedback
-        Some(CommandPayload::FailToolCall {
-            tool_call_id: p.tool_call_id.clone(),
-            name: p.name.clone(),
-            error: format!("unknown tool: {}", p.name),
-        })
-    }
-
     /// Build a ToolResult from a resolved ToolCallState.
     fn tool_result(tc: &ToolCallState) -> ToolResult {
         ToolResult {
@@ -911,7 +731,7 @@ impl SessionState {
         }
     }
 
-    /// Detect whether an event should trigger a strategy decision.
+    /// Detect whether an event should trigger a worker decision.
     fn detect_trigger(&self, event: &EventPayload) -> Option<DecisionTrigger> {
         match event {
             EventPayload::MessageUser(p) => Some(DecisionTrigger::UserMessage {
@@ -935,7 +755,7 @@ impl SessionState {
                 })
             }
             EventPayload::LlmCallErrored(p) => {
-                // Only consult strategy when retries are exhausted.
+                // Only consult worker when retries are exhausted.
                 // Transient failures are retried by the runtime via wake scheduling.
                 let exhausted = self
                     .llm_calls
@@ -951,7 +771,7 @@ impl SessionState {
                 }
             }
             EventPayload::ToolCallErrored(p) => {
-                // Only consult strategy when retries are exhausted.
+                // Only consult worker when retries are exhausted.
                 let exhausted = self
                     .tool_calls
                     .get(&p.tool_call_id)
@@ -978,24 +798,17 @@ impl SessionState {
         }
     }
 
-    /// Dispatch a strategy decision via the transport (fire-and-forget).
-    fn dispatch_strategy_decision(
+    /// Dispatch a worker decision via the executor (fire-and-forget).
+    fn dispatch_worker_decision(
         &self,
-        req: &StrategyDecisionRequested,
+        req: &WorkerDecisionRequested,
         ctx: &SessionContext,
         span: &SpanContext,
     ) {
-        if let (Some(transport), Some(strategy_ctx)) =
-            (&ctx.strategy_transport, self.strategy_ctx(ctx))
+        if let (Some(executor), Some(dispatch)) =
+            (&ctx.worker_executor, self.worker_dispatch(ctx, req, span))
         {
-            transport.dispatch(StrategyDispatch {
-                session_id: self.session_id,
-                decision_id: req.decision_id.clone(),
-                trigger: req.trigger.clone(),
-                strategy_state: self.strategy_state.clone(),
-                ctx: strategy_ctx,
-                span: span.clone(),
-            });
+            executor.dispatch_decision(dispatch);
         }
     }
 }
@@ -1047,9 +860,19 @@ impl AggregateState for SessionState {
             }
             EventPayload::ToolCallRequested(p) => {
                 if self.tool_calls.get(&p.tool_call_id).is_some_and(|tc| {
-                    tc.status == ToolCallStatus::Pending && tc.handler == ToolHandler::Runtime
+                    tc.status == ToolCallStatus::Pending && tc.handler == ToolHandler::Worker
                 }) {
-                    return self.handle_tool_call(p, ctx, span).await;
+                    if let Some(transport) = &ctx.worker_executor {
+                        transport.dispatch_tool_call(ToolCallDispatch {
+                            session_id: self.session_id,
+                            tool_call_id: p.tool_call_id.clone(),
+                            name: p.name.clone(),
+                            arguments: p.arguments.clone(),
+                            context: p.context.clone(),
+                            max_result_bytes: self.tool_result_max_bytes(ctx),
+                            span: span.clone(),
+                        });
+                    }
                 }
                 None
             }
@@ -1063,6 +886,7 @@ impl AggregateState for SessionState {
                                 tool_call_id: delivery.tool_call_id.clone(),
                                 name: delivery.tool_name.clone(),
                                 result,
+                                worker_state: None,
                             },
                             span.child("session.done.deliver"),
                         );
@@ -1071,16 +895,16 @@ impl AggregateState for SessionState {
                 None
             }
 
-            // --- Strategy dispatch (fire-and-forget via transport) ---
-            EventPayload::StrategyDecisionRequested(req) => {
-                self.dispatch_strategy_decision(req, ctx, span);
+            // --- Worker dispatch (fire-and-forget via transport) ---
+            EventPayload::WorkerDecisionRequested(req) => {
+                self.dispatch_worker_decision(req, ctx, span);
                 None
             }
 
             // --- Everything else: detect triggers ---
             _ => self
                 .detect_trigger(event)
-                .map(|trigger| CommandPayload::TriggerStrategyDecision { trigger }),
+                .map(|trigger| CommandPayload::TriggerWorkerDecision { trigger }),
         }
     }
 

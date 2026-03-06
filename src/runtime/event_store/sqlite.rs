@@ -763,7 +763,7 @@ mod tests {
             },
             system_prompt: "test".into(),
             mcp_servers: vec![],
-            strategy: Default::default(),
+            worker: Default::default(),
             max_context_tokens: None,
             sub_agents: vec![],
             tool_result_max_bytes: None,

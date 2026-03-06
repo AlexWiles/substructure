@@ -6,10 +6,10 @@ use super::state::{
     new_call_id, LlmCallStatus, SessionContext, SessionState, SessionStatus, ToolCallState,
     ToolCallStatus,
 };
-use super::strategy::{
-    DecisionTrigger, StrategyAction, StrategyDecisionCompleted, StrategyDecisionRequested,
-};
 use super::types::*;
+use super::worker::{
+    DecisionTrigger, WorkerAction, WorkerDecisionCompleted, WorkerDecisionRequested,
+};
 use crate::runtime::aggregate::Emit;
 use crate::runtime::budget;
 use crate::runtime::config::{AgentConfig, ClientIdentity};
@@ -28,7 +28,7 @@ use crate::runtime::span::SpanContext;
 ///
 /// `max_bytes = None` means no limit (disabled). Truncation respects UTF-8
 /// char boundaries and appends a note with the original and limit sizes.
-pub(super) fn truncate_tool_result(s: String, max_bytes: Option<usize>) -> String {
+pub fn truncate_tool_result(s: String, max_bytes: Option<usize>) -> String {
     let Some(max_bytes) = max_bytes else {
         return s;
     };
@@ -104,16 +104,22 @@ pub enum CommandPayload {
         deadline: DateTime<Utc>,
         #[allow(dead_code)]
         handler: ToolHandler,
+        /// Opaque context from the worker, passed through to transport dispatch.
+        context: serde_json::Value,
     },
     CompleteToolCall {
         tool_call_id: String,
         name: String,
         result: String,
+        /// Optional updated worker state returned alongside the tool result.
+        worker_state: Option<serde_json::Value>,
     },
     FailToolCall {
         tool_call_id: String,
         name: String,
         error: String,
+        /// Optional updated worker state returned alongside the tool error.
+        worker_state: Option<serde_json::Value>,
     },
     Interrupt {
         interrupt_id: String,
@@ -124,15 +130,15 @@ pub enum CommandPayload {
         interrupt_id: String,
         payload: serde_json::Value,
     },
-    UpdateStrategyState {
+    UpdateWorkerState {
         state: Option<String>,
     },
-    TriggerStrategyDecision {
+    TriggerWorkerDecision {
         trigger: DecisionTrigger,
     },
-    SubmitStrategyDecision {
+    SubmitWorkerDecision {
         decision_id: String,
-        actions: Vec<StrategyAction>,
+        actions: Vec<WorkerAction>,
         state: serde_json::Value,
     },
     CancelSession,
@@ -248,7 +254,7 @@ impl SessionState {
                             name,
                             ..
                         }) => {
-                            let max = state.tool_result_max_bytes(name, ctx);
+                            let max = state.tool_result_max_bytes(ctx);
                             if let Some(err) = error {
                                 let err = truncate_tool_result(err, max);
                                 Ok(vec![Emit::new(EventPayload::ToolCallErrored(
@@ -337,7 +343,7 @@ impl SessionState {
                             }
                         }
 
-                        // Tool calls are no longer emitted here — the strategy
+                        // Tool calls are no longer emitted here — the worker
                         // decides which tools to execute via the decision pipeline.
                         let events = vec![
                             completed,
@@ -385,36 +391,35 @@ impl SessionState {
                 arguments,
                 deadline,
                 handler,
+                context,
             } => match state.tool_calls.get(&tool_call_id) {
                 // Already tracked — skip
                 Some(_) => Ok(vec![]),
                 // New tool call
-                None => {
-                    let meta = self.tool_call_meta(&name, &tool_call_id, &ctx.mcp_tools);
-                    Ok(vec![Emit::new(EventPayload::ToolCallRequested(
-                        ToolCallRequested {
-                            tool_call_id,
-                            name: name.clone(),
-                            arguments,
-                            deadline,
-                            handler,
-                            meta,
-                        },
-                    ))
-                    .with("tool.name", &name)
-                    .label(name)])
-                }
+                None => Ok(vec![Emit::new(EventPayload::ToolCallRequested(
+                    ToolCallRequested {
+                        tool_call_id,
+                        name: name.clone(),
+                        arguments,
+                        deadline,
+                        handler,
+                        context,
+                    },
+                ))
+                .with("tool.name", &name)
+                .label(name)]),
             },
             CommandPayload::CompleteToolCall {
                 tool_call_id,
                 name,
                 result,
+                worker_state,
             } => match state.tool_calls.get(&tool_call_id).map(|tc| &tc.status) {
                 // Pending — complete and emit tool message
                 Some(&ToolCallStatus::Pending) => {
-                    let max = state.tool_result_max_bytes(&name, ctx);
+                    let max = state.tool_result_max_bytes(ctx);
                     let result = truncate_tool_result(result, max);
-                    Ok(vec![
+                    let mut events = vec![
                         Emit::new(EventPayload::ToolCallCompleted(ToolCallCompleted {
                             tool_call_id: tool_call_id.clone(),
                             name: name.clone(),
@@ -433,7 +438,17 @@ impl SessionState {
                             },
                         })
                         .into(),
-                    ])
+                    ];
+                    if let Some(ws) = worker_state {
+                        events.push(
+                            EventPayload::WorkerDecisionCompleted(WorkerDecisionCompleted {
+                                decision_id: String::new(),
+                                state: ws,
+                            })
+                            .into(),
+                        );
+                    }
+                    Ok(events)
                 }
                 // Not pending or unknown — skip
                 _ => Ok(vec![]),
@@ -442,13 +457,14 @@ impl SessionState {
                 tool_call_id,
                 name,
                 error,
+                worker_state,
             } => match state.tool_calls.get(&tool_call_id).map(|tc| &tc.status) {
                 // Pending — fail and emit error tool message
                 Some(&ToolCallStatus::Pending) => {
-                    let max = state.tool_result_max_bytes(&name, ctx);
+                    let max = state.tool_result_max_bytes(ctx);
                     let error = truncate_tool_result(error, max);
                     let error_content = format!("Error: {}", error);
-                    Ok(vec![
+                    let mut events = vec![
                         Emit::new(EventPayload::ToolCallErrored(ToolCallErrored {
                             tool_call_id: tool_call_id.clone(),
                             name: name.clone(),
@@ -457,7 +473,7 @@ impl SessionState {
                         }))
                         .with("tool.name", &name)
                         .label(&name)
-                        .error(error),
+                        .error(&error),
                         EventPayload::MessageTool(MessageTool {
                             message: Message {
                                 role: Role::Tool,
@@ -469,7 +485,17 @@ impl SessionState {
                             },
                         })
                         .into(),
-                    ])
+                    ];
+                    if let Some(ws) = worker_state {
+                        events.push(
+                            EventPayload::WorkerDecisionCompleted(WorkerDecisionCompleted {
+                                decision_id: String::new(),
+                                state: ws,
+                            })
+                            .into(),
+                        );
+                    }
+                    Ok(events)
                 }
                 // Not pending or unknown — skip
                 _ => Ok(vec![]),
@@ -503,32 +529,30 @@ impl SessionState {
                 // No active interrupt or wrong ID — skip
                 _ => Ok(vec![]),
             },
-            CommandPayload::UpdateStrategyState { state } => {
-                Ok(vec![EventPayload::StrategyStateChanged(
-                    StrategyStateChanged { state },
-                )
+            CommandPayload::UpdateWorkerState { state } => {
+                Ok(vec![EventPayload::WorkerStateChanged(WorkerStateChanged {
+                    state,
+                })
                 .into()])
             }
-            CommandPayload::TriggerStrategyDecision { trigger } => {
-                Ok(vec![Self::strategy_decision_event(trigger)])
+            CommandPayload::TriggerWorkerDecision { trigger } => {
+                Ok(vec![Self::worker_decision_event(trigger)])
             }
-            CommandPayload::SubmitStrategyDecision {
+            CommandPayload::SubmitWorkerDecision {
                 decision_id,
                 actions,
                 state,
             } => {
                 let mut events: Vec<Emit<EventPayload>> = vec![
-                    EventPayload::StrategyDecisionCompleted(
-                        StrategyDecisionCompleted {
-                            decision_id,
-                            state,
-                        },
-                    )
+                    EventPayload::WorkerDecisionCompleted(WorkerDecisionCompleted {
+                        decision_id,
+                        state,
+                    })
                     .into(),
                 ];
                 for action in actions {
                     let sub_cmd = match action {
-                        StrategyAction::RequestLlm { request, stream } => {
+                        WorkerAction::RequestLlm { request, stream } => {
                             CommandPayload::RequestLlmCall {
                                 call_id: new_call_id(),
                                 request,
@@ -536,8 +560,9 @@ impl SessionState {
                                 deadline: self.llm_deadline(),
                             }
                         }
-                        StrategyAction::RequestToolCalls { tool_calls } => {
-                            for tc in tool_calls {
+                        WorkerAction::RequestToolCalls { tool_calls } => {
+                            for tca in tool_calls {
+                                let tc = &tca.tool_call;
                                 let handler = if ctx
                                     .client_tools
                                     .iter()
@@ -551,11 +576,9 @@ impl SessionState {
                                     tool_call_id: tc.id.clone(),
                                     name: tc.name.clone(),
                                     arguments: tc.arguments.clone(),
-                                    deadline: self.tool_deadline(
-                                        self.tool_call_meta(&tc.name, &tc.id, &ctx.mcp_tools)
-                                            .as_ref(),
-                                    ),
+                                    deadline: self.tool_deadline(),
                                     handler,
+                                    context: tca.context,
                                 };
                                 if let Ok(sub_events) = self.handle(sub, ctx) {
                                     events.extend(sub_events);
@@ -563,16 +586,12 @@ impl SessionState {
                             }
                             continue;
                         }
-                        StrategyAction::Done { artifacts } => {
-                            CommandPayload::MarkDone { artifacts }
-                        }
-                        StrategyAction::UpdateState { state } => {
+                        WorkerAction::Done { artifacts } => CommandPayload::MarkDone { artifacts },
+                        WorkerAction::UpdateState { state } => {
                             // No validation needed — emit directly
                             events.push(
-                                EventPayload::StrategyStateChanged(StrategyStateChanged {
-                                    state,
-                                })
-                                .into(),
+                                EventPayload::WorkerStateChanged(WorkerStateChanged { state })
+                                    .into(),
                             );
                             continue;
                         }
@@ -593,9 +612,9 @@ impl SessionState {
         }
     }
 
-    /// Build a StrategyDecisionRequested emit from a trigger.
-    fn strategy_decision_event(trigger: DecisionTrigger) -> Emit<EventPayload> {
-        EventPayload::StrategyDecisionRequested(StrategyDecisionRequested {
+    /// Build a WorkerDecisionRequested emit from a trigger.
+    fn worker_decision_event(trigger: DecisionTrigger) -> Emit<EventPayload> {
+        EventPayload::WorkerDecisionRequested(WorkerDecisionRequested {
             decision_id: new_call_id(),
             trigger,
         })
@@ -625,27 +644,12 @@ impl SessionState {
             }
         }
 
-        // 2. Timed-out pending tool calls → fail (or re-issue for sub-agents)
+        // 2. Timed-out pending tool calls → fail
         for tc in state.tool_calls.values() {
             if tc.status == ToolCallStatus::Pending
                 && tc.deadline <= now
                 && tc.handler != ToolHandler::Client
             {
-                if tc.child_session_id().is_some() {
-                    // Sub-agent: re-arm with fresh deadline (parent-driven retry)
-                    return Ok(vec![Emit::new(EventPayload::ToolCallRequested(
-                        ToolCallRequested {
-                            tool_call_id: tc.tool_call_id.clone(),
-                            name: tc.name.clone(),
-                            arguments: tc.arguments.clone(),
-                            deadline: self.tool_deadline(tc.meta.as_ref()),
-                            handler: tc.handler.clone(),
-                            meta: tc.meta.clone(),
-                        },
-                    ))
-                    .with("tool.name", &tc.name)
-                    .label(&tc.name)]);
-                }
                 // Check if retries remain
                 if tc.retry.attempts < tc.retry_policy.max_retries {
                     // Retryable — emit only ToolCallErrored, apply_core will schedule retry
@@ -717,9 +721,9 @@ impl SessionState {
                                 tool_call_id: tc.tool_call_id.clone(),
                                 name: tc.name.clone(),
                                 arguments: tc.arguments.clone(),
-                                deadline: self.tool_deadline(tc.meta.as_ref()),
+                                deadline: self.tool_deadline(),
                                 handler: tc.handler.clone(),
-                                meta: tc.meta.clone(),
+                                context: tc.context.clone(),
                             },
                         ))
                         .with("tool.name", &tc.name)
@@ -742,7 +746,7 @@ impl SessionState {
                         arguments: tc.arguments.clone(),
                         deadline: tc.deadline,
                         handler: tc.handler.clone(),
-                        meta: tc.meta.clone(),
+                        context: tc.context.clone(),
                     },
                 ))
                 .with("tool.name", &tc.name)
@@ -763,14 +767,13 @@ impl SessionState {
             }
         }
 
-        // 6. All tools done, no next step → trigger strategy decision (stall recovery)
+        // 6. All tools done, no next step → trigger worker decision (stall recovery)
         if state.all_tools_resolved() && !state.has_pending_llm() {
-            return Ok(vec![Self::strategy_decision_event(DecisionTrigger::Stall)]);
+            return Ok(vec![Self::worker_decision_event(DecisionTrigger::Stall)]);
         }
 
         Ok(vec![])
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -805,7 +808,7 @@ mod tests {
             },
             system_prompt: "test".into(),
             mcp_servers: vec![],
-            strategy: Default::default(),
+            worker: Default::default(),
             max_context_tokens: None,
             sub_agents: vec![],
             tool_result_max_bytes: None,
@@ -913,13 +916,13 @@ mod tests {
         assert_eq!(
             emits.len(),
             2,
-            "expected LlmCallCompleted + MessageAssistant (tool calls come from strategy pipeline)"
+            "expected LlmCallCompleted + MessageAssistant (tool calls come from worker pipeline)"
         );
         assert!(matches!(&emits[0].event, EventPayload::LlmCallCompleted(_)));
         assert!(
             matches!(&emits[1].event, EventPayload::MessageAssistant(m) if m.message.content == Some("thinking...".into()))
         );
-        // Tool call requests now come from SubmitStrategyDecision, not from CompleteLlmCall
+        // Tool call requests now come from SubmitWorkerDecision, not from CompleteLlmCall
         let msg = match &emits[1].event {
             EventPayload::MessageAssistant(m) => &m.message,
             _ => panic!("expected MessageAssistant"),
@@ -984,7 +987,7 @@ mod tests {
             .unwrap();
         apply_events(&mut state, emits);
 
-        // Register the tool call (previously done by CompleteLlmCall, now via strategy pipeline)
+        // Register the tool call (previously done by CompleteLlmCall, now via worker pipeline)
         let emits = state
             .state
             .handle(
@@ -993,7 +996,8 @@ mod tests {
                     name: "test".into(),
                     arguments: "{}".into(),
                     deadline: far_future(),
-                    handler: ToolHandler::Runtime,
+                    handler: ToolHandler::Worker,
+                    context: serde_json::Value::Null,
                 },
                 &default_ctx(),
             )
@@ -1008,6 +1012,7 @@ mod tests {
                     tool_call_id: tool_call_id.clone(),
                     name: "test".into(),
                     result: "ok".into(),
+                    worker_state: None,
                 },
                 &default_ctx(),
             )
@@ -1256,7 +1261,7 @@ mod tests {
             .unwrap();
         apply_events(&mut state, emits);
 
-        // Register the tool call (previously done by CompleteLlmCall, now via strategy pipeline)
+        // Register the tool call (previously done by CompleteLlmCall, now via worker pipeline)
         let emits = state
             .state
             .handle(
@@ -1265,7 +1270,8 @@ mod tests {
                     name: "test_tool".into(),
                     arguments: "{}".into(),
                     deadline: far_future(),
-                    handler: ToolHandler::Runtime,
+                    handler: ToolHandler::Worker,
+                    context: serde_json::Value::Null,
                 },
                 &default_ctx(),
             )
@@ -1281,6 +1287,7 @@ mod tests {
                     tool_call_id: tool_call_id.clone(),
                     name: "test_tool".into(),
                     result: large_result,
+                    worker_state: None,
                 },
                 &default_ctx(),
             )

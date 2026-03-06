@@ -1,75 +1,70 @@
-use ractor::ActorRef;
+use std::collections::{BTreeMap, HashMap};
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::runtime::session::command::CommandPayload;
+use super::state::{LlmCallStatus, ToolCallStatus};
+use super::worker::DecisionTrigger;
+use crate::runtime::config::AgentConfig;
 use crate::runtime::span::SpanContext;
-use crate::runtime::types::RuntimeMessage;
-
-use super::default_strategy::DefaultStrategy;
-use super::strategy::{DecisionTrigger, Strategy, StrategyCtx};
 
 // ---------------------------------------------------------------------------
-// Strategy dispatch — the wire message
+// Worker dispatch — the wire message for decisions
 // ---------------------------------------------------------------------------
 
-/// Serializable request sent to a strategy executor (local or remote).
+/// Serializable request sent to a worker (local or remote).
+///
+/// Carries session-specific data. The executor combines this with its own
+/// tool/sub-agent knowledge to build the full `WorkerCtx` for `decide()`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StrategyDispatch {
+pub struct WorkerDispatch {
     pub session_id: Uuid,
     pub decision_id: String,
     pub trigger: DecisionTrigger,
-    pub strategy_state: serde_json::Value,
-    pub ctx: StrategyCtx,
+    pub worker_state: serde_json::Value,
+    // Session snapshot
+    pub stream: bool,
+    pub agent: AgentConfig,
+    pub token_usage: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub tool_call_statuses: HashMap<String, ToolCallStatus>,
+    #[serde(default)]
+    pub llm_call_statuses: HashMap<String, LlmCallStatus>,
     pub span: SpanContext,
 }
 
 // ---------------------------------------------------------------------------
-// Strategy transport — abstracts local vs remote strategy execution
+// Tool call dispatch — the wire message for tool execution
 // ---------------------------------------------------------------------------
 
-/// Transport abstraction for strategy execution.
+/// Serializable request sent to a tool executor (local or remote).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallDispatch {
+    pub session_id: Uuid,
+    pub tool_call_id: String,
+    pub name: String,
+    pub arguments: String,
+    /// Opaque context from the worker (e.g. sub-agent AgentConfig).
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub context: serde_json::Value,
+    /// Pre-resolved max result bytes (None = unlimited).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_result_bytes: Option<usize>,
+    pub span: SpanContext,
+}
+
+// ---------------------------------------------------------------------------
+// WorkerExecutor — abstracts local vs remote worker execution
+// ---------------------------------------------------------------------------
+
+/// Transport abstraction for worker execution.
 ///
-/// The session aggregate calls `dispatch()` and returns — fire-and-forget.
-/// The transport handles execution and delivers the result back via
-/// `RuntimeMessage::DeliverToSession`.
-pub trait StrategyTransport: Send + Sync {
-    fn dispatch(&self, request: StrategyDispatch);
-}
-
-/// Executes strategies in-process and delivers results back via the runtime actor.
-pub struct LocalStrategyTransport {
-    pub runtime: ActorRef<RuntimeMessage>,
-}
-
-impl StrategyTransport for LocalStrategyTransport {
-    fn dispatch(&self, request: StrategyDispatch) {
-        let strategy = resolve_strategy(&request.ctx.agent.strategy);
-        let decision = strategy.decide(
-            &request.trigger,
-            &request.strategy_state,
-            &request.ctx,
-        );
-        let _ = self.runtime.send_message(RuntimeMessage::DeliverToSession {
-            session_id: request.session_id,
-            payload: CommandPayload::SubmitStrategyDecision {
-                decision_id: request.decision_id,
-                actions: decision.actions,
-                state: decision.state,
-            },
-            span: request.span,
-        });
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Strategy resolution
-// ---------------------------------------------------------------------------
-
-use crate::runtime::config::StrategyConfig;
-
-/// Resolve a strategy implementation from agent config.
-pub fn resolve_strategy(_config: &StrategyConfig) -> Box<dyn Strategy> {
-    // V1: only the default strategy. Future: match on config.kind.
-    Box::new(DefaultStrategy)
+/// A message channel to a worker "somewhere" (local, remote, different process).
+/// The session aggregate calls dispatch methods and returns — fire-and-forget.
+/// Results come back asynchronously via commands delivered to the session.
+pub trait WorkerExecutor: Send + Sync {
+    /// Dispatch a decision request to the worker.
+    fn dispatch_decision(&self, request: WorkerDispatch);
+    /// Dispatch a tool call to the worker for execution.
+    fn dispatch_tool_call(&self, request: ToolCallDispatch);
 }
