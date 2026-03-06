@@ -7,7 +7,7 @@ use super::state::{
     ToolCallStatus,
 };
 use super::types::*;
-use super::worker::{
+use super::decision::{
     DecisionTrigger, WorkerAction, WorkerDecisionCompleted, WorkerDecisionRequested,
 };
 use crate::runtime::aggregate::Emit;
@@ -112,14 +112,14 @@ pub enum CommandPayload {
         name: String,
         result: String,
         /// Optional updated worker state returned alongside the tool result.
-        worker_state: Option<serde_json::Value>,
+        worker_state: Option<Vec<u8>>,
     },
     FailToolCall {
         tool_call_id: String,
         name: String,
         error: String,
         /// Optional updated worker state returned alongside the tool error.
-        worker_state: Option<serde_json::Value>,
+        worker_state: Option<Vec<u8>>,
     },
     Interrupt {
         interrupt_id: String,
@@ -130,16 +130,14 @@ pub enum CommandPayload {
         interrupt_id: String,
         payload: serde_json::Value,
     },
-    UpdateWorkerState {
-        state: Option<String>,
-    },
     TriggerWorkerDecision {
         trigger: DecisionTrigger,
     },
     SubmitWorkerDecision {
         decision_id: String,
         actions: Vec<WorkerAction>,
-        state: serde_json::Value,
+        /// Opaque worker state bytes — passed through without interpretation.
+        state: Vec<u8>,
     },
     CancelSession,
     MarkDone {
@@ -529,12 +527,6 @@ impl SessionState {
                 // No active interrupt or wrong ID — skip
                 _ => Ok(vec![]),
             },
-            CommandPayload::UpdateWorkerState { state } => {
-                Ok(vec![EventPayload::WorkerStateChanged(WorkerStateChanged {
-                    state,
-                })
-                .into()])
-            }
             CommandPayload::TriggerWorkerDecision { trigger } => {
                 Ok(vec![Self::worker_decision_event(trigger)])
             }
@@ -587,14 +579,6 @@ impl SessionState {
                             continue;
                         }
                         WorkerAction::Done { artifacts } => CommandPayload::MarkDone { artifacts },
-                        WorkerAction::UpdateState { state } => {
-                            // No validation needed — emit directly
-                            events.push(
-                                EventPayload::WorkerStateChanged(WorkerStateChanged { state })
-                                    .into(),
-                            );
-                            continue;
-                        }
                     };
                     if let Ok(sub_events) = self.handle(sub_cmd, ctx) {
                         events.extend(sub_events);

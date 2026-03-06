@@ -20,7 +20,7 @@ use super::llm::LlmProviderTrait;
 use super::mcp::{self, McpClient};
 use super::session::client::{Notification, SessionClientActor, SessionClientArgs};
 use super::session::routing::{aggregate_actor_name, notify_observers, session_route};
-use super::local_worker::LocalWorkerExecutor;
+use super::local_executor::LocalWorkerExecutor;
 use super::session::{BudgetActorRef, NotifyChunkFn, SessionContext};
 use super::types::{RuntimeError, RuntimeMessage, SessionHandle, SessionInit, SubAgentRequest};
 use super::wake_scheduler::spawn_wake_scheduler;

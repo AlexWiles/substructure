@@ -88,13 +88,6 @@ pub struct InterruptResumed {
     pub payload: serde_json::Value,
 }
 
-// --- Worker ---
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkerStateChanged {
-    pub state: Option<String>,
-}
-
 // --- Tool calls ---
 
 /// Who is responsible for executing a tool call.

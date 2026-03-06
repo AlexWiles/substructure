@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::state::{LlmCallStatus, ToolCallStatus};
-use super::worker::DecisionTrigger;
+use super::decision::DecisionTrigger;
 use crate::runtime::config::AgentConfig;
 use crate::runtime::span::SpanContext;
 
@@ -21,7 +21,7 @@ pub struct WorkerDispatch {
     pub session_id: Uuid,
     pub decision_id: String,
     pub trigger: DecisionTrigger,
-    pub worker_state: serde_json::Value,
+    pub worker_state: Vec<u8>,
     // Session snapshot
     pub stream: bool,
     pub agent: AgentConfig,

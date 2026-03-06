@@ -6,9 +6,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::transport::{ToolCallDispatch, WorkerDispatch, WorkerExecutor};
+use super::dispatch::{ToolCallDispatch, WorkerDispatch, WorkerExecutor};
 use super::types::{Artifact, CompletionDelivery, ToolHandler};
-use super::worker::{DecisionTrigger, WorkerDecisionRequested};
+use super::decision::{DecisionTrigger, WorkerDecisionRequested};
 use crate::runtime::aggregate::{AggregateState, AggregateStatus, Emit};
 use crate::runtime::budget::{self, BudgetContext, BudgetError};
 use crate::runtime::config::{AgentConfig, ClientIdentity, ExhaustionStrategy, RetryPolicy};
@@ -198,8 +198,9 @@ pub struct SessionState {
     pub token_usage: BTreeMap<String, u64>,
 
     /// Opaque worker state — owned and managed exclusively by the worker.
+    /// Session stores but never interprets these bytes.
     #[serde(default)]
-    pub worker_state: serde_json::Value,
+    pub worker_state: Vec<u8>,
 
     /// Sub-agent completion delivery target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -222,7 +223,7 @@ impl SessionState {
             agent: None,
             auth: None,
             token_usage: BTreeMap::new(),
-            worker_state: serde_json::Value::Null,
+            worker_state: Vec::new(),
             on_done: None,
             artifacts: vec![],
             llm_calls: HashMap::new(),
@@ -376,9 +377,6 @@ impl SessionState {
             }
             EventPayload::InterruptResumed(_) => {
                 self.status = SessionStatus::Active;
-            }
-            EventPayload::WorkerStateChanged(_) => {
-                // Legacy: state updates now flow through WorkerDecisionCompleted.
             }
             EventPayload::WorkerDecisionRequested(_) => {
                 // Keep Active while decision is pending
@@ -862,8 +860,8 @@ impl AggregateState for SessionState {
                 if self.tool_calls.get(&p.tool_call_id).is_some_and(|tc| {
                     tc.status == ToolCallStatus::Pending && tc.handler == ToolHandler::Worker
                 }) {
-                    if let Some(transport) = &ctx.worker_executor {
-                        transport.dispatch_tool_call(ToolCallDispatch {
+                    if let Some(executor) = &ctx.worker_executor {
+                        executor.dispatch_tool_call(ToolCallDispatch {
                             session_id: self.session_id,
                             tool_call_id: p.tool_call_id.clone(),
                             name: p.name.clone(),

@@ -7,15 +7,16 @@ use uuid::Uuid;
 use crate::runtime::config::{AgentConfig, ClientIdentity, WorkerConfig};
 use crate::runtime::llm::{LlmTool, LlmToolFunction};
 use crate::runtime::mcp::{Content, McpClient, ToolDefinition};
-use crate::runtime::session::{truncate_tool_result, CommandPayload};
-use crate::runtime::session::default_worker::DefaultWorker;
-use crate::runtime::session::transport::{ToolCallDispatch, WorkerDispatch, WorkerExecutor};
+use crate::runtime::session::{
+    truncate_tool_result, CommandPayload, ToolCallDispatch, WorkerDispatch, WorkerExecutor,
+};
 use crate::runtime::session::types::CompletionDelivery;
-use crate::runtime::session::worker::{Worker, WorkerCtx};
 use crate::runtime::types::{RuntimeMessage, SubAgentRequest};
+use crate::worker::{self as proto, Worker};
+use crate::worker::default::DefaultWorker;
 
 // ---------------------------------------------------------------------------
-// Local worker transport — in-process executor
+// Local worker executor — in-process execution
 // ---------------------------------------------------------------------------
 
 /// Executes worker decisions and tool calls in-process, delivering results
@@ -32,7 +33,7 @@ pub struct LocalWorkerExecutor {
 }
 
 impl LocalWorkerExecutor {
-    /// Build a new transport, pre-computing tool definitions from MCP clients
+    /// Build a new executor, pre-computing tool definitions from MCP clients
     /// and sub-agent configs from the agents map.
     pub fn new(
         runtime: ActorRef<RuntimeMessage>,
@@ -83,33 +84,54 @@ impl LocalWorkerExecutor {
             stream,
         }
     }
+
+    /// Build a proto WorkerCtx from the dispatch + executor's own tools/sub-agents.
+    fn build_worker_ctx(&self, request: &WorkerDispatch) -> proto::WorkerCtx {
+        proto::WorkerCtx {
+            session_id: request.session_id.to_string(),
+            stream: request.stream,
+            agent: Some((&request.agent).into()),
+            tools: self.tools.iter().map(Into::into).collect(),
+            sub_agent_names: self.sub_agent_configs.keys().cloned().collect(),
+            token_usage: request.token_usage.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+            tool_call_statuses: request
+                .tool_call_statuses
+                .iter()
+                .map(|(id, s)| {
+                    let cs: proto::CallStatus = s.into();
+                    (id.clone(), cs as i32)
+                })
+                .collect(),
+            llm_call_statuses: request
+                .llm_call_statuses
+                .iter()
+                .map(|(id, s)| {
+                    let cs: proto::CallStatus = s.into();
+                    (id.clone(), cs as i32)
+                })
+                .collect(),
+        }
+    }
 }
 
 impl WorkerExecutor for LocalWorkerExecutor {
     fn dispatch_decision(&self, request: WorkerDispatch) {
-        // Build full WorkerCtx from session data (dispatch) + executor's tools
-        let ctx = WorkerCtx {
-            session_id: request.session_id,
-            stream: request.stream,
-            agent: request.agent.clone(),
-            all_tools: if self.tools.is_empty() {
-                None
-            } else {
-                Some(self.tools.clone())
-            },
-            sub_agents: self.sub_agent_configs.clone(),
-            token_usage: request.token_usage.clone(),
-            tool_call_statuses: request.tool_call_statuses.clone(),
-            llm_call_statuses: request.llm_call_statuses.clone(),
-        };
-
         let worker = resolve_worker(&request.agent.worker);
-        let decision = worker.decide(&request.trigger, &request.worker_state, &ctx);
+
+        // Convert internal trigger to proto; state is opaque bytes passed through
+        let proto_trigger: proto::DecisionTrigger = (&request.trigger).into();
+        let ctx = self.build_worker_ctx(&request);
+
+        let decision = worker.decide(&proto_trigger, &request.worker_state, &ctx);
+
+        // Convert proto actions back to internal types; state bytes pass through
+        let actions = decision.actions.iter().map(Into::into).collect();
+
         let _ = self.runtime.send_message(RuntimeMessage::DeliverToSession {
             session_id: request.session_id,
             payload: CommandPayload::SubmitWorkerDecision {
                 decision_id: request.decision_id,
-                actions: decision.actions,
+                actions,
                 state: decision.state,
             },
             span: request.span,
@@ -117,8 +139,8 @@ impl WorkerExecutor for LocalWorkerExecutor {
     }
 
     fn dispatch_tool_call(&self, request: ToolCallDispatch) {
-        // Sub-agent tool call — context carries the full AgentConfig
-        if let Ok(agent) = serde_json::from_value::<AgentConfig>(request.context.clone()) {
+        // Sub-agent tool call — executor owns the configs
+        if let Some(agent) = self.sub_agent_configs.get(&request.name) {
             let args: serde_json::Value =
                 serde_json::from_str(&request.arguments).unwrap_or_default();
             let message = args

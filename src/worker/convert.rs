@@ -1,0 +1,354 @@
+//! Conversions between internal runtime types and worker proto types.
+
+use crate::runtime::config::AgentConfig;
+use crate::runtime::llm as internal_llm;
+use crate::runtime::message as internal_msg;
+use crate::runtime::session::{LlmCallStatus, ToolCallStatus, ToolResult};
+use crate::runtime::session::types::{Artifact, Part};
+use crate::worker as proto;
+
+use proto::{CallStatus, Role};
+
+// ---------------------------------------------------------------------------
+// AgentConfig → AgentInfo
+// ---------------------------------------------------------------------------
+
+impl From<&AgentConfig> for proto::AgentInfo {
+    fn from(a: &AgentConfig) -> Self {
+        Self {
+            name: a.name.clone(),
+            description: a.description.clone(),
+            system_prompt: a.system_prompt.clone(),
+            model: a.llm.model.clone(),
+            temperature: a.llm.temperature,
+            max_completion_tokens: a.llm.max_completion_tokens,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Message conversions
+// ---------------------------------------------------------------------------
+
+impl From<&internal_msg::Message> for proto::Message {
+    fn from(m: &internal_msg::Message) -> Self {
+        Self {
+            role: match m.role {
+                internal_msg::Role::System => Role::System as i32,
+                internal_msg::Role::User => Role::User as i32,
+                internal_msg::Role::Assistant => Role::Assistant as i32,
+                internal_msg::Role::Tool => Role::Tool as i32,
+            },
+            content: m.content.clone(),
+            tool_calls: m.tool_calls.iter().map(Into::into).collect(),
+            tool_call_id: m.tool_call_id.clone(),
+            call_id: m.call_id.clone(),
+            usage: m.usage.as_ref().and_then(|v| serde_json::from_value(v.clone()).ok()),
+        }
+    }
+}
+
+impl From<&proto::Message> for internal_msg::Message {
+    fn from(m: &proto::Message) -> Self {
+        Self {
+            role: match Role::try_from(m.role).unwrap_or(Role::Unspecified) {
+                Role::System => internal_msg::Role::System,
+                Role::User => internal_msg::Role::User,
+                Role::Assistant => internal_msg::Role::Assistant,
+                Role::Tool => internal_msg::Role::Tool,
+                _ => internal_msg::Role::User,
+            },
+            content: m.content.clone(),
+            tool_calls: m.tool_calls.iter().map(Into::into).collect(),
+            tool_call_id: m.tool_call_id.clone(),
+            call_id: m.call_id.clone(),
+            usage: m.usage.as_ref().and_then(|v| serde_json::to_value(v).ok()),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ToolCall conversions
+// ---------------------------------------------------------------------------
+
+impl From<&internal_msg::ToolCall> for proto::ToolCall {
+    fn from(tc: &internal_msg::ToolCall) -> Self {
+        Self {
+            id: tc.id.clone(),
+            name: tc.name.clone(),
+            arguments: tc.arguments.clone(),
+        }
+    }
+}
+
+impl From<&proto::ToolCall> for internal_msg::ToolCall {
+    fn from(tc: &proto::ToolCall) -> Self {
+        Self {
+            id: tc.id.clone(),
+            name: tc.name.clone(),
+            arguments: tc.arguments.clone(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LlmTool conversions
+// ---------------------------------------------------------------------------
+
+impl From<&internal_llm::LlmTool> for proto::LlmTool {
+    fn from(t: &internal_llm::LlmTool) -> Self {
+        Self {
+            tool_type: t.tool_type.clone(),
+            function: Some(proto::LlmToolFunction {
+                name: t.function.name.clone(),
+                description: t.function.description.clone(),
+                parameters: serde_json::from_value(t.function.parameters.clone()).ok(),
+            }),
+        }
+    }
+}
+
+impl From<&proto::LlmTool> for internal_llm::LlmTool {
+    fn from(t: &proto::LlmTool) -> Self {
+        let function = t.function.as_ref().expect("LlmTool.function required");
+        Self {
+            tool_type: t.tool_type.clone(),
+            function: internal_llm::LlmToolFunction {
+                name: function.name.clone(),
+                description: function.description.clone(),
+                parameters: function
+                    .parameters
+                    .as_ref()
+                    .and_then(|v| serde_json::to_value(v).ok())
+                    .unwrap_or(serde_json::Value::Null),
+            },
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LlmRequest conversions
+// ---------------------------------------------------------------------------
+
+impl From<&internal_llm::LlmRequest> for proto::LlmRequest {
+    fn from(r: &internal_llm::LlmRequest) -> Self {
+        Self {
+            model: r.model.clone(),
+            messages: r.messages.iter().map(Into::into).collect(),
+            tools: r
+                .tools
+                .as_ref()
+                .map(|ts| ts.iter().map(Into::into).collect())
+                .unwrap_or_default(),
+            temperature: r.temperature,
+            max_completion_tokens: r.max_completion_tokens,
+        }
+    }
+}
+
+impl From<&proto::LlmRequest> for internal_llm::LlmRequest {
+    fn from(r: &proto::LlmRequest) -> Self {
+        Self {
+            model: r.model.clone(),
+            messages: r.messages.iter().map(Into::into).collect(),
+            tools: if r.tools.is_empty() {
+                None
+            } else {
+                Some(r.tools.iter().map(Into::into).collect())
+            },
+            temperature: r.temperature,
+            max_completion_tokens: r.max_completion_tokens,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ToolResult conversions
+// ---------------------------------------------------------------------------
+
+impl From<&ToolResult> for proto::ToolResult {
+    fn from(r: &ToolResult) -> Self {
+        Self {
+            tool_call_id: r.tool_call_id.clone(),
+            name: r.name.clone(),
+            content: r.content.clone(),
+            is_error: r.is_error,
+        }
+    }
+}
+
+impl From<&proto::ToolResult> for ToolResult {
+    fn from(r: &proto::ToolResult) -> Self {
+        Self {
+            tool_call_id: r.tool_call_id.clone(),
+            name: r.name.clone(),
+            content: r.content.clone(),
+            is_error: r.is_error,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Artifact / Part conversions
+// ---------------------------------------------------------------------------
+
+impl From<&Artifact> for proto::Artifact {
+    fn from(a: &Artifact) -> Self {
+        Self {
+            name: a.name.clone(),
+            description: a.description.clone(),
+            parts: a.parts.iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<&proto::Artifact> for Artifact {
+    fn from(a: &proto::Artifact) -> Self {
+        Self {
+            name: a.name.clone(),
+            description: a.description.clone(),
+            parts: a.parts.iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<&Part> for proto::Part {
+    fn from(p: &Part) -> Self {
+        match p {
+            Part::Text { text } => Self {
+                kind: Some(proto::part::Kind::Text(text.clone())),
+            },
+            Part::Data { data } => Self {
+                kind: Some(proto::part::Kind::Data(
+                    serde_json::from_value(data.clone()).unwrap_or_default(),
+                )),
+            },
+        }
+    }
+}
+
+impl From<&proto::Part> for Part {
+    fn from(p: &proto::Part) -> Self {
+        match &p.kind {
+            Some(proto::part::Kind::Text(text)) => Part::Text { text: text.clone() },
+            Some(proto::part::Kind::Data(data)) => Part::Data {
+                data: serde_json::to_value(data).unwrap_or(serde_json::Value::Null),
+            },
+            None => Part::Text {
+                text: String::new(),
+            },
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Call status conversions
+// ---------------------------------------------------------------------------
+
+impl From<&ToolCallStatus> for CallStatus {
+    fn from(s: &ToolCallStatus) -> Self {
+        match s {
+            ToolCallStatus::Pending => CallStatus::Pending,
+            ToolCallStatus::Completed => CallStatus::Completed,
+            ToolCallStatus::Failed => CallStatus::Failed,
+            ToolCallStatus::RetryScheduled => CallStatus::RetryScheduled,
+        }
+    }
+}
+
+impl From<&LlmCallStatus> for CallStatus {
+    fn from(s: &LlmCallStatus) -> Self {
+        match s {
+            LlmCallStatus::Pending => CallStatus::Pending,
+            LlmCallStatus::Completed => CallStatus::Completed,
+            LlmCallStatus::Failed => CallStatus::Failed,
+            LlmCallStatus::RetryScheduled => CallStatus::RetryScheduled,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DecisionTrigger conversions
+// ---------------------------------------------------------------------------
+
+impl From<&crate::runtime::session::decision::DecisionTrigger> for proto::DecisionTrigger {
+    fn from(t: &crate::runtime::session::decision::DecisionTrigger) -> Self {
+        use crate::runtime::session::decision::DecisionTrigger as DT;
+        let trigger = match t {
+            DT::UserMessage { stream, message } => {
+                proto::decision_trigger::Trigger::UserMessage(proto::UserMessage {
+                    stream: *stream,
+                    message: Some(message.into()),
+                })
+            }
+            DT::LlmCompleted {
+                call_id,
+                message,
+                truncated,
+            } => proto::decision_trigger::Trigger::LlmCompleted(proto::LlmCompleted {
+                call_id: call_id.clone(),
+                message: Some(message.into()),
+                truncated: *truncated,
+            }),
+            DT::LlmFailed { call_id, error } => {
+                proto::decision_trigger::Trigger::LlmFailed(proto::LlmFailed {
+                    call_id: call_id.clone(),
+                    error: error.clone(),
+                })
+            }
+            DT::ToolResolved { result } => {
+                proto::decision_trigger::Trigger::ToolResolved(proto::ToolResolved {
+                    result: Some(result.into()),
+                })
+            }
+            DT::InterruptResumed { interrupt_id } => {
+                proto::decision_trigger::Trigger::InterruptResumed(proto::InterruptResumed {
+                    interrupt_id: interrupt_id.clone(),
+                })
+            }
+            DT::Stall => proto::decision_trigger::Trigger::Stall(proto::Stall {}),
+        };
+        Self {
+            trigger: Some(trigger),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WorkerAction conversions (proto → internal)
+// ---------------------------------------------------------------------------
+
+impl From<&proto::WorkerAction> for crate::runtime::session::decision::WorkerAction {
+    fn from(a: &proto::WorkerAction) -> Self {
+        use crate::runtime::session::decision::{ToolCallAction, WorkerAction as WA};
+        match a.action.as_ref().expect("WorkerAction.action required") {
+            proto::worker_action::Action::RequestLlm(r) => WA::RequestLlm {
+                request: r.request.as_ref().expect("RequestLlm.request required").into(),
+                stream: r.stream,
+            },
+            proto::worker_action::Action::RequestToolCalls(r) => WA::RequestToolCalls {
+                tool_calls: r
+                    .tool_calls
+                    .iter()
+                    .map(|tca| {
+                        let tc = tca
+                            .tool_call
+                            .as_ref()
+                            .expect("ToolCallAction.tool_call required");
+                        ToolCallAction {
+                            tool_call: tc.into(),
+                            context: tca
+                                .context
+                                .as_ref()
+                                .and_then(|v| serde_json::to_value(v).ok())
+                                .unwrap_or(serde_json::Value::Null),
+                        }
+                    })
+                    .collect(),
+            },
+            proto::worker_action::Action::Done(d) => WA::Done {
+                artifacts: d.artifacts.iter().map(Into::into).collect(),
+            },
+        }
+    }
+}

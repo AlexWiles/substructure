@@ -26,7 +26,7 @@ pub mod session;
 pub mod wake_scheduler;
 
 mod actor;
-mod local_worker;
+mod local_executor;
 mod types;
 
 use self::config::{AgentConfig, ClientIdentity, EventStoreConfig, SystemConfig};

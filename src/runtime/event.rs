@@ -3,9 +3,9 @@ use serde::{Deserialize, Serialize};
 use crate::runtime::llm::{LlmCallCompleted, LlmCallErrored, LlmCallRequested};
 use crate::runtime::session::types::{
     InterruptResumed, MessageAssistant, MessageTool, MessageUser, SessionCreated, SessionDone,
-    SessionInterrupted, ToolCallCompleted, ToolCallErrored, ToolCallRequested, WorkerStateChanged,
+    SessionInterrupted, ToolCallCompleted, ToolCallErrored, ToolCallRequested,
 };
-use crate::runtime::session::worker::{WorkerDecisionCompleted, WorkerDecisionRequested};
+use crate::runtime::session::decision::{WorkerDecisionCompleted, WorkerDecisionRequested};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -34,8 +34,6 @@ pub enum EventPayload {
     SessionInterrupted(SessionInterrupted),
     #[serde(rename = "session.interrupt_resumed")]
     InterruptResumed(InterruptResumed),
-    #[serde(rename = "worker.state_changed")]
-    WorkerStateChanged(WorkerStateChanged),
     #[serde(rename = "worker.decision.requested")]
     WorkerDecisionRequested(WorkerDecisionRequested),
     #[serde(rename = "worker.decision.completed")]
