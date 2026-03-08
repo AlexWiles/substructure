@@ -27,31 +27,3 @@ limit = 4096
 window = "1m"
 strategy = "interrupt"
 
-[agents.alex]
-name = "alex"
-description = """A helpful assistant named Alex"""
-system_prompt = """You are an intelligent analyst."""
-llm = { client = "openrouter", model = "stepfun/step-3.5-flash:free", retry = { max_retries = 5 }, max_completion_tokens = 200 }
-sub_agents = ["file-system"]
-
-[agents.file-system]
-name = "file-system"
-description = "Explores the filesystem — reads files, lists directories, and searches for content. Returns a summary of findings."
-system_prompt = """You are a filesystem research assistant. \
-Use the filesystem tools to explore files and directories, then return a clear summary of what you found. \
-Be concise and factual.
-
-Be careful of large directory trees. If you list a tree that is too large you will stop working.
-"""
-llm = { client = "openrouter", model = "stepfun/step-3.5-flash:free", retry = { max_retries = 5 }  }
-
-
-[[agents.file-system.mcp_servers]]
-name = "filesystem"
-max_tool_result_bytes = 50_000
-retry.timeout_secs = 2
-transport.type = "stdio"
-transport.command = "npx"
-transport.args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
-
-

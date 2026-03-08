@@ -567,59 +567,6 @@ fn usage_in_window(
 }
 
 // ---------------------------------------------------------------------------
-// BudgetActorRef — async reserve method (impl here to keep ractor out of session)
-// ---------------------------------------------------------------------------
-
-use super::aggregate::actor::{AggregateActorHandle, AggregateError};
-use super::session::BudgetActorRef;
-
-impl BudgetActorRef {
-    /// Attempt to reserve budget against policies before an LLM call.
-    ///
-    /// Returns `Ok(())` if granted or if no matching policies exist.
-    /// Returns `Err(BudgetError::Denied(_))` when a policy rejects.
-    /// Fails open on infrastructure errors (timeouts, actor crashes).
-    pub(crate) async fn reserve(
-        &self,
-        session_id: Uuid,
-        call_id: &str,
-        context: BudgetContext,
-        breakdown: UsageBreakdown,
-        span: &SpanContext,
-    ) -> Result<(), BudgetError> {
-        let Some(handle) = self
-            .inner
-            .downcast_ref::<AggregateActorHandle<BudgetLedger>>()
-        else {
-            tracing::error!("BudgetActorRef contains unexpected type — skipping reservation");
-            return Ok(());
-        };
-
-        match handle
-            .send_command(
-                BudgetCommand::Reserve {
-                    session_id,
-                    call_id: call_id.to_string(),
-                    context,
-                    breakdown,
-                    reserved_at: Utc::now(),
-                },
-                span.clone(),
-                Utc::now(),
-            )
-            .await
-        {
-            Ok(_) => Ok(()),
-            Err(AggregateError::Command(e)) => Err(e),
-            Err(other) => {
-                tracing::warn!(error = %other, "budget reserve failed — proceeding without reservation");
-                Ok(())
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

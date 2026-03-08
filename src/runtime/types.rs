@@ -4,10 +4,9 @@ use ractor::{ActorRef, RpcReplyPort};
 use uuid::Uuid;
 
 use crate::runtime::aggregate::DomainEvent;
-use crate::runtime::config::{AgentConfig, ClientIdentity};
-use crate::runtime::llm::LlmTool;
+use crate::runtime::config::ClientIdentity;
 use crate::runtime::session::types::CompletionDelivery;
-use crate::runtime::session::{CommandPayload, SessionCommand, SessionError, SessionState};
+use crate::runtime::session::{SessionCommand, SessionError, SessionState};
 use crate::runtime::span::{SpanContext, TraceId};
 
 use super::event_store::{Event, StoreError};
@@ -27,8 +26,6 @@ pub enum RuntimeError {
     ActorCall(String),
     #[error("unknown LLM client: {0}")]
     UnknownLlmClient(String),
-    #[error("unknown agent: {0}")]
-    UnknownAgent(String),
     #[error("session not found")]
     SessionNotFound,
 }
@@ -49,8 +46,6 @@ pub enum SessionMessage {
     Wake,
     /// Cancel this session (used by parent to cancel sub-agent).
     Cancel,
-    /// Set client-provided tools (from AG-UI RunAgentInput).
-    SetClientTools(Vec<LlmTool>),
     /// Transient notification — broadcast to observers, never persisted.
     Notify(Arc<Notification>),
 }
@@ -60,7 +55,7 @@ pub enum SessionMessage {
 // ---------------------------------------------------------------------------
 
 pub struct SessionInit {
-    pub agent: AgentConfig,
+    pub agent_name: String,
     pub auth: ClientIdentity,
     pub on_done: Option<CompletionDelivery>,
     pub span: SpanContext,
@@ -68,35 +63,8 @@ pub struct SessionInit {
 }
 
 // ---------------------------------------------------------------------------
-// RuntimeMessage — commands handled by the RuntimeActor
+// SubAgentRequest
 // ---------------------------------------------------------------------------
-
-pub enum RuntimeMessage {
-    StartSession(
-        Uuid,
-        Box<SessionInit>,
-        RpcReplyPort<Result<SessionHandle, RuntimeError>>,
-    ),
-    RunSubAgent(SubAgentRequest),
-    WakeAggregate {
-        aggregate_id: Uuid,
-        aggregate_type: String,
-        tenant_id: String,
-    },
-    /// Find-or-start the aggregate actor, then deliver a command.
-    DeliverToSession {
-        session_id: Uuid,
-        payload: CommandPayload,
-        span: SpanContext,
-    },
-    /// Ensure the aggregate actor is running, waking it if needed.
-    EnsureAggregate {
-        aggregate_id: Uuid,
-        aggregate_type: String,
-        tenant_id: String,
-        reply: RpcReplyPort<Result<(), RuntimeError>>,
-    },
-}
 
 pub struct SubAgentRequest {
     pub session_id: Uuid,
@@ -107,6 +75,12 @@ pub struct SubAgentRequest {
     pub span: SpanContext,
     pub stream: bool,
 }
+
+// ---------------------------------------------------------------------------
+// SupervisorMessage — uninhabited (supervisor processes no messages)
+// ---------------------------------------------------------------------------
+
+pub enum SupervisorMessage {}
 
 // ---------------------------------------------------------------------------
 // SessionHandle — per-session interface

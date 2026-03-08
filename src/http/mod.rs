@@ -20,6 +20,7 @@ use crate::runtime::event_store::{self, Event as StoreEvent, SpanSummary};
 use crate::runtime::{
     AggregateFilter, AggregateSort, AggregateSummary, EventFilter, Runtime, RuntimeError,
 };
+use crate::worker::Worker;
 
 #[derive(Clone)]
 pub struct HttpState {
@@ -76,13 +77,6 @@ impl FromRequestParts<HttpState> for ClientAuth {
 // ---------------------------------------------------------------------------
 // Request / response types
 // ---------------------------------------------------------------------------
-
-#[derive(serde::Serialize)]
-pub struct AgentInfoResponse {
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-}
 
 #[derive(serde::Deserialize)]
 pub struct CreateSessionRequest {
@@ -150,14 +144,18 @@ impl From<AggregateSummary> for SessionSummary {
 // Server
 // ---------------------------------------------------------------------------
 
-pub async fn start_server(config: SystemConfig, addr: std::net::SocketAddr) -> anyhow::Result<()> {
-    let runtime = Runtime::start(&config).await?;
+pub async fn start_server(
+    config: SystemConfig,
+    worker: Option<Arc<dyn Worker>>,
+    addr: std::net::SocketAddr,
+) -> anyhow::Result<()> {
+    let runtime = Runtime::start(&config, worker).await?;
 
     let auth: Arc<dyn AuthResolver> = build_auth_resolver(&config.auth)
         .map_err(|e| anyhow::anyhow!("failed to build auth resolver: {e}"))?;
 
     let state = HttpState {
-        runtime: Arc::new(runtime),
+        runtime,
         auth,
     };
 
@@ -168,9 +166,9 @@ pub async fn start_server(config: SystemConfig, addr: std::net::SocketAddr) -> a
         .route("/traces/{trace_id}/otel", get(trace_otel));
 
     let client_routes = Router::new()
-        .route("/agents", get(list_agents))
         .route("/sessions", get(list_sessions).post(create_session))
-        .route("/sessions/{session_id}", get(get_session));
+        .route("/sessions/{session_id}", get(get_session))
+;
 
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -300,28 +298,6 @@ async fn trace_otel(
 // Client handlers
 // ---------------------------------------------------------------------------
 
-async fn list_agents(
-    ClientAuth(_auth): ClientAuth,
-    State(state): State<HttpState>,
-) -> Json<Vec<AgentInfoResponse>> {
-    let agents: Vec<AgentInfoResponse> = state
-        .runtime
-        .agent_names()
-        .into_iter()
-        .map(|name| {
-            let description = state
-                .runtime
-                .agent(name)
-                .and_then(|a| a.description.clone());
-            AgentInfoResponse {
-                name: name.to_string(),
-                description,
-            }
-        })
-        .collect();
-    Json(agents)
-}
-
 async fn create_session(
     ClientAuth(auth): ClientAuth,
     State(state): State<HttpState>,
@@ -394,7 +370,6 @@ impl axum::response::IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
         let status = match &self {
             AppError::Runtime(RuntimeError::SessionNotFound) => StatusCode::NOT_FOUND,
-            AppError::Runtime(RuntimeError::UnknownAgent(_)) => StatusCode::BAD_REQUEST,
             AppError::Auth(_) => StatusCode::UNAUTHORIZED,
             _ => StatusCode::BAD_REQUEST,
         };
@@ -405,27 +380,6 @@ impl axum::response::IntoResponse for AppError {
     }
 }
 
-/// Ensure the session actor is running (start from store if needed).
-#[tracing::instrument(skip(runtime, auth), fields(%session_id))]
-async fn ensure_session_running(
-    runtime: &Runtime,
-    session_id: Uuid,
-    auth: &ClientIdentity,
-) -> Result<(), AppError> {
-    if runtime.session_is_running(session_id) {
-        return Ok(());
-    }
-
-    let summary = find_aggregate_summary(runtime, session_id, &auth.tenant_id).await?;
-    let agent_name = summary
-        .label
-        .as_deref()
-        .ok_or(AppError::Runtime(RuntimeError::SessionNotFound))?;
-    let _handle = runtime
-        .start_session(session_id, agent_name, auth.clone())
-        .await?;
-    Ok(())
-}
 
 async fn find_aggregate_summary(
     runtime: &Runtime,

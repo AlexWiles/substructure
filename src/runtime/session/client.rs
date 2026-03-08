@@ -7,10 +7,11 @@ use super::state::SessionState;
 use crate::runtime::aggregate::actor::{AggregateError, AggregateMessage};
 use crate::runtime::aggregate::{Aggregate, DomainEvent};
 use crate::runtime::config::ClientIdentity;
+use crate::runtime::event::EventPayload;
 use crate::runtime::event_store::EventStore;
+use super::system::SessionSystem;
 use crate::runtime::span::SpanContext;
-use crate::runtime::types::{RuntimeError, RuntimeMessage, SessionMessage};
-use crate::runtime::Runtime;
+use crate::runtime::types::{RuntimeError, SessionMessage};
 
 // ---------------------------------------------------------------------------
 // Notification — transient signals, never persisted
@@ -38,7 +39,7 @@ pub enum SessionUpdate {
 }
 
 /// Callback invoked for each update (event or notification).
-pub type OnSessionUpdate = Box<dyn Fn(&SessionUpdate) + Send + Sync>;
+pub type OnSessionUpdate = Box<dyn FnMut(&SessionUpdate) + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // SessionClientActor
@@ -49,9 +50,10 @@ pub struct SessionClientActor;
 pub struct SessionClientState {
     session_id: Uuid,
     tenant_id: String,
+    system: SessionSystem,
     core: Aggregate<SessionState>,
     on_event: Option<OnSessionUpdate>,
-    runtime: ActorRef<RuntimeMessage>,
+    stop_on_done: bool,
 }
 
 pub struct SessionClientArgs {
@@ -59,8 +61,10 @@ pub struct SessionClientArgs {
     pub auth: ClientIdentity,
     pub aggregate_actor_id: Uuid,
     pub store: Arc<dyn EventStore>,
+    pub system: SessionSystem,
     pub on_event: Option<OnSessionUpdate>,
-    pub runtime: ActorRef<RuntimeMessage>,
+    /// When true, the actor will stop itself after processing a SessionDone event.
+    pub stop_on_done: bool,
 }
 
 impl Actor for SessionClientActor {
@@ -88,28 +92,26 @@ impl Actor for SessionClientActor {
         Ok(SessionClientState {
             session_id: args.session_id,
             tenant_id: args.auth.tenant_id.clone(),
+            system: args.system,
             core,
             on_event: args.on_event,
-            runtime: args.runtime,
+            stop_on_done: args.stop_on_done,
         })
     }
 
     async fn handle(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SessionMessage::Execute(cmd, reply) => {
                 // Find or create the aggregate actor
-                let cell = match Runtime::ensure_aggregate(
-                    &state.runtime,
-                    state.session_id,
-                    "session",
-                    &state.tenant_id,
-                )
-                .await
+                let cell = match state
+                    .system
+                    .ensure_session(state.session_id, &state.tenant_id)
+                    .await
                 {
                     Ok(cell) => cell,
                     Err(e) => {
@@ -156,24 +158,31 @@ impl Actor for SessionClientActor {
                 }
             }
             SessionMessage::Events(typed_events) => {
+                let mut is_done = false;
                 for typed in &typed_events {
                     state
                         .core
                         .apply(&typed.payload, typed.sequence, typed.occurred_at);
-                    if let Some(f) = &state.on_event {
+                    if let Some(f) = &mut state.on_event {
                         f(&SessionUpdate::Event(Box::new(typed.as_ref().clone())));
                     }
+                    if matches!(&typed.payload, EventPayload::SessionDone(_)) {
+                        is_done = true;
+                    }
+                }
+                if is_done && state.stop_on_done {
+                    myself.stop(None);
                 }
             }
             SessionMessage::Notify(notification) => {
-                if let Some(f) = &state.on_event {
+                if let Some(f) = &mut state.on_event {
                     f(&SessionUpdate::Notification(notification));
                 }
             }
             SessionMessage::GetState(reply) => {
                 let _ = reply.send(state.core.state.clone());
             }
-            _ => {} // Wake, Cancel, Cast, SetClientTools — not for clients
+            _ => {} // Wake, Cancel, Cast — not for clients
         }
         Ok(())
     }

@@ -119,6 +119,14 @@ pub struct LlmCallRequested {
     pub request: LlmRequest,
     pub stream: bool,
     pub deadline: DateTime<Utc>,
+    /// Which LLM provider to use (e.g. "openrouter", "mock").
+    #[serde(default)]
+    pub llm_client: String,
+    /// Per-request retry hint from the worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

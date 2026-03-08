@@ -8,10 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let descriptor_path = out_dir.join("proto_descriptor.bin");
     prost_build::Config::new()
         .file_descriptor_set_path(&descriptor_path)
-        .compile_protos(
-            &["proto/a2a.proto", "proto/worker.proto"],
-            &["proto/"],
-        )?;
+        .compile_protos(&["proto/a2a.proto", "proto/worker.proto"], &["proto/"])?;
 
     // prost_build maps google.protobuf WKTs to ::prost_types, which lack serde impls.
     // Rewrite to use ::pbjson_types (drop-in replacements with serde support).
@@ -40,20 +37,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .package("worker")
         .method(
             tonic_build::manual::Method::builder()
-                .name("get_decision")
-                .route_name("GetDecision")
-                .input_type("crate::worker::GetDecisionRequest")
-                .output_type("crate::worker::WorkerDispatch")
+                .name("get_work")
+                .route_name("GetWork")
+                .input_type("crate::worker::GetWorkRequest")
+                .output_type("crate::worker::WorkItem")
                 .codec_path("tonic::codec::ProstCodec")
                 .build(),
         )
         .method(
             tonic_build::manual::Method::builder()
-                .name("submit_decision")
-                .route_name("SubmitDecision")
-                .input_type("crate::worker::SubmitDecisionRequest")
-                .output_type("crate::worker::SubmitDecisionResponse")
+                .name("submit_result")
+                .route_name("SubmitResult")
+                .input_type("crate::worker::WorkResult")
+                .output_type("crate::worker::SubmitResultResponse")
                 .codec_path("tonic::codec::ProstCodec")
+                .build(),
+        )
+        .method(
+            tonic_build::manual::Method::builder()
+                .name("run_session")
+                .route_name("RunSession")
+                .input_type("crate::worker::RunSessionRequest")
+                .output_type("crate::worker::SessionEvent")
+                .codec_path("tonic::codec::ProstCodec")
+                .server_streaming()
                 .build(),
         )
         .build();

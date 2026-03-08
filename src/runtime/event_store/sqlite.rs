@@ -734,7 +734,6 @@ mod tests {
     use super::*;
     use crate::runtime::aggregate::{Aggregate, DomainEvent};
     use crate::runtime::config::ClientIdentity;
-    use crate::runtime::config::{AgentConfig, LlmConfig};
     use crate::runtime::event::EventPayload;
     use crate::runtime::session::types::SessionCreated;
     use crate::runtime::session::SessionState;
@@ -748,35 +747,12 @@ mod tests {
         }
     }
 
-    fn test_agent(name: &str) -> AgentConfig {
-        AgentConfig {
-            id: Uuid::new_v4(),
-            name: name.into(),
-            description: None,
-            llm: LlmConfig {
-                client: "mock".into(),
-                model: "mock-model".into(),
-                max_completion_tokens: None,
-                temperature: None,
-                retry: Default::default(),
-                params: Default::default(),
-            },
-            system_prompt: "test".into(),
-            mcp_servers: vec![],
-            worker: Default::default(),
-            max_context_tokens: None,
-            sub_agents: vec![],
-            tool_result_max_bytes: None,
-        }
-    }
-
     fn session_created_event(
         session_id: Uuid,
         tenant: &str,
         agent_name: &str,
     ) -> (Vec<Event>, Aggregate<SessionState>) {
         let auth = test_auth(tenant);
-        let agent = test_agent(agent_name);
         let domain_event: DomainEvent<SessionState> = DomainEvent {
             id: Uuid::new_v4(),
             tenant_id: tenant.into(),
@@ -785,7 +761,7 @@ mod tests {
             span: SpanContext::root(),
             occurred_at: chrono::Utc::now(),
             payload: EventPayload::SessionCreated(Box::new(SessionCreated {
-                agent: agent.clone(),
+                agent_name: agent_name.into(),
                 auth: auth.clone(),
                 on_done: None,
             })),

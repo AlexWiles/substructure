@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::runtime::config::{AgentConfig, ClientIdentity};
+use crate::runtime::config::ClientIdentity;
 use crate::runtime::message::Message;
 use crate::runtime::span::SpanContext;
 
@@ -43,7 +43,7 @@ pub struct CompletionDelivery {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionCreated {
-    pub agent: AgentConfig,
+    pub agent_name: String,
     pub auth: ClientIdentity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_done: Option<CompletionDelivery>,
@@ -94,11 +94,13 @@ pub struct InterruptResumed {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolHandler {
-    /// Dispatched via WorkerExecutor (local MCP/sub-agent or remote worker).
+    /// Dispatched to the work queue for the worker to execute.
     #[default]
     Worker,
     /// Executed by the client. Session goes Idle while waiting.
     Client,
+    /// Sub-agent: runtime spawns a child session.
+    SubAgent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +114,11 @@ pub struct ToolCallRequested {
     /// Opaque context from the worker, passed through to transport dispatch.
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub context: serde_json::Value,
+    /// Per-request retry hints from the worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

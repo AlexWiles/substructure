@@ -48,3 +48,22 @@ pub fn notify_observers(session_id: Uuid, notification: Arc<Notification>) {
         let _ = actor.send_message(SessionMessage::Notify(Arc::clone(&notification)));
     }
 }
+
+/// Broadcast an LLM stream chunk to session observers.
+pub fn notify_llm_chunk(
+    session_id: Uuid,
+    call_id: String,
+    chunk_index: u32,
+    text: String,
+    span: crate::runtime::span::SpanContext,
+) {
+    notify_observers(
+        session_id,
+        Arc::new(Notification::LlmStreamChunk {
+            call_id,
+            chunk_index,
+            text,
+            span,
+        }),
+    );
+}

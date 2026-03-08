@@ -1,23 +1,23 @@
-use std::fmt::Write;
-
 use chrono::{DateTime, Utc};
 
+use super::decision::{
+    DecisionTrigger, WorkerDecisionCompleted, WorkerDecisionRequested, WorkerStateUpdated,
+};
 use super::state::{
     new_call_id, LlmCallStatus, SessionContext, SessionState, SessionStatus, ToolCallState,
     ToolCallStatus,
 };
 use super::types::*;
-use super::decision::{DecisionTrigger, WorkerDecisionCompleted, WorkerDecisionRequested, WorkerStateUpdated};
-use crate::worker as proto;
 use crate::runtime::aggregate::Emit;
 use crate::runtime::budget;
-use crate::runtime::config::{AgentConfig, ClientIdentity};
+use crate::runtime::config::ClientIdentity;
 use crate::runtime::event::EventPayload;
 use crate::runtime::llm::{
     LlmCallCompleted, LlmCallErrored, LlmCallRequested, LlmRequest, LlmResponse,
 };
 use crate::runtime::message::{Message, Role};
 use crate::runtime::span::SpanContext;
+use crate::worker as proto;
 
 // ---------------------------------------------------------------------------
 // Tool result truncation
@@ -27,24 +27,6 @@ use crate::runtime::span::SpanContext;
 ///
 /// `max_bytes = None` means no limit (disabled). Truncation respects UTF-8
 /// char boundaries and appends a note with the original and limit sizes.
-pub fn truncate_tool_result(s: String, max_bytes: Option<usize>) -> String {
-    let Some(max_bytes) = max_bytes else {
-        return s;
-    };
-    if s.len() <= max_bytes {
-        return s;
-    }
-    let total = s.len();
-    let cut = s.floor_char_boundary(max_bytes);
-    let mut out = s;
-    out.truncate(cut);
-    let _ = write!(
-        out,
-        "\n\n--- Output truncated ({total} bytes, limit: {max_bytes} bytes) ---"
-    );
-    out
-}
-
 // ---------------------------------------------------------------------------
 // Command types
 // ---------------------------------------------------------------------------
@@ -72,7 +54,7 @@ pub struct SessionCommand {
 #[derive(Debug, Clone)]
 pub enum CommandPayload {
     CreateSession {
-        agent: Box<AgentConfig>,
+        agent_name: String,
         auth: ClientIdentity,
         on_done: Option<CompletionDelivery>,
     },
@@ -85,6 +67,9 @@ pub enum CommandPayload {
         request: LlmRequest,
         stream: bool,
         deadline: DateTime<Utc>,
+        llm_client: String,
+        timeout_secs: Option<u32>,
+        max_retries: Option<u32>,
     },
     CompleteLlmCall {
         call_id: String,
@@ -101,10 +86,11 @@ pub enum CommandPayload {
         name: String,
         arguments: String,
         deadline: DateTime<Utc>,
-        #[allow(dead_code)]
         handler: ToolHandler,
         /// Opaque context from the worker, passed through to transport dispatch.
         context: serde_json::Value,
+        timeout_secs: Option<u32>,
+        max_retries: Option<u32>,
     },
     CompleteToolCall {
         tool_call_id: String,
@@ -167,22 +153,22 @@ impl SessionState {
         cmd: CommandPayload,
         ctx: &SessionContext,
     ) -> Result<Vec<Emit<EventPayload>>, SessionError> {
-        match (&self.agent, cmd) {
+        match (&self.agent_name, cmd) {
             (
                 None,
                 CommandPayload::CreateSession {
-                    agent,
+                    agent_name,
                     auth,
                     on_done,
                 },
             ) => Ok(vec![Emit::new(EventPayload::SessionCreated(Box::new(
                 SessionCreated {
-                    agent: (*agent).clone(),
+                    agent_name: agent_name.clone(),
                     auth,
                     on_done,
                 },
             )))
-            .label(&agent.name)]),
+            .label(&agent_name)]),
             (Some(_), CommandPayload::CreateSession { .. }) => {
                 Err(SessionError::SessionAlreadyCreated)
             }
@@ -208,11 +194,7 @@ impl SessionState {
                     SessionStatus::Interrupted { .. } => Err(SessionError::SessionInterrupted),
                     SessionStatus::Active => Err(SessionError::SessionBusy),
                     _ => {
-                        let agent_name = state
-                            .agent
-                            .as_ref()
-                            .map(|a| a.name.as_str())
-                            .unwrap_or("unknown");
+                        let agent_name = state.agent_name.as_deref().unwrap_or("unknown");
                         Ok(vec![Emit::new(EventPayload::MessageUser(MessageUser {
                             message: Message {
                                 role: Role::User,
@@ -251,9 +233,7 @@ impl SessionState {
                             name,
                             ..
                         }) => {
-                            let max = state.tool_result_max_bytes(ctx);
                             if let Some(err) = error {
-                                let err = truncate_tool_result(err, max);
                                 Ok(vec![Emit::new(EventPayload::ToolCallErrored(
                                     ToolCallErrored {
                                         tool_call_id,
@@ -266,7 +246,6 @@ impl SessionState {
                                 .label(name.as_str())
                                 .error(err)])
                             } else {
-                                let content = truncate_tool_result(content, max);
                                 Ok(vec![Emit::new(EventPayload::ToolCallCompleted(
                                     ToolCallCompleted {
                                         tool_call_id,
@@ -286,6 +265,9 @@ impl SessionState {
                 request,
                 stream,
                 deadline,
+                llm_client,
+                timeout_secs,
+                max_retries,
             } => {
                 let has_pending = state
                     .llm_calls
@@ -312,6 +294,9 @@ impl SessionState {
                         request,
                         stream,
                         deadline,
+                        llm_client,
+                        timeout_secs,
+                        max_retries,
                     })
                     .into()])
                 } else {
@@ -389,6 +374,8 @@ impl SessionState {
                 deadline,
                 handler,
                 context,
+                timeout_secs,
+                max_retries,
             } => match state.tool_calls.get(&tool_call_id) {
                 // Already tracked — skip
                 Some(_) => Ok(vec![]),
@@ -401,6 +388,8 @@ impl SessionState {
                         deadline,
                         handler,
                         context,
+                        timeout_secs,
+                        max_retries,
                     },
                 ))
                 .with("tool.name", &name)
@@ -414,8 +403,6 @@ impl SessionState {
             } => match state.tool_calls.get(&tool_call_id).map(|tc| &tc.status) {
                 // Pending — complete and emit tool message
                 Some(&ToolCallStatus::Pending) => {
-                    let max = state.tool_result_max_bytes(ctx);
-                    let result = truncate_tool_result(result, max);
                     let mut events = vec![
                         Emit::new(EventPayload::ToolCallCompleted(ToolCallCompleted {
                             tool_call_id: tool_call_id.clone(),
@@ -438,10 +425,8 @@ impl SessionState {
                     ];
                     if let Some(ws) = worker_state {
                         events.push(
-                            EventPayload::WorkerStateUpdated(WorkerStateUpdated {
-                                state: ws,
-                            })
-                            .into(),
+                            EventPayload::WorkerStateUpdated(WorkerStateUpdated { state: ws })
+                                .into(),
                         );
                     }
                     Ok(events)
@@ -457,8 +442,6 @@ impl SessionState {
             } => match state.tool_calls.get(&tool_call_id).map(|tc| &tc.status) {
                 // Pending — fail and emit error tool message
                 Some(&ToolCallStatus::Pending) => {
-                    let max = state.tool_result_max_bytes(ctx);
-                    let error = truncate_tool_result(error, max);
                     let error_content = format!("Error: {}", error);
                     let mut events = vec![
                         Emit::new(EventPayload::ToolCallErrored(ToolCallErrored {
@@ -484,10 +467,8 @@ impl SessionState {
                     ];
                     if let Some(ws) = worker_state {
                         events.push(
-                            EventPayload::WorkerStateUpdated(WorkerStateUpdated {
-                                state: ws,
-                            })
-                            .into(),
+                            EventPayload::WorkerStateUpdated(WorkerStateUpdated { state: ws })
+                                .into(),
                         );
                     }
                     Ok(events)
@@ -553,6 +534,9 @@ impl SessionState {
                                 request: request.into(),
                                 stream: r.stream,
                                 deadline: self.llm_deadline(),
+                                llm_client: r.llm_client.clone(),
+                                timeout_secs: r.timeout_secs,
+                                max_retries: r.max_retries,
                             };
                             if let Ok(sub_events) = self.handle(sub_cmd, ctx) {
                                 events.extend(sub_events);
@@ -563,15 +547,7 @@ impl SessionState {
                                 let Some(tc) = &tca.tool_call else {
                                     continue;
                                 };
-                                let handler = if ctx
-                                    .client_tools
-                                    .iter()
-                                    .any(|t| t.function.name == tc.name)
-                                {
-                                    ToolHandler::Client
-                                } else {
-                                    ToolHandler::default()
-                                };
+                                let handler = ToolHandler::default();
                                 let context = tca
                                     .context
                                     .as_ref()
@@ -584,6 +560,8 @@ impl SessionState {
                                     deadline: self.tool_deadline(),
                                     handler,
                                     context,
+                                    timeout_secs: tca.timeout_secs,
+                                    max_retries: tca.max_retries,
                                 };
                                 if let Ok(sub_events) = self.handle(sub, ctx) {
                                     events.extend(sub_events);
@@ -593,6 +571,21 @@ impl SessionState {
                         proto::worker_action::Action::Done(d) => {
                             let sub_cmd = CommandPayload::MarkDone {
                                 artifacts: d.artifacts.iter().map(Into::into).collect(),
+                            };
+                            if let Ok(sub_events) = self.handle(sub_cmd, ctx) {
+                                events.extend(sub_events);
+                            }
+                        }
+                        proto::worker_action::Action::RequestSubAgent(r) => {
+                            let sub_cmd = CommandPayload::RequestToolCall {
+                                tool_call_id: new_call_id(),
+                                name: r.agent_name.clone(),
+                                arguments: serde_json::json!({"message": r.message}).to_string(),
+                                deadline: self.tool_deadline(),
+                                handler: ToolHandler::SubAgent,
+                                context: serde_json::Value::Null,
+                                timeout_secs: None,
+                                max_retries: None,
                             };
                             if let Ok(sub_events) = self.handle(sub_cmd, ctx) {
                                 events.extend(sub_events);
@@ -704,6 +697,9 @@ impl SessionState {
                             request: call.request.clone(),
                             stream: call.stream,
                             deadline: self.llm_deadline(),
+                            llm_client: call.llm_client.clone(),
+                            timeout_secs: None,
+                            max_retries: None,
                         })
                         .into()]);
                     }
@@ -724,6 +720,8 @@ impl SessionState {
                                 deadline: self.tool_deadline(),
                                 handler: tc.handler.clone(),
                                 context: tc.context.clone(),
+                                timeout_secs: None,
+                                max_retries: None,
                             },
                         ))
                         .with("tool.name", &tc.name)
@@ -747,6 +745,8 @@ impl SessionState {
                         deadline: tc.deadline,
                         handler: tc.handler.clone(),
                         context: tc.context.clone(),
+                        timeout_secs: None,
+                        max_retries: None,
                     },
                 ))
                 .with("tool.name", &tc.name)
@@ -762,6 +762,9 @@ impl SessionState {
                     request: call.request.clone(),
                     stream: call.stream,
                     deadline: call.deadline,
+                    llm_client: call.llm_client.clone(),
+                    timeout_secs: None,
+                    max_retries: None,
                 })
                 .into()]);
             }
@@ -784,35 +787,12 @@ impl SessionState {
 mod tests {
     use super::*;
     use crate::runtime::aggregate::Aggregate;
-    use crate::runtime::config::{AgentConfig, LlmConfig};
     use crate::runtime::llm::openai;
     use chrono::Utc;
     use uuid::Uuid;
 
     fn far_future() -> DateTime<Utc> {
         Utc::now() + chrono::Duration::hours(1)
-    }
-
-    fn test_agent() -> AgentConfig {
-        AgentConfig {
-            id: Uuid::new_v4(),
-            name: "test".into(),
-            description: None,
-            llm: LlmConfig {
-                client: "mock".into(),
-                model: "mock-model".into(),
-                max_completion_tokens: None,
-                temperature: None,
-                retry: Default::default(),
-                params: Default::default(),
-            },
-            system_prompt: "test".into(),
-            mcp_servers: vec![],
-            worker: Default::default(),
-            max_context_tokens: None,
-            sub_agents: vec![],
-            tool_result_max_bytes: None,
-        }
     }
 
     fn test_auth() -> ClientIdentity {
@@ -837,7 +817,7 @@ mod tests {
         let mut state = Aggregate::new(SessionState::new(Uuid::new_v4()));
         state.apply(
             &EventPayload::SessionCreated(Box::new(SessionCreated {
-                agent: test_agent(),
+                agent_name: "test".into(),
                 auth: test_auth(),
                 on_done: None,
             })),
@@ -855,7 +835,18 @@ mod tests {
     }
 
     fn default_ctx() -> SessionContext {
-        SessionContext::default()
+        use crate::runtime::session::system::SessionSystem;
+
+        SessionContext {
+            session_id: Uuid::nil(),
+            auth: ClientIdentity {
+                tenant_id: String::new(),
+                sub: None,
+                attrs: Default::default(),
+            },
+            stream: false,
+            system: SessionSystem::for_test(),
+        }
     }
 
     #[test]
@@ -872,6 +863,9 @@ mod tests {
                     request: mock_llm_request(),
                     stream: false,
                     deadline: far_future(),
+                    llm_client: "mock".into(),
+                    timeout_secs: None,
+                    max_retries: None,
                 },
                 &default_ctx(),
             )
@@ -946,6 +940,9 @@ mod tests {
                     request: mock_llm_request(),
                     stream: false,
                     deadline: far_future(),
+                    llm_client: "mock".into(),
+                    timeout_secs: None,
+                    max_retries: None,
                 },
                 &default_ctx(),
             )
@@ -998,6 +995,8 @@ mod tests {
                     deadline: far_future(),
                     handler: ToolHandler::Worker,
                     context: serde_json::Value::Null,
+                    timeout_secs: None,
+                    max_retries: None,
                 },
                 &default_ctx(),
             )
@@ -1147,161 +1146,5 @@ mod tests {
             &default_ctx(),
         );
         assert!(matches!(result, Err(SessionError::SessionInterrupted)));
-    }
-
-    // -----------------------------------------------------------------------
-    // truncate_tool_result tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn truncate_none_limit_returns_unchanged() {
-        let input = "x".repeat(1_000_000);
-        let result = truncate_tool_result(input.clone(), None);
-        assert_eq!(result, input);
-    }
-
-    #[test]
-    fn truncate_under_limit_returns_unchanged() {
-        let input = "hello world".to_string();
-        let result = truncate_tool_result(input.clone(), Some(100));
-        assert_eq!(result, input);
-    }
-
-    #[test]
-    fn truncate_at_limit_returns_unchanged() {
-        let input = "x".repeat(100);
-        let result = truncate_tool_result(input.clone(), Some(100));
-        assert_eq!(result, input);
-    }
-
-    #[test]
-    fn truncate_over_limit() {
-        let input = "x".repeat(200);
-        let result = truncate_tool_result(input, Some(100));
-        assert!(result.starts_with(&"x".repeat(100)));
-        assert!(result.contains("Output truncated"));
-        assert!(result.contains("200 bytes"));
-        assert!(result.contains("limit: 100 bytes"));
-    }
-
-    #[test]
-    fn truncate_respects_utf8_boundary() {
-        // Each emoji is 4 bytes; 3 emojis = 12 bytes
-        let input = "\u{1F600}\u{1F600}\u{1F600}".to_string();
-        assert_eq!(input.len(), 12);
-        // Limit at 5 — should cut to 4 bytes (1 complete emoji)
-        let result = truncate_tool_result(input, Some(5));
-        assert!(result.starts_with("\u{1F600}"));
-        assert!(result.contains("Output truncated"));
-    }
-
-    #[test]
-    fn complete_tool_call_truncates_large_result() {
-        let mut agent = test_agent();
-        agent.tool_result_max_bytes = Some(50);
-
-        let mut state = Aggregate::new(SessionState::new(Uuid::new_v4()));
-        state.apply(
-            &EventPayload::SessionCreated(Box::new(SessionCreated {
-                agent,
-                auth: test_auth(),
-                on_done: None,
-            })),
-            1,
-            Utc::now(),
-        );
-
-        let call_id = "call-1".to_string();
-        let tool_call_id = "tc-1".to_string();
-
-        // Request LLM call
-        let emits = state
-            .state
-            .handle(
-                CommandPayload::RequestLlmCall {
-                    call_id: call_id.clone(),
-                    request: mock_llm_request(),
-                    stream: false,
-                    deadline: far_future(),
-                },
-                &default_ctx(),
-            )
-            .unwrap();
-        apply_events(&mut state, emits);
-
-        // Complete LLM call with a tool call
-        let response = LlmResponse::OpenAi(openai::ChatCompletionResponse {
-            id: "resp-1".into(),
-            model: "mock".into(),
-            choices: vec![openai::Choice {
-                index: 0,
-                message: openai::ChatMessage {
-                    role: openai::Role::Assistant,
-                    content: None,
-                    tool_calls: Some(vec![openai::ToolCall {
-                        id: tool_call_id.clone(),
-                        call_type: "function".into(),
-                        function: openai::FunctionCall {
-                            name: "test_tool".into(),
-                            arguments: "{}".into(),
-                        },
-                    }]),
-                    tool_call_id: None,
-                },
-                finish_reason: Some("tool_calls".into()),
-            }],
-            usage: None,
-        });
-        let emits = state
-            .state
-            .handle(
-                CommandPayload::CompleteLlmCall { call_id, response },
-                &default_ctx(),
-            )
-            .unwrap();
-        apply_events(&mut state, emits);
-
-        // Register the tool call (previously done by CompleteLlmCall, now via worker pipeline)
-        let emits = state
-            .state
-            .handle(
-                CommandPayload::RequestToolCall {
-                    tool_call_id: tool_call_id.clone(),
-                    name: "test_tool".into(),
-                    arguments: "{}".into(),
-                    deadline: far_future(),
-                    handler: ToolHandler::Worker,
-                    context: serde_json::Value::Null,
-                },
-                &default_ctx(),
-            )
-            .unwrap();
-        apply_events(&mut state, emits);
-
-        // Complete tool call with a large result
-        let large_result = "x".repeat(200);
-        let emits = state
-            .state
-            .handle(
-                CommandPayload::CompleteToolCall {
-                    tool_call_id: tool_call_id.clone(),
-                    name: "test_tool".into(),
-                    result: large_result,
-                    worker_state: None,
-                },
-                &default_ctx(),
-            )
-            .unwrap();
-
-        // Verify the MessageTool content is truncated
-        let tool_msg = emits
-            .iter()
-            .find(|e| matches!(&e.event, EventPayload::MessageTool(_)));
-        assert!(tool_msg.is_some(), "expected MessageTool event");
-        if let EventPayload::MessageTool(m) = &tool_msg.unwrap().event {
-            let content = m.message.content.as_ref().unwrap();
-            assert!(content.len() < 200);
-            assert!(content.contains("Output truncated"));
-        }
     }
 }

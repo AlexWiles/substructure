@@ -1,30 +1,14 @@
 //! Conversions between internal runtime types and worker proto types.
 
-use crate::runtime::config::AgentConfig;
+use crate::runtime::config::ClientIdentity;
 use crate::runtime::llm as internal_llm;
 use crate::runtime::message as internal_msg;
-use crate::runtime::session::{LlmCallStatus, ToolCallStatus, ToolResult};
 use crate::runtime::session::types::{Artifact, Part};
+use crate::runtime::session::{LlmCallStatus, ToolCallStatus, ToolResult};
+use crate::runtime::span::{SpanContext, SpanId, TraceId};
 use crate::worker as proto;
 
 use proto::{CallStatus, Role};
-
-// ---------------------------------------------------------------------------
-// AgentConfig → AgentInfo
-// ---------------------------------------------------------------------------
-
-impl From<&AgentConfig> for proto::AgentInfo {
-    fn from(a: &AgentConfig) -> Self {
-        Self {
-            name: a.name.clone(),
-            description: a.description.clone(),
-            system_prompt: a.system_prompt.clone(),
-            model: a.llm.model.clone(),
-            temperature: a.llm.temperature,
-            max_completion_tokens: a.llm.max_completion_tokens,
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Message conversions
@@ -43,7 +27,10 @@ impl From<&internal_msg::Message> for proto::Message {
             tool_calls: m.tool_calls.iter().map(Into::into).collect(),
             tool_call_id: m.tool_call_id.clone(),
             call_id: m.call_id.clone(),
-            usage: m.usage.as_ref().and_then(|v| serde_json::from_value(v.clone()).ok()),
+            usage: m
+                .usage
+                .as_ref()
+                .and_then(|v| serde_json::from_value(v.clone()).ok()),
         }
     }
 }
@@ -315,6 +302,71 @@ impl From<&crate::runtime::session::decision::DecisionTrigger> for proto::Decisi
 }
 
 // ---------------------------------------------------------------------------
+// ClientIdentity conversions
+// ---------------------------------------------------------------------------
+
+impl From<&ClientIdentity> for proto::ClientIdentity {
+    fn from(c: &ClientIdentity) -> Self {
+        Self {
+            tenant_id: c.tenant_id.clone(),
+            sub: c.sub.clone(),
+            attrs: c.attrs.clone(),
+        }
+    }
+}
+
+impl From<&proto::ClientIdentity> for ClientIdentity {
+    fn from(c: &proto::ClientIdentity) -> Self {
+        Self {
+            tenant_id: c.tenant_id.clone(),
+            sub: c.sub.clone(),
+            attrs: c.attrs.clone(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SpanContext conversions
+// ---------------------------------------------------------------------------
+
+impl From<&SpanContext> for proto::SpanContext {
+    fn from(s: &SpanContext) -> Self {
+        Self {
+            trace_id: s.trace_id.as_bytes().to_vec(),
+            span_id: s.span_id.as_bytes().to_vec(),
+            parent_span_id: s.parent_span_id.map(|id| id.as_bytes().to_vec()),
+            trace_flags: s.trace_flags as u32,
+            trace_state: s.trace_state.clone(),
+            name: s.name.clone(),
+        }
+    }
+}
+
+impl From<&proto::SpanContext> for SpanContext {
+    fn from(s: &proto::SpanContext) -> Self {
+        let trace_id = <[u8; 16]>::try_from(s.trace_id.as_slice())
+            .map(TraceId::from_bytes)
+            .unwrap_or_else(|_| TraceId::random());
+        let span_id = <[u8; 8]>::try_from(s.span_id.as_slice())
+            .map(SpanId::from_bytes)
+            .unwrap_or_else(|_| SpanId::random());
+        let parent_span_id = s
+            .parent_span_id
+            .as_ref()
+            .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
+            .map(SpanId::from_bytes);
+        Self {
+            trace_id,
+            span_id,
+            parent_span_id,
+            trace_flags: s.trace_flags as u8,
+            trace_state: s.trace_state.clone(),
+            name: s.name.clone(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // WorkerCtx from WorkerDispatch (extract decision context from wire message)
 // ---------------------------------------------------------------------------
 
@@ -323,12 +375,11 @@ impl From<&proto::WorkerDispatch> for proto::WorkerCtx {
         Self {
             session_id: d.session_id.clone(),
             stream: d.stream,
-            agent: d.agent.clone(),
-            tools: d.tools.clone(),
-            sub_agent_names: d.sub_agent_names.clone(),
+            agent_name: d.agent_name.clone(),
             token_usage: d.token_usage.clone(),
             tool_call_statuses: d.tool_call_statuses.clone(),
             llm_call_statuses: d.llm_call_statuses.clone(),
+            auth: d.auth.clone(),
         }
     }
 }

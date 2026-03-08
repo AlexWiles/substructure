@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef, SpawnErr};
 use tokio::task::AbortHandle;
 
-use super::event_store::{AggregateFilter, AggregateSort, EventBatch, EventStore};
-use super::RuntimeMessage;
+use crate::runtime::event_store::{AggregateFilter, AggregateSort, EventBatch, EventStore};
+use super::system::SessionSystem;
 
 // ---------------------------------------------------------------------------
 // Messages
@@ -26,7 +26,7 @@ pub struct WakeScheduler;
 
 pub struct WakeSchedulerState {
     store: Arc<dyn EventStore>,
-    runtime: ActorRef<RuntimeMessage>,
+    sessions: SessionSystem,
     myself: ActorRef<WakeSchedulerMessage>,
     next_tick_at: Option<DateTime<Utc>>,
     timer_handle: Option<AbortHandle>,
@@ -34,7 +34,7 @@ pub struct WakeSchedulerState {
 
 pub struct WakeSchedulerArgs {
     pub store: Arc<dyn EventStore>,
-    pub runtime: ActorRef<RuntimeMessage>,
+    pub sessions: SessionSystem,
 }
 
 fn schedule(state: &mut WakeSchedulerState, at: DateTime<Utc>) {
@@ -99,7 +99,7 @@ impl Actor for WakeScheduler {
 
         Ok(WakeSchedulerState {
             store: args.store,
-            runtime: args.runtime,
+            sessions: args.sessions,
             myself,
             next_tick_at: None,
             timer_handle: None,
@@ -138,11 +138,11 @@ impl Actor for WakeScheduler {
                 };
                 let due = state.store.list_aggregates(&filter).await;
                 for agg in due {
-                    state.runtime.send_message(RuntimeMessage::WakeAggregate {
-                        aggregate_id: agg.aggregate_id,
-                        aggregate_type: agg.aggregate_type,
-                        tenant_id: agg.tenant_id,
-                    })?;
+                    let ss = state.sessions.clone();
+                    tokio::spawn(async move {
+                        ss.wake_aggregate(agg.aggregate_id, &agg.aggregate_type, &agg.tenant_id)
+                            .await;
+                    });
                 }
 
                 // Schedule next tick from the store.
@@ -155,7 +155,7 @@ impl Actor for WakeScheduler {
 
 pub async fn spawn_wake_scheduler(
     store: Arc<dyn EventStore>,
-    runtime: ActorRef<RuntimeMessage>,
+    sessions: SessionSystem,
     supervisor: ActorCell,
 ) -> Result<ActorRef<WakeSchedulerMessage>, SpawnErr> {
     let (actor_ref, _handle) = Actor::spawn_linked(
@@ -163,7 +163,7 @@ pub async fn spawn_wake_scheduler(
         WakeScheduler,
         WakeSchedulerArgs {
             store: store.clone(),
-            runtime,
+            sessions,
         },
         supervisor,
     )

@@ -6,17 +6,6 @@ package worker;
 
 import "google/protobuf/struct.proto";
 
-// --- Agent info (subset of internal AgentConfig) ---
-
-message AgentInfo {
-  string name = 1;
-  optional string description = 2;
-  string system_prompt = 3;
-  string model = 4;
-  optional double temperature = 5;
-  optional uint64 max_completion_tokens = 6;
-}
-
 // --- Messages (LLM conversation) ---
 
 enum Role {
@@ -141,12 +130,11 @@ message Stall {}
 message WorkerCtx {
   string session_id = 1;
   bool stream = 2;
-  AgentInfo agent = 3;
-  repeated LlmTool tools = 4;
-  repeated string sub_agent_names = 5;
+  string agent_name = 3;
   map<string, uint64> token_usage = 6;
   map<string, CallStatus> tool_call_statuses = 7;
   map<string, CallStatus> llm_call_statuses = 8;
+  ClientIdentity auth = 9;
 }
 
 // --- Worker actions (output from decide) ---
@@ -154,6 +142,8 @@ message WorkerCtx {
 message ToolCallAction {
   ToolCall tool_call = 1;
   google.protobuf.Value context = 2;
+  optional uint32 timeout_secs = 3;
+  optional uint32 max_retries = 4;
 }
 
 message WorkerAction {
@@ -161,12 +151,16 @@ message WorkerAction {
     RequestLlm request_llm = 1;
     RequestToolCalls request_tool_calls = 2;
     Done done = 3;
+    RequestSubAgent request_sub_agent = 4;
   }
 }
 
 message RequestLlm {
   LlmRequest request = 1;
   bool stream = 2;
+  string llm_client = 3;
+  optional uint32 timeout_secs = 4;
+  optional uint32 max_retries = 5;
 }
 
 message RequestToolCalls {
@@ -177,11 +171,35 @@ message Done {
   repeated Artifact artifacts = 1;
 }
 
+message RequestSubAgent {
+  string agent_name = 1;
+  string message = 2;
+}
+
 // --- Worker decision (return from decide) ---
 
 message WorkerDecision {
   repeated WorkerAction actions = 1;
   bytes state = 2;
+}
+
+// --- Auth identity ---
+
+message ClientIdentity {
+  string tenant_id = 1;
+  optional string sub = 2;
+  map<string, string> attrs = 3;
+}
+
+// --- Span context (distributed tracing) ---
+
+message SpanContext {
+  bytes trace_id = 1;
+  bytes span_id = 2;
+  optional bytes parent_span_id = 3;
+  uint32 trace_flags = 4;
+  optional string trace_state = 5;
+  optional string name = 6;
 }
 
 // --- Wire messages (dispatch) ---
@@ -192,13 +210,12 @@ message WorkerDispatch {
   DecisionTrigger trigger = 3;
   bytes worker_state = 4;
   bool stream = 5;
-  AgentInfo agent = 6;
+  string agent_name = 6;
   map<string, uint64> token_usage = 7;
   map<string, CallStatus> tool_call_statuses = 8;
   map<string, CallStatus> llm_call_statuses = 9;
-  string span_json = 10;
-  repeated LlmTool tools = 11;
-  repeated string sub_agent_names = 12;
+  SpanContext span = 10;
+  ClientIdentity auth = 11;
 }
 
 message ToolCallDispatch {
@@ -208,10 +225,12 @@ message ToolCallDispatch {
   string arguments = 4;
   google.protobuf.Value context = 5;
   optional uint64 max_result_bytes = 6;
-  string span_json = 7;
+  SpanContext span = 7;
+  string agent_name = 8;
+  ClientIdentity auth = 9;
 }
 
-// --- Tool call result (returned from executor) ---
+// --- Tool call result (returned from worker) ---
 
 message ToolCallResult {
   string tool_call_id = 1;
@@ -223,31 +242,66 @@ message ToolCallResult {
   optional bytes worker_state = 5;
 }
 
-// --- gRPC services ---
+// --- gRPC service ---
 
-// Worker execution service (runtime calls worker).
-service WorkerService {
-  rpc Decide(WorkerDispatch) returns (WorkerDecision);
-  rpc ExecuteToolCall(ToolCallDispatch) returns (ToolCallResult);
-}
-
-// Runtime's worker gateway. External workers connect here.
-// Workers pull work via GetDecision (blocks) and submit results via SubmitDecision.
+// Worker lifecycle: GetWork/SubmitResult loop.
+// GetWork carries agent names (what this worker handles) and optionally the
+// result from the previous work item.  SubmitResult is fire-and-forget
+// (for graceful shutdown — submit final result without blocking for next work).
 service WorkerGateway {
-  rpc GetDecision(GetDecisionRequest) returns (WorkerDispatch);
-  rpc SubmitDecision(SubmitDecisionRequest) returns (SubmitDecisionResponse);
+  // Worker RPCs
+  rpc GetWork(GetWorkRequest) returns (WorkItem);
+  rpc SubmitResult(WorkResult) returns (SubmitResultResponse);
+
+  // Client RPCs
+  rpc RunSession(RunSessionRequest) returns (stream SessionEvent);
 }
 
-message GetDecisionRequest {
+message GetWorkRequest {
   string worker_id = 1;
+  repeated string agent_names = 2;
+  WorkResult result = 3;
 }
 
-message SubmitDecisionRequest {
+message WorkItem {
+  oneof item {
+    WorkerDispatch decision = 1;
+    ToolCallDispatch tool_call = 2;
+  }
+}
+
+message WorkResult {
+  oneof result {
+    DecisionResult decision = 1;
+    ToolCallSubmission tool_call = 2;
+  }
+}
+
+message DecisionResult {
   string session_id = 1;
   string decision_id = 2;
   WorkerDecision decision = 3;
-  // Pass-through from WorkerDispatch.span_json for trace continuity.
-  string span_json = 4;
+  SpanContext span = 4;
 }
 
-message SubmitDecisionResponse {}
+message ToolCallSubmission {
+  string session_id = 1;
+  ToolCallResult result = 2;
+  SpanContext span = 3;
+}
+
+message SubmitResultResponse {}
+
+// --- Client session RPCs ---
+
+message RunSessionRequest {
+  string agent = 1;
+  string message = 2;
+}
+
+message SessionEvent {
+  string session_id = 1;
+  string event_type = 2;
+  string payload_json = 3;
+  uint64 sequence = 4;
+}

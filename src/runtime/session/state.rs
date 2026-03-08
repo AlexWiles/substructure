@@ -1,80 +1,36 @@
 use std::cmp::min;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::dispatch::{ToolCallDispatch, WorkerDispatch, WorkerExecutor};
-use super::types::{Artifact, CompletionDelivery, ToolHandler};
 use super::decision::{DecisionTrigger, WorkerDecisionRequested};
+use super::dispatch::{ToolCallDispatch, WorkerDispatch};
+use super::types::{Artifact, CompletionDelivery, ToolHandler};
 use crate::runtime::aggregate::{AggregateState, AggregateStatus, Emit};
 use crate::runtime::budget::{self, BudgetContext, BudgetError};
-use crate::runtime::config::{AgentConfig, ClientIdentity, ExhaustionStrategy, RetryPolicy};
+use crate::runtime::config::{ClientIdentity, ExhaustionStrategy, RetryPolicy};
 use crate::runtime::event::EventPayload;
-use crate::runtime::llm::{LlmCallRequested, LlmRequest, LlmResponse, LlmTool};
+use crate::runtime::llm::{LlmCallRequested, LlmRequest, LlmResponse};
+use crate::runtime::llm::StreamDelta;
 use crate::runtime::message::{Message, Role};
+use super::system::SessionSystem;
 use crate::runtime::span::SpanContext;
 use async_trait::async_trait;
 
 use super::command::{CommandPayload, SessionError};
-use crate::runtime::defaults;
 
 // ---------------------------------------------------------------------------
 // SessionContext — transient state passed through handle_command/on_event
 // ---------------------------------------------------------------------------
-
-/// Callback for streaming LLM chunks to observers.
-pub type NotifyChunkFn = Arc<dyn Fn(Uuid, String, u32, String, SpanContext) + Send + Sync>;
-/// Callback for sending a command to a session (fire-and-forget).
-pub type SendToSessionFn = Arc<dyn Fn(Uuid, CommandPayload, SpanContext) + Send + Sync>;
 
 /// Transient context for command handling and event reactions — not persisted.
 pub struct SessionContext {
     pub session_id: Uuid,
     pub auth: ClientIdentity,
     pub stream: bool,
-    // Runtime resources for I/O in on_event
-    pub llm_provider: Option<Arc<dyn LlmProviderTrait>>,
-    pub client_tools: Vec<LlmTool>,
-    pub budget_actor: Option<BudgetActorRef>,
-    // Callbacks for side-effects
-    pub notify_chunk: Option<NotifyChunkFn>,
-    pub send_to_session: Option<SendToSessionFn>,
-    /// System-wide max tool result bytes (from SystemConfig).
-    pub tool_result_max_bytes: Option<usize>,
-    /// Worker transport — dispatches decisions and tool calls (local or remote).
-    pub worker_executor: Option<Arc<dyn WorkerExecutor>>,
-}
-
-impl Default for SessionContext {
-    fn default() -> Self {
-        Self {
-            session_id: Uuid::nil(),
-            auth: ClientIdentity {
-                tenant_id: String::new(),
-                sub: None,
-                attrs: Default::default(),
-            },
-            stream: false,
-            llm_provider: None,
-            client_tools: Vec::new(),
-            budget_actor: None,
-            notify_chunk: None,
-            send_to_session: None,
-            tool_result_max_bytes: None,
-            worker_executor: None,
-        }
-    }
-}
-
-use crate::runtime::llm::{LlmProviderTrait, StreamDelta};
-
-/// Opaque handle to the budget actor — avoids leaking ractor types into the domain.
-/// Reserve method is implemented in `budget/mod.rs` where the concrete types are known.
-pub struct BudgetActorRef {
-    pub(crate) inner: Box<dyn std::any::Any + Send + Sync>,
+    /// Shared infrastructure handle — inter-session messaging, LLM, workers.
+    pub system: SessionSystem,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,6 +94,9 @@ pub struct LlmCallState {
     /// Original request, stored for retries and crash recovery.
     pub request: LlmRequest,
     pub stream: bool,
+    /// Which LLM provider to use (e.g. "openrouter", "mock").
+    #[serde(default)]
+    pub llm_client: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -193,7 +152,7 @@ pub struct DerivedState {
 pub struct SessionState {
     pub session_id: Uuid,
     pub status: SessionStatus,
-    pub agent: Option<AgentConfig>,
+    pub agent_name: Option<String>,
     pub auth: Option<ClientIdentity>,
     pub token_usage: BTreeMap<String, u64>,
 
@@ -220,7 +179,7 @@ impl SessionState {
         SessionState {
             session_id,
             status: SessionStatus::Done,
-            agent: None,
+            agent_name: None,
             auth: None,
             token_usage: BTreeMap::new(),
             worker_state: Vec::new(),
@@ -236,7 +195,7 @@ impl SessionState {
         match payload {
             EventPayload::SessionCreated(payload) => {
                 self.status = SessionStatus::Idle;
-                self.agent = Some(payload.agent.clone());
+                self.agent_name = Some(payload.agent_name.clone());
                 self.auth = Some(payload.auth.clone());
                 self.on_done = payload.on_done.clone();
             }
@@ -263,9 +222,13 @@ impl SessionState {
                             status: LlmCallStatus::Pending,
                             retry: RetryState::default(),
                             deadline: payload.deadline,
-                            retry_policy: self.resolve_llm_retry(),
+                            retry_policy: Self::resolve_llm_retry(
+                                payload.timeout_secs,
+                                payload.max_retries,
+                            ),
                             request: payload.request.clone(),
                             stream: payload.stream,
+                            llm_client: payload.llm_client.clone(),
                         },
                     );
                 }
@@ -310,7 +273,10 @@ impl SessionState {
                             name: payload.name.clone(),
                             status: ToolCallStatus::Pending,
                             retry: RetryState::default(),
-                            retry_policy: self.resolve_tool_retry(),
+                            retry_policy: Self::resolve_tool_retry(
+                                payload.timeout_secs,
+                                payload.max_retries,
+                            ),
                             deadline: payload.deadline,
                             context: payload.context.clone(),
                             handler: payload.handler.clone(),
@@ -323,7 +289,7 @@ impl SessionState {
                 // Active only if there's worker-handled work to do;
                 // Idle if all pending calls are client tools.
                 let has_worker_work = self.tool_calls.values().any(|tc| {
-                    tc.status == ToolCallStatus::Pending && tc.handler == ToolHandler::Worker
+                    tc.status == ToolCallStatus::Pending && tc.handler != ToolHandler::Client
                 });
                 self.status = if has_worker_work {
                     SessionStatus::Active
@@ -503,50 +469,43 @@ impl SessionState {
         }
     }
 
-    /// Resolve LLM retry policy: agent.llm.retry → defaults.
-    pub(super) fn resolve_llm_retry(&self) -> RetryPolicy {
-        self.agent
-            .as_ref()
-            .map(|a| a.llm.retry.resolve(&RetryPolicy::LLM_DEFAULTS))
-            .unwrap_or(RetryPolicy::LLM_DEFAULTS)
+    /// Resolve LLM retry policy from per-request hints, fallback to defaults.
+    fn resolve_llm_retry(timeout_secs: Option<u32>, max_retries: Option<u32>) -> RetryPolicy {
+        let mut policy = RetryPolicy::LLM_DEFAULTS;
+        if let Some(t) = timeout_secs {
+            policy.timeout_secs = t;
+        }
+        if let Some(r) = max_retries {
+            policy.max_retries = r;
+        }
+        policy
     }
 
-    /// Resolve tool retry policy.
-    pub(super) fn resolve_tool_retry(&self) -> RetryPolicy {
-        RetryPolicy::TOOL_DEFAULTS
+    /// Resolve tool retry policy from per-request hints, fallback to defaults.
+    fn resolve_tool_retry(timeout_secs: Option<u32>, max_retries: Option<u32>) -> RetryPolicy {
+        let mut policy = RetryPolicy::TOOL_DEFAULTS;
+        if let Some(t) = timeout_secs {
+            policy.timeout_secs = t;
+        }
+        if let Some(r) = max_retries {
+            policy.max_retries = r;
+        }
+        policy
     }
 
-    /// Compute LLM call deadline from agent config.
+    /// Compute LLM call deadline using system defaults.
     pub(super) fn llm_deadline(&self) -> DateTime<Utc> {
-        let policy = self.resolve_llm_retry();
-        Utc::now() + chrono::Duration::seconds(i64::from(policy.timeout_secs))
+        Utc::now() + chrono::Duration::seconds(i64::from(RetryPolicy::LLM_DEFAULTS.timeout_secs))
     }
 
-    /// Compute tool call deadline.
+    /// Compute tool call deadline using system defaults.
     pub(super) fn tool_deadline(&self) -> DateTime<Utc> {
-        let policy = self.resolve_tool_retry();
-        Utc::now() + chrono::Duration::seconds(i64::from(policy.timeout_secs))
+        Utc::now() + chrono::Duration::seconds(i64::from(RetryPolicy::TOOL_DEFAULTS.timeout_secs))
     }
 
-    /// Resolve the max tool result size.
-    ///
-    /// Resolution: agent → system → hardcoded default.
-    /// `Some(0)` at any level means "no limit" (returns `None`).
-    pub(super) fn tool_result_max_bytes(&self, ctx: &SessionContext) -> Option<usize> {
-        // 1. Per-agent
-        if let Some(limit) = self.agent.as_ref().and_then(|a| a.tool_result_max_bytes) {
-            return if limit == 0 { None } else { Some(limit) };
-        }
-        // 2. System-wide
-        if let Some(limit) = ctx.tool_result_max_bytes {
-            return if limit == 0 { None } else { Some(limit) };
-        }
-        // 3. Hardcoded default
-        Some(defaults::TOOL_RESULT_MAX_BYTES)
-    }
 
     pub fn label(&self) -> Option<String> {
-        self.agent.as_ref().map(|a| a.name.clone())
+        self.agent_name.clone()
     }
 
     /// Build a WorkerDispatch from session state.
@@ -557,14 +516,15 @@ impl SessionState {
         req: &WorkerDecisionRequested,
         span: &SpanContext,
     ) -> Option<WorkerDispatch> {
-        let agent = self.agent.as_ref()?;
+        let name = self.agent_name.as_ref()?;
         Some(WorkerDispatch {
             session_id: self.session_id,
             decision_id: req.decision_id.clone(),
             trigger: req.trigger.clone(),
             worker_state: self.worker_state.clone(),
             stream: ctx.stream,
-            agent: agent.clone(),
+            agent_name: name.clone(),
+            auth: ctx.auth.clone(),
             token_usage: self.token_usage.clone(),
             tool_call_statuses: self
                 .tool_calls
@@ -589,38 +549,26 @@ impl SessionState {
     /// Reserve budget for an LLM call. Returns the failing command if a policy rejects.
     async fn reserve_budget(
         &self,
-        call_id: &str,
+        call: &LlmCallState,
         ctx: &SessionContext,
         span: &SpanContext,
     ) -> Result<(), CommandPayload> {
-        let Some(ref budget) = ctx.budget_actor else {
-            return Ok(());
-        };
-
-        let agent = match self.agent.as_ref() {
-            Some(a) => a,
-            None => return Ok(()),
-        };
-
         let auth = self.auth.as_ref().unwrap_or(&ctx.auth);
-        let client_id = &agent.llm.client;
-        let model = &agent.llm.model;
-
-        let context = BudgetContext::for_llm_call(ctx.session_id, auth, client_id, model);
+        let context = BudgetContext::for_llm_call(ctx.session_id, auth, &call.llm_client, &call.request.model);
 
         let mut breakdown = BTreeMap::new();
-        if let Some(max_completion_tokens) = agent.llm.max_completion_tokens {
+        if let Some(max_completion_tokens) = call.request.max_completion_tokens {
             breakdown.insert("completion_tokens".into(), max_completion_tokens);
         }
 
-        match budget
-            .reserve(ctx.session_id, call_id, context, breakdown, span)
+        match ctx.system
+            .reserve_budget(&auth.tenant_id, ctx.session_id, &call.call_id, context, breakdown, span)
             .await
         {
             Ok(()) => Ok(()),
             Err(BudgetError::Denied(ref denial)) => match denial.status.strategy {
                 ExhaustionStrategy::Reject => Err(CommandPayload::FailLlmCall {
-                    call_id: call_id.to_string(),
+                    call_id: call.call_id.clone(),
                     error: denial.to_string(),
                     retryable: false,
                     source: Some(serde_json::to_value(denial).unwrap()),
@@ -641,25 +589,21 @@ impl SessionState {
         ctx: &SessionContext,
         span: &SpanContext,
     ) -> CommandPayload {
-        let provider = match &ctx.llm_provider {
-            Some(p) => p,
+        let provider = ctx.system.llm_provider();
+
+        let call = match self.llm_calls.get(&p.call_id) {
+            Some(c) => c,
             None => {
                 return CommandPayload::FailLlmCall {
                     call_id: p.call_id.clone(),
-                    error: "no LLM provider configured".into(),
+                    error: "LLM call not found in state".into(),
                     retryable: false,
                     source: None,
                 };
             }
         };
 
-        let client_id = self
-            .agent
-            .as_ref()
-            .map(|a| a.llm.client.clone())
-            .unwrap_or_default();
-
-        let client = match provider.resolve(&client_id, &ctx.auth).await {
+        let client = match provider.resolve(&call.llm_client, &ctx.auth).await {
             Ok(c) => c,
             Err(e) => {
                 return CommandPayload::FailLlmCall {
@@ -671,7 +615,7 @@ impl SessionState {
             }
         };
 
-        if let Err(cmd) = self.reserve_budget(&p.call_id, ctx, span).await {
+        if let Err(cmd) = self.reserve_budget(call, ctx, span).await {
             return cmd;
         }
 
@@ -682,23 +626,20 @@ impl SessionState {
 
             let call_id = p.call_id.clone();
             let session_id = ctx.session_id;
-            let notify = ctx.notify_chunk.clone();
             let chunk_span = span.child("llm.stream");
             let mut chunk_index: u32 = 0;
 
             let (result, _) = tokio::join!(client.call_streaming(&request, chunk_tx), async {
                 while let Some(delta) = chunk_rx.recv().await {
                     if let Some(text) = delta.text {
-                        if let Some(ref notify) = notify {
-                            notify(
-                                session_id,
-                                call_id.clone(),
-                                chunk_index,
-                                text,
-                                chunk_span.clone(),
-                            );
-                            chunk_index += 1;
-                        }
+                        super::routing::notify_llm_chunk(
+                            session_id,
+                            call_id.clone(),
+                            chunk_index,
+                            text,
+                            chunk_span.clone(),
+                        );
+                        chunk_index += 1;
                     }
                 }
             });
@@ -805,10 +746,8 @@ impl SessionState {
         ctx: &SessionContext,
         span: &SpanContext,
     ) {
-        if let (Some(executor), Some(dispatch)) =
-            (&ctx.worker_executor, self.worker_dispatch(ctx, req, span))
-        {
-            executor.dispatch_decision(dispatch);
+        if let Some(dispatch) = self.worker_dispatch(ctx, req, span) {
+            ctx.system.worker_executor().dispatch_decision(dispatch);
         }
     }
 }
@@ -859,19 +798,49 @@ impl AggregateState for SessionState {
                 None
             }
             EventPayload::ToolCallRequested(p) => {
-                if self.tool_calls.get(&p.tool_call_id).is_some_and(|tc| {
-                    tc.status == ToolCallStatus::Pending && tc.handler == ToolHandler::Worker
-                }) {
-                    if let Some(executor) = &ctx.worker_executor {
-                        executor.dispatch_tool_call(ToolCallDispatch {
-                            session_id: self.session_id,
-                            tool_call_id: p.tool_call_id.clone(),
-                            name: p.name.clone(),
-                            arguments: p.arguments.clone(),
-                            context: p.context.clone(),
-                            max_result_bytes: self.tool_result_max_bytes(ctx),
-                            span: span.clone(),
-                        });
+                let tc = self.tool_calls.get(&p.tool_call_id);
+                if let Some(tc) = tc.filter(|tc| tc.status == ToolCallStatus::Pending) {
+                    match tc.handler {
+                        ToolHandler::Worker => {
+                            ctx.system.worker_executor().dispatch_tool_call(ToolCallDispatch {
+                                session_id: self.session_id,
+                                tool_call_id: p.tool_call_id.clone(),
+                                name: p.name.clone(),
+                                arguments: p.arguments.clone(),
+                                context: p.context.clone(),
+                                agent_name: self.agent_name.clone().unwrap_or_default(),
+                                auth: ctx.auth.clone(),
+                                span: span.clone(),
+                            });
+                        }
+                        ToolHandler::SubAgent => {
+                            let args: serde_json::Value =
+                                serde_json::from_str(&p.arguments).unwrap_or_default();
+                            let message = args
+                                .get("message")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let child_session_id =
+                                Uuid::new_v5(&self.session_id, p.tool_call_id.as_bytes());
+                            ctx.system.spawn_sub_agent(
+                                crate::runtime::types::SubAgentRequest {
+                                    session_id: child_session_id,
+                                    agent_name: p.name.clone(),
+                                    message,
+                                    auth: ctx.auth.clone(),
+                                    delivery: CompletionDelivery {
+                                        parent_session_id: self.session_id,
+                                        tool_call_id: p.tool_call_id.clone(),
+                                        tool_name: p.name.clone(),
+                                        span: span.child("sub_agent.delivery"),
+                                    },
+                                    span: span.child("sub_agent.spawn"),
+                                    stream: ctx.stream,
+                                },
+                            ).await;
+                        }
+                        ToolHandler::Client => {}
                     }
                 }
                 None
@@ -879,18 +848,16 @@ impl AggregateState for SessionState {
             EventPayload::SessionDone(_) => {
                 if let Some(ref delivery) = self.on_done {
                     let result = serde_json::to_string(&self.artifacts).unwrap_or_default();
-                    if let Some(ref send) = ctx.send_to_session {
-                        send(
-                            delivery.parent_session_id,
-                            CommandPayload::CompleteToolCall {
-                                tool_call_id: delivery.tool_call_id.clone(),
-                                name: delivery.tool_name.clone(),
-                                result,
-                                worker_state: None,
-                            },
-                            span.child("session.done.deliver"),
-                        );
-                    }
+                    ctx.system.deliver(
+                        delivery.parent_session_id,
+                        CommandPayload::CompleteToolCall {
+                            tool_call_id: delivery.tool_call_id.clone(),
+                            name: delivery.tool_name.clone(),
+                            result,
+                            worker_state: None,
+                        },
+                        span.child("session.done.deliver"),
+                    ).await;
                 }
                 None
             }

@@ -3,9 +3,9 @@ use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::state::{LlmCallStatus, ToolCallStatus};
 use super::decision::DecisionTrigger;
-use crate::runtime::config::AgentConfig;
+use super::state::{LlmCallStatus, ToolCallStatus};
+use crate::runtime::config::ClientIdentity;
 use crate::runtime::span::SpanContext;
 
 // ---------------------------------------------------------------------------
@@ -24,7 +24,8 @@ pub struct WorkerDispatch {
     pub worker_state: Vec<u8>,
     // Session snapshot
     pub stream: bool,
-    pub agent: AgentConfig,
+    pub agent_name: String,
+    pub auth: ClientIdentity,
     pub token_usage: BTreeMap<String, u64>,
     #[serde(default)]
     pub tool_call_statuses: HashMap<String, ToolCallStatus>,
@@ -47,9 +48,8 @@ pub struct ToolCallDispatch {
     /// Opaque context from the worker (e.g. sub-agent AgentConfig).
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub context: serde_json::Value,
-    /// Pre-resolved max result bytes (None = unlimited).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_result_bytes: Option<usize>,
+    pub agent_name: String,
+    pub auth: ClientIdentity,
     pub span: SpanContext,
 }
 

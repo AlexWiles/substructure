@@ -16,13 +16,19 @@ use substructure::runtime::session::{CommandPayload, IncomingMessage, SessionCom
 use substructure::runtime::span::SpanContext;
 use substructure::runtime::Runtime;
 use substructure::runtime::SessionUpdate;
+use substructure::worker::default::{DefaultWorker, DefaultWorkerConfig};
+use substructure::worker::Worker;
 
 #[derive(Parser)]
 #[command(name = "substructure", about = "Substructure agent runtime CLI")]
 struct Cli {
-    /// Path to TOML config file
+    /// Path to system TOML config file
     #[arg(long, global = true)]
     config: Option<String>,
+
+    /// Path to worker TOML config file (agent definitions)
+    #[arg(long, global = true)]
+    worker_config: Option<String>,
 
     #[command(subcommand)]
     command: Command,
@@ -81,6 +87,39 @@ fn init_tracing(config: &LoggingConfig) {
     }
 }
 
+/// Load and resolve the system config from --config.
+fn load_system_config(path: &str) -> anyhow::Result<SystemConfig> {
+    let raw =
+        std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("failed to read {path}: {e}"))?;
+    let config: SystemConfig =
+        toml::from_str(&raw).map_err(|e| anyhow::anyhow!("failed to parse {path}: {e}"))?;
+    let providers = config.secret_providers.clone();
+    Ok(resolve_secrets(config, &providers)?)
+}
+
+/// Load and resolve the worker config from --worker-config.
+fn load_worker_config(path: &str) -> anyhow::Result<DefaultWorkerConfig> {
+    let raw =
+        std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("failed to read {path}: {e}"))?;
+    let config: DefaultWorkerConfig =
+        toml::from_str(&raw).map_err(|e| anyhow::anyhow!("failed to parse {path}: {e}"))?;
+    let providers = config.secret_providers.clone();
+    Ok(resolve_secrets(config, &providers)?)
+}
+
+/// Build a local worker from the worker config (if provided).
+#[cfg(feature = "http")]
+fn build_worker(worker_config: Option<&str>) -> anyhow::Result<Option<Arc<dyn Worker>>> {
+    match worker_config {
+        Some(path) => {
+            let config = load_worker_config(path)?;
+            tracing::info!(agents = config.agents.len(), "worker config loaded from {path}");
+            Ok(Some(Arc::new(DefaultWorker::new(config, vec![]))))
+        }
+        None => Ok(None),
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -89,19 +128,14 @@ async fn main() -> anyhow::Result<()> {
         .config
         .ok_or_else(|| anyhow::anyhow!("--config <path> is required"))?;
 
-    let raw = std::fs::read_to_string(&config_path)
-        .map_err(|e| anyhow::anyhow!("failed to read {config_path}: {e}"))?;
-    let config: SystemConfig =
-        toml::from_str(&raw).map_err(|e| anyhow::anyhow!("failed to parse config: {e}"))?;
-    let config = resolve_secrets(config)?;
+    let config = load_system_config(&config_path)?;
 
     init_tracing(&config.logging);
 
     tracing::info!(
-        agents = config.agents.len(),
         llm_clients = config.llm_clients.len(),
         budgets = config.budgets.len(),
-        "config loaded from {config_path}",
+        "system config loaded from {config_path}",
     );
 
     match cli.command {
@@ -109,19 +143,30 @@ async fn main() -> anyhow::Result<()> {
             agent,
             message,
             session,
-        } => run_one_shot(config, &agent, &message, session).await,
+        } => {
+            let worker_path = cli.worker_config.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("--worker-config is required for the run command")
+            })?;
+            let worker_config = load_worker_config(worker_path)?;
+            let worker = Arc::new(DefaultWorker::new(worker_config, vec![]));
+            run_one_shot(config, worker, &agent, &message, session).await
+        }
         #[cfg(feature = "http")]
-        Command::Serve { host, port } => run_http(config, &host, port).await,
+        Command::Serve { host, port } => {
+            let worker = build_worker(cli.worker_config.as_deref())?;
+            run_http(config, worker, &host, port).await
+        }
     }
 }
 
 async fn run_one_shot(
     config: SystemConfig,
+    worker: Arc<dyn Worker>,
     agent_name: &str,
     message: &str,
     session_id: Option<Uuid>,
 ) -> anyhow::Result<()> {
-    let runtime = Runtime::start(&config).await?;
+    let runtime = Runtime::start(&config, Some(worker)).await?;
 
     let auth = ClientIdentity {
         tenant_id: "cli".into(),
@@ -156,6 +201,7 @@ async fn run_one_shot(
                         }
                     }
                 })),
+                false,
             )
             .await?
     };
@@ -188,10 +234,15 @@ async fn run_one_shot(
 }
 
 #[cfg(feature = "http")]
-async fn run_http(config: SystemConfig, host: &str, port: u16) -> anyhow::Result<()> {
+async fn run_http(
+    config: SystemConfig,
+    worker: Option<Arc<dyn Worker>>,
+    host: &str,
+    port: u16,
+) -> anyhow::Result<()> {
     let addr: std::net::SocketAddr = format!("{host}:{port}")
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid host/port: {e}"))?;
 
-    start_server(config, addr).await
+    start_server(config, worker, addr).await
 }

@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use thiserror::Error;
 
-use super::config::{SecretProviderConfig, SystemConfig};
+use serde::{de::DeserializeOwned, Serialize};
+
+use super::config::SecretProviderConfig;
 
 #[derive(Debug, Error)]
 pub enum SecretError {
@@ -52,8 +54,11 @@ fn build_providers(
     Ok(providers)
 }
 
-pub fn resolve_secrets(config: SystemConfig) -> Result<SystemConfig, SecretError> {
-    let providers = build_providers(&config.secret_providers)?;
+pub fn resolve_secrets<T: Serialize + DeserializeOwned>(
+    config: T,
+    secret_providers: &HashMap<String, SecretProviderConfig>,
+) -> Result<T, SecretError> {
+    let providers = build_providers(secret_providers)?;
 
     let mut value = serde_json::to_value(&config)
         .map_err(|e| SecretError::Resolution(format!("serialize: {e}")))?;

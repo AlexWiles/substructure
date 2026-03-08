@@ -173,8 +173,6 @@ pub struct SystemConfig {
     pub secret_providers: HashMap<String, SecretProviderConfig>,
     #[serde(default)]
     pub llm_clients: HashMap<String, LlmClientConfig>,
-    #[serde(default)]
-    pub agents: HashMap<String, AgentConfig>,
     #[serde(default, rename = "budget_policies")]
     pub budgets: Vec<BudgetPolicyConfig>,
     #[serde(default)]
@@ -194,6 +192,9 @@ pub struct SystemConfig {
 pub struct GatewayConfig {
     /// Address to bind the gRPC server to, e.g. "0.0.0.0:50051".
     pub addr: String,
+    /// Auth config for the worker gateway. Defaults to no auth.
+    #[serde(default)]
+    pub auth: AuthConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
