@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::runtime::event_store::{
     AggregateFilter, AggregateSort, AggregateSummary, AppendInput, Event, EventFilter, EventStore,
-    StoreError, StreamLoad, Version,
+    Snapshot, StoreError, Version,
 };
 
 const SCHEMA: &str = "
@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS events (
     trace_id         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_events_occurred_at ON events (occurred_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_events_aggregate_seq ON events (aggregate_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_events_aggregate ON events (aggregate_id);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events (aggregate_type);
 CREATE INDEX IF NOT EXISTS idx_events_trace_id ON events (trace_id);
@@ -34,8 +35,6 @@ CREATE TABLE IF NOT EXISTS snapshots (
     tenant_id        TEXT NOT NULL,
     stream_version   INTEGER NOT NULL,
     data             TEXT NOT NULL,
-    status           TEXT,
-    label            TEXT,
     wake_at          TEXT,
     first_event_at   TEXT,
     last_event_at    TEXT
@@ -53,8 +52,6 @@ enum Snapshots {
     AggregateType,
     TenantId,
     StreamVersion,
-    Status,
-    Label,
     WakeAt,
     FirstEventAt,
     LastEventAt,
@@ -105,26 +102,6 @@ fn parse_dt(s: &str) -> Option<DateTime<Utc>> {
     s.parse().ok()
 }
 
-struct IndexFields {
-    status: Option<String>,
-    label: Option<String>,
-    wake_at: Option<String>,
-    first_event_at: Option<String>,
-    last_event_at: Option<String>,
-}
-
-fn extract_index_fields(snapshot: &serde_json::Value) -> IndexFields {
-    let str_field =
-        |key: &str| -> Option<String> { snapshot.get(key)?.as_str().map(|s| s.to_string()) };
-    IndexFields {
-        status: str_field("status"),
-        label: str_field("label"),
-        wake_at: str_field("wake_at"),
-        first_event_at: str_field("first_event_at"),
-        last_event_at: str_field("last_event_at"),
-    }
-}
-
 /// Convert sea-query Values to rusqlite params.
 fn sea_params(values: sea_query::Values) -> Vec<Box<dyn rusqlite::types::ToSql>> {
     values
@@ -143,10 +120,11 @@ fn sea_params(values: sea_query::Values) -> Vec<Box<dyn rusqlite::types::ToSql>>
         .collect()
 }
 
-fn do_append(conn: &Connection, input: AppendInput) -> Result<(), StoreError> {
-    let aid = input.aggregate_id.to_string();
+fn do_append(conn: &mut Connection, input: AppendInput) -> Result<(), StoreError> {
+    let snap = &input.snapshot;
+    let aid = snap.aggregate_id.to_string();
     let tx = conn
-        .unchecked_transaction()
+        .transaction()
         .map_err(|e| StoreError::Internal(e.to_string()))?;
 
     let expected_i64 = i64::try_from(input.expected_version)
@@ -170,15 +148,15 @@ fn do_append(conn: &Connection, input: AppendInput) -> Result<(), StoreError> {
                      )
                  )",
                 rusqlite::params![
-                    input.aggregate_type,
+                    snap.aggregate_type,
                     aid,
-                    input.tenant_id,
+                    snap.tenant_id,
                     event.sequence,
                     occurred_at,
                     data,
                     trace_id,
                     expected_i64,
-                    input.tenant_id,
+                    snap.tenant_id,
                 ],
             )
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -193,7 +171,7 @@ fn do_append(conn: &Connection, input: AppendInput) -> Result<(), StoreError> {
                 .optional()
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
             return match existing {
-                Some((_, ref t)) if t != &input.tenant_id => Err(StoreError::TenantMismatch),
+                Some((_, ref t)) if t != &snap.tenant_id => Err(StoreError::TenantMismatch),
                 Some((v, _)) => Err(StoreError::VersionConflict {
                     expected: Version(input.expected_version),
                     actual: Version(v),
@@ -206,32 +184,27 @@ fn do_append(conn: &Connection, input: AppendInput) -> Result<(), StoreError> {
         }
     }
 
-    let snapshot_data =
-        serde_json::to_string(&input.snapshot).map_err(|e| StoreError::Internal(e.to_string()))?;
-    let idx = extract_index_fields(&input.snapshot);
+    let snapshot_data = serde_json::to_string(&snap.data)
+        .map_err(|e| StoreError::Internal(e.to_string()))?;
 
     tx.execute(
-        "INSERT INTO snapshots (aggregate_id, aggregate_type, tenant_id, stream_version, data, status, label, wake_at, first_event_at, last_event_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        "INSERT INTO snapshots (aggregate_id, aggregate_type, tenant_id, stream_version, data, wake_at, first_event_at, last_event_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(aggregate_id) DO UPDATE SET
              stream_version = excluded.stream_version,
              data = excluded.data,
-             status = excluded.status,
-             label = excluded.label,
              wake_at = excluded.wake_at,
              first_event_at = COALESCE(snapshots.first_event_at, excluded.first_event_at),
              last_event_at = excluded.last_event_at",
         rusqlite::params![
             aid,
-            input.aggregate_type,
-            input.tenant_id,
-            input.new_version,
+            snap.aggregate_type,
+            snap.tenant_id,
+            snap.stream_version,
             snapshot_data,
-            idx.status,
-            idx.label,
-            idx.wake_at,
-            idx.first_event_at,
-            idx.last_event_at,
+            snap.wake_at.map(|t| t.to_rfc3339()),
+            snap.first_event_at.map(|t| t.to_rfc3339()),
+            snap.last_event_at.map(|t| t.to_rfc3339()),
         ],
     )
     .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -246,18 +219,22 @@ fn do_load(
     conn: &Connection,
     aggregate_id: Uuid,
     tenant_id: &str,
-) -> Result<StreamLoad, StoreError> {
+) -> Result<Snapshot, StoreError> {
     let aid = aggregate_id.to_string();
 
-    let (stored_tenant, snapshot_data, stream_version) = conn
+    let row = conn
         .query_row(
-            "SELECT tenant_id, data, stream_version FROM snapshots WHERE aggregate_id = ?1",
+            "SELECT aggregate_type, tenant_id, data, stream_version, wake_at, first_event_at, last_event_at FROM snapshots WHERE aggregate_id = ?1",
             [&aid],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, u64>(2)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, u64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
                 ))
             },
         )
@@ -266,16 +243,24 @@ fn do_load(
             other => StoreError::Internal(other.to_string()),
         })?;
 
+    let (agg_type, stored_tenant, snapshot_data, stream_version, wake_at_str, first_str, last_str) = row;
+
     if stored_tenant != tenant_id {
         return Err(StoreError::TenantMismatch);
     }
 
-    let snapshot: serde_json::Value =
+    let data: serde_json::Value =
         serde_json::from_str(&snapshot_data).map_err(|e| StoreError::Internal(e.to_string()))?;
 
-    Ok(StreamLoad {
-        snapshot,
+    Ok(Snapshot {
+        aggregate_id,
+        tenant_id: stored_tenant,
+        aggregate_type: agg_type,
+        data,
         stream_version,
+        wake_at: wake_at_str.as_deref().and_then(parse_dt),
+        first_event_at: first_str.as_deref().and_then(parse_dt),
+        last_event_at: last_str.as_deref().and_then(parse_dt),
     })
 }
 
@@ -288,8 +273,6 @@ fn do_list_aggregates(
             Snapshots::AggregateId,
             Snapshots::AggregateType,
             Snapshots::TenantId,
-            Snapshots::Status,
-            Snapshots::Label,
             Snapshots::WakeAt,
             Snapshots::StreamVersion,
             Snapshots::FirstEventAt,
@@ -305,12 +288,6 @@ fn do_list_aggregates(
         })
         .apply_if(filter.tenant_id.as_ref(), |q, v| {
             q.and_where(Expr::col(Snapshots::TenantId).eq(v));
-        })
-        .apply_if(filter.status.as_ref(), |q, statuses| {
-            q.and_where(Expr::col(Snapshots::Status).is_in(statuses.clone()));
-        })
-        .apply_if(filter.label.as_ref(), |q, v| {
-            q.and_where(Expr::col(Snapshots::Label).eq(v));
         })
         .apply_if(filter.wake_at_before.as_ref(), |q, before| {
             q.and_where(Expr::col(Snapshots::WakeAt).is_not_null());
@@ -348,18 +325,16 @@ fn do_list_aggregates(
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
+                row.get::<_, u64>(4)?,
                 row.get::<_, Option<String>>(5)?,
-                row.get::<_, u64>(6)?,
-                row.get::<_, Option<String>>(7)?,
-                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(6)?,
             ))
         })
         .map_err(|e| StoreError::Internal(e.to_string()))?;
 
     let mut results = Vec::new();
     for row in rows {
-        let (aid, agg_type, tenant, status, label, wake_at_str, version, first, last) =
+        let (aid, agg_type, tenant, wake_at_str, version, first, last) =
             row.map_err(|e| StoreError::Internal(e.to_string()))?;
         let aggregate_id = aid
             .parse()
@@ -368,8 +343,6 @@ fn do_list_aggregates(
             aggregate_id,
             aggregate_type: agg_type,
             tenant_id: tenant,
-            status,
-            label,
             wake_at: wake_at_str.as_deref().and_then(parse_dt),
             stream_version: version,
             first_event_at: first.as_deref().and_then(parse_dt),
@@ -442,16 +415,16 @@ impl EventStore for SqliteEventStore {
     async fn append(&self, input: AppendInput) -> Result<(), StoreError> {
         let writer = self.writer.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = writer
+            let mut conn = writer
                 .lock()
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
-            do_append(&conn, input)
+            do_append(&mut conn, input)
         })
         .await
         .map_err(spawn_err)?
     }
 
-    async fn load(&self, aggregate_id: Uuid, tenant_id: &str) -> Result<StreamLoad, StoreError> {
+    async fn load(&self, aggregate_id: Uuid, tenant_id: &str) -> Result<Snapshot, StoreError> {
         let tenant = tenant_id.to_string();
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {

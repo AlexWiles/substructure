@@ -4,13 +4,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::runtime::event_store::{EventStore, Snapshot, StoreError};
 use crate::runtime::span::{SpanContext, TraceId};
 
 use super::state::{AggregateState, ApplyContext, DomainEvent};
 
 pub struct CommitContext {
-    pub aggregate_id: Uuid,
-    pub tenant_id: String,
     pub span: SpanContext,
     pub occurred_at: DateTime<Utc>,
 }
@@ -18,6 +17,8 @@ pub struct CommitContext {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct Aggregate<R: AggregateState> {
+    pub id: Uuid,
+    pub tenant_id: String,
     pub state: R,
     pub stream_version: u64,
     pub last_applied: Option<u64>,
@@ -33,8 +34,10 @@ pub struct Aggregate<R: AggregateState> {
 }
 
 impl<R: AggregateState> Aggregate<R> {
-    pub fn new(state: R) -> Self {
+    pub fn new(id: Uuid, tenant_id: String, state: R) -> Self {
         Aggregate {
+            id,
+            tenant_id,
             state,
             stream_version: 0,
             last_applied: None,
@@ -43,6 +46,24 @@ impl<R: AggregateState> Aggregate<R> {
             wake_at: None,
             label: None,
             trace_id: None,
+        }
+    }
+
+    pub async fn load_or_create(
+        store: &dyn EventStore,
+        id: Uuid,
+        tenant_id: String,
+    ) -> Result<(Self, u64), StoreError> {
+        match store.load(id, &tenant_id).await {
+            Ok(snapshot) => {
+                let agg: Self = serde_json::from_value(snapshot.data)
+                    .map_err(|e| StoreError::Internal(e.to_string()))?;
+                Ok((agg, snapshot.stream_version))
+            }
+            Err(StoreError::StreamNotFound) => {
+                Ok((Self::new(id, tenant_id, R::initial(id)), 0))
+            }
+            Err(e) => Err(e),
         }
     }
 
@@ -103,8 +124,8 @@ impl<R: AggregateState> Aggregate<R> {
 
             domain_events.push(DomainEvent {
                 id: Uuid::now_v7(),
-                tenant_id: ctx.tenant_id.clone(),
-                aggregate_id: ctx.aggregate_id,
+                tenant_id: self.tenant_id.clone(),
+                aggregate_id: self.id,
                 sequence: self.stream_version,
                 span: ctx.span.clone(),
                 occurred_at: ctx.occurred_at,
@@ -115,5 +136,18 @@ impl<R: AggregateState> Aggregate<R> {
         }
 
         domain_events
+    }
+
+    pub fn to_snapshot(&self) -> Result<Snapshot, serde_json::Error> {
+        Ok(Snapshot {
+            aggregate_id: self.id,
+            tenant_id: self.tenant_id.clone(),
+            aggregate_type: R::AGGREGATE_TYPE.to_string(),
+            data: serde_json::to_value(self)?,
+            stream_version: self.stream_version,
+            wake_at: self.wake_at,
+            first_event_at: self.first_event_at,
+            last_event_at: self.last_event_at,
+        })
     }
 }

@@ -8,7 +8,8 @@ use tokio_stream::StreamExt;
 
 use rust_decimal::Decimal;
 
-use crate::runtime::llm::{LlmCallError, LlmCallable, LlmRequest, LlmResponse, LlmTool, StreamDelta};
+use crate::runtime::identity::ClientIdentity;
+use crate::runtime::llm::{LlmCallError, LlmCallable, LlmProviderTrait, LlmRequest, LlmResponse, LlmTool, StreamDelta};
 use crate::runtime::session::message::{ToolCall, ToolCallFunction};
 
 /// Wraps our normalized `LlmTool` with the `"type": "function"` field
@@ -419,5 +420,28 @@ impl LlmCallable for OpenRouterClient {
             usage,
             cost,
         })
+    }
+}
+
+pub struct OpenRouterProvider {
+    client: Arc<OpenRouterClient>,
+}
+
+impl OpenRouterProvider {
+    pub fn new(config: OpenRouterConfig) -> Self {
+        Self {
+            client: Arc::new(OpenRouterClient::from_config(config)),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProviderTrait for OpenRouterProvider {
+    async fn resolve(
+        &self,
+        _client_id: &str,
+        _auth: &ClientIdentity,
+    ) -> Result<Arc<dyn LlmCallable>, String> {
+        Ok(self.client.clone())
     }
 }

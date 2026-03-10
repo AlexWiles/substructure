@@ -1,5 +1,4 @@
 use chrono::Utc;
-use uuid::Uuid;
 
 use crate::runtime::event_store::{AppendInput, EventStore, StoreError};
 use crate::runtime::span::SpanContext;
@@ -23,7 +22,7 @@ pub struct ExecuteResult<R: AggregateState> {
 }
 
 pub struct ExecuteInput<R: AggregateState> {
-    pub aggregate_id: Uuid,
+    pub aggregate_id: uuid::Uuid,
     pub tenant_id: String,
     pub command: R::Command,
     pub span: SpanContext,
@@ -35,18 +34,9 @@ pub async fn execute<R: AggregateState>(
 ) -> Result<ExecuteResult<R>, ExecuteError<R::Error>> {
     let start_time = Utc::now();
 
-    // 1. Load or create aggregate.
-    let (mut aggregate, expected_version) = match store.load(input.aggregate_id, &input.tenant_id).await {
-        Ok(loaded) => {
-            let agg: Aggregate<R> =
-                serde_json::from_value(loaded.snapshot)?;
-            (agg, loaded.stream_version)
-        }
-        Err(StoreError::StreamNotFound) => (Aggregate::new(R::initial(input.aggregate_id)), 0),
-        Err(e) => return Err(e.into()),
-    };
+    let (mut aggregate, expected_version) =
+        Aggregate::<R>::load_or_create(store, input.aggregate_id, input.tenant_id).await?;
 
-    // 2. Handle command.
     let events = aggregate
         .state
         .handle_command(input.command)
@@ -61,8 +51,6 @@ pub async fn execute<R: AggregateState>(
 
     // 3. Commit — apply events, wrap as domain events.
     let commit_ctx = CommitContext {
-        aggregate_id: input.aggregate_id,
-        tenant_id: input.tenant_id.clone(),
         span: input.span,
         occurred_at: Utc::now(),
     };
@@ -77,16 +65,11 @@ pub async fn execute<R: AggregateState>(
         .collect::<Result<_, _>>()?;
 
     // 5. Append to store.
-    let snapshot = serde_json::to_value(&aggregate)?;
     store
         .append(AppendInput {
-            aggregate_id: input.aggregate_id,
-            tenant_id: input.tenant_id,
-            aggregate_type: R::AGGREGATE_TYPE.to_string(),
             events: store_events,
-            snapshot,
+            snapshot: aggregate.to_snapshot()?,
             expected_version,
-            new_version: aggregate.stream_version,
         })
         .await?;
 

@@ -182,12 +182,10 @@ impl SessionState {
                 if self.has_pending_llm() {
                     return Ok(vec![]);
                 }
-                let issue = match self.llm_calls.get(&call_id).map(|c| &c.tracking.status) {
-                    None => true,
-                    Some(&EffectStatus::Failed) => true,
-                    Some(&EffectStatus::RetryScheduled) => true,
-                    _ => false,
-                };
+                let issue = matches!(
+                    self.llm_calls.get(&call_id).map(|c| &c.tracking.status),
+                    None | Some(&EffectStatus::Failed) | Some(&EffectStatus::RetryScheduled)
+                );
                 if issue {
                     Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {
                         call_id,

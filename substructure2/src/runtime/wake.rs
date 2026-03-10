@@ -33,7 +33,7 @@ pub fn spawn_wake_scheduler(
                     if let Ok(events) = batch {
                         let earliest = events
                             .iter()
-                            .filter_map(|e| extract_wake_at(e))
+                            .filter_map(extract_wake_at)
                             .min();
                         if earliest.is_some_and(|at| at < deadline) {
                             continue;
