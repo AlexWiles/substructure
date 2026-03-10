@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+
+# Generated proto stubs
+substructure/_proto/*_pb2.py
+substructure/_proto/*_pb2_grpc.py
+substructure/_proto/*_pb2.pyi

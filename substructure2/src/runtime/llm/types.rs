@@ -1,0 +1,89 @@
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+
+use crate::runtime::identity::ClientIdentity;
+use crate::runtime::session::message::{Message, ToolCall};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmToolFunction {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmTool {
+    pub function: LlmToolFunction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmRequest {
+    pub model: String,
+    pub messages: Vec<Message>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<LlmTool>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u64>,
+}
+
+/// Normalized LLM response. Provider adapters convert their raw responses
+/// into this type at the boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmResponse {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<serde_json::Value>,
+    /// Cost in dollars for this call, if the provider reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<Decimal>,
+}
+
+/// Trait for LLM client providers (resolved by the runtime).
+#[async_trait]
+pub trait LlmProviderTrait: Send + Sync {
+    async fn resolve(
+        &self,
+        client_id: &str,
+        auth: &ClientIdentity,
+    ) -> Result<Arc<dyn LlmCallable>, String>;
+}
+
+/// Trait for calling an LLM (single call or streaming).
+#[async_trait]
+pub trait LlmCallable: Send + Sync + 'static {
+    async fn call(&self, request: &LlmRequest) -> Result<LlmResponse, LlmCallError>;
+
+    /// Streaming variant — sends deltas through `tx` while the call is
+    /// in progress, then returns the final assembled response.
+    /// Default implementation ignores the channel and delegates to `call()`.
+    async fn call_streaming(
+        &self,
+        request: &LlmRequest,
+        _tx: tokio::sync::mpsc::UnboundedSender<StreamDelta>,
+    ) -> Result<LlmResponse, LlmCallError> {
+        self.call(request).await
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LlmCallError {
+    pub message: String,
+    pub retryable: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamDelta {
+    pub text: Option<String>,
+    pub finish_reason: Option<String>,
+}
