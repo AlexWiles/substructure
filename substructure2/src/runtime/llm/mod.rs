@@ -1,3 +1,7 @@
 pub mod handler;
-pub mod openrouter;
-pub mod types;
+mod types;
+
+pub use types::{
+    LlmCallError, LlmCallable, LlmProviderTrait, LlmRequest, LlmResponse, LlmTool,
+    LlmToolFunction, StreamDelta,
+};

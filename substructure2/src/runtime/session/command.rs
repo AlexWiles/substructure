@@ -6,7 +6,7 @@ use super::events::*;
 use super::message::{Message, Role};
 use super::state::{new_call_id, EffectStatus, SessionState, SessionStatus};
 use crate::runtime::identity::ClientIdentity;
-use crate::runtime::llm::types::{LlmRequest, LlmResponse};
+use crate::runtime::llm::{LlmRequest, LlmResponse};
 use crate::runtime::retry::RetryPolicy;
 
 #[derive(Debug, Clone)]

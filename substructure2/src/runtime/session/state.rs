@@ -11,7 +11,7 @@ use rust_decimal::Decimal;
 
 use crate::runtime::aggregate::ApplyContext;
 use crate::runtime::identity::ClientIdentity;
-use crate::runtime::llm::types::LlmRequest;
+use crate::runtime::llm::LlmRequest;
 use crate::runtime::retry::{RetryPolicy, RetryState};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

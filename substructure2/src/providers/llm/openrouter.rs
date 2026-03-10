@@ -8,7 +8,7 @@ use tokio_stream::StreamExt;
 
 use rust_decimal::Decimal;
 
-use super::types::{LlmCallError, LlmCallable, LlmRequest, LlmResponse, LlmTool, StreamDelta};
+use crate::runtime::llm::{LlmCallError, LlmCallable, LlmRequest, LlmResponse, LlmTool, StreamDelta};
 use crate::runtime::session::message::{ToolCall, ToolCallFunction};
 
 /// Wraps our normalized `LlmTool` with the `"type": "function"` field

@@ -4,10 +4,10 @@ use tokio::task::JoinHandle;
 
 use event_store::{spawn_handler_pool, EventBus, EventStore};
 use llm::handler::LlmEventHandler;
-use llm::types::LlmProviderTrait;
+use llm::LlmProviderTrait;
 use session::state::SessionState;
 use wake::spawn_wake_scheduler;
-use worker::handler::spawn_worker_enqueue;
+use worker::spawn_worker_enqueue;
 use worker::WorkerQueue;
 
 pub mod aggregate;
@@ -58,11 +58,7 @@ pub fn start(
     let bus = EventBus::new(1024);
 
     let llm_handler = Arc::new(LlmEventHandler::new(store.clone(), llm_provider));
-    let llm_handle = spawn_handler_pool::<SessionState>(
-        &bus,
-        llm_handler,
-        config.llm_pool_size,
-    );
+    let llm_handle = spawn_handler_pool::<SessionState>(&bus, llm_handler, config.llm_pool_size);
 
     let worker_handle = spawn_worker_enqueue(&bus, worker_queue);
     let wake_handle = spawn_wake_scheduler(&bus, store.clone(), config.wake_poll_interval);

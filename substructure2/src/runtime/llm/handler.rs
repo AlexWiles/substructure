@@ -8,7 +8,7 @@ use crate::runtime::session::command::CommandPayload;
 use crate::runtime::session::events::EventPayload;
 use crate::runtime::session::state::SessionState;
 
-use super::types::LlmProviderTrait;
+use super::LlmProviderTrait;
 
 pub struct LlmEventHandler {
     store: Arc<dyn EventStore>,

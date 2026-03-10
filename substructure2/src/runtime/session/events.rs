@@ -4,7 +4,7 @@ use uuid::Uuid;
 use super::decision::DecisionTrigger;
 use super::message::Message;
 use crate::runtime::identity::ClientIdentity;
-use crate::runtime::llm::types::{LlmRequest, LlmResponse};
+use crate::runtime::llm::{LlmRequest, LlmResponse};
 use crate::runtime::retry::RetryPolicy;
 use crate::runtime::serde_helpers::base64_bytes;
 use crate::runtime::span::SpanContext;
