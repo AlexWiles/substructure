@@ -3,17 +3,17 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 
 use crate::runtime::aggregate::{AggregateState, DomainEvent};
-use crate::runtime::event_store::{Event, EventBus};
+use crate::runtime::event_store::{Event, EventStore};
 use crate::runtime::session::events::EventPayload;
 use crate::runtime::session::state::SessionState;
 
 use super::{PendingDecision, WorkerQueue};
 
 pub fn spawn_worker_enqueue(
-    bus: &EventBus,
+    store: Arc<dyn EventStore>,
     queue: Arc<dyn WorkerQueue>,
 ) -> JoinHandle<()> {
-    let mut rx = bus.subscribe();
+    let mut rx = store.subscribe();
     tokio::spawn(async move {
         while let Ok(batch) = rx.recv().await {
             for raw in batch.iter() {

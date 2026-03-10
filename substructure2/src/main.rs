@@ -43,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Serve { host, port, db } => {
-            let store = Arc::new(SqliteEventStore::open(&db)?);
+            let store = Arc::new(SqliteEventStore::new(&db)?);
             let queue = Arc::new(InMemoryWorkerQueue::new());
             let llm_provider = Arc::new(OpenRouterProvider::new(OpenRouterConfig {
                 base_url: std::env::var("OPENROUTER_BASE_URL")
@@ -53,7 +53,8 @@ async fn main() -> anyhow::Result<()> {
 
             let rt = Arc::new(runtime::start(store, llm_provider, queue, Default::default()));
 
-            let app = transport::worker_http::router(rt);
+            let app = transport::worker_http::router(rt.clone())
+                .merge(transport::client_http::router(rt));
             let addr = format!("{host}:{port}");
             tracing::info!(%addr, "listening");
             let listener = TcpListener::bind(&addr).await?;

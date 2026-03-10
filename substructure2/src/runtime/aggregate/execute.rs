@@ -64,7 +64,7 @@ pub async fn execute<R: AggregateState>(
         .map(|e| e.into_raw(start_time, end_time))
         .collect::<Result<_, _>>()?;
 
-    // 5. Append to store.
+    // 5. Append to store (store is responsible for publishing to the bus).
     store
         .append(AppendInput {
             events: store_events,

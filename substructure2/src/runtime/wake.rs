@@ -5,17 +5,16 @@ use chrono::{DateTime, Utc};
 use tokio::task::JoinHandle;
 
 use crate::runtime::aggregate::{execute, AggregateState, ExecuteInput};
-use crate::runtime::event_store::{AggregateFilter, AggregateSort, Event, EventBus, EventStore};
+use crate::runtime::event_store::{AggregateFilter, AggregateSort, Event, EventStore};
 use crate::runtime::session::command::CommandPayload;
 use crate::runtime::session::state::SessionState;
 use crate::runtime::span::SpanContext;
 
 pub fn spawn_wake_scheduler(
-    bus: &EventBus,
     store: Arc<dyn EventStore>,
     poll_interval: Duration,
 ) -> JoinHandle<()> {
-    let mut rx = bus.subscribe();
+    let mut rx = store.subscribe();
     tokio::spawn(async move {
         loop {
             let now = Utc::now();

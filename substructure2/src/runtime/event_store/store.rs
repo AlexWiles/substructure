@@ -5,6 +5,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use std::sync::Arc;
+
+use tokio::sync::broadcast;
+
 use crate::runtime::span::SpanContext;
 
 /// The raw event envelope persisted by the store.
@@ -112,10 +116,7 @@ pub struct EventFilter {
 #[async_trait]
 pub trait EventStore: Send + Sync {
     /// Persist events and snapshot atomically.
-    ///
-    /// Returns `VersionConflict` if `expected_version` doesn't match the
-    /// current stream version. Returns `TenantMismatch` if the stream
-    /// belongs to a different tenant.
+    /// Implementations must notify subscribers after a successful append.
     async fn append(&self, input: AppendInput) -> Result<(), StoreError>;
 
     /// Load the latest snapshot for a stream.
@@ -129,4 +130,7 @@ pub trait EventStore: Send + Sync {
 
     /// Query events with filtering and pagination.
     async fn query_events(&self, filter: &EventFilter) -> Result<Vec<Event>, StoreError>;
+
+    /// Subscribe to new events as they are appended.
+    fn subscribe(&self) -> broadcast::Receiver<Arc<Vec<Event>>>;
 }

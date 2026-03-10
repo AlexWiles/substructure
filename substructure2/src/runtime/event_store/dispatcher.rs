@@ -7,10 +7,10 @@ use tokio::task::JoinHandle;
 
 use crate::runtime::aggregate::{AggregateState, DomainEvent, EventHandler};
 
-use super::bus::EventBus;
+use super::store::EventStore;
 
 pub fn spawn_handler_pool<R: AggregateState>(
-    bus: &EventBus,
+    store: Arc<dyn EventStore>,
     handler: Arc<dyn EventHandler<R>>,
     pool_size: usize,
 ) -> JoinHandle<()> {
@@ -23,7 +23,7 @@ pub fn spawn_handler_pool<R: AggregateState>(
         worker_txs.push(tx);
     }
 
-    let mut rx = bus.subscribe();
+    let mut rx = store.subscribe();
     tokio::spawn(async move {
         while let Ok(batch) = rx.recv().await {
             for raw in batch.iter() {

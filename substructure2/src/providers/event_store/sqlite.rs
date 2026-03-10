@@ -7,6 +7,10 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use sea_query::{Expr, ExprTrait, Iden, Order, Query, SqliteQueryBuilder};
 use uuid::Uuid;
 
+use std::sync::Arc as StdArc;
+
+use tokio::sync::broadcast;
+
 use crate::runtime::event_store::{
     AggregateFilter, AggregateSort, AggregateSummary, AppendInput, Event, EventFilter, EventStore,
     Snapshot, StoreError, Version,
@@ -72,10 +76,11 @@ enum Events {
 pub struct SqliteEventStore {
     writer: Arc<Mutex<Connection>>,
     path: String,
+    tx: broadcast::Sender<StdArc<Vec<Event>>>,
 }
 
 impl SqliteEventStore {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+    pub fn new(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path_str = path.as_ref().to_string_lossy().to_string();
 
         let writer =
@@ -87,9 +92,12 @@ impl SqliteEventStore {
             .pragma_update(None, "journal_mode", "WAL")
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
+        let (tx, _) = broadcast::channel(1024);
+
         Ok(Self {
             writer: Arc::new(Mutex::new(writer)),
             path: path_str,
+            tx,
         })
     }
 }
@@ -413,6 +421,7 @@ fn spawn_err(e: tokio::task::JoinError) -> StoreError {
 #[async_trait]
 impl EventStore for SqliteEventStore {
     async fn append(&self, input: AppendInput) -> Result<(), StoreError> {
+        let events = input.events.clone();
         let writer = self.writer.clone();
         tokio::task::spawn_blocking(move || {
             let mut conn = writer
@@ -421,7 +430,10 @@ impl EventStore for SqliteEventStore {
             do_append(&mut conn, input)
         })
         .await
-        .map_err(spawn_err)?
+        .map_err(spawn_err)??;
+
+        let _ = self.tx.send(StdArc::new(events));
+        Ok(())
     }
 
     async fn load(&self, aggregate_id: Uuid, tenant_id: &str) -> Result<Snapshot, StoreError> {
@@ -458,5 +470,9 @@ impl EventStore for SqliteEventStore {
         })
         .await
         .map_err(spawn_err)?
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<StdArc<Vec<Event>>> {
+        self.tx.subscribe()
     }
 }

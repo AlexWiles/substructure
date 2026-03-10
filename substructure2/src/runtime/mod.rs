@@ -5,7 +5,7 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use aggregate::{execute, ExecuteError, ExecuteInput};
-use event_store::{spawn_handler_pool, EventBus, EventStore};
+use event_store::{spawn_handler_pool, EventStore};
 use identity::ClientIdentity;
 use llm::handler::LlmEventHandler;
 use llm::LlmProviderTrait;
@@ -43,7 +43,6 @@ impl Default for RuntimeConfig {
 }
 
 pub struct Runtime {
-    pub bus: EventBus,
     store: Arc<dyn EventStore>,
     queue: Arc<dyn WorkerQueue>,
     handles: Vec<JoinHandle<()>>,
@@ -145,16 +144,13 @@ pub fn start(
     worker_queue: Arc<dyn WorkerQueue>,
     config: RuntimeConfig,
 ) -> Runtime {
-    let bus = EventBus::new(1024);
-
     let llm_handler = Arc::new(LlmEventHandler::new(store.clone(), llm_provider));
-    let llm_handle = spawn_handler_pool::<SessionState>(&bus, llm_handler, config.llm_pool_size);
+    let llm_handle = spawn_handler_pool::<SessionState>(store.clone(), llm_handler, config.llm_pool_size);
 
-    let worker_handle = spawn_worker_enqueue(&bus, worker_queue.clone());
-    let wake_handle = spawn_wake_scheduler(&bus, store.clone(), config.wake_poll_interval);
+    let worker_handle = spawn_worker_enqueue(store.clone(), worker_queue.clone());
+    let wake_handle = spawn_wake_scheduler(store.clone(), config.wake_poll_interval);
 
     Runtime {
-        bus,
         store,
         queue: worker_queue,
         handles: vec![llm_handle, worker_handle, wake_handle],
