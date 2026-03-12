@@ -51,3 +51,16 @@ pub struct SubmitResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct RegisterRequest {
+    pub tenant_id: String,
+    pub agent_ids: Vec<String>,
+    pub transport_type: String,
+    pub config: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RegisterResponse {
+    pub ok: bool,
+}

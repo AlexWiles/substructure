@@ -263,9 +263,3 @@ class SendMessageRequest(BaseModel):
     message: str
     tenant_id: Optional[str] = None
     session_id: Optional[UUID] = None
-
-
-class SendMessageResponse(BaseModel):
-    session_id: UUID
-    ok: bool
-    error: Optional[str] = None

@@ -1,16 +1,17 @@
 mod routes;
-mod types;
+pub mod types;
 
 use std::sync::Arc;
 
 use axum::routing::post;
 use axum::Router;
 
-use crate::runtime::Runtime;
+use crate::push::PushAdapter;
 
-pub fn router(runtime: Arc<Runtime>) -> Router {
+pub fn router(adapter: Arc<PushAdapter>) -> Router {
     Router::new()
         .route("/workers/poll", post(routes::poll))
         .route("/workers/submit", post(routes::submit))
-        .with_state(runtime)
+        .route("/workers/register", post(routes::register))
+        .with_state(adapter)
 }

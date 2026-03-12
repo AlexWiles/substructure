@@ -47,6 +47,14 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_tenant ON snapshots (tenant_id);
 CREATE INDEX IF NOT EXISTS idx_snapshots_type ON snapshots (aggregate_type);
 CREATE INDEX IF NOT EXISTS idx_snapshots_wake_at ON snapshots (wake_at);
 CREATE INDEX IF NOT EXISTS idx_snapshots_last_event ON snapshots (last_event_at);
+
+CREATE TABLE IF NOT EXISTS push_registrations (
+    tenant_id       TEXT NOT NULL,
+    agent_id        TEXT NOT NULL,
+    transport_type  TEXT NOT NULL,
+    config          TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, agent_id)
+);
 ";
 
 #[derive(Iden)]
@@ -73,13 +81,13 @@ enum Events {
     Data,
 }
 
-pub struct SqliteEventStore {
+pub struct SqliteStore {
     writer: Arc<Mutex<Connection>>,
     path: String,
     tx: broadcast::Sender<StdArc<Vec<Event>>>,
 }
 
-impl SqliteEventStore {
+impl SqliteStore {
     pub fn new(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path_str = path.as_ref().to_string_lossy().to_string();
 
@@ -419,7 +427,7 @@ fn spawn_err(e: tokio::task::JoinError) -> StoreError {
 }
 
 #[async_trait]
-impl EventStore for SqliteEventStore {
+impl EventStore for SqliteStore {
     async fn append(&self, input: AppendInput) -> Result<(), StoreError> {
         let events = input.events.clone();
         let writer = self.writer.clone();
@@ -474,5 +482,122 @@ impl EventStore for SqliteEventStore {
 
     fn subscribe(&self) -> broadcast::Receiver<StdArc<Vec<Event>>> {
         self.tx.subscribe()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PushRegistrationStore
+// ---------------------------------------------------------------------------
+
+use crate::runtime::worker::push::{PushRegistrationRecord, PushRegistrationStore};
+use std::collections::HashMap;
+
+#[async_trait]
+impl PushRegistrationStore for SqliteStore {
+    async fn save(&self, record: &PushRegistrationRecord) -> Result<(), String> {
+        let record = record.clone();
+        let writer = self.writer.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = writer.lock().map_err(|e| e.to_string())?;
+            let config_str = serde_json::to_string(&record.config).map_err(|e| e.to_string())?;
+            conn.execute(
+                "INSERT INTO push_registrations (tenant_id, agent_id, transport_type, config)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(tenant_id, agent_id) DO UPDATE SET
+                     transport_type = excluded.transport_type,
+                     config = excluded.config",
+                rusqlite::params![record.tenant_id, record.agent_id, record.transport_type, config_str],
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    async fn remove(&self, tenant_id: &str, agent_id: &str) -> Result<(), String> {
+        let tenant_id = tenant_id.to_string();
+        let agent_id = agent_id.to_string();
+        let writer = self.writer.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = writer.lock().map_err(|e| e.to_string())?;
+            conn.execute(
+                "DELETE FROM push_registrations WHERE tenant_id = ?1 AND agent_id = ?2",
+                rusqlite::params![tenant_id, agent_id],
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    async fn get(
+        &self,
+        tenant_id: &str,
+        agent_id: &str,
+    ) -> Result<Option<PushRegistrationRecord>, String> {
+        let tenant_id = tenant_id.to_string();
+        let agent_id = agent_id.to_string();
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = open_conn_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|e| e.to_string())?;
+            let result = conn
+                .query_row(
+                    "SELECT transport_type, config FROM push_registrations
+                     WHERE tenant_id = ?1 AND agent_id = ?2",
+                    rusqlite::params![tenant_id, agent_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            match result {
+                Some((transport_type, config_str)) => {
+                    let config = serde_json::from_str(&config_str).map_err(|e| e.to_string())?;
+                    Ok(Some(PushRegistrationRecord {
+                        tenant_id,
+                        agent_id,
+                        transport_type,
+                        config,
+                    }))
+                }
+                None => Ok(None),
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    async fn list_tenants(&self) -> Result<HashMap<String, Vec<String>>, String> {
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = open_conn_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|e| e.to_string())?;
+            let mut stmt = conn
+                .prepare("SELECT tenant_id, agent_id FROM push_registrations")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            let mut result: HashMap<String, Vec<String>> = HashMap::new();
+            for row in rows {
+                let (tenant_id, agent_id) = row.map_err(|e| e.to_string())?;
+                result.entry(tenant_id).or_default().push(agent_id);
+            }
+            Ok(result)
+        })
+        .await
+        .map_err(|e| e.to_string())?
     }
 }

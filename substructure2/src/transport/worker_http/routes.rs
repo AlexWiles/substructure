@@ -6,16 +6,17 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 
+use crate::push::PushAdapter;
 use crate::runtime::span::SpanContext;
+use crate::runtime::worker::push::PushRegistrationRecord;
 use crate::runtime::worker::{DequeueFilter, SubmitDecision};
-use crate::runtime::Runtime;
 
-use super::types::{PollRequest, PollResponse, SubmitRequest, SubmitResponse};
+use super::types::{PollRequest, PollResponse, RegisterRequest, RegisterResponse, SubmitRequest, SubmitResponse};
 
 const MAX_POLL_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub async fn poll(
-    State(runtime): State<Arc<Runtime>>,
+    State(adapter): State<Arc<PushAdapter>>,
     Json(req): Json<PollRequest>,
 ) -> impl IntoResponse {
     let timeout = Duration::from_millis(req.timeout_ms).min(MAX_POLL_TIMEOUT);
@@ -25,7 +26,7 @@ pub async fn poll(
         agent_ids: req.agent_ids,
     };
 
-    let result = tokio::time::timeout(timeout, runtime.dequeue_decision(&filter)).await;
+    let result = tokio::time::timeout(timeout, adapter.runtime.dequeue_decision(&filter)).await;
 
     match result {
         Ok(Some(decision)) => {
@@ -47,7 +48,7 @@ pub async fn poll(
 }
 
 pub async fn submit(
-    State(runtime): State<Arc<Runtime>>,
+    State(adapter): State<Arc<PushAdapter>>,
     Json(req): Json<SubmitRequest>,
 ) -> Json<SubmitResponse> {
     let span = req
@@ -55,7 +56,8 @@ pub async fn submit(
         .unwrap_or_else(SpanContext::root)
         .child("worker_submit");
 
-    let result = runtime
+    let result = adapter
+        .runtime
         .submit_decision(SubmitDecision {
             session_id: req.session_id,
             tenant_id: req.tenant_id,
@@ -76,4 +78,30 @@ pub async fn submit(
             error: Some(e.to_string()),
         }),
     }
+}
+
+pub async fn register(
+    State(adapter): State<Arc<PushAdapter>>,
+    Json(req): Json<RegisterRequest>,
+) -> impl IntoResponse {
+    for agent_id in req.agent_ids {
+        let record = PushRegistrationRecord {
+            tenant_id: req.tenant_id.clone(),
+            agent_id,
+            transport_type: req.transport_type.clone(),
+            config: req.config.clone(),
+        };
+        if let Err(e) = adapter.register(record).await {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(SubmitResponse {
+                    ok: false,
+                    error: Some(e),
+                }),
+            )
+                .into_response();
+        }
+    }
+
+    Json(RegisterResponse { ok: true }).into_response()
 }

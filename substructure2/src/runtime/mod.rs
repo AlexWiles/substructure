@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -70,14 +71,26 @@ impl Runtime {
         self.queue.dequeue(filter).await
     }
 
-    pub async fn send_message(&self, input: SendMessage) -> Result<(), RuntimeError> {
+    /// Send a message to a session and return a stream of events for that session.
+    ///
+    /// Subscribes to the event store broadcast *before* sending so no events are missed.
+    /// The returned receiver yields events until the broadcast closes or the receiver is dropped.
+    pub async fn send_message(
+        &self,
+        input: SendMessage,
+    ) -> Result<(Uuid, mpsc::Receiver<event_store::Event>), RuntimeError> {
+        let session_id = input.session_id;
+
+        // Subscribe BEFORE sending so we don't miss events
+        let mut rx = self.store.subscribe();
+
         let span = SpanContext::root();
 
         // Create session (ignore if already exists)
         let create_result = execute::<SessionState>(
             &*self.store,
             ExecuteInput {
-                aggregate_id: input.session_id,
+                aggregate_id: session_id,
                 tenant_id: input.tenant_id.clone(),
                 command: CommandPayload::CreateSession {
                     agent_id: input.agent_id,
@@ -100,11 +113,33 @@ impl Runtime {
             Err(e) => return Err(RuntimeError(e.to_string())),
         }
 
+        // Spawn a task that filters broadcast events for this session
+        let (tx, event_rx) = mpsc::channel::<event_store::Event>(64);
+
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(batch) => {
+                        for event in batch.iter() {
+                            if event.aggregate_id != session_id {
+                                continue;
+                            }
+                            if tx.send(event.clone()).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => return,
+                }
+            }
+        });
+
         // Send the message
         execute::<SessionState>(
             &*self.store,
             ExecuteInput {
-                aggregate_id: input.session_id,
+                aggregate_id: session_id,
                 tenant_id: input.tenant_id,
                 command: CommandPayload::SendUserMessage {
                     content: input.content,
@@ -114,8 +149,9 @@ impl Runtime {
             },
         )
         .await
-        .map(|_| ())
-        .map_err(|e| RuntimeError(e.to_string()))
+        .map_err(|e| RuntimeError(e.to_string()))?;
+
+        Ok((session_id, event_rx))
     }
 
     pub async fn submit_decision(&self, input: SubmitDecision) -> Result<(), RuntimeError> {
@@ -143,16 +179,17 @@ pub fn start(
     llm_provider: Arc<dyn LlmProviderTrait>,
     worker_queue: Arc<dyn WorkerQueue>,
     config: RuntimeConfig,
-) -> Runtime {
+) -> Arc<Runtime> {
     let llm_handler = Arc::new(LlmEventHandler::new(store.clone(), llm_provider));
-    let llm_handle = spawn_handler_pool::<SessionState>(store.clone(), llm_handler, config.llm_pool_size);
+    let llm_handle =
+        spawn_handler_pool::<SessionState>(store.clone(), llm_handler, config.llm_pool_size);
 
     let worker_handle = spawn_worker_enqueue(store.clone(), worker_queue.clone());
     let wake_handle = spawn_wake_scheduler(store.clone(), config.wake_poll_interval);
 
-    Runtime {
+    Arc::new(Runtime {
         store,
         queue: worker_queue,
         handles: vec![llm_handle, worker_handle, wake_handle],
-    }
+    })
 }

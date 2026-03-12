@@ -6,8 +6,6 @@ import asyncio
 import logging
 import signal
 from base64 import b64decode, b64encode
-from typing import Optional
-from uuid import UUID
 
 import httpx
 
@@ -16,7 +14,6 @@ from .client import Client
 from .types import (
     PollRequest,
     PollResponse,
-    SendMessageResponse,
     SpanContext,
     SubmitRequest,
     SubmitResponse,
@@ -31,12 +28,14 @@ class Worker:
 
     Usage::
 
-        worker = Worker(
-            url="http://localhost:3000",
-            tenant_id="acme",
-            agents=[agent],
-        )
-        asyncio.run(worker.run())
+        worker = Worker(Client("http://localhost:8080"), agents=[agent])
+
+        # Just run the worker
+        worker.run()
+
+        # Or send a message and handle events while the worker runs
+        for event in worker.send("weather", "What's the weather?"):
+            print(event)
     """
 
     def __init__(
@@ -53,18 +52,11 @@ class Worker:
         self._agents: dict[str, Agent] = {a.name: a for a in agents}
         self._running = True
 
-    async def send(
-        self,
-        agent_id: str,
-        message: str,
-        *,
-        session_id: Optional[UUID] = None,
-    ) -> SendMessageResponse:
-        """Send a message to an agent, creating a session if needed."""
-        return await self.client.send(agent_id, message, session_id=session_id)
+    def run(self) -> None:
+        """Run the worker poll loop (blocking)."""
+        asyncio.run(self._run())
 
-    async def run(self) -> None:
-        """Main loop: poll for work, dispatch to agents, submit results."""
+    async def _run(self) -> None:
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self._shutdown)

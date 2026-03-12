@@ -1,6 +1,5 @@
 """Example substructure2 worker with a weather agent."""
 
-import asyncio
 import logging
 import random
 
@@ -60,17 +59,15 @@ def convert_temperature(value: float, to_unit: str) -> str:
         return f"{value}°C = {converted:.1f}°F"
 
 
-async def main() -> None:
-    client = Client("http://localhost:8080")
-    worker = Worker(client, agents=[agent])
-
-    # Start a session
-    resp = await worker.send("weather", "What's the weather in NYC?")
-    logging.info("Session started: %s", resp.session_id)
-
-    # Run the worker loop
-    await worker.run()
-
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    client = Client("http://localhost:8080")
+
+    # Start worker in a thread
+    worker = Worker(client, agents=[agent])
+    from threading import Thread
+    Thread(target=worker.run, daemon=True).start()
+
+    # Send a message and stream events
+    for event in client.send("weather", "What's the weather in NYC?"):
+        event_type = event.get("payload", {}).get("type", "?")
+        logging.info("Event: %s", event_type)

@@ -7,6 +7,7 @@ use crate::runtime::session::command::WorkerAction;
 use crate::runtime::session::decision::DecisionTrigger;
 use crate::runtime::span::SpanContext;
 
+#[derive(Clone)]
 pub struct PendingDecision {
     pub session_id: Uuid,
     pub tenant_id: String,

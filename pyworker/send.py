@@ -1,22 +1,12 @@
-"""Send a message to an agent via the substructure2 runtime."""
+"""Send a message to an agent and stream events."""
 
-import asyncio
+import json
 import sys
 
 from substructure2 import Client
 
+message = " ".join(sys.argv[1:]) or "What's the weather in NYC?"
 
-async def main() -> None:
-    message = " ".join(sys.argv[1:]) or "What's the weather in NYC?"
-
-    client = Client("http://localhost:8080")
-    resp = await client.send("weather", message)
-
-    if resp.ok:
-        print(f"Sent to session {resp.session_id}")
-    else:
-        print(f"Error: {resp.error}")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+for event in Client("http://localhost:8080").send("weather", message):
+    event_type = event.get("payload", {}).get("type", "?")
+    print(f"{event_type}: {json.dumps(event, indent=2)}")

@@ -1,3 +1,3 @@
-pub mod event_store;
 pub mod llm;
+pub mod sqlite;
 pub mod worker;
