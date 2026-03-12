@@ -30,6 +30,11 @@ pub enum DecisionTrigger {
     ToolResolved {
         result: ToolResult,
     },
+    SubAgentFailed {
+        call_id: String,
+        agent_id: String,
+        error: String,
+    },
     InterruptResumed {
         interrupt_id: String,
     },

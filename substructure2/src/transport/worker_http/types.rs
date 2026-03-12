@@ -1,9 +1,7 @@
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::runtime::session::command::WorkerAction;
-use crate::runtime::session::decision::DecisionTrigger;
 use crate::runtime::serde_helpers::base64_bytes;
 use crate::runtime::span::SpanContext;
 
@@ -17,20 +15,6 @@ pub struct PollRequest {
 
 fn default_timeout_ms() -> u64 {
     30_000
-}
-
-#[derive(Debug, Serialize)]
-pub struct PollResponse {
-    pub session_id: Uuid,
-    pub tenant_id: String,
-    pub decision_id: String,
-    pub agent_id: String,
-    pub trigger: DecisionTrigger,
-    #[serde(with = "base64_bytes")]
-    pub worker_state: Vec<u8>,
-    pub span: SpanContext,
-    pub attempts: u32,
-    pub deadline: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize)]

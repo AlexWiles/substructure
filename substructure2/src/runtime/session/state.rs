@@ -112,6 +112,16 @@ pub struct ToolCallState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubAgentCallState {
+    pub call_id: String,
+    pub agent_id: String,
+    pub tracking: EffectTracking,
+    pub arguments: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_session_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerDecisionState {
     pub decision_id: String,
     pub tracking: EffectTracking,
@@ -126,6 +136,10 @@ pub struct DerivedState {
     pub agent_id: Option<String>,
     #[serde(default)]
     pub worker_state: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ancestry: Vec<AncestryEntry>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub sub_agent_calls: HashMap<String, SubAgentCallState>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub worker_decisions: HashMap<String, WorkerDecisionState>,
 }
@@ -149,8 +163,8 @@ pub struct SessionState {
     #[serde(default)]
     pub worker_state: Vec<u8>,
 
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_done: Option<CompletionDelivery>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ancestry: Vec<AncestryEntry>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<Artifact>,
@@ -160,6 +174,7 @@ pub struct SessionState {
 
     pub llm_calls: HashMap<String, LlmCallState>,
     pub tool_calls: HashMap<String, ToolCallState>,
+    pub sub_agent_calls: HashMap<String, SubAgentCallState>,
     pub worker_decisions: HashMap<String, WorkerDecisionState>,
 }
 
@@ -173,11 +188,12 @@ impl SessionState {
             token_usage: BTreeMap::new(),
             cost: Decimal::ZERO,
             worker_state: Vec::new(),
-            on_done: None,
+            ancestry: Vec::new(),
             artifacts: vec![],
             worker_retry: None,
             llm_calls: HashMap::new(),
             tool_calls: HashMap::new(),
+            sub_agent_calls: HashMap::new(),
             worker_decisions: HashMap::new(),
         }
     }
@@ -189,7 +205,7 @@ impl SessionState {
                 self.status = SessionStatus::Idle;
                 self.agent_id = Some(payload.agent_id.clone());
                 self.auth = Some(payload.auth.clone());
-                self.on_done = payload.on_done.clone();
+                self.ancestry = payload.ancestry.clone();
                 self.worker_retry = Some(payload.worker_retry.clone());
             }
             EventPayload::NewMessage(payload) => {
@@ -268,6 +284,34 @@ impl SessionState {
                     }
                 }
             }
+            EventPayload::SubAgentRequested(payload) => {
+                if let Some(existing) = self.sub_agent_calls.get_mut(&payload.call_id) {
+                    existing.tracking.reset_pending(now);
+                    existing.arguments = payload.arguments.clone();
+                } else {
+                    self.sub_agent_calls.insert(
+                        payload.call_id.clone(),
+                        SubAgentCallState {
+                            call_id: payload.call_id.clone(),
+                            agent_id: payload.agent_id.clone(),
+                            tracking: EffectTracking::new(payload.retry.clone(), now),
+                            arguments: payload.arguments.clone(),
+                            child_session_id: None,
+                        },
+                    );
+                }
+                self.status = SessionStatus::Idle;
+            }
+            EventPayload::SubAgentStarted(payload) => {
+                if let Some(sa) = self.sub_agent_calls.get_mut(&payload.call_id) {
+                    sa.child_session_id = Some(payload.child_session_id);
+                }
+            }
+            EventPayload::SubAgentErrored(payload) => {
+                if let Some(sa) = self.sub_agent_calls.get_mut(&payload.call_id) {
+                    sa.tracking.record_error(payload.retryable, now);
+                }
+            }
             EventPayload::SessionInterrupted(payload) => {
                 self.status = SessionStatus::Interrupted {
                     interrupt_id: payload.interrupt_id.clone(),
@@ -319,7 +363,7 @@ impl SessionState {
             }
             EventPayload::SessionDone(payload) => {
                 self.artifacts = payload.artifacts.clone();
-                if self.on_done.is_some() {
+                if !self.ancestry.is_empty() {
                     self.status = SessionStatus::Done;
                 } else {
                     self.status = SessionStatus::Idle;
@@ -358,6 +402,7 @@ impl SessionState {
             .values()
             .filter_map(|c| c.tracking.earliest_wake())
             .chain(self.tool_calls.values().filter_map(|c| c.tracking.earliest_wake()))
+            .chain(self.sub_agent_calls.values().filter_map(|c| c.tracking.earliest_wake()))
             .chain(self.worker_decisions.values().filter_map(|d| d.tracking.earliest_wake()))
             .min()
     }
@@ -369,6 +414,8 @@ impl SessionState {
             auth: self.auth.clone(),
             agent_id: self.agent_id.clone(),
             worker_state: self.worker_state.clone(),
+            ancestry: self.ancestry.clone(),
+            sub_agent_calls: self.sub_agent_calls.clone(),
             worker_decisions: self.worker_decisions.clone(),
         }
     }

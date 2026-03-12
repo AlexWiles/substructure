@@ -10,13 +10,14 @@ use event_store::{spawn_handler_pool, EventStore};
 use identity::ClientIdentity;
 use llm::handler::LlmEventHandler;
 use llm::LlmProviderTrait;
+use sub_agent::SubAgentHandler;
 use retry::RetryPolicy;
 use session::command::{CommandPayload, SessionError};
 use session::state::SessionState;
 use span::SpanContext;
 use wake::spawn_wake_scheduler;
 use worker::spawn_worker_enqueue;
-use worker::{DequeueFilter, PendingDecision, SubmitDecision, WorkerQueue};
+use worker::{DequeueFilter, WorkerDecisionRequest, SubmitDecision, WorkerQueue};
 
 pub mod aggregate;
 pub mod event_store;
@@ -26,6 +27,7 @@ pub mod retry;
 pub mod serde_helpers;
 pub mod session;
 pub mod span;
+pub mod sub_agent;
 pub mod wake;
 pub mod worker;
 
@@ -67,7 +69,7 @@ impl Runtime {
         }
     }
 
-    pub async fn dequeue_decision(&self, filter: &DequeueFilter) -> Option<PendingDecision> {
+    pub async fn dequeue_decision(&self, filter: &DequeueFilter) -> Option<WorkerDecisionRequest> {
         self.queue.dequeue(filter).await
     }
 
@@ -99,7 +101,7 @@ impl Runtime {
                         sub: None,
                         attrs: HashMap::new(),
                     },
-                    on_done: None,
+                    ancestry: vec![],
                     worker_retry: RetryPolicy::no_retry(),
                 },
                 span: span.child("create_session"),
@@ -184,12 +186,16 @@ pub fn start(
     let llm_handle =
         spawn_handler_pool::<SessionState>(store.clone(), llm_handler, config.llm_pool_size);
 
+    let sub_agent_handler = Arc::new(SubAgentHandler::new(store.clone()));
+    let sub_agent_handle =
+        spawn_handler_pool::<SessionState>(store.clone(), sub_agent_handler, 2);
+
     let worker_handle = spawn_worker_enqueue(store.clone(), worker_queue.clone());
     let wake_handle = spawn_wake_scheduler(store.clone(), config.wake_poll_interval);
 
     Arc::new(Runtime {
         store,
         queue: worker_queue,
-        handles: vec![llm_handle, worker_handle, wake_handle],
+        handles: vec![llm_handle, sub_agent_handle, worker_handle, wake_handle],
     })
 }

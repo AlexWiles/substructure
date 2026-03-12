@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use super::decision::{DecisionTrigger, ToolResult};
 use super::events::*;
@@ -14,7 +15,7 @@ pub enum CommandPayload {
     CreateSession {
         agent_id: String,
         auth: ClientIdentity,
-        on_done: Option<CompletionDelivery>,
+        ancestry: Vec<AncestryEntry>,
         worker_retry: RetryPolicy,
     },
     SendUserMessage {
@@ -57,6 +58,21 @@ pub enum CommandPayload {
         retryable: bool,
         worker_state: Option<Vec<u8>>,
     },
+    RequestSubAgent {
+        call_id: String,
+        agent_id: String,
+        arguments: String,
+        retry: RetryPolicy,
+    },
+    StartSubAgent {
+        call_id: String,
+        child_session_id: Uuid,
+    },
+    FailSubAgent {
+        call_id: String,
+        error: String,
+        retryable: bool,
+    },
     Interrupt {
         interrupt_id: String,
         reason: String,
@@ -98,6 +114,7 @@ pub enum WorkerAction {
         retry: RetryPolicy,
     },
     RequestSubAgent {
+        call_id: String,
         agent_id: String,
         message: String,
         retry: RetryPolicy,
@@ -125,14 +142,14 @@ impl SessionState {
                 CommandPayload::CreateSession {
                     agent_id,
                     auth,
-                    on_done,
+                    ancestry,
                     worker_retry,
                 },
             ) => Ok(vec![EventPayload::SessionCreated(Box::new(
                 SessionCreated {
                     agent_id,
                     auth,
-                    on_done,
+                    ancestry,
                     worker_retry,
                 },
             ))]),
@@ -373,6 +390,65 @@ impl SessionState {
                 Ok(events)
             }
 
+            CommandPayload::RequestSubAgent {
+                call_id,
+                agent_id,
+                arguments,
+                retry,
+            } => match self.sub_agent_calls.get(&call_id) {
+                Some(_) => Ok(vec![]),
+                None => Ok(vec![EventPayload::SubAgentRequested(SubAgentRequested {
+                    call_id,
+                    agent_id,
+                    arguments,
+                    retry,
+                })]),
+            },
+
+            CommandPayload::StartSubAgent {
+                call_id,
+                child_session_id,
+            } => match self.sub_agent_calls.get(&call_id).map(|c| &c.tracking.status) {
+                Some(&EffectStatus::Pending) => {
+                    Ok(vec![EventPayload::SubAgentStarted(SubAgentStarted {
+                        call_id,
+                        child_session_id,
+                    })])
+                }
+                _ => Ok(vec![]),
+            },
+
+            CommandPayload::FailSubAgent {
+                call_id,
+                error,
+                retryable,
+            } => {
+                let Some(sa) = self.sub_agent_calls.get(&call_id) else {
+                    return Ok(vec![]);
+                };
+                if sa.tracking.status != EffectStatus::Pending {
+                    return Ok(vec![]);
+                }
+                let mut events = vec![EventPayload::SubAgentErrored(SubAgentErrored {
+                    call_id: call_id.clone(),
+                    error: error.clone(),
+                    retryable,
+                })];
+                if sa.tracking.retry_policy.exhausted(&sa.tracking.retry, retryable) {
+                    events.push(EventPayload::WorkerDecisionRequested(
+                        WorkerDecisionRequested {
+                            decision_id: new_call_id(),
+                            trigger: DecisionTrigger::SubAgentFailed {
+                                call_id,
+                                agent_id: sa.agent_id.clone(),
+                                error,
+                            },
+                        },
+                    ));
+                }
+                Ok(events)
+            }
+
             CommandPayload::Interrupt {
                 interrupt_id,
                 reason,
@@ -448,14 +524,14 @@ impl SessionState {
                             retry,
                         }),
                         WorkerAction::RequestSubAgent {
+                            call_id,
                             agent_id,
                             message,
                             retry,
-                        } => self.handle(CommandPayload::RequestToolCall {
-                            tool_call_id: new_call_id(),
-                            name: agent_id,
-                            arguments: serde_json::json!({"message": message}).to_string(),
-                            handler: ToolHandler::SubAgent,
+                        } => self.handle(CommandPayload::RequestSubAgent {
+                            call_id,
+                            agent_id,
+                            arguments: message,
                             retry,
                         }),
                         WorkerAction::Done { artifacts } => {
@@ -542,7 +618,36 @@ impl SessionState {
             }
         }
 
-        // 5. Timed-out pending worker decisions → fail
+        // 5. Timed-out pending sub-agent calls → fail
+        for sa in self.sub_agent_calls.values() {
+            if sa.tracking.status == EffectStatus::Pending
+                && sa.tracking.deadline.is_some_and(|d| d <= now)
+            {
+                return Ok(vec![EventPayload::SubAgentErrored(SubAgentErrored {
+                    call_id: sa.call_id.clone(),
+                    error: "deadline exceeded".to_string(),
+                    retryable: true,
+                })]);
+            }
+        }
+
+        // 6. RetryScheduled sub-agent calls ready to re-issue
+        for sa in self.sub_agent_calls.values() {
+            if sa.tracking.status == EffectStatus::RetryScheduled {
+                if let Some(next_at) = sa.tracking.retry.next_at {
+                    if next_at <= now {
+                        return Ok(vec![EventPayload::SubAgentRequested(SubAgentRequested {
+                            call_id: sa.call_id.clone(),
+                            agent_id: sa.agent_id.clone(),
+                            arguments: sa.arguments.clone(),
+                            retry: sa.tracking.retry_policy.clone(),
+                        })]);
+                    }
+                }
+            }
+        }
+
+        // 7. Timed-out pending worker decisions → fail
         for wd in self.worker_decisions.values() {
             if wd.tracking.status == EffectStatus::Pending
                 && wd.tracking.deadline.is_some_and(|d| d <= now)
@@ -557,7 +662,7 @@ impl SessionState {
             }
         }
 
-        // 6. RetryScheduled worker decisions ready to re-issue
+        // 8. RetryScheduled worker decisions ready to re-issue
         for wd in self.worker_decisions.values() {
             if wd.tracking.status == EffectStatus::RetryScheduled {
                 if let Some(next_at) = wd.tracking.retry.next_at {
@@ -573,7 +678,7 @@ impl SessionState {
             }
         }
 
-        // 7. All tools done, no next step → stall recovery
+        // 9. All tools done, no next step → stall recovery
         if self.all_tools_resolved() && !self.has_pending_llm() {
             return Ok(vec![EventPayload::WorkerDecisionRequested(
                 WorkerDecisionRequested {

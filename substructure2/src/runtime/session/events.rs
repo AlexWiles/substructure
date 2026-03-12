@@ -7,7 +7,6 @@ use crate::runtime::identity::ClientIdentity;
 use crate::runtime::llm::{LlmRequest, LlmResponse};
 use crate::runtime::retry::RetryPolicy;
 use crate::runtime::serde_helpers::base64_bytes;
-use crate::runtime::span::SpanContext;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -28,6 +27,12 @@ pub enum EventPayload {
     ToolCallCompleted(ToolCallCompleted),
     #[serde(rename = "tool.call.errored")]
     ToolCallErrored(ToolCallErrored),
+    #[serde(rename = "sub_agent.requested")]
+    SubAgentRequested(SubAgentRequested),
+    #[serde(rename = "sub_agent.started")]
+    SubAgentStarted(SubAgentStarted),
+    #[serde(rename = "sub_agent.errored")]
+    SubAgentErrored(SubAgentErrored),
     #[serde(rename = "session.interrupted")]
     SessionInterrupted(SessionInterrupted),
     #[serde(rename = "session.interrupt_resumed")]
@@ -47,24 +52,18 @@ pub enum EventPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionCreated {
-    pub agent_id: String,
-    pub auth: ClientIdentity,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_done: Option<CompletionDelivery>,
-    pub worker_retry: RetryPolicy,
+pub struct AncestryEntry {
+    pub session_id: Uuid,
+    pub call_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompletionDelivery {
-    /// Session ID of the parent session to deliver to
-    pub parent_session_id: Uuid,
-    /// Tool call ID that this result satisfies on the parent session
-    pub tool_call_id: String,
-    /// Tool name for the completion
-    pub tool_name: String,
-    /// Span context for tracing
-    pub span: SpanContext,
+pub struct SessionCreated {
+    pub agent_id: String,
+    pub auth: ClientIdentity,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ancestry: Vec<AncestryEntry>,
+    pub worker_retry: RetryPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,8 +132,28 @@ pub enum ToolHandler {
     Worker,
     /// Executed by the client. Session goes Idle while waiting.
     Client,
-    /// Sub-agent: runtime spawns a child session.
-    SubAgent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubAgentRequested {
+    pub call_id: String,
+    pub agent_id: String,
+    pub arguments: String,
+    pub retry: RetryPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubAgentStarted {
+    pub call_id: String,
+    pub child_session_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubAgentErrored {
+    pub call_id: String,
+    pub error: String,
+    #[serde(default)]
+    pub retryable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

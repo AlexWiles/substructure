@@ -7,7 +7,7 @@ use crate::runtime::event_store::{Event, EventStore};
 use crate::runtime::session::events::EventPayload;
 use crate::runtime::session::state::SessionState;
 
-use super::{PendingDecision, WorkerQueue};
+use super::{WorkerDecisionRequest, WorkerQueue};
 
 pub fn spawn_worker_enqueue(
     store: Arc<dyn EventStore>,
@@ -25,7 +25,7 @@ pub fn spawn_worker_enqueue(
     })
 }
 
-fn try_extract(raw: &Event) -> Option<PendingDecision> {
+fn try_extract(raw: &Event) -> Option<WorkerDecisionRequest> {
     if raw.aggregate_type != SessionState::AGGREGATE_TYPE {
         return None;
     }
@@ -39,7 +39,7 @@ fn try_extract(raw: &Event) -> Option<PendingDecision> {
     let auth = derived.auth.as_ref()?;
     let wd = derived.worker_decisions.get(&req.decision_id)?;
 
-    Some(PendingDecision {
+    Some(WorkerDecisionRequest {
         session_id: event.aggregate_id,
         tenant_id: event.tenant_id.clone(),
         decision_id: req.decision_id.clone(),
@@ -47,6 +47,7 @@ fn try_extract(raw: &Event) -> Option<PendingDecision> {
         auth: auth.clone(),
         trigger: req.trigger.clone(),
         worker_state: derived.worker_state.clone(),
+        ancestry: derived.ancestry.clone(),
         span: event.span.clone(),
         attempts: wd.tracking.retry.attempts,
         deadline: wd.tracking.deadline,

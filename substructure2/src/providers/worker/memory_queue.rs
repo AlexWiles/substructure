@@ -3,23 +3,23 @@ use std::collections::VecDeque;
 use async_trait::async_trait;
 use tokio::sync::{oneshot, Mutex};
 
-use crate::runtime::worker::{DequeueFilter, PendingDecision, WorkerQueue};
+use crate::runtime::worker::{DequeueFilter, WorkerDecisionRequest, WorkerQueue};
 
 struct Waiter {
     tenant_id: String,
     agent_ids: Vec<String>,
-    tx: oneshot::Sender<PendingDecision>,
+    tx: oneshot::Sender<WorkerDecisionRequest>,
 }
 
 impl Waiter {
-    fn matches(&self, decision: &PendingDecision) -> bool {
+    fn matches(&self, decision: &WorkerDecisionRequest) -> bool {
         self.tenant_id == decision.tenant_id
             && self.agent_ids.iter().any(|id| id == &decision.agent_id)
     }
 }
 
 struct Inner {
-    items: VecDeque<PendingDecision>,
+    items: VecDeque<WorkerDecisionRequest>,
     waiters: VecDeque<Waiter>,
 }
 
@@ -38,14 +38,14 @@ impl InMemoryWorkerQueue {
     }
 }
 
-fn matches_filter(decision: &PendingDecision, filter: &DequeueFilter) -> bool {
+fn matches_filter(decision: &WorkerDecisionRequest, filter: &DequeueFilter) -> bool {
     decision.tenant_id == filter.tenant_id
         && filter.agent_ids.iter().any(|id| id == &decision.agent_id)
 }
 
 #[async_trait]
 impl WorkerQueue for InMemoryWorkerQueue {
-    async fn enqueue(&self, mut decision: PendingDecision) {
+    async fn enqueue(&self, mut decision: WorkerDecisionRequest) {
         let mut inner = self.inner.lock().await;
         // Remove stale waiters and try to hand off to a live one
         inner.waiters.retain(|w| !w.tx.is_closed());
@@ -59,7 +59,7 @@ impl WorkerQueue for InMemoryWorkerQueue {
         inner.items.push_back(decision);
     }
 
-    async fn dequeue(&self, filter: &DequeueFilter) -> Option<PendingDecision> {
+    async fn dequeue(&self, filter: &DequeueFilter) -> Option<WorkerDecisionRequest> {
         let rx = {
             let mut inner = self.inner.lock().await;
             // Check buffered items first

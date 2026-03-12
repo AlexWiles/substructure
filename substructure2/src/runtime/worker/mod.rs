@@ -3,4 +3,4 @@ pub mod push;
 mod queue;
 
 pub use handler::spawn_worker_enqueue;
-pub use queue::{DequeueFilter, PendingDecision, SubmitDecision, WorkerQueue};
+pub use queue::{DequeueFilter, SubmitDecision, WorkerDecisionRequest, WorkerQueue};

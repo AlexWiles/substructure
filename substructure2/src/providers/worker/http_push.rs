@@ -6,8 +6,8 @@ use reqwest::Client;
 use serde::Deserialize;
 
 use crate::runtime::worker::push::{PushError, PushResponse, PushTransport, TransportConstructor};
-use crate::runtime::worker::PendingDecision;
-use crate::transport::worker_http::types::{PollResponse, SubmitRequest};
+use crate::runtime::worker::WorkerDecisionRequest;
+use crate::transport::worker_http::types::SubmitRequest;
 
 pub struct HttpPushTransport {
     http: Client,
@@ -27,23 +27,11 @@ impl HttpPushTransport {
 
 #[async_trait]
 impl PushTransport for HttpPushTransport {
-    async fn push(&self, decision: &PendingDecision) -> Result<PushResponse, PushError> {
-        let body = PollResponse {
-            session_id: decision.session_id,
-            tenant_id: decision.tenant_id.clone(),
-            decision_id: decision.decision_id.clone(),
-            agent_id: decision.agent_id.clone(),
-            trigger: decision.trigger.clone(),
-            worker_state: decision.worker_state.clone(),
-            span: decision.span.clone(),
-            attempts: decision.attempts,
-            deadline: decision.deadline,
-        };
-
+    async fn push(&self, decision: &WorkerDecisionRequest) -> Result<PushResponse, PushError> {
         let resp = self
             .http
             .post(&self.endpoint_url)
-            .json(&body)
+            .json(decision)
             .timeout(self.timeout)
             .send()
             .await

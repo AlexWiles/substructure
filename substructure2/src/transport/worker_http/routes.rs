@@ -11,7 +11,7 @@ use crate::runtime::span::SpanContext;
 use crate::runtime::worker::push::PushRegistrationRecord;
 use crate::runtime::worker::{DequeueFilter, SubmitDecision};
 
-use super::types::{PollRequest, PollResponse, RegisterRequest, RegisterResponse, SubmitRequest, SubmitResponse};
+use super::types::{PollRequest, RegisterRequest, RegisterResponse, SubmitRequest, SubmitResponse};
 
 const MAX_POLL_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -29,20 +29,7 @@ pub async fn poll(
     let result = tokio::time::timeout(timeout, adapter.runtime.dequeue_decision(&filter)).await;
 
     match result {
-        Ok(Some(decision)) => {
-            let response = PollResponse {
-                session_id: decision.session_id,
-                tenant_id: decision.tenant_id,
-                decision_id: decision.decision_id,
-                agent_id: decision.agent_id,
-                trigger: decision.trigger,
-                worker_state: decision.worker_state,
-                span: decision.span,
-                attempts: decision.attempts,
-                deadline: decision.deadline,
-            };
-            (StatusCode::OK, Json(response)).into_response()
-        }
+        Ok(Some(decision)) => (StatusCode::OK, Json(decision)).into_response(),
         _ => StatusCode::NO_CONTENT.into_response(),
     }
 }

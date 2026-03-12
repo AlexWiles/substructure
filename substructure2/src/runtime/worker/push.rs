@@ -4,11 +4,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use super::PendingDecision;
+use super::WorkerDecisionRequest;
 
 #[async_trait]
 pub trait PushTransport: Send + Sync {
-    async fn push(&self, decision: &PendingDecision) -> Result<PushResponse, PushError>;
+    async fn push(&self, decision: &WorkerDecisionRequest) -> Result<PushResponse, PushError>;
 }
 
 pub struct PushResponse {
