@@ -104,7 +104,7 @@ pub struct ToolCallState {
     /// Original arguments, stored for retries and crash recovery.
     #[serde(default)]
     pub arguments: String,
-    /// Result content, stored for enriching ToolResolved trigger.
+    /// Result content, stored for enriching ToolResult trigger.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
     #[serde(default)]

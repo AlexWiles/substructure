@@ -69,7 +69,7 @@ impl Runtime {
         }
     }
 
-    pub async fn dequeue_decision(&self, filter: &DequeueFilter) -> Option<WorkerDecisionRequest> {
+    pub(crate) async fn dequeue_decision(&self, filter: &DequeueFilter) -> Option<WorkerDecisionRequest> {
         self.queue.dequeue(filter).await
     }
 

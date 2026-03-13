@@ -209,7 +209,7 @@ impl SessionState {
                             }),
                             EventPayload::WorkerDecisionRequested(WorkerDecisionRequested {
                                 decision_id: new_call_id(),
-                                trigger: DecisionTrigger::LlmCompleted {
+                                trigger: DecisionTrigger::LlmResponse {
                                     call_id,
                                     message,
                                     truncated,
@@ -242,7 +242,7 @@ impl SessionState {
                     events.push(EventPayload::WorkerDecisionRequested(
                         WorkerDecisionRequested {
                             decision_id: new_call_id(),
-                            trigger: DecisionTrigger::LlmFailed { call_id, error },
+                            trigger: DecisionTrigger::LlmError { call_id, error },
                         },
                     ));
                 }
@@ -269,7 +269,7 @@ impl SessionState {
                         events.push(EventPayload::WorkerDecisionRequested(
                             WorkerDecisionRequested {
                                 decision_id: new_call_id(),
-                                trigger: DecisionTrigger::ToolCallRequested {
+                                trigger: DecisionTrigger::ToolExecute {
                                     tool_call_id,
                                     name,
                                     arguments,
@@ -319,7 +319,7 @@ impl SessionState {
                 events.push(EventPayload::WorkerDecisionRequested(
                     WorkerDecisionRequested {
                         decision_id: new_call_id(),
-                        trigger: DecisionTrigger::ToolResolved {
+                        trigger: DecisionTrigger::ToolResult {
                             result: ToolResult {
                                 tool_call_id,
                                 name,
@@ -360,7 +360,7 @@ impl SessionState {
                     events.push(EventPayload::WorkerDecisionRequested(
                         WorkerDecisionRequested {
                             decision_id: new_call_id(),
-                            trigger: DecisionTrigger::ToolResolved {
+                            trigger: DecisionTrigger::ToolResult {
                                 result: ToolResult {
                                     tool_call_id,
                                     name,
@@ -423,7 +423,7 @@ impl SessionState {
                     events.push(EventPayload::WorkerDecisionRequested(
                         WorkerDecisionRequested {
                             decision_id: new_call_id(),
-                            trigger: DecisionTrigger::SubAgentFailed {
+                            trigger: DecisionTrigger::SubAgentError {
                                 session_id,
                                 agent_id: sa.agent_id.clone(),
                                 error,
@@ -483,7 +483,7 @@ impl SessionState {
                 ];
                 for action in actions {
                     let sub_events = match action {
-                        WorkerAction::RequestLlm {
+                        WorkerAction::CallLlm {
                             request,
                             stream,
                             llm_client,
@@ -495,7 +495,7 @@ impl SessionState {
                             llm_client,
                             retry,
                         }),
-                        WorkerAction::RequestToolCall {
+                        WorkerAction::CallTool {
                             tool_call_id,
                             name,
                             arguments,
@@ -508,7 +508,7 @@ impl SessionState {
                             handler,
                             retry,
                         }),
-                        WorkerAction::RequestSubAgent {
+                        WorkerAction::SpawnSubAgent {
                             session_id,
                             agent_id,
                             retry,
@@ -517,7 +517,7 @@ impl SessionState {
                             agent_id,
                             retry,
                         }),
-                        WorkerAction::SendSessionMessage {
+                        WorkerAction::SendMessage {
                             session_id,
                             message,
                         } => Ok(vec![EventPayload::SessionMessageRequested(
@@ -526,7 +526,7 @@ impl SessionState {
                                 message,
                             },
                         )]),
-                        WorkerAction::CompleteToolCall {
+                        WorkerAction::ReturnToolResult {
                             tool_call_id,
                             result,
                             attempt,
@@ -545,7 +545,7 @@ impl SessionState {
                                 _ => Ok(vec![]),
                             }
                         }
-                        WorkerAction::FailToolCall {
+                        WorkerAction::ReturnToolError {
                             tool_call_id,
                             error,
                             retryable,
@@ -566,7 +566,7 @@ impl SessionState {
                                 _ => Ok(vec![]),
                             }
                         }
-                        WorkerAction::ResolveToolCall {
+                        WorkerAction::ResolveRemoteTool {
                             session_id,
                             tool_call_id,
                             result,
@@ -661,7 +661,7 @@ impl SessionState {
                             events.push(EventPayload::WorkerDecisionRequested(
                                 WorkerDecisionRequested {
                                     decision_id: new_call_id(),
-                                    trigger: DecisionTrigger::ToolCallRequested {
+                                    trigger: DecisionTrigger::ToolExecute {
                                         tool_call_id: tc.tool_call_id.clone(),
                                         name: tc.name.clone(),
                                         arguments: tc.arguments.clone(),

@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -9,30 +8,9 @@ use axum::Json;
 use crate::push::PushAdapter;
 use crate::runtime::span::SpanContext;
 use crate::runtime::worker::push::PushRegistrationRecord;
-use crate::runtime::worker::{DequeueFilter, SubmitDecision};
+use crate::runtime::worker::SubmitDecision;
 
-use super::types::{PollRequest, RegisterRequest, RegisterResponse, SubmitRequest, SubmitResponse};
-
-const MAX_POLL_TIMEOUT: Duration = Duration::from_secs(60);
-
-pub async fn poll(
-    State(adapter): State<Arc<PushAdapter>>,
-    Json(req): Json<PollRequest>,
-) -> impl IntoResponse {
-    let timeout = Duration::from_millis(req.timeout_ms).min(MAX_POLL_TIMEOUT);
-
-    let filter = DequeueFilter {
-        tenant_id: req.tenant_id,
-        agent_ids: req.agent_ids,
-    };
-
-    let result = tokio::time::timeout(timeout, adapter.runtime.dequeue_decision(&filter)).await;
-
-    match result {
-        Ok(Some(decision)) => (StatusCode::OK, Json(decision)).into_response(),
-        _ => StatusCode::NO_CONTENT.into_response(),
-    }
-}
+use super::types::{RegisterRequest, RegisterResponse, SubmitRequest, SubmitResponse};
 
 pub async fn submit(
     State(adapter): State<Arc<PushAdapter>>,

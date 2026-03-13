@@ -22,27 +22,27 @@ pub enum DecisionTrigger {
         stream: bool,
         message: Message,
     },
-    LlmCompleted {
+    LlmResponse {
         call_id: String,
         message: Message,
         /// True when finish_reason was "length" (output truncated).
         truncated: bool,
     },
-    LlmFailed {
+    LlmError {
         call_id: String,
         error: String,
     },
-    ToolCallRequested {
+    ToolExecute {
         tool_call_id: String,
         name: String,
         arguments: String,
         attempt: u32,
         deadline: Option<DateTime<Utc>>,
     },
-    ToolResolved {
+    ToolResult {
         result: ToolResult,
     },
-    SubAgentFailed {
+    SubAgentError {
         session_id: Uuid,
         agent_id: String,
         error: String,
@@ -57,41 +57,41 @@ pub enum DecisionTrigger {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WorkerAction {
-    RequestLlm {
+    CallLlm {
         request: LlmRequest,
         stream: bool,
         llm_client: String,
         retry: RetryPolicy,
     },
-    RequestToolCall {
+    CallTool {
         tool_call_id: String,
         name: String,
         arguments: String,
         handler: ToolHandler,
         retry: RetryPolicy,
     },
-    CompleteToolCall {
+    ReturnToolResult {
         tool_call_id: String,
         result: String,
         attempt: u32,
     },
-    FailToolCall {
+    ReturnToolError {
         tool_call_id: String,
         error: String,
         retryable: bool,
         attempt: u32,
     },
-    ResolveToolCall {
+    ResolveRemoteTool {
         session_id: Uuid,
         tool_call_id: String,
         result: String,
     },
-    RequestSubAgent {
+    SpawnSubAgent {
         session_id: Uuid,
         agent_id: String,
         retry: RetryPolicy,
     },
-    SendSessionMessage {
+    SendMessage {
         session_id: Uuid,
         message: Message,
     },

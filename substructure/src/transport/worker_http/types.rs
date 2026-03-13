@@ -6,18 +6,6 @@ use crate::runtime::serde_helpers::base64_bytes;
 use crate::runtime::span::SpanContext;
 
 #[derive(Debug, Deserialize)]
-pub struct PollRequest {
-    pub tenant_id: String,
-    pub agent_ids: Vec<String>,
-    #[serde(default = "default_timeout_ms")]
-    pub timeout_ms: u64,
-}
-
-fn default_timeout_ms() -> u64 {
-    30_000
-}
-
-#[derive(Debug, Deserialize)]
 pub struct SubmitRequest {
     pub session_id: Uuid,
     pub tenant_id: String,

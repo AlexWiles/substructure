@@ -10,7 +10,6 @@ use crate::push::PushAdapter;
 
 pub fn router(adapter: Arc<PushAdapter>) -> Router {
     Router::new()
-        .route("/workers/poll", post(routes::poll))
         .route("/workers/submit", post(routes::submit))
         .route("/workers/register", post(routes::register))
         .with_state(adapter)
