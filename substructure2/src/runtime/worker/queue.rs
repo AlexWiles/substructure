@@ -5,9 +5,8 @@ use uuid::Uuid;
 
 use crate::runtime::identity::ClientIdentity;
 use crate::runtime::serde_helpers::base64_bytes;
-use crate::runtime::session::command::WorkerAction;
+use crate::runtime::session::decision::WorkerAction;
 use crate::runtime::session::decision::DecisionTrigger;
-use crate::runtime::session::events::AncestryEntry;
 use crate::runtime::span::SpanContext;
 
 /// Wire format sent to workers (via poll or push) when a decision is needed.
@@ -22,7 +21,7 @@ pub struct WorkerDecisionRequest {
     #[serde(with = "base64_bytes")]
     pub worker_state: Vec<u8>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ancestry: Vec<AncestryEntry>,
+    pub ancestry: Vec<Uuid>,
     pub span: SpanContext,
     pub attempts: u32,
     pub deadline: Option<DateTime<Utc>>,

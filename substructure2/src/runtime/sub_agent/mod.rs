@@ -1,15 +1,14 @@
 //! Event handler that spawns child sessions for sub-agent requests
-//! and confirms them with a SubAgentStarted event on the parent.
+//! and handles cross-session tool call resolution.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use uuid::Uuid;
 
 use crate::runtime::aggregate::{execute, DomainEvent, EventHandler, ExecuteInput};
 use crate::runtime::event_store::EventStore;
 use crate::runtime::session::command::CommandPayload;
-use crate::runtime::session::events::{AncestryEntry, EventPayload};
+use crate::runtime::session::events::EventPayload;
 use crate::runtime::session::state::SessionState;
 
 pub struct SubAgentHandler {
@@ -28,24 +27,21 @@ impl EventHandler<SessionState> for SubAgentHandler {
         match &event.payload {
             // SubAgent requested → spawn child session
             EventPayload::SubAgentRequested(req) => {
+                let child_session_id = req.session_id;
                 let agent_id = req.agent_id.clone();
-                let child_session_id = Uuid::now_v7();
 
                 let auth = match event.derived.as_ref().and_then(|d| d.auth.as_ref()) {
                     Some(auth) => auth.clone(),
                     None => return,
                 };
 
-                // Build child ancestry: parent's ancestry + this link
+                // Build child ancestry: parent's ancestry + parent session id
                 let mut ancestry = event
                     .derived
                     .as_ref()
                     .map(|d| d.ancestry.clone())
                     .unwrap_or_default();
-                ancestry.push(AncestryEntry {
-                    session_id: event.aggregate_id,
-                    call_id: req.call_id.clone(),
-                });
+                ancestry.push(event.aggregate_id);
 
                 // Create child session
                 let create_result = execute::<SessionState>(
@@ -71,7 +67,7 @@ impl EventHandler<SessionState> for SubAgentHandler {
                             aggregate_id: event.aggregate_id,
                             tenant_id: event.tenant_id.clone(),
                             command: CommandPayload::FailSubAgent {
-                                call_id: req.call_id.clone(),
+                                session_id: child_session_id,
                                 error: "failed to create child session".to_string(),
                                 retryable: false,
                             },
@@ -89,25 +85,44 @@ impl EventHandler<SessionState> for SubAgentHandler {
                         aggregate_id: event.aggregate_id,
                         tenant_id: event.tenant_id.clone(),
                         command: CommandPayload::StartSubAgent {
-                            call_id: req.call_id.clone(),
-                            child_session_id,
+                            session_id: child_session_id,
                         },
                         span: event.span.child("start_sub_agent"),
                     },
                 )
                 .await;
+            }
 
-                // Send the arguments as the user message to the child
+            // Send message to another session
+            EventPayload::SessionMessageRequested(req) => {
                 let _ = execute::<SessionState>(
                     &*self.store,
                     ExecuteInput {
-                        aggregate_id: child_session_id,
+                        aggregate_id: req.target_session_id,
                         tenant_id: event.tenant_id.clone(),
-                        command: CommandPayload::SendUserMessage {
-                            content: req.arguments.clone(),
+                        command: CommandPayload::SendMessage {
+                            message: req.message.clone(),
                             stream: false,
                         },
-                        span: event.span.child("send_to_sub_agent"),
+                        span: event.span.child("send_session_message"),
+                    },
+                )
+                .await;
+            }
+
+            // Tool call resolution → complete tool call on target session
+            EventPayload::ToolCallResolutionRequested(req) => {
+                let _ = execute::<SessionState>(
+                    &*self.store,
+                    ExecuteInput {
+                        aggregate_id: req.target_session_id,
+                        tenant_id: event.tenant_id.clone(),
+                        command: CommandPayload::CompleteToolCall {
+                            tool_call_id: req.tool_call_id.clone(),
+                            result: req.result.clone(),
+                            worker_state: None,
+                        },
+                        span: event.span.child("resolve_tool_call"),
                     },
                 )
                 .await;

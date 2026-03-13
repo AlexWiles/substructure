@@ -143,8 +143,14 @@ impl Runtime {
             ExecuteInput {
                 aggregate_id: session_id,
                 tenant_id: input.tenant_id,
-                command: CommandPayload::SendUserMessage {
-                    content: input.content,
+                command: CommandPayload::SendMessage {
+                    message: session::message::Message {
+                        role: session::message::Role::User,
+                        content: Some(input.content),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                    },
                     stream: false,
                 },
                 span: span.child("send_message"),

@@ -113,12 +113,9 @@ pub struct ToolCallState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentCallState {
-    pub call_id: String,
+    pub session_id: Uuid,
     pub agent_id: String,
     pub tracking: EffectTracking,
-    pub arguments: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub child_session_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,7 +134,7 @@ pub struct DerivedState {
     #[serde(default)]
     pub worker_state: Vec<u8>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ancestry: Vec<AncestryEntry>,
+    pub ancestry: Vec<Uuid>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub sub_agent_calls: HashMap<String, SubAgentCallState>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -164,7 +161,7 @@ pub struct SessionState {
     pub worker_state: Vec<u8>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ancestry: Vec<AncestryEntry>,
+    pub ancestry: Vec<Uuid>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<Artifact>,
@@ -285,30 +282,28 @@ impl SessionState {
                 }
             }
             EventPayload::SubAgentRequested(payload) => {
-                if let Some(existing) = self.sub_agent_calls.get_mut(&payload.call_id) {
+                let sid = payload.session_id;
+                if let Some(existing) = self.sub_agent_calls.get_mut(&sid.to_string()) {
                     existing.tracking.reset_pending(now);
-                    existing.arguments = payload.arguments.clone();
                 } else {
                     self.sub_agent_calls.insert(
-                        payload.call_id.clone(),
+                        sid.to_string(),
                         SubAgentCallState {
-                            call_id: payload.call_id.clone(),
+                            session_id: sid,
                             agent_id: payload.agent_id.clone(),
                             tracking: EffectTracking::new(payload.retry.clone(), now),
-                            arguments: payload.arguments.clone(),
-                            child_session_id: None,
                         },
                     );
                 }
                 self.status = SessionStatus::Idle;
             }
             EventPayload::SubAgentStarted(payload) => {
-                if let Some(sa) = self.sub_agent_calls.get_mut(&payload.call_id) {
-                    sa.child_session_id = Some(payload.child_session_id);
+                if let Some(sa) = self.sub_agent_calls.get_mut(&payload.session_id.to_string()) {
+                    sa.tracking.complete();
                 }
             }
             EventPayload::SubAgentErrored(payload) => {
-                if let Some(sa) = self.sub_agent_calls.get_mut(&payload.call_id) {
+                if let Some(sa) = self.sub_agent_calls.get_mut(&payload.session_id.to_string()) {
                     sa.tracking.record_error(payload.retryable, now);
                 }
             }
@@ -355,6 +350,8 @@ impl SessionState {
                     wd.tracking.record_error(p.retryable, now);
                 }
             }
+            EventPayload::SessionMessageRequested(_) => {}
+            EventPayload::ToolCallResolutionRequested(_) => {}
             EventPayload::WorkerStateUpdated(p) => {
                 self.worker_state = p.state.clone();
             }

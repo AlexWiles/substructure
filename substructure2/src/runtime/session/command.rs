@@ -1,8 +1,7 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::decision::{DecisionTrigger, ToolResult};
+use super::decision::{DecisionTrigger, ToolResult, WorkerAction};
 use super::events::*;
 use super::message::{Message, Role};
 use super::state::{new_call_id, EffectStatus, SessionState, SessionStatus};
@@ -15,11 +14,12 @@ pub enum CommandPayload {
     CreateSession {
         agent_id: String,
         auth: ClientIdentity,
-        ancestry: Vec<AncestryEntry>,
+        ancestry: Vec<Uuid>,
         worker_retry: RetryPolicy,
     },
-    SendUserMessage {
-        content: String,
+    SendMessage {
+        message: Message,
+        #[allow(dead_code)]
         stream: bool,
     },
     RequestLlmCall {
@@ -47,29 +47,25 @@ pub enum CommandPayload {
     },
     CompleteToolCall {
         tool_call_id: String,
-        name: String,
         result: String,
         worker_state: Option<Vec<u8>>,
     },
     FailToolCall {
         tool_call_id: String,
-        name: String,
         error: String,
         retryable: bool,
         worker_state: Option<Vec<u8>>,
     },
     RequestSubAgent {
-        call_id: String,
+        session_id: Uuid,
         agent_id: String,
-        arguments: String,
         retry: RetryPolicy,
     },
     StartSubAgent {
-        call_id: String,
-        child_session_id: Uuid,
+        session_id: Uuid,
     },
     FailSubAgent {
-        call_id: String,
+        session_id: Uuid,
         error: String,
         retryable: bool,
     },
@@ -93,34 +89,6 @@ pub enum CommandPayload {
     },
     Wake {
         now: DateTime<Utc>,
-    },
-}
-
-/// Actions a worker can request as part of a decision.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum WorkerAction {
-    RequestLlm {
-        request: LlmRequest,
-        stream: bool,
-        llm_client: String,
-        retry: RetryPolicy,
-    },
-    RequestToolCall {
-        tool_call_id: String,
-        name: String,
-        arguments: String,
-        handler: ToolHandler,
-        retry: RetryPolicy,
-    },
-    RequestSubAgent {
-        call_id: String,
-        agent_id: String,
-        message: String,
-        retry: RetryPolicy,
-    },
-    Done {
-        artifacts: Vec<Artifact>,
     },
 }
 
@@ -167,27 +135,25 @@ impl SessionState {
                 Err(SessionError::SessionAlreadyCreated)
             }
 
-            CommandPayload::SendUserMessage { content, stream } => match self.status {
-                SessionStatus::Interrupted { .. } => Err(SessionError::SessionInterrupted),
-                _ => {
-                    let message = Message {
-                        role: Role::User,
-                        content: Some(content),
-                        tool_calls: None,
-                        tool_call_id: None,
-                        name: None,
-                    };
-                    Ok(vec![
-                        EventPayload::NewMessage(NewMessage {
-                            message: message.clone(),
-                        }),
-                        EventPayload::WorkerDecisionRequested(WorkerDecisionRequested {
-                            decision_id: new_call_id(),
-                            trigger: DecisionTrigger::UserMessage { stream, message },
-                        }),
-                    ])
+            CommandPayload::SendMessage { message, stream } => match self.status {
+                SessionStatus::Interrupted { .. } if message.role == Role::User => {
+                    Err(SessionError::SessionInterrupted)
                 }
-            },
+                _ => {
+                    let mut events = vec![EventPayload::NewMessage(NewMessage {
+                        message: message.clone(),
+                    })];
+                    if message.role == Role::User {
+                        events.push(EventPayload::WorkerDecisionRequested(
+                            WorkerDecisionRequested {
+                                decision_id: new_call_id(),
+                                trigger: DecisionTrigger::UserMessage { stream, message },
+                            },
+                        ));
+                    }
+                    Ok(events)
+                }
+            }
 
             CommandPayload::RequestLlmCall {
                 call_id,
@@ -291,65 +257,83 @@ impl SessionState {
                 retry,
             } => match self.tool_calls.get(&tool_call_id) {
                 Some(_) => Ok(vec![]),
-                None => Ok(vec![EventPayload::ToolCallRequested(ToolCallRequested {
-                    tool_call_id,
-                    name,
-                    arguments,
-                    handler,
-                    retry,
-                })]),
+                None => {
+                    let mut events = vec![EventPayload::ToolCallRequested(ToolCallRequested {
+                        tool_call_id: tool_call_id.clone(),
+                        name: name.clone(),
+                        arguments: arguments.clone(),
+                        handler: handler.clone(),
+                        retry: retry.clone(),
+                    })];
+                    if handler == ToolHandler::Worker {
+                        events.push(EventPayload::WorkerDecisionRequested(
+                            WorkerDecisionRequested {
+                                decision_id: new_call_id(),
+                                trigger: DecisionTrigger::ToolCallRequested {
+                                    tool_call_id,
+                                    name,
+                                    arguments,
+                                    attempt: 0,
+                                    deadline: retry.deadline(chrono::Utc::now()),
+                                },
+                            },
+                        ));
+                    }
+                    Ok(events)
+                }
             },
 
             CommandPayload::CompleteToolCall {
                 tool_call_id,
-                name,
                 result,
                 worker_state,
-            } => match self.tool_calls.get(&tool_call_id).map(|tc| &tc.tracking.status) {
-                Some(&EffectStatus::Pending) => {
-                    let mut events = vec![
-                        EventPayload::ToolCallCompleted(ToolCallCompleted {
-                            tool_call_id: tool_call_id.clone(),
-                            name: name.clone(),
-                            result: result.clone(),
-                        }),
-                        EventPayload::NewMessage(NewMessage {
-                            message: Message {
-                                role: Role::Tool,
-                                content: Some(result.clone()),
-                                tool_calls: None,
-                                tool_call_id: Some(tool_call_id.clone()),
-                                name: None,
-                            },
-                        }),
-                    ];
-                    if let Some(ws) = worker_state {
-                        events
-                            .push(EventPayload::WorkerStateUpdated(WorkerStateUpdated {
-                                state: ws,
-                            }));
-                    }
-                    events.push(EventPayload::WorkerDecisionRequested(
-                        WorkerDecisionRequested {
-                            decision_id: new_call_id(),
-                            trigger: DecisionTrigger::ToolResolved {
-                                result: ToolResult {
-                                    tool_call_id,
-                                    name,
-                                    content: result,
-                                    is_error: false,
-                                },
+            } => {
+                let Some(tc) = self.tool_calls.get(&tool_call_id) else {
+                    return Ok(vec![]);
+                };
+                if tc.tracking.status != EffectStatus::Pending {
+                    return Ok(vec![]);
+                }
+                let name = tc.name.clone();
+                let mut events = vec![
+                    EventPayload::ToolCallCompleted(ToolCallCompleted {
+                        tool_call_id: tool_call_id.clone(),
+                        name: name.clone(),
+                        result: result.clone(),
+                    }),
+                    EventPayload::NewMessage(NewMessage {
+                        message: Message {
+                            role: Role::Tool,
+                            content: Some(result.clone()),
+                            tool_calls: None,
+                            tool_call_id: Some(tool_call_id.clone()),
+                            name: None,
+                        },
+                    }),
+                ];
+                if let Some(ws) = worker_state {
+                    events.push(EventPayload::WorkerStateUpdated(WorkerStateUpdated {
+                        state: ws,
+                    }));
+                }
+                events.push(EventPayload::WorkerDecisionRequested(
+                    WorkerDecisionRequested {
+                        decision_id: new_call_id(),
+                        trigger: DecisionTrigger::ToolResolved {
+                            result: ToolResult {
+                                tool_call_id,
+                                name,
+                                content: result,
+                                is_error: false,
                             },
                         },
-                    ));
-                    Ok(events)
-                }
-                _ => Ok(vec![]),
-            },
+                    },
+                ));
+                Ok(events)
+            }
 
             CommandPayload::FailToolCall {
                 tool_call_id,
-                name,
                 error,
                 retryable,
                 worker_state,
@@ -360,6 +344,7 @@ impl SessionState {
                 if tc.tracking.status != EffectStatus::Pending {
                     return Ok(vec![]);
                 }
+                let name = tc.name.clone();
                 let mut events = vec![EventPayload::ToolCallErrored(ToolCallErrored {
                     tool_call_id: tool_call_id.clone(),
                     name: name.clone(),
@@ -367,10 +352,9 @@ impl SessionState {
                     retryable,
                 })];
                 if let Some(ws) = worker_state {
-                    events
-                        .push(EventPayload::WorkerStateUpdated(WorkerStateUpdated {
-                            state: ws,
-                        }));
+                    events.push(EventPayload::WorkerStateUpdated(WorkerStateUpdated {
+                        state: ws,
+                    }));
                 }
                 if tc.tracking.retry_policy.exhausted(&tc.tracking.retry, retryable) {
                     events.push(EventPayload::WorkerDecisionRequested(
@@ -391,46 +375,47 @@ impl SessionState {
             }
 
             CommandPayload::RequestSubAgent {
-                call_id,
+                session_id,
                 agent_id,
-                arguments,
                 retry,
-            } => match self.sub_agent_calls.get(&call_id) {
-                Some(_) => Ok(vec![]),
-                None => Ok(vec![EventPayload::SubAgentRequested(SubAgentRequested {
-                    call_id,
-                    agent_id,
-                    arguments,
-                    retry,
-                })]),
-            },
-
-            CommandPayload::StartSubAgent {
-                call_id,
-                child_session_id,
-            } => match self.sub_agent_calls.get(&call_id).map(|c| &c.tracking.status) {
-                Some(&EffectStatus::Pending) => {
-                    Ok(vec![EventPayload::SubAgentStarted(SubAgentStarted {
-                        call_id,
-                        child_session_id,
-                    })])
+            } => {
+                let key = session_id.to_string();
+                match self.sub_agent_calls.get(&key) {
+                    Some(_) => Ok(vec![]),
+                    None => Ok(vec![EventPayload::SubAgentRequested(SubAgentRequested {
+                        session_id,
+                        agent_id,
+                        retry,
+                    })]),
                 }
-                _ => Ok(vec![]),
-            },
+            }
+
+            CommandPayload::StartSubAgent { session_id } => {
+                let key = session_id.to_string();
+                match self.sub_agent_calls.get(&key).map(|c| &c.tracking.status) {
+                    Some(&EffectStatus::Pending) => {
+                        Ok(vec![EventPayload::SubAgentStarted(SubAgentStarted {
+                            session_id,
+                        })])
+                    }
+                    _ => Ok(vec![]),
+                }
+            }
 
             CommandPayload::FailSubAgent {
-                call_id,
+                session_id,
                 error,
                 retryable,
             } => {
-                let Some(sa) = self.sub_agent_calls.get(&call_id) else {
+                let key = session_id.to_string();
+                let Some(sa) = self.sub_agent_calls.get(&key) else {
                     return Ok(vec![]);
                 };
                 if sa.tracking.status != EffectStatus::Pending {
                     return Ok(vec![]);
                 }
                 let mut events = vec![EventPayload::SubAgentErrored(SubAgentErrored {
-                    call_id: call_id.clone(),
+                    session_id,
                     error: error.clone(),
                     retryable,
                 })];
@@ -439,7 +424,7 @@ impl SessionState {
                         WorkerDecisionRequested {
                             decision_id: new_call_id(),
                             trigger: DecisionTrigger::SubAgentFailed {
-                                call_id,
+                                session_id,
                                 agent_id: sa.agent_id.clone(),
                                 error,
                             },
@@ -524,16 +509,74 @@ impl SessionState {
                             retry,
                         }),
                         WorkerAction::RequestSubAgent {
-                            call_id,
+                            session_id,
                             agent_id,
-                            message,
                             retry,
                         } => self.handle(CommandPayload::RequestSubAgent {
-                            call_id,
+                            session_id,
                             agent_id,
-                            arguments: message,
                             retry,
                         }),
+                        WorkerAction::SendSessionMessage {
+                            session_id,
+                            message,
+                        } => Ok(vec![EventPayload::SessionMessageRequested(
+                            SessionMessageRequested {
+                                target_session_id: session_id,
+                                message,
+                            },
+                        )]),
+                        WorkerAction::CompleteToolCall {
+                            tool_call_id,
+                            result,
+                            attempt,
+                        } => {
+                            match self.tool_calls.get(&tool_call_id) {
+                                Some(tc)
+                                    if tc.tracking.status == EffectStatus::Pending
+                                        && tc.tracking.retry.attempts == attempt =>
+                                {
+                                    self.handle(CommandPayload::CompleteToolCall {
+                                        tool_call_id,
+                                        result,
+                                        worker_state: None,
+                                    })
+                                }
+                                _ => Ok(vec![]),
+                            }
+                        }
+                        WorkerAction::FailToolCall {
+                            tool_call_id,
+                            error,
+                            retryable,
+                            attempt,
+                        } => {
+                            match self.tool_calls.get(&tool_call_id) {
+                                Some(tc)
+                                    if tc.tracking.status == EffectStatus::Pending
+                                        && tc.tracking.retry.attempts == attempt =>
+                                {
+                                    self.handle(CommandPayload::FailToolCall {
+                                        tool_call_id,
+                                        error,
+                                        retryable,
+                                        worker_state: None,
+                                    })
+                                }
+                                _ => Ok(vec![]),
+                            }
+                        }
+                        WorkerAction::ResolveToolCall {
+                            session_id,
+                            tool_call_id,
+                            result,
+                        } => Ok(vec![EventPayload::ToolCallResolutionRequested(
+                            ToolCallResolutionRequested {
+                                target_session_id: session_id,
+                                tool_call_id,
+                                result,
+                            },
+                        )]),
                         WorkerAction::Done { artifacts } => {
                             self.handle(CommandPayload::MarkDone { artifacts })
                         }
@@ -606,13 +649,29 @@ impl SessionState {
             if tc.tracking.status == EffectStatus::RetryScheduled {
                 if let Some(next_at) = tc.tracking.retry.next_at {
                     if next_at <= now {
-                        return Ok(vec![EventPayload::ToolCallRequested(ToolCallRequested {
-                            tool_call_id: tc.tool_call_id.clone(),
-                            name: tc.name.clone(),
-                            arguments: tc.arguments.clone(),
-                            handler: tc.handler.clone(),
-                            retry: tc.tracking.retry_policy.clone(),
-                        })]);
+                        let mut events =
+                            vec![EventPayload::ToolCallRequested(ToolCallRequested {
+                                tool_call_id: tc.tool_call_id.clone(),
+                                name: tc.name.clone(),
+                                arguments: tc.arguments.clone(),
+                                handler: tc.handler.clone(),
+                                retry: tc.tracking.retry_policy.clone(),
+                            })];
+                        if tc.handler == ToolHandler::Worker {
+                            events.push(EventPayload::WorkerDecisionRequested(
+                                WorkerDecisionRequested {
+                                    decision_id: new_call_id(),
+                                    trigger: DecisionTrigger::ToolCallRequested {
+                                        tool_call_id: tc.tool_call_id.clone(),
+                                        name: tc.name.clone(),
+                                        arguments: tc.arguments.clone(),
+                                        attempt: tc.tracking.retry.attempts + 1,
+                                        deadline: tc.tracking.retry_policy.deadline(now),
+                                    },
+                                },
+                            ));
+                        }
+                        return Ok(events);
                     }
                 }
             }
@@ -624,7 +683,7 @@ impl SessionState {
                 && sa.tracking.deadline.is_some_and(|d| d <= now)
             {
                 return Ok(vec![EventPayload::SubAgentErrored(SubAgentErrored {
-                    call_id: sa.call_id.clone(),
+                    session_id: sa.session_id,
                     error: "deadline exceeded".to_string(),
                     retryable: true,
                 })]);
@@ -637,9 +696,8 @@ impl SessionState {
                 if let Some(next_at) = sa.tracking.retry.next_at {
                     if next_at <= now {
                         return Ok(vec![EventPayload::SubAgentRequested(SubAgentRequested {
-                            call_id: sa.call_id.clone(),
+                            session_id: sa.session_id,
                             agent_id: sa.agent_id.clone(),
-                            arguments: sa.arguments.clone(),
                             retry: sa.tracking.retry_policy.clone(),
                         })]);
                     }

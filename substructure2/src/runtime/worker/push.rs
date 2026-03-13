@@ -12,7 +12,7 @@ pub trait PushTransport: Send + Sync {
 }
 
 pub struct PushResponse {
-    pub actions: Vec<crate::runtime::session::command::WorkerAction>,
+    pub actions: Vec<crate::runtime::session::decision::WorkerAction>,
     pub state: Vec<u8>,
 }
 

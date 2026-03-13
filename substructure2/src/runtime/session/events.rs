@@ -43,6 +43,10 @@ pub enum EventPayload {
     WorkerDecisionCompleted(WorkerDecisionCompleted),
     #[serde(rename = "worker.decision.errored")]
     WorkerDecisionErrored(WorkerDecisionErrored),
+    #[serde(rename = "session.message_requested")]
+    SessionMessageRequested(SessionMessageRequested),
+    #[serde(rename = "tool_call.resolution_requested")]
+    ToolCallResolutionRequested(ToolCallResolutionRequested),
     #[serde(rename = "worker.state.updated")]
     WorkerStateUpdated(WorkerStateUpdated),
     #[serde(rename = "session.cancelled")]
@@ -52,17 +56,11 @@ pub enum EventPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AncestryEntry {
-    pub session_id: Uuid,
-    pub call_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionCreated {
     pub agent_id: String,
     pub auth: ClientIdentity,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ancestry: Vec<AncestryEntry>,
+    pub ancestry: Vec<Uuid>,
     pub worker_retry: RetryPolicy,
 }
 
@@ -136,21 +134,19 @@ pub enum ToolHandler {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentRequested {
-    pub call_id: String,
+    pub session_id: Uuid,
     pub agent_id: String,
-    pub arguments: String,
     pub retry: RetryPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentStarted {
-    pub call_id: String,
-    pub child_session_id: Uuid,
+    pub session_id: Uuid,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentErrored {
-    pub call_id: String,
+    pub session_id: Uuid,
     pub error: String,
     #[serde(default)]
     pub retryable: bool,
@@ -215,6 +211,19 @@ pub struct WorkerDecisionErrored {
     pub error: String,
     #[serde(default = "default_true")]
     pub retryable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionMessageRequested {
+    pub target_session_id: Uuid,
+    pub message: Message,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallResolutionRequested {
+    pub target_session_id: Uuid,
+    pub tool_call_id: String,
+    pub result: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

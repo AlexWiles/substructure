@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::runtime::session::command::WorkerAction;
+use crate::runtime::session::decision::WorkerAction;
 use crate::runtime::serde_helpers::base64_bytes;
 use crate::runtime::span::SpanContext;
 
