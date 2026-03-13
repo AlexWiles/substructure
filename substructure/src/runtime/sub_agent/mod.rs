@@ -103,6 +103,7 @@ impl EventHandler<SessionState> for SubAgentHandler {
                         command: CommandPayload::SendMessage {
                             message: req.message.clone(),
                             stream: false,
+                            turn_id: None,
                         },
                         span: event.span.child("send_session_message"),
                     },
@@ -123,6 +124,36 @@ impl EventHandler<SessionState> for SubAgentHandler {
                             worker_state: None,
                         },
                         span: event.span.child("resolve_tool_call"),
+                    },
+                )
+                .await;
+            }
+
+            // Child session done → notify parent
+            EventPayload::SessionDone(done) => {
+                let derived = match event.derived.as_ref() {
+                    Some(d) => d,
+                    None => return,
+                };
+                let parent_id = match derived.ancestry.last() {
+                    Some(&id) => id,
+                    None => return, // root session, nothing to notify
+                };
+                let agent_id = derived.agent_id.clone().unwrap_or_default();
+                let turn_id = derived.turn_id.clone().unwrap_or_default();
+
+                let _ = execute::<SessionState>(
+                    &*self.store,
+                    ExecuteInput {
+                        aggregate_id: parent_id,
+                        tenant_id: event.tenant_id.clone(),
+                        command: CommandPayload::CompleteSubAgentTurn {
+                            session_id: event.aggregate_id,
+                            agent_id,
+                            turn_id,
+                            artifacts: done.artifacts.clone(),
+                        },
+                        span: event.span.child("sub_agent_turn_complete"),
                     },
                 )
                 .await;

@@ -139,6 +139,7 @@ pub struct DerivedState {
     pub sub_agent_calls: HashMap<String, SubAgentCallState>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub worker_decisions: HashMap<String, WorkerDecisionState>,
+    pub turn_id: Option<String>,
 }
 
 pub(super) fn new_call_id() -> String {
@@ -173,6 +174,9 @@ pub struct SessionState {
     pub tool_calls: HashMap<String, ToolCallState>,
     pub sub_agent_calls: HashMap<String, SubAgentCallState>,
     pub worker_decisions: HashMap<String, WorkerDecisionState>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
 }
 
 impl SessionState {
@@ -192,6 +196,7 @@ impl SessionState {
             tool_calls: HashMap::new(),
             sub_agent_calls: HashMap::new(),
             worker_decisions: HashMap::new(),
+            turn_id: None,
         }
     }
 
@@ -366,6 +371,12 @@ impl SessionState {
                     self.status = SessionStatus::Idle;
                 }
             }
+            EventPayload::TurnStarted(p) => {
+                self.turn_id = Some(p.turn_id.clone());
+            }
+            EventPayload::TurnCompleted(_) => {
+                self.turn_id = None;
+            }
         }
     }
 
@@ -414,6 +425,7 @@ impl SessionState {
             ancestry: self.ancestry.clone(),
             sub_agent_calls: self.sub_agent_calls.clone(),
             worker_decisions: self.worker_decisions.clone(),
+            turn_id: self.turn_id.clone(),
         }
     }
 

@@ -14,15 +14,38 @@ export type DecisionHandler = (
   request: WorkerDecisionRequestWire
 ) => Promise<DecisionResult>;
 
-export class Worker {
-  private handler: DecisionHandler;
+export interface HasHandler {
+  readonly id: string;
+  handler(): DecisionHandler;
+}
 
-  constructor(handler: DecisionHandler) {
-    this.handler = handler;
+export class Worker {
+  readonly agentIds: string[];
+  private handlers: Map<string, DecisionHandler>;
+
+  constructor(handler: DecisionHandler);
+  constructor(agents: HasHandler[]);
+  constructor(arg: DecisionHandler | HasHandler[]) {
+    if (typeof arg === "function") {
+      this.agentIds = [];
+      this.handlers = new Map([["*", arg]]);
+    } else {
+      this.agentIds = arg.map((a) => a.id);
+      this.handlers = new Map(arg.map((a) => [a.id, a.handler()]));
+    }
+  }
+
+  static from(...agents: HasHandler[]): Worker {
+    return new Worker(agents);
   }
 
   async handleDecision(request: WorkerDecisionRequestWire): Promise<SubmitRequest> {
-    const result = await this.handler(request);
+    const handler = this.handlers.get(request.agent_id) ?? this.handlers.get("*");
+    if (!handler) {
+      throw new Error(`No handler for agent: ${request.agent_id}`);
+    }
+
+    const result = await handler(request);
 
     return {
       session_id: request.session_id,

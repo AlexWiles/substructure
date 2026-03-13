@@ -63,7 +63,8 @@ async fn main() -> anyhow::Result<()> {
             adapter.start().await;
 
             let app =
-                transport::worker_http::router(adapter).merge(transport::client_http::router(rt));
+                transport::worker_http::router(adapter).merge(transport::client_http::router(rt))
+                    .layer(tower_http::trace::TraceLayer::new_for_http());
 
             let addr = format!("{host}:{port}");
             tracing::info!(%addr, "listening");

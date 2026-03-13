@@ -61,7 +61,14 @@ impl PushAdapter {
 
             loop {
                 let decision = match runtime.dequeue_decision(&filter).await {
-                    Some(d) => d,
+                    Some(d) => {
+                        tracing::debug!(
+                            decision_id = %d.decision_id,
+                            agent_id = %d.agent_id,
+                            "push loop dequeued decision"
+                        );
+                        d
+                    }
                     None => continue,
                 };
 

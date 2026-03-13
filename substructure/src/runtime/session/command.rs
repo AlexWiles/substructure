@@ -21,6 +21,7 @@ pub enum CommandPayload {
         message: Message,
         #[allow(dead_code)]
         stream: bool,
+        turn_id: Option<String>,
     },
     RequestLlmCall {
         call_id: String,
@@ -68,6 +69,12 @@ pub enum CommandPayload {
         session_id: Uuid,
         error: String,
         retryable: bool,
+    },
+    CompleteSubAgentTurn {
+        session_id: Uuid,
+        agent_id: String,
+        turn_id: String,
+        artifacts: Vec<Artifact>,
     },
     Interrupt {
         interrupt_id: String,
@@ -135,7 +142,7 @@ impl SessionState {
                 Err(SessionError::SessionAlreadyCreated)
             }
 
-            CommandPayload::SendMessage { message, stream } => match self.status {
+            CommandPayload::SendMessage { message, stream, turn_id } => match self.status {
                 SessionStatus::Interrupted { .. } if message.role == Role::User => {
                     Err(SessionError::SessionInterrupted)
                 }
@@ -143,6 +150,9 @@ impl SessionState {
                     let mut events = vec![EventPayload::NewMessage(NewMessage {
                         message: message.clone(),
                     })];
+                    if let Some(turn_id) = turn_id {
+                        events.push(EventPayload::TurnStarted(TurnStarted { turn_id }));
+                    }
                     if message.role == Role::User {
                         events.push(EventPayload::WorkerDecisionRequested(
                             WorkerDecisionRequested {
@@ -434,6 +444,31 @@ impl SessionState {
                 Ok(events)
             }
 
+            CommandPayload::CompleteSubAgentTurn {
+                session_id,
+                agent_id,
+                turn_id,
+                artifacts,
+            } => {
+                let key = session_id.to_string();
+                // Only fire if we know about this sub-agent
+                if self.sub_agent_calls.contains_key(&key) {
+                    Ok(vec![EventPayload::WorkerDecisionRequested(
+                        WorkerDecisionRequested {
+                            decision_id: new_call_id(),
+                            trigger: DecisionTrigger::SubAgentTurnComplete {
+                                session_id,
+                                agent_id,
+                                turn_id,
+                                artifacts,
+                            },
+                        },
+                    )])
+                } else {
+                    Ok(vec![])
+                }
+            }
+
             CommandPayload::Interrupt {
                 interrupt_id,
                 reason,
@@ -591,7 +626,13 @@ impl SessionState {
             CommandPayload::CancelSession => Ok(vec![EventPayload::SessionCancelled]),
 
             CommandPayload::MarkDone { artifacts } => {
-                Ok(vec![EventPayload::SessionDone(SessionDone { artifacts })])
+                let mut events = vec![EventPayload::SessionDone(SessionDone { artifacts })];
+                if let Some(turn_id) = &self.turn_id {
+                    events.push(EventPayload::TurnCompleted(TurnCompleted {
+                        turn_id: turn_id.clone(),
+                    }));
+                }
+                Ok(events)
             }
 
             CommandPayload::Wake { now } => self.handle_wake(now),

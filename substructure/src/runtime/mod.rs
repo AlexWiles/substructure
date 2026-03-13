@@ -82,6 +82,7 @@ impl Runtime {
         input: SendMessage,
     ) -> Result<(Uuid, mpsc::Receiver<event_store::Event>), RuntimeError> {
         let session_id = input.session_id;
+        let turn_id = Uuid::now_v7().to_string();
 
         // Subscribe BEFORE sending so we don't miss events
         let mut rx = self.store.subscribe();
@@ -117,6 +118,7 @@ impl Runtime {
 
         // Spawn a task that filters broadcast events for this session
         let (tx, event_rx) = mpsc::channel::<event_store::Event>(64);
+        let stream_turn_id = turn_id.clone();
 
         tokio::spawn(async move {
             loop {
@@ -128,6 +130,12 @@ impl Runtime {
                             }
                             if tx.send(event.clone()).await.is_err() {
                                 return;
+                            }
+                            // Close stream when our turn completes
+                            if let Ok(de) = aggregate::DomainEvent::<SessionState>::from_raw(event) {
+                                if matches!(&de.payload, session::events::EventPayload::TurnCompleted(tc) if tc.turn_id == stream_turn_id) {
+                                    return;
+                                }
                             }
                         }
                     }
@@ -152,6 +160,7 @@ impl Runtime {
                         name: None,
                     },
                     stream: false,
+                    turn_id: Some(turn_id.clone()),
                 },
                 span: span.child("send_message"),
             },

@@ -18,6 +18,13 @@ pub fn spawn_worker_enqueue(
         while let Ok(batch) = rx.recv().await {
             for raw in batch.iter() {
                 if let Some(decision) = try_extract(raw) {
+                    tracing::debug!(
+                        session_id = %decision.session_id,
+                        decision_id = %decision.decision_id,
+                        agent_id = %decision.agent_id,
+                        trigger_type = ?decision.trigger,
+                        "enqueuing worker decision"
+                    );
                     queue.enqueue(decision).await;
                 }
             }

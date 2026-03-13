@@ -138,6 +138,7 @@ export type DecisionTrigger =
       deadline?: DateTime;
     }
   | { type: "tool_result"; result: ToolResult }
+  | { type: "sub_agent_turn_complete"; session_id: Uuid; agent_id: string; turn_id: string; artifacts: Artifact[] }
   | { type: "sub_agent_error"; session_id: Uuid; agent_id: string; error: string }
   | { type: "interrupt_resumed"; interrupt_id: string }
   | { type: "stall" };
@@ -315,6 +316,16 @@ export interface WorkerStateUpdated {
   state: string;
 }
 
+export interface TurnStarted {
+  type: "turn.started";
+  turn_id: string;
+}
+
+export interface TurnCompleted {
+  type: "turn.completed";
+  turn_id: string;
+}
+
 // ── Event (tagged union) ────────────────────────────────────────────────────
 
 export type EventPayload =
@@ -338,7 +349,9 @@ export type EventPayload =
   | ToolCallResolutionRequested
   | WorkerStateUpdated
   | SessionCancelled
-  | SessionDone;
+  | SessionDone
+  | TurnStarted
+  | TurnCompleted;
 
 // ── Event Envelope ──────────────────────────────────────────────────────────
 

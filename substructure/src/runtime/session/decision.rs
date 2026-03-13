@@ -42,6 +42,17 @@ pub enum DecisionTrigger {
     ToolResult {
         result: ToolResult,
     },
+    SubAgentDone {
+        session_id: Uuid,
+        agent_id: String,
+        artifacts: Vec<Artifact>,
+    },
+    SubAgentTurnComplete {
+        session_id: Uuid,
+        agent_id: String,
+        turn_id: String,
+        artifacts: Vec<Artifact>,
+    },
     SubAgentError {
         session_id: Uuid,
         agent_id: String,

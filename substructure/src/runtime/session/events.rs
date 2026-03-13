@@ -53,6 +53,10 @@ pub enum EventPayload {
     SessionCancelled,
     #[serde(rename = "session.done")]
     SessionDone(SessionDone),
+    #[serde(rename = "turn.started")]
+    TurnStarted(TurnStarted),
+    #[serde(rename = "turn.completed")]
+    TurnCompleted(TurnCompleted),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -230,4 +234,14 @@ pub struct ToolCallResolutionRequested {
 pub struct WorkerStateUpdated {
     #[serde(with = "base64_bytes")]
     pub state: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurnStarted {
+    pub turn_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurnCompleted {
+    pub turn_id: String,
 }
