@@ -82,7 +82,7 @@ impl<R: AggregateState> DomainEvent<R> {
 
 pub trait AggregateState: Sized + Serialize + DeserializeOwned + Clone + Send + Sync + 'static {
     type Event: Serialize + DeserializeOwned + Clone + Send + Sync + 'static;
-    type Command: Send + Sync + 'static;
+    type Command: Clone + Send + Sync + 'static;
     type Error: std::fmt::Debug + Send + Sync + 'static;
     type Derived: Serialize + DeserializeOwned + Clone + Send + Sync + 'static;
 
