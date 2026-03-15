@@ -5,7 +5,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use aggregate::{execute, ExecuteError, ExecuteInput};
+use aggregate::{execute, ConflictRetry, ExecuteError, ExecuteInput};
 use event_store::{spawn_handler_pool, EventStore};
 use identity::ClientIdentity;
 use llm::handler::LlmEventHandler;
@@ -84,8 +84,7 @@ impl Runtime {
         let session_id = input.session_id;
         let turn_id = Uuid::now_v7().to_string();
 
-        // Subscribe BEFORE sending so we don't miss events
-        let mut rx = self.store.subscribe();
+        let event_rx = self.subscribe_session(session_id, turn_id.clone());
 
         let span = SpanContext::root();
 
@@ -107,6 +106,7 @@ impl Runtime {
                 },
                 span: span.child("create_session"),
             },
+            &ConflictRetry::default(),
         )
         .await;
 
@@ -115,35 +115,6 @@ impl Runtime {
             Err(ExecuteError::Command(SessionError::SessionAlreadyCreated)) => {}
             Err(e) => return Err(RuntimeError(e.to_string())),
         }
-
-        // Spawn a task that filters broadcast events for this session
-        let (tx, event_rx) = mpsc::channel::<event_store::Event>(64);
-        let stream_turn_id = turn_id.clone();
-
-        tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(batch) => {
-                        for event in batch.iter() {
-                            if event.aggregate_id != session_id {
-                                continue;
-                            }
-                            if tx.send(event.clone()).await.is_err() {
-                                return;
-                            }
-                            // Close stream when our turn completes
-                            if let Ok(de) = aggregate::DomainEvent::<SessionState>::from_raw(event) {
-                                if matches!(&de.payload, session::events::EventPayload::TurnCompleted(tc) if tc.turn_id == stream_turn_id) {
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(_) => return,
-                }
-            }
-        });
 
         // Send the message
         execute::<SessionState>(
@@ -164,11 +135,58 @@ impl Runtime {
                 },
                 span: span.child("send_message"),
             },
+            &ConflictRetry::default(),
         )
         .await
         .map_err(|e| RuntimeError(e.to_string()))?;
 
         Ok((session_id, event_rx))
+    }
+
+    /// Subscribe to events for a session, filtered by session ID.
+    /// Closes when the given turn completes.
+    /// Must be called *before* the command that triggers events so nothing is missed.
+    pub fn subscribe_session(
+        &self,
+        session_id: Uuid,
+        turn_id: String,
+    ) -> mpsc::Receiver<event_store::Event> {
+        let mut rx = self.store.subscribe();
+        let (tx, event_rx) = mpsc::channel::<event_store::Event>(64);
+
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(batch) => {
+                        for event in batch.iter() {
+                            let is_self = event.aggregate_id == session_id;
+                            let is_descendant = !is_self
+                                && event.derived.as_ref().and_then(|d| {
+                                    serde_json::from_value::<session::state::DerivedState>(d.clone()).ok()
+                                }).map_or(false, |d| d.ancestry.contains(&session_id));
+
+                            if !is_self && !is_descendant {
+                                continue;
+                            }
+                            if tx.send(event.clone()).await.is_err() {
+                                return;
+                            }
+                            if is_self {
+                                if let Ok(de) = aggregate::DomainEvent::<SessionState>::from_raw(event) {
+                                    if matches!(&de.payload, session::events::EventPayload::TurnCompleted(tc) if tc.turn_id == turn_id) {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => return,
+                }
+            }
+        });
+
+        event_rx
     }
 
     pub async fn submit_decision(&self, input: SubmitDecision) -> Result<(), RuntimeError> {
@@ -184,6 +202,7 @@ impl Runtime {
                 },
                 span: input.span,
             },
+            &ConflictRetry::default(),
         )
         .await
         .map(|_| ())

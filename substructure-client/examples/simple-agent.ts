@@ -91,7 +91,7 @@ for await (const event of client.sendMessage({
   agent_id: "weather-agent",
   message: "What is the sum of the current temperatures in San Francisco and New York?",
 })) {
-  console.log(event.payload.type);
+  console.log(event.derived.agent_id, event.aggregate_type, event.aggregate_id, event.payload.type);
 }
 
 server.stop();

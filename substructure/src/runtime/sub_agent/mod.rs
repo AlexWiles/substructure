@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::runtime::aggregate::{execute, DomainEvent, EventHandler, ExecuteInput};
+use crate::runtime::aggregate::{execute, ConflictRetry, DomainEvent, EventHandler, ExecuteInput};
 use crate::runtime::event_store::EventStore;
 use crate::runtime::session::command::CommandPayload;
 use crate::runtime::session::events::EventPayload;
@@ -57,6 +57,7 @@ impl EventHandler<SessionState> for SubAgentHandler {
                         },
                         span: event.span.child("create_sub_agent"),
                     },
+                    &ConflictRetry::default(),
                 )
                 .await;
 
@@ -73,6 +74,7 @@ impl EventHandler<SessionState> for SubAgentHandler {
                             },
                             span: event.span.child("fail_sub_agent"),
                         },
+                        &ConflictRetry::default(),
                     )
                     .await;
                     return;
@@ -89,6 +91,7 @@ impl EventHandler<SessionState> for SubAgentHandler {
                         },
                         span: event.span.child("start_sub_agent"),
                     },
+                    &ConflictRetry::default(),
                 )
                 .await;
             }
@@ -107,6 +110,7 @@ impl EventHandler<SessionState> for SubAgentHandler {
                         },
                         span: event.span.child("send_session_message"),
                     },
+                    &ConflictRetry::default(),
                 )
                 .await;
             }
@@ -125,6 +129,7 @@ impl EventHandler<SessionState> for SubAgentHandler {
                         },
                         span: event.span.child("resolve_tool_call"),
                     },
+                    &ConflictRetry::default(),
                 )
                 .await;
             }
@@ -155,6 +160,7 @@ impl EventHandler<SessionState> for SubAgentHandler {
                         },
                         span: event.span.child("sub_agent_turn_complete"),
                     },
+                    &ConflictRetry::default(),
                 )
                 .await;
             }

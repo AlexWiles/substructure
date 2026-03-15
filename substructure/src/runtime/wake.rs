@@ -4,7 +4,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use tokio::task::JoinHandle;
 
-use crate::runtime::aggregate::{execute, AggregateState, ExecuteInput};
+use crate::runtime::aggregate::{execute, AggregateState, ConflictRetry, ExecuteInput};
 use crate::runtime::event_store::{AggregateFilter, AggregateSort, Event, EventStore};
 use crate::runtime::session::command::CommandPayload;
 use crate::runtime::session::state::SessionState;
@@ -64,6 +64,7 @@ async fn fire_due(store: &Arc<dyn EventStore>, now: DateTime<Utc>) {
                 command: CommandPayload::Wake { now },
                 span: SpanContext::root(),
             },
+            &ConflictRetry::default(),
         )
         .await;
     }

@@ -79,13 +79,6 @@ impl ConflictRetry {
 pub async fn execute<R: AggregateState>(
     store: &dyn EventStore,
     input: ExecuteInput<R>,
-) -> Result<ExecuteResult<R>, ExecuteError<R::Error>> {
-    execute_with_retry(store, input, &ConflictRetry::default()).await
-}
-
-pub async fn execute_with_retry<R: AggregateState>(
-    store: &dyn EventStore,
-    input: ExecuteInput<R>,
     retry: &ConflictRetry,
 ) -> Result<ExecuteResult<R>, ExecuteError<R::Error>> {
     let mut attempt = 0u32;
