@@ -11,9 +11,12 @@ const TENANT_ID = "default";
 
 const mathAgent = new Agent({
   id: "math-agent",
-  model: "openrouter/hunter-alpha",
   systemPrompt: "You are a math assistant. Use tools to compute results. Be concise.",
-  llmClient: "openrouter",
+  llm: {
+    model: "openrouter/hunter-alpha",
+    client: "openrouter",
+    retry: { timeout_secs: 120, max_retries: 3, backoff_base_secs: 1, backoff_max_secs: 10 },
+  },
 });
 
 mathAgent.tool(
@@ -32,10 +35,12 @@ mathAgent.tool(
 
 const weatherAgent = new Agent({
   id: "weather-agent",
-  model: "openrouter/hunter-alpha",
   systemPrompt: "You are a weather assistant. Use tools when appropriate. Be concise.",
-  llmClient: "openrouter",
-  retry: { timeout_secs: 120, max_retries: 0, backoff_base_secs: 0, backoff_max_secs: 0 },
+  llm: {
+    model: "openrouter/hunter-alpha",
+    client: "openrouter",
+    retry: { timeout_secs: 120, max_retries: 3, backoff_base_secs: 1, backoff_max_secs: 10 },
+  },
 });
 
 weatherAgent.tool(

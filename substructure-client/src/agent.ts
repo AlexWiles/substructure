@@ -10,12 +10,16 @@ import type { DecisionHandler } from "./worker";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
+export interface LlmConfig {
+  model: string;
+  client?: string;
+  retry?: RetryPolicy;
+}
+
 export interface AgentOptions {
   id: string;
-  model: string;
+  llm: LlmConfig;
   systemPrompt?: string;
-  llmClient?: string;
-  retry?: RetryPolicy;
 }
 
 export type ToolFn = (args: Record<string, unknown>) => Promise<unknown> | unknown;
@@ -63,19 +67,19 @@ function encodeState(state: AgentState): string {
 
 export class Agent {
   readonly id: string;
-  private model: string;
+  private llm: LlmConfig & { client: string; retry: RetryPolicy };
   private systemPrompt?: string;
-  private llmClient: string;
-  private retry: RetryPolicy;
   private tools: Map<string, RegisteredTool> = new Map();
   private subAgents: Map<string, RegisteredSubAgent> = new Map();
 
   constructor(options: AgentOptions) {
     this.id = options.id;
-    this.model = options.model;
     this.systemPrompt = options.systemPrompt;
-    this.llmClient = options.llmClient ?? "openrouter";
-    this.retry = options.retry ?? DEFAULT_RETRY;
+    this.llm = {
+      model: options.llm.model,
+      client: options.llm.client ?? "openrouter",
+      retry: options.llm.retry ?? DEFAULT_RETRY,
+    };
   }
 
   tool(
@@ -145,7 +149,7 @@ export class Agent {
                     type: "spawn_sub_agent",
                     session_id: childSessionId,
                     agent_id: sub.agentId,
-                    retry: this.retry,
+                    retry: this.llm.retry,
                   },
                   {
                     type: "send_message",
@@ -160,7 +164,7 @@ export class Agent {
                   name: tc.function.name,
                   arguments: tc.function.arguments,
                   handler: "worker",
-                  retry: this.retry,
+                  retry: this.llm.retry,
                 });
               }
             }
@@ -302,13 +306,13 @@ export class Agent {
     return [{
       type: "call_llm",
       request: {
-        model: this.model,
+        model: this.llm.model,
         messages,
         ...(toolDefs.length > 0 ? { tools: toolDefs } : {}),
       },
       stream: false,
-      llm_client: this.llmClient,
-      retry: this.retry,
+      llm_client: this.llm.client,
+      retry: this.llm.retry,
     }];
   }
 }
