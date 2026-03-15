@@ -189,6 +189,56 @@ impl Runtime {
         event_rx
     }
 
+    // ---- Admin / inspection methods ----
+
+    pub async fn list_sessions(
+        &self,
+        filter: &event_store::AggregateFilter,
+    ) -> Result<Vec<(event_store::AggregateSummary, SessionState)>, RuntimeError> {
+        let summaries = self
+            .store
+            .list_aggregates(filter)
+            .await
+            .map_err(|e| RuntimeError(e.to_string()))?;
+
+        let mut results = Vec::with_capacity(summaries.len());
+        for summary in &summaries {
+            let snapshot = self
+                .store
+                .load(summary.aggregate_id)
+                .await
+                .map_err(|e| RuntimeError(e.to_string()))?;
+            let state: SessionState = serde_json::from_value(snapshot.data)
+                .map_err(|e| RuntimeError(e.to_string()))?;
+            results.push((summary.clone(), state));
+        }
+        Ok(results)
+    }
+
+    pub async fn get_session(
+        &self,
+        session_id: Uuid,
+    ) -> Result<(event_store::Snapshot, SessionState), RuntimeError> {
+        let snapshot = self
+            .store
+            .load(session_id)
+            .await
+            .map_err(|e| RuntimeError(e.to_string()))?;
+        let state: SessionState = serde_json::from_value(snapshot.data.clone())
+            .map_err(|e| RuntimeError(e.to_string()))?;
+        Ok((snapshot, state))
+    }
+
+    pub async fn get_session_events(
+        &self,
+        filter: &event_store::EventFilter,
+    ) -> Result<Vec<event_store::Event>, RuntimeError> {
+        self.store
+            .query_events(filter)
+            .await
+            .map_err(|e| RuntimeError(e.to_string()))
+    }
+
     pub async fn submit_decision(&self, input: SubmitDecision) -> Result<(), RuntimeError> {
         execute::<SessionState>(
             &*self.store,

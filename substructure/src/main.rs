@@ -1,6 +1,7 @@
 mod providers;
 mod push;
 mod runtime;
+mod server;
 mod transport;
 
 use std::sync::Arc;
@@ -14,6 +15,7 @@ use providers::worker::http_push::http_transport;
 use providers::worker::memory_queue::InMemoryWorkerQueue;
 use push::PushAdapter;
 use runtime::worker::push::{PushRegistry, TransportRegistry};
+use server::SubstructureServer;
 
 #[derive(Parser)]
 #[command(name = "substructure2", version)]
@@ -58,20 +60,19 @@ async fn main() -> anyhow::Result<()> {
             let rt = runtime::start(store.clone(), llm_provider, queue, Default::default());
 
             let transports = TransportRegistry::new(vec![http_transport()]);
-            let registry = PushRegistry::new(store.clone(), transports);
+            let registry = PushRegistry::new(store, transports);
             let adapter = Arc::new(PushAdapter::new(rt.clone(), registry, 16));
             adapter.start().await;
 
-            let app =
-                transport::worker_http::router(adapter).merge(transport::client_http::router(rt))
-                    .layer(tower_http::trace::TraceLayer::new_for_http());
+            let admin_routes = transport::admin_http::router(rt.clone());
+            let client_routes = transport::client_http::router(rt);
+            let worker_routes = transport::worker_http::router(adapter);
+            let server = SubstructureServer::new(vec![admin_routes, client_routes, worker_routes]);
 
             let addr = format!("{host}:{port}");
             tracing::info!(%addr, "listening");
             let listener = TcpListener::bind(&addr).await?;
-            axum::serve(listener, app).await?;
-
-            Ok(())
+            server.serve(listener).await
         }
     }
 }

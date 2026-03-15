@@ -44,8 +44,6 @@ pub enum StoreError {
     VersionConflict { expected: Version, actual: Version },
     #[error("stream not found")]
     StreamNotFound,
-    #[error("tenant mismatch")]
-    TenantMismatch,
     #[error("internal store error: {0}")]
     Internal(String),
 }
@@ -120,7 +118,7 @@ pub trait EventStore: Send + Sync {
     async fn append(&self, input: AppendInput) -> Result<(), StoreError>;
 
     /// Load the latest snapshot for a stream.
-    async fn load(&self, aggregate_id: Uuid, tenant_id: &str) -> Result<Snapshot, StoreError>;
+    async fn load(&self, aggregate_id: Uuid) -> Result<Snapshot, StoreError>;
 
     /// Query aggregates with filtering, sorting, and pagination.
     async fn list_aggregates(

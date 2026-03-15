@@ -54,8 +54,11 @@ impl<R: AggregateState> Aggregate<R> {
         id: Uuid,
         tenant_id: String,
     ) -> Result<(Self, u64), StoreError> {
-        match store.load(id, &tenant_id).await {
+        match store.load(id).await {
             Ok(snapshot) => {
+                if snapshot.tenant_id != tenant_id {
+                    return Err(StoreError::Internal("tenant mismatch".into()));
+                }
                 let agg: Self = serde_json::from_value(snapshot.data)
                     .map_err(|e| StoreError::Internal(e.to_string()))?;
                 Ok((agg, snapshot.stream_version))

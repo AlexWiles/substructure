@@ -160,7 +160,7 @@ fn do_append(conn: &mut Connection, input: AppendInput) -> Result<(), StoreError
                      (?8 = 0 AND NOT EXISTS (SELECT 1 FROM snapshots WHERE aggregate_id = ?2))
                      OR EXISTS (
                          SELECT 1 FROM snapshots
-                         WHERE aggregate_id = ?2 AND stream_version = ?8 AND tenant_id = ?9
+                         WHERE aggregate_id = ?2 AND stream_version = ?8
                      )
                  )",
                 rusqlite::params![
@@ -172,31 +172,24 @@ fn do_append(conn: &mut Connection, input: AppendInput) -> Result<(), StoreError
                     data,
                     trace_id,
                     expected_i64,
-                    snap.tenant_id,
                 ],
             )
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
         if rows == 0 {
-            let existing: Option<(u64, String)> = tx
+            let actual_version: u64 = tx
                 .query_row(
-                    "SELECT stream_version, tenant_id FROM snapshots WHERE aggregate_id = ?1",
+                    "SELECT stream_version FROM snapshots WHERE aggregate_id = ?1",
                     [&aid],
-                    |row| Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?)),
+                    |row| row.get(0),
                 )
                 .optional()
-                .map_err(|e| StoreError::Internal(e.to_string()))?;
-            return match existing {
-                Some((_, ref t)) if t != &snap.tenant_id => Err(StoreError::TenantMismatch),
-                Some((v, _)) => Err(StoreError::VersionConflict {
-                    expected: Version(input.expected_version),
-                    actual: Version(v),
-                }),
-                None => Err(StoreError::VersionConflict {
-                    expected: Version(input.expected_version),
-                    actual: Version(0),
-                }),
-            };
+                .map_err(|e| StoreError::Internal(e.to_string()))?
+                .unwrap_or(0);
+            return Err(StoreError::VersionConflict {
+                expected: Version(input.expected_version),
+                actual: Version(actual_version),
+            });
         }
     }
 
@@ -231,11 +224,7 @@ fn do_append(conn: &mut Connection, input: AppendInput) -> Result<(), StoreError
     Ok(())
 }
 
-fn do_load(
-    conn: &Connection,
-    aggregate_id: Uuid,
-    tenant_id: &str,
-) -> Result<Snapshot, StoreError> {
+fn do_load(conn: &Connection, aggregate_id: Uuid) -> Result<Snapshot, StoreError> {
     let aid = aggregate_id.to_string();
 
     let row = conn
@@ -259,18 +248,15 @@ fn do_load(
             other => StoreError::Internal(other.to_string()),
         })?;
 
-    let (agg_type, stored_tenant, snapshot_data, stream_version, wake_at_str, first_str, last_str) = row;
-
-    if stored_tenant != tenant_id {
-        return Err(StoreError::TenantMismatch);
-    }
+    let (agg_type, tenant_id, snapshot_data, stream_version, wake_at_str, first_str, last_str) =
+        row;
 
     let data: serde_json::Value =
         serde_json::from_str(&snapshot_data).map_err(|e| StoreError::Internal(e.to_string()))?;
 
     Ok(Snapshot {
         aggregate_id,
-        tenant_id: stored_tenant,
+        tenant_id,
         aggregate_type: agg_type,
         data,
         stream_version,
@@ -444,12 +430,11 @@ impl EventStore for SqliteStore {
         Ok(())
     }
 
-    async fn load(&self, aggregate_id: Uuid, tenant_id: &str) -> Result<Snapshot, StoreError> {
-        let tenant = tenant_id.to_string();
+    async fn load(&self, aggregate_id: Uuid) -> Result<Snapshot, StoreError> {
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
             let conn = open_conn_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-            do_load(&conn, aggregate_id, &tenant)
+            do_load(&conn, aggregate_id)
         })
         .await
         .map_err(spawn_err)?
