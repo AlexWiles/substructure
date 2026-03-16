@@ -1,0 +1,33 @@
+{
+  "name": "server",
+  "targets": {
+    "build": {
+      "dependsOn": ["@substructure.ai/dashboard:build"],
+      "command": "cargo build --release",
+      "options": {
+        "cwd": "server"
+      },
+      "inputs": [
+        "{projectRoot}/src/**",
+        "{projectRoot}/Cargo.toml",
+        "{projectRoot}/Cargo.lock",
+        "dashboard/dist/**"
+      ],
+      "outputs": ["{projectRoot}/target/release/substructure"],
+      "cache": true
+    },
+    "dev": {
+      "command": "cargo run -- serve",
+      "options": {
+        "cwd": "server"
+      }
+    },
+    "check": {
+      "command": "cargo check",
+      "options": {
+        "cwd": "server"
+      },
+      "cache": true
+    }
+  }
+}

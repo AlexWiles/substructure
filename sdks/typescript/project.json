@@ -1,0 +1,19 @@
+{
+  "name": "@substructure.ai/sdk",
+  "targets": {
+    "build": {
+      "command": "pnpm build",
+      "options": {
+        "cwd": "sdks/typescript"
+      },
+      "inputs": [
+        "{projectRoot}/src/**",
+        "{projectRoot}/tsup.config.ts",
+        "{projectRoot}/tsconfig.json",
+        "{projectRoot}/package.json"
+      ],
+      "outputs": ["{projectRoot}/dist"],
+      "cache": true
+    }
+  }
+}

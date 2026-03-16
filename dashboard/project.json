@@ -1,0 +1,26 @@
+{
+  "name": "@substructure.ai/dashboard",
+  "targets": {
+    "build": {
+      "command": "pnpm build",
+      "options": {
+        "cwd": "dashboard"
+      },
+      "inputs": [
+        "{projectRoot}/src/**",
+        "{projectRoot}/public/**",
+        "{projectRoot}/vite.config.ts",
+        "{projectRoot}/tsconfig.json",
+        "{projectRoot}/package.json"
+      ],
+      "outputs": ["{projectRoot}/dist"],
+      "cache": true
+    },
+    "dev": {
+      "command": "pnpm dev",
+      "options": {
+        "cwd": "dashboard"
+      }
+    }
+  }
+}

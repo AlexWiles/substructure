@@ -67,7 +67,8 @@ async fn main() -> anyhow::Result<()> {
             let admin_routes = transport::admin_http::router(rt.clone());
             let client_routes = transport::client_http::router(rt);
             let worker_routes = transport::worker_http::router(adapter);
-            let server = SubstructureServer::new(vec![admin_routes, client_routes, worker_routes]);
+            let dashboard_routes = transport::dashboard::router();
+            let server = SubstructureServer::new(vec![admin_routes, client_routes, worker_routes, dashboard_routes]);
 
             let addr = format!("{host}:{port}");
             tracing::info!(%addr, "listening");

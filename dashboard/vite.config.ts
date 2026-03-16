@@ -9,7 +9,7 @@ import { nitro } from 'nitro/vite'
 
 const config = defineConfig({
   plugins: [
-    nitro({ rollupConfig: { external: [/^@sentry\//] } }),
+    nitro({ preset: 'static', rollupConfig: { external: [/^@sentry\//] } }),
     tsconfigPaths({ projects: ['./tsconfig.json'] }),
     tailwindcss(),
     tanstackStart(),
