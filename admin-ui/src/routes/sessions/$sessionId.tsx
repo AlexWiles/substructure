@@ -1,6 +1,8 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
+import { useEffect, useRef, useCallback } from 'react'
 import type { DerivedState } from '@substructure.ai/client/types'
 import { EventList } from '#/components/EventList.tsx'
+import { KeyValue, Panel } from '#/components/ui.tsx'
 import { useSessionEvents } from '#/hooks/useSessionEvents.ts'
 import { formatDuration } from '#/components/events/format.ts'
 
@@ -31,36 +33,56 @@ function SessionOverview({ sessionId, derived, firstEventAt, lastEventAt }: {
     : null
 
   return (
-    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-4 py-3">
-      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-        <dt className="text-[var(--color-text-secondary)]">Session ID</dt>
-        <dd className="font-mono text-xs text-[var(--color-text)]">{sessionId}</dd>
-        <dt className="text-[var(--color-text-secondary)]">Status</dt>
-        <dd className="text-[var(--color-text)]">{derived ? formatStatus(derived.status) : '-'}</dd>
-        <dt className="text-[var(--color-text-secondary)]">Agent</dt>
-        <dd className="text-[var(--color-text)]">{derived?.agent_id ?? '-'}</dd>
-        <dt className="text-[var(--color-text-secondary)]">Cost</dt>
-        <dd className="text-[var(--color-text)]">{derived ? formatTotalCost(derived) : '-'}</dd>
-        {firstEventAt && <>
-          <dt className="text-[var(--color-text-secondary)]">First Event</dt>
-          <dd className="font-mono text-xs text-[var(--color-text)]">{new Date(firstEventAt).toLocaleString()}</dd>
-        </>}
-        {lastEventAt && <>
-          <dt className="text-[var(--color-text-secondary)]">Last Event</dt>
-          <dd className="font-mono text-xs text-[var(--color-text)]">{new Date(lastEventAt).toLocaleString()}</dd>
-        </>}
-        {durationMs != null && <>
-          <dt className="text-[var(--color-text-secondary)]">Duration</dt>
-          <dd className="font-mono text-xs text-[var(--color-text)]">{formatDuration(0, durationMs)}</dd>
-        </>}
-      </dl>
-    </div>
+    <Panel>
+      <KeyValue label="Session" value={sessionId} />
+      <KeyValue label="Status" value={derived ? formatStatus(derived.status) : '-'} />
+      <KeyValue label="Agent" value={derived?.agent_id ?? '-'} />
+      <KeyValue label="Cost" value={derived ? formatTotalCost(derived) : '-'} />
+      {firstEventAt && <KeyValue label="Started" value={new Date(firstEventAt).toLocaleString()} />}
+      {durationMs != null && <KeyValue label="Duration" value={formatDuration(0, durationMs)} />}
+    </Panel>
   )
+}
+
+function useAutoScroll(itemCount: number) {
+  const bottomRef = useRef<HTMLDivElement>(null)
+  const stickRef = useRef(true)
+  const readyRef = useRef(false)
+  const prevCountRef = useRef(itemCount)
+
+  // Wait 2s after mount before enabling, so the historical replay settles
+  useEffect(() => {
+    const id = setTimeout(() => { readyRef.current = true }, 2000)
+    return () => { clearTimeout(id); readyRef.current = false }
+  }, [])
+
+  const onScroll = useCallback(() => {
+    const el = document.documentElement
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 64
+    stickRef.current = atBottom
+  }, [])
+
+  useEffect(() => {
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => window.removeEventListener('scroll', onScroll)
+  }, [onScroll])
+
+  useEffect(() => {
+    const prev = prevCountRef.current
+    prevCountRef.current = itemCount
+
+    if (readyRef.current && itemCount > prev && stickRef.current) {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [itemCount])
+
+  return bottomRef
 }
 
 function SessionDetailPage() {
   const { sessionId } = Route.useParams()
-  const { items, isLoading, derived, firstEventAt, lastEventAt } = useSessionEvents(sessionId)
+  const { items, isLoading, isStreaming, derived, firstEventAt, lastEventAt } = useSessionEvents(sessionId)
+  const bottomRef = useAutoScroll(items.length)
 
   return (
     <main className="mx-auto max-w-5xl px-4 pb-8 pt-8">
@@ -81,6 +103,7 @@ function SessionDetailPage() {
       )}
 
       {items.length > 0 && <EventList items={items} />}
+      <div ref={bottomRef} />
     </main>
   )
 }

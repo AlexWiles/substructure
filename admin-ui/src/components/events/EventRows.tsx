@@ -40,7 +40,7 @@ function eventIcon(type: EventPayload['type']): React.ReactNode {
 
 function Timestamp({ iso }: { iso: string }) {
   return (
-    <span className="text-xs text-[var(--color-text-secondary)] whitespace-nowrap">
+    <span className="font-mono text-xs text-[var(--color-text-secondary)] whitespace-nowrap">
       {formatTime(iso)}
     </span>
   )

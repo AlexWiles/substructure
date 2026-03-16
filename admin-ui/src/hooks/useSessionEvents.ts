@@ -66,6 +66,7 @@ export function useSessionEvents(sessionId: string) {
     items: state.events.items,
     isDone: state.events.isDone,
     isLoading: state.status === 'loading',
+    isStreaming: state.status === 'streaming',
     error: state.error,
     derived: state.events.derived,
     firstEventAt: state.events.firstEventAt,

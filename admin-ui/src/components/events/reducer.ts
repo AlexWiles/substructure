@@ -132,6 +132,8 @@ export function applyEvent(state: SessionEventState, event: Event): SessionEvent
           seen,
           isDone,
           derived,
+          firstEventAt,
+          lastEventAt,
           rootSessionId,
         }
       }

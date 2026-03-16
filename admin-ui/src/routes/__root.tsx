@@ -2,6 +2,7 @@ import {
   HeadContent,
   Outlet,
   Scripts,
+  ScrollRestoration,
   createRootRouteWithContext,
 } from '@tanstack/react-router'
 import { TanStackRouterDevtoolsPanel } from '@tanstack/react-router-devtools'
@@ -42,6 +43,7 @@ function RootLayout() {
       </head>
       <body className="font-sans antialiased">
         <TanStackQueryProvider>
+          <ScrollRestoration />
           <Header />
           <Outlet />
           <TanStackDevtools
