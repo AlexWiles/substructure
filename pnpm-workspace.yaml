@@ -1,0 +1,5 @@
+packages:
+  - sdks/typescript
+  - packages/*
+  - dashboard
+  - examples

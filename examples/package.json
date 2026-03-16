@@ -1,0 +1,8 @@
+{
+  "name": "@substructure.ai/examples",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@substructure.ai/sdk": "workspace:*"
+  }
+}

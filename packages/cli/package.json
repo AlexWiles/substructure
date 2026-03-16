@@ -1,0 +1,23 @@
+{
+  "name": "@substructure.ai/cli",
+  "version": "0.1.0",
+  "description": "CLI for Substructure",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "substructure": "./bin/substructure.js"
+  },
+  "main": "./src/index.js",
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ],
+  "optionalDependencies": {
+    "@substructure.ai/cli-darwin-arm64": "0.1.0",
+    "@substructure.ai/cli-darwin-x64": "0.1.0",
+    "@substructure.ai/cli-linux-arm64": "0.1.0",
+    "@substructure.ai/cli-linux-x64": "0.1.0",
+    "@substructure.ai/cli-win32-x64": "0.1.0"
+  }
+}

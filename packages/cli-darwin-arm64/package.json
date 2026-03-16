@@ -1,0 +1,10 @@
+{
+  "name": "@substructure.ai/cli-darwin-arm64",
+  "version": "0.1.0",
+  "description": "Substructure CLI binary for macOS ARM64",
+  "license": "MIT",
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "files": ["bin", "README.md"],
+  "preferUnplugged": true
+}
