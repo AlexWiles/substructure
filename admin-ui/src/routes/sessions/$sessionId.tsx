@@ -1,8 +1,8 @@
-import { createFileRoute, Link } from '@tanstack/react-router'
+import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useRef, useCallback } from 'react'
 import type { DerivedState } from '@substructure.ai/client/types'
 import { EventList } from '#/components/EventList.tsx'
-import { KeyValue, Panel } from '#/components/ui.tsx'
+import { Page, Breadcrumbs, KeyValue, Panel, SectionLabel } from '#/components/ui.tsx'
 import { useSessionEvents } from '#/hooks/useSessionEvents.ts'
 import { formatDuration } from '#/components/events/format.ts'
 
@@ -22,8 +22,9 @@ function formatTotalCost(derived: DerivedState): string {
   return `$${own + sub}`
 }
 
-function SessionOverview({ sessionId, derived, firstEventAt, lastEventAt }: {
+function SessionOverview({ sessionId, tenantId, derived, firstEventAt, lastEventAt }: {
   sessionId: string
+  tenantId?: string
   derived?: DerivedState
   firstEventAt?: string
   lastEventAt?: string
@@ -35,6 +36,7 @@ function SessionOverview({ sessionId, derived, firstEventAt, lastEventAt }: {
   return (
     <Panel>
       <KeyValue label="Session" value={sessionId} />
+      {tenantId && <KeyValue label="Tenant" value={tenantId} />}
       <KeyValue label="Status" value={derived ? formatStatus(derived.status) : '-'} />
       <KeyValue label="Agent" value={derived?.agent_id ?? '-'} />
       <KeyValue label="Cost" value={derived ? formatTotalCost(derived) : '-'} />
@@ -81,29 +83,36 @@ function useAutoScroll(itemCount: number) {
 
 function SessionDetailPage() {
   const { sessionId } = Route.useParams()
-  const { items, isLoading, isStreaming, derived, firstEventAt, lastEventAt } = useSessionEvents(sessionId)
+  const { items, isLoading, isStreaming, derived, tenantId, firstEventAt, lastEventAt } = useSessionEvents(sessionId)
   const bottomRef = useAutoScroll(items.length)
 
+  if (items.length === 0) {
+    return (
+      <Page>
+        <Breadcrumbs crumbs={[
+          { label: 'sessions', to: '/sessions' },
+          { label: sessionId, to: '/sessions/$sessionId', params: { sessionId } },
+        ]} />
+        <p className="font-mono text-xs text-[var(--color-text-secondary)]">
+          {isLoading ? 'Loading...' : 'No events yet.'}
+        </p>
+      </Page>
+    )
+  }
+
   return (
-    <main className="mx-auto max-w-5xl px-4 pb-8 pt-8">
-      <div className="mb-6">
-        <Link to="/sessions" className="text-sm">
-          &larr; All Sessions
-        </Link>
-      </div>
+    <Page>
+      <Breadcrumbs crumbs={[
+          { label: 'sessions', to: '/sessions' },
+          { label: sessionId, to: '/sessions/$sessionId', params: { sessionId } },
+        ]} />
 
-      <h2 className="mb-3 text-lg font-semibold">Overview</h2>
-      <SessionOverview sessionId={sessionId} derived={derived} firstEventAt={firstEventAt} lastEventAt={lastEventAt} />
+      <SectionLabel>Overview</SectionLabel>
+      <SessionOverview sessionId={sessionId} tenantId={tenantId} derived={derived} firstEventAt={firstEventAt} lastEventAt={lastEventAt} />
 
-      <h2 className="mb-3 mt-6 text-lg font-semibold">Events</h2>
-      {isLoading && <p className="text-[var(--color-text-secondary)]">Loading events...</p>}
-
-      {!isLoading && items.length === 0 && (
-        <p className="text-[var(--color-text-secondary)]">No events yet.</p>
-      )}
-
-      {items.length > 0 && <EventList items={items} />}
+      <div className="mt-6"><SectionLabel>Events</SectionLabel></div>
+      <EventList items={items} />
       <div ref={bottomRef} />
-    </main>
+    </Page>
   )
 }

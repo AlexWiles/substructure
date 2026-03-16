@@ -69,6 +69,7 @@ export function useSessionEvents(sessionId: string) {
     isStreaming: state.status === 'streaming',
     error: state.error,
     derived: state.events.derived,
+    tenantId: state.events.tenantId,
     firstEventAt: state.events.firstEventAt,
     lastEventAt: state.events.lastEventAt,
   }

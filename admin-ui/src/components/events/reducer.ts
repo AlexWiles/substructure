@@ -27,6 +27,7 @@ export interface SessionEventState {
   isDone: boolean
   /** Latest derived state from the most recent event. */
   derived?: DerivedState
+  tenantId?: string
   firstEventAt?: string
   lastEventAt?: string
   /** The root session's aggregate_id (set from the first event). */
@@ -77,6 +78,7 @@ export function applyEvent(state: SessionEventState, event: Event): SessionEvent
   const { type } = event.payload
   const isDone = state.isDone || type === 'session.done'
   const derived = event.derived ?? state.derived
+  const tenantId = state.tenantId ?? event.tenant_id
   const firstEventAt = state.firstEventAt ?? event.occurred_at
   const lastEventAt = event.occurred_at
   const rootSessionId = state.rootSessionId ?? event.aggregate_id
@@ -107,6 +109,7 @@ export function applyEvent(state: SessionEventState, event: Event): SessionEvent
         seen,
         isDone,
         derived,
+        tenantId,
         firstEventAt,
         lastEventAt,
         rootSessionId,
@@ -132,7 +135,8 @@ export function applyEvent(state: SessionEventState, event: Event): SessionEvent
           seen,
           isDone,
           derived,
-          firstEventAt,
+          tenantId,
+        firstEventAt,
           lastEventAt,
           rootSessionId,
         }

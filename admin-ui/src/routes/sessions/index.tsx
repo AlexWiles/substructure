@@ -1,8 +1,7 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useInfiniteQuery } from '@tanstack/react-query'
 import { adminClient } from '#/lib/api.ts'
-import { StatusBadge } from '#/components/StatusBadge.tsx'
-import { Table, THead, TBody, Th, Td, Button } from '#/components/ui.tsx'
+import { Page, Breadcrumbs, Table, THead, TBody, Th, Td, Button } from '#/components/ui.tsx'
 
 import type { SessionListItem } from '#/lib/api.ts'
 
@@ -22,7 +21,7 @@ function SessionsPage() {
       adminClient.listSessions({
         top_level: true,
         sort: 'last_event_desc',
-        limit: 50,
+        limit: 20,
         cursor: pageParam,
       }),
     initialPageParam: undefined as string | undefined,
@@ -34,8 +33,10 @@ function SessionsPage() {
   const sessions = data?.pages.flatMap((p) => p.items) ?? []
 
   return (
-    <main className="mx-auto max-w-5xl px-4 pb-8 pt-8">
-      <h1 className="mb-4 text-lg font-semibold">Sessions</h1>
+    <Page>
+      <Breadcrumbs crumbs={[
+        { label: 'sessions', to: '/sessions' },
+      ]} />
 
       {isLoading && <p className="text-[var(--color-text-secondary)]">Loading sessions...</p>}
       {error && (
@@ -53,7 +54,6 @@ function SessionsPage() {
           <THead>
             <Th>Session ID</Th>
             <Th>Agent</Th>
-            <Th>Status</Th>
             <Th>Tenant</Th>
             <Th align="right">Cost</Th>
             <Th>Last Activity</Th>
@@ -74,7 +74,6 @@ function SessionsPage() {
                   </Link>
                 </Td>
                 <Td>{item.state.agent_id ?? '-'}</Td>
-                <Td><StatusBadge status={item.state.status} /></Td>
                 <Td secondary>{item.summary.tenant_id}</Td>
                 <Td secondary align="right">
                   ${(parseFloat(item.state.cost || '0') + parseFloat(item.state.sub_agent_cost || '0')).toFixed(6)}
@@ -97,6 +96,6 @@ function SessionsPage() {
           </Button>
         </div>
       )}
-    </main>
+    </Page>
   )
 }

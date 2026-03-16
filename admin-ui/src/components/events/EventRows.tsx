@@ -1,6 +1,7 @@
 import { memo } from 'react'
 import { Loader2, CheckCircle2, XCircle, Circle, MessageSquare, Play, Square, Zap, Bot, Wrench, BrainCircuit, RotateCcw } from 'lucide-react'
 import type { Event, EventPayload, DerivedState } from '@substructure.ai/client/types'
+import { Panel } from '#/components/ui.tsx'
 import { useSessionEvents } from '#/hooks/useSessionEvents.ts'
 import { formatTime, formatDuration } from './format.ts'
 import { isGroup } from './grouping.ts'
@@ -86,8 +87,8 @@ export const EventRow = memo(function EventRow({ event, depth = 0 }: { event: Ev
       summary={eventSummary(event.payload)}
       trailing={<Timestamp iso={event.occurred_at} />}
     >
-      <div className="bg-[var(--color-bg)] px-4 py-2 mx-2 mb-1" style={{ marginLeft: `${32 + depth * 20}px` }}>
-        <EventBody event={event} />
+      <div className="mx-2 mb-1" style={{ marginLeft: `${32 + depth * 20}px` }}>
+        <Panel><div className="px-3 py-1"><EventBody event={event} /></div></Panel>
       </div>
     </TreeRow>
   )
