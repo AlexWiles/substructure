@@ -15,5 +15,9 @@ pub fn router(runtime: Arc<Runtime>) -> Router {
             "/admin/sessions/{session_id}/events",
             get(routes::get_session_events),
         )
+        .route(
+            "/admin/sessions/{session_id}/events/stream",
+            get(routes::stream_session_events),
+        )
         .with_state(runtime)
 }

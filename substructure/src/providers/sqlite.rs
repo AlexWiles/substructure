@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
-use sea_query::{Expr, ExprTrait, Iden, Order, Query, SqliteQueryBuilder};
+use sea_query::{Expr, ExprTrait, Func, Iden, Order, Query, SqliteQueryBuilder};
 use uuid::Uuid;
 
 use std::sync::Arc as StdArc;
@@ -467,6 +467,156 @@ impl EventStore for SqliteStore {
 
     fn subscribe(&self) -> broadcast::Receiver<StdArc<Vec<Event>>> {
         self.tx.subscribe()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SessionIndex
+// ---------------------------------------------------------------------------
+
+use crate::runtime::aggregate::Aggregate;
+use crate::runtime::session::state::SessionState;
+use crate::runtime::session_index::{
+    SessionCursor, SessionFilter, SessionIndex, SessionItem, SessionPage,
+};
+
+#[derive(Iden)]
+struct JsonArrayLength;
+
+#[derive(Iden)]
+enum SnapshotsData {
+    #[iden = "data"]
+    Data,
+}
+
+fn do_list_sessions(
+    conn: &Connection,
+    filter: &SessionFilter,
+) -> Result<SessionPage, StoreError> {
+    let fetch_limit = filter.limit.unwrap_or(50);
+
+    let mut q = Query::select()
+        .columns([
+            Snapshots::AggregateId,
+            Snapshots::AggregateType,
+            Snapshots::TenantId,
+            Snapshots::WakeAt,
+            Snapshots::StreamVersion,
+            Snapshots::FirstEventAt,
+            Snapshots::LastEventAt,
+        ])
+        .column(SnapshotsData::Data)
+        .from(Snapshots::Table)
+        .and_where(Expr::col(Snapshots::AggregateType).eq("session"))
+        .apply_if(filter.tenant_id.as_ref(), |q, v| {
+            q.and_where(Expr::col(Snapshots::TenantId).eq(v));
+        })
+        .take();
+
+    if filter.top_level {
+        let len_expr = Expr::expr(
+            Func::cust(JsonArrayLength)
+                .arg(Expr::col(SnapshotsData::Data))
+                .arg(Expr::val("$.state.ancestry")),
+        );
+        q.and_where(len_expr.eq(0).or(Expr::expr(
+            Func::cust(JsonArrayLength)
+                .arg(Expr::col(SnapshotsData::Data))
+                .arg(Expr::val("$.state.ancestry")),
+        ).is_null()));
+    }
+
+    if let Some(ref cursor) = filter.cursor {
+        let cursor_dt = cursor.last_event_at.to_rfc3339();
+        let cursor_id = cursor.aggregate_id.to_string();
+        q.and_where(Expr::cust_with_values(
+            "(last_event_at < ? OR (last_event_at = ? AND aggregate_id < ?))",
+            [cursor_dt.clone(), cursor_dt, cursor_id],
+        ));
+    }
+
+    let (order_col, order_dir) = match filter.sort {
+        AggregateSort::LastEventDesc => (Snapshots::LastEventAt, Order::Desc),
+        AggregateSort::FirstEventAsc => (Snapshots::FirstEventAt, Order::Asc),
+        AggregateSort::FirstEventDesc => (Snapshots::FirstEventAt, Order::Desc),
+        AggregateSort::WakeAtAsc => (Snapshots::WakeAt, Order::Asc),
+    };
+    q.order_by(order_col, order_dir);
+    q.order_by(Snapshots::AggregateId, Order::Desc);
+    q.limit((fetch_limit + 1) as u64);
+
+    let (sql, values) = q.build(SqliteQueryBuilder);
+    let params = sea_params(values);
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| StoreError::Internal(e.to_string()))?;
+
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, u64>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        })
+        .map_err(|e| StoreError::Internal(e.to_string()))?;
+
+    let mut items = Vec::new();
+    for row in rows {
+        let (aid, agg_type, tenant, wake_at_str, version, first, last, data_str) =
+            row.map_err(|e| StoreError::Internal(e.to_string()))?;
+        let aggregate_id: Uuid = aid
+            .parse()
+            .map_err(|e: uuid::Error| StoreError::Internal(format!("bad aggregate_id: {e}")))?;
+        let agg: Aggregate<SessionState> = serde_json::from_str(&data_str)
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
+
+        items.push(SessionItem {
+            summary: AggregateSummary {
+                aggregate_id,
+                aggregate_type: agg_type,
+                tenant_id: tenant,
+                wake_at: wake_at_str.as_deref().and_then(parse_dt),
+                stream_version: version,
+                first_event_at: first.as_deref().and_then(parse_dt),
+                last_event_at: last.as_deref().and_then(parse_dt),
+            },
+            state: agg.state,
+        });
+    }
+
+    let next_cursor = if items.len() > fetch_limit {
+        items.pop();
+        let last = &items[items.len() - 1];
+        last.summary.last_event_at.map(|dt| SessionCursor {
+            last_event_at: dt,
+            aggregate_id: last.summary.aggregate_id,
+        })
+    } else {
+        None
+    };
+
+    Ok(SessionPage { items, next_cursor })
+}
+
+#[async_trait]
+impl SessionIndex for SqliteStore {
+    async fn list_sessions(&self, filter: &SessionFilter) -> Result<SessionPage, StoreError> {
+        let filter = filter.clone();
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = open_conn_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            do_list_sessions(&conn, &filter)
+        })
+        .await
+        .map_err(spawn_err)?
     }
 }
 

@@ -1,4 +1,7 @@
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 use uuid::Uuid;
 
 use super::decision::{DecisionTrigger, ToolResult, WorkerAction};
@@ -75,6 +78,8 @@ pub enum CommandPayload {
         agent_id: String,
         turn_id: String,
         artifacts: Vec<Artifact>,
+        cost: Decimal,
+        token_usage: BTreeMap<String, u64>,
     },
     Interrupt {
         interrupt_id: String,
@@ -449,21 +454,30 @@ impl SessionState {
                 agent_id,
                 turn_id,
                 artifacts,
+                cost,
+                token_usage,
             } => {
                 let key = session_id.to_string();
                 // Only fire if we know about this sub-agent
                 if self.sub_agent_calls.contains_key(&key) {
-                    Ok(vec![EventPayload::WorkerDecisionRequested(
-                        WorkerDecisionRequested {
-                            decision_id: new_call_id(),
-                            trigger: DecisionTrigger::SubAgentTurnComplete {
-                                session_id,
-                                agent_id,
-                                turn_id,
-                                artifacts,
+                    Ok(vec![
+                        EventPayload::SubAgentTurnCompleted(SubAgentTurnCompleted {
+                            session_id,
+                            cost,
+                            token_usage,
+                        }),
+                        EventPayload::WorkerDecisionRequested(
+                            WorkerDecisionRequested {
+                                decision_id: new_call_id(),
+                                trigger: DecisionTrigger::SubAgentTurnComplete {
+                                    session_id,
+                                    agent_id,
+                                    turn_id,
+                                    artifacts,
+                                },
                             },
-                        },
-                    )])
+                        ),
+                    ])
                 } else {
                     Ok(vec![])
                 }
@@ -626,12 +640,16 @@ impl SessionState {
             CommandPayload::CancelSession => Ok(vec![EventPayload::SessionCancelled]),
 
             CommandPayload::MarkDone { artifacts } => {
-                let mut events = vec![EventPayload::SessionDone(SessionDone { artifacts })];
+                let mut events = Vec::new();
                 if let Some(turn_id) = &self.turn_id {
                     events.push(EventPayload::TurnCompleted(TurnCompleted {
                         turn_id: turn_id.clone(),
+                        artifacts,
+                        turn_cost: self.turn_cost,
+                        turn_token_usage: self.turn_token_usage.clone(),
                     }));
                 }
+                events.push(EventPayload::SessionDone(SessionDone {}));
                 Ok(events)
             }
 

@@ -1,7 +1,6 @@
 import { Agent } from "../src/agent";
 import { Worker } from "../src/worker";
-import { Client } from "../src/client";
-import type { WorkerDecisionRequestWire } from "../src/types";
+import { UserClient } from "../src/client";
 
 const RUNTIME_URL = "http://localhost:8080";
 const WORKER_PORT = 4444;
@@ -13,7 +12,7 @@ const mathAgent = new Agent({
   id: "math-agent",
   systemPrompt: "You are a math assistant. Use tools to compute results. Be concise.",
   llm: {
-    model: "openrouter/hunter-alpha",
+    model: "minimax/minimax-m2.5",
     client: "openrouter",
     retry: { timeout_secs: 120, max_retries: 3, backoff_base_secs: 1, backoff_max_secs: 10 },
   },
@@ -62,23 +61,13 @@ weatherAgent.subAgent(mathAgent, "A math assistant that can add numbers. Send it
 
 const worker = Worker.from(weatherAgent, mathAgent);
 
-const server = Bun.serve({
-  port: WORKER_PORT,
-  async fetch(req) {
-    const decision = (await req.json()) as WorkerDecisionRequestWire;
-    const submit = await worker.handleDecision(decision);
-    return Response.json(submit);
-  },
-});
-
+const server = Bun.serve({ port: WORKER_PORT, fetch: worker.fetchHandler() });
 console.log(`Worker listening on port ${WORKER_PORT}`);
 
-const client = new Client({ baseUrl: RUNTIME_URL });
-const res = await client.register({
-  tenant_id: TENANT_ID,
-  agent_ids: worker.agentIds,
-  transport_type: "http",
-  config: { endpoint_url: `http://localhost:${WORKER_PORT}` },
+const res = await worker.register({
+  runtimeUrl: RUNTIME_URL,
+  tenantId: TENANT_ID,
+  endpointUrl: `http://localhost:${WORKER_PORT}`,
 });
 
 if (!res.ok) {
@@ -92,7 +81,9 @@ console.log(`Registered agents: ${worker.agentIds.join(", ")}`);
 
 console.log("\nAsking weather agent to sum temperatures...\n");
 
-for await (const event of client.sendMessage({
+const userClient = new UserClient({ baseUrl: RUNTIME_URL });
+
+for await (const event of userClient.sendMessage({
   agent_id: "weather-agent",
   message: "What is the sum of the current temperatures in San Francisco and New York?",
 })) {

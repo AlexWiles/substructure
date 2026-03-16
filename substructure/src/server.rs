@@ -21,6 +21,7 @@ impl SubstructureServer {
     pub async fn serve(self, listener: TcpListener) -> anyhow::Result<()> {
         let app = self
             .router
+            .layer(tower_http::cors::CorsLayer::permissive())
             .layer(tower_http::trace::TraceLayer::new_for_http());
         axum::serve(listener, app).await?;
         Ok(())

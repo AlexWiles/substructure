@@ -3,7 +3,9 @@ import type {
   WorkerAction,
   SubmitRequest,
   SpanContext,
+  RegisterResponse,
 } from "./types";
+import { WorkerClient } from "./worker-client";
 
 export interface DecisionResult {
   actions: WorkerAction[];
@@ -37,6 +39,35 @@ export class Worker {
 
   static from(...agents: HasHandler[]): Worker {
     return new Worker(agents);
+  }
+
+  /**
+   * Returns a fetch-compatible handler: (Request) => Promise<Response>.
+   * Works with Bun.serve, Deno.serve, Cloudflare Workers, or any Node adapter.
+   */
+  fetchHandler(): (req: Request) => Promise<Response> {
+    return async (req: Request) => {
+      const decision = (await req.json()) as WorkerDecisionRequestWire;
+      const submit = await this.handleDecision(decision);
+      return Response.json(submit);
+    };
+  }
+
+  /**
+   * Registers this worker's agents with the runtime.
+   */
+  async register(options: {
+    runtimeUrl: string;
+    tenantId: string;
+    endpointUrl: string;
+  }): Promise<RegisterResponse> {
+    const client = new WorkerClient({ baseUrl: options.runtimeUrl });
+    return client.register({
+      tenant_id: options.tenantId,
+      agent_ids: this.agentIds,
+      transport_type: "http",
+      config: { endpoint_url: options.endpointUrl },
+    });
   }
 
   async handleDecision(request: WorkerDecisionRequestWire): Promise<SubmitRequest> {

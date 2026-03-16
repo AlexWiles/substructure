@@ -140,6 +140,18 @@ pub struct DerivedState {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub worker_decisions: HashMap<String, WorkerDecisionState>,
     pub turn_id: Option<String>,
+    #[serde(default)]
+    pub cost: Decimal,
+    #[serde(default)]
+    pub sub_agent_cost: Decimal,
+    #[serde(default)]
+    pub turn_cost: Decimal,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub turn_token_usage: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub token_usage: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sub_agent_token_usage: BTreeMap<String, u64>,
 }
 
 pub(super) fn new_call_id() -> String {
@@ -157,6 +169,22 @@ pub struct SessionState {
     /// Accumulated cost across all LLM calls in this session.
     #[serde(default)]
     pub cost: Decimal,
+
+    /// Accumulated cost from sub-agent sessions.
+    #[serde(default)]
+    pub sub_agent_cost: Decimal,
+
+    /// Cost accumulated in the current turn only.
+    #[serde(default)]
+    pub turn_cost: Decimal,
+
+    /// Token usage accumulated in the current turn only.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub turn_token_usage: BTreeMap<String, u64>,
+
+    /// Token usage accumulated from sub-agent sessions.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sub_agent_token_usage: BTreeMap<String, u64>,
 
     #[serde(default)]
     pub worker_state: Vec<u8>,
@@ -188,6 +216,10 @@ impl SessionState {
             auth: None,
             token_usage: BTreeMap::new(),
             cost: Decimal::ZERO,
+            sub_agent_cost: Decimal::ZERO,
+            turn_cost: Decimal::ZERO,
+            turn_token_usage: BTreeMap::new(),
+            sub_agent_token_usage: BTreeMap::new(),
             worker_state: Vec::new(),
             ancestry: Vec::new(),
             artifacts: vec![],
@@ -236,8 +268,10 @@ impl SessionState {
             }
             EventPayload::LlmCallCompleted(payload) => {
                 self.track_usage(&payload.response.usage);
+                self.track_turn_usage(&payload.response.usage);
                 if let Some(c) = payload.response.cost {
                     self.cost += c;
+                    self.turn_cost += c;
                 }
                 if let Some(call) = self.llm_calls.get_mut(&payload.call_id) {
                     call.tracking.complete();
@@ -363,19 +397,31 @@ impl SessionState {
             EventPayload::SessionCancelled => {
                 self.status = SessionStatus::Done;
             }
-            EventPayload::SessionDone(payload) => {
-                self.artifacts = payload.artifacts.clone();
+            EventPayload::SessionDone(_) => {
                 if !self.ancestry.is_empty() {
                     self.status = SessionStatus::Done;
                 } else {
                     self.status = SessionStatus::Idle;
                 }
             }
+            EventPayload::SubAgentTurnCompleted(payload) => {
+                self.sub_agent_cost += payload.cost;
+                self.turn_cost += payload.cost;
+                for (k, v) in &payload.token_usage {
+                    *self.sub_agent_token_usage.entry(k.clone()).or_insert(0) += v;
+                    *self.turn_token_usage.entry(k.clone()).or_insert(0) += v;
+                }
+            }
             EventPayload::TurnStarted(p) => {
                 self.turn_id = Some(p.turn_id.clone());
+                self.turn_cost = Decimal::ZERO;
+                self.turn_token_usage.clear();
             }
-            EventPayload::TurnCompleted(_) => {
+            EventPayload::TurnCompleted(payload) => {
+                self.artifacts = payload.artifacts.clone();
                 self.turn_id = None;
+                self.turn_cost = Decimal::ZERO;
+                self.turn_token_usage.clear();
             }
         }
     }
@@ -426,6 +472,12 @@ impl SessionState {
             sub_agent_calls: self.sub_agent_calls.clone(),
             worker_decisions: self.worker_decisions.clone(),
             turn_id: self.turn_id.clone(),
+            cost: self.cost,
+            sub_agent_cost: self.sub_agent_cost,
+            turn_cost: self.turn_cost,
+            turn_token_usage: self.turn_token_usage.clone(),
+            token_usage: self.token_usage.clone(),
+            sub_agent_token_usage: self.sub_agent_token_usage.clone(),
         }
     }
 
@@ -437,6 +489,18 @@ impl SessionState {
         for (k, v) in obj {
             if let Some(n) = v.as_u64() {
                 *self.token_usage.entry(k.clone()).or_insert(0) += n;
+            }
+        }
+    }
+
+    fn track_turn_usage(&mut self, usage: &Option<serde_json::Value>) {
+        let obj = match usage.as_ref().and_then(|v| v.as_object()) {
+            Some(o) => o,
+            None => return,
+        };
+        for (k, v) in obj {
+            if let Some(n) = v.as_u64() {
+                *self.turn_token_usage.entry(k.clone()).or_insert(0) += n;
             }
         }
     }

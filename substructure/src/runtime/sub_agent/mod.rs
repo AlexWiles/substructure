@@ -98,6 +98,7 @@ impl EventHandler<SessionState> for SubAgentHandler {
 
             // Send message to another session
             EventPayload::SessionMessageRequested(req) => {
+                let turn_id = uuid::Uuid::now_v7().to_string();
                 let _ = execute::<SessionState>(
                     &*self.store,
                     ExecuteInput {
@@ -106,7 +107,7 @@ impl EventHandler<SessionState> for SubAgentHandler {
                         command: CommandPayload::SendMessage {
                             message: req.message.clone(),
                             stream: false,
-                            turn_id: None,
+                            turn_id: Some(turn_id),
                         },
                         span: event.span.child("send_session_message"),
                     },
@@ -134,8 +135,8 @@ impl EventHandler<SessionState> for SubAgentHandler {
                 .await;
             }
 
-            // Child session done → notify parent
-            EventPayload::SessionDone(done) => {
+            // Child turn completed → notify parent with cost and artifacts
+            EventPayload::TurnCompleted(tc) => {
                 let derived = match event.derived.as_ref() {
                     Some(d) => d,
                     None => return,
@@ -145,7 +146,6 @@ impl EventHandler<SessionState> for SubAgentHandler {
                     None => return, // root session, nothing to notify
                 };
                 let agent_id = derived.agent_id.clone().unwrap_or_default();
-                let turn_id = derived.turn_id.clone().unwrap_or_default();
 
                 let _ = execute::<SessionState>(
                     &*self.store,
@@ -155,8 +155,10 @@ impl EventHandler<SessionState> for SubAgentHandler {
                         command: CommandPayload::CompleteSubAgentTurn {
                             session_id: event.aggregate_id,
                             agent_id,
-                            turn_id,
-                            artifacts: done.artifacts.clone(),
+                            turn_id: tc.turn_id.clone(),
+                            artifacts: tc.artifacts.clone(),
+                            cost: tc.turn_cost,
+                            token_usage: tc.turn_token_usage.clone(),
                         },
                         span: event.span.child("sub_agent_turn_complete"),
                     },

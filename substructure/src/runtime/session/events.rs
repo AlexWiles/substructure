@@ -1,3 +1,6 @@
+use std::collections::BTreeMap;
+
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -49,6 +52,8 @@ pub enum EventPayload {
     ToolCallResolutionRequested(ToolCallResolutionRequested),
     #[serde(rename = "worker.state.updated")]
     WorkerStateUpdated(WorkerStateUpdated),
+    #[serde(rename = "sub_agent.turn_completed")]
+    SubAgentTurnCompleted(SubAgentTurnCompleted),
     #[serde(rename = "session.cancelled")]
     SessionCancelled,
     #[serde(rename = "session.done")]
@@ -68,11 +73,9 @@ pub struct SessionCreated {
     pub worker_retry: RetryPolicy,
 }
 
+/// Pure lifecycle marker — no data. Turn output lives in TurnCompleted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionDone {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifacts: Vec<Artifact>,
-}
+pub struct SessionDone {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Artifact {
@@ -244,4 +247,19 @@ pub struct TurnStarted {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnCompleted {
     pub turn_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<Artifact>,
+    #[serde(default)]
+    pub turn_cost: Decimal,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub turn_token_usage: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubAgentTurnCompleted {
+    pub session_id: Uuid,
+    #[serde(default)]
+    pub cost: Decimal,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub token_usage: BTreeMap<String, u64>,
 }

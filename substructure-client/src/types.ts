@@ -184,9 +184,9 @@ export interface SessionCreated {
   worker_retry: RetryPolicy;
 }
 
+/** Pure lifecycle marker — no data. Turn output lives in TurnCompleted. */
 export interface SessionDone {
   type: "session.done";
-  artifacts?: Artifact[];
 }
 
 export interface SessionCancelled {
@@ -264,6 +264,13 @@ export interface SubAgentErrored {
   retryable: boolean;
 }
 
+export interface SubAgentTurnCompleted {
+  type: "sub_agent.turn_completed";
+  session_id: Uuid;
+  cost: Decimal;
+  token_usage?: Record<string, number>;
+}
+
 export interface SessionInterrupted {
   type: "session.interrupted";
   interrupt_id: string;
@@ -324,6 +331,9 @@ export interface TurnStarted {
 export interface TurnCompleted {
   type: "turn.completed";
   turn_id: string;
+  artifacts?: Artifact[];
+  turn_cost?: Decimal;
+  turn_token_usage?: Record<string, number>;
 }
 
 // ── Event (tagged union) ────────────────────────────────────────────────────
@@ -340,6 +350,7 @@ export type EventPayload =
   | SubAgentRequested
   | SubAgentStarted
   | SubAgentErrored
+  | SubAgentTurnCompleted
   | SessionInterrupted
   | InterruptResumed
   | WorkerDecisionRequested
@@ -355,6 +366,18 @@ export type EventPayload =
 
 // ── Event Envelope ──────────────────────────────────────────────────────────
 
+export interface DerivedState {
+  status: SessionStatus;
+  agent_id?: string;
+  cost: Decimal;
+  sub_agent_cost: Decimal;
+  turn_cost: Decimal;
+  turn_token_usage?: Record<string, number>;
+  token_usage?: Record<string, number>;
+  sub_agent_token_usage?: Record<string, number>;
+  turn_id?: string;
+}
+
 export interface Event {
   id: Uuid;
   tenant_id: string;
@@ -364,7 +387,7 @@ export interface Event {
   span: SpanContext;
   occurred_at: DateTime;
   payload: EventPayload;
-  derived?: unknown;
+  derived?: DerivedState;
   metadata?: Record<string, string>;
   start_time: DateTime;
   end_time: DateTime;
@@ -423,6 +446,10 @@ export interface SessionState {
   auth?: ClientIdentity;
   token_usage: Record<string, number>;
   cost: Decimal;
+  sub_agent_cost: Decimal;
+  turn_cost: Decimal;
+  turn_token_usage?: Record<string, number>;
+  sub_agent_token_usage?: Record<string, number>;
   /** Base64-encoded opaque worker state */
   worker_state: string;
   ancestry?: Uuid[];

@@ -14,6 +14,7 @@ use sub_agent::SubAgentHandler;
 use retry::RetryPolicy;
 use session::command::{CommandPayload, SessionError};
 use session::state::SessionState;
+use session_index::{SessionFilter, SessionIndex, SessionPage};
 use span::SpanContext;
 use wake::spawn_wake_scheduler;
 use worker::spawn_worker_enqueue;
@@ -29,6 +30,7 @@ pub mod session;
 pub mod span;
 pub mod sub_agent;
 pub mod wake;
+pub mod session_index;
 pub mod worker;
 
 pub struct RuntimeConfig {
@@ -48,6 +50,7 @@ impl Default for RuntimeConfig {
 pub struct Runtime {
     store: Arc<dyn EventStore>,
     queue: Arc<dyn WorkerQueue>,
+    session_index: Arc<dyn SessionIndex>,
     handles: Vec<JoinHandle<()>>,
 }
 
@@ -189,30 +192,57 @@ impl Runtime {
         event_rx
     }
 
+    /// Subscribe to all events for a session (and descendants).
+    /// Never auto-closes — stays open until the receiver is dropped.
+    pub fn subscribe_session_admin(
+        &self,
+        session_id: Uuid,
+    ) -> mpsc::Receiver<event_store::Event> {
+        let mut rx = self.store.subscribe();
+        let (tx, event_rx) = mpsc::channel::<event_store::Event>(64);
+
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(batch) => {
+                        for event in batch.iter() {
+                            let is_self = event.aggregate_id == session_id;
+                            let is_descendant = !is_self
+                                && event.derived.as_ref().and_then(|d| {
+                                    serde_json::from_value::<session::state::DerivedState>(
+                                        d.clone(),
+                                    )
+                                    .ok()
+                                })
+                                .map_or(false, |d| d.ancestry.contains(&session_id));
+
+                            if !is_self && !is_descendant {
+                                continue;
+                            }
+                            if tx.send(event.clone()).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => return,
+                }
+            }
+        });
+
+        event_rx
+    }
+
     // ---- Admin / inspection methods ----
 
     pub async fn list_sessions(
         &self,
-        filter: &event_store::AggregateFilter,
-    ) -> Result<Vec<(event_store::AggregateSummary, SessionState)>, RuntimeError> {
-        let summaries = self
-            .store
-            .list_aggregates(filter)
+        filter: &SessionFilter,
+    ) -> Result<SessionPage, RuntimeError> {
+        self.session_index
+            .list_sessions(filter)
             .await
-            .map_err(|e| RuntimeError(e.to_string()))?;
-
-        let mut results = Vec::with_capacity(summaries.len());
-        for summary in &summaries {
-            let snapshot = self
-                .store
-                .load(summary.aggregate_id)
-                .await
-                .map_err(|e| RuntimeError(e.to_string()))?;
-            let state: SessionState = serde_json::from_value(snapshot.data)
-                .map_err(|e| RuntimeError(e.to_string()))?;
-            results.push((summary.clone(), state));
-        }
-        Ok(results)
+            .map_err(|e| RuntimeError(e.to_string()))
     }
 
     pub async fn get_session(
@@ -224,8 +254,10 @@ impl Runtime {
             .load(session_id)
             .await
             .map_err(|e| RuntimeError(e.to_string()))?;
-        let state: SessionState = serde_json::from_value(snapshot.data.clone())
-            .map_err(|e| RuntimeError(e.to_string()))?;
+        let agg: aggregate::Aggregate<SessionState> =
+            serde_json::from_value(snapshot.data.clone())
+                .map_err(|e| RuntimeError(e.to_string()))?;
+        let state = agg.state;
         Ok((snapshot, state))
     }
 
@@ -264,6 +296,7 @@ pub fn start(
     store: Arc<dyn EventStore>,
     llm_provider: Arc<dyn LlmProviderTrait>,
     worker_queue: Arc<dyn WorkerQueue>,
+    session_index: Arc<dyn SessionIndex>,
     config: RuntimeConfig,
 ) -> Arc<Runtime> {
     let llm_handler = Arc::new(LlmEventHandler::new(store.clone(), llm_provider));
@@ -280,6 +313,7 @@ pub fn start(
     Arc::new(Runtime {
         store,
         queue: worker_queue,
+        session_index,
         handles: vec![llm_handle, sub_agent_handle, worker_handle, wake_handle],
     })
 }
