@@ -11,9 +11,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use uuid::Uuid;
 
-use crate::runtime::event_store::{AggregateSort, EventFilter};
-use crate::runtime::session_index::{SessionCursor, SessionFilter};
-use crate::runtime::Runtime;
+use substructure_core::event_store::{AggregateSort, EventFilter};
+use substructure_core::session_index::{SessionCursor, SessionFilter};
+use substructure_core::Runtime;
 
 #[derive(Debug, Deserialize)]
 pub struct ListSessionsParams {

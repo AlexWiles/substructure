@@ -9,7 +9,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use uuid::Uuid;
 
-use crate::runtime::{Runtime, SendMessage};
+use substructure_core::{Runtime, SendMessage};
 
 use super::types::SendMessageRequest;
 

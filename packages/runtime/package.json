@@ -1,0 +1,30 @@
+{
+  "name": "@substructure.ai/runtime",
+  "version": "0.1.0",
+  "description": "In-process Substructure runtime for Node.js",
+  "license": "MIT",
+  "type": "module",
+  "main": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "napi": {
+    "binaryName": "substructure-napi",
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-unknown-linux-gnu",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "optionalDependencies": {
+    "@substructure.ai/runtime-darwin-arm64": "0.1.0",
+    "@substructure.ai/runtime-darwin-x64": "0.1.0",
+    "@substructure.ai/runtime-linux-arm64": "0.1.0",
+    "@substructure.ai/runtime-linux-x64": "0.1.0",
+    "@substructure.ai/runtime-win32-x64": "0.1.0"
+  }
+}

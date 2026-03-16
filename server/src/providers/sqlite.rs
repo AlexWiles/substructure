@@ -11,7 +11,7 @@ use std::sync::Arc as StdArc;
 
 use tokio::sync::broadcast;
 
-use crate::runtime::event_store::{
+use substructure_core::event_store::{
     AggregateFilter, AggregateSort, AggregateSummary, AppendInput, Event, EventFilter, EventStore,
     Snapshot, StoreError, Version,
 };
@@ -474,9 +474,9 @@ impl EventStore for SqliteStore {
 // SessionIndex
 // ---------------------------------------------------------------------------
 
-use crate::runtime::aggregate::Aggregate;
-use crate::runtime::session::state::SessionState;
-use crate::runtime::session_index::{
+use substructure_core::aggregate::Aggregate;
+use substructure_core::session::state::SessionState;
+use substructure_core::session_index::{
     SessionCursor, SessionFilter, SessionIndex, SessionItem, SessionPage,
 };
 
@@ -624,7 +624,7 @@ impl SessionIndex for SqliteStore {
 // PushRegistrationStore
 // ---------------------------------------------------------------------------
 
-use crate::runtime::worker::push::{PushRegistrationRecord, PushRegistrationStore};
+use substructure_core::worker::push::{PushRegistrationRecord, PushRegistrationStore};
 use std::collections::HashMap;
 
 #[async_trait]

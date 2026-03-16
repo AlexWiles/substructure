@@ -1,0 +1,20 @@
+[package]
+name = "substructure-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core runtime for Substructure — event-sourced agent orchestration"
+license = "MIT"
+
+[dependencies]
+async-trait = "0.1.89"
+base64 = "0.22"
+hex = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+rand = "0.9"
+rust_decimal = { version = "1.40.0", features = ["serde-with-str"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+thiserror = "2"
+tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["serde", "v7"] }

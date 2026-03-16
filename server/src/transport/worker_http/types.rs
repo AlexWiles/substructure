@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::runtime::session::decision::WorkerAction;
-use crate::runtime::serde_helpers::base64_bytes;
-use crate::runtime::span::SpanContext;
+use substructure_core::session::decision::WorkerAction;
+use substructure_core::serde_helpers::base64_bytes;
+use substructure_core::span::SpanContext;
 
 #[derive(Debug, Deserialize)]
 pub struct SubmitRequest {

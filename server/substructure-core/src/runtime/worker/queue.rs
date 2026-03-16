@@ -32,6 +32,7 @@ pub struct DequeueFilter {
     pub agent_ids: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
 pub struct SubmitDecision {
     pub session_id: Uuid,
     pub tenant_id: String,

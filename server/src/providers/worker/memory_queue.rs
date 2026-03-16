@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use async_trait::async_trait;
 use tokio::sync::{oneshot, Mutex};
 
-use crate::runtime::worker::{DequeueFilter, WorkerDecisionRequest, WorkerQueue};
+use substructure_core::worker::{DequeueFilter, WorkerDecisionRequest, WorkerQueue};
 
 struct Waiter {
     tenant_id: String,

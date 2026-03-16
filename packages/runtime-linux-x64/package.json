@@ -1,0 +1,10 @@
+{
+  "name": "@substructure.ai/runtime-linux-x64",
+  "version": "0.1.0",
+  "description": "Substructure runtime native addon for linux x64",
+  "license": "MIT",
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "files": ["substructure-napi.node", "README.md"],
+  "preferUnplugged": true
+}

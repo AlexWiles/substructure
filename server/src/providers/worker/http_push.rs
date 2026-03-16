@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
 
-use crate::runtime::worker::push::{PushError, PushResponse, PushTransport, TransportConstructor};
-use crate::runtime::worker::WorkerDecisionRequest;
+use substructure_core::worker::push::{PushError, PushResponse, PushTransport, TransportConstructor};
+use substructure_core::worker::WorkerDecisionRequest;
 use crate::transport::worker_http::types::SubmitRequest;
 
 pub struct HttpPushTransport {

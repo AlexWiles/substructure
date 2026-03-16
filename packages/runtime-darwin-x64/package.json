@@ -1,0 +1,10 @@
+{
+  "name": "@substructure.ai/runtime-darwin-x64",
+  "version": "0.1.0",
+  "description": "Substructure runtime native addon for darwin x64",
+  "license": "MIT",
+  "os": ["darwin"],
+  "cpu": ["x64"],
+  "files": ["substructure-napi.node", "README.md"],
+  "preferUnplugged": true
+}
