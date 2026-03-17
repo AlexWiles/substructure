@@ -15,11 +15,20 @@ export function resolve() {
   const pkg = PLATFORMS[key];
   if (!pkg) {
     throw new Error(
-      `Unsupported platform: ${key}. Substructure CLI supports: ${Object.keys(PLATFORMS).join(", ")}`
+      `Unsupported platform: ${key}. Supported: ${Object.keys(PLATFORMS).join(", ")}`
     );
   }
+
   const require = createRequire(import.meta.url);
-  const pkgJson = require.resolve(`${pkg}/package.json`);
   const binName = key.startsWith("win32") ? "substructure.exe" : "substructure";
-  return join(pkgJson, "..", "bin", binName);
+
+  try {
+    const pkgJson = require.resolve(`${pkg}/package.json`);
+    return join(pkgJson, "..", "bin", binName);
+  } catch {
+    throw new Error(
+      `Could not find package ${pkg}. Make sure it's installed.\n` +
+      `If you're developing locally, run the server directly with: cargo run -p substructure`
+    );
+  }
 }
