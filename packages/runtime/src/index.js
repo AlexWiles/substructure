@@ -1,6 +1,5 @@
 import { platform, arch } from "os";
 import { createRequire } from "module";
-import { join } from "path";
 
 const PLATFORMS = {
   "darwin-arm64": "@substructure.ai/runtime-darwin-arm64",
@@ -11,17 +10,72 @@ const PLATFORMS = {
 };
 
 function loadBinding() {
-  const key = `${platform()}-${arch()}`;
-  const pkg = PLATFORMS[key];
-  if (!pkg) {
-    throw new Error(
-      `Unsupported platform: ${key}. Substructure runtime supports: ${Object.keys(PLATFORMS).join(", ")}`
-    );
-  }
   const require = createRequire(import.meta.url);
-  return require(`${pkg}/substructure-napi.node`);
+  const key = `${platform()}-${arch()}`;
+  const localFile = `substructure-napi.${key}.node`;
+  const errors = [];
+
+  // Local build output first (development)
+  try {
+    return require(`./${localFile}`);
+  } catch (e) {
+    errors.push(e);
+  }
+
+  // Platform-specific npm package (production)
+  const pkg = PLATFORMS[key];
+  if (pkg) {
+    try {
+      return require(pkg);
+    } catch (e) {
+      errors.push(e);
+    }
+  }
+
+  throw new Error(
+    `Could not load substructure-napi for ${key}.\n` +
+    `Run "napi build --platform" or install the platform package.\n` +
+    errors.map((e) => e.message).join("\n"),
+  );
 }
 
 const binding = loadBinding();
+const NativeJsRuntime = binding.JsRuntime;
 
-export const { JsRuntime } = binding;
+export class JsRuntime {
+  constructor(options) {
+    this._native = new NativeJsRuntime(options);
+  }
+
+  registerWorker(tenantId, agentIds, callback) {
+    return this._native.registerWorker(tenantId, agentIds, callback);
+  }
+
+  async *sendMessage(sessionId, tenantId, agentId, content) {
+    let resolve;
+    let done = false;
+    const buffer = [];
+
+    const finished = this._native.sendMessage(
+      sessionId, tenantId, agentId, content,
+      (json) => {
+        buffer.push(json);
+        resolve?.();
+      },
+    ).then(() => { done = true; resolve?.(); });
+
+    while (!done || buffer.length > 0) {
+      if (buffer.length > 0) {
+        yield buffer.shift();
+      } else {
+        await new Promise((r) => { resolve = r; });
+      }
+    }
+
+    await finished;
+  }
+
+  shutdown() {
+    return this._native.shutdown();
+  }
+}

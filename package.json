@@ -12,6 +12,7 @@
     "test": "nx run-many -t test"
   },
   "devDependencies": {
+    "@napi-rs/cli": "^3.5.1",
     "nx": "latest"
   }
 }

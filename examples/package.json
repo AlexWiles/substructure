@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@substructure.ai/sdk": "workspace:*"
+    "@substructure.ai/sdk": "workspace:*",
+    "@substructure.ai/runtime": "workspace:*"
   }
 }

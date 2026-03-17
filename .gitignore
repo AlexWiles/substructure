@@ -9,15 +9,18 @@ dist-ssr
 .wrangler
 .output
 .vinxi
+.claude
 __unconfig*
 todos.json
 
 # Rust
-/server/target
-/target
+target/
 *.db
 *.db-shm
 *.db-wal
+
+# NAPI build artifacts
+*.node
 
 # Nx
 .nx

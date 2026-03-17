@@ -12,6 +12,7 @@
   ],
   "napi": {
     "binaryName": "substructure-napi",
+    "packageName": "@substructure.ai/runtime",
     "targets": [
       "aarch64-apple-darwin",
       "x86_64-apple-darwin",
@@ -19,6 +20,11 @@
       "x86_64-unknown-linux-gnu",
       "x86_64-pc-windows-msvc"
     ]
+  },
+  "scripts": {
+    "build": "napi build --manifest-path ../../crates/napi/Cargo.toml --platform --js false --dts false --output-dir ./src",
+    "prepublish": "napi prepublish --skip-gh-release",
+    "artifacts": "napi artifacts"
   },
   "optionalDependencies": {
     "@substructure.ai/runtime-darwin-arm64": "0.1.0",

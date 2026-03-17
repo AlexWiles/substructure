@@ -1,9 +1,6 @@
 import { Substructure, Agent } from "@substructure.ai/sdk/substructure";
 
-const RUNTIME_URL = "http://localhost:8080";
-const WORKER_PORT = 4444;
-
-// ── Define agents ────────────────────────────────────────────────────────────
+// ── Define agents ───────────────────────────────────────────────────────────
 
 const mathAgent = new Agent({
   id: "math-agent",
@@ -54,20 +51,18 @@ weatherAgent.tool(
 
 weatherAgent.subAgent(mathAgent, "A math assistant that can add numbers. Send it a math question.");
 
-// ── Serve and register ───────────────────────────────────────────────────────
+// ── Setup ────────────────────────────────────────────────────────────────────
 
 const sub = new Substructure({
-  url: RUNTIME_URL,
-  workerUrl: `http://localhost:${WORKER_PORT}`,
+  db: "data.db",
+  openrouterApiKey: process.env.OPENROUTER_API_KEY,
 });
 
-const worker = await sub.agents(weatherAgent, mathAgent);
-const server = Bun.serve({ port: WORKER_PORT, fetch: worker.fetchHandler() });
-console.log(`Worker listening on port ${WORKER_PORT}`);
+await sub.agents(weatherAgent, mathAgent);
 
 // ── Run ──────────────────────────────────────────────────────────────────────
 
-console.log("\nAsking weather agent to sum temperatures...\n");
+console.log("Asking weather agent to sum temperatures...\n");
 
 const stream = sub.run(
     "weather-agent",
@@ -78,4 +73,4 @@ for await (const event of stream) {
   console.log(event.derived?.agent_id, event.aggregate_type, event.aggregate_id, event.payload.type);
 }
 
-server.stop();
+await sub.shutdown();

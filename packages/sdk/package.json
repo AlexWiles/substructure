@@ -1,0 +1,29 @@
+{
+  "name": "@substructure.ai/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for Substructure",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/client.ts",
+    "./admin": "./src/admin-client.ts",
+    "./worker": "./src/worker-client.ts",
+    "./user": "./src/user-client.ts",
+    "./types": "./src/types.ts",
+    "./agent": "./src/agent.ts",
+    "./worker-handler": "./src/worker.ts",
+    "./runtime": "./src/runtime.ts",
+    "./substructure": "./src/substructure.ts"
+  },
+  "scripts": {
+    "build": "tsup",
+    "prepublishOnly": "pnpm build"
+  },
+  "optionalDependencies": {
+    "@substructure.ai/runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "typescript": "^5.7.2"
+  }
+}
