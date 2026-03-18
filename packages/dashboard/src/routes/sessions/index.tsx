@@ -3,7 +3,7 @@ import { useInfiniteQuery } from '@tanstack/react-query'
 import { adminClient } from '#/lib/api.ts'
 import { Page, Breadcrumbs, Table, THead, TBody, Th, Td, Button } from '#/components/ui.tsx'
 
-import type { SessionListItem } from '#/lib/api.ts'
+import type { SessionListItem } from '@substructure.ai/sdk/admin'
 
 export const Route = createFileRoute('/sessions/')({ component: SessionsPage })
 

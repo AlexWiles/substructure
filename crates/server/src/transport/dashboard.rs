@@ -8,7 +8,7 @@ use axum::{
 use rust_embed::Embed;
 
 #[derive(Embed)]
-#[folder = "../../dashboard/dist/client"]
+#[folder = "../../packages/dashboard/dist"]
 struct DashboardAssets;
 
 pub fn router() -> Router {

@@ -11,6 +11,8 @@ const PLATFORMS = {
 };
 
 export function resolve() {
+  if (process.env.SUBSTRUCTURE_BIN) return process.env.SUBSTRUCTURE_BIN;
+
   const key = `${platform()}-${arch()}`;
   const pkg = PLATFORMS[key];
   if (!pkg) {

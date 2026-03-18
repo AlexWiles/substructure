@@ -13,14 +13,13 @@ export class BaseClient {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
   }
 
-  protected buildUrl(path: string, params?: Record<string, string | undefined>): string {
-    const url = new URL(`${this.baseUrl}${path}`);
-    if (params) {
-      for (const [k, v] of Object.entries(params)) {
-        if (v !== undefined) url.searchParams.set(k, v);
-      }
-    }
-    return url.toString();
+  protected buildUrl(path: string, query?: Record<string, string | undefined>): string {
+    const url = `${this.baseUrl}${path}`;
+    if (!query) return url;
+    const search = new URLSearchParams(
+      Object.entries(query).filter(([, v]) => v !== undefined) as [string, string][]
+    );
+    return `${url}?${search}`;
   }
 
   protected async fetch(url: string, init?: RequestInit): Promise<Response> {

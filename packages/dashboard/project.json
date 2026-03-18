@@ -4,7 +4,7 @@
     "build": {
       "command": "pnpm build",
       "options": {
-        "cwd": "dashboard"
+        "cwd": "packages/dashboard"
       },
       "inputs": [
         "{projectRoot}/src/**",
@@ -13,13 +13,12 @@
         "{projectRoot}/tsconfig.json",
         "{projectRoot}/package.json"
       ],
-      "outputs": ["{projectRoot}/dist"],
-      "cache": true
+      "outputs": ["{projectRoot}/dist"]
     },
     "dev": {
       "command": "pnpm dev",
       "options": {
-        "cwd": "dashboard"
+        "cwd": "packages/dashboard"
       }
     }
   }

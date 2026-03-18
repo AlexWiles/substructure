@@ -4,7 +4,7 @@
     "build": {
       "command": "pnpm build",
       "options": {
-        "cwd": "sdks/typescript"
+        "cwd": "packages/sdk"
       },
       "inputs": [
         "{projectRoot}/src/**",
@@ -12,8 +12,7 @@
         "{projectRoot}/tsconfig.json",
         "{projectRoot}/package.json"
       ],
-      "outputs": ["{projectRoot}/dist"],
-      "cache": true
+      "outputs": ["{projectRoot}/dist"]
     }
   }
 }
