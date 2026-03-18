@@ -39,7 +39,7 @@ impl EventHandler<SessionState> for LlmEventHandler {
                 let _ = execute::<SessionState>(
                     &*self.store,
                     ExecuteInput {
-                        aggregate_id: event.aggregate_id,
+                        aggregate_id: event.aggregate_id.clone(),
                         tenant_id: event.tenant_id.clone(),
                         command: CommandPayload::FailLlmCall {
                             call_id: req.call_id.clone(),
@@ -77,7 +77,7 @@ impl EventHandler<SessionState> for LlmEventHandler {
         let _ = execute::<SessionState>(
             &*self.store,
             ExecuteInput {
-                aggregate_id: event.aggregate_id,
+                aggregate_id: event.aggregate_id.clone(),
                 tenant_id: event.tenant_id.clone(),
                 command,
                 span: event.span.child("llm_call"),

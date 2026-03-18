@@ -17,7 +17,7 @@ pub struct CommitContext {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct Aggregate<R: AggregateState> {
-    pub id: Uuid,
+    pub id: String,
     pub tenant_id: String,
     pub state: R,
     pub stream_version: u64,
@@ -34,7 +34,7 @@ pub struct Aggregate<R: AggregateState> {
 }
 
 impl<R: AggregateState> Aggregate<R> {
-    pub fn new(id: Uuid, tenant_id: String, state: R) -> Self {
+    pub fn new(id: String, tenant_id: String, state: R) -> Self {
         Aggregate {
             id,
             tenant_id,
@@ -51,10 +51,10 @@ impl<R: AggregateState> Aggregate<R> {
 
     pub async fn load_or_create(
         store: &dyn EventStore,
-        id: Uuid,
+        id: String,
         tenant_id: String,
     ) -> Result<(Self, u64), StoreError> {
-        match store.load(id).await {
+        match store.load(&tenant_id, &id).await {
             Ok(snapshot) => {
                 if snapshot.tenant_id != tenant_id {
                     return Err(StoreError::Internal("tenant mismatch".into()));
@@ -64,7 +64,7 @@ impl<R: AggregateState> Aggregate<R> {
                 Ok((agg, snapshot.stream_version))
             }
             Err(StoreError::StreamNotFound) => {
-                Ok((Self::new(id, tenant_id, R::initial(id)), 0))
+                Ok((Self::new(id.clone(), tenant_id, R::initial(id)), 0))
             }
             Err(e) => Err(e),
         }
@@ -128,7 +128,7 @@ impl<R: AggregateState> Aggregate<R> {
             domain_events.push(DomainEvent {
                 id: Uuid::now_v7(),
                 tenant_id: self.tenant_id.clone(),
-                aggregate_id: self.id,
+                aggregate_id: self.id.clone(),
                 sequence: self.stream_version,
                 span: ctx.span.clone(),
                 occurred_at: ctx.occurred_at,
@@ -143,7 +143,7 @@ impl<R: AggregateState> Aggregate<R> {
 
     pub fn to_snapshot(&self) -> Result<Snapshot, serde_json::Error> {
         Ok(Snapshot {
-            aggregate_id: self.id,
+            aggregate_id: self.id.clone(),
             tenant_id: self.tenant_id.clone(),
             aggregate_type: R::AGGREGATE_TYPE.to_string(),
             data: serde_json::to_value(self)?,

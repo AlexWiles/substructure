@@ -22,7 +22,8 @@ export class JsRuntime {
     sessionId: string,
     tenantId: string,
     agentId: string,
-    content: string
+    content: string,
+    turnId?: string,
   ): AsyncGenerator<string, void, unknown>;
 
   shutdown(): Promise<void>;

@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use super::event_store::{AggregateSummary, AggregateSort, StoreError};
 use super::session::state::SessionState;
@@ -20,7 +19,7 @@ pub struct SessionFilter {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionCursor {
     pub last_event_at: DateTime<Utc>,
-    pub aggregate_id: Uuid,
+    pub aggregate_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

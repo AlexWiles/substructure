@@ -22,6 +22,7 @@ export interface NativeRuntime {
     tenantId: string,
     agentId: string,
     content: string,
+    turnId?: string,
   ): AsyncGenerator<string, void, unknown>;
   shutdown(): Promise<void>;
 }
@@ -112,6 +113,7 @@ export class InProcessRuntime {
       tenantId,
       request.agent_id,
       request.message,
+      request.turn_id,
     )) {
       yield JSON.parse(json) as Event;
     }

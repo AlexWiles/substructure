@@ -51,13 +51,13 @@ export class JsRuntime {
     return this._native.registerWorker(tenantId, agentIds, callback);
   }
 
-  async *sendMessage(sessionId, tenantId, agentId, content) {
+  async *sendMessage(sessionId, tenantId, agentId, content, turnId) {
     let resolve;
     let done = false;
     const buffer = [];
 
     const finished = this._native.sendMessage(
-      sessionId, tenantId, agentId, content,
+      sessionId, tenantId, agentId, content, turnId,
       (json) => {
         buffer.push(json);
         resolve?.();

@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use substructure_core::session::decision::WorkerAction;
 use substructure_core::serde_helpers::base64_bytes;
@@ -7,8 +6,7 @@ use substructure_core::span::SpanContext;
 
 #[derive(Debug, Deserialize)]
 pub struct SubmitRequest {
-    pub session_id: Uuid,
-    pub tenant_id: String,
+    pub session_id: String,
     pub decision_id: String,
     pub actions: Vec<WorkerAction>,
     #[serde(with = "base64_bytes")]
@@ -26,7 +24,6 @@ pub struct SubmitResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct RegisterRequest {
-    pub tenant_id: String,
     pub agent_ids: Vec<String>,
     pub transport_type: String,
     pub config: serde_json::Value,

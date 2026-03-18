@@ -35,13 +35,14 @@ pub fn spawn_handler_pool<R: AggregateState>(
                     Err(_) => continue,
                 };
                 let idx = route(&event.aggregate_id, worker_txs.len());
+
                 let _ = worker_txs[idx].send(event).await;
             }
         }
     })
 }
 
-fn route(aggregate_id: &uuid::Uuid, pool_size: usize) -> usize {
+fn route(aggregate_id: &str, pool_size: usize) -> usize {
     let mut hasher = DefaultHasher::new();
     aggregate_id.hash(&mut hasher);
     hasher.finish() as usize % pool_size

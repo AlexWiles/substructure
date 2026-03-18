@@ -5,7 +5,6 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use sea_query::{Expr, ExprTrait, Func, Iden, Order, Query, SqliteQueryBuilder};
-use uuid::Uuid;
 
 use std::sync::Arc as StdArc;
 
@@ -28,20 +27,21 @@ CREATE TABLE IF NOT EXISTS events (
     trace_id         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_events_occurred_at ON events (occurred_at);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_events_aggregate_seq ON events (aggregate_id, sequence);
-CREATE INDEX IF NOT EXISTS idx_events_aggregate ON events (aggregate_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_events_aggregate_seq ON events (tenant_id, aggregate_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_events_aggregate ON events (tenant_id, aggregate_id);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events (aggregate_type);
 CREATE INDEX IF NOT EXISTS idx_events_trace_id ON events (trace_id);
 
 CREATE TABLE IF NOT EXISTS snapshots (
-    aggregate_id     TEXT PRIMARY KEY,
+    aggregate_id     TEXT NOT NULL,
     aggregate_type   TEXT NOT NULL,
     tenant_id        TEXT NOT NULL,
     stream_version   INTEGER NOT NULL,
     data             TEXT NOT NULL,
     wake_at          TEXT,
     first_event_at   TEXT,
-    last_event_at    TEXT
+    last_event_at    TEXT,
+    PRIMARY KEY (tenant_id, aggregate_id)
 );
 CREATE INDEX IF NOT EXISTS idx_snapshots_tenant ON snapshots (tenant_id);
 CREATE INDEX IF NOT EXISTS idx_snapshots_type ON snapshots (aggregate_type);
@@ -138,7 +138,7 @@ fn sea_params(values: sea_query::Values) -> Vec<Box<dyn rusqlite::types::ToSql>>
 
 fn do_append(conn: &mut Connection, input: AppendInput) -> Result<(), StoreError> {
     let snap = &input.snapshot;
-    let aid = snap.aggregate_id.to_string();
+    let aid = &snap.aggregate_id;
     let tx = conn
         .transaction()
         .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -157,10 +157,10 @@ fn do_append(conn: &mut Connection, input: AppendInput) -> Result<(), StoreError
                 "INSERT INTO events (aggregate_type, aggregate_id, tenant_id, sequence, occurred_at, data, trace_id)
                  SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7
                  WHERE (
-                     (?8 = 0 AND NOT EXISTS (SELECT 1 FROM snapshots WHERE aggregate_id = ?2))
+                     (?8 = 0 AND NOT EXISTS (SELECT 1 FROM snapshots WHERE tenant_id = ?3 AND aggregate_id = ?2))
                      OR EXISTS (
                          SELECT 1 FROM snapshots
-                         WHERE aggregate_id = ?2 AND stream_version = ?8
+                         WHERE tenant_id = ?3 AND aggregate_id = ?2 AND stream_version = ?8
                      )
                  )",
                 rusqlite::params![
@@ -179,8 +179,8 @@ fn do_append(conn: &mut Connection, input: AppendInput) -> Result<(), StoreError
         if rows == 0 {
             let actual_version: u64 = tx
                 .query_row(
-                    "SELECT stream_version FROM snapshots WHERE aggregate_id = ?1",
-                    [&aid],
+                    "SELECT stream_version FROM snapshots WHERE tenant_id = ?1 AND aggregate_id = ?2",
+                    rusqlite::params![&snap.tenant_id, &aid],
                     |row| row.get(0),
                 )
                 .optional()
@@ -199,7 +199,7 @@ fn do_append(conn: &mut Connection, input: AppendInput) -> Result<(), StoreError
     tx.execute(
         "INSERT INTO snapshots (aggregate_id, aggregate_type, tenant_id, stream_version, data, wake_at, first_event_at, last_event_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-         ON CONFLICT(aggregate_id) DO UPDATE SET
+         ON CONFLICT(tenant_id, aggregate_id) DO UPDATE SET
              stream_version = excluded.stream_version,
              data = excluded.data,
              wake_at = excluded.wake_at,
@@ -224,13 +224,11 @@ fn do_append(conn: &mut Connection, input: AppendInput) -> Result<(), StoreError
     Ok(())
 }
 
-fn do_load(conn: &Connection, aggregate_id: Uuid) -> Result<Snapshot, StoreError> {
-    let aid = aggregate_id.to_string();
-
+fn do_load(conn: &Connection, tenant_id: &str, aggregate_id: &str) -> Result<Snapshot, StoreError> {
     let row = conn
         .query_row(
-            "SELECT aggregate_type, tenant_id, data, stream_version, wake_at, first_event_at, last_event_at FROM snapshots WHERE aggregate_id = ?1",
-            [&aid],
+            "SELECT aggregate_type, tenant_id, data, stream_version, wake_at, first_event_at, last_event_at FROM snapshots WHERE tenant_id = ?1 AND aggregate_id = ?2",
+            rusqlite::params![tenant_id, aggregate_id],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -255,7 +253,7 @@ fn do_load(conn: &Connection, aggregate_id: Uuid) -> Result<Snapshot, StoreError
         serde_json::from_str(&snapshot_data).map_err(|e| StoreError::Internal(e.to_string()))?;
 
     Ok(Snapshot {
-        aggregate_id,
+        aggregate_id: aggregate_id.to_string(),
         tenant_id,
         aggregate_type: agg_type,
         data,
@@ -285,8 +283,7 @@ fn do_list_aggregates(
             q.and_where(Expr::col(Snapshots::AggregateType).eq(v));
         })
         .apply_if(filter.aggregate_ids.as_ref(), |q, ids| {
-            let id_strs: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
-            q.and_where(Expr::col(Snapshots::AggregateId).is_in(id_strs));
+            q.and_where(Expr::col(Snapshots::AggregateId).is_in(ids.clone()));
         })
         .apply_if(filter.tenant_id.as_ref(), |q, v| {
             q.and_where(Expr::col(Snapshots::TenantId).eq(v));
@@ -338,11 +335,8 @@ fn do_list_aggregates(
     for row in rows {
         let (aid, agg_type, tenant, wake_at_str, version, first, last) =
             row.map_err(|e| StoreError::Internal(e.to_string()))?;
-        let aggregate_id = aid
-            .parse()
-            .map_err(|e: uuid::Error| StoreError::Internal(format!("bad aggregate_id: {e}")))?;
         results.push(AggregateSummary {
-            aggregate_id,
+            aggregate_id: aid,
             aggregate_type: agg_type,
             tenant_id: tenant,
             wake_at: wake_at_str.as_deref().and_then(parse_dt),
@@ -359,8 +353,8 @@ fn do_query_events(conn: &Connection, filter: EventFilter) -> Result<Vec<Event>,
     let (sql, values) = Query::select()
         .column(Events::Data)
         .from(Events::Table)
-        .apply_if(filter.aggregate_id, |q, id| {
-            q.and_where(Expr::col(Events::AggregateId).eq(id.to_string()));
+        .apply_if(filter.aggregate_id.as_ref(), |q, id| {
+            q.and_where(Expr::col(Events::AggregateId).eq(id));
         })
         .apply_if(filter.aggregate_type.as_ref(), |q, v| {
             q.and_where(Expr::col(Events::AggregateType).eq(v));
@@ -430,11 +424,13 @@ impl EventStore for SqliteStore {
         Ok(())
     }
 
-    async fn load(&self, aggregate_id: Uuid) -> Result<Snapshot, StoreError> {
+    async fn load(&self, tenant_id: &str, aggregate_id: &str) -> Result<Snapshot, StoreError> {
         let path = self.path.clone();
+        let tenant_id = tenant_id.to_string();
+        let aggregate_id = aggregate_id.to_string();
         tokio::task::spawn_blocking(move || {
             let conn = open_conn_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-            do_load(&conn, aggregate_id)
+            do_load(&conn, &tenant_id, &aggregate_id)
         })
         .await
         .map_err(spawn_err)?
@@ -528,7 +524,7 @@ fn do_list_sessions(
 
     if let Some(ref cursor) = filter.cursor {
         let cursor_dt = cursor.last_event_at.to_rfc3339();
-        let cursor_id = cursor.aggregate_id.to_string();
+        let cursor_id = cursor.aggregate_id.clone();
         q.and_where(Expr::cust_with_values(
             "(last_event_at < ? OR (last_event_at = ? AND aggregate_id < ?))",
             [cursor_dt.clone(), cursor_dt, cursor_id],
@@ -572,15 +568,12 @@ fn do_list_sessions(
     for row in rows {
         let (aid, agg_type, tenant, wake_at_str, version, first, last, data_str) =
             row.map_err(|e| StoreError::Internal(e.to_string()))?;
-        let aggregate_id: Uuid = aid
-            .parse()
-            .map_err(|e: uuid::Error| StoreError::Internal(format!("bad aggregate_id: {e}")))?;
         let agg: Aggregate<SessionState> = serde_json::from_str(&data_str)
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
         items.push(SessionItem {
             summary: AggregateSummary {
-                aggregate_id,
+                aggregate_id: aid,
                 aggregate_type: agg_type,
                 tenant_id: tenant,
                 wake_at: wake_at_str.as_deref().and_then(parse_dt),
@@ -597,7 +590,7 @@ fn do_list_sessions(
         let last = &items[items.len() - 1];
         last.summary.last_event_at.map(|dt| SessionCursor {
             last_event_at: dt,
-            aggregate_id: last.summary.aggregate_id,
+            aggregate_id: last.summary.aggregate_id.clone(),
         })
     } else {
         None

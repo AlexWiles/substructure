@@ -21,7 +21,7 @@ pub struct ApplyContext {
 pub struct DomainEvent<R: AggregateState> {
     pub id: Uuid,
     pub tenant_id: String,
-    pub aggregate_id: Uuid,
+    pub aggregate_id: String,
     pub sequence: u64,
     pub span: SpanContext,
     pub occurred_at: DateTime<Utc>,
@@ -41,7 +41,7 @@ impl<R: AggregateState> DomainEvent<R> {
         Ok(DomainEvent {
             id: raw.id,
             tenant_id: raw.tenant_id.clone(),
-            aggregate_id: raw.aggregate_id,
+            aggregate_id: raw.aggregate_id.clone(),
             sequence: raw.sequence,
             span: raw.span.clone(),
             occurred_at: raw.occurred_at,
@@ -88,7 +88,7 @@ pub trait AggregateState: Sized + Serialize + DeserializeOwned + Clone + Send + 
 
     const AGGREGATE_TYPE: &'static str;
 
-    fn initial(id: Uuid) -> Self;
+    fn initial(id: String) -> Self;
 
     fn apply(&mut self, event: &Self::Event, ctx: &ApplyContext);
 

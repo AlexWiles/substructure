@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use super::decision::DecisionTrigger;
 use super::message::Message;
@@ -69,7 +68,7 @@ pub struct SessionCreated {
     pub agent_id: String,
     pub auth: ClientIdentity,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ancestry: Vec<Uuid>,
+    pub ancestry: Vec<String>,
     pub worker_retry: RetryPolicy,
 }
 
@@ -141,19 +140,19 @@ pub enum ToolHandler {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentRequested {
-    pub session_id: Uuid,
+    pub session_id: String,
     pub agent_id: String,
     pub retry: RetryPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentStarted {
-    pub session_id: Uuid,
+    pub session_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentErrored {
-    pub session_id: Uuid,
+    pub session_id: String,
     pub error: String,
     #[serde(default)]
     pub retryable: bool,
@@ -222,13 +221,13 @@ pub struct WorkerDecisionErrored {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMessageRequested {
-    pub target_session_id: Uuid,
+    pub target_session_id: String,
     pub message: Message,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallResolutionRequested {
-    pub target_session_id: Uuid,
+    pub target_session_id: String,
     pub tool_call_id: String,
     pub result: String,
 }
@@ -257,7 +256,7 @@ pub struct TurnCompleted {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentTurnCompleted {
-    pub session_id: Uuid,
+    pub session_id: String,
     #[serde(default)]
     pub cost: Decimal,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

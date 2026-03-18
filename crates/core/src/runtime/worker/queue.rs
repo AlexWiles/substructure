@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::runtime::identity::ClientIdentity;
 use crate::runtime::serde_helpers::base64_bytes;
@@ -12,7 +11,7 @@ use crate::runtime::span::SpanContext;
 /// Wire format sent to workers (via poll or push) when a decision is needed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerDecisionRequest {
-    pub session_id: Uuid,
+    pub session_id: String,
     pub tenant_id: String,
     pub decision_id: String,
     pub agent_id: String,
@@ -21,7 +20,7 @@ pub struct WorkerDecisionRequest {
     #[serde(with = "base64_bytes")]
     pub worker_state: Vec<u8>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ancestry: Vec<Uuid>,
+    pub ancestry: Vec<String>,
     pub span: SpanContext,
     pub attempts: u32,
     pub deadline: Option<DateTime<Utc>>,
@@ -34,7 +33,7 @@ pub struct DequeueFilter {
 
 #[derive(Debug, Deserialize)]
 pub struct SubmitDecision {
-    pub session_id: Uuid,
+    pub session_id: String,
     pub tenant_id: String,
     pub decision_id: String,
     pub actions: Vec<WorkerAction>,

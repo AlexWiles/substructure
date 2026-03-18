@@ -1,12 +1,11 @@
 import type {
-  WorkerDecisionRequestWire,
   WorkerAction,
   Message,
   LlmTool,
   RetryPolicy,
   Uuid,
 } from "./types";
-import type { DecisionHandler } from "./worker";
+import type { HandlerContext, HandlerResult, Composable, StateContributor, MiddlewareFn, ToolDef } from "./worker";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -18,20 +17,11 @@ export interface LlmConfig {
 
 export interface AgentOptions {
   id: string;
+  description?: string;
   llm: LlmConfig;
   systemPrompt?: string;
-}
-
-export type ToolFn = (args: Record<string, unknown>) => Promise<unknown> | unknown;
-
-interface RegisteredTool {
-  definition: LlmTool;
-  handler: ToolFn;
-}
-
-interface RegisteredSubAgent {
-  definition: LlmTool;
-  agentId: string;
+  tools?: Record<string, ToolDef>;
+  subAgents?: Agent[];
 }
 
 const DEFAULT_RETRY: RetryPolicy = {
@@ -53,20 +43,21 @@ interface AgentState {
   pendingSubAgents: Record<string, PendingSubAgent>;
 }
 
-function decodeState(raw: string): AgentState {
-  if (!raw || raw === "") return { messages: [], pendingSubAgents: {} };
-  const parsed = JSON.parse(Buffer.from(raw, "base64").toString("utf-8"));
-  return { messages: parsed.messages ?? [], pendingSubAgents: parsed.pendingSubAgents ?? {} };
-}
-
-function encodeState(state: AgentState): string {
-  return Buffer.from(JSON.stringify(state), "utf-8").toString("base64");
-}
-
 // ── Agent ────────────────────────────────────────────────────────────────────
 
-export class Agent {
+interface RegisteredTool {
+  definition: LlmTool;
+  execute: (args: Record<string, unknown>) => Promise<unknown> | unknown;
+}
+
+interface RegisteredSubAgent {
+  definition: LlmTool;
+  agentId: string;
+}
+
+export class Agent implements Composable<AgentState> {
   readonly id: string;
+  readonly description?: string;
   private llm: LlmConfig & { client: string; retry: RetryPolicy };
   private systemPrompt?: string;
   private tools: Map<string, RegisteredTool> = new Map();
@@ -74,134 +65,136 @@ export class Agent {
 
   constructor(options: AgentOptions) {
     this.id = options.id;
+    this.description = options.description;
     this.systemPrompt = options.systemPrompt;
     this.llm = {
       model: options.llm.model,
       client: options.llm.client ?? "openrouter",
       retry: options.llm.retry ?? DEFAULT_RETRY,
     };
-  }
 
-  tool(
-    name: string,
-    description: string,
-    parameters: unknown,
-    handler: ToolFn,
-  ): this {
-    this.tools.set(name, {
-      definition: { function: { name, description, parameters } },
-      handler,
-    });
-    return this;
-  }
+    if (options.tools) {
+      for (const [name, def] of Object.entries(options.tools)) {
+        this.tools.set(name, {
+          definition: { function: { name, description: def.description, parameters: def.parameters } },
+          execute: def.execute,
+        });
+      }
+    }
 
-  subAgent(agent: Agent, description?: string): this {
-    this.subAgents.set(agent.id, {
-      agentId: agent.id,
-      definition: {
-        function: {
-          name: agent.id,
-          description: description ?? agent.systemPrompt ?? `Delegate to ${agent.id}`,
-          parameters: {
-            type: "object",
-            properties: {
-              message: { type: "string", description: "The message to send to the agent" },
+    if (options.subAgents) {
+      for (const agent of options.subAgents) {
+        this.subAgents.set(agent.id, {
+          agentId: agent.id,
+          definition: {
+            function: {
+              name: agent.id,
+              description: agent.description ?? agent.systemPrompt ?? `Delegate to ${agent.id}`,
+              parameters: {
+                type: "object",
+                properties: {
+                  message: { type: "string", description: "The message to send to the agent" },
+                },
+                required: ["message"],
+              },
             },
-            required: ["message"],
           },
-        },
-      },
-    });
-    return this;
+        });
+      }
+    }
   }
 
-  handler(): DecisionHandler {
-    return async (request: WorkerDecisionRequestWire) => {
-      const { trigger } = request;
-      const state = decodeState(request.worker_state);
+  toMiddleware(): StateContributor<AgentState> {
+    const self = this;
+    const mw: MiddlewareFn<any, any> = (ctx, next) => {
+      if (ctx.request.agent_id !== self.id) return next(ctx);
+      if (!ctx.state.messages) ctx.state.messages = [];
+      if (!ctx.state.pendingSubAgents) ctx.state.pendingSubAgents = {};
+      return self.handle(ctx as HandlerContext<AgentState>);
+    };
+    return Object.assign(mw, { _contributes: undefined as unknown as AgentState });
+  }
 
-      switch (trigger.type) {
-        case "user_message": {
-          state.messages.push(trigger.message);
-          return { actions: this.callLlmActions(state), state: encodeState(state) };
-        }
+  private handle(ctx: HandlerContext<AgentState>): HandlerResult | Promise<HandlerResult> {
+    const { trigger, state } = ctx;
 
-        case "llm_response": {
-          state.messages.push(trigger.message);
+    switch (trigger.type) {
+      case "user_message": {
+        state.messages.push(trigger.message);
+        return { actions: this.callLlmActions(state) };
+      }
 
-          if (trigger.message.tool_calls?.length) {
-            const actions: WorkerAction[] = [];
+      case "llm_response": {
+        state.messages.push(trigger.message);
 
-            for (const tc of trigger.message.tool_calls) {
-              const sub = this.subAgents.get(tc.function.name);
-              if (sub) {
-                const childSessionId = crypto.randomUUID() as Uuid;
-                const args = JSON.parse(tc.function.arguments);
+        if (trigger.message.tool_calls?.length) {
+          const actions: WorkerAction[] = [];
 
-                // Track the pending sub-agent so we can resolve the tool call when it completes
-                state.pendingSubAgents[childSessionId] = {
-                  toolCallId: tc.id,
-                  name: tc.function.name,
-                };
+          for (const tc of trigger.message.tool_calls) {
+            const sub = this.subAgents.get(tc.function.name);
+            if (sub) {
+              const childSessionId = crypto.randomUUID() as Uuid;
+              const args = JSON.parse(tc.function.arguments);
 
-                actions.push(
-                  {
-                    type: "spawn_sub_agent",
-                    session_id: childSessionId,
-                    agent_id: sub.agentId,
-                    retry: this.llm.retry,
-                  },
-                  {
-                    type: "send_message",
-                    session_id: childSessionId,
-                    message: { role: "user", content: args.message },
-                  },
-                );
-              } else {
-                actions.push({
-                  type: "call_tool",
-                  tool_call_id: tc.id,
-                  name: tc.function.name,
-                  arguments: tc.function.arguments,
-                  handler: "worker",
+              state.pendingSubAgents[childSessionId] = {
+                toolCallId: tc.id,
+                name: tc.function.name,
+              };
+
+              actions.push(
+                {
+                  type: "spawn_sub_agent",
+                  session_id: childSessionId,
+                  agent_id: sub.agentId,
                   retry: this.llm.retry,
-                });
-              }
+                },
+                {
+                  type: "send_message",
+                  session_id: childSessionId,
+                  message: { role: "user", content: args.message },
+                },
+              );
+            } else {
+              actions.push({
+                type: "call_tool",
+                tool_call_id: tc.id,
+                name: tc.function.name,
+                arguments: tc.function.arguments,
+                handler: "worker",
+                retry: this.llm.retry,
+              });
             }
-
-            return { actions, state: encodeState(state) };
           }
 
-          // Pack last assistant message into artifacts
-          const lastMsg = state.messages[state.messages.length - 1];
-          const artifacts = lastMsg?.content
-            ? [{ parts: [{ kind: "text" as const, text: lastMsg.content }] }]
-            : [];
+          return { actions };
+        }
 
+        const lastMsg = state.messages[state.messages.length - 1];
+        const artifacts = lastMsg?.content
+          ? [{ parts: [{ kind: "text" as const, text: lastMsg.content }] }]
+          : [];
+
+        return { actions: [{ type: "done", artifacts }] };
+      }
+
+      case "tool_execute": {
+        const tool = this.tools.get(trigger.name);
+        if (!tool) {
           return {
-            actions: [{ type: "done" as const, artifacts }],
-            state: encodeState(state),
+            actions: [{
+              type: "return_tool_error",
+              tool_call_id: trigger.tool_call_id,
+              error: `Unknown tool: ${trigger.name}`,
+              retryable: false,
+              attempt: trigger.attempt,
+            }],
           };
         }
 
-        case "tool_execute": {
-          const tool = this.tools.get(trigger.name);
-          if (!tool) {
-            return {
-              actions: [{
-                type: "return_tool_error" as const,
-                tool_call_id: trigger.tool_call_id,
-                error: `Unknown tool: ${trigger.name}`,
-                retryable: false,
-                attempt: trigger.attempt,
-              }],
-              state: encodeState(state),
-            };
-          }
-
+        return (async () => {
           try {
             const args = JSON.parse(trigger.arguments);
-            const result = await tool.handler(args);
+            const result = await tool.execute(args);
             return {
               actions: [{
                 type: "return_tool_result" as const,
@@ -209,7 +202,6 @@ export class Agent {
                 result: typeof result === "string" ? result : JSON.stringify(result),
                 attempt: trigger.attempt,
               }],
-              state: encodeState(state),
             };
           } catch (e: any) {
             return {
@@ -220,75 +212,64 @@ export class Agent {
                 retryable: false,
                 attempt: trigger.attempt,
               }],
-              state: encodeState(state),
             };
           }
+        })();
+      }
+
+      case "tool_result": {
+        state.messages.push({
+          role: "tool",
+          content: trigger.result.content,
+          tool_call_id: trigger.result.tool_call_id,
+          name: trigger.result.name,
+        });
+        return { actions: this.callLlmActions(state) };
+      }
+
+      case "sub_agent_turn_complete": {
+        const pending = state.pendingSubAgents[trigger.session_id];
+        if (!pending) {
+          return { actions: [{ type: "done", artifacts: [] }] };
         }
 
-        case "tool_result": {
-          state.messages.push({
-            role: "tool",
-            content: trigger.result.content,
-            tool_call_id: trigger.result.tool_call_id,
-            name: trigger.result.name,
-          });
-          return { actions: this.callLlmActions(state), state: encodeState(state) };
-        }
+        delete state.pendingSubAgents[trigger.session_id];
 
-        case "sub_agent_turn_complete": {
-          const pending = state.pendingSubAgents[trigger.session_id];
-          if (!pending) {
-            return {
-              actions: [{ type: "done" as const, artifacts: [] }],
-              state: encodeState(state),
-            };
-          }
+        const parts = trigger.artifacts.flatMap((a) => a.parts);
+        const text = parts
+          .map((p) => (p.kind === "text" ? p.text : JSON.stringify(p.data)))
+          .join("\n");
 
+        state.messages.push({
+          role: "tool",
+          content: text || `Sub-agent ${trigger.agent_id} completed with no output.`,
+          tool_call_id: pending.toolCallId,
+          name: pending.name,
+        });
+
+        return { actions: this.callLlmActions(state) };
+      }
+
+      case "sub_agent_error": {
+        const pending = state.pendingSubAgents[trigger.session_id];
+        if (pending) {
           delete state.pendingSubAgents[trigger.session_id];
-
-          // Extract text from artifacts for the tool result
-          const parts = trigger.artifacts.flatMap((a) => a.parts);
-          const text = parts
-            .map((p) => (p.kind === "text" ? p.text : JSON.stringify(p.data)))
-            .join("\n");
-
           state.messages.push({
             role: "tool",
-            content: text || `Sub-agent ${trigger.agent_id} completed with no output.`,
+            content: `Sub-agent ${trigger.agent_id} failed: ${trigger.error}`,
             tool_call_id: pending.toolCallId,
             name: pending.name,
           });
-
-          return { actions: this.callLlmActions(state), state: encodeState(state) };
+          return { actions: this.callLlmActions(state) };
         }
-
-        case "sub_agent_error": {
-          const pending = state.pendingSubAgents[trigger.session_id];
-          if (pending) {
-            delete state.pendingSubAgents[trigger.session_id];
-            state.messages.push({
-              role: "tool",
-              content: `Sub-agent ${trigger.agent_id} failed: ${trigger.error}`,
-              tool_call_id: pending.toolCallId,
-              name: pending.name,
-            });
-            return { actions: this.callLlmActions(state), state: encodeState(state) };
-          }
-          return {
-            actions: [{ type: "done" as const, artifacts: [] }],
-            state: encodeState(state),
-          };
-        }
-
-        case "llm_error":
-        default: {
-          return {
-            actions: [{ type: "done" as const, artifacts: [] }],
-            state: encodeState(state),
-          };
-        }
+        return { actions: [{ type: "done", artifacts: [] }] };
       }
-    };
+
+      case "llm_error":
+      default: {
+        return { actions: [{ type: "done", artifacts: [] }] };
+      }
+    }
   }
 
   private callLlmActions(state: AgentState): WorkerAction[] {

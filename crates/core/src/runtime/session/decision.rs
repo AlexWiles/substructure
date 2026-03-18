@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use super::events::{Artifact, ToolHandler};
 use super::message::Message;
@@ -27,6 +27,10 @@ pub enum DecisionTrigger {
         message: Message,
         /// True when finish_reason was "length" (output truncated).
         truncated: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost: Option<Decimal>,
     },
     LlmError {
         call_id: String,
@@ -43,18 +47,18 @@ pub enum DecisionTrigger {
         result: ToolResult,
     },
     SubAgentDone {
-        session_id: Uuid,
+        session_id: String,
         agent_id: String,
         artifacts: Vec<Artifact>,
     },
     SubAgentTurnComplete {
-        session_id: Uuid,
+        session_id: String,
         agent_id: String,
         turn_id: String,
         artifacts: Vec<Artifact>,
     },
     SubAgentError {
-        session_id: Uuid,
+        session_id: String,
         agent_id: String,
         error: String,
     },
@@ -93,17 +97,17 @@ pub enum WorkerAction {
         attempt: u32,
     },
     ResolveRemoteTool {
-        session_id: Uuid,
+        session_id: String,
         tool_call_id: String,
         result: String,
     },
     SpawnSubAgent {
-        session_id: Uuid,
+        session_id: String,
         agent_id: String,
         retry: RetryPolicy,
     },
     SendMessage {
-        session_id: Uuid,
+        session_id: String,
         message: Message,
     },
     Done {

@@ -13,6 +13,7 @@
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.5.1",
-    "nx": "latest"
+    "nx": "latest",
+    "typescript": "^5.9.3"
   }
 }

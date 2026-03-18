@@ -27,7 +27,7 @@ impl EventHandler<SessionState> for SubAgentHandler {
         match &event.payload {
             // SubAgent requested → spawn child session
             EventPayload::SubAgentRequested(req) => {
-                let child_session_id = req.session_id;
+                let child_session_id = req.session_id.clone();
                 let agent_id = req.agent_id.clone();
 
                 let auth = match event.derived.as_ref().and_then(|d| d.auth.as_ref()) {
@@ -41,13 +41,13 @@ impl EventHandler<SessionState> for SubAgentHandler {
                     .as_ref()
                     .map(|d| d.ancestry.clone())
                     .unwrap_or_default();
-                ancestry.push(event.aggregate_id);
+                ancestry.push(event.aggregate_id.clone());
 
                 // Create child session
                 let create_result = execute::<SessionState>(
                     &*self.store,
                     ExecuteInput {
-                        aggregate_id: child_session_id,
+                        aggregate_id: child_session_id.clone(),
                         tenant_id: event.tenant_id.clone(),
                         command: CommandPayload::CreateSession {
                             agent_id,
@@ -65,10 +65,10 @@ impl EventHandler<SessionState> for SubAgentHandler {
                     let _ = execute::<SessionState>(
                         &*self.store,
                         ExecuteInput {
-                            aggregate_id: event.aggregate_id,
+                            aggregate_id: event.aggregate_id.clone(),
                             tenant_id: event.tenant_id.clone(),
                             command: CommandPayload::FailSubAgent {
-                                session_id: child_session_id,
+                                session_id: child_session_id.clone(),
                                 error: "failed to create child session".to_string(),
                                 retryable: false,
                             },
@@ -84,7 +84,7 @@ impl EventHandler<SessionState> for SubAgentHandler {
                 let _ = execute::<SessionState>(
                     &*self.store,
                     ExecuteInput {
-                        aggregate_id: event.aggregate_id,
+                        aggregate_id: event.aggregate_id.clone(),
                         tenant_id: event.tenant_id.clone(),
                         command: CommandPayload::StartSubAgent {
                             session_id: child_session_id,
@@ -102,7 +102,7 @@ impl EventHandler<SessionState> for SubAgentHandler {
                 let _ = execute::<SessionState>(
                     &*self.store,
                     ExecuteInput {
-                        aggregate_id: req.target_session_id,
+                        aggregate_id: req.target_session_id.clone(),
                         tenant_id: event.tenant_id.clone(),
                         command: CommandPayload::SendMessage {
                             message: req.message.clone(),
@@ -121,7 +121,7 @@ impl EventHandler<SessionState> for SubAgentHandler {
                 let _ = execute::<SessionState>(
                     &*self.store,
                     ExecuteInput {
-                        aggregate_id: req.target_session_id,
+                        aggregate_id: req.target_session_id.clone(),
                         tenant_id: event.tenant_id.clone(),
                         command: CommandPayload::CompleteToolCall {
                             tool_call_id: req.tool_call_id.clone(),
@@ -142,7 +142,7 @@ impl EventHandler<SessionState> for SubAgentHandler {
                     None => return,
                 };
                 let parent_id = match derived.ancestry.last() {
-                    Some(&id) => id,
+                    Some(id) => id.clone(),
                     None => return, // root session, nothing to notify
                 };
                 let agent_id = derived.agent_id.clone().unwrap_or_default();
@@ -153,7 +153,7 @@ impl EventHandler<SessionState> for SubAgentHandler {
                         aggregate_id: parent_id,
                         tenant_id: event.tenant_id.clone(),
                         command: CommandPayload::CompleteSubAgentTurn {
-                            session_id: event.aggregate_id,
+                            session_id: event.aggregate_id.clone(),
                             agent_id,
                             turn_id: tc.turn_id.clone(),
                             artifacts: tc.artifacts.clone(),

@@ -4,6 +4,7 @@
   "type": "module",
   "dependencies": {
     "@substructure.ai/sdk": "workspace:*",
-    "@substructure.ai/runtime": "workspace:*"
+    "@substructure.ai/runtime": "workspace:*",
+    "zod": "^4.3.6"
   }
 }

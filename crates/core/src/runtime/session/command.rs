@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use uuid::Uuid;
 
 use super::decision::{DecisionTrigger, ToolResult, WorkerAction};
 use super::events::*;
@@ -17,7 +16,7 @@ pub enum CommandPayload {
     CreateSession {
         agent_id: String,
         auth: ClientIdentity,
-        ancestry: Vec<Uuid>,
+        ancestry: Vec<String>,
         worker_retry: RetryPolicy,
     },
     SendMessage {
@@ -61,20 +60,20 @@ pub enum CommandPayload {
         worker_state: Option<Vec<u8>>,
     },
     RequestSubAgent {
-        session_id: Uuid,
+        session_id: String,
         agent_id: String,
         retry: RetryPolicy,
     },
     StartSubAgent {
-        session_id: Uuid,
+        session_id: String,
     },
     FailSubAgent {
-        session_id: Uuid,
+        session_id: String,
         error: String,
         retryable: bool,
     },
     CompleteSubAgentTurn {
-        session_id: Uuid,
+        session_id: String,
         agent_id: String,
         turn_id: String,
         artifacts: Vec<Artifact>,
@@ -112,6 +111,10 @@ pub enum SessionError {
     SessionAlreadyCreated,
     #[error("session is interrupted")]
     SessionInterrupted,
+    #[error("turn already active: {turn_id}")]
+    TurnAlreadyActive { turn_id: String },
+    #[error("turn already completed: {turn_id}")]
+    TurnAlreadyCompleted { turn_id: String },
 }
 
 impl SessionState {
@@ -147,7 +150,18 @@ impl SessionState {
                 Err(SessionError::SessionAlreadyCreated)
             }
 
-            CommandPayload::SendMessage { message, stream, turn_id } => match self.status {
+            CommandPayload::SendMessage { message, stream, turn_id } => {
+                // Idempotency guard: reject if this turn_id was already seen
+                if let Some(ref tid) = turn_id {
+                    if self.completed_turn_ids.contains(tid) {
+                        return Err(SessionError::TurnAlreadyCompleted { turn_id: tid.clone() });
+                    }
+                    if self.turn_id.as_ref() == Some(tid) {
+                        return Err(SessionError::TurnAlreadyActive { turn_id: tid.clone() });
+                    }
+                }
+
+                match self.status {
                 SessionStatus::Interrupted { .. } if message.role == Role::User => {
                     Err(SessionError::SessionInterrupted)
                 }
@@ -167,6 +181,7 @@ impl SessionState {
                         ));
                     }
                     Ok(events)
+                }
                 }
             }
 
@@ -202,6 +217,8 @@ impl SessionState {
                     Some(&EffectStatus::Pending) => {
                         let truncated =
                             response.finish_reason.as_deref() == Some("length");
+                        let usage = response.usage.clone();
+                        let cost = response.cost;
                         let tool_calls = if response.tool_calls.is_empty() {
                             None
                         } else {
@@ -228,6 +245,8 @@ impl SessionState {
                                     call_id,
                                     message,
                                     truncated,
+                                    usage,
+                                    cost,
                                 },
                             }),
                         ])
@@ -394,8 +413,7 @@ impl SessionState {
                 agent_id,
                 retry,
             } => {
-                let key = session_id.to_string();
-                match self.sub_agent_calls.get(&key) {
+                match self.sub_agent_calls.get(&session_id) {
                     Some(_) => Ok(vec![]),
                     None => Ok(vec![EventPayload::SubAgentRequested(SubAgentRequested {
                         session_id,
@@ -406,8 +424,7 @@ impl SessionState {
             }
 
             CommandPayload::StartSubAgent { session_id } => {
-                let key = session_id.to_string();
-                match self.sub_agent_calls.get(&key).map(|c| &c.tracking.status) {
+                match self.sub_agent_calls.get(&session_id).map(|c| &c.tracking.status) {
                     Some(&EffectStatus::Pending) => {
                         Ok(vec![EventPayload::SubAgentStarted(SubAgentStarted {
                             session_id,
@@ -422,15 +439,14 @@ impl SessionState {
                 error,
                 retryable,
             } => {
-                let key = session_id.to_string();
-                let Some(sa) = self.sub_agent_calls.get(&key) else {
+                let Some(sa) = self.sub_agent_calls.get(&session_id) else {
                     return Ok(vec![]);
                 };
                 if sa.tracking.status != EffectStatus::Pending {
                     return Ok(vec![]);
                 }
                 let mut events = vec![EventPayload::SubAgentErrored(SubAgentErrored {
-                    session_id,
+                    session_id: session_id.clone(),
                     error: error.clone(),
                     retryable,
                 })];
@@ -457,12 +473,11 @@ impl SessionState {
                 cost,
                 token_usage,
             } => {
-                let key = session_id.to_string();
                 // Only fire if we know about this sub-agent
-                if self.sub_agent_calls.contains_key(&key) {
+                if self.sub_agent_calls.contains_key(&session_id) {
                     Ok(vec![
                         EventPayload::SubAgentTurnCompleted(SubAgentTurnCompleted {
-                            session_id,
+                            session_id: session_id.clone(),
                             cost,
                             token_usage,
                         }),
@@ -742,7 +757,7 @@ impl SessionState {
                 && sa.tracking.deadline.is_some_and(|d| d <= now)
             {
                 return Ok(vec![EventPayload::SubAgentErrored(SubAgentErrored {
-                    session_id: sa.session_id,
+                    session_id: sa.session_id.clone(),
                     error: "deadline exceeded".to_string(),
                     retryable: true,
                 })]);
@@ -755,7 +770,7 @@ impl SessionState {
                 if let Some(next_at) = sa.tracking.retry.next_at {
                     if next_at <= now {
                         return Ok(vec![EventPayload::SubAgentRequested(SubAgentRequested {
-                            session_id: sa.session_id,
+                            session_id: sa.session_id.clone(),
                             agent_id: sa.agent_id.clone(),
                             retry: sa.tracking.retry_policy.clone(),
                         })]);

@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
+
+
 
 use aggregate::{execute, ConflictRetry, ExecuteError, ExecuteInput};
 use event_store::{spawn_handler_pool, EventStore};
@@ -29,6 +31,7 @@ pub mod serde_helpers;
 pub mod session;
 pub mod span;
 pub mod sub_agent;
+pub mod subscriptions;
 pub mod wake;
 pub mod session_index;
 pub mod worker;
@@ -51,14 +54,17 @@ pub struct Runtime {
     store: Arc<dyn EventStore>,
     queue: Arc<dyn WorkerQueue>,
     session_index: Arc<dyn SessionIndex>,
+    subscriptions: subscriptions::Subscriptions,
     handles: Vec<JoinHandle<()>>,
 }
 
 pub struct SendMessage {
-    pub session_id: Uuid,
+    pub session_id: String,
     pub tenant_id: String,
     pub agent_id: String,
     pub content: String,
+    /// Caller-provided turn ID for idempotency. Auto-generated if None.
+    pub turn_id: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -83,11 +89,9 @@ impl Runtime {
     pub async fn send_message(
         &self,
         input: SendMessage,
-    ) -> Result<(Uuid, mpsc::Receiver<event_store::Event>), RuntimeError> {
+    ) -> Result<(String, mpsc::Receiver<event_store::Event>), RuntimeError> {
         let session_id = input.session_id;
-        let turn_id = Uuid::now_v7().to_string();
-
-        let event_rx = self.subscribe_session(session_id, turn_id.clone());
+        let turn_id = input.turn_id.unwrap_or_else(|| Uuid::now_v7().to_string());
 
         let span = SpanContext::root();
 
@@ -95,7 +99,7 @@ impl Runtime {
         let create_result = execute::<SessionState>(
             &*self.store,
             ExecuteInput {
-                aggregate_id: session_id,
+                aggregate_id: session_id.clone(),
                 tenant_id: input.tenant_id.clone(),
                 command: CommandPayload::CreateSession {
                     agent_id: input.agent_id,
@@ -119,11 +123,11 @@ impl Runtime {
             Err(e) => return Err(RuntimeError(e.to_string())),
         }
 
-        // Send the message
-        execute::<SessionState>(
+        // Try to send the message (idempotency guard may reject)
+        let send_result = execute::<SessionState>(
             &*self.store,
             ExecuteInput {
-                aggregate_id: session_id,
+                aggregate_id: session_id.clone(),
                 tenant_id: input.tenant_id,
                 command: CommandPayload::SendMessage {
                     message: session::message::Message {
@@ -140,97 +144,45 @@ impl Runtime {
             },
             &ConflictRetry::default(),
         )
-        .await
-        .map_err(|e| RuntimeError(e.to_string()))?;
+        .await;
 
-        Ok((session_id, event_rx))
+        // Determine effective turn_id and whether the turn is already completed
+        let (effective_turn_id, is_completed) = match send_result {
+            Ok(_) => (turn_id, false),
+            Err(ExecuteError::Command(SessionError::TurnAlreadyActive { turn_id })) => {
+                (turn_id, false)
+            }
+            Err(ExecuteError::Command(SessionError::TurnAlreadyCompleted { turn_id })) => {
+                (turn_id, true)
+            }
+            Err(e) => return Err(RuntimeError(e.to_string())),
+        };
+
+        // Build event stream: replay historical + live (if active)
+        if is_completed {
+            self.subscriptions.replay_turn(session_id, effective_turn_id).await
+        } else {
+            self.subscriptions.catchup_turn(session_id, effective_turn_id).await
+        }
     }
 
     /// Subscribe to events for a session, filtered by session ID.
     /// Closes when the given turn completes.
-    /// Must be called *before* the command that triggers events so nothing is missed.
     pub fn subscribe_session(
         &self,
-        session_id: Uuid,
+        session_id: String,
         turn_id: String,
     ) -> mpsc::Receiver<event_store::Event> {
-        let mut rx = self.store.subscribe();
-        let (tx, event_rx) = mpsc::channel::<event_store::Event>(64);
-
-        tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(batch) => {
-                        for event in batch.iter() {
-                            let is_self = event.aggregate_id == session_id;
-                            let is_descendant = !is_self
-                                && event.derived.as_ref().and_then(|d| {
-                                    serde_json::from_value::<session::state::DerivedState>(d.clone()).ok()
-                                }).map_or(false, |d| d.ancestry.contains(&session_id));
-
-                            if !is_self && !is_descendant {
-                                continue;
-                            }
-                            if tx.send(event.clone()).await.is_err() {
-                                return;
-                            }
-                            if is_self {
-                                if let Ok(de) = aggregate::DomainEvent::<SessionState>::from_raw(event) {
-                                    if matches!(&de.payload, session::events::EventPayload::TurnCompleted(tc) if tc.turn_id == turn_id) {
-                                        return;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(_) => return,
-                }
-            }
-        });
-
-        event_rx
+        self.subscriptions.subscribe_turn(session_id, turn_id)
     }
 
     /// Subscribe to all events for a session (and descendants).
     /// Never auto-closes — stays open until the receiver is dropped.
     pub fn subscribe_session_admin(
         &self,
-        session_id: Uuid,
+        session_id: String,
     ) -> mpsc::Receiver<event_store::Event> {
-        let mut rx = self.store.subscribe();
-        let (tx, event_rx) = mpsc::channel::<event_store::Event>(64);
-
-        tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(batch) => {
-                        for event in batch.iter() {
-                            let is_self = event.aggregate_id == session_id;
-                            let is_descendant = !is_self
-                                && event.derived.as_ref().and_then(|d| {
-                                    serde_json::from_value::<session::state::DerivedState>(
-                                        d.clone(),
-                                    )
-                                    .ok()
-                                })
-                                .map_or(false, |d| d.ancestry.contains(&session_id));
-
-                            if !is_self && !is_descendant {
-                                continue;
-                            }
-                            if tx.send(event.clone()).await.is_err() {
-                                return;
-                            }
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(_) => return,
-                }
-            }
-        });
-
-        event_rx
+        self.subscriptions.subscribe_all(session_id)
     }
 
     // ---- Admin / inspection methods ----
@@ -247,11 +199,12 @@ impl Runtime {
 
     pub async fn get_session(
         &self,
-        session_id: Uuid,
+        tenant_id: &str,
+        session_id: &str,
     ) -> Result<(event_store::Snapshot, SessionState), RuntimeError> {
         let snapshot = self
             .store
-            .load(session_id)
+            .load(tenant_id, session_id)
             .await
             .map_err(|e| RuntimeError(e.to_string()))?;
         let agg: aggregate::Aggregate<SessionState> =
@@ -275,7 +228,7 @@ impl Runtime {
         execute::<SessionState>(
             &*self.store,
             ExecuteInput {
-                aggregate_id: input.session_id,
+                aggregate_id: input.session_id.clone(),
                 tenant_id: input.tenant_id,
                 command: CommandPayload::SubmitWorkerDecision {
                     decision_id: input.decision_id,
@@ -310,10 +263,13 @@ pub fn start(
     let worker_handle = spawn_worker_enqueue(store.clone(), worker_queue.clone());
     let wake_handle = spawn_wake_scheduler(store.clone(), config.wake_poll_interval);
 
+    let subscriptions = subscriptions::Subscriptions::new(store.clone());
+
     Arc::new(Runtime {
         store,
         queue: worker_queue,
         session_index,
+        subscriptions,
         handles: vec![llm_handle, sub_agent_handle, worker_handle, wake_handle],
     })
 }

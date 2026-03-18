@@ -9,15 +9,15 @@ use base64::Engine;
 use serde::Deserialize;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
-use uuid::Uuid;
 
 use substructure_core::event_store::{AggregateSort, EventFilter};
 use substructure_core::session_index::{SessionCursor, SessionFilter};
 use substructure_core::Runtime;
 
+use crate::transport::extractors::TenantId;
+
 #[derive(Debug, Deserialize)]
 pub struct ListSessionsParams {
-    pub tenant_id: Option<String>,
     #[serde(default = "default_true")]
     pub top_level: bool,
     #[serde(default)]
@@ -32,6 +32,7 @@ fn default_true() -> bool {
 
 pub async fn list_sessions(
     State(runtime): State<Arc<Runtime>>,
+    TenantId(tenant_id): TenantId,
     Query(params): Query<ListSessionsParams>,
 ) -> impl IntoResponse {
     let cursor = match params.cursor {
@@ -49,7 +50,7 @@ pub async fn list_sessions(
     };
 
     let filter = SessionFilter {
-        tenant_id: params.tenant_id,
+        tenant_id: Some(tenant_id),
         top_level: params.top_level,
         sort: params.sort,
         limit: params.limit,
@@ -90,9 +91,10 @@ fn decode_cursor(encoded: &str) -> Result<SessionCursor, String> {
 
 pub async fn get_session(
     State(runtime): State<Arc<Runtime>>,
-    Path(session_id): Path<Uuid>,
+    TenantId(tenant_id): TenantId,
+    Path(session_id): Path<String>,
 ) -> impl IntoResponse {
-    match runtime.get_session(session_id).await {
+    match runtime.get_session(&tenant_id, &session_id).await {
         Ok((snapshot, state)) => Json(serde_json::json!({
             "stream_version": snapshot.stream_version,
             "first_event_at": snapshot.first_event_at,
@@ -116,11 +118,11 @@ pub struct SessionEventsParams {
 
 pub async fn get_session_events(
     State(runtime): State<Arc<Runtime>>,
-    Path(session_id): Path<Uuid>,
+    Path(session_id): Path<String>,
     Query(params): Query<SessionEventsParams>,
 ) -> impl IntoResponse {
     let filter = EventFilter {
-        aggregate_id: Some(session_id),
+        aggregate_id: Some(session_id.clone()),
         sequence_after: params.sequence_after,
         limit: params.limit,
         ..Default::default()
@@ -137,11 +139,11 @@ pub async fn get_session_events(
 
 pub async fn stream_session_events(
     State(runtime): State<Arc<Runtime>>,
-    Path(session_id): Path<Uuid>,
+    Path(session_id): Path<String>,
     Query(params): Query<SessionEventsParams>,
 ) -> Response {
     // Subscribe BEFORE querying historical events so we don't miss anything
-    let live_rx = runtime.subscribe_session_admin(session_id);
+    let live_rx = runtime.subscribe_session_admin(session_id.clone());
 
     // Query historical events
     let filter = EventFilter {

@@ -6,6 +6,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 
 use crate::push::PushAdapter;
+use crate::transport::extractors::TenantId;
 use substructure_core::span::SpanContext;
 use substructure_core::worker::push::PushRegistrationRecord;
 use substructure_core::worker::SubmitDecision;
@@ -14,6 +15,7 @@ use super::types::{RegisterRequest, RegisterResponse, SubmitRequest, SubmitRespo
 
 pub async fn submit(
     State(adapter): State<Arc<PushAdapter>>,
+    TenantId(tenant_id): TenantId,
     Json(req): Json<SubmitRequest>,
 ) -> Json<SubmitResponse> {
     let span = req
@@ -25,7 +27,7 @@ pub async fn submit(
         .runtime
         .submit_decision(SubmitDecision {
             session_id: req.session_id,
-            tenant_id: req.tenant_id,
+            tenant_id,
             decision_id: req.decision_id,
             actions: req.actions,
             state: req.state,
@@ -47,11 +49,12 @@ pub async fn submit(
 
 pub async fn register(
     State(adapter): State<Arc<PushAdapter>>,
+    TenantId(tenant_id): TenantId,
     Json(req): Json<RegisterRequest>,
 ) -> impl IntoResponse {
     for agent_id in req.agent_ids {
         let record = PushRegistrationRecord {
-            tenant_id: req.tenant_id.clone(),
+            tenant_id: tenant_id.clone(),
             agent_id,
             transport_type: req.transport_type.clone(),
             config: req.config.clone(),

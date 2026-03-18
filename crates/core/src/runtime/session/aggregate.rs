@@ -1,5 +1,3 @@
-use uuid::Uuid;
-
 use crate::runtime::aggregate::{AggregateState, ApplyContext};
 
 use super::command::{CommandPayload, SessionError};
@@ -14,7 +12,7 @@ impl AggregateState for SessionState {
 
     const AGGREGATE_TYPE: &'static str = "session";
 
-    fn initial(id: Uuid) -> Self {
+    fn initial(id: String) -> Self {
         SessionState::new(id)
     }
 

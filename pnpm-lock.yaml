@@ -14,6 +14,9 @@ importers:
       nx:
         specifier: latest
         version: 22.5.4
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
 
   dashboard:
     dependencies:
@@ -117,19 +120,32 @@ importers:
       '@substructure.ai/sdk':
         specifier: workspace:*
         version: link:../packages/sdk
+      zod:
+        specifier: ^4.3.6
+        version: 4.3.6
 
   packages/cli: {}
 
   packages/runtime: {}
 
   packages/sdk:
+    dependencies:
+      zod-to-json-schema:
+        specifier: ^3.25.1
+        version: 3.25.1(zod@4.3.6)
     devDependencies:
+      '@types/node':
+        specifier: ^22.19.15
+        version: 22.19.15
       tsup:
         specifier: ^8.0.0
         version: 8.5.1(jiti@2.6.1)(postcss@8.5.8)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.2)
       typescript:
         specifier: ^5.7.2
         version: 5.9.3
+      zod:
+        specifier: ^4.3.6
+        version: 4.3.6
     optionalDependencies:
       '@substructure.ai/runtime':
         specifier: workspace:*
@@ -4065,8 +4081,16 @@ packages:
     resolution: {integrity: sha512-rVksvsnNCdJ/ohGc6xgPwyN8eheCxsiLM8mxuE/t/mOVqJewPuO1miLpTHQiRgTKCLexL4MeAFVagts7HmNZ2Q==}
     engines: {node: '>=10'}
 
+  zod-to-json-schema@3.25.1:
+    resolution: {integrity: sha512-pM/SU9d3YAggzi6MtR4h7ruuQlqKtad8e9S0fmxcMi+ueAK5Korys/aWcV9LIIHTVbj01NdzxcnXSN+O74ZIVA==}
+    peerDependencies:
+      zod: ^3.25 || ^4
+
   zod@3.25.76:
     resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
+
+  zod@4.3.6:
+    resolution: {integrity: sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg==}
 
   zwitch@2.0.4:
     resolution: {integrity: sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A==}
@@ -7897,6 +7921,12 @@ snapshots:
 
   yocto-queue@0.1.0: {}
 
+  zod-to-json-schema@3.25.1(zod@4.3.6):
+    dependencies:
+      zod: 4.3.6
+
   zod@3.25.76: {}
+
+  zod@4.3.6: {}
 
   zwitch@2.0.4: {}

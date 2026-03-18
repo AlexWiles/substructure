@@ -166,25 +166,24 @@ impl JsRuntime {
     }
 
     /// Send a message to an agent session, calling `onEvent` for each event as it arrives.
-    #[napi(ts_args_type = "sessionId: string, tenantId: string, agentId: string, content: string, onEvent: (event: string) => void")]
+    #[napi(ts_args_type = "sessionId: string, tenantId: string, agentId: string, content: string, turnId: string | undefined, onEvent: (event: string) => void")]
     pub async fn send_message(
         &self,
         session_id: String,
         tenant_id: String,
         agent_id: String,
         content: String,
+        turn_id: Option<String>,
         on_event: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
     ) -> Result<()> {
-        let sid = uuid::Uuid::parse_str(&session_id)
-            .map_err(|e| Error::from_reason(format!("invalid session_id: {e}")))?;
-
         let (_, mut rx) = self
             .inner
             .send_message(SendMessage {
-                session_id: sid,
+                session_id,
                 tenant_id,
                 agent_id,
                 content,
+                turn_id,
             })
             .await
             .map_err(|e| Error::from_reason(e.to_string()))?;

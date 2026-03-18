@@ -20,7 +20,7 @@ pub struct Event {
     pub id: Uuid,
     pub tenant_id: String,
     pub aggregate_type: String,
-    pub aggregate_id: Uuid,
+    pub aggregate_id: String,
     pub sequence: u64,
     pub span: SpanContext,
     pub occurred_at: DateTime<Utc>,
@@ -49,7 +49,7 @@ pub enum StoreError {
 }
 
 pub struct Snapshot {
-    pub aggregate_id: Uuid,
+    pub aggregate_id: String,
     pub tenant_id: String,
     pub aggregate_type: String,
     pub data: serde_json::Value,
@@ -78,7 +78,7 @@ pub enum AggregateSort {
 #[derive(Debug, Clone, Default)]
 pub struct AggregateFilter {
     pub aggregate_type: Option<String>,
-    pub aggregate_ids: Option<Vec<Uuid>>,
+    pub aggregate_ids: Option<Vec<String>>,
     pub tenant_id: Option<String>,
     /// Only include aggregates with `wake_at <= t`.
     pub wake_at_before: Option<DateTime<Utc>>,
@@ -90,7 +90,7 @@ pub struct AggregateFilter {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AggregateSummary {
-    pub aggregate_id: Uuid,
+    pub aggregate_id: String,
     pub aggregate_type: String,
     pub tenant_id: String,
     pub wake_at: Option<DateTime<Utc>>,
@@ -101,7 +101,7 @@ pub struct AggregateSummary {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct EventFilter {
-    pub aggregate_id: Option<Uuid>,
+    pub aggregate_id: Option<String>,
     pub aggregate_type: Option<String>,
     pub tenant_id: Option<String>,
     pub trace_id: Option<String>,
@@ -117,8 +117,8 @@ pub trait EventStore: Send + Sync {
     /// Implementations must notify subscribers after a successful append.
     async fn append(&self, input: AppendInput) -> Result<(), StoreError>;
 
-    /// Load the latest snapshot for a stream.
-    async fn load(&self, aggregate_id: Uuid) -> Result<Snapshot, StoreError>;
+    /// Load the latest snapshot for a stream (tenant-scoped).
+    async fn load(&self, tenant_id: &str, aggregate_id: &str) -> Result<Snapshot, StoreError>;
 
     /// Query aggregates with filtering, sorting, and pagination.
     async fn list_aggregates(

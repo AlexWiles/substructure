@@ -32,6 +32,23 @@ export interface RetryPolicy {
   backoff_max_secs: number;
 }
 
+export class Retry implements RetryPolicy {
+  timeout_secs: number | null = null;
+  max_retries: number = 0;
+  backoff_base_secs: number = 0;
+  backoff_max_secs: number = 0;
+
+  timeout(secs: number): this { this.timeout_secs = secs; return this; }
+  retries(n: number): this { this.max_retries = n; return this; }
+  backoff(baseSecs: number, maxSecs: number): this {
+    this.backoff_base_secs = baseSecs;
+    this.backoff_max_secs = maxSecs;
+    return this;
+  }
+}
+
+export function retry(): Retry { return new Retry(); }
+
 export interface RetryState {
   attempts: number;
   next_at?: DateTime;
@@ -127,7 +144,7 @@ export interface ToolResult {
 
 export type DecisionTrigger =
   | { type: "user_message"; stream: boolean; message: Message }
-  | { type: "llm_response"; call_id: string; message: Message; truncated: boolean }
+  | { type: "llm_response"; call_id: string; message: Message; truncated: boolean; usage?: Record<string, unknown>; cost?: Decimal }
   | { type: "llm_error"; call_id: string; error: string }
   | {
       type: "tool_execute";
@@ -468,6 +485,7 @@ export interface SendMessageRequest {
   message: string;
   tenant_id?: string;
   session_id?: Uuid;
+  turn_id?: string;
 }
 
 // ── Worker HTTP API ─────────────────────────────────────────────────────────

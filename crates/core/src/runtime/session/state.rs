@@ -113,7 +113,7 @@ pub struct ToolCallState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentCallState {
-    pub session_id: Uuid,
+    pub session_id: String,
     pub agent_id: String,
     pub tracking: EffectTracking,
 }
@@ -134,7 +134,7 @@ pub struct DerivedState {
     #[serde(default)]
     pub worker_state: Vec<u8>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ancestry: Vec<Uuid>,
+    pub ancestry: Vec<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub sub_agent_calls: HashMap<String, SubAgentCallState>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -160,7 +160,7 @@ pub(super) fn new_call_id() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionState {
-    pub session_id: Uuid,
+    pub session_id: String,
     pub status: SessionStatus,
     pub agent_id: Option<String>,
     pub auth: Option<ClientIdentity>,
@@ -190,7 +190,7 @@ pub struct SessionState {
     pub worker_state: Vec<u8>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ancestry: Vec<Uuid>,
+    pub ancestry: Vec<String>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<Artifact>,
@@ -205,10 +205,14 @@ pub struct SessionState {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
+
+    /// Turn IDs that have completed, used for idempotency checks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub completed_turn_ids: Vec<String>,
 }
 
 impl SessionState {
-    pub fn new(session_id: Uuid) -> Self {
+    pub fn new(session_id: String) -> Self {
         SessionState {
             session_id,
             status: SessionStatus::Done,
@@ -229,6 +233,7 @@ impl SessionState {
             sub_agent_calls: HashMap::new(),
             worker_decisions: HashMap::new(),
             turn_id: None,
+            completed_turn_ids: Vec::new(),
         }
     }
 
@@ -321,12 +326,12 @@ impl SessionState {
                 }
             }
             EventPayload::SubAgentRequested(payload) => {
-                let sid = payload.session_id;
-                if let Some(existing) = self.sub_agent_calls.get_mut(&sid.to_string()) {
+                let sid = payload.session_id.clone();
+                if let Some(existing) = self.sub_agent_calls.get_mut(&sid) {
                     existing.tracking.reset_pending(now);
                 } else {
                     self.sub_agent_calls.insert(
-                        sid.to_string(),
+                        sid.clone(),
                         SubAgentCallState {
                             session_id: sid,
                             agent_id: payload.agent_id.clone(),
@@ -337,12 +342,12 @@ impl SessionState {
                 self.status = SessionStatus::Idle;
             }
             EventPayload::SubAgentStarted(payload) => {
-                if let Some(sa) = self.sub_agent_calls.get_mut(&payload.session_id.to_string()) {
+                if let Some(sa) = self.sub_agent_calls.get_mut(&payload.session_id) {
                     sa.tracking.complete();
                 }
             }
             EventPayload::SubAgentErrored(payload) => {
-                if let Some(sa) = self.sub_agent_calls.get_mut(&payload.session_id.to_string()) {
+                if let Some(sa) = self.sub_agent_calls.get_mut(&payload.session_id) {
                     sa.tracking.record_error(payload.retryable, now);
                 }
             }
@@ -418,8 +423,10 @@ impl SessionState {
                 self.turn_token_usage.clear();
             }
             EventPayload::TurnCompleted(payload) => {
+                if let Some(tid) = self.turn_id.clone() {
+                    self.completed_turn_ids.push(tid);
+                }
                 self.artifacts = payload.artifacts.clone();
-                self.turn_id = None;
                 self.turn_cost = Decimal::ZERO;
                 self.turn_token_usage.clear();
             }
