@@ -8,6 +8,7 @@ pub use runtime::{
     identity,
     llm,
     retry,
+    projection,
     serde_helpers,
     session,
     session_index,

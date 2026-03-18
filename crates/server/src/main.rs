@@ -56,7 +56,14 @@ async fn main() -> anyhow::Result<()> {
                 api_key: std::env::var("OPENROUTER_API_KEY").unwrap_or_default(),
             }));
 
-            let rt = substructure_core::start(store.clone(), llm_provider, queue, store.clone(), Default::default());
+            let rt = substructure_core::start(
+                store.clone(),
+                llm_provider,
+                queue,
+                store.clone(),
+                store.clone(),
+                Default::default(),
+            );
 
             let transports = TransportRegistry::new(vec![http_transport()]);
             let registry = PushRegistry::new(store, transports);

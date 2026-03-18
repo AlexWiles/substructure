@@ -14,10 +14,6 @@ impl SubstructureServer {
         Self { router }
     }
 
-    pub fn router(&self) -> Router {
-        self.router.clone()
-    }
-
     pub async fn serve(self, listener: TcpListener) -> anyhow::Result<()> {
         let app = self
             .router

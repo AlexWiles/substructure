@@ -66,7 +66,14 @@ impl JsRuntime {
         // Enter the NAPI tokio runtime so background tasks spawned by start() work
         let rt = tokio::runtime::Handle::current();
         let inner = rt.block_on(async {
-            substructure_core::start(store.clone(), llm_provider, queue, store, config)
+            substructure_core::start(
+                store.clone(),
+                llm_provider,
+                queue,
+                store.clone(),
+                store,
+                config,
+            )
         });
 
         Ok(Self {

@@ -14,6 +14,12 @@ use substructure_core::event_store::{
     AggregateFilter, AggregateSort, AggregateSummary, AppendInput, Event, EventFilter, EventStore,
     Snapshot, StoreError, Version,
 };
+use substructure_core::projection::{
+    CheckpointError, ProjectionCheckpoint, ProjectionCheckpointStore,
+};
+use substructure_core::span::SpanContext;
+use std::collections::HashMap;
+use uuid::Uuid;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS events (
@@ -55,6 +61,16 @@ CREATE TABLE IF NOT EXISTS push_registrations (
     config          TEXT NOT NULL,
     PRIMARY KEY (tenant_id, agent_id)
 );
+
+CREATE TABLE IF NOT EXISTS projection_checkpoints (
+    projection_name TEXT NOT NULL,
+    shard_id        INTEGER NOT NULL,
+    position        INTEGER NOT NULL,
+    version         INTEGER NOT NULL,
+    owner_id        TEXT,
+    updated_at      TEXT NOT NULL,
+    PRIMARY KEY (projection_name, shard_id)
+);
 ";
 
 #[derive(Iden)]
@@ -85,6 +101,61 @@ pub struct SqliteStore {
     writer: Arc<Mutex<Connection>>,
     path: String,
     tx: broadcast::Sender<StdArc<Vec<Event>>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct StoredEvent {
+    id: Uuid,
+    tenant_id: String,
+    aggregate_type: String,
+    aggregate_id: String,
+    sequence: u64,
+    span: SpanContext,
+    occurred_at: DateTime<Utc>,
+    payload: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    derived: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    metadata: HashMap<String, String>,
+    start_time: DateTime<Utc>,
+    end_time: DateTime<Utc>,
+}
+
+impl StoredEvent {
+    fn from_event(event: &Event) -> Self {
+        Self {
+            id: event.id,
+            tenant_id: event.tenant_id.clone(),
+            aggregate_type: event.aggregate_type.clone(),
+            aggregate_id: event.aggregate_id.clone(),
+            sequence: event.sequence,
+            span: event.span.clone(),
+            occurred_at: event.occurred_at,
+            payload: event.payload.clone(),
+            derived: event.derived.clone(),
+            metadata: event.metadata.clone(),
+            start_time: event.start_time,
+            end_time: event.end_time,
+        }
+    }
+
+    fn into_event(self, position: u64) -> Event {
+        Event {
+            position,
+            id: self.id,
+            tenant_id: self.tenant_id,
+            aggregate_type: self.aggregate_type,
+            aggregate_id: self.aggregate_id,
+            sequence: self.sequence,
+            span: self.span,
+            occurred_at: self.occurred_at,
+            payload: self.payload,
+            derived: self.derived,
+            metadata: self.metadata,
+            start_time: self.start_time,
+            end_time: self.end_time,
+        }
+    }
 }
 
 impl SqliteStore {
@@ -136,9 +207,10 @@ fn sea_params(values: sea_query::Values) -> Vec<Box<dyn rusqlite::types::ToSql>>
         .collect()
 }
 
-fn do_append(conn: &mut Connection, input: AppendInput) -> Result<(), StoreError> {
+fn do_append(conn: &mut Connection, input: AppendInput) -> Result<Vec<u64>, StoreError> {
     let snap = &input.snapshot;
     let aid = &snap.aggregate_id;
+    let mut positions = Vec::with_capacity(input.events.len());
     let tx = conn
         .transaction()
         .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -147,7 +219,9 @@ fn do_append(conn: &mut Connection, input: AppendInput) -> Result<(), StoreError
         .map_err(|_| StoreError::Internal("expected_version exceeds i64".into()))?;
 
     for event in &input.events {
-        let data = serde_json::to_string(event).map_err(|e| StoreError::Internal(e.to_string()))?;
+        let stored = StoredEvent::from_event(event);
+        let data =
+            serde_json::to_string(&stored).map_err(|e| StoreError::Internal(e.to_string()))?;
         let trace_id = event.span.trace_id.to_string();
 
         let occurred_at = event.occurred_at.to_rfc3339();
@@ -191,6 +265,11 @@ fn do_append(conn: &mut Connection, input: AppendInput) -> Result<(), StoreError
                 actual: Version(actual_version),
             });
         }
+
+        let row_id = tx.last_insert_rowid();
+        let position = u64::try_from(row_id)
+            .map_err(|_| StoreError::Internal("event position exceeds u64".into()))?;
+        positions.push(position);
     }
 
     let snapshot_data = serde_json::to_string(&snap.data)
@@ -221,7 +300,7 @@ fn do_append(conn: &mut Connection, input: AppendInput) -> Result<(), StoreError
     tx.commit()
         .map_err(|e| StoreError::Internal(e.to_string()))?;
 
-    Ok(())
+    Ok(positions)
 }
 
 fn do_load(conn: &Connection, tenant_id: &str, aggregate_id: &str) -> Result<Snapshot, StoreError> {
@@ -351,8 +430,12 @@ fn do_list_aggregates(
 
 fn do_query_events(conn: &Connection, filter: EventFilter) -> Result<Vec<Event>, StoreError> {
     let (sql, values) = Query::select()
+        .column(Events::GlobalSequence)
         .column(Events::Data)
         .from(Events::Table)
+        .apply_if(filter.after_position, |q, pos| {
+            q.and_where(Expr::col(Events::GlobalSequence).gt(pos as i64));
+        })
         .apply_if(filter.aggregate_id.as_ref(), |q, id| {
             q.and_where(Expr::col(Events::AggregateId).eq(id));
         })
@@ -388,18 +471,106 @@ fn do_query_events(conn: &Connection, filter: EventFilter) -> Result<Vec<Event>,
         .map_err(|e| StoreError::Internal(e.to_string()))?;
 
     let rows = stmt
-        .query_map(param_refs.as_slice(), |row| row.get::<_, String>(0))
+        .query_map(param_refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, u64>(0)?,
+                row.get::<_, String>(1)?,
+            ))
+        })
         .map_err(|e| StoreError::Internal(e.to_string()))?;
 
     let mut events = Vec::new();
     for row in rows {
-        let data = row.map_err(|e| StoreError::Internal(e.to_string()))?;
-        let event: Event =
+        let (position, data) = row.map_err(|e| StoreError::Internal(e.to_string()))?;
+        let stored: StoredEvent =
             serde_json::from_str(&data).map_err(|e| StoreError::Internal(e.to_string()))?;
+        let event = stored.into_event(position);
         events.push(event);
     }
 
     Ok(events)
+}
+
+fn do_load_projection_checkpoint(
+    conn: &Connection,
+    projection: &str,
+    shard_id: u32,
+) -> Result<ProjectionCheckpoint, CheckpointError> {
+    let row = conn
+        .query_row(
+            "SELECT position, version, updated_at FROM projection_checkpoints WHERE projection_name = ?1 AND shard_id = ?2",
+            rusqlite::params![projection, shard_id],
+            |row| {
+                Ok((
+                    row.get::<_, u64>(0)?,
+                    row.get::<_, u64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| CheckpointError::Message(e.to_string()))?;
+
+    match row {
+        Some((position, version, updated_at)) => Ok(ProjectionCheckpoint {
+            position,
+            version,
+            updated_at: parse_dt(&updated_at).unwrap_or_else(Utc::now),
+        }),
+        None => Ok(ProjectionCheckpoint {
+            position: 0,
+            version: 0,
+            updated_at: Utc::now(),
+        }),
+    }
+}
+
+fn do_compare_and_set_projection_checkpoint(
+    conn: &mut Connection,
+    projection: &str,
+    shard_id: u32,
+    expected_version: u64,
+    new_position: u64,
+    owner_id: Option<&str>,
+) -> Result<bool, CheckpointError> {
+    let tx = conn
+        .transaction()
+        .map_err(|e| CheckpointError::Message(e.to_string()))?;
+
+    if expected_version == 0 {
+        tx.execute(
+            "INSERT OR IGNORE INTO projection_checkpoints (projection_name, shard_id, position, version, owner_id, updated_at)
+             VALUES (?1, ?2, 0, 0, NULL, ?3)",
+            rusqlite::params![projection, shard_id, Utc::now().to_rfc3339()],
+        )
+        .map_err(|e| CheckpointError::Message(e.to_string()))?;
+    }
+
+    let updated = tx
+        .execute(
+            "UPDATE projection_checkpoints
+             SET position = ?1,
+                 version = version + 1,
+                 owner_id = ?2,
+                 updated_at = ?3
+             WHERE projection_name = ?4
+               AND shard_id = ?5
+               AND version = ?6",
+            rusqlite::params![
+                new_position,
+                owner_id,
+                Utc::now().to_rfc3339(),
+                projection,
+                shard_id,
+                expected_version,
+            ],
+        )
+        .map_err(|e| CheckpointError::Message(e.to_string()))?;
+
+    tx.commit()
+        .map_err(|e| CheckpointError::Message(e.to_string()))?;
+
+    Ok(updated == 1)
 }
 
 fn spawn_err(e: tokio::task::JoinError) -> StoreError {
@@ -411,7 +582,7 @@ impl EventStore for SqliteStore {
     async fn append(&self, input: AppendInput) -> Result<(), StoreError> {
         let events = input.events.clone();
         let writer = self.writer.clone();
-        tokio::task::spawn_blocking(move || {
+        let positions = tokio::task::spawn_blocking(move || {
             let mut conn = writer
                 .lock()
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -420,7 +591,18 @@ impl EventStore for SqliteStore {
         .await
         .map_err(spawn_err)??;
 
-        let _ = self.tx.send(StdArc::new(events));
+        if events.len() != positions.len() {
+            return Err(StoreError::Internal(
+                "inserted event count did not match assigned positions".into(),
+            ));
+        }
+
+        let mut with_positions = events;
+        for (event, position) in with_positions.iter_mut().zip(positions.into_iter()) {
+            event.position = position;
+        }
+
+        let _ = self.tx.send(StdArc::new(with_positions));
         Ok(())
     }
 
@@ -463,6 +645,53 @@ impl EventStore for SqliteStore {
 
     fn subscribe(&self) -> broadcast::Receiver<StdArc<Vec<Event>>> {
         self.tx.subscribe()
+    }
+}
+
+#[async_trait]
+impl ProjectionCheckpointStore for SqliteStore {
+    async fn load_checkpoint(
+        &self,
+        projection: &str,
+        shard_id: u32,
+    ) -> Result<ProjectionCheckpoint, CheckpointError> {
+        let projection = projection.to_string();
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = open_conn_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|e| CheckpointError::Message(e.to_string()))?;
+            do_load_projection_checkpoint(&conn, &projection, shard_id)
+        })
+        .await
+        .map_err(|e| CheckpointError::Message(e.to_string()))?
+    }
+
+    async fn compare_and_set_checkpoint(
+        &self,
+        projection: &str,
+        shard_id: u32,
+        expected_version: u64,
+        new_position: u64,
+        owner_id: Option<&str>,
+    ) -> Result<bool, CheckpointError> {
+        let projection = projection.to_string();
+        let owner_id = owner_id.map(str::to_string);
+        let writer = self.writer.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = writer
+                .lock()
+                .map_err(|e| CheckpointError::Message(e.to_string()))?;
+            do_compare_and_set_projection_checkpoint(
+                &mut conn,
+                &projection,
+                shard_id,
+                expected_version,
+                new_position,
+                owner_id.as_deref(),
+            )
+        })
+        .await
+        .map_err(|e| CheckpointError::Message(e.to_string()))?
     }
 }
 
@@ -618,7 +847,6 @@ impl SessionIndex for SqliteStore {
 // ---------------------------------------------------------------------------
 
 use substructure_core::worker::push::{PushRegistrationRecord, PushRegistrationStore};
-use std::collections::HashMap;
 
 #[async_trait]
 impl PushRegistrationStore for SqliteStore {

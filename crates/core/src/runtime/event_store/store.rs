@@ -17,6 +17,7 @@ use crate::runtime::span::SpanContext;
 /// with the typed `DomainEvent<R>` and converts at the boundary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
+    pub position: u64,
     pub id: Uuid,
     pub tenant_id: String,
     pub aggregate_type: String,
@@ -101,6 +102,7 @@ pub struct AggregateSummary {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct EventFilter {
+    pub after_position: Option<u64>,
     pub aggregate_id: Option<String>,
     pub aggregate_type: Option<String>,
     pub tenant_id: Option<String>,
@@ -127,6 +129,8 @@ pub trait EventStore: Send + Sync {
     ) -> Result<Vec<AggregateSummary>, StoreError>;
 
     /// Query events with filtering and pagination.
+    ///
+    /// Implementations must return events in ascending `position` order.
     async fn query_events(&self, filter: &EventFilter) -> Result<Vec<Event>, StoreError>;
 
     /// Subscribe to new events as they are appended.

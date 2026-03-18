@@ -61,9 +61,14 @@ impl<R: AggregateState> DomainEvent<R> {
         end_time: DateTime<Utc>,
     ) -> Result<StoreEvent, serde_json::Error> {
         let payload = serde_json::to_value(&self.payload)?;
-        let derived = self.derived.as_ref().map(serde_json::to_value).transpose()?;
+        let derived = self
+            .derived
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()?;
 
         Ok(StoreEvent {
+            position: 0,
             id: self.id,
             tenant_id: self.tenant_id,
             aggregate_type: R::AGGREGATE_TYPE.to_string(),
@@ -80,7 +85,9 @@ impl<R: AggregateState> DomainEvent<R> {
     }
 }
 
-pub trait AggregateState: Sized + Serialize + DeserializeOwned + Clone + Send + Sync + 'static {
+pub trait AggregateState:
+    Sized + Serialize + DeserializeOwned + Clone + Send + Sync + 'static
+{
     type Event: Serialize + DeserializeOwned + Clone + Send + Sync + 'static;
     type Command: Clone + Send + Sync + 'static;
     type Error: std::fmt::Debug + Send + Sync + 'static;

@@ -12,6 +12,7 @@ use event_store::{spawn_handler_pool, EventStore};
 use identity::ClientIdentity;
 use llm::handler::LlmEventHandler;
 use llm::LlmProviderTrait;
+use projection::ProjectionCheckpointStore;
 use sub_agent::SubAgentHandler;
 use retry::RetryPolicy;
 use session::command::{CommandPayload, SessionError};
@@ -19,7 +20,7 @@ use session::state::SessionState;
 use session_index::{SessionFilter, SessionIndex, SessionPage};
 use span::SpanContext;
 use wake::spawn_wake_scheduler;
-use worker::spawn_worker_enqueue;
+use worker::spawn_worker_projection;
 use worker::{DequeueFilter, WorkerDecisionRequest, SubmitDecision, WorkerQueue};
 
 pub mod aggregate;
@@ -29,6 +30,7 @@ pub mod llm;
 pub mod retry;
 pub mod serde_helpers;
 pub mod session;
+pub mod projection;
 pub mod span;
 pub mod sub_agent;
 pub mod subscriptions;
@@ -250,6 +252,7 @@ pub fn start(
     llm_provider: Arc<dyn LlmProviderTrait>,
     worker_queue: Arc<dyn WorkerQueue>,
     session_index: Arc<dyn SessionIndex>,
+    checkpoint_store: Arc<dyn ProjectionCheckpointStore>,
     config: RuntimeConfig,
 ) -> Arc<Runtime> {
     let llm_handler = Arc::new(LlmEventHandler::new(store.clone(), llm_provider));
@@ -260,7 +263,11 @@ pub fn start(
     let sub_agent_handle =
         spawn_handler_pool::<SessionState>(store.clone(), sub_agent_handler, 2);
 
-    let worker_handle = spawn_worker_enqueue(store.clone(), worker_queue.clone());
+    let worker_handle = spawn_worker_projection(
+        store.clone(),
+        checkpoint_store,
+        worker_queue.clone(),
+    );
     let wake_handle = spawn_wake_scheduler(store.clone(), config.wake_poll_interval);
 
     let subscriptions = subscriptions::Subscriptions::new(store.clone());
