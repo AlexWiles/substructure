@@ -63,5 +63,4 @@ for await (const event of stream) {
 const result = await stream.result;
 console.log("\nTurn result:", result);
 
-await server.shutdown();
 await sub.shutdown();
