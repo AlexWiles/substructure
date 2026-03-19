@@ -18,3 +18,4 @@ thiserror = "2"
 tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["serde", "v7"] }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }

@@ -71,6 +71,7 @@ impl JsRuntime {
                 llm_provider,
                 queue,
                 store.clone(),
+                store.clone(),
                 store,
                 config,
             )

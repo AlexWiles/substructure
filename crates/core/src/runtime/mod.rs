@@ -19,7 +19,7 @@ use session::command::{CommandPayload, SessionError};
 use session::state::SessionState;
 use session_index::{SessionFilter, SessionIndex, SessionPage};
 use span::SpanContext;
-use wake::spawn_wake_scheduler;
+use wake::{spawn_wake_dispatcher, spawn_wake_projection, WakeScheduleStore};
 use worker::spawn_worker_projection;
 use worker::{DequeueFilter, WorkerDecisionRequest, SubmitDecision, WorkerQueue};
 
@@ -253,6 +253,7 @@ pub fn start(
     worker_queue: Arc<dyn WorkerQueue>,
     session_index: Arc<dyn SessionIndex>,
     checkpoint_store: Arc<dyn ProjectionCheckpointStore>,
+    wake_store: Arc<dyn WakeScheduleStore>,
     config: RuntimeConfig,
 ) -> Arc<Runtime> {
     let llm_handler = Arc::new(LlmEventHandler::new(store.clone(), llm_provider));
@@ -265,10 +266,16 @@ pub fn start(
 
     let worker_handle = spawn_worker_projection(
         store.clone(),
-        checkpoint_store,
+        checkpoint_store.clone(),
         worker_queue.clone(),
     );
-    let wake_handle = spawn_wake_scheduler(store.clone(), config.wake_poll_interval);
+    let wake_projection_handle = spawn_wake_projection(
+        store.clone(),
+        checkpoint_store,
+        wake_store.clone(),
+    );
+    let wake_dispatcher_handle =
+        spawn_wake_dispatcher(store.clone(), wake_store, config.wake_poll_interval);
 
     let subscriptions = subscriptions::Subscriptions::new(store.clone());
 
@@ -277,6 +284,12 @@ pub fn start(
         queue: worker_queue,
         session_index,
         subscriptions,
-        handles: vec![llm_handle, sub_agent_handle, worker_handle, wake_handle],
+        handles: vec![
+            llm_handle,
+            sub_agent_handle,
+            worker_handle,
+            wake_projection_handle,
+            wake_dispatcher_handle,
+        ],
     })
 }

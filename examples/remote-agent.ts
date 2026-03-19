@@ -10,7 +10,7 @@ const add = tool({
 const mathAgent = new Agent({
     id: "math-agent",
     description: "Performs math computations",
-    llm: { model: "openrouter/hunter-alpha", client: "openrouter", retry: retry().timeout(120).retries(3).backoff(1, 10) },
+    llm: { model: "arcee-ai/trinity-large-preview:free", client: "openrouter", retry: retry().timeout(120).retries(3).backoff(1, 10) },
     systemPrompt: "You are a math assistant. Compute whatever is asked. Be concise, return only the result.",
     tools: { add },
 });
@@ -24,7 +24,7 @@ const getWeather = tool({
 const weatherAgent = new Agent({
     id: "weather-agent",
     description: "Answers questions about the weather",
-    llm: { model: "openrouter/hunter-alpha", client: "openrouter", retry: retry().timeout(120).retries(3).backoff(1, 10) },
+    llm: { model: "arcee-ai/trinity-large-preview:free", client: "openrouter", retry: retry().timeout(120).retries(3).backoff(1, 10) },
     systemPrompt: "You are a weather assistant. Use tools when appropriate. Be concise.",
     tools: { get_weather: getWeather },
     subAgents: [mathAgent],
@@ -48,8 +48,8 @@ const server = Bun.serve({ port: WORKER_PORT, fetch: sub.fetchHandler() });
 
 const stream = sub.run(
     "weather-agent",
-    "What is the sum of the current temperatures in San Francisco and New York?",
-    { sessionId: "raw-session-1", turnId: "turn-1" },
+    "What is the cube of the sum - the square of the diff of the current temperatures in San Francisco and New York?",
+    { sessionId: "raw-session-3", turnId: "turn-3" },
 );
 
 for await (const event of stream) {
@@ -61,6 +61,6 @@ for await (const event of stream) {
 }
 
 const result = await stream.result;
-console.log("\nTurn result:", result);
+console.log("\nTurn result:", result.artifacts[0]);
 
 await sub.shutdown();

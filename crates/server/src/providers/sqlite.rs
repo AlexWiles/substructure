@@ -18,6 +18,7 @@ use substructure_core::projection::{
     CheckpointError, ProjectionCheckpoint, ProjectionCheckpointStore,
 };
 use substructure_core::span::SpanContext;
+use substructure_core::wake::{WakeScheduleItem, WakeScheduleStore};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -71,6 +72,15 @@ CREATE TABLE IF NOT EXISTS projection_checkpoints (
     updated_at      TEXT NOT NULL,
     PRIMARY KEY (projection_name, shard_id)
 );
+
+CREATE TABLE IF NOT EXISTS wake_schedule (
+    tenant_id       TEXT NOT NULL,
+    aggregate_id    TEXT NOT NULL,
+    wake_at         TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, aggregate_id)
+);
+CREATE INDEX IF NOT EXISTS idx_wake_schedule_wake_at ON wake_schedule (wake_at);
 ";
 
 #[derive(Iden)]
@@ -573,6 +583,85 @@ fn do_compare_and_set_projection_checkpoint(
     Ok(updated == 1)
 }
 
+fn do_upsert_wake(
+    conn: &Connection,
+    tenant_id: &str,
+    aggregate_id: &str,
+    wake_at: DateTime<Utc>,
+) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO wake_schedule (tenant_id, aggregate_id, wake_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(tenant_id, aggregate_id) DO UPDATE SET
+             wake_at = excluded.wake_at,
+             updated_at = excluded.updated_at",
+        rusqlite::params![tenant_id, aggregate_id, wake_at.to_rfc3339(), Utc::now().to_rfc3339()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn do_remove_wake(conn: &Connection, tenant_id: &str, aggregate_id: &str) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM wake_schedule WHERE tenant_id = ?1 AND aggregate_id = ?2",
+        rusqlite::params![tenant_id, aggregate_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn do_list_due_wakes(
+    conn: &Connection,
+    now: DateTime<Utc>,
+    limit: usize,
+) -> Result<Vec<WakeScheduleItem>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT tenant_id, aggregate_id, wake_at
+             FROM wake_schedule
+             WHERE wake_at <= ?1
+             ORDER BY wake_at ASC
+             LIMIT ?2",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map(rusqlite::params![now.to_rfc3339(), limit as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        let (tenant_id, aggregate_id, wake_at_str) = row.map_err(|e| e.to_string())?;
+        let Some(wake_at) = parse_dt(&wake_at_str) else {
+            continue;
+        };
+        out.push(WakeScheduleItem {
+            tenant_id,
+            aggregate_id,
+            wake_at,
+        });
+    }
+    Ok(out)
+}
+
+fn do_next_wake_at(conn: &Connection) -> Result<Option<DateTime<Utc>>, String> {
+    let wake_at = conn
+        .query_row(
+            "SELECT wake_at FROM wake_schedule ORDER BY wake_at ASC LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    Ok(wake_at.as_deref().and_then(parse_dt))
+}
+
 fn spawn_err(e: tokio::task::JoinError) -> StoreError {
     StoreError::Internal(format!("spawn_blocking: {e}"))
 }
@@ -692,6 +781,64 @@ impl ProjectionCheckpointStore for SqliteStore {
         })
         .await
         .map_err(|e| CheckpointError::Message(e.to_string()))?
+    }
+}
+
+#[async_trait]
+impl WakeScheduleStore for SqliteStore {
+    async fn upsert_wake(
+        &self,
+        tenant_id: &str,
+        aggregate_id: &str,
+        wake_at: DateTime<Utc>,
+    ) -> Result<(), String> {
+        let tenant_id = tenant_id.to_string();
+        let aggregate_id = aggregate_id.to_string();
+        let writer = self.writer.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = writer.lock().map_err(|e| e.to_string())?;
+            do_upsert_wake(&conn, &tenant_id, &aggregate_id, wake_at)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    async fn remove_wake(&self, tenant_id: &str, aggregate_id: &str) -> Result<(), String> {
+        let tenant_id = tenant_id.to_string();
+        let aggregate_id = aggregate_id.to_string();
+        let writer = self.writer.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = writer.lock().map_err(|e| e.to_string())?;
+            do_remove_wake(&conn, &tenant_id, &aggregate_id)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    async fn list_due_wakes(
+        &self,
+        now: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<WakeScheduleItem>, String> {
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = open_conn_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|e| e.to_string())?;
+            do_list_due_wakes(&conn, now, limit)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    async fn next_wake_at(&self) -> Result<Option<DateTime<Utc>>, String> {
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = open_conn_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|e| e.to_string())?;
+            do_next_wake_at(&conn)
+        })
+        .await
+        .map_err(|e| e.to_string())?
     }
 }
 

@@ -57,6 +57,6 @@ for await (const event of stream) {
 }
 
 const result = await stream.result;
-console.log(result.artifacts[0].parts);
+console.log(result.artifacts[0].parts[0]);
 
 await sub.shutdown();

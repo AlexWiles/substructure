@@ -62,6 +62,7 @@ async fn main() -> anyhow::Result<()> {
                 queue,
                 store.clone(),
                 store.clone(),
+                store.clone(),
                 Default::default(),
             );
 

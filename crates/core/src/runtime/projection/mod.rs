@@ -4,6 +4,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use tokio::task::JoinHandle;
+use xxhash_rust::xxh3::xxh3_64;
 
 use crate::runtime::event_store::{Event, EventFilter, EventStore};
 
@@ -81,6 +82,10 @@ pub struct ProjectionRunner {
     config: ProjectionRunnerConfig,
 }
 
+enum BatchProcessError {
+    ApplyFailed,
+}
+
 impl ProjectionRunner {
     pub fn new(
         store: Arc<dyn EventStore>,
@@ -130,7 +135,7 @@ impl ProjectionRunner {
 
         let mut wake_rx = self.store.subscribe();
 
-        'run: loop {
+        loop {
             let events = match self
                 .store
                 .query_events(&EventFilter {
@@ -161,13 +166,27 @@ impl ProjectionRunner {
                 continue;
             }
 
-            let mut committable_position = checkpoint.position;
+            let _ = self
+                .process_batch(projection_name, &mut checkpoint, &events)
+                .await;
+        }
+    }
 
-            for event in &events {
-                if !event_matches_shard(event, self.projection.as_ref(), self.config.shard_count, self.config.shard_id) {
-                    committable_position = committable_position.max(event.position);
-                    continue;
-                }
+    async fn process_batch(
+        &self,
+        projection_name: &str,
+        checkpoint: &mut ProjectionCheckpoint,
+        events: &[Event],
+    ) -> Result<(), BatchProcessError> {
+        let mut committable_position = checkpoint.position;
+
+        for event in events {
+            if event_matches_shard(
+                event,
+                self.projection.as_ref(),
+                self.config.shard_count,
+                self.config.shard_id,
+            ) {
                 if let Err(err) = self.projection.apply(event).await {
                     tracing::error!(
                         projection = projection_name,
@@ -180,26 +199,27 @@ impl ProjectionRunner {
                     if committable_position > checkpoint.position {
                         self.commit_checkpoint_position(
                             projection_name,
-                            &mut checkpoint,
+                            checkpoint,
                             committable_position,
                         )
                         .await;
                     }
 
                     tokio::time::sleep(self.config.error_backoff).await;
-                    continue 'run;
+                    return Err(BatchProcessError::ApplyFailed);
                 }
-
-                committable_position = committable_position.max(event.position);
             }
 
-            if committable_position == checkpoint.position {
-                continue;
-            }
-
-            self.commit_checkpoint_position(projection_name, &mut checkpoint, committable_position)
-                .await;
+            committable_position = committable_position.max(event.position);
         }
+
+        if committable_position == checkpoint.position {
+            return Ok(());
+        }
+
+        self.commit_checkpoint_position(projection_name, checkpoint, committable_position)
+            .await;
+        Ok(())
     }
 
     async fn commit_checkpoint_position(
@@ -246,6 +266,24 @@ impl ProjectionRunner {
                     error = %err,
                     "failed to commit projection checkpoint"
                 );
+
+                match self
+                    .checkpoint_store
+                    .load_checkpoint(projection_name, self.config.shard_id)
+                    .await
+                {
+                    Ok(cp) => *checkpoint = cp,
+                    Err(load_err) => {
+                        tracing::error!(
+                            projection = projection_name,
+                            shard_id = self.config.shard_id,
+                            error = %load_err,
+                            "failed to reload checkpoint after commit error"
+                        );
+                    }
+                }
+
+                tokio::time::sleep(self.config.error_backoff).await;
             }
         }
     }
@@ -262,17 +300,9 @@ fn event_matches_shard(
         Some(k) => k,
         None => return false,
     };
-    (stable_hash(&key) % u64::from(shard_count)) as u32 == shard_id
+    (stable_hash(&key) % u64::from(shard_count)) == u64::from(shard_id)
 }
 
 fn stable_hash(input: &str) -> u64 {
-    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x100000001b3;
-
-    let mut hash = FNV_OFFSET_BASIS;
-    for byte in input.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    hash
+    xxh3_64(input.as_bytes())
 }
