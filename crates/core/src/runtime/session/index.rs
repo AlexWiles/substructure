@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use crate::runtime::aggregate::{AggregateState, DomainEvent};
 use crate::runtime::event_store::{AggregateSort, Event, EventStore, StoreError};
-use crate::runtime::projection::{
-    Projection, ProjectionCheckpointStore, ProjectionError, ProjectionRunner,
-    ProjectionRunnerConfig,
+use crate::runtime::processor::{
+    EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCheckpointStore,
+    ProcessorError,
 };
 use crate::runtime::session::state::{SessionState, SessionStatus};
 
@@ -84,7 +84,7 @@ impl SessionIndexProjection {
 }
 
 #[async_trait::async_trait]
-impl Projection for SessionIndexProjection {
+impl EventProcessor for SessionIndexProjection {
     fn name(&self) -> &'static str {
         "session_index_v1"
     }
@@ -96,17 +96,17 @@ impl Projection for SessionIndexProjection {
         Some(event.aggregate_id.clone())
     }
 
-    async fn apply(&self, event: &Event) -> Result<(), ProjectionError> {
+    async fn apply(&self, event: &Event) -> Result<(), ProcessorError> {
         if event.aggregate_type != SessionState::AGGREGATE_TYPE {
             return Ok(());
         }
 
-        let event = DomainEvent::<SessionState>::from_raw(event)
-            .map_err(|e| ProjectionError::Apply(e.to_string()))?;
+        let event =
+            DomainEvent::<SessionState>::from_raw(event).map_err(|e| ProcessorError::Apply(e.to_string()))?;
 
-        let derived = event.derived.ok_or_else(|| {
-            ProjectionError::Apply("missing derived state for session event".into())
-        })?;
+        let derived = event
+            .derived
+            .ok_or_else(|| ProcessorError::Apply("missing derived state for session event".into()))?;
 
         let record = SessionIndexRecord {
             tenant_id: event.tenant_id,
@@ -126,18 +126,18 @@ impl Projection for SessionIndexProjection {
         self.store
             .upsert_session_index(record)
             .await
-            .map_err(ProjectionError::Apply)
-    }
+            .map_err(ProcessorError::Apply)
+}
 }
 
-pub fn spawn_session_index_projection(
+pub fn spawn_session_index_processor(
     event_store: Arc<dyn EventStore>,
-    checkpoint_store: Arc<dyn ProjectionCheckpointStore>,
+    checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
     session_index_store: Arc<dyn SessionIndexStore>,
 ) -> tokio::task::JoinHandle<()> {
     let projection = Arc::new(SessionIndexProjection::new(session_index_store));
-    let mut config = ProjectionRunnerConfig::default();
+    let mut config = EventProcessorRunnerConfig::default();
     config.batch_size = 512;
     config.owner_id = Some("session_index".to_string());
-    ProjectionRunner::new(event_store, checkpoint_store, projection, config).spawn()
+    EventProcessorRunner::new(event_store, checkpoint_store, projection, config).spawn()
 }

@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use crate::runtime::aggregate::{AggregateState, DomainEvent};
 use crate::runtime::event_store::{Event, EventStore};
-use crate::runtime::projection::{
-    Projection, ProjectionCheckpointStore, ProjectionError, ProjectionRunner,
-    ProjectionRunnerConfig,
+use crate::runtime::processor::{
+    EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCheckpointStore,
+    ProcessorError,
 };
 use crate::runtime::session::events::EventPayload;
 use crate::runtime::session::state::SessionState;
@@ -22,7 +22,7 @@ impl LlmDispatchProjection {
 }
 
 #[async_trait::async_trait]
-impl Projection for LlmDispatchProjection {
+impl EventProcessor for LlmDispatchProjection {
     fn name(&self) -> &'static str {
         "llm_dispatch_v1"
     }
@@ -34,13 +34,13 @@ impl Projection for LlmDispatchProjection {
         Some(event.aggregate_id.clone())
     }
 
-    async fn apply(&self, raw: &Event) -> Result<(), ProjectionError> {
+    async fn apply(&self, raw: &Event) -> Result<(), ProcessorError> {
         if raw.aggregate_type != SessionState::AGGREGATE_TYPE {
             return Ok(());
         }
 
-        let event = DomainEvent::<SessionState>::from_raw(raw)
-            .map_err(|e| ProjectionError::Apply(e.to_string()))?;
+        let event =
+            DomainEvent::<SessionState>::from_raw(raw).map_err(|e| ProcessorError::Apply(e.to_string()))?;
 
         let req = match &event.payload {
             EventPayload::LlmCallRequested(req) => req,
@@ -52,7 +52,7 @@ impl Projection for LlmDispatchProjection {
             .as_ref()
             .and_then(|d| d.auth.as_ref())
             .cloned()
-            .ok_or_else(|| ProjectionError::Apply("missing auth in derived state".to_string()))?;
+            .ok_or_else(|| ProcessorError::Apply("missing auth in derived state".to_string()))?;
 
         let task = LlmTask {
             session_id: event.aggregate_id,
@@ -74,17 +74,17 @@ impl Projection for LlmDispatchProjection {
         self.queue
             .enqueue(task)
             .await
-            .map_err(ProjectionError::Apply)
+            .map_err(ProcessorError::Apply)
     }
 }
 
-pub fn spawn_llm_dispatch_projection(
+pub fn spawn_llm_dispatch_processor(
     store: Arc<dyn EventStore>,
-    checkpoint_store: Arc<dyn ProjectionCheckpointStore>,
+    checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
     queue: Arc<dyn LlmTaskQueue>,
 ) -> tokio::task::JoinHandle<()> {
     let projection = Arc::new(LlmDispatchProjection::new(queue));
-    let mut config = ProjectionRunnerConfig::default();
+    let mut config = EventProcessorRunnerConfig::default();
     config.owner_id = Some("llm_dispatch".to_string());
-    ProjectionRunner::new(store, checkpoint_store, projection, config).spawn()
+    EventProcessorRunner::new(store, checkpoint_store, projection, config).spawn()
 }

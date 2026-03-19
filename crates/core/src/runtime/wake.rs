@@ -8,9 +8,9 @@ use crate::runtime::aggregate::{
     execute, AggregateState, ConflictRetry, DomainEvent, ExecuteInput,
 };
 use crate::runtime::event_store::{Event, EventStore};
-use crate::runtime::projection::{
-    Projection, ProjectionCheckpointStore, ProjectionError, ProjectionRunner,
-    ProjectionRunnerConfig,
+use crate::runtime::processor::{
+    EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCheckpointStore,
+    ProcessorError,
 };
 use crate::runtime::session::command::CommandPayload;
 use crate::runtime::session::state::SessionState;
@@ -51,7 +51,7 @@ impl WakeScheduleProjection {
 }
 
 #[async_trait::async_trait]
-impl Projection for WakeScheduleProjection {
+impl EventProcessor for WakeScheduleProjection {
     fn name(&self) -> &'static str {
         "wake_schedule"
     }
@@ -63,38 +63,38 @@ impl Projection for WakeScheduleProjection {
         Some(event.aggregate_id.clone())
     }
 
-    async fn apply(&self, event: &Event) -> Result<(), ProjectionError> {
+    async fn apply(&self, event: &Event) -> Result<(), ProcessorError> {
         if event.aggregate_type != SessionState::AGGREGATE_TYPE {
             return Ok(());
         }
-        let event = DomainEvent::<SessionState>::from_raw(event)
-            .map_err(|e| ProjectionError::Apply(e.to_string()))?;
+        let event =
+            DomainEvent::<SessionState>::from_raw(event).map_err(|e| ProcessorError::Apply(e.to_string()))?;
         match event.derived.and_then(|d| d.wake_at) {
             Some(wake_at) => self
                 .wake_store
                 .upsert_wake(&event.tenant_id, &event.aggregate_id, wake_at)
                 .await
-                .map_err(ProjectionError::Apply),
+                .map_err(ProcessorError::Apply),
             None => self
                 .wake_store
                 .remove_wake(&event.tenant_id, &event.aggregate_id)
                 .await
-                .map_err(ProjectionError::Apply),
+                .map_err(ProcessorError::Apply),
         }
     }
 }
 
-pub fn spawn_wake_projection(
+pub fn spawn_wake_processor(
     store: Arc<dyn EventStore>,
-    checkpoint_store: Arc<dyn ProjectionCheckpointStore>,
+    checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
     wake_store: Arc<dyn WakeScheduleStore>,
 ) -> JoinHandle<()> {
     let projection = Arc::new(WakeScheduleProjection::new(wake_store));
-    ProjectionRunner::new(
+    EventProcessorRunner::new(
         store,
         checkpoint_store,
         projection,
-        ProjectionRunnerConfig::default(),
+        EventProcessorRunnerConfig::default(),
     )
     .spawn()
 }

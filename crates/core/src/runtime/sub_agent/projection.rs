@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use crate::runtime::aggregate::{AggregateState, DomainEvent};
 use crate::runtime::event_store::{Event, EventStore};
-use crate::runtime::projection::{
-    Projection, ProjectionCheckpointStore, ProjectionError, ProjectionRunner,
-    ProjectionRunnerConfig,
+use crate::runtime::processor::{
+    EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCheckpointStore,
+    ProcessorError,
 };
 use crate::runtime::session::events::EventPayload;
 use crate::runtime::session::state::SessionState;
@@ -22,7 +22,7 @@ impl SubAgentDispatchProjection {
 }
 
 #[async_trait::async_trait]
-impl Projection for SubAgentDispatchProjection {
+impl EventProcessor for SubAgentDispatchProjection {
     fn name(&self) -> &'static str {
         "sub_agent_dispatch_v1"
     }
@@ -34,13 +34,13 @@ impl Projection for SubAgentDispatchProjection {
         Some(event.aggregate_id.clone())
     }
 
-    async fn apply(&self, raw: &Event) -> Result<(), ProjectionError> {
+    async fn apply(&self, raw: &Event) -> Result<(), ProcessorError> {
         if raw.aggregate_type != SessionState::AGGREGATE_TYPE {
             return Ok(());
         }
 
-        let event = DomainEvent::<SessionState>::from_raw(raw)
-            .map_err(|e| ProjectionError::Apply(e.to_string()))?;
+        let event =
+            DomainEvent::<SessionState>::from_raw(raw).map_err(|e| ProcessorError::Apply(e.to_string()))?;
 
         let task = match &event.payload {
             EventPayload::SubAgentRequested(req) => {
@@ -50,7 +50,7 @@ impl Projection for SubAgentDispatchProjection {
                     .and_then(|d| d.auth.as_ref())
                     .cloned()
                     .ok_or_else(|| {
-                        ProjectionError::Apply("missing auth in derived state".to_string())
+                        ProcessorError::Apply("missing auth in derived state".to_string())
                     })?;
 
                 let mut ancestry = event
@@ -91,7 +91,7 @@ impl Projection for SubAgentDispatchProjection {
                 let derived = event
                     .derived
                     .as_ref()
-                    .ok_or_else(|| ProjectionError::Apply("missing derived state".to_string()))?;
+                    .ok_or_else(|| ProcessorError::Apply("missing derived state".to_string()))?;
                 let parent_session_id = match derived.ancestry.last() {
                     Some(id) => id.clone(),
                     None => return Ok(()),
@@ -126,17 +126,17 @@ impl Projection for SubAgentDispatchProjection {
         self.queue
             .enqueue(task)
             .await
-            .map_err(ProjectionError::Apply)
+            .map_err(ProcessorError::Apply)
     }
 }
 
-pub fn spawn_sub_agent_dispatch_projection(
+pub fn spawn_sub_agent_dispatch_processor(
     store: Arc<dyn EventStore>,
-    checkpoint_store: Arc<dyn ProjectionCheckpointStore>,
+    checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
     queue: Arc<dyn SubAgentTaskQueue>,
 ) -> tokio::task::JoinHandle<()> {
     let projection = Arc::new(SubAgentDispatchProjection::new(queue));
-    let mut config = ProjectionRunnerConfig::default();
+    let mut config = EventProcessorRunnerConfig::default();
     config.owner_id = Some("sub_agent_dispatch".to_string());
-    ProjectionRunner::new(store, checkpoint_store, projection, config).spawn()
+    EventProcessorRunner::new(store, checkpoint_store, projection, config).spawn()
 }

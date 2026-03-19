@@ -15,8 +15,8 @@ use substructure_core::event_store::{
     AggregateFilter, AggregateSort, AggregateSummary, AppendInput, Event, EventFilter, EventStore,
     Snapshot, StoreError, Version,
 };
-use substructure_core::projection::{
-    CheckpointError, ProjectionCheckpoint, ProjectionCheckpointStore,
+use substructure_core::processor::{
+    CheckpointError, ProcessorCheckpoint, ProcessorCheckpointStore,
 };
 use substructure_core::span::SpanContext;
 use substructure_core::wake::{WakeScheduleItem, WakeScheduleStore};
@@ -543,7 +543,7 @@ fn do_load_projection_checkpoint(
     conn: &Connection,
     projection: &str,
     shard_id: u32,
-) -> Result<ProjectionCheckpoint, CheckpointError> {
+) -> Result<ProcessorCheckpoint, CheckpointError> {
     let row = conn
         .query_row(
             "SELECT position, version, updated_at FROM projection_checkpoints WHERE projection_name = ?1 AND shard_id = ?2",
@@ -560,12 +560,12 @@ fn do_load_projection_checkpoint(
         .map_err(|e| CheckpointError::Message(e.to_string()))?;
 
     match row {
-        Some((position, version, updated_at)) => Ok(ProjectionCheckpoint {
+        Some((position, version, updated_at)) => Ok(ProcessorCheckpoint {
             position,
             version,
             updated_at: parse_dt(&updated_at).unwrap_or_else(Utc::now),
         }),
-        None => Ok(ProjectionCheckpoint {
+        None => Ok(ProcessorCheckpoint {
             position: 0,
             version: 0,
             updated_at: Utc::now(),
@@ -781,12 +781,12 @@ impl EventStore for SqliteStore {
 }
 
 #[async_trait]
-impl ProjectionCheckpointStore for SqliteStore {
+impl ProcessorCheckpointStore for SqliteStore {
     async fn load_checkpoint(
         &self,
         projection: &str,
         shard_id: u32,
-    ) -> Result<ProjectionCheckpoint, CheckpointError> {
+    ) -> Result<ProcessorCheckpoint, CheckpointError> {
         let projection = projection.to_string();
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {

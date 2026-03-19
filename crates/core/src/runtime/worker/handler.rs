@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use crate::runtime::aggregate::{AggregateState, DomainEvent};
 use crate::runtime::event_store::{Event, EventStore};
-use crate::runtime::projection::{
-    Projection, ProjectionCheckpointStore, ProjectionError, ProjectionRunner,
-    ProjectionRunnerConfig,
+use crate::runtime::processor::{
+    EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCheckpointStore,
+    ProcessorError,
 };
 use crate::runtime::session::events::EventPayload;
 use crate::runtime::session::state::SessionState;
@@ -22,7 +22,7 @@ impl WorkerDecisionProjection {
 }
 
 #[async_trait::async_trait]
-impl Projection for WorkerDecisionProjection {
+impl EventProcessor for WorkerDecisionProjection {
     fn name(&self) -> &'static str {
         "worker_decision_enqueue"
     }
@@ -34,7 +34,7 @@ impl Projection for WorkerDecisionProjection {
         Some(event.aggregate_id.clone())
     }
 
-    async fn apply(&self, event: &Event) -> Result<(), ProjectionError> {
+    async fn apply(&self, event: &Event) -> Result<(), ProcessorError> {
         if let Some(decision) = try_extract(event) {
             tracing::debug!(
                 session_id = %decision.session_id,
@@ -49,17 +49,17 @@ impl Projection for WorkerDecisionProjection {
     }
 }
 
-pub fn spawn_worker_projection(
+pub fn spawn_worker_processor(
     store: Arc<dyn EventStore>,
-    checkpoint_store: Arc<dyn ProjectionCheckpointStore>,
+    checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
     queue: Arc<dyn WorkerQueue>,
 ) -> tokio::task::JoinHandle<()> {
     let projection = Arc::new(WorkerDecisionProjection::new(queue));
-    ProjectionRunner::new(
+    EventProcessorRunner::new(
         store,
         checkpoint_store,
         projection,
-        ProjectionRunnerConfig::default(),
+        EventProcessorRunnerConfig::default(),
     )
     .spawn()
 }

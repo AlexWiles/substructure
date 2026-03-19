@@ -8,28 +8,28 @@ use uuid::Uuid;
 use aggregate::{execute, ConflictRetry, ExecuteError, ExecuteInput};
 use event_store::EventStore;
 use identity::ClientIdentity;
-use llm::{spawn_llm_dispatch_projection, spawn_llm_task_executor, LlmProviderTrait, LlmTaskQueue};
-use projection::ProjectionCheckpointStore;
+use llm::{spawn_llm_dispatch_processor, spawn_llm_task_executor, LlmProviderTrait, LlmTaskQueue};
+use processor::ProcessorCheckpointStore;
 use retry::RetryPolicy;
 use session::command::{CommandPayload, SessionError};
 use session::index::{
-    spawn_session_index_projection, SessionFilter, SessionIndexStore, SessionPage,
+    spawn_session_index_processor, SessionFilter, SessionIndexStore, SessionPage,
 };
 use session::state::SessionState;
 use session::subscriptions::SessionSubscriptionSpec;
 use span::SpanContext;
 use sub_agent::{
-    spawn_sub_agent_dispatch_projection, spawn_sub_agent_task_executor, SubAgentTaskQueue,
+    spawn_sub_agent_dispatch_processor, spawn_sub_agent_task_executor, SubAgentTaskQueue,
 };
-use wake::{spawn_wake_dispatcher, spawn_wake_projection, WakeScheduleStore};
-use worker::spawn_worker_projection;
+use wake::{spawn_wake_dispatcher, spawn_wake_processor, WakeScheduleStore};
+use worker::spawn_worker_processor;
 use worker::{DequeueFilter, SubmitDecision, WorkerDecisionRequest, WorkerQueue};
 
 pub mod aggregate;
 pub mod event_store;
 pub mod identity;
 pub mod llm;
-pub mod projection;
+pub mod processor;
 pub mod retry;
 pub mod serde_helpers;
 pub mod session;
@@ -269,11 +269,11 @@ pub fn start(
     sub_agent_task_queue: Arc<dyn SubAgentTaskQueue>,
     worker_queue: Arc<dyn WorkerQueue>,
     session_index_store: Arc<dyn SessionIndexStore>,
-    checkpoint_store: Arc<dyn ProjectionCheckpointStore>,
+    checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
     wake_store: Arc<dyn WakeScheduleStore>,
     config: RuntimeConfig,
 ) -> Arc<Runtime> {
-    let llm_projection_handle = spawn_llm_dispatch_projection(
+    let llm_processor_handle = spawn_llm_dispatch_processor(
         store.clone(),
         checkpoint_store.clone(),
         llm_task_queue.clone(),
@@ -285,7 +285,7 @@ pub fn start(
         config.llm_executor_workers,
     );
 
-    let sub_agent_projection_handle = spawn_sub_agent_dispatch_projection(
+    let sub_agent_processor_handle = spawn_sub_agent_dispatch_processor(
         store.clone(),
         checkpoint_store.clone(),
         sub_agent_task_queue.clone(),
@@ -296,18 +296,18 @@ pub fn start(
         config.sub_agent_executor_workers,
     );
 
-    let worker_handle = spawn_worker_projection(
+    let worker_handle = spawn_worker_processor(
         store.clone(),
         checkpoint_store.clone(),
         worker_queue.clone(),
     );
-    let session_index_projection_handle = spawn_session_index_projection(
+    let session_index_processor_handle = spawn_session_index_processor(
         store.clone(),
         checkpoint_store.clone(),
         session_index_store.clone(),
     );
-    let wake_projection_handle =
-        spawn_wake_projection(store.clone(), checkpoint_store, wake_store.clone());
+    let wake_processor_handle =
+        spawn_wake_processor(store.clone(), checkpoint_store, wake_store.clone());
     let wake_dispatcher_handle =
         spawn_wake_dispatcher(store.clone(), wake_store, config.wake_poll_interval);
 
@@ -320,11 +320,11 @@ pub fn start(
         session_subscriptions,
         handles: {
             let mut handles = vec![
-                llm_projection_handle,
-                sub_agent_projection_handle,
+                llm_processor_handle,
+                sub_agent_processor_handle,
                 worker_handle,
-                session_index_projection_handle,
-                wake_projection_handle,
+                session_index_processor_handle,
+                wake_processor_handle,
                 wake_dispatcher_handle,
             ];
             handles.extend(llm_executor_handles);

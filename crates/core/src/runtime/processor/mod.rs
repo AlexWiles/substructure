@@ -9,7 +9,7 @@ use xxhash_rust::xxh3::xxh3_64;
 use crate::runtime::event_store::{Event, EventFilter, EventStore};
 
 #[derive(Debug, Clone)]
-pub struct ProjectionCheckpoint {
+pub struct ProcessorCheckpoint {
     pub position: u64,
     pub version: u64,
     pub updated_at: DateTime<Utc>,
@@ -22,29 +22,29 @@ pub enum CheckpointError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ProjectionError {
-    #[error("projection apply failed: {0}")]
+pub enum ProcessorError {
+    #[error("processor apply failed: {0}")]
     Apply(String),
 }
 
 #[async_trait]
-pub trait Projection: Send + Sync + 'static {
+pub trait EventProcessor: Send + Sync + 'static {
     fn name(&self) -> &'static str;
     fn shard_key(&self, event: &Event) -> Option<String>;
-    async fn apply(&self, event: &Event) -> Result<(), ProjectionError>;
+    async fn apply(&self, event: &Event) -> Result<(), ProcessorError>;
 }
 
 #[async_trait]
-pub trait ProjectionCheckpointStore: Send + Sync {
+pub trait ProcessorCheckpointStore: Send + Sync {
     async fn load_checkpoint(
         &self,
-        projection: &str,
+        processor: &str,
         shard_id: u32,
-    ) -> Result<ProjectionCheckpoint, CheckpointError>;
+    ) -> Result<ProcessorCheckpoint, CheckpointError>;
 
     async fn compare_and_set_checkpoint(
         &self,
-        projection: &str,
+        processor: &str,
         shard_id: u32,
         expected_version: u64,
         new_position: u64,
@@ -53,7 +53,7 @@ pub trait ProjectionCheckpointStore: Send + Sync {
 }
 
 #[derive(Debug, Clone)]
-pub struct ProjectionRunnerConfig {
+pub struct EventProcessorRunnerConfig {
     pub shard_id: u32,
     pub shard_count: u32,
     pub batch_size: usize,
@@ -62,7 +62,7 @@ pub struct ProjectionRunnerConfig {
     pub owner_id: Option<String>,
 }
 
-impl Default for ProjectionRunnerConfig {
+impl Default for EventProcessorRunnerConfig {
     fn default() -> Self {
         Self {
             shard_id: 0,
@@ -75,33 +75,33 @@ impl Default for ProjectionRunnerConfig {
     }
 }
 
-pub struct ProjectionRunner {
+pub struct EventProcessorRunner {
     store: Arc<dyn EventStore>,
-    checkpoint_store: Arc<dyn ProjectionCheckpointStore>,
-    projection: Arc<dyn Projection>,
-    config: ProjectionRunnerConfig,
+    checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
+    processor: Arc<dyn EventProcessor>,
+    config: EventProcessorRunnerConfig,
 }
 
 enum BatchProcessError {
     ApplyFailed,
 }
 
-impl ProjectionRunner {
+impl EventProcessorRunner {
     pub fn new(
         store: Arc<dyn EventStore>,
-        checkpoint_store: Arc<dyn ProjectionCheckpointStore>,
-        projection: Arc<dyn Projection>,
-        config: ProjectionRunnerConfig,
+        checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
+        processor: Arc<dyn EventProcessor>,
+        config: EventProcessorRunnerConfig,
     ) -> Self {
-        assert!(config.shard_count > 0, "projection shard_count must be > 0");
+        assert!(config.shard_count > 0, "processor shard_count must be > 0");
         assert!(
             config.shard_id < config.shard_count,
-            "projection shard_id must be < shard_count"
+            "processor shard_id must be < shard_count"
         );
         Self {
             store,
             checkpoint_store,
-            projection,
+            processor,
             config,
         }
     }
@@ -113,20 +113,20 @@ impl ProjectionRunner {
     }
 
     pub async fn run(self) {
-        let projection_name = self.projection.name();
+        let processor_name = self.processor.name();
         let mut checkpoint = loop {
             match self
                 .checkpoint_store
-                .load_checkpoint(projection_name, self.config.shard_id)
+                .load_checkpoint(processor_name, self.config.shard_id)
                 .await
             {
                 Ok(cp) => break cp,
                 Err(err) => {
                     tracing::error!(
-                        projection = projection_name,
+                        processor = processor_name,
                         shard_id = self.config.shard_id,
                         error = %err,
-                        "failed to load projection checkpoint"
+                        "failed to load processor checkpoint"
                     );
                     tokio::time::sleep(self.config.error_backoff).await;
                 }
@@ -148,10 +148,10 @@ impl ProjectionRunner {
                 Ok(events) => events,
                 Err(err) => {
                     tracing::error!(
-                        projection = projection_name,
+                        processor = processor_name,
                         shard_id = self.config.shard_id,
                         error = %err,
-                        "failed to read projection events"
+                        "failed to read processor events"
                     );
                     tokio::time::sleep(self.config.error_backoff).await;
                     continue;
@@ -167,15 +167,15 @@ impl ProjectionRunner {
             }
 
             let _ = self
-                .process_batch(projection_name, &mut checkpoint, &events)
+                .process_batch(processor_name, &mut checkpoint, &events)
                 .await;
         }
     }
 
     async fn process_batch(
         &self,
-        projection_name: &str,
-        checkpoint: &mut ProjectionCheckpoint,
+        processor_name: &str,
+        checkpoint: &mut ProcessorCheckpoint,
         events: &[Event],
     ) -> Result<(), BatchProcessError> {
         let mut committable_position = checkpoint.position;
@@ -183,22 +183,22 @@ impl ProjectionRunner {
         for event in events {
             if event_matches_shard(
                 event,
-                self.projection.as_ref(),
+                self.processor.as_ref(),
                 self.config.shard_count,
                 self.config.shard_id,
             ) {
-                if let Err(err) = self.projection.apply(event).await {
+                if let Err(err) = self.processor.apply(event).await {
                     tracing::error!(
-                        projection = projection_name,
+                        processor = processor_name,
                         shard_id = self.config.shard_id,
                         event_position = event.position,
                         error = %err,
-                        "projection apply failed"
+                        "processor apply failed"
                     );
 
                     if committable_position > checkpoint.position {
                         self.commit_checkpoint_position(
-                            projection_name,
+                            processor_name,
                             checkpoint,
                             committable_position,
                         )
@@ -217,21 +217,21 @@ impl ProjectionRunner {
             return Ok(());
         }
 
-        self.commit_checkpoint_position(projection_name, checkpoint, committable_position)
+        self.commit_checkpoint_position(processor_name, checkpoint, committable_position)
             .await;
         Ok(())
     }
 
     async fn commit_checkpoint_position(
         &self,
-        projection_name: &str,
-        checkpoint: &mut ProjectionCheckpoint,
+        processor_name: &str,
+        checkpoint: &mut ProcessorCheckpoint,
         new_position: u64,
     ) {
         match self
             .checkpoint_store
             .compare_and_set_checkpoint(
-                projection_name,
+                processor_name,
                 self.config.shard_id,
                 checkpoint.version,
                 new_position,
@@ -246,13 +246,13 @@ impl ProjectionRunner {
             }
             Ok(false) => match self
                 .checkpoint_store
-                .load_checkpoint(projection_name, self.config.shard_id)
+                .load_checkpoint(processor_name, self.config.shard_id)
                 .await
             {
                 Ok(cp) => *checkpoint = cp,
                 Err(err) => {
                     tracing::error!(
-                        projection = projection_name,
+                        processor = processor_name,
                         shard_id = self.config.shard_id,
                         error = %err,
                         "failed to reload checkpoint after CAS conflict"
@@ -261,21 +261,21 @@ impl ProjectionRunner {
             },
             Err(err) => {
                 tracing::error!(
-                    projection = projection_name,
+                    processor = processor_name,
                     shard_id = self.config.shard_id,
                     error = %err,
-                    "failed to commit projection checkpoint"
+                    "failed to commit processor checkpoint"
                 );
 
                 match self
                     .checkpoint_store
-                    .load_checkpoint(projection_name, self.config.shard_id)
+                    .load_checkpoint(processor_name, self.config.shard_id)
                     .await
                 {
                     Ok(cp) => *checkpoint = cp,
                     Err(load_err) => {
                         tracing::error!(
-                            projection = projection_name,
+                            processor = processor_name,
                             shard_id = self.config.shard_id,
                             error = %load_err,
                             "failed to reload checkpoint after commit error"
@@ -291,12 +291,12 @@ impl ProjectionRunner {
 
 fn event_matches_shard(
     event: &Event,
-    projection: &dyn Projection,
+    processor: &dyn EventProcessor,
     shard_count: u32,
     shard_id: u32,
 ) -> bool {
-    debug_assert!(shard_count > 0, "projection shard_count must be > 0");
-    let key = match projection.shard_key(event) {
+    debug_assert!(shard_count > 0, "processor shard_count must be > 0");
+    let key = match processor.shard_key(event) {
         Some(k) => k,
         None => return false,
     };
