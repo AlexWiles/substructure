@@ -72,7 +72,7 @@ impl JsRuntime {
                 queue,
                 store.clone(),
                 store.clone(),
-                store,
+                store.clone(),
                 config,
             )
         });

@@ -17,7 +17,7 @@ use sub_agent::SubAgentHandler;
 use retry::RetryPolicy;
 use session::command::{CommandPayload, SessionError};
 use session::state::SessionState;
-use session_index::{SessionFilter, SessionIndex, SessionPage};
+use session_index::{spawn_session_index_projection, SessionFilter, SessionIndexStore, SessionPage};
 use span::SpanContext;
 use wake::{spawn_wake_dispatcher, spawn_wake_projection, WakeScheduleStore};
 use worker::spawn_worker_projection;
@@ -55,7 +55,7 @@ impl Default for RuntimeConfig {
 pub struct Runtime {
     store: Arc<dyn EventStore>,
     queue: Arc<dyn WorkerQueue>,
-    session_index: Arc<dyn SessionIndex>,
+    session_index: Arc<dyn SessionIndexStore>,
     subscriptions: subscriptions::Subscriptions,
     handles: Vec<JoinHandle<()>>,
 }
@@ -251,7 +251,7 @@ pub fn start(
     store: Arc<dyn EventStore>,
     llm_provider: Arc<dyn LlmProviderTrait>,
     worker_queue: Arc<dyn WorkerQueue>,
-    session_index: Arc<dyn SessionIndex>,
+    session_index_store: Arc<dyn SessionIndexStore>,
     checkpoint_store: Arc<dyn ProjectionCheckpointStore>,
     wake_store: Arc<dyn WakeScheduleStore>,
     config: RuntimeConfig,
@@ -269,6 +269,11 @@ pub fn start(
         checkpoint_store.clone(),
         worker_queue.clone(),
     );
+    let session_index_projection_handle = spawn_session_index_projection(
+        store.clone(),
+        checkpoint_store.clone(),
+        session_index_store.clone(),
+    );
     let wake_projection_handle = spawn_wake_projection(
         store.clone(),
         checkpoint_store,
@@ -282,12 +287,13 @@ pub fn start(
     Arc::new(Runtime {
         store,
         queue: worker_queue,
-        session_index,
+        session_index: session_index_store,
         subscriptions,
         handles: vec![
             llm_handle,
             sub_agent_handle,
             worker_handle,
+            session_index_projection_handle,
             wake_projection_handle,
             wake_dispatcher_handle,
         ],

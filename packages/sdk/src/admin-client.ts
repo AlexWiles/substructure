@@ -2,8 +2,10 @@ import { BaseClient, type RequestOptions } from "./base";
 import type {
   Uuid,
   DateTime,
+  Decimal,
   Event,
   SessionState,
+  SessionStatus,
 } from "./types";
 
 // ── Admin response types ────────────────────────────────────────────────────
@@ -19,8 +21,18 @@ export interface AggregateSummary {
 }
 
 export interface SessionListItem {
-  summary: AggregateSummary;
-  state: SessionState;
+  session_id: Uuid;
+  tenant_id: string;
+  stream_version: number;
+  first_event_at?: DateTime;
+  last_event_at?: DateTime;
+  wake_at?: DateTime;
+  top_level: boolean;
+  agent_id?: string;
+  cost: Decimal;
+  sub_agent_cost: Decimal;
+  status: SessionStatus;
+  turn_id?: string;
 }
 
 export interface SessionListResponse {

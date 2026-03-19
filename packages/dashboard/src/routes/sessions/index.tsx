@@ -61,26 +61,26 @@ function SessionsPage() {
           <TBody>
             {sessions.map((item: SessionListItem) => (
               <tr
-                key={item.summary.aggregate_id}
+                key={item.session_id}
                 className="cursor-pointer transition-colors hover:bg-[var(--color-hover)]"
-                onClick={() => navigate({ to: '/sessions/$sessionId', params: { sessionId: item.summary.aggregate_id } })}
+                onClick={() => navigate({ to: '/sessions/$sessionId', params: { sessionId: item.session_id } })}
               >
                 <Td>
                   <Link
                     to="/sessions/$sessionId"
-                    params={{ sessionId: item.summary.aggregate_id }}
+                    params={{ sessionId: item.session_id }}
                   >
-                    {item.summary.aggregate_id}
+                    {item.session_id}
                   </Link>
                 </Td>
-                <Td>{item.state.agent_id ?? '-'}</Td>
-                <Td secondary>{item.summary.tenant_id}</Td>
+                <Td>{item.agent_id ?? '-'}</Td>
+                <Td secondary>{item.tenant_id}</Td>
                 <Td secondary align="right">
-                  ${(parseFloat(item.state.cost || '0') + parseFloat(item.state.sub_agent_cost || '0')).toFixed(6)}
+                  ${(parseFloat(item.cost || '0') + parseFloat(item.sub_agent_cost || '0')).toFixed(6)}
                 </Td>
                 <Td secondary>
-                  {item.summary.last_event_at
-                    ? new Date(item.summary.last_event_at).toLocaleString()
+                  {item.last_event_at
+                    ? new Date(item.last_event_at).toLocaleString()
                     : '-'}
                 </Td>
               </tr>
