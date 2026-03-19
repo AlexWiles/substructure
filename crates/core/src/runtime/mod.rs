@@ -16,6 +16,7 @@ use projection::ProjectionCheckpointStore;
 use sub_agent::SubAgentHandler;
 use retry::RetryPolicy;
 use session::command::{CommandPayload, SessionError};
+use session::subscriptions::SessionSubscriptionSpec;
 use session::state::SessionState;
 use session_index::{spawn_session_index_projection, SessionFilter, SessionIndexStore, SessionPage};
 use span::SpanContext;
@@ -33,7 +34,6 @@ pub mod session;
 pub mod projection;
 pub mod span;
 pub mod sub_agent;
-pub mod subscriptions;
 pub mod wake;
 pub mod session_index;
 pub mod worker;
@@ -56,7 +56,7 @@ pub struct Runtime {
     store: Arc<dyn EventStore>,
     queue: Arc<dyn WorkerQueue>,
     session_index: Arc<dyn SessionIndexStore>,
-    subscriptions: subscriptions::Subscriptions,
+    session_subscriptions: session::subscriptions::SessionSubscriptions,
     handles: Vec<JoinHandle<()>>,
 }
 
@@ -162,9 +162,19 @@ impl Runtime {
 
         // Build event stream: replay historical + live (if active)
         if is_completed {
-            self.subscriptions.replay_turn(session_id, effective_turn_id).await
+            self.session_subscriptions
+                .replay(SessionSubscriptionSpec::Turn {
+                    root_session_id: session_id,
+                    turn_id: effective_turn_id,
+                })
+                .await
         } else {
-            self.subscriptions.catchup_turn(session_id, effective_turn_id).await
+            self.session_subscriptions
+                .catchup(SessionSubscriptionSpec::Turn {
+                    root_session_id: session_id,
+                    turn_id: effective_turn_id,
+                })
+                .await
         }
     }
 
@@ -175,7 +185,10 @@ impl Runtime {
         session_id: String,
         turn_id: String,
     ) -> mpsc::Receiver<event_store::Event> {
-        self.subscriptions.subscribe_turn(session_id, turn_id)
+        self.session_subscriptions.subscribe(SessionSubscriptionSpec::Turn {
+            root_session_id: session_id,
+            turn_id,
+        })
     }
 
     /// Subscribe to all events for a session (and descendants).
@@ -184,7 +197,10 @@ impl Runtime {
         &self,
         session_id: String,
     ) -> mpsc::Receiver<event_store::Event> {
-        self.subscriptions.subscribe_all(session_id)
+        self.session_subscriptions
+            .subscribe(SessionSubscriptionSpec::All {
+                root_session_id: session_id,
+            })
     }
 
     // ---- Admin / inspection methods ----
@@ -282,13 +298,13 @@ pub fn start(
     let wake_dispatcher_handle =
         spawn_wake_dispatcher(store.clone(), wake_store, config.wake_poll_interval);
 
-    let subscriptions = subscriptions::Subscriptions::new(store.clone());
+    let session_subscriptions = session::subscriptions::SessionSubscriptions::new(store.clone());
 
     Arc::new(Runtime {
         store,
         queue: worker_queue,
         session_index: session_index_store,
-        subscriptions,
+        session_subscriptions,
         handles: vec![
             llm_handle,
             sub_agent_handle,
