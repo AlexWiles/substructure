@@ -95,11 +95,7 @@ impl<R: AggregateState> Aggregate<R> {
     ///
     /// This is the mutation step — call it after the pure decision
     /// (`handle_command`) has produced event payloads.
-    pub fn commit(
-        &mut self,
-        events: Vec<R::Event>,
-        ctx: &CommitContext,
-    ) -> Vec<DomainEvent<R>> {
+    pub fn commit(&mut self, events: Vec<R::Event>, ctx: &CommitContext) -> Vec<DomainEvent<R>> {
         if events.is_empty() {
             return vec![];
         }

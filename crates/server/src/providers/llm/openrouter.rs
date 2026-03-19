@@ -9,7 +9,9 @@ use tokio_stream::StreamExt;
 use rust_decimal::Decimal;
 
 use substructure_core::identity::ClientIdentity;
-use substructure_core::llm::{LlmCallError, LlmCallable, LlmProviderTrait, LlmRequest, LlmResponse, LlmTool, StreamDelta};
+use substructure_core::llm::{
+    LlmCallError, LlmCallable, LlmProviderTrait, LlmRequest, LlmResponse, LlmTool, StreamDelta,
+};
 use substructure_core::session::message::{ToolCall, ToolCallFunction};
 
 /// Wraps our normalized `LlmTool` with the `"type": "function"` field

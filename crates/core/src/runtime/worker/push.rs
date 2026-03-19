@@ -84,10 +84,7 @@ pub struct PushRegistry {
 }
 
 impl PushRegistry {
-    pub fn new(
-        store: Arc<dyn PushRegistrationStore>,
-        transports: TransportRegistry,
-    ) -> Self {
+    pub fn new(store: Arc<dyn PushRegistrationStore>, transports: TransportRegistry) -> Self {
         Self { store, transports }
     }
 
@@ -101,11 +98,7 @@ impl PushRegistry {
         self.store.remove(tenant_id, agent_id).await
     }
 
-    pub async fn lookup(
-        &self,
-        tenant_id: &str,
-        agent_id: &str,
-    ) -> Option<Arc<dyn PushTransport>> {
+    pub async fn lookup(&self, tenant_id: &str, agent_id: &str) -> Option<Arc<dyn PushTransport>> {
         let record = self.store.get(tenant_id, agent_id).await.ok()??;
         self.transports
             .create(&record.transport_type, record.config)
@@ -116,4 +109,3 @@ impl PushRegistry {
         self.store.list_tenants().await.unwrap_or_default()
     }
 }
-

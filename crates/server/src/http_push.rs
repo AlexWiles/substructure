@@ -5,9 +5,11 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
 
-use substructure_core::worker::push::{PushError, PushResponse, PushTransport, TransportConstructor};
-use substructure_core::worker::WorkerDecisionRequest;
 use crate::transport::worker_http::types::SubmitRequest;
+use substructure_core::worker::push::{
+    PushError, PushResponse, PushTransport, TransportConstructor,
+};
+use substructure_core::worker::WorkerDecisionRequest;
 
 pub struct HttpPushTransport {
     http: Client,
@@ -68,10 +70,13 @@ struct HttpTransportConfig {
 }
 
 pub fn http_transport() -> (&'static str, TransportConstructor) {
-    ("http", Box::new(|config| {
-        let c: HttpTransportConfig =
-            serde_json::from_value(config).map_err(|e| e.to_string())?;
-        let timeout = c.timeout_secs.map(Duration::from_secs);
-        Ok(Arc::new(HttpPushTransport::new(c.endpoint_url, timeout)))
-    }))
+    (
+        "http",
+        Box::new(|config| {
+            let c: HttpTransportConfig =
+                serde_json::from_value(config).map_err(|e| e.to_string())?;
+            let timeout = c.timeout_secs.map(Duration::from_secs);
+            Ok(Arc::new(HttpPushTransport::new(c.endpoint_url, timeout)))
+        }),
+    )
 }

@@ -5,47 +5,46 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-
-
 use aggregate::{execute, ConflictRetry, ExecuteError, ExecuteInput};
 use event_store::{spawn_handler_pool, EventStore};
 use identity::ClientIdentity;
-use llm::handler::LlmEventHandler;
-use llm::LlmProviderTrait;
+use llm::{spawn_llm_dispatch_projection, spawn_llm_task_executor, LlmProviderTrait, LlmTaskQueue};
 use projection::ProjectionCheckpointStore;
-use sub_agent::SubAgentHandler;
 use retry::RetryPolicy;
 use session::command::{CommandPayload, SessionError};
-use session::index::{spawn_session_index_projection, SessionFilter, SessionIndexStore, SessionPage};
-use session::subscriptions::SessionSubscriptionSpec;
+use session::index::{
+    spawn_session_index_projection, SessionFilter, SessionIndexStore, SessionPage,
+};
 use session::state::SessionState;
+use session::subscriptions::SessionSubscriptionSpec;
 use span::SpanContext;
+use sub_agent::SubAgentHandler;
 use wake::{spawn_wake_dispatcher, spawn_wake_projection, WakeScheduleStore};
 use worker::spawn_worker_projection;
-use worker::{DequeueFilter, WorkerDecisionRequest, SubmitDecision, WorkerQueue};
+use worker::{DequeueFilter, SubmitDecision, WorkerDecisionRequest, WorkerQueue};
 
 pub mod aggregate;
 pub mod event_store;
 pub mod identity;
 pub mod llm;
+pub mod projection;
 pub mod retry;
 pub mod serde_helpers;
 pub mod session;
-pub mod projection;
 pub mod span;
 pub mod sub_agent;
 pub mod wake;
 pub mod worker;
 
 pub struct RuntimeConfig {
-    pub llm_pool_size: usize,
+    pub llm_executor_workers: usize,
     pub wake_poll_interval: std::time::Duration,
 }
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
-            llm_pool_size: 4,
+            llm_executor_workers: 4,
             wake_poll_interval: std::time::Duration::from_secs(30),
         }
     }
@@ -184,10 +183,11 @@ impl Runtime {
         session_id: String,
         turn_id: String,
     ) -> mpsc::Receiver<event_store::Event> {
-        self.session_subscriptions.subscribe(SessionSubscriptionSpec::Turn {
-            root_session_id: session_id,
-            turn_id,
-        })
+        self.session_subscriptions
+            .subscribe(SessionSubscriptionSpec::Turn {
+                root_session_id: session_id,
+                turn_id,
+            })
     }
 
     /// Subscribe to all events for a session (and descendants).
@@ -204,10 +204,7 @@ impl Runtime {
 
     // ---- Admin / inspection methods ----
 
-    pub async fn list_sessions(
-        &self,
-        filter: &SessionFilter,
-    ) -> Result<SessionPage, RuntimeError> {
+    pub async fn list_sessions(&self, filter: &SessionFilter) -> Result<SessionPage, RuntimeError> {
         self.session_index
             .list_sessions(filter)
             .await
@@ -224,9 +221,8 @@ impl Runtime {
             .load(tenant_id, session_id)
             .await
             .map_err(|e| RuntimeError(e.to_string()))?;
-        let agg: aggregate::Aggregate<SessionState> =
-            serde_json::from_value(snapshot.data.clone())
-                .map_err(|e| RuntimeError(e.to_string()))?;
+        let agg: aggregate::Aggregate<SessionState> = serde_json::from_value(snapshot.data.clone())
+            .map_err(|e| RuntimeError(e.to_string()))?;
         let state = agg.state;
         Ok((snapshot, state))
     }
@@ -265,19 +261,27 @@ impl Runtime {
 pub fn start(
     store: Arc<dyn EventStore>,
     llm_provider: Arc<dyn LlmProviderTrait>,
+    llm_task_queue: Arc<dyn LlmTaskQueue>,
     worker_queue: Arc<dyn WorkerQueue>,
     session_index_store: Arc<dyn SessionIndexStore>,
     checkpoint_store: Arc<dyn ProjectionCheckpointStore>,
     wake_store: Arc<dyn WakeScheduleStore>,
     config: RuntimeConfig,
 ) -> Arc<Runtime> {
-    let llm_handler = Arc::new(LlmEventHandler::new(store.clone(), llm_provider));
-    let llm_handle =
-        spawn_handler_pool::<SessionState>(store.clone(), llm_handler, config.llm_pool_size);
+    let llm_projection_handle = spawn_llm_dispatch_projection(
+        store.clone(),
+        checkpoint_store.clone(),
+        llm_task_queue.clone(),
+    );
+    let llm_executor_handles = spawn_llm_task_executor(
+        store.clone(),
+        llm_provider,
+        llm_task_queue,
+        config.llm_executor_workers,
+    );
 
     let sub_agent_handler = Arc::new(SubAgentHandler::new(store.clone()));
-    let sub_agent_handle =
-        spawn_handler_pool::<SessionState>(store.clone(), sub_agent_handler, 2);
+    let sub_agent_handle = spawn_handler_pool::<SessionState>(store.clone(), sub_agent_handler, 2);
 
     let worker_handle = spawn_worker_projection(
         store.clone(),
@@ -289,11 +293,8 @@ pub fn start(
         checkpoint_store.clone(),
         session_index_store.clone(),
     );
-    let wake_projection_handle = spawn_wake_projection(
-        store.clone(),
-        checkpoint_store,
-        wake_store.clone(),
-    );
+    let wake_projection_handle =
+        spawn_wake_projection(store.clone(), checkpoint_store, wake_store.clone());
     let wake_dispatcher_handle =
         spawn_wake_dispatcher(store.clone(), wake_store, config.wake_poll_interval);
 
@@ -304,13 +305,17 @@ pub fn start(
         queue: worker_queue,
         session_index: session_index_store,
         session_subscriptions,
-        handles: vec![
-            llm_handle,
-            sub_agent_handle,
-            worker_handle,
-            session_index_projection_handle,
-            wake_projection_handle,
-            wake_dispatcher_handle,
-        ],
+        handles: {
+            let mut handles = vec![
+                llm_projection_handle,
+                sub_agent_handle,
+                worker_handle,
+                session_index_projection_handle,
+                wake_projection_handle,
+                wake_dispatcher_handle,
+            ];
+            handles.extend(llm_executor_handles);
+            handles
+        },
     })
 }

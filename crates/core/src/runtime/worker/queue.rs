@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::runtime::identity::ClientIdentity;
 use crate::runtime::serde_helpers::base64_bytes;
-use crate::runtime::session::decision::WorkerAction;
 use crate::runtime::session::decision::DecisionTrigger;
+use crate::runtime::session::decision::WorkerAction;
 use crate::runtime::span::SpanContext;
 
 /// Wire format sent to workers (via poll or push) when a decision is needed.

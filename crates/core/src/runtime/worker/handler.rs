@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use crate::runtime::aggregate::{AggregateState, DomainEvent};
 use crate::runtime::event_store::{Event, EventStore};
-use crate::runtime::projection::{Projection, ProjectionError, ProjectionRunner, ProjectionRunnerConfig, ProjectionCheckpointStore};
+use crate::runtime::projection::{
+    Projection, ProjectionCheckpointStore, ProjectionError, ProjectionRunner,
+    ProjectionRunnerConfig,
+};
 use crate::runtime::session::events::EventPayload;
 use crate::runtime::session::state::SessionState;
 

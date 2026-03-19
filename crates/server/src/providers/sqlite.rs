@@ -10,6 +10,7 @@ use std::sync::Arc as StdArc;
 
 use tokio::sync::broadcast;
 
+use std::collections::HashMap;
 use substructure_core::event_store::{
     AggregateFilter, AggregateSort, AggregateSummary, AppendInput, Event, EventFilter, EventStore,
     Snapshot, StoreError, Version,
@@ -19,7 +20,6 @@ use substructure_core::projection::{
 };
 use substructure_core::span::SpanContext;
 use substructure_core::wake::{WakeScheduleItem, WakeScheduleStore};
-use std::collections::HashMap;
 use uuid::Uuid;
 
 const SCHEMA: &str = "
@@ -323,8 +323,8 @@ fn do_append(conn: &mut Connection, input: AppendInput) -> Result<Vec<u64>, Stor
         positions.push(position);
     }
 
-    let snapshot_data = serde_json::to_string(&snap.data)
-        .map_err(|e| StoreError::Internal(e.to_string()))?;
+    let snapshot_data =
+        serde_json::to_string(&snap.data).map_err(|e| StoreError::Internal(e.to_string()))?;
 
     tx.execute(
         "INSERT INTO snapshots (aggregate_id, aggregate_type, tenant_id, stream_version, data, wake_at, first_event_at, last_event_at)
@@ -523,10 +523,7 @@ fn do_query_events(conn: &Connection, filter: EventFilter) -> Result<Vec<Event>,
 
     let rows = stmt
         .query_map(param_refs.as_slice(), |row| {
-            Ok((
-                row.get::<_, u64>(0)?,
-                row.get::<_, String>(1)?,
-            ))
+            Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?))
         })
         .map_err(|e| StoreError::Internal(e.to_string()))?;
 
@@ -636,7 +633,12 @@ fn do_upsert_wake(
          ON CONFLICT(tenant_id, aggregate_id) DO UPDATE SET
              wake_at = excluded.wake_at,
              updated_at = excluded.updated_at",
-        rusqlite::params![tenant_id, aggregate_id, wake_at.to_rfc3339(), Utc::now().to_rfc3339()],
+        rusqlite::params![
+            tenant_id,
+            aggregate_id,
+            wake_at.to_rfc3339(),
+            Utc::now().to_rfc3339()
+        ],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -888,14 +890,10 @@ impl WakeScheduleStore for SqliteStore {
 // ---------------------------------------------------------------------------
 
 use substructure_core::session::index::{
-    SessionCursor, SessionFilter, SessionIndexRecord, SessionIndexStore,
-    SessionItem, SessionPage,
+    SessionCursor, SessionFilter, SessionIndexRecord, SessionIndexStore, SessionItem, SessionPage,
 };
 
-fn do_list_sessions(
-    conn: &Connection,
-    filter: &SessionFilter,
-) -> Result<SessionPage, StoreError> {
+fn do_list_sessions(conn: &Connection, filter: &SessionFilter) -> Result<SessionPage, StoreError> {
     let fetch_limit = filter.limit.unwrap_or(50);
 
     let (order_col, order_dir, cursor_predicate, session_id_order) = match filter.sort {
@@ -1013,8 +1011,8 @@ fn do_list_sessions(
         let sub_agent_cost = sub_agent_cost
             .parse()
             .map_err(|e: rust_decimal::Error| StoreError::Internal(e.to_string()))?;
-        let status = serde_json::from_str(&status_json)
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        let status =
+            serde_json::from_str(&status_json).map_err(|e| StoreError::Internal(e.to_string()))?;
 
         items.push(SessionItem {
             session_id,
@@ -1139,7 +1137,12 @@ impl PushRegistrationStore for SqliteStore {
                  ON CONFLICT(tenant_id, agent_id) DO UPDATE SET
                      transport_type = excluded.transport_type,
                      config = excluded.config",
-                rusqlite::params![record.tenant_id, record.agent_id, record.transport_type, config_str],
+                rusqlite::params![
+                    record.tenant_id,
+                    record.agent_id,
+                    record.transport_type,
+                    config_str
+                ],
             )
             .map_err(|e| e.to_string())?;
             Ok(())
@@ -1181,12 +1184,7 @@ impl PushRegistrationStore for SqliteStore {
                     "SELECT transport_type, config FROM push_registrations
                      WHERE tenant_id = ?1 AND agent_id = ?2",
                     rusqlite::params![tenant_id, agent_id],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                        ))
-                    },
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                 )
                 .optional()
                 .map_err(|e| e.to_string())?;
@@ -1217,10 +1215,7 @@ impl PushRegistrationStore for SqliteStore {
                 .map_err(|e| e.to_string())?;
             let rows = stmt
                 .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                    ))
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                 })
                 .map_err(|e| e.to_string())?;
             let mut result: HashMap<String, Vec<String>> = HashMap::new();

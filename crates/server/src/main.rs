@@ -8,13 +8,14 @@ use std::sync::Arc;
 use clap::Parser;
 use tokio::net::TcpListener;
 
+use http_push::http_transport;
+use push::PushAdapter;
+use server::SubstructureServer;
 use substructure::providers::llm::openrouter::{OpenRouterConfig, OpenRouterProvider};
 use substructure::providers::sqlite::SqliteStore;
-use http_push::http_transport;
 use substructure::providers::worker::memory_queue::InMemoryWorkerQueue;
-use push::PushAdapter;
+use substructure_core::llm::InMemoryLlmTaskQueue;
 use substructure_core::worker::push::{PushRegistry, TransportRegistry};
-use server::SubstructureServer;
 
 #[derive(Parser)]
 #[command(name = "substructure", version)]
@@ -50,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Serve { host, port, db } => {
             let store = Arc::new(SqliteStore::new(&db)?);
             let queue = Arc::new(InMemoryWorkerQueue::new());
+            let llm_task_queue = Arc::new(InMemoryLlmTaskQueue::new());
             let llm_provider = Arc::new(OpenRouterProvider::new(OpenRouterConfig {
                 base_url: std::env::var("OPENROUTER_BASE_URL")
                     .unwrap_or_else(|_| "https://openrouter.ai/api".to_string()),
@@ -59,6 +61,7 @@ async fn main() -> anyhow::Result<()> {
             let rt = substructure_core::start(
                 store.clone(),
                 llm_provider,
+                llm_task_queue,
                 queue,
                 store.clone(),
                 store.clone(),
@@ -75,7 +78,12 @@ async fn main() -> anyhow::Result<()> {
             let client_routes = transport::client_http::router(rt);
             let worker_routes = transport::worker_http::router(adapter);
             let dashboard_routes = transport::dashboard::router();
-            let server = SubstructureServer::new(vec![admin_routes, client_routes, worker_routes, dashboard_routes]);
+            let server = SubstructureServer::new(vec![
+                admin_routes,
+                client_routes,
+                worker_routes,
+                dashboard_routes,
+            ]);
 
             let addr = format!("{host}:{port}");
             tracing::info!(%addr, "listening");

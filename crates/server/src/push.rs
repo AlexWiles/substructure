@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
-use substructure_core::worker::push::{PushRegistry, PushRegistrationRecord};
+use substructure_core::worker::push::{PushRegistrationRecord, PushRegistry};
 use substructure_core::worker::{DequeueFilter, SubmitDecision};
 use substructure_core::Runtime;
 

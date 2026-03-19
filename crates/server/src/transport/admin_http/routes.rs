@@ -152,7 +152,10 @@ pub async fn stream_session_events(
         limit: None,
         ..Default::default()
     };
-    let historical = runtime.get_session_events(&filter).await.unwrap_or_default();
+    let historical = runtime
+        .get_session_events(&filter)
+        .await
+        .unwrap_or_default();
 
     // Track last sequence sent to deduplicate overlap between historical and live
     let last_historical_seq = historical.last().map(|e| e.sequence).unwrap_or(0);

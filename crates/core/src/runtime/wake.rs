@@ -4,9 +4,14 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use tokio::task::JoinHandle;
 
-use crate::runtime::aggregate::{execute, AggregateState, ConflictRetry, DomainEvent, ExecuteInput};
+use crate::runtime::aggregate::{
+    execute, AggregateState, ConflictRetry, DomainEvent, ExecuteInput,
+};
 use crate::runtime::event_store::{Event, EventStore};
-use crate::runtime::projection::{Projection, ProjectionCheckpointStore, ProjectionError, ProjectionRunner, ProjectionRunnerConfig};
+use crate::runtime::projection::{
+    Projection, ProjectionCheckpointStore, ProjectionError, ProjectionRunner,
+    ProjectionRunnerConfig,
+};
 use crate::runtime::session::command::CommandPayload;
 use crate::runtime::session::state::SessionState;
 use crate::runtime::span::SpanContext;

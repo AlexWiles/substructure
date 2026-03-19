@@ -365,10 +365,7 @@ impl SessionState {
                 self.status = SessionStatus::Idle;
             }
             EventPayload::WorkerDecisionRequested(p) => {
-                let retry_policy = self
-                    .worker_retry
-                    .clone()
-                    .unwrap_or(RetryPolicy::no_retry());
+                let retry_policy = self.worker_retry.clone().unwrap_or(RetryPolicy::no_retry());
                 if let Some(existing) = self.worker_decisions.get_mut(&p.decision_id) {
                     existing.tracking.reset_pending(now);
                 } else {
@@ -462,9 +459,21 @@ impl SessionState {
         self.llm_calls
             .values()
             .filter_map(|c| c.tracking.earliest_wake())
-            .chain(self.tool_calls.values().filter_map(|c| c.tracking.earliest_wake()))
-            .chain(self.sub_agent_calls.values().filter_map(|c| c.tracking.earliest_wake()))
-            .chain(self.worker_decisions.values().filter_map(|d| d.tracking.earliest_wake()))
+            .chain(
+                self.tool_calls
+                    .values()
+                    .filter_map(|c| c.tracking.earliest_wake()),
+            )
+            .chain(
+                self.sub_agent_calls
+                    .values()
+                    .filter_map(|c| c.tracking.earliest_wake()),
+            )
+            .chain(
+                self.worker_decisions
+                    .values()
+                    .filter_map(|d| d.tracking.earliest_wake()),
+            )
             .min()
     }
 

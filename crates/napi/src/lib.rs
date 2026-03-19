@@ -8,11 +8,12 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing_subscriber::EnvFilter;
 
+use base64::Engine;
 use substructure::providers::llm::openrouter::{OpenRouterConfig, OpenRouterProvider};
 use substructure::providers::sqlite::SqliteStore;
 use substructure::providers::worker::memory_queue::InMemoryWorkerQueue;
+use substructure_core::llm::InMemoryLlmTaskQueue;
 use substructure_core::worker::{DequeueFilter, SubmitDecision};
-use base64::Engine;
 use substructure_core::{Runtime, RuntimeConfig, SendMessage};
 
 /// Configuration for creating a new Runtime.
@@ -41,9 +42,7 @@ impl JsRuntime {
     pub fn new(options: RuntimeOptions) -> Result<Self> {
         // Initialize tracing (ignore if already set)
         let _ = tracing_subscriber::fmt()
-            .with_env_filter(
-                EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-            )
+            .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
             .try_init();
 
         let store = Arc::new(
@@ -51,6 +50,7 @@ impl JsRuntime {
                 .map_err(|e| Error::from_reason(format!("failed to open database: {e}")))?,
         );
         let queue = Arc::new(InMemoryWorkerQueue::new());
+        let llm_task_queue = Arc::new(InMemoryLlmTaskQueue::new());
         let llm_provider = Arc::new(OpenRouterProvider::new(OpenRouterConfig {
             base_url: options
                 .openrouter_base_url
@@ -59,7 +59,7 @@ impl JsRuntime {
         }));
 
         let config = RuntimeConfig {
-            llm_pool_size: options.llm_pool_size.unwrap_or(4) as usize,
+            llm_executor_workers: options.llm_pool_size.unwrap_or(4) as usize,
             ..Default::default()
         };
 
@@ -69,6 +69,7 @@ impl JsRuntime {
             substructure_core::start(
                 store.clone(),
                 llm_provider,
+                llm_task_queue,
                 queue,
                 store.clone(),
                 store.clone(),
@@ -84,7 +85,9 @@ impl JsRuntime {
     }
 
     /// Register a JavaScript function as a worker for the given tenant and agent IDs.
-    #[napi(ts_args_type = "tenantId: string, agentIds: string[], callback: (decision: string) => Promise<string>")]
+    #[napi(
+        ts_args_type = "tenantId: string, agentIds: string[], callback: (decision: string) => Promise<string>"
+    )]
     pub async fn register_worker(
         &self,
         tenant_id: String,
@@ -115,13 +118,11 @@ impl JsRuntime {
                     }
                 };
 
-                let result: Result<String> = match callback
-                    .call_async::<Promise<String>>(decision_json)
-                    .await
-                {
-                    Ok(promise) => promise.await,
-                    Err(e) => Err(e),
-                };
+                let result: Result<String> =
+                    match callback.call_async::<Promise<String>>(decision_json).await {
+                        Ok(promise) => promise.await,
+                        Err(e) => Err(e),
+                    };
 
                 match result {
                     Ok(response_json) => {
@@ -140,7 +141,11 @@ impl JsRuntime {
                             actions: submit.actions,
                             state: submit
                                 .state
-                                .map(|s| base64::engine::general_purpose::STANDARD.decode(s).unwrap_or_default())
+                                .map(|s| {
+                                    base64::engine::general_purpose::STANDARD
+                                        .decode(s)
+                                        .unwrap_or_default()
+                                })
                                 .unwrap_or_default(),
                             span: decision.span.child("js_worker"),
                         };
@@ -174,7 +179,9 @@ impl JsRuntime {
     }
 
     /// Send a message to an agent session, calling `onEvent` for each event as it arrives.
-    #[napi(ts_args_type = "sessionId: string, tenantId: string, agentId: string, content: string, turnId: string | undefined, onEvent: (event: string) => void")]
+    #[napi(
+        ts_args_type = "sessionId: string, tenantId: string, agentId: string, content: string, turnId: string | undefined, onEvent: (event: string) => void"
+    )]
     pub async fn send_message(
         &self,
         session_id: String,
@@ -197,9 +204,12 @@ impl JsRuntime {
             .map_err(|e| Error::from_reason(e.to_string()))?;
 
         while let Some(event) = rx.recv().await {
-            let json = serde_json::to_string(&event)
-                .map_err(|e| Error::from_reason(e.to_string()))?;
-            on_event.call(json, napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking);
+            let json =
+                serde_json::to_string(&event).map_err(|e| Error::from_reason(e.to_string()))?;
+            on_event.call(
+                json,
+                napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
+            );
         }
 
         Ok(())

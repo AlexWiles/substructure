@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use substructure_core::session::decision::WorkerAction;
 use substructure_core::serde_helpers::base64_bytes;
+use substructure_core::session::decision::WorkerAction;
 use substructure_core::span::SpanContext;
 
 #[derive(Debug, Deserialize)]

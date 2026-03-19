@@ -29,8 +29,7 @@ impl SessionSubscriptionSpec {
     fn root_session_id(&self) -> &str {
         match self {
             Self::Turn {
-                root_session_id,
-                ..
+                root_session_id, ..
             }
             | Self::All { root_session_id } => root_session_id,
         }

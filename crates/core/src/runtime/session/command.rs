@@ -146,42 +146,48 @@ impl SessionState {
 
     fn handle_active(&self, cmd: CommandPayload) -> Result<Vec<EventPayload>, SessionError> {
         match cmd {
-            CommandPayload::CreateSession { .. } => {
-                Err(SessionError::SessionAlreadyCreated)
-            }
+            CommandPayload::CreateSession { .. } => Err(SessionError::SessionAlreadyCreated),
 
-            CommandPayload::SendMessage { message, stream, turn_id } => {
+            CommandPayload::SendMessage {
+                message,
+                stream,
+                turn_id,
+            } => {
                 // Idempotency guard: reject if this turn_id was already seen
                 if let Some(ref tid) = turn_id {
                     if self.completed_turn_ids.contains(tid) {
-                        return Err(SessionError::TurnAlreadyCompleted { turn_id: tid.clone() });
+                        return Err(SessionError::TurnAlreadyCompleted {
+                            turn_id: tid.clone(),
+                        });
                     }
                     if self.turn_id.as_ref() == Some(tid) {
-                        return Err(SessionError::TurnAlreadyActive { turn_id: tid.clone() });
+                        return Err(SessionError::TurnAlreadyActive {
+                            turn_id: tid.clone(),
+                        });
                     }
                 }
 
                 match self.status {
-                SessionStatus::Interrupted { .. } if message.role == Role::User => {
-                    Err(SessionError::SessionInterrupted)
-                }
-                _ => {
-                    let mut events = vec![EventPayload::NewMessage(NewMessage {
-                        message: message.clone(),
-                    })];
-                    if let Some(turn_id) = turn_id {
-                        events.push(EventPayload::TurnStarted(TurnStarted { turn_id }));
+                    SessionStatus::Interrupted { .. } if message.role == Role::User => {
+                        Err(SessionError::SessionInterrupted)
                     }
-                    if message.role == Role::User {
-                        events.push(EventPayload::WorkerDecisionRequested(
-                            WorkerDecisionRequested {
-                                decision_id: new_call_id(),
-                                trigger: DecisionTrigger::UserMessage { stream, message },
-                            },
-                        ));
+                    _ => {
+                        let mut events = vec![EventPayload::NewMessage(NewMessage {
+                            message: message.clone(),
+                        })];
+                        if let Some(turn_id) = turn_id {
+                            events.push(EventPayload::TurnStarted(TurnStarted { turn_id }));
+                        }
+                        if message.role == Role::User {
+                            events.push(EventPayload::WorkerDecisionRequested(
+                                WorkerDecisionRequested {
+                                    decision_id: new_call_id(),
+                                    trigger: DecisionTrigger::UserMessage { stream, message },
+                                },
+                            ));
+                        }
+                        Ok(events)
                     }
-                    Ok(events)
-                }
                 }
             }
 
@@ -215,8 +221,7 @@ impl SessionState {
             CommandPayload::CompleteLlmCall { call_id, response } => {
                 match self.llm_calls.get(&call_id).map(|c| &c.tracking.status) {
                     Some(&EffectStatus::Pending) => {
-                        let truncated =
-                            response.finish_reason.as_deref() == Some("length");
+                        let truncated = response.finish_reason.as_deref() == Some("length");
                         let usage = response.usage.clone();
                         let cost = response.cost;
                         let tool_calls = if response.tool_calls.is_empty() {
@@ -272,7 +277,11 @@ impl SessionState {
                     retryable,
                     source: None,
                 })];
-                if call.tracking.retry_policy.exhausted(&call.tracking.retry, retryable) {
+                if call
+                    .tracking
+                    .retry_policy
+                    .exhausted(&call.tracking.retry, retryable)
+                {
                     events.push(EventPayload::WorkerDecisionRequested(
                         WorkerDecisionRequested {
                             decision_id: new_call_id(),
@@ -390,7 +399,11 @@ impl SessionState {
                         state: ws,
                     }));
                 }
-                if tc.tracking.retry_policy.exhausted(&tc.tracking.retry, retryable) {
+                if tc
+                    .tracking
+                    .retry_policy
+                    .exhausted(&tc.tracking.retry, retryable)
+                {
                     events.push(EventPayload::WorkerDecisionRequested(
                         WorkerDecisionRequested {
                             decision_id: new_call_id(),
@@ -412,19 +425,21 @@ impl SessionState {
                 session_id,
                 agent_id,
                 retry,
-            } => {
-                match self.sub_agent_calls.get(&session_id) {
-                    Some(_) => Ok(vec![]),
-                    None => Ok(vec![EventPayload::SubAgentRequested(SubAgentRequested {
-                        session_id,
-                        agent_id,
-                        retry,
-                    })]),
-                }
-            }
+            } => match self.sub_agent_calls.get(&session_id) {
+                Some(_) => Ok(vec![]),
+                None => Ok(vec![EventPayload::SubAgentRequested(SubAgentRequested {
+                    session_id,
+                    agent_id,
+                    retry,
+                })]),
+            },
 
             CommandPayload::StartSubAgent { session_id } => {
-                match self.sub_agent_calls.get(&session_id).map(|c| &c.tracking.status) {
+                match self
+                    .sub_agent_calls
+                    .get(&session_id)
+                    .map(|c| &c.tracking.status)
+                {
                     Some(&EffectStatus::Pending) => {
                         Ok(vec![EventPayload::SubAgentStarted(SubAgentStarted {
                             session_id,
@@ -450,7 +465,11 @@ impl SessionState {
                     error: error.clone(),
                     retryable,
                 })];
-                if sa.tracking.retry_policy.exhausted(&sa.tracking.retry, retryable) {
+                if sa
+                    .tracking
+                    .retry_policy
+                    .exhausted(&sa.tracking.retry, retryable)
+                {
                     events.push(EventPayload::WorkerDecisionRequested(
                         WorkerDecisionRequested {
                             decision_id: new_call_id(),
@@ -481,17 +500,15 @@ impl SessionState {
                             cost,
                             token_usage,
                         }),
-                        EventPayload::WorkerDecisionRequested(
-                            WorkerDecisionRequested {
-                                decision_id: new_call_id(),
-                                trigger: DecisionTrigger::SubAgentTurnComplete {
-                                    session_id,
-                                    agent_id,
-                                    turn_id,
-                                    artifacts,
-                                },
+                        EventPayload::WorkerDecisionRequested(WorkerDecisionRequested {
+                            decision_id: new_call_id(),
+                            trigger: DecisionTrigger::SubAgentTurnComplete {
+                                session_id,
+                                agent_id,
+                                turn_id,
+                                artifacts,
                             },
-                        ),
+                        }),
                     ])
                 } else {
                     Ok(vec![])
@@ -515,18 +532,16 @@ impl SessionState {
                 interrupt_id,
                 payload,
             } => match self.active_interrupt() {
-                Some(id) if id == interrupt_id => {
-                    Ok(vec![
-                        EventPayload::InterruptResumed(InterruptResumed {
-                            interrupt_id: interrupt_id.clone(),
-                            payload,
-                        }),
-                        EventPayload::WorkerDecisionRequested(WorkerDecisionRequested {
-                            decision_id: new_call_id(),
-                            trigger: DecisionTrigger::InterruptResumed { interrupt_id },
-                        }),
-                    ])
-                }
+                Some(id) if id == interrupt_id => Ok(vec![
+                    EventPayload::InterruptResumed(InterruptResumed {
+                        interrupt_id: interrupt_id.clone(),
+                        payload,
+                    }),
+                    EventPayload::WorkerDecisionRequested(WorkerDecisionRequested {
+                        decision_id: new_call_id(),
+                        trigger: DecisionTrigger::InterruptResumed { interrupt_id },
+                    }),
+                ]),
                 _ => Ok(vec![]),
             },
 
@@ -535,16 +550,17 @@ impl SessionState {
                 actions,
                 state,
             } => {
-                match self.worker_decisions.get(&decision_id).map(|d| &d.tracking.status) {
+                match self
+                    .worker_decisions
+                    .get(&decision_id)
+                    .map(|d| &d.tracking.status)
+                {
                     Some(&EffectStatus::Pending) => {}
                     _ => return Ok(vec![]),
                 }
-                let mut events: Vec<EventPayload> = vec![
-                    EventPayload::WorkerDecisionCompleted(WorkerDecisionCompleted {
-                        decision_id,
-                        state,
-                    }),
-                ];
+                let mut events: Vec<EventPayload> = vec![EventPayload::WorkerDecisionCompleted(
+                    WorkerDecisionCompleted { decision_id, state },
+                )];
                 for action in actions {
                     let sub_events = match action {
                         WorkerAction::CallLlm {
@@ -594,42 +610,38 @@ impl SessionState {
                             tool_call_id,
                             result,
                             attempt,
-                        } => {
-                            match self.tool_calls.get(&tool_call_id) {
-                                Some(tc)
-                                    if tc.tracking.status == EffectStatus::Pending
-                                        && tc.tracking.retry.attempts == attempt =>
-                                {
-                                    self.handle(CommandPayload::CompleteToolCall {
-                                        tool_call_id,
-                                        result,
-                                        worker_state: None,
-                                    })
-                                }
-                                _ => Ok(vec![]),
+                        } => match self.tool_calls.get(&tool_call_id) {
+                            Some(tc)
+                                if tc.tracking.status == EffectStatus::Pending
+                                    && tc.tracking.retry.attempts == attempt =>
+                            {
+                                self.handle(CommandPayload::CompleteToolCall {
+                                    tool_call_id,
+                                    result,
+                                    worker_state: None,
+                                })
                             }
-                        }
+                            _ => Ok(vec![]),
+                        },
                         WorkerAction::ReturnToolError {
                             tool_call_id,
                             error,
                             retryable,
                             attempt,
-                        } => {
-                            match self.tool_calls.get(&tool_call_id) {
-                                Some(tc)
-                                    if tc.tracking.status == EffectStatus::Pending
-                                        && tc.tracking.retry.attempts == attempt =>
-                                {
-                                    self.handle(CommandPayload::FailToolCall {
-                                        tool_call_id,
-                                        error,
-                                        retryable,
-                                        worker_state: None,
-                                    })
-                                }
-                                _ => Ok(vec![]),
+                        } => match self.tool_calls.get(&tool_call_id) {
+                            Some(tc)
+                                if tc.tracking.status == EffectStatus::Pending
+                                    && tc.tracking.retry.attempts == attempt =>
+                            {
+                                self.handle(CommandPayload::FailToolCall {
+                                    tool_call_id,
+                                    error,
+                                    retryable,
+                                    worker_state: None,
+                                })
                             }
-                        }
+                            _ => Ok(vec![]),
+                        },
                         WorkerAction::ResolveRemoteTool {
                             session_id,
                             tool_call_id,
@@ -723,14 +735,13 @@ impl SessionState {
             if tc.tracking.status == EffectStatus::RetryScheduled {
                 if let Some(next_at) = tc.tracking.retry.next_at {
                     if next_at <= now {
-                        let mut events =
-                            vec![EventPayload::ToolCallRequested(ToolCallRequested {
-                                tool_call_id: tc.tool_call_id.clone(),
-                                name: tc.name.clone(),
-                                arguments: tc.arguments.clone(),
-                                handler: tc.handler.clone(),
-                                retry: tc.tracking.retry_policy.clone(),
-                            })];
+                        let mut events = vec![EventPayload::ToolCallRequested(ToolCallRequested {
+                            tool_call_id: tc.tool_call_id.clone(),
+                            name: tc.name.clone(),
+                            arguments: tc.arguments.clone(),
+                            handler: tc.handler.clone(),
+                            retry: tc.tracking.retry_policy.clone(),
+                        })];
                         if tc.handler == ToolHandler::Worker {
                             events.push(EventPayload::WorkerDecisionRequested(
                                 WorkerDecisionRequested {
