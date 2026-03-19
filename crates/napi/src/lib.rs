@@ -13,6 +13,7 @@ use substructure::providers::llm::openrouter::{OpenRouterConfig, OpenRouterProvi
 use substructure::providers::sqlite::SqliteStore;
 use substructure::providers::worker::memory_queue::InMemoryWorkerQueue;
 use substructure_core::llm::InMemoryLlmTaskQueue;
+use substructure_core::sub_agent::InMemorySubAgentTaskQueue;
 use substructure_core::worker::{DequeueFilter, SubmitDecision};
 use substructure_core::{Runtime, RuntimeConfig, SendMessage};
 
@@ -51,6 +52,7 @@ impl JsRuntime {
         );
         let queue = Arc::new(InMemoryWorkerQueue::new());
         let llm_task_queue = Arc::new(InMemoryLlmTaskQueue::new());
+        let sub_agent_task_queue = Arc::new(InMemorySubAgentTaskQueue::new());
         let llm_provider = Arc::new(OpenRouterProvider::new(OpenRouterConfig {
             base_url: options
                 .openrouter_base_url
@@ -70,6 +72,7 @@ impl JsRuntime {
                 store.clone(),
                 llm_provider,
                 llm_task_queue,
+                sub_agent_task_queue,
                 queue,
                 store.clone(),
                 store.clone(),

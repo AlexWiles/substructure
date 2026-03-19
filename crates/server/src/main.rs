@@ -15,6 +15,7 @@ use substructure::providers::llm::openrouter::{OpenRouterConfig, OpenRouterProvi
 use substructure::providers::sqlite::SqliteStore;
 use substructure::providers::worker::memory_queue::InMemoryWorkerQueue;
 use substructure_core::llm::InMemoryLlmTaskQueue;
+use substructure_core::sub_agent::InMemorySubAgentTaskQueue;
 use substructure_core::worker::push::{PushRegistry, TransportRegistry};
 
 #[derive(Parser)]
@@ -52,6 +53,7 @@ async fn main() -> anyhow::Result<()> {
             let store = Arc::new(SqliteStore::new(&db)?);
             let queue = Arc::new(InMemoryWorkerQueue::new());
             let llm_task_queue = Arc::new(InMemoryLlmTaskQueue::new());
+            let sub_agent_task_queue = Arc::new(InMemorySubAgentTaskQueue::new());
             let llm_provider = Arc::new(OpenRouterProvider::new(OpenRouterConfig {
                 base_url: std::env::var("OPENROUTER_BASE_URL")
                     .unwrap_or_else(|_| "https://openrouter.ai/api".to_string()),
@@ -62,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
                 store.clone(),
                 llm_provider,
                 llm_task_queue,
+                sub_agent_task_queue,
                 queue,
                 store.clone(),
                 store.clone(),

@@ -6,7 +6,7 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use aggregate::{execute, ConflictRetry, ExecuteError, ExecuteInput};
-use event_store::{spawn_handler_pool, EventStore};
+use event_store::EventStore;
 use identity::ClientIdentity;
 use llm::{spawn_llm_dispatch_projection, spawn_llm_task_executor, LlmProviderTrait, LlmTaskQueue};
 use projection::ProjectionCheckpointStore;
@@ -18,7 +18,9 @@ use session::index::{
 use session::state::SessionState;
 use session::subscriptions::SessionSubscriptionSpec;
 use span::SpanContext;
-use sub_agent::SubAgentHandler;
+use sub_agent::{
+    spawn_sub_agent_dispatch_projection, spawn_sub_agent_task_executor, SubAgentTaskQueue,
+};
 use wake::{spawn_wake_dispatcher, spawn_wake_projection, WakeScheduleStore};
 use worker::spawn_worker_projection;
 use worker::{DequeueFilter, SubmitDecision, WorkerDecisionRequest, WorkerQueue};
@@ -38,6 +40,7 @@ pub mod worker;
 
 pub struct RuntimeConfig {
     pub llm_executor_workers: usize,
+    pub sub_agent_executor_workers: usize,
     pub wake_poll_interval: std::time::Duration,
 }
 
@@ -45,6 +48,7 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             llm_executor_workers: 4,
+            sub_agent_executor_workers: 2,
             wake_poll_interval: std::time::Duration::from_secs(30),
         }
     }
@@ -262,6 +266,7 @@ pub fn start(
     store: Arc<dyn EventStore>,
     llm_provider: Arc<dyn LlmProviderTrait>,
     llm_task_queue: Arc<dyn LlmTaskQueue>,
+    sub_agent_task_queue: Arc<dyn SubAgentTaskQueue>,
     worker_queue: Arc<dyn WorkerQueue>,
     session_index_store: Arc<dyn SessionIndexStore>,
     checkpoint_store: Arc<dyn ProjectionCheckpointStore>,
@@ -280,8 +285,16 @@ pub fn start(
         config.llm_executor_workers,
     );
 
-    let sub_agent_handler = Arc::new(SubAgentHandler::new(store.clone()));
-    let sub_agent_handle = spawn_handler_pool::<SessionState>(store.clone(), sub_agent_handler, 2);
+    let sub_agent_projection_handle = spawn_sub_agent_dispatch_projection(
+        store.clone(),
+        checkpoint_store.clone(),
+        sub_agent_task_queue.clone(),
+    );
+    let sub_agent_executor_handles = spawn_sub_agent_task_executor(
+        store.clone(),
+        sub_agent_task_queue,
+        config.sub_agent_executor_workers,
+    );
 
     let worker_handle = spawn_worker_projection(
         store.clone(),
@@ -308,13 +321,14 @@ pub fn start(
         handles: {
             let mut handles = vec![
                 llm_projection_handle,
-                sub_agent_handle,
+                sub_agent_projection_handle,
                 worker_handle,
                 session_index_projection_handle,
                 wake_projection_handle,
                 wake_dispatcher_handle,
             ];
             handles.extend(llm_executor_handles);
+            handles.extend(sub_agent_executor_handles);
             handles
         },
     })
