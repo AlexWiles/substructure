@@ -4,9 +4,9 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
-use substructure_core::worker::push::{PushRegistrationRecord, PushRegistry};
-use substructure_core::worker::{DequeueFilter, SubmitDecision};
-use substructure_core::Runtime;
+use crate::worker::push::{PushRegistrationRecord, PushRegistry};
+use crate::worker::{DequeueFilter, SubmitDecision};
+use crate::Runtime;
 
 pub struct PushAdapter {
     pub runtime: Arc<Runtime>,

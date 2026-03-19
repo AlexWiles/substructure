@@ -2234,7 +2234,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
-name = "substructure"
+name = "substructure-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2253,31 +2253,12 @@ dependencies = [
  "sea-query",
  "serde",
  "serde_json",
- "substructure-core",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
  "tower-http",
  "tracing",
  "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "substructure-core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64",
- "chrono",
- "hex",
- "rand 0.9.2",
- "rust_decimal",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
  "uuid",
  "xxhash-rust",
 ]
@@ -2292,7 +2273,6 @@ dependencies = [
  "napi-derive",
  "serde",
  "serde_json",
- "substructure",
  "substructure-core",
  "tokio",
  "tracing",

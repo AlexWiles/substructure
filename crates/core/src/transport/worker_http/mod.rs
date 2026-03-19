@@ -6,7 +6,7 @@ use std::sync::Arc;
 use axum::routing::post;
 use axum::Router;
 
-use crate::push::PushAdapter;
+use crate::transport::push::PushAdapter;
 
 pub fn router(adapter: Arc<PushAdapter>) -> Router {
     Router::new()

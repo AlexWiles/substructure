@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use substructure_core::serde_helpers::base64_bytes;
-use substructure_core::session::decision::WorkerAction;
-use substructure_core::span::SpanContext;
+use crate::serde_helpers::base64_bytes;
+use crate::session::decision::WorkerAction;
+use crate::span::SpanContext;
 
 #[derive(Debug, Deserialize)]
 pub struct SubmitRequest {

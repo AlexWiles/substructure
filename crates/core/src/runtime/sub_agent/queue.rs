@@ -1,8 +1,5 @@
-use std::collections::VecDeque;
-
 use async_trait::async_trait;
 use rust_decimal::Decimal;
-use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
 
 use crate::runtime::identity::ClientIdentity;
@@ -94,57 +91,4 @@ impl SubAgentTask {
 pub trait SubAgentTaskQueue: Send + Sync {
     async fn enqueue(&self, task: SubAgentTask) -> Result<(), String>;
     async fn dequeue(&self) -> Option<SubAgentTask>;
-}
-
-struct Waiter {
-    tx: oneshot::Sender<SubAgentTask>,
-}
-
-struct Inner {
-    items: VecDeque<SubAgentTask>,
-    waiters: VecDeque<Waiter>,
-}
-
-pub struct InMemorySubAgentTaskQueue {
-    inner: Mutex<Inner>,
-}
-
-impl InMemorySubAgentTaskQueue {
-    pub fn new() -> Self {
-        Self {
-            inner: Mutex::new(Inner {
-                items: VecDeque::new(),
-                waiters: VecDeque::new(),
-            }),
-        }
-    }
-}
-
-#[async_trait]
-impl SubAgentTaskQueue for InMemorySubAgentTaskQueue {
-    async fn enqueue(&self, mut task: SubAgentTask) -> Result<(), String> {
-        let mut inner = self.inner.lock().await;
-        inner.waiters.retain(|w| !w.tx.is_closed());
-        while let Some(waiter) = inner.waiters.pop_front() {
-            match waiter.tx.send(task) {
-                Ok(()) => return Ok(()),
-                Err(t) => task = t,
-            }
-        }
-        inner.items.push_back(task);
-        Ok(())
-    }
-
-    async fn dequeue(&self) -> Option<SubAgentTask> {
-        let rx = {
-            let mut inner = self.inner.lock().await;
-            if let Some(task) = inner.items.pop_front() {
-                return Some(task);
-            }
-            let (tx, rx) = oneshot::channel();
-            inner.waiters.push_back(Waiter { tx });
-            rx
-        };
-        rx.await.ok()
-    }
 }

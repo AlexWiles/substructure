@@ -6,10 +6,10 @@ use reqwest::Client;
 use serde::Deserialize;
 
 use crate::transport::worker_http::types::SubmitRequest;
-use substructure_core::worker::push::{
+use crate::worker::push::{
     PushError, PushResponse, PushTransport, TransportConstructor,
 };
-use substructure_core::worker::WorkerDecisionRequest;
+use crate::worker::WorkerDecisionRequest;
 
 pub struct HttpPushTransport {
     http: Client,

@@ -9,11 +9,11 @@ use tokio::task::JoinHandle;
 use tracing_subscriber::EnvFilter;
 
 use base64::Engine;
-use substructure::providers::llm::openrouter::{OpenRouterConfig, OpenRouterProvider};
-use substructure::providers::sqlite::SqliteStore;
-use substructure::providers::worker::memory_queue::InMemoryWorkerQueue;
-use substructure_core::llm::InMemoryLlmTaskQueue;
-use substructure_core::sub_agent::InMemorySubAgentTaskQueue;
+use substructure_core::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
+use substructure_core::providers::sqlite::SqliteStore;
+use substructure_core::providers::worker_queue::InMemoryWorkerQueue;
+use substructure_core::providers::llm_task_queue::InMemoryLlmTaskQueue;
+use substructure_core::providers::sub_agent_task_queue::InMemorySubAgentTaskQueue;
 use substructure_core::worker::{DequeueFilter, SubmitDecision};
 use substructure_core::{Runtime, RuntimeConfig, SendMessage};
 

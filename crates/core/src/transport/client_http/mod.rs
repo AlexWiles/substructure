@@ -6,7 +6,7 @@ use std::sync::Arc;
 use axum::routing::post;
 use axum::Router;
 
-use substructure_core::Runtime;
+use crate::Runtime;
 
 pub fn router(runtime: Arc<Runtime>) -> Router {
     Router::new()

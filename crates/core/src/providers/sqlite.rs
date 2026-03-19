@@ -11,15 +11,15 @@ use std::sync::Arc as StdArc;
 use tokio::sync::broadcast;
 
 use std::collections::HashMap;
-use substructure_core::event_store::{
+use crate::event_store::{
     AggregateFilter, AggregateSort, AggregateSummary, AppendInput, Event, EventFilter, EventStore,
     Snapshot, StoreError, Version,
 };
-use substructure_core::processor::{
+use crate::processor::{
     CheckpointError, ProcessorCheckpoint, ProcessorCheckpointStore,
 };
-use substructure_core::span::SpanContext;
-use substructure_core::wake::{WakeScheduleItem, WakeScheduleStore};
+use crate::span::SpanContext;
+use crate::wake::{WakeScheduleItem, WakeScheduleStore};
 use uuid::Uuid;
 
 const SCHEMA: &str = "
@@ -889,7 +889,7 @@ impl WakeScheduleStore for SqliteStore {
 // SessionIndex
 // ---------------------------------------------------------------------------
 
-use substructure_core::session::index::{
+use crate::session::index::{
     SessionCursor, SessionFilter, SessionIndexRecord, SessionIndexStore, SessionItem, SessionPage,
 };
 
@@ -1121,7 +1121,7 @@ impl SessionIndexStore for SqliteStore {
 // PushRegistrationStore
 // ---------------------------------------------------------------------------
 
-use substructure_core::worker::push::{PushRegistrationRecord, PushRegistrationStore};
+use crate::worker::push::{PushRegistrationRecord, PushRegistrationStore};
 
 #[async_trait]
 impl PushRegistrationStore for SqliteStore {

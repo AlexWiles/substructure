@@ -1,21 +1,16 @@
-mod http_push;
-mod push;
-mod server;
-mod transport;
-
 use std::sync::Arc;
 
 use clap::Parser;
 use tokio::net::TcpListener;
 
-use http_push::http_transport;
-use push::PushAdapter;
-use server::SubstructureServer;
-use substructure::providers::llm::openrouter::{OpenRouterConfig, OpenRouterProvider};
-use substructure::providers::sqlite::SqliteStore;
-use substructure::providers::worker::memory_queue::InMemoryWorkerQueue;
-use substructure_core::llm::InMemoryLlmTaskQueue;
-use substructure_core::sub_agent::InMemorySubAgentTaskQueue;
+use substructure_core::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
+use substructure_core::providers::sqlite::SqliteStore;
+use substructure_core::providers::worker_queue::InMemoryWorkerQueue;
+use substructure_core::transport::http_push::http_transport;
+use substructure_core::transport::push::PushAdapter;
+use substructure_core::transport::server::SubstructureServer;
+use substructure_core::providers::llm_task_queue::InMemoryLlmTaskQueue;
+use substructure_core::providers::sub_agent_task_queue::InMemorySubAgentTaskQueue;
 use substructure_core::worker::push::{PushRegistry, TransportRegistry};
 
 #[derive(Parser)]
@@ -77,10 +72,10 @@ async fn main() -> anyhow::Result<()> {
             let adapter = Arc::new(PushAdapter::new(rt.clone(), registry, 16));
             adapter.start().await;
 
-            let admin_routes = transport::admin_http::router(rt.clone());
-            let client_routes = transport::client_http::router(rt);
-            let worker_routes = transport::worker_http::router(adapter);
-            let dashboard_routes = transport::dashboard::router();
+            let admin_routes = substructure_core::transport::admin_http::router(rt.clone());
+            let client_routes = substructure_core::transport::client_http::router(rt);
+            let worker_routes = substructure_core::transport::worker_http::router(adapter);
+            let dashboard_routes = substructure_core::transport::dashboard::router();
             let server = SubstructureServer::new(vec![
                 admin_routes,
                 client_routes,

@@ -5,17 +5,32 @@ edition = "2021"
 description = "Core runtime for Substructure — event-sourced agent orchestration"
 license = "MIT"
 
+[[bin]]
+name = "substructure"
+path = "src/main.rs"
+
 [dependencies]
+anyhow = "1"
 async-trait = "0.1.89"
+axum = { version = "0.8", features = ["default"] }
 base64 = "0.22"
-hex = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+mime_guess = "2"
 rand = "0.9"
+reqwest = { version = "0.13.2", features = ["stream", "json"] }
+rust-embed = { version = "8", features = ["compression"] }
 rust_decimal = { version = "1.40.0", features = ["serde-with-str"] }
+rusqlite = { version = "0.35", features = ["bundled"] }
+sea-query = { version = "1.0.0-rc.1", features = ["derive", "backend-sqlite", "with-chrono", "with-json", "with-uuid"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 thiserror = "2"
-tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1.18"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["serde", "v7"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }

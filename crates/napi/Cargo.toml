@@ -8,7 +8,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 substructure-core = { path = "../core" }
-substructure = { path = "../server" }
 napi = { version = "2", features = ["async", "serde-json", "tokio_rt"] }
 napi-derive = "2"
 base64 = "0.22"

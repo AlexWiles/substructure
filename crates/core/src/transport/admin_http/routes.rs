@@ -10,9 +10,9 @@ use serde::Deserialize;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 
-use substructure_core::event_store::{AggregateSort, EventFilter};
-use substructure_core::session::index::{SessionCursor, SessionFilter};
-use substructure_core::Runtime;
+use crate::event_store::{AggregateSort, EventFilter};
+use crate::session::index::{SessionCursor, SessionFilter};
+use crate::Runtime;
 
 use crate::transport::extractors::TenantId;
 
