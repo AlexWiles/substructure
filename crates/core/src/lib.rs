@@ -11,7 +11,6 @@ pub use runtime::{
     projection,
     serde_helpers,
     session,
-    session_index,
     span,
     sub_agent,
     wake,

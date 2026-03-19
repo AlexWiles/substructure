@@ -887,7 +887,7 @@ impl WakeScheduleStore for SqliteStore {
 // SessionIndex
 // ---------------------------------------------------------------------------
 
-use substructure_core::session_index::{
+use substructure_core::session::index::{
     SessionCursor, SessionFilter, SessionIndexRecord, SessionIndexStore,
     SessionItem, SessionPage,
 };

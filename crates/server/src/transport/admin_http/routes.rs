@@ -11,7 +11,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 
 use substructure_core::event_store::{AggregateSort, EventFilter};
-use substructure_core::session_index::{SessionCursor, SessionFilter};
+use substructure_core::session::index::{SessionCursor, SessionFilter};
 use substructure_core::Runtime;
 
 use crate::transport::extractors::TenantId;

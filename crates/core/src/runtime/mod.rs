@@ -16,9 +16,9 @@ use projection::ProjectionCheckpointStore;
 use sub_agent::SubAgentHandler;
 use retry::RetryPolicy;
 use session::command::{CommandPayload, SessionError};
+use session::index::{spawn_session_index_projection, SessionFilter, SessionIndexStore, SessionPage};
 use session::subscriptions::SessionSubscriptionSpec;
 use session::state::SessionState;
-use session_index::{spawn_session_index_projection, SessionFilter, SessionIndexStore, SessionPage};
 use span::SpanContext;
 use wake::{spawn_wake_dispatcher, spawn_wake_projection, WakeScheduleStore};
 use worker::spawn_worker_projection;
@@ -35,7 +35,6 @@ pub mod projection;
 pub mod span;
 pub mod sub_agent;
 pub mod wake;
-pub mod session_index;
 pub mod worker;
 
 pub struct RuntimeConfig {
