@@ -9,11 +9,10 @@ use tokio::task::JoinHandle;
 use tracing_subscriber::EnvFilter;
 
 use base64::Engine;
+use substructure_core::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use substructure_core::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
 use substructure_core::providers::sqlite::SqliteStore;
 use substructure_core::providers::worker_queue::InMemoryWorkerQueue;
-use substructure_core::providers::llm_task_queue::InMemoryLlmTaskQueue;
-use substructure_core::providers::sub_agent_task_queue::InMemorySubAgentTaskQueue;
 use substructure_core::worker::{DequeueFilter, SubmitDecision};
 use substructure_core::{Runtime, RuntimeConfig, SendMessage};
 
@@ -50,20 +49,23 @@ impl JsRuntime {
             SqliteStore::new(&options.db)
                 .map_err(|e| Error::from_reason(format!("failed to open database: {e}")))?,
         );
+
+        let config = RuntimeConfig {
+            llm_executor_workers: options.llm_pool_size.unwrap_or(4) as usize,
+            ..Default::default()
+        };
+
         let queue = Arc::new(InMemoryWorkerQueue::new());
-        let llm_task_queue = Arc::new(InMemoryLlmTaskQueue::new());
-        let sub_agent_task_queue = Arc::new(InMemorySubAgentTaskQueue::new());
+        let llm_task_queue: Arc<dyn TaskQueue<substructure_core::llm::LlmTask>> =
+            Arc::new(ShardedInMemoryQueue::new(config.llm_executor_workers as u32));
+        let sub_agent_task_queue: Arc<dyn TaskQueue<substructure_core::sub_agent::SubAgentTask>> =
+            Arc::new(ShardedInMemoryQueue::new(config.sub_agent_executor_workers as u32));
         let llm_provider = Arc::new(OpenRouterProvider::new(OpenRouterConfig {
             base_url: options
                 .openrouter_base_url
                 .unwrap_or_else(|| "https://openrouter.ai/api".to_string()),
             api_key: options.openrouter_api_key.unwrap_or_default(),
         }));
-
-        let config = RuntimeConfig {
-            llm_executor_workers: options.llm_pool_size.unwrap_or(4) as usize,
-            ..Default::default()
-        };
 
         // Enter the NAPI tokio runtime so background tasks spawned by start() work
         let rt = tokio::runtime::Handle::current();

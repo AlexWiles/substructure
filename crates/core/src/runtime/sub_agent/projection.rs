@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::providers::memory_queue::TaskQueue;
 use crate::runtime::aggregate::{AggregateState, DomainEvent};
 use crate::runtime::event_store::{Event, EventStore};
 use crate::runtime::processor::{
@@ -9,14 +10,14 @@ use crate::runtime::processor::{
 use crate::runtime::session::events::EventPayload;
 use crate::runtime::session::state::SessionState;
 
-use super::{SubAgentTask, SubAgentTaskQueue};
+use super::SubAgentTask;
 
 struct SubAgentDispatchProjection {
-    queue: Arc<dyn SubAgentTaskQueue>,
+    queue: Arc<dyn TaskQueue<SubAgentTask>>,
 }
 
 impl SubAgentDispatchProjection {
-    fn new(queue: Arc<dyn SubAgentTaskQueue>) -> Self {
+    fn new(queue: Arc<dyn TaskQueue<SubAgentTask>>) -> Self {
         Self { queue }
     }
 }
@@ -41,6 +42,8 @@ impl EventProcessor for SubAgentDispatchProjection {
 
         let event =
             DomainEvent::<SessionState>::from_raw(raw).map_err(|e| ProcessorError::Apply(e.to_string()))?;
+
+        let shard_key = raw.aggregate_id.clone();
 
         let task = match &event.payload {
             EventPayload::SubAgentRequested(req) => {
@@ -124,7 +127,7 @@ impl EventProcessor for SubAgentDispatchProjection {
         );
 
         self.queue
-            .enqueue(task)
+            .enqueue(&shard_key, task)
             .await
             .map_err(ProcessorError::Apply)
     }
@@ -133,7 +136,7 @@ impl EventProcessor for SubAgentDispatchProjection {
 pub fn spawn_sub_agent_dispatch_processor(
     store: Arc<dyn EventStore>,
     checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
-    queue: Arc<dyn SubAgentTaskQueue>,
+    queue: Arc<dyn TaskQueue<SubAgentTask>>,
 ) -> tokio::task::JoinHandle<()> {
     let projection = Arc::new(SubAgentDispatchProjection::new(queue));
     let mut config = EventProcessorRunnerConfig::default();

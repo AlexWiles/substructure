@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use rust_decimal::Decimal;
 use uuid::Uuid;
 
@@ -85,10 +84,4 @@ impl SubAgentTask {
             ),
         }
     }
-}
-
-#[async_trait]
-pub trait SubAgentTaskQueue: Send + Sync {
-    async fn enqueue(&self, task: SubAgentTask) -> Result<(), String>;
-    async fn dequeue(&self) -> Option<SubAgentTask>;
 }

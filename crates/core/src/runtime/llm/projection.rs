@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::providers::memory_queue::TaskQueue;
 use crate::runtime::aggregate::{AggregateState, DomainEvent};
 use crate::runtime::event_store::{Event, EventStore};
 use crate::runtime::processor::{
@@ -9,14 +10,14 @@ use crate::runtime::processor::{
 use crate::runtime::session::events::EventPayload;
 use crate::runtime::session::state::SessionState;
 
-use super::{LlmTask, LlmTaskQueue};
+use super::LlmTask;
 
 struct LlmDispatchProjection {
-    queue: Arc<dyn LlmTaskQueue>,
+    queue: Arc<dyn TaskQueue<LlmTask>>,
 }
 
 impl LlmDispatchProjection {
-    fn new(queue: Arc<dyn LlmTaskQueue>) -> Self {
+    fn new(queue: Arc<dyn TaskQueue<LlmTask>>) -> Self {
         Self { queue }
     }
 }
@@ -54,6 +55,8 @@ impl EventProcessor for LlmDispatchProjection {
             .cloned()
             .ok_or_else(|| ProcessorError::Apply("missing auth in derived state".to_string()))?;
 
+        let shard_key = raw.aggregate_id.clone();
+
         let task = LlmTask {
             session_id: event.aggregate_id,
             tenant_id: event.tenant_id,
@@ -72,7 +75,7 @@ impl EventProcessor for LlmDispatchProjection {
         );
 
         self.queue
-            .enqueue(task)
+            .enqueue(&shard_key, task)
             .await
             .map_err(ProcessorError::Apply)
     }
@@ -81,7 +84,7 @@ impl EventProcessor for LlmDispatchProjection {
 pub fn spawn_llm_dispatch_processor(
     store: Arc<dyn EventStore>,
     checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
-    queue: Arc<dyn LlmTaskQueue>,
+    queue: Arc<dyn TaskQueue<LlmTask>>,
 ) -> tokio::task::JoinHandle<()> {
     let projection = Arc::new(LlmDispatchProjection::new(queue));
     let mut config = EventProcessorRunnerConfig::default();

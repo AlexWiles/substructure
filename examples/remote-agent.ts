@@ -49,7 +49,7 @@ const server = Bun.serve({ port: WORKER_PORT, fetch: sub.fetchHandler() });
 const stream = sub.run(
     "weather-agent",
     "What is the cube of the sum - the square of the diff of the current temperatures in San Francisco and New York?",
-    { sessionId: "raw-session-3", turnId: "turn-3" },
+    { sessionId: "raw-session-4", turnId: "turn-1" },
 );
 
 for await (const event of stream) {

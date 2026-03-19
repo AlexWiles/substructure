@@ -3,15 +3,15 @@ use std::sync::Arc;
 use clap::Parser;
 use tokio::net::TcpListener;
 
+use substructure_core::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use substructure_core::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
 use substructure_core::providers::sqlite::SqliteStore;
 use substructure_core::providers::worker_queue::InMemoryWorkerQueue;
 use substructure_core::transport::http_push::http_transport;
 use substructure_core::transport::push::PushAdapter;
 use substructure_core::transport::server::SubstructureServer;
-use substructure_core::providers::llm_task_queue::InMemoryLlmTaskQueue;
-use substructure_core::providers::sub_agent_task_queue::InMemorySubAgentTaskQueue;
 use substructure_core::worker::push::{PushRegistry, TransportRegistry};
+use substructure_core::RuntimeConfig;
 
 #[derive(Parser)]
 #[command(name = "substructure", version)]
@@ -46,9 +46,12 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Serve { host, port, db } => {
             let store = Arc::new(SqliteStore::new(&db)?);
+            let config = RuntimeConfig::default();
             let queue = Arc::new(InMemoryWorkerQueue::new());
-            let llm_task_queue = Arc::new(InMemoryLlmTaskQueue::new());
-            let sub_agent_task_queue = Arc::new(InMemorySubAgentTaskQueue::new());
+            let llm_task_queue: Arc<dyn TaskQueue<substructure_core::llm::LlmTask>> =
+                Arc::new(ShardedInMemoryQueue::new(config.llm_executor_workers as u32));
+            let sub_agent_task_queue: Arc<dyn TaskQueue<substructure_core::sub_agent::SubAgentTask>> =
+                Arc::new(ShardedInMemoryQueue::new(config.sub_agent_executor_workers as u32));
             let llm_provider = Arc::new(OpenRouterProvider::new(OpenRouterConfig {
                 base_url: std::env::var("OPENROUTER_BASE_URL")
                     .unwrap_or_else(|_| "https://openrouter.ai/api".to_string()),
@@ -64,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
                 store.clone(),
                 store.clone(),
                 store.clone(),
-                Default::default(),
+                config,
             );
 
             let transports = TransportRegistry::new(vec![http_transport()]);

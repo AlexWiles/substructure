@@ -1,5 +1,3 @@
-use async_trait::async_trait;
-
 use crate::runtime::identity::ClientIdentity;
 use crate::runtime::llm::LlmRequest;
 use crate::runtime::span::SpanContext;
@@ -19,10 +17,4 @@ impl LlmTask {
     pub fn dedupe_key(&self) -> String {
         format!("llm:{}:{}", self.session_id, self.call_id)
     }
-}
-
-#[async_trait]
-pub trait LlmTaskQueue: Send + Sync {
-    async fn enqueue(&self, task: LlmTask) -> Result<(), String>;
-    async fn dequeue(&self) -> Option<LlmTask>;
 }

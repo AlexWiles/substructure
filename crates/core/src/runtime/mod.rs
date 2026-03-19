@@ -5,10 +5,11 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+use crate::providers::memory_queue::TaskQueue;
 use aggregate::{execute, ConflictRetry, ExecuteError, ExecuteInput};
 use event_store::EventStore;
 use identity::ClientIdentity;
-use llm::{spawn_llm_dispatch_processor, spawn_llm_task_executor, LlmProviderTrait, LlmTaskQueue};
+use llm::{spawn_llm_dispatch_processor, spawn_llm_task_executor, LlmProviderTrait, LlmTask};
 use processor::ProcessorCheckpointStore;
 use retry::RetryPolicy;
 use session::command::{CommandPayload, SessionError};
@@ -19,7 +20,7 @@ use session::state::SessionState;
 use session::subscriptions::SessionSubscriptionSpec;
 use span::SpanContext;
 use sub_agent::{
-    spawn_sub_agent_dispatch_processor, spawn_sub_agent_task_executor, SubAgentTaskQueue,
+    spawn_sub_agent_dispatch_processor, spawn_sub_agent_task_executor, SubAgentTask,
 };
 use wake::{spawn_wake_dispatcher, spawn_wake_processor, WakeScheduleStore};
 use worker::spawn_worker_processor;
@@ -265,8 +266,8 @@ impl Runtime {
 pub fn start(
     store: Arc<dyn EventStore>,
     llm_provider: Arc<dyn LlmProviderTrait>,
-    llm_task_queue: Arc<dyn LlmTaskQueue>,
-    sub_agent_task_queue: Arc<dyn SubAgentTaskQueue>,
+    llm_task_queue: Arc<dyn TaskQueue<LlmTask>>,
+    sub_agent_task_queue: Arc<dyn TaskQueue<SubAgentTask>>,
     worker_queue: Arc<dyn WorkerQueue>,
     session_index_store: Arc<dyn SessionIndexStore>,
     checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
