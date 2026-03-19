@@ -7,7 +7,8 @@ use std::sync::Arc;
 use crate::runtime::aggregate::{AggregateState, DomainEvent};
 use crate::runtime::event_store::{AggregateSort, Event, EventStore, StoreError};
 use crate::runtime::projection::{
-    Projection, ProjectionCheckpointStore, ProjectionError, ProjectionRunner, ProjectionRunnerConfig,
+    Projection, ProjectionCheckpointStore, ProjectionError, ProjectionRunner,
+    ProjectionRunnerConfig,
 };
 use crate::runtime::session::state::{SessionState, SessionStatus};
 
@@ -100,11 +101,12 @@ impl Projection for SessionIndexProjection {
             return Ok(());
         }
 
-        let event =
-            DomainEvent::<SessionState>::from_raw(event).map_err(|e| ProjectionError::Apply(e.to_string()))?;
-        let derived = event
-            .derived
-            .ok_or_else(|| ProjectionError::Apply("missing derived state for session event".into()))?;
+        let event = DomainEvent::<SessionState>::from_raw(event)
+            .map_err(|e| ProjectionError::Apply(e.to_string()))?;
+
+        let derived = event.derived.ok_or_else(|| {
+            ProjectionError::Apply("missing derived state for session event".into())
+        })?;
 
         let record = SessionIndexRecord {
             tenant_id: event.tenant_id,
