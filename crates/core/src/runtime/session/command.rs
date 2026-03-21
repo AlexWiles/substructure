@@ -5,7 +5,7 @@ use rust_decimal::Decimal;
 
 use super::decision::{DecisionTrigger, ToolResult, WorkerAction};
 use super::events::*;
-use super::message::{Message, Role};
+use super::message::{Content, ContentPart, ImageUrl, Message, Role};
 use super::state::{new_call_id, EffectStatus, SessionState, SessionStatus};
 use crate::runtime::identity::ClientIdentity;
 use crate::runtime::llm::{LlmRequest, LlmResponse};
@@ -229,9 +229,23 @@ impl SessionState {
                         } else {
                             Some(response.tool_calls.clone())
                         };
+                        let content = if response.images.is_empty() {
+                            response.content.clone().map(Content::Text)
+                        } else {
+                            let mut parts: Vec<ContentPart> = Vec::new();
+                            if let Some(text) = &response.content {
+                                parts.push(ContentPart::Text { text: text.clone() });
+                            }
+                            for img in &response.images {
+                                parts.push(ContentPart::ImageUrl {
+                                    image_url: ImageUrl { url: img.url.clone() },
+                                });
+                            }
+                            Some(Content::Parts(parts))
+                        };
                         let message = Message {
                             role: Role::Assistant,
-                            content: response.content.clone(),
+                            content,
                             tool_calls,
                             tool_call_id: None,
                             name: None,
@@ -347,7 +361,7 @@ impl SessionState {
                     EventPayload::NewMessage(NewMessage {
                         message: Message {
                             role: Role::Tool,
-                            content: Some(result.clone()),
+                            content: Some(Content::Text(result.clone())),
                             tool_calls: None,
                             tool_call_id: Some(tool_call_id.clone()),
                             name: None,

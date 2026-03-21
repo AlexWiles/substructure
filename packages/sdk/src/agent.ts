@@ -5,6 +5,7 @@ import type {
   RetryPolicy,
   Uuid,
 } from "./types";
+import { contentText } from "./types";
 import type { HandlerContext, HandlerResult, Composable, StateContributor, MiddlewareFn, ToolDef } from "./worker";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -170,8 +171,9 @@ export class Agent implements Composable<AgentState> {
         }
 
         const lastMsg = state.messages[state.messages.length - 1];
-        const artifacts = lastMsg?.content
-          ? [{ parts: [{ kind: "text" as const, text: lastMsg.content }] }]
+        const lastText = contentText(lastMsg?.content);
+        const artifacts = lastText
+          ? [{ parts: [{ kind: "text" as const, text: lastText }] }]
           : [];
 
         return { actions: [{ type: "done", artifacts }] };

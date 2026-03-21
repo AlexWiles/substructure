@@ -10,7 +10,8 @@ use rust_decimal::Decimal;
 
 use crate::identity::ClientIdentity;
 use crate::llm::{
-    LlmCallError, LlmCallable, LlmProviderTrait, LlmRequest, LlmResponse, LlmTool, StreamDelta,
+    LlmCallError, LlmCallable, LlmProviderTrait, LlmRequest, LlmResponse, LlmTool,
+    ResponseImage, StreamDelta,
 };
 use crate::session::message::{ToolCall, ToolCallFunction};
 
@@ -72,10 +73,22 @@ struct Choice {
 }
 
 #[derive(Debug, Deserialize)]
+struct WireResponseImage {
+    image_url: WireImageUrl,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireImageUrl {
+    url: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct ChoiceMessage {
     content: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<WireToolCall>>,
+    #[serde(default)]
+    images: Option<Vec<WireResponseImage>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,6 +133,17 @@ impl ChatCompletionResponse {
     fn into_llm_response(self) -> LlmResponse {
         let choice = self.choices.into_iter().next();
         let cost = extract_cost(&self.usage);
+        let images = choice
+            .as_ref()
+            .and_then(|c| c.message.images.as_ref())
+            .map(|imgs| {
+                imgs.iter()
+                    .map(|img| ResponseImage {
+                        url: img.image_url.url.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         LlmResponse {
             model: self.model,
             content: choice.as_ref().and_then(|c| c.message.content.clone()),
@@ -131,6 +155,7 @@ impl ChatCompletionResponse {
             finish_reason: choice.and_then(|c| c.finish_reason),
             usage: self.usage,
             cost,
+            images,
         }
     }
 }
@@ -421,6 +446,7 @@ impl LlmCallable for OpenRouterClient {
             finish_reason,
             usage,
             cost,
+            images: Vec::new(),
         })
     }
 }

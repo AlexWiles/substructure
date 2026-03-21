@@ -80,12 +80,54 @@ export interface ToolCall {
   function: ToolCallFunction;
 }
 
+// ── Multimodal content parts (OpenAI/OpenRouter wire format) ──────────
+
+export interface ImageUrlPart {
+  type: "image_url";
+  image_url: { url: string };
+}
+
+export interface FilePart {
+  type: "file";
+  file: { filename: string; file_data: string };
+}
+
+export interface InputAudioPart {
+  type: "input_audio";
+  input_audio: { data: string; format: string };
+}
+
+export interface VideoUrlPart {
+  type: "video_url";
+  video_url: { url: string };
+}
+
+export interface TextPart {
+  type: "text";
+  text: string;
+}
+
+export type ContentPart = TextPart | ImageUrlPart | FilePart | InputAudioPart | VideoUrlPart;
+
+/** Message content: plain string or array of typed parts. */
+export type Content = string | ContentPart[];
+
 export interface Message {
   role: Role;
-  content?: string;
+  content?: Content;
   tool_calls?: ToolCall[];
   tool_call_id?: string;
   name?: string;
+}
+
+/** Extract concatenated text from message content. */
+export function contentText(content: Content | undefined): string {
+  if (content === undefined) return "";
+  if (typeof content === "string") return content;
+  return content
+    .filter((p): p is TextPart => p.type === "text")
+    .map((p) => p.text)
+    .join("\n");
 }
 
 // ── LLM ─────────────────────────────────────────────────────────────────────
@@ -108,6 +150,10 @@ export interface LlmRequest {
   max_completion_tokens?: number;
 }
 
+export interface ResponseImage {
+  url: string;
+}
+
 export interface LlmResponse {
   model: string;
   content?: string;
@@ -115,6 +161,7 @@ export interface LlmResponse {
   finish_reason?: string;
   usage?: Record<string, unknown>;
   cost?: Decimal;
+  images?: ResponseImage[];
 }
 
 // ── Artifacts ───────────────────────────────────────────────────────────────

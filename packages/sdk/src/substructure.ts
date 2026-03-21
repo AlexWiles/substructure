@@ -7,7 +7,8 @@ import { WorkerClient } from "./worker-client";
 
 export { Agent } from "./agent";
 export type { AgentOptions, LlmConfig } from "./agent";
-export { retry, Retry } from "./types";
+export { retry, Retry, contentText } from "./types";
+export type { Content, ContentPart, TextPart, ImageUrlPart, FilePart, InputAudioPart, VideoUrlPart } from "./types";
 export { defineHandler, withJsonState, withState, withMessages, withAgentLoop, withLogging, subAgent, tool } from "./worker";
 export type { HandlerContext, HandlerResult, Handler, MiddlewareFn, Next, ToolDef, ToolFn, Composable } from "./worker";
 

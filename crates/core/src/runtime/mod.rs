@@ -137,7 +137,7 @@ impl Runtime {
                 command: CommandPayload::SendMessage {
                     message: session::message::Message {
                         role: session::message::Role::User,
-                        content: Some(input.content),
+                        content: Some(session::message::Content::Text(input.content)),
                         tool_calls: None,
                         tool_call_id: None,
                         name: None,

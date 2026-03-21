@@ -8,6 +8,7 @@ import type {
     RetryPolicy,
     Uuid,
 } from "./types";
+import { contentText } from "./types";
 import type { NativeRuntime } from "./runtime";
 import type { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
@@ -403,7 +404,7 @@ export function withAgentLoop(options: AgentLoopOptions): StateContributor<HasAg
 
             // Summary response — replace messages and emit the real LLM call
             if (state.agentLoop.isCompacting) {
-                const summaryText = trigger.message.content ?? "";
+                const summaryText = contentText(trigger.message.content);
                 const lastUserMsg = [...state.messages].reverse().find(m => m.role === "user");
                 state.messages = [
                     { role: "system", content: `Previous conversation summary:\n${summaryText}` },
@@ -459,11 +460,12 @@ export function withAgentLoop(options: AgentLoopOptions): StateContributor<HasAg
             // Final response — track message + done
             state.messages.push(trigger.message);
             const last = state.messages.at(-1);
+            const lastText = contentText(last?.content);
             return {
                 actions: [{
                     type: "done" as const,
-                    artifacts: last?.content
-                        ? [{ parts: [{ kind: "text" as const, text: last.content }] }]
+                    artifacts: lastText
+                        ? [{ parts: [{ kind: "text" as const, text: lastText }] }]
                         : [],
                 }],
             };
@@ -512,7 +514,7 @@ type MiddlewareOut<M> = M extends MiddlewareFn<any, infer Out> ? Out : never;
 /** Detect the `any` type. */
 type IsAny<T> = 0 extends (1 & T) ? true : false;
 
-const DEFAULT_FALLBACK: AnyNext = () => ({ actions: [{ type: "done", artifacts: [] }] });
+const DEFAULT_FALLBACK: AnyNext = () => ({ actions: [] });
 
 class HandlerBuilder<S> implements Handler {
     private middlewares: AnyMiddleware[] = [];
