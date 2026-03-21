@@ -63,6 +63,16 @@ CREATE TABLE IF NOT EXISTS push_registrations (
     PRIMARY KEY (tenant_id, agent_id)
 );
 
+CREATE TABLE IF NOT EXISTS worker_queue (
+    decision_id    TEXT PRIMARY KEY,
+    tenant_id      TEXT NOT NULL,
+    agent_id       TEXT NOT NULL,
+    payload        TEXT NOT NULL,
+    enqueued_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_worker_queue_tenant_agent_order
+    ON worker_queue (tenant_id, agent_id, enqueued_at, decision_id);
+
 CREATE TABLE IF NOT EXISTS projection_checkpoints (
     projection_name TEXT NOT NULL,
     shard_id        INTEGER NOT NULL,

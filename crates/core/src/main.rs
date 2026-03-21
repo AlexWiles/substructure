@@ -6,7 +6,7 @@ use tokio::net::TcpListener;
 use substructure_core::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use substructure_core::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
 use substructure_core::providers::sqlite::SqliteStore;
-use substructure_core::providers::worker_queue::InMemoryWorkerQueue;
+use substructure_core::providers::worker_queue::SqliteWorkerQueue;
 use substructure_core::transport::http_push::http_transport;
 use substructure_core::transport::push::PushAdapter;
 use substructure_core::transport::server::SubstructureServer;
@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Serve { host, port, db } => {
             let store = Arc::new(SqliteStore::new(&db)?);
             let config = RuntimeConfig::default();
-            let queue = Arc::new(InMemoryWorkerQueue::new());
+            let queue = Arc::new(SqliteWorkerQueue::new(&db).map_err(anyhow::Error::msg)?);
             let llm_task_queue: Arc<dyn TaskQueue<substructure_core::llm::LlmTask>> =
                 Arc::new(ShardedInMemoryQueue::new(config.llm_executor_workers as u32));
             let sub_agent_task_queue: Arc<dyn TaskQueue<substructure_core::sub_agent::SubAgentTask>> =
