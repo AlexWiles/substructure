@@ -7,11 +7,18 @@ use substructure_core::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue
 use substructure_core::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
 use substructure_core::providers::sqlite::SqliteStore;
 use substructure_core::providers::worker_queue::SqliteWorkerQueue;
+use substructure_core::sub_agent::SubAgentTask;
+use substructure_core::transport::admin_http;
+use substructure_core::transport::auth::{ApiKeyBinding, HashedApiKeyAuthResolver};
+use substructure_core::transport::client_http;
+use substructure_core::transport::dashboard;
 use substructure_core::transport::http_push::http_transport;
 use substructure_core::transport::push::PushAdapter;
 use substructure_core::transport::server::SubstructureServer;
+use substructure_core::transport::worker_http::{self, WorkerHttpState};
 use substructure_core::worker::push::{PushRegistry, TransportRegistry};
-use substructure_core::RuntimeConfig;
+use substructure_core::{start, RuntimeConfig};
+use substructure_core::llm::LlmTask;
 
 #[derive(Parser)]
 #[command(name = "substructure", version)]
@@ -48,9 +55,9 @@ async fn main() -> anyhow::Result<()> {
             let store = Arc::new(SqliteStore::new(&db)?);
             let config = RuntimeConfig::default();
             let queue = Arc::new(SqliteWorkerQueue::new(&db).map_err(anyhow::Error::msg)?);
-            let llm_task_queue: Arc<dyn TaskQueue<substructure_core::llm::LlmTask>> =
+            let llm_task_queue: Arc<dyn TaskQueue<LlmTask>> =
                 Arc::new(ShardedInMemoryQueue::new(config.llm_executor_workers as u32));
-            let sub_agent_task_queue: Arc<dyn TaskQueue<substructure_core::sub_agent::SubAgentTask>> =
+            let sub_agent_task_queue: Arc<dyn TaskQueue<SubAgentTask>> =
                 Arc::new(ShardedInMemoryQueue::new(config.sub_agent_executor_workers as u32));
             let llm_provider = Arc::new(OpenRouterProvider::new(OpenRouterConfig {
                 base_url: std::env::var("OPENROUTER_BASE_URL")
@@ -58,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
                 api_key: std::env::var("OPENROUTER_API_KEY").unwrap_or_default(),
             }));
 
-            let rt = substructure_core::start(
+            let rt = start(
                 store.clone(),
                 llm_provider,
                 llm_task_queue,
@@ -73,12 +80,24 @@ async fn main() -> anyhow::Result<()> {
             let transports = TransportRegistry::new(vec![http_transport()]);
             let registry = PushRegistry::new(store, transports);
             let adapter = Arc::new(PushAdapter::new(rt.clone(), registry, 16));
+            let worker_auth = HashedApiKeyAuthResolver::new(vec![
+                ApiKeyBinding::new(
+                    "default",
+                    "0b42357e3654716d9915e42b3b44d9c762169d7c4c972906b45a1d8b28dbad2e",
+                    "default-dev-key",
+                ),
+            ])
+            .map_err(anyhow::Error::msg)?
+            .into_dyn();
             adapter.start().await;
 
-            let admin_routes = substructure_core::transport::admin_http::router(rt.clone());
-            let client_routes = substructure_core::transport::client_http::router(rt);
-            let worker_routes = substructure_core::transport::worker_http::router(adapter);
-            let dashboard_routes = substructure_core::transport::dashboard::router();
+            let admin_routes = admin_http::router(rt.clone());
+            let client_routes = client_http::router(rt);
+            let worker_routes = worker_http::router(WorkerHttpState {
+                adapter,
+                auth: worker_auth,
+            });
+            let dashboard_routes = dashboard::router();
             let server = SubstructureServer::new(vec![
                 admin_routes,
                 client_routes,

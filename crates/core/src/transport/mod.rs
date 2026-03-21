@@ -1,4 +1,5 @@
 pub mod admin_http;
+pub mod auth;
 pub mod client_http;
 pub mod dashboard;
 pub mod extractors;

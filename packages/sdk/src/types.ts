@@ -537,6 +537,10 @@ export interface SendMessageRequest {
 
 // ── Worker HTTP API ─────────────────────────────────────────────────────────
 
+export interface WorkerAuthOptions {
+  bearerToken: string;
+}
+
 export interface WorkerDecisionRequestWire {
   session_id: Uuid;
   tenant_id: string;
@@ -554,7 +558,6 @@ export interface WorkerDecisionRequestWire {
 
 export interface SubmitRequest {
   session_id: Uuid;
-  tenant_id: string;
   decision_id: string;
   actions: WorkerAction[];
   /** Base64-encoded opaque worker state */
@@ -568,7 +571,6 @@ export interface SubmitResponse {
 }
 
 export interface RegisterRequest {
-  tenant_id: string;
   agent_ids: string[];
   transport_type: string;
   config: unknown;

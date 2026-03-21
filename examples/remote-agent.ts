@@ -47,10 +47,12 @@ const handler = defineHandler()
     .use(mathAgent)
 
 const WORKER_PORT = 4444;
+const WORKER_API_KEY = "dev-worker-key";
 
 const sub = new Substructure({
     url: "http://localhost:8080",
     workerUrl: `http://localhost:${WORKER_PORT}`,
+    workerAuth: { bearerToken: WORKER_API_KEY },
     handler
 });
 

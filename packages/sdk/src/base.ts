@@ -1,16 +1,33 @@
+type ClientHeaders = Record<string, string>;
+
 export interface BaseClientOptions {
   baseUrl: string;
+  headers?: ClientHeaders;
 }
 
 export interface RequestOptions {
   signal?: AbortSignal;
+  headers?: ClientHeaders;
 }
 
 export class BaseClient {
   protected baseUrl: string;
+  protected headers?: ClientHeaders;
 
   constructor(options: BaseClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
+    this.headers = options.headers;
+  }
+
+  protected mergeHeaders(headers?: ClientHeaders): Headers {
+    const merged = new Headers(this.headers);
+    if (headers) {
+      const extra = new Headers(headers);
+      for (const [k, v] of extra.entries()) {
+        merged.set(k, v);
+      }
+    }
+    return merged;
   }
 
   protected buildUrl(path: string, query?: Record<string, string | undefined>): string {
@@ -32,14 +49,17 @@ export class BaseClient {
   }
 
   protected async get<T>(path: string, params?: Record<string, string | undefined>, opts?: RequestOptions): Promise<T> {
-    const resp = await this.fetch(this.buildUrl(path, params), { signal: opts?.signal });
+    const resp = await this.fetch(this.buildUrl(path, params), {
+      signal: opts?.signal,
+      headers: this.mergeHeaders(opts?.headers),
+    });
     return (await resp.json()) as T;
   }
 
   protected async post<T>(path: string, body: unknown, opts?: RequestOptions): Promise<T> {
     const resp = await this.fetch(this.buildUrl(path), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this.mergeHeaders({ "Content-Type": "application/json", ...opts?.headers }),
       body: JSON.stringify(body),
       signal: opts?.signal,
     });
@@ -47,14 +67,17 @@ export class BaseClient {
   }
 
   protected async *streamNdjsonGet<T>(path: string, params?: Record<string, string | undefined>, opts?: RequestOptions): AsyncGenerator<T> {
-    const resp = await this.fetch(this.buildUrl(path, params), { signal: opts?.signal });
+    const resp = await this.fetch(this.buildUrl(path, params), {
+      signal: opts?.signal,
+      headers: this.mergeHeaders(opts?.headers),
+    });
     yield* this.readNdjson<T>(resp);
   }
 
   protected async *streamNdjson<T>(path: string, body: unknown, opts?: RequestOptions): AsyncGenerator<T> {
     const resp = await this.fetch(this.buildUrl(path), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this.mergeHeaders({ "Content-Type": "application/json", ...opts?.headers }),
       body: JSON.stringify(body),
       signal: opts?.signal,
     });

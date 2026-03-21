@@ -632,7 +632,6 @@ export class Worker {
         const result = await this.handler(request);
         return {
             session_id: request.session_id,
-            tenant_id: request.tenant_id,
             decision_id: request.decision_id,
             actions: result.actions,
             state: result.state,

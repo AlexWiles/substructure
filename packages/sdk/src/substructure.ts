@@ -4,6 +4,7 @@ import type { Handler } from "./worker";
 import { Worker } from "./worker";
 import { UserClient } from "./user-client";
 import { WorkerClient } from "./worker-client";
+import type { WorkerAuthOptions } from "./types";
 
 export { Agent } from "./agent";
 export type { AgentOptions, LlmConfig } from "./agent";
@@ -85,6 +86,8 @@ export interface RemoteConfig {
   handler: Handler;
   /** Worker endpoint URL (required for HTTP push transport) */
   workerUrl?: string;
+  /** Worker API authentication for register/submit endpoints */
+  workerAuth?: WorkerAuthOptions;
 }
 
 export type SubstructureConfig = LocalConfig | RemoteConfig;
@@ -109,7 +112,10 @@ export class Substructure {
 
     if (isRemote(config)) {
       this.userClient = new UserClient({ baseUrl: config.url });
-      this.workerClient = new WorkerClient({ baseUrl: config.url });
+      this.workerClient = new WorkerClient({
+        baseUrl: config.url,
+        headers: buildWorkerAuthHeaders(config.workerAuth),
+      });
     }
 
     this.ready = this.register();
@@ -126,21 +132,18 @@ export class Substructure {
   }
 
   private async register(): Promise<void> {
-    const tenantId = "default";
-
     if (isRemote(this.config)) {
       if (!this.config.workerUrl) {
         throw new Error("workerUrl is required for remote mode registration");
       }
       await this.workerClient!.register({
-        tenant_id: tenantId,
         agent_ids: this.worker.agentIds,
         transport_type: "http",
         config: { endpoint_url: this.config.workerUrl },
       });
     } else {
       const runtime = await this.getRuntime();
-      await this.worker.register(runtime, tenantId);
+      await this.worker.register(runtime, "default");
     }
   }
 
@@ -184,4 +187,11 @@ export class Substructure {
       await this.runtime.shutdown();
     }
   }
+}
+
+function buildWorkerAuthHeaders(auth?: WorkerAuthOptions): Record<string, string> | undefined {
+  if (!auth) {
+    return undefined;
+  }
+  return { Authorization: `Bearer ${auth.bearerToken}` };
 }
