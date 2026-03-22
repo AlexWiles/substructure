@@ -51,6 +51,7 @@ const WORKER_API_KEY = "dev-worker-key";
 
 const sub = new Substructure({
     url: "http://localhost:8080",
+    // Same bearer token now protects /api/machine/workers/* and /api/machine/sessions/send.
     workerUrl: `http://localhost:${WORKER_PORT}`,
     workerAuth: { bearerToken: WORKER_API_KEY },
     handler

@@ -9,11 +9,11 @@ import type {
 
 export class WorkerClient extends BaseClient {
   async submit(request: SubmitRequest, auth?: WorkerAuthOptions): Promise<SubmitResponse> {
-    return this.post("/workers/submit", request, { headers: buildWorkerAuthHeaders(auth) });
+    return this.post("/api/machine/workers/submit", request, { headers: buildWorkerAuthHeaders(auth) });
   }
 
   async register(request: RegisterRequest, auth?: WorkerAuthOptions): Promise<RegisterResponse> {
-    return this.post("/workers/register", request, { headers: buildWorkerAuthHeaders(auth) });
+    return this.post("/api/machine/workers/register", request, { headers: buildWorkerAuthHeaders(auth) });
   }
 }
 

@@ -1,7 +1,5 @@
-use std::sync::Arc;
-
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -9,22 +7,24 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use uuid::Uuid;
 
-use crate::{Runtime, SendMessage};
+use crate::transport::auth::AuthPrincipal;
+use crate::SendMessage;
 
 use super::types::SendMessageRequest;
-use crate::transport::extractors::TenantId;
+use super::ClientHttpState;
 
 pub async fn send_message(
-    State(runtime): State<Arc<Runtime>>,
-    TenantId(tenant_id): TenantId,
+    State(state): State<ClientHttpState>,
+    Extension(principal): Extension<AuthPrincipal>,
     Json(req): Json<SendMessageRequest>,
 ) -> Response {
     let session_id = req.session_id.unwrap_or_else(|| Uuid::now_v7().to_string());
 
-    let result = runtime
+    let result = state
+        .runtime
         .send_message(SendMessage {
             session_id,
-            tenant_id,
+            tenant_id: principal.tenant_id,
             agent_id: req.agent_id,
             content: req.message,
             turn_id: req.turn_id,

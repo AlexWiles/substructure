@@ -86,7 +86,7 @@ export interface RemoteConfig {
   handler: Handler;
   /** Worker endpoint URL (required for HTTP push transport) */
   workerUrl?: string;
-  /** Worker API authentication for register/submit endpoints */
+  /** Server API authentication for worker + send-message endpoints */
   workerAuth?: WorkerAuthOptions;
 }
 
@@ -111,11 +111,12 @@ export class Substructure {
     this.worker = new Worker(config.handler);
 
     if (isRemote(config)) {
-      this.userClient = new UserClient({ baseUrl: config.url });
+      const authHeaders = buildWorkerAuthHeaders(config.workerAuth);
       this.workerClient = new WorkerClient({
         baseUrl: config.url,
-        headers: buildWorkerAuthHeaders(config.workerAuth),
+        headers: authHeaders,
       });
+      this.userClient = new UserClient({ baseUrl: config.url, headers: authHeaders });
     }
 
     this.ready = this.register();

@@ -6,6 +6,6 @@ import type {
 
 export class UserClient extends BaseClient {
   async *sendMessage(request: SendMessageRequest): AsyncGenerator<Event> {
-    yield* this.streamNdjson("/sessions/send", request);
+    yield* this.streamNdjson("/api/machine/sessions/send", request);
   }
 }

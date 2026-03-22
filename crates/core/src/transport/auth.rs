@@ -8,6 +8,7 @@ use subtle::ConstantTimeEq;
 #[derive(Debug, Clone, Copy)]
 pub enum AuthCapability {
     WorkerApi,
+    ClientApi,
 }
 
 #[derive(Debug, Clone)]

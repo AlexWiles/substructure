@@ -21,8 +21,8 @@ pub struct WorkerHttpState {
 
 pub fn router(state: WorkerHttpState) -> Router {
     Router::new()
-        .route("/workers/submit", post(routes::submit))
-        .route("/workers/register", post(routes::register))
+        .route("/api/machine/workers/submit", post(routes::submit))
+        .route("/api/machine/workers/register", post(routes::register))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             worker_auth_middleware,
