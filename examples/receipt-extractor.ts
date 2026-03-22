@@ -1,4 +1,4 @@
-import { Substructure, Agent, defineHandler, withJsonState, withLogging, retry, tool } from "@substructure.ai/sdk/substructure";
+import { Substructure, Agent, defineAgent, withState, withLogging, retry, tool } from "@substructure.ai/sdk/substructure";
 import { z } from "zod";
 import { appendFileSync, existsSync } from "fs";
 import { randomUUID } from "crypto";
@@ -38,16 +38,16 @@ If the currency is not stated, assume USD.`,
     tools: { save_to_csv: saveToCSV },
 });
 
-const handler = defineHandler()
-    .use(withLogging())
-    .use(withJsonState())
-    .use(receiptAgent);
-
 const sub = new Substructure({
     db: "data.db",
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
-    handler,
 });
+
+sub.agent("receipt-extractor", defineAgent()
+    .use(withLogging())
+    .use(withState({}))
+    .use(receiptAgent)
+);
 
 // Sample receipts to process
 const receipts = [

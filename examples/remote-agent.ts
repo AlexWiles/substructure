@@ -1,4 +1,4 @@
-import { Substructure, Agent, defineHandler, withJsonState, withLogging, retry, tool } from "@substructure.ai/sdk/substructure";
+import { Substructure, Agent, defineAgent, withState, withLogging, retry, tool } from "@substructure.ai/sdk/substructure";
 import { z } from "zod";
 
 const add = tool({
@@ -40,22 +40,26 @@ const weatherAgent = new Agent({
     subAgents: [mathAgent],
 });
 
-const handler = defineHandler()
-    .use(withLogging())
-    .use(withJsonState())
-    .use(weatherAgent)
-    .use(mathAgent)
-
 const WORKER_PORT = 4444;
 const WORKER_API_KEY = "dev-worker-key";
 
 const sub = new Substructure({
     url: "http://localhost:8080",
-    // Same bearer token now protects /api/machine/workers/* and /api/machine/sessions/send.
     workerUrl: `http://localhost:${WORKER_PORT}`,
     workerAuth: { bearerToken: WORKER_API_KEY },
-    handler
 });
+
+sub.agent("weather-agent", defineAgent()
+    .use(withLogging())
+    .use(withState({}))
+    .use(weatherAgent)
+);
+
+sub.agent("math-agent", defineAgent()
+    .use(withLogging())
+    .use(withState({}))
+    .use(mathAgent)
+);
 
 const server = Bun.serve({ port: WORKER_PORT, fetch: sub.fetchHandler() });
 

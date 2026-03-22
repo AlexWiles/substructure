@@ -1,4 +1,4 @@
-import { Substructure, Agent, defineHandler, withJsonState, withLogging, retry, tool } from "@substructure.ai/sdk/substructure";
+import { Substructure, Agent, defineAgent, withState, withLogging, retry, tool } from "@substructure.ai/sdk/substructure";
 import { z } from "zod";
 
 const add = tool({
@@ -30,17 +30,22 @@ const weatherAgent = new Agent({
     subAgents: [mathAgent],
 });
 
-const handler = defineHandler()
-    .use(withLogging())
-    .use(withJsonState())
-    .use(weatherAgent)
-    .use(mathAgent)
-
 const sub = new Substructure({
     db: "data.db",
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
-    handler,
 });
+
+sub.agent("weather-agent", defineAgent()
+    .use(withLogging())
+    .use(withState({}))
+    .use(weatherAgent)
+);
+
+sub.agent("math-agent", defineAgent()
+    .use(withLogging())
+    .use(withState({}))
+    .use(mathAgent)
+);
 
 const stream = sub.run(
     "weather-agent",

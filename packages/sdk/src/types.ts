@@ -18,51 +18,51 @@ export type SpanId = string;
 // ── Identity ────────────────────────────────────────────────────────────────
 
 export interface ClientIdentity {
-  tenant_id: string;
-  sub?: string;
-  attrs?: Record<string, string>;
+    tenant_id: string;
+    sub?: string;
+    attrs?: Record<string, string>;
 }
 
 // ── Retry ───────────────────────────────────────────────────────────────────
 
 export interface RetryPolicy {
-  timeout_secs: number | null;
-  max_retries: number;
-  backoff_base_secs: number;
-  backoff_max_secs: number;
+    timeout_secs: number | null;
+    max_retries: number;
+    backoff_base_secs: number;
+    backoff_max_secs: number;
 }
 
 export class Retry implements RetryPolicy {
-  timeout_secs: number | null = null;
-  max_retries: number = 0;
-  backoff_base_secs: number = 0;
-  backoff_max_secs: number = 0;
+    timeout_secs: number | null = null;
+    max_retries: number = 0;
+    backoff_base_secs: number = 0;
+    backoff_max_secs: number = 0;
 
-  timeout(secs: number): this { this.timeout_secs = secs; return this; }
-  retries(n: number): this { this.max_retries = n; return this; }
-  backoff(baseSecs: number, maxSecs: number): this {
-    this.backoff_base_secs = baseSecs;
-    this.backoff_max_secs = maxSecs;
-    return this;
-  }
+    timeout(secs: number): this { this.timeout_secs = secs; return this; }
+    retries(n: number): this { this.max_retries = n; return this; }
+    backoff(baseSecs: number, maxSecs: number): this {
+        this.backoff_base_secs = baseSecs;
+        this.backoff_max_secs = maxSecs;
+        return this;
+    }
 }
 
 export function retry(): Retry { return new Retry(); }
 
 export interface RetryState {
-  attempts: number;
-  next_at?: DateTime;
+    attempts: number;
+    next_at?: DateTime;
 }
 
 // ── Tracing ─────────────────────────────────────────────────────────────────
 
 export interface SpanContext {
-  trace_id: TraceId;
-  span_id: SpanId;
-  parent_span_id?: SpanId;
-  trace_flags: number;
-  trace_state?: string;
-  name?: string;
+    trace_id: TraceId;
+    span_id: SpanId;
+    parent_span_id?: SpanId;
+    trace_flags: number;
+    trace_state?: string;
+    name?: string;
 }
 
 // ── Messages ────────────────────────────────────────────────────────────────
@@ -70,41 +70,41 @@ export interface SpanContext {
 export type Role = "system" | "user" | "assistant" | "tool";
 
 export interface ToolCallFunction {
-  name: string;
-  arguments: string;
+    name: string;
+    arguments: string;
 }
 
 export interface ToolCall {
-  id: string;
-  type: string;
-  function: ToolCallFunction;
+    id: string;
+    type: string;
+    function: ToolCallFunction;
 }
 
 // ── Multimodal content parts (OpenAI/OpenRouter wire format) ──────────
 
 export interface ImageUrlPart {
-  type: "image_url";
-  image_url: { url: string };
+    type: "image_url";
+    image_url: { url: string };
 }
 
 export interface FilePart {
-  type: "file";
-  file: { filename: string; file_data: string };
+    type: "file";
+    file: { filename: string; file_data: string };
 }
 
 export interface InputAudioPart {
-  type: "input_audio";
-  input_audio: { data: string; format: string };
+    type: "input_audio";
+    input_audio: { data: string; format: string };
 }
 
 export interface VideoUrlPart {
-  type: "video_url";
-  video_url: { url: string };
+    type: "video_url";
+    video_url: { url: string };
 }
 
 export interface TextPart {
-  type: "text";
-  text: string;
+    type: "text";
+    text: string;
 }
 
 export type ContentPart = TextPart | ImageUrlPart | FilePart | InputAudioPart | VideoUrlPart;
@@ -113,67 +113,67 @@ export type ContentPart = TextPart | ImageUrlPart | FilePart | InputAudioPart | 
 export type Content = string | ContentPart[];
 
 export interface Message {
-  role: Role;
-  content?: Content;
-  tool_calls?: ToolCall[];
-  tool_call_id?: string;
-  name?: string;
+    role: Role;
+    content?: Content;
+    tool_calls?: ToolCall[];
+    tool_call_id?: string;
+    name?: string;
 }
 
 /** Extract concatenated text from message content. */
 export function contentText(content: Content | undefined): string {
-  if (content === undefined) return "";
-  if (typeof content === "string") return content;
-  return content
-    .filter((p): p is TextPart => p.type === "text")
-    .map((p) => p.text)
-    .join("\n");
+    if (content === undefined) return "";
+    if (typeof content === "string") return content;
+    return content
+        .filter((p): p is TextPart => p.type === "text")
+        .map((p) => p.text)
+        .join("\n");
 }
 
 // ── LLM ─────────────────────────────────────────────────────────────────────
 
 export interface LlmToolFunction {
-  name: string;
-  description: string;
-  parameters: unknown;
+    name: string;
+    description: string;
+    parameters: unknown;
 }
 
 export interface LlmTool {
-  function: LlmToolFunction;
+    function: LlmToolFunction;
 }
 
 export interface LlmRequest {
-  model: string;
-  messages: Message[];
-  tools?: LlmTool[];
-  temperature?: number;
-  max_completion_tokens?: number;
+    model: string;
+    messages: Message[];
+    tools?: LlmTool[];
+    temperature?: number;
+    max_completion_tokens?: number;
 }
 
 export interface ResponseImage {
-  url: string;
+    url: string;
 }
 
 export interface LlmResponse {
-  model: string;
-  content?: string;
-  tool_calls: ToolCall[];
-  finish_reason?: string;
-  usage?: Record<string, unknown>;
-  cost?: Decimal;
-  images?: ResponseImage[];
+    model: string;
+    content?: string;
+    tool_calls: ToolCall[];
+    finish_reason?: string;
+    usage?: Record<string, unknown>;
+    cost?: Decimal;
+    images?: ResponseImage[];
 }
 
 // ── Artifacts ───────────────────────────────────────────────────────────────
 
 export type Part =
-  | { kind: "text"; text: string }
-  | { kind: "data"; data: unknown };
+    | { kind: "text"; text: string }
+    | { kind: "data"; data: unknown };
 
 export interface Artifact {
-  name?: string;
-  description?: string;
-  parts: Part[];
+    name?: string;
+    description?: string;
+    parts: Part[];
 }
 
 // ── Tool Handler ────────────────────────────────────────────────────────────
@@ -183,399 +183,399 @@ export type ToolHandler = "worker" | "client";
 // ── Decision Triggers ───────────────────────────────────────────────────────
 
 export interface ToolResult {
-  tool_call_id: string;
-  name: string;
-  content: string;
-  is_error: boolean;
+    tool_call_id: string;
+    name: string;
+    content: string;
+    is_error: boolean;
 }
 
 export type DecisionTrigger =
-  | { type: "user_message"; stream: boolean; message: Message }
-  | { type: "llm_response"; call_id: string; message: Message; truncated: boolean; usage?: Record<string, unknown>; cost?: Decimal }
-  | { type: "llm_error"; call_id: string; error: string }
-  | {
-      type: "tool_execute";
-      tool_call_id: string;
-      name: string;
-      arguments: string;
-      attempt: number;
-      deadline?: DateTime;
+    | { type: "user_message"; stream: boolean; message: Message }
+    | { type: "llm_response"; call_id: string; message: Message; truncated: boolean; usage?: Record<string, unknown>; cost?: Decimal }
+    | { type: "llm_error"; call_id: string; error: string }
+    | {
+        type: "tool_execute";
+        tool_call_id: string;
+        name: string;
+        arguments: string;
+        attempt: number;
+        deadline?: DateTime;
     }
-  | { type: "tool_result"; result: ToolResult }
-  | { type: "sub_agent_turn_complete"; session_id: Uuid; agent_id: string; turn_id: string; artifacts: Artifact[] }
-  | { type: "sub_agent_error"; session_id: Uuid; agent_id: string; error: string }
-  | { type: "interrupt_resumed"; interrupt_id: string }
-  | { type: "stall" };
+    | { type: "tool_result"; result: ToolResult }
+    | { type: "sub_agent_turn_complete"; session_id: Uuid; agent_id: string; turn_id: string; artifacts: Artifact[] }
+    | { type: "sub_agent_error"; session_id: Uuid; agent_id: string; error: string }
+    | { type: "interrupt_resumed"; interrupt_id: string }
+    | { type: "stall" };
 
 // ── Worker Actions ──────────────────────────────────────────────────────────
 
 export type WorkerAction =
-  | {
-      type: "call_llm";
-      request: LlmRequest;
-      stream: boolean;
-      llm_client: string;
-      retry: RetryPolicy;
+    | {
+        type: "call_llm";
+        request: LlmRequest;
+        stream: boolean;
+        llm_client: string;
+        retry: RetryPolicy;
     }
-  | {
-      type: "call_tool";
-      tool_call_id: string;
-      name: string;
-      arguments: string;
-      handler: ToolHandler;
-      retry: RetryPolicy;
+    | {
+        type: "call_tool";
+        tool_call_id: string;
+        name: string;
+        arguments: string;
+        handler: ToolHandler;
+        retry: RetryPolicy;
     }
-  | { type: "return_tool_result"; tool_call_id: string; result: string; attempt: number }
-  | {
-      type: "return_tool_error";
-      tool_call_id: string;
-      error: string;
-      retryable: boolean;
-      attempt: number;
+    | { type: "return_tool_result"; tool_call_id: string; result: string; attempt: number }
+    | {
+        type: "return_tool_error";
+        tool_call_id: string;
+        error: string;
+        retryable: boolean;
+        attempt: number;
     }
-  | { type: "resolve_remote_tool"; session_id: Uuid; tool_call_id: string; result: string }
-  | { type: "spawn_sub_agent"; session_id: Uuid; agent_id: string; retry: RetryPolicy }
-  | { type: "send_message"; session_id: Uuid; message: Message }
-  | { type: "done"; artifacts: Artifact[] };
+    | { type: "resolve_remote_tool"; session_id: Uuid; tool_call_id: string; result: string }
+    | { type: "spawn_sub_agent"; session_id: Uuid; agent_id: string; retry: RetryPolicy }
+    | { type: "send_message"; session_id: Uuid; message: Message }
+    | { type: "done"; artifacts: Artifact[] };
 
 // ── Event Payloads ──────────────────────────────────────────────────────────
 
 export interface SessionCreated {
-  type: "session.created";
-  agent_id: string;
-  auth: ClientIdentity;
-  ancestry?: Uuid[];
-  worker_retry: RetryPolicy;
+    type: "session.created";
+    agent_id: string;
+    auth: ClientIdentity;
+    ancestry?: Uuid[];
+    worker_retry: RetryPolicy;
 }
 
 /** Pure lifecycle marker — no data. Turn output lives in TurnCompleted. */
 export interface SessionDone {
-  type: "session.done";
+    type: "session.done";
 }
 
 export interface SessionCancelled {
-  type: "session.cancelled";
+    type: "session.cancelled";
 }
 
 export interface NewMessage {
-  type: "message.new";
-  message: Message;
+    type: "message.new";
+    message: Message;
 }
 
 export interface LlmCallRequested {
-  type: "llm.call.requested";
-  call_id: string;
-  request: LlmRequest;
-  stream: boolean;
-  llm_client: string;
-  retry: RetryPolicy;
+    type: "llm.call.requested";
+    call_id: string;
+    request: LlmRequest;
+    stream: boolean;
+    llm_client: string;
+    retry: RetryPolicy;
 }
 
 export interface LlmCallCompleted {
-  type: "llm.call.completed";
-  call_id: string;
-  response: LlmResponse;
+    type: "llm.call.completed";
+    call_id: string;
+    response: LlmResponse;
 }
 
 export interface LlmCallErrored {
-  type: "llm.call.errored";
-  call_id: string;
-  error: string;
-  retryable: boolean;
-  source?: unknown;
+    type: "llm.call.errored";
+    call_id: string;
+    error: string;
+    retryable: boolean;
+    source?: unknown;
 }
 
 export interface ToolCallRequested {
-  type: "tool.call.requested";
-  tool_call_id: string;
-  name: string;
-  arguments: string;
-  handler: ToolHandler;
-  retry: RetryPolicy;
+    type: "tool.call.requested";
+    tool_call_id: string;
+    name: string;
+    arguments: string;
+    handler: ToolHandler;
+    retry: RetryPolicy;
 }
 
 export interface ToolCallCompleted {
-  type: "tool.call.completed";
-  tool_call_id: string;
-  name: string;
-  result: string;
+    type: "tool.call.completed";
+    tool_call_id: string;
+    name: string;
+    result: string;
 }
 
 export interface ToolCallErrored {
-  type: "tool.call.errored";
-  tool_call_id: string;
-  name: string;
-  error: string;
-  retryable: boolean;
+    type: "tool.call.errored";
+    tool_call_id: string;
+    name: string;
+    error: string;
+    retryable: boolean;
 }
 
 export interface SubAgentRequested {
-  type: "sub_agent.requested";
-  session_id: Uuid;
-  agent_id: string;
-  retry: RetryPolicy;
+    type: "sub_agent.requested";
+    session_id: Uuid;
+    agent_id: string;
+    retry: RetryPolicy;
 }
 
 export interface SubAgentStarted {
-  type: "sub_agent.started";
-  session_id: Uuid;
+    type: "sub_agent.started";
+    session_id: Uuid;
 }
 
 export interface SubAgentErrored {
-  type: "sub_agent.errored";
-  session_id: Uuid;
-  error: string;
-  retryable: boolean;
+    type: "sub_agent.errored";
+    session_id: Uuid;
+    error: string;
+    retryable: boolean;
 }
 
 export interface SubAgentTurnCompleted {
-  type: "sub_agent.turn_completed";
-  session_id: Uuid;
-  cost: Decimal;
-  token_usage?: Record<string, number>;
+    type: "sub_agent.turn_completed";
+    session_id: Uuid;
+    cost: Decimal;
+    token_usage?: Record<string, number>;
 }
 
 export interface SessionInterrupted {
-  type: "session.interrupted";
-  interrupt_id: string;
-  reason: string;
-  payload: unknown;
+    type: "session.interrupted";
+    interrupt_id: string;
+    reason: string;
+    payload: unknown;
 }
 
 export interface InterruptResumed {
-  type: "session.interrupt_resumed";
-  interrupt_id: string;
-  payload: unknown;
+    type: "session.interrupt_resumed";
+    interrupt_id: string;
+    payload: unknown;
 }
 
 export interface WorkerDecisionRequested {
-  type: "worker.decision.requested";
-  decision_id: string;
-  trigger: DecisionTrigger;
+    type: "worker.decision.requested";
+    decision_id: string;
+    trigger: DecisionTrigger;
 }
 
 export interface WorkerDecisionCompleted {
-  type: "worker.decision.completed";
-  decision_id: string;
-  /** Base64-encoded opaque worker state */
-  state: string;
+    type: "worker.decision.completed";
+    decision_id: string;
+    /** Base64-encoded opaque worker state */
+    state: string;
 }
 
 export interface WorkerDecisionErrored {
-  type: "worker.decision.errored";
-  decision_id: string;
-  error: string;
-  retryable: boolean;
+    type: "worker.decision.errored";
+    decision_id: string;
+    error: string;
+    retryable: boolean;
 }
 
 export interface SessionMessageRequested {
-  type: "session.message_requested";
-  target_session_id: Uuid;
-  message: Message;
+    type: "session.message_requested";
+    target_session_id: Uuid;
+    message: Message;
 }
 
 export interface ToolCallResolutionRequested {
-  type: "tool_call.resolution_requested";
-  target_session_id: Uuid;
-  tool_call_id: string;
-  result: string;
+    type: "tool_call.resolution_requested";
+    target_session_id: Uuid;
+    tool_call_id: string;
+    result: string;
 }
 
 export interface WorkerStateUpdated {
-  type: "worker.state.updated";
-  /** Base64-encoded opaque worker state */
-  state: string;
+    type: "worker.state.updated";
+    /** Base64-encoded opaque worker state */
+    state: string;
 }
 
 export interface TurnStarted {
-  type: "turn.started";
-  turn_id: string;
+    type: "turn.started";
+    turn_id: string;
 }
 
 export interface TurnCompleted {
-  type: "turn.completed";
-  turn_id: string;
-  artifacts?: Artifact[];
-  turn_cost?: Decimal;
-  turn_token_usage?: Record<string, number>;
+    type: "turn.completed";
+    turn_id: string;
+    artifacts?: Artifact[];
+    turn_cost?: Decimal;
+    turn_token_usage?: Record<string, number>;
 }
 
 // ── Event (tagged union) ────────────────────────────────────────────────────
 
 export type EventPayload =
-  | SessionCreated
-  | NewMessage
-  | LlmCallRequested
-  | LlmCallCompleted
-  | LlmCallErrored
-  | ToolCallRequested
-  | ToolCallCompleted
-  | ToolCallErrored
-  | SubAgentRequested
-  | SubAgentStarted
-  | SubAgentErrored
-  | SubAgentTurnCompleted
-  | SessionInterrupted
-  | InterruptResumed
-  | WorkerDecisionRequested
-  | WorkerDecisionCompleted
-  | WorkerDecisionErrored
-  | SessionMessageRequested
-  | ToolCallResolutionRequested
-  | WorkerStateUpdated
-  | SessionCancelled
-  | SessionDone
-  | TurnStarted
-  | TurnCompleted;
+    | SessionCreated
+    | NewMessage
+    | LlmCallRequested
+    | LlmCallCompleted
+    | LlmCallErrored
+    | ToolCallRequested
+    | ToolCallCompleted
+    | ToolCallErrored
+    | SubAgentRequested
+    | SubAgentStarted
+    | SubAgentErrored
+    | SubAgentTurnCompleted
+    | SessionInterrupted
+    | InterruptResumed
+    | WorkerDecisionRequested
+    | WorkerDecisionCompleted
+    | WorkerDecisionErrored
+    | SessionMessageRequested
+    | ToolCallResolutionRequested
+    | WorkerStateUpdated
+    | SessionCancelled
+    | SessionDone
+    | TurnStarted
+    | TurnCompleted;
 
 // ── Event Envelope ──────────────────────────────────────────────────────────
 
 export interface DerivedState {
-  status: SessionStatus;
-  agent_id?: string;
-  cost: Decimal;
-  sub_agent_cost: Decimal;
-  turn_cost: Decimal;
-  turn_token_usage?: Record<string, number>;
-  token_usage?: Record<string, number>;
-  sub_agent_token_usage?: Record<string, number>;
-  turn_id?: string;
+    status: SessionStatus;
+    agent_id?: string;
+    cost: Decimal;
+    sub_agent_cost: Decimal;
+    turn_cost: Decimal;
+    turn_token_usage?: Record<string, number>;
+    token_usage?: Record<string, number>;
+    sub_agent_token_usage?: Record<string, number>;
+    turn_id?: string;
 }
 
 export interface Event {
-  id: Uuid;
-  tenant_id: string;
-  aggregate_type: string;
-  aggregate_id: Uuid;
-  sequence: number;
-  span: SpanContext;
-  occurred_at: DateTime;
-  payload: EventPayload;
-  derived?: DerivedState;
-  metadata?: Record<string, string>;
-  start_time: DateTime;
-  end_time: DateTime;
+    id: Uuid;
+    tenant_id: string;
+    aggregate_type: string;
+    aggregate_id: Uuid;
+    sequence: number;
+    span: SpanContext;
+    occurred_at: DateTime;
+    payload: EventPayload;
+    derived?: DerivedState;
+    metadata?: Record<string, string>;
+    start_time: DateTime;
+    end_time: DateTime;
 }
 
 // ── Session State ───────────────────────────────────────────────────────────
 
 export type SessionStatus =
-  | "idle"
-  | { interrupted: { interrupt_id: string } }
-  | "done";
+    | "idle"
+    | { interrupted: { interrupt_id: string } }
+    | "done";
 
 export type EffectStatus = "pending" | "completed" | "failed" | "retry_scheduled";
 
 export interface EffectTracking {
-  status: EffectStatus;
-  retry: RetryState;
-  retry_policy: RetryPolicy;
-  deadline?: DateTime;
+    status: EffectStatus;
+    retry: RetryState;
+    retry_policy: RetryPolicy;
+    deadline?: DateTime;
 }
 
 export interface LlmCallState {
-  call_id: string;
-  tracking: EffectTracking;
-  request: LlmRequest;
-  stream: boolean;
-  llm_client: string;
+    call_id: string;
+    tracking: EffectTracking;
+    request: LlmRequest;
+    stream: boolean;
+    llm_client: string;
 }
 
 export interface ToolCallState {
-  tool_call_id: string;
-  name: string;
-  tracking: EffectTracking;
-  handler: ToolHandler;
-  arguments: string;
-  result?: string;
-  is_error: boolean;
+    tool_call_id: string;
+    name: string;
+    tracking: EffectTracking;
+    handler: ToolHandler;
+    arguments: string;
+    result?: string;
+    is_error: boolean;
 }
 
 export interface SubAgentCallState {
-  session_id: Uuid;
-  agent_id: string;
-  tracking: EffectTracking;
+    session_id: Uuid;
+    agent_id: string;
+    tracking: EffectTracking;
 }
 
 export interface WorkerDecisionState {
-  decision_id: string;
-  tracking: EffectTracking;
-  trigger: DecisionTrigger;
+    decision_id: string;
+    tracking: EffectTracking;
+    trigger: DecisionTrigger;
 }
 
 export interface SessionState {
-  session_id: Uuid;
-  status: SessionStatus;
-  agent_id?: string;
-  auth?: ClientIdentity;
-  token_usage: Record<string, number>;
-  cost: Decimal;
-  sub_agent_cost: Decimal;
-  turn_cost: Decimal;
-  turn_token_usage?: Record<string, number>;
-  sub_agent_token_usage?: Record<string, number>;
-  /** Base64-encoded opaque worker state */
-  worker_state: string;
-  ancestry?: Uuid[];
-  artifacts?: Artifact[];
-  worker_retry?: RetryPolicy;
-  llm_calls: Record<string, LlmCallState>;
-  tool_calls: Record<string, ToolCallState>;
-  sub_agent_calls: Record<string, SubAgentCallState>;
-  worker_decisions: Record<string, WorkerDecisionState>;
+    session_id: Uuid;
+    status: SessionStatus;
+    agent_id?: string;
+    auth?: ClientIdentity;
+    token_usage: Record<string, number>;
+    cost: Decimal;
+    sub_agent_cost: Decimal;
+    turn_cost: Decimal;
+    turn_token_usage?: Record<string, number>;
+    sub_agent_token_usage?: Record<string, number>;
+    /** Base64-encoded opaque worker state */
+    worker_state: string;
+    ancestry?: Uuid[];
+    artifacts?: Artifact[];
+    worker_retry?: RetryPolicy;
+    llm_calls: Record<string, LlmCallState>;
+    tool_calls: Record<string, ToolCallState>;
+    sub_agent_calls: Record<string, SubAgentCallState>;
+    worker_decisions: Record<string, WorkerDecisionState>;
 }
 
 // ── Client HTTP API ─────────────────────────────────────────────────────────
 
 export interface SendMessageRequest {
-  agent_id: string;
-  message: string;
-  tenant_id?: string;
-  session_id?: Uuid;
-  turn_id?: string;
+    agent_id: string;
+    message: string;
+    tenant_id?: string;
+    session_id?: Uuid;
+    turn_id?: string;
 }
 
 // ── Worker HTTP API ─────────────────────────────────────────────────────────
 
 export interface WorkerAuthOptions {
-  bearerToken: string;
+    bearerToken: string;
 }
 
 export interface WorkerDecisionRequestWire {
-  session_id: Uuid;
-  tenant_id: string;
-  decision_id: string;
-  agent_id: string;
-  auth: ClientIdentity;
-  trigger: DecisionTrigger;
-  /** Base64-encoded opaque worker state */
-  worker_state: string;
-  ancestry?: Uuid[];
-  span: SpanContext;
-  attempts: number;
-  deadline?: DateTime;
+    session_id: Uuid;
+    tenant_id: string;
+    decision_id: string;
+    agent_id: string;
+    auth: ClientIdentity;
+    trigger: DecisionTrigger;
+    /** Base64-encoded opaque worker state */
+    worker_state: string;
+    ancestry?: Uuid[];
+    span: SpanContext;
+    attempts: number;
+    deadline?: DateTime;
 }
 
 export interface SubmitRequest {
-  session_id: Uuid;
-  decision_id: string;
-  actions: WorkerAction[];
-  /** Base64-encoded opaque worker state */
-  state: string;
-  span?: SpanContext;
+    session_id: Uuid;
+    decision_id: string;
+    actions: WorkerAction[];
+    /** Base64-encoded opaque worker state */
+    state: string;
+    span?: SpanContext;
 }
 
 export interface SubmitResponse {
-  ok: boolean;
-  error?: string;
+    ok: boolean;
+    error?: string;
 }
 
 export interface RegisterRequest {
-  agent_ids: string[];
-  transport_type: string;
-  config: unknown;
+    agent_ids: string[];
+    transport_type: string;
+    config: unknown;
 }
 
 export interface RegisterResponse {
-  ok: boolean;
+    ok: boolean;
 }

@@ -7,11 +7,9 @@ import { WorkerClient } from "./worker-client";
 import type { WorkerAuthOptions } from "./types";
 
 export { Agent } from "./agent";
-export type { AgentOptions, LlmConfig } from "./agent";
-export { retry, Retry, contentText } from "./types";
-export type { Content, ContentPart, TextPart, ImageUrlPart, FilePart, InputAudioPart, VideoUrlPart } from "./types";
-export { defineHandler, withJsonState, withState, withMessages, withAgentLoop, withLogging, subAgent, tool } from "./worker";
-export type { HandlerContext, HandlerResult, Handler, MiddlewareFn, Next, ToolDef, ToolFn, Composable } from "./worker";
+export { retry, contentText } from "./types";
+export { defineAgent, withState, withLogging, tool } from "./worker";
+export type { MiddlewareFn } from "./worker";
 
 // ── RunStream ────────────────────────────────────────────────────────────────
 
@@ -69,8 +67,6 @@ export class RunStream {
 export interface LocalConfig {
   /** SQLite database path */
   db: string;
-  /** Handler returned by defineHandler().use(...).handle(...) */
-  handler: Handler;
   /** OpenRouter API base URL (default: "https://openrouter.ai/api") */
   openrouterBaseUrl?: string;
   /** OpenRouter API key */
@@ -82,8 +78,6 @@ export interface LocalConfig {
 export interface RemoteConfig {
   /** Substructure server URL */
   url: string;
-  /** Handler returned by defineHandler().use(...).handle(...) */
-  handler: Handler;
   /** Worker endpoint URL (required for HTTP push transport) */
   workerUrl?: string;
   /** Server API authentication for worker + send-message endpoints */
@@ -103,12 +97,12 @@ export class Substructure {
   private runtime: NativeRuntime | null = null;
   private userClient: UserClient | null = null;
   private workerClient: WorkerClient | null = null;
-  private worker: Worker;
-  private ready: Promise<void>;
+  private agents: Record<string, Handler> = {};
+  private worker: Worker | null = null;
+  private registered: Promise<void> | null = null;
 
   constructor(config: SubstructureConfig) {
     this.config = config;
-    this.worker = new Worker(config.handler);
 
     if (isRemote(config)) {
       const authHeaders = buildWorkerAuthHeaders(config.workerAuth);
@@ -118,8 +112,21 @@ export class Substructure {
       });
       this.userClient = new UserClient({ baseUrl: config.url, headers: authHeaders });
     }
+  }
 
-    this.ready = this.register();
+  agent(id: string, handler: Handler): this {
+    if (this.registered) {
+      throw new Error("Cannot register agents after run() has been called");
+    }
+    this.agents[id] = handler;
+    return this;
+  }
+
+  private ensureWorker(): Worker {
+    if (!this.worker) {
+      this.worker = new Worker(this.agents);
+    }
+    return this.worker;
   }
 
   private async getRuntime(): Promise<NativeRuntime> {
@@ -132,20 +139,25 @@ export class Substructure {
     return this.runtime;
   }
 
-  private async register(): Promise<void> {
-    if (isRemote(this.config)) {
-      if (!this.config.workerUrl) {
-        throw new Error("workerUrl is required for remote mode registration");
+  private register(): Promise<void> {
+    if (this.registered) return this.registered;
+    this.registered = (async () => {
+      const worker = this.ensureWorker();
+      if (isRemote(this.config)) {
+        if (!this.config.workerUrl) {
+          throw new Error("workerUrl is required for remote mode registration");
+        }
+        await this.workerClient!.register({
+          agent_ids: worker.agentIds,
+          transport_type: "http",
+          config: { endpoint_url: this.config.workerUrl },
+        });
+      } else {
+        const runtime = await this.getRuntime();
+        await worker.register(runtime, "default");
       }
-      await this.workerClient!.register({
-        agent_ids: this.worker.agentIds,
-        transport_type: "http",
-        config: { endpoint_url: this.config.workerUrl },
-      });
-    } else {
-      const runtime = await this.getRuntime();
-      await this.worker.register(runtime, "default");
-    }
+    })();
+    return this.registered;
   }
 
   run(
@@ -159,7 +171,7 @@ export class Substructure {
 
     const self = this;
     async function* generate(): AsyncGenerator<Event> {
-      await self.ready;
+      await self.register();
       if (isRemote(self.config)) {
         yield* self.userClient!.sendMessage({
           agent_id: agentId,
@@ -180,7 +192,7 @@ export class Substructure {
   }
 
   fetchHandler(): (req: Request) => Promise<Response> {
-    return this.worker.fetchHandler();
+    return this.ensureWorker().fetchHandler();
   }
 
   async shutdown(): Promise<void> {

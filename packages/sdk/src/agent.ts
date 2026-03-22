@@ -108,7 +108,6 @@ export class Agent implements Composable<AgentState> {
   toMiddleware(): StateContributor<AgentState> {
     const self = this;
     const mw: MiddlewareFn<any, any> = (ctx, next) => {
-      if (ctx.request.agent_id !== self.id) return next(ctx);
       if (!ctx.state.messages) ctx.state.messages = [];
       if (!ctx.state.pendingSubAgents) ctx.state.pendingSubAgents = {};
       return self.handle(ctx as HandlerContext<AgentState>);
