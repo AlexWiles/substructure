@@ -41,7 +41,7 @@ function renderDetail(payload: EventPayload): React.ReactNode {
   switch (payload.type) {
     case 'message.new': {
       const { message: msg } = payload
-      const content = msg.content ?? ''
+      const content = typeof msg.content === 'string' ? msg.content : ''
       const hasToolCalls = msg.tool_calls && msg.tool_calls.length > 0
       return (
         <div className="space-y-2 text-sm">
@@ -229,7 +229,7 @@ function renderDetail(payload: EventPayload): React.ReactNode {
       )
 
     case 'turn.completed': {
-      const { artifacts, turn_cost, turn_token_usage } = payload
+      const { data, turn_cost, turn_token_usage } = payload
       return (
         <div className="space-y-3 text-sm">
           <DetailGrid>
@@ -239,32 +239,18 @@ function renderDetail(payload: EventPayload): React.ReactNode {
               <Field label="Token Usage">{Object.entries(turn_token_usage).map(([k, v]) => `${k}: ${v}`).join(', ')}</Field>
             )}
           </DetailGrid>
-          {artifacts && artifacts.length > 0 && (
-            <div className="space-y-3">
-              <div className="text-xs font-bold text-[var(--color-text-secondary)] uppercase tracking-wide">Artifacts</div>
-              {artifacts.map((artifact, i) => (
-                <div key={i} className="rounded border border-[var(--color-border)] bg-[var(--color-bg)]">
-                  {(artifact.name || artifact.description) && (
-                    <div className="px-3 py-2 border-b border-[var(--color-border)]">
-                      {artifact.name && <div className="font-semibold text-[var(--color-text)]">{artifact.name}</div>}
-                      {artifact.description && <div className="text-xs text-[var(--color-text-secondary)]">{artifact.description}</div>}
-                    </div>
-                  )}
-                  <div className="px-3 py-2 space-y-2">
-                    {artifact.parts.map((part, j) => (
-                      part.kind === 'text' ? (
-                        <div key={j} className="prose prose-sm dark:prose-invert max-w-none text-[var(--color-text)]">
-                          <Markdown>{part.text}</Markdown>
-                        </div>
-                      ) : (
-                        <pre key={j} className="max-h-48 overflow-auto rounded bg-[var(--color-surface)] p-2 text-xs text-[var(--color-text-secondary)]">
-                          {JSON.stringify(part.data, null, 2)}
-                        </pre>
-                      )
-                    ))}
-                  </div>
+          {data !== undefined && data !== null && (
+            <div className="space-y-2">
+              <div className="text-xs font-bold text-[var(--color-text-secondary)] uppercase tracking-wide">Data</div>
+              {typeof data === 'string' ? (
+                <div className="prose prose-sm dark:prose-invert max-w-none text-[var(--color-text)]">
+                  <Markdown>{data}</Markdown>
                 </div>
-              ))}
+              ) : (
+                <pre className="max-h-64 overflow-auto rounded bg-[var(--color-surface)] p-2 text-xs text-[var(--color-text-secondary)]">
+                  {JSON.stringify(data, null, 2)}
+                </pre>
+              )}
             </div>
           )}
         </div>

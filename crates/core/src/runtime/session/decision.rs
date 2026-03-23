@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use super::events::{Artifact, ToolHandler};
+use super::events::ToolHandler;
 use super::message::Message;
 use crate::runtime::llm::LlmRequest;
 use crate::runtime::retry::RetryPolicy;
@@ -49,13 +49,13 @@ pub enum DecisionTrigger {
     SubAgentDone {
         session_id: String,
         agent_id: String,
-        artifacts: Vec<Artifact>,
+        data: serde_json::Value,
     },
     SubAgentTurnComplete {
         session_id: String,
         agent_id: String,
         turn_id: String,
-        artifacts: Vec<Artifact>,
+        data: serde_json::Value,
     },
     SubAgentError {
         session_id: String,
@@ -111,6 +111,6 @@ pub enum WorkerAction {
         message: Message,
     },
     Done {
-        artifacts: Vec<Artifact>,
+        data: serde_json::Value,
     },
 }

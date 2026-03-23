@@ -1,75 +1,118 @@
-import { Substructure, Agent, defineAgent, withState, withLogging, retry, tool } from "@substructure.ai/sdk/substructure";
+import {
+    Substructure,
+    defineAgent,
+    withState,
+    withLogging,
+    tool,
+    withConversation,
+    withSystemMessage,
+    withTools,
+    withCallLLM,
+    withSubAgents,
+} from "@substructure.ai/sdk/substructure";
+import type { Message } from "@substructure.ai/sdk/types";
 import { z } from "zod";
+
+type State = {
+    messages: Message[];
+    subAgentTracker: Record<string, { toolCallId: string; name: string }>;
+};
+
+const messagesAdapter = {
+    getMessages: (state: State) => state.messages,
+    setMessages: (state: State, messages: Message[]) => {
+        state.messages = messages;
+    },
+};
+
+const subAgentTrackerAdapter = {
+    getSubAgentTracker: (state: State) => state.subAgentTracker,
+    setSubAgentTracker: (state: State, tracker: State["subAgentTracker"]) => {
+        state.subAgentTracker = tracker;
+    },
+};
+
+const addRetry = {
+    timeout_secs: 20,
+    max_retries: 10,
+    backoff_base_secs: 1,
+    backoff_max_secs: 10,
+};
+
+const mathRetry = {
+    timeout_secs: 20,
+    max_retries: 10,
+    backoff_base_secs: 1,
+    backoff_max_secs: 10,
+};
+
+const weatherRetry = {
+    timeout_secs: 120,
+    max_retries: 3,
+    backoff_base_secs: 1,
+    backoff_max_secs: 10,
+};
 
 const add = tool({
     description: "Add two numbers",
     parameters: z.object({ a: z.number(), b: z.number() }),
     execute: ({ a, b }) => ({ result: a + b }),
-    retry: retry().timeout(20).retries(10).backoff(1, 10)
+    retry: addRetry,
 });
 
-const mathAgent = new Agent({
-    id: "math-agent",
-    description: "Performs math computations",
-    llm: {
-        client: "openrouter",
-        model: "arcee-ai/trinity-large-preview:free",
-        retry: retry().timeout(20).retries(10).backoff(1, 10)
-    },
-    systemPrompt: "You are a math assistant. Compute whatever is asked. Be concise, return only the result.",
-    tools: { add },
-});
+const mathHandler = defineAgent("math-agent")
+    .use(withLogging())
+    .use(withState<State>({ messages: [], subAgentTracker: {} }))
+    .use(withConversation<State>(messagesAdapter))
+    .use(withSystemMessage<State>("You are a math assistant. Compute whatever is asked. Be concise, return only the result."))
+    .use(withTools<State>({ add }))
+    .use(withCallLLM<State>((_state) => ({
+        request: { model: "arcee-ai/trinity-large-preview:free" },
+        llm_client: "openrouter",
+        retry: mathRetry,
+    })));
 
 const getWeather = tool({
     description: "Get the current weather for a city. Returns temperature in fahrenheit.",
     parameters: z.object({ city: z.string().describe("City name") }),
     execute: ({ city }) => ({ city, temp_f: city === "San Francisco" ? 62 : 78, condition: "sunny" }),
-    retry: retry().timeout(120).retries(3).backoff(1, 10)
+    retry: weatherRetry,
 });
 
-const weatherAgent = new Agent({
-    id: "weather-agent",
-    description: "Answers questions about the weather",
-    llm: {
-        client: "openrouter",
-        model: "arcee-ai/trinity-large-preview:free",
-        retry: retry().timeout(120).retries(3).backoff(1, 10)
-    },
-    systemPrompt: "You are a weather assistant. Use tools when appropriate. Be concise.",
-    tools: { getWeather },
-    subAgents: [mathAgent],
-});
+const weatherHandler = defineAgent("weather-agent")
+    .use(withLogging())
+    .use(withState<State>({ messages: [], subAgentTracker: {} }))
+    .use(withConversation<State>(messagesAdapter))
+    .use(withSystemMessage<State>("You are a weather assistant. Use tools when appropriate. Be concise."))
+    .use(withTools<State>({ getWeather }))
+    .use(withSubAgents<State>({
+        delegates: [mathHandler],
+        tracker: subAgentTrackerAdapter,
+        retry: weatherRetry,
+    }))
+    .use(withCallLLM<State>((_state) => ({
+        request: { model: "arcee-ai/trinity-large-preview:free" },
+        llm_client: "openrouter",
+        retry: weatherRetry,
+    })));
 
 const WORKER_PORT = 4444;
-const WORKER_API_KEY = "dev-worker-key";
 
 const sub = new Substructure({
     url: "http://localhost:8080",
     workerUrl: `http://localhost:${WORKER_PORT}`,
-    workerAuth: { bearerToken: WORKER_API_KEY },
+    workerAuth: { bearerToken: "dev-worker-key" },
 });
 
-sub.agent("weather-agent", defineAgent()
-    .use(withLogging())
-    .use(withState({}))
-    .use(weatherAgent)
-);
-
-sub.agent("math-agent", defineAgent()
-    .use(withLogging())
-    .use(withState({}))
-    .use(mathAgent)
-);
+sub.agent(weatherHandler);
+sub.agent(mathHandler);
 
 const server = Bun.serve({ port: WORKER_PORT, fetch: sub.fetchHandler() });
 
 const stream = sub.run(
-    weatherAgent.id,
+    "weather-agent",
     "What is the cube of the sum - the square of the diff of the current temperatures in San Francisco and New York?",
-    {
-        sessionId: "raw-session-6",
-        turnId: "turn-1"
-    },
+    { sessionId: "raw-session-6", turnId: "turn-1" },
 );
 
 for await (const event of stream) {
@@ -81,6 +124,7 @@ for await (const event of stream) {
 }
 
 const result = await stream.result;
-console.log("\nTurn result:", result.artifacts[0]);
+console.log("\nTurn result:", result.data);
 
 await sub.shutdown();
+server.stop();

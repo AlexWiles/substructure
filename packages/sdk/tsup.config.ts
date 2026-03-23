@@ -7,7 +7,6 @@ export default defineConfig({
     "src/worker-client.ts",
     "src/user-client.ts",
     "src/types.ts",
-    "src/agent.ts",
     "src/worker.ts",
     "src/runtime.ts",
     "src/substructure.ts",

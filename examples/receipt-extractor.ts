@@ -1,9 +1,27 @@
-import { Substructure, Agent, defineAgent, withState, withLogging, retry, tool } from "@substructure.ai/sdk/substructure";
+import {
+    Substructure,
+    defineAgent,
+    withState,
+    withLogging,
+    tool,
+    withConversation,
+    withSystemMessage,
+    withTools,
+    withCallLLM,
+} from "@substructure.ai/sdk/substructure";
+import type { Message } from "@substructure.ai/sdk/types";
 import { z } from "zod";
 import { appendFileSync, existsSync } from "fs";
 import { randomUUID } from "crypto";
 
 const CSV_PATH = "receipts.csv";
+
+const receiptRetry = {
+    timeout_secs: 120,
+    max_retries: 3,
+    backoff_base_secs: 1,
+    backoff_max_secs: 10,
+};
 
 const saveToCSV = tool({
     description: "Append an extracted receipt to the CSV file",
@@ -23,31 +41,42 @@ const saveToCSV = tool({
     },
 });
 
-const receiptAgent = new Agent({
-    id: "receipt-extractor",
-    description: "Extracts payment amounts from receipt text and saves them to a CSV",
-    llm: {
-        client: "openrouter",
-        model: "arcee-ai/trinity-large-preview:free",
-        retry: retry().timeout(120).retries(3).backoff(1, 10),
+const RECEIPT_AGENT_ID = "receipt-extractor";
+
+type State = {
+    messages: Message[];
+};
+
+const messagesAdapter = {
+    getMessages: (state: State) => state.messages,
+    setMessages: (state: State, messages: Message[]) => {
+        state.messages = messages;
     },
-    systemPrompt: `You extract structured data from payment receipts.
+};
+
+const receiptHandler = defineAgent(RECEIPT_AGENT_ID)
+    .use(withLogging())
+    .use(withState<State>({ messages: [] }))
+    .use(withConversation<State>(messagesAdapter))
+    .use(withSystemMessage<State>(`You extract structured data from payment receipts.
 Given receipt text, identify the date, vendor, total amount, and currency.
 Then call save_to_csv to record it. If the date is unclear, use your best guess.
-If the currency is not stated, assume USD.`,
-    tools: { save_to_csv: saveToCSV },
-});
+If the currency is not stated, assume USD.`))
+    .use(withTools<State>({ save_to_csv: saveToCSV }))
+    .use(withCallLLM<State>((state) => ({
+        request: {
+            model: "arcee-ai/trinity-large-preview:free",
+        },
+        llm_client: "openrouter",
+        retry: receiptRetry,
+    })));
 
 const sub = new Substructure({
     db: "data.db",
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
 });
 
-sub.agent("receipt-extractor", defineAgent()
-    .use(withLogging())
-    .use(withState({}))
-    .use(receiptAgent)
-);
+sub.agent(receiptHandler);
 
 // Sample receipts to process
 const receipts = [
@@ -79,7 +108,7 @@ for (const [i, receipt] of receipts.entries()) {
     console.log(`\n--- Processing receipt ${i + 1} ---`);
 
     const stream = sub.run(
-        receiptAgent.id,
+        RECEIPT_AGENT_ID,
         `Extract the payment details from this receipt:\n\n${receipt}`,
         { sessionId: randomUUID(), turnId: randomUUID() },
     );

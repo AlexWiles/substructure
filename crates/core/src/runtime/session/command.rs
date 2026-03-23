@@ -76,7 +76,7 @@ pub enum CommandPayload {
         session_id: String,
         agent_id: String,
         turn_id: String,
-        artifacts: Vec<Artifact>,
+        data: serde_json::Value,
         cost: Decimal,
         token_usage: BTreeMap<String, u64>,
     },
@@ -96,7 +96,7 @@ pub enum CommandPayload {
     },
     CancelSession,
     MarkDone {
-        artifacts: Vec<Artifact>,
+        data: serde_json::Value,
     },
     Wake {
         now: DateTime<Utc>,
@@ -238,7 +238,9 @@ impl SessionState {
                             }
                             for img in &response.images {
                                 parts.push(ContentPart::ImageUrl {
-                                    image_url: ImageUrl { url: img.url.clone() },
+                                    image_url: ImageUrl {
+                                        url: img.url.clone(),
+                                    },
                                 });
                             }
                             Some(Content::Parts(parts))
@@ -502,7 +504,7 @@ impl SessionState {
                 session_id,
                 agent_id,
                 turn_id,
-                artifacts,
+                data,
                 cost,
                 token_usage,
             } => {
@@ -520,7 +522,7 @@ impl SessionState {
                                 session_id,
                                 agent_id,
                                 turn_id,
-                                artifacts,
+                                data,
                             },
                         }),
                     ])
@@ -667,8 +669,8 @@ impl SessionState {
                                 result,
                             },
                         )]),
-                        WorkerAction::Done { artifacts } => {
-                            self.handle(CommandPayload::MarkDone { artifacts })
+                        WorkerAction::Done { data } => {
+                            self.handle(CommandPayload::MarkDone { data })
                         }
                     };
                     if let Ok(sub) = sub_events {
@@ -680,12 +682,12 @@ impl SessionState {
 
             CommandPayload::CancelSession => Ok(vec![EventPayload::SessionCancelled]),
 
-            CommandPayload::MarkDone { artifacts } => {
+            CommandPayload::MarkDone { data } => {
                 let mut events = Vec::new();
                 if let Some(turn_id) = &self.turn_id {
                     events.push(EventPayload::TurnCompleted(TurnCompleted {
                         turn_id: turn_id.clone(),
-                        artifacts,
+                        data,
                         turn_cost: self.turn_cost,
                         turn_token_usage: self.turn_token_usage.clone(),
                     }));

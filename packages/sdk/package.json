@@ -10,7 +10,6 @@
     "./worker": "./src/worker-client.ts",
     "./user": "./src/user-client.ts",
     "./types": "./src/types.ts",
-    "./agent": "./src/agent.ts",
     "./worker-handler": "./src/worker.ts",
     "./runtime": "./src/runtime.ts",
     "./substructure": "./src/substructure.ts"

@@ -77,22 +77,6 @@ pub struct SessionCreated {
 pub struct SessionDone {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Artifact {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    pub parts: Vec<Part>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Part {
-    Text { text: String },
-    Data { data: serde_json::Value },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewMessage {
     pub message: Message,
 }
@@ -246,8 +230,8 @@ pub struct TurnStarted {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnCompleted {
     pub turn_id: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifacts: Vec<Artifact>,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub data: serde_json::Value,
     #[serde(default)]
     pub turn_cost: Decimal,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

@@ -3,11 +3,8 @@ import type {
     WorkerAction,
     SubmitRequest,
     SpanContext,
-    RetryPolicy,
 } from "./types";
 import type { NativeRuntime } from "./runtime";
-import type { z } from "zod";
-import { zodToJsonSchema } from "zod-to-json-schema";
 
 // ── Handler types ────────────────────────────────────────────────────────────
 
@@ -25,8 +22,6 @@ export interface HandlerContext<S = unknown> {
     trigger: WorkerDecisionRequestWire["trigger"];
     state: S;
     request: WorkerDecisionRequestWire;
-    /** @internal — set by state serialization middleware */
-    _encodedState?: string;
 }
 
 export interface HandlerResult {
@@ -53,6 +48,7 @@ export interface MiddlewareFn<In = unknown, Out = In> {
 // ── Handler ─────────────────────────────────────────────────────────────────
 
 export interface Handler {
+    readonly agentId: string;
     toDecisionHandler(): DecisionHandler;
 }
 
@@ -62,107 +58,54 @@ export interface Handler {
  * Middleware that contributes state keys. The `_contributes` brand
  * tells the builder to intersect `A` onto the current state type.
  */
-export type StateContributor<A> = MiddlewareFn<any, any> & { readonly _contributes: A };
+export type StateContributor<A> = MiddlewareFn<unknown, unknown> & { readonly _contributes: A };
 
-/**
- * JSON + base64 state serialization middleware.
- * Decodes `request.worker_state` into `ctx.state` (falling back to `init`),
- * runs the chain, then encodes `ctx.state` back.
- */
-export function withState<S extends object>(init: S): StateContributor<S> {
-    const mw: MiddlewareFn<any, any> = async (ctx, next) => {
-        const raw = ctx.request.worker_state;
-        ctx.state = (raw && raw !== "")
-            ? JSON.parse(Buffer.from(raw, "base64").toString("utf-8"))
-            : { ...init };
-        const result = await next(ctx);
-        ctx._encodedState = Buffer.from(JSON.stringify(ctx.state), "utf-8").toString("base64");
-        return result;
-    };
-    return Object.assign(mw, { _contributes: init });
-}
-
-// ── Tool types ──────────────────────────────────────────────────────────────
-
-export type ToolFn = (args: Record<string, unknown>) => Promise<unknown> | unknown;
-
-export interface ToolDef {
-    description: string;
-    parameters: unknown;
-    execute: ToolFn;
-    retry?: RetryPolicy;
-}
-
-/** Define a tool with a zod schema for type-safe parameters. */
-export function tool<T extends z.ZodType<any, any>>(config: {
-    description: string;
-    parameters: T;
-    execute: (args: z.infer<T>) => unknown | Promise<unknown>;
-    retry?: RetryPolicy;
-}): ToolDef {
-    return {
-        description: config.description,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        parameters: zodToJsonSchema(config.parameters as any, { target: "openAi" }),
-        execute: config.execute as ToolFn,
-        retry: config.retry,
-    };
-}
-
-// ── withLogging ─────────────────────────────────────────────────────────────
-
-export function withLogging(label?: string): MiddlewareFn<any, any> {
-    const prefix = label ? `[${label}]` : "[handler]";
-    return async (ctx, next) => {
-        const t = ctx.trigger;
-        const tag = t.type === "tool_execute" ? `${t.type}:${t.name}` : t.type;
-        console.log(`${prefix} ${tag}`);
-        const start = performance.now();
-        const result = await next(ctx);
-        const ms = (performance.now() - start).toFixed(1);
-        console.log(`${prefix} ${tag} -> ${result.actions.map((a) => a.type).join(", ")} (${ms}ms)`);
-        return result;
-    };
-}
-
-// ── Composable ──────────────────────────────────────────────────────────────
-
-/** Object that can be used as middleware via .use() (e.g. Agent). */
-export interface Composable<A = any> {
-    toMiddleware(): StateContributor<A>;
-}
+export {
+    withState,
+    tool,
+    withLogging,
+    withMessageHistory,
+    withMessages,
+    withConversation,
+    withSystemMessage,
+    withTools,
+    withCallLLM,
+    withSubAgents,
+} from "./middleware";
+export type {
+    ToolFn,
+    ToolDef,
+    SubAgentTrack,
+    MessagesAdapter,
+    SubAgentTrackerAdapter,
+    CallLlmSelection,
+    ToolSelector,
+    MessageSelector,
+    SystemMessageSelector,
+} from "./middleware";
 
 // ── HandlerBuilder ──────────────────────────────────────────────────────────
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type AnyMiddleware = MiddlewareFn<any, any>;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type AnyNext = Next<any>;
+type UnknownMiddleware = MiddlewareFn<unknown, unknown>;
+type UnknownNext = Next<unknown>;
 
-/** Extract the output state type from a middleware. */
-type MiddlewareOut<M> = M extends MiddlewareFn<any, infer Out> ? Out : never;
-
-/** Detect the `any` type. */
-type IsAny<T> = 0 extends (1 & T) ? true : false;
-
-const DEFAULT_FALLBACK: AnyNext = () => ({ actions: [] });
+const DEFAULT_FALLBACK: UnknownNext = () => ({ actions: [] });
 
 class HandlerBuilder<S> implements Handler {
-    private middlewares: AnyMiddleware[] = [];
+    readonly agentId: string;
+    private middlewares: UnknownMiddleware[] = [];
 
-    /** Composable object (e.g. Agent): extracts middleware and intersects its state. */
-    use<A>(mw: Composable<A>): HandlerBuilder<S & A>;
+    constructor(agentId: string) {
+        this.agentId = agentId;
+    }
+
     /** State contributor: intersects new keys onto current state. */
     use<A>(mw: StateContributor<A>): HandlerBuilder<S & A>;
     /** State transformer: replaces state type (e.g. withState). */
-    use<M extends MiddlewareFn<S, any>>(mw: M): HandlerBuilder<IsAny<MiddlewareOut<M>> extends true ? S : MiddlewareOut<M>>;
-    use(mw: AnyMiddleware | Composable): HandlerBuilder<any> {
-        if (typeof mw !== "function" && "toMiddleware" in mw) {
-            this.middlewares.push(mw.toMiddleware());
-        } else {
-            this.middlewares.push(mw as AnyMiddleware);
-        }
-        return this as any;
+    use<Out>(mw: MiddlewareFn<S, Out>): HandlerBuilder<Out>;
+    use<Out>(mw: MiddlewareFn<S, Out>): HandlerBuilder<Out> {
+        this.middlewares.push(mw as UnknownMiddleware);
+        return this as unknown as HandlerBuilder<Out>;
     }
 
     toDecisionHandler(): DecisionHandler {
@@ -179,14 +122,14 @@ class HandlerBuilder<S> implements Handler {
             const result = await chain(ctx);
             return {
                 actions: result.actions,
-                state: ctx._encodedState ?? "",
+                state: ctx.request.worker_state,
             };
         };
     }
 }
 
-function composeChain(middlewares: AnyMiddleware[], handle: AnyNext): AnyNext {
-    let fn: AnyNext = handle;
+function composeChain(middlewares: UnknownMiddleware[], handle: UnknownNext): UnknownNext {
+    let fn: UnknownNext = handle;
     for (let i = middlewares.length - 1; i >= 0; i--) {
         const mw = middlewares[i];
         const next = fn;
@@ -196,8 +139,8 @@ function composeChain(middlewares: AnyMiddleware[], handle: AnyNext): AnyNext {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-empty-object-type
-export function defineAgent(): HandlerBuilder<{}> {
-    return new HandlerBuilder();
+export function defineAgent(agentId: string): HandlerBuilder<{}> {
+    return new HandlerBuilder(agentId);
 }
 
 // ── Worker (internal) ───────────────────────────────────────────────────────

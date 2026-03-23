@@ -192,8 +192,8 @@ pub struct SessionState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ancestry: Vec<String>,
 
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifacts: Vec<Artifact>,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub data: serde_json::Value,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_retry: Option<RetryPolicy>,
@@ -226,7 +226,7 @@ impl SessionState {
             sub_agent_token_usage: BTreeMap::new(),
             worker_state: Vec::new(),
             ancestry: Vec::new(),
-            artifacts: vec![],
+            data: serde_json::Value::Null,
             worker_retry: None,
             llm_calls: HashMap::new(),
             tool_calls: HashMap::new(),
@@ -423,7 +423,7 @@ impl SessionState {
                 if let Some(tid) = self.turn_id.clone() {
                     self.completed_turn_ids.push(tid);
                 }
-                self.artifacts = payload.artifacts.clone();
+                self.data = payload.data.clone();
                 self.turn_cost = Decimal::ZERO;
                 self.turn_token_usage.clear();
             }

@@ -108,7 +108,7 @@ impl EventProcessor for SubAgentDispatchProjection {
                     child_session_id: event.aggregate_id,
                     agent_id,
                     turn_id: tc.turn_id.clone(),
-                    artifacts: tc.artifacts.clone(),
+                    data: tc.data.clone(),
                     cost: tc.turn_cost,
                     token_usage: tc.turn_token_usage.clone(),
                     span: event.span,

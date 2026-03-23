@@ -64,10 +64,10 @@ export interface InProcessRuntimeOptions {
  * ```ts
  * import { JsRuntime } from '@substructure.ai/runtime'
  * import { InProcessRuntime } from '@substructure.ai/sdk/runtime'
- * import { Worker, Agent } from '@substructure.ai/sdk/agent'
+ * import { defineAgent } from '@substructure.ai/sdk/substructure'
  *
  * const runtime = new InProcessRuntime({ native: new JsRuntime() })
- * const worker = Worker.from(myAgent)
+ * const worker = defineAgent("my-agent")
  * await runtime.register(worker, 'default')
  *
  * for await (const event of runtime.sendMessage({ agent_id: 'my-agent', message: 'hello' })) {

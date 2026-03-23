@@ -1,4 +1,4 @@
-import { Substructure, defineAgent, withState, withLogging, retry, contentText } from "@substructure.ai/sdk/substructure";
+import { Substructure, defineAgent, withState, withLogging, contentText } from "@substructure.ai/sdk/substructure";
 import type { MiddlewareFn } from "@substructure.ai/sdk/substructure";
 import type { WorkerAction, Message } from "@substructure.ai/sdk/types";
 import { z } from "zod";
@@ -19,7 +19,12 @@ const ContactSchema = z.object({
 });
 
 
-const RETRY = retry().timeout(120).retries(3).backoff(1, 10);
+const RETRY = {
+    timeout_secs: 120,
+    max_retries: 3,
+    backoff_base_secs: 1,
+    backoff_max_secs: 10,
+};
 const SYSTEM_MESSAGE: Message = {
     role: "system",
     content: "You extract contact information from text. When given text, identify the person's name, email, company, and role. Always call extract_contact with the structured data."
@@ -51,18 +56,40 @@ function callLlm(state: State): WorkerAction {
     };
 }
 
-const structuredOutput: MiddlewareFn<State> = (ctx, next) => {
+const withMessageHistory = (): MiddlewareFn<State> => (ctx, next) => {
     const { trigger, state } = ctx;
 
     switch (trigger.type) {
         case "user_message": {
             state.messages.push(trigger.message);
-            return { actions: [callLlm(state)] };
+            break;
         }
-
         case "llm_response": {
             state.messages.push(trigger.message);
+            break;
+        }
+        case "tool_result": {
+            state.messages.push({
+                role: "tool",
+                content: trigger.result.content,
+                tool_call_id: trigger.result.tool_call_id,
+                name: trigger.result.name,
+            });
+            break;
+        }
+    }
 
+    return next(ctx);
+};
+
+const withStructuredOutputFlow = (): MiddlewareFn<State> => (ctx, next) => {
+    const { trigger, state } = ctx;
+
+    switch (trigger.type) {
+        case "user_message":
+            return { actions: [callLlm(state)] };
+
+        case "llm_response": {
             if (trigger.message.tool_calls?.length) {
                 return {
                     actions: trigger.message.tool_calls.map((tc) => ({
@@ -77,7 +104,7 @@ const structuredOutput: MiddlewareFn<State> = (ctx, next) => {
             }
 
             const text = contentText(trigger.message.content);
-            return { actions: [{ type: "done", artifacts: text ? [{ parts: [{ kind: "text", text }] }] : [] }] };
+            return { actions: [{ type: "done", data: text ?? null }] };
         }
 
         case "tool_execute": {
@@ -87,7 +114,7 @@ const structuredOutput: MiddlewareFn<State> = (ctx, next) => {
                 return {
                     actions: [{
                         type: "done",
-                        artifacts: [{ parts: [{ kind: "data" as const, data: contact }] }],
+                        data: contact,
                     }],
                 };
             } catch (e: any) {
@@ -104,16 +131,17 @@ const structuredOutput: MiddlewareFn<State> = (ctx, next) => {
         }
 
         default:
-            return { actions: [{ type: "done", artifacts: [] }] };
+            return next(ctx);
     }
 };
 
-const extractor = defineAgent()
+const extractor = defineAgent("contact-extractor")
     .use(withLogging())
     .use(withState<State>({ messages: [] }))
-    .use(structuredOutput)
+    .use(withMessageHistory())
+    .use(withStructuredOutputFlow())
 
-sub.agent("contact-extractor", extractor);
+sub.agent(extractor);
 
 const input = `Hey! Just met Sarah Chen at the conference. She's a Senior Engineer
 at Acme Corp. Shoot her a note at schen@acme.io about the integration work.`;
@@ -136,6 +164,6 @@ for await (const event of stream) {
 }
 
 const result = await stream.result;
-console.log("\nArtifacts:", JSON.stringify(result.artifacts, null, 2));
+console.log(result.data);
 
 await sub.shutdown();

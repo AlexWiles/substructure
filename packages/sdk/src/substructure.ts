@@ -1,4 +1,4 @@
-import type { Event, Artifact, Decimal, TurnCompleted } from "./types";
+import type { Event, Decimal, TurnCompleted } from "./types";
 import type { NativeRuntime } from "./runtime";
 import type { Handler } from "./worker";
 import { Worker } from "./worker";
@@ -6,16 +6,27 @@ import { UserClient } from "./user-client";
 import { WorkerClient } from "./worker-client";
 import type { WorkerAuthOptions } from "./types";
 
-export { Agent } from "./agent";
-export { retry, contentText } from "./types";
-export { defineAgent, withState, withLogging, tool } from "./worker";
+export { contentText } from "./types";
+export {
+  defineAgent,
+  withState,
+  withLogging,
+  tool,
+  withMessageHistory,
+  withMessages,
+  withConversation,
+  withSystemMessage,
+  withTools,
+  withCallLLM,
+  withSubAgents,
+} from "./worker";
 export type { MiddlewareFn } from "./worker";
 
 // ── RunStream ────────────────────────────────────────────────────────────────
 
 export interface TurnResult {
   turnId: string;
-  artifacts: Artifact[];
+  data: unknown;
   cost: Decimal;
   tokenUsage: Record<string, number>;
 }
@@ -48,7 +59,7 @@ export class RunStream {
       if (tc) {
         this.resolveResult({
           turnId: tc.payload.turn_id,
-          artifacts: tc.payload.artifacts ?? [],
+          data: tc.payload.data,
           cost: tc.payload.turn_cost ?? "0",
           tokenUsage: tc.payload.turn_token_usage ?? {},
         });
@@ -114,11 +125,11 @@ export class Substructure {
     }
   }
 
-  agent(id: string, handler: Handler): this {
+  agent(handler: Handler): this {
     if (this.registered) {
       throw new Error("Cannot register agents after run() has been called");
     }
-    this.agents[id] = handler;
+    this.agents[handler.agentId] = handler;
     return this;
   }
 

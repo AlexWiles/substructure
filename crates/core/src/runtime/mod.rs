@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use tokio::task::AbortHandle;
 use uuid::Uuid;
 
 use crate::providers::memory_queue::TaskQueue;
@@ -19,9 +19,7 @@ use session::index::{
 use session::state::SessionState;
 use session::subscriptions::SessionSubscriptionSpec;
 use span::SpanContext;
-use sub_agent::{
-    spawn_sub_agent_dispatch_processor, spawn_sub_agent_task_executor, SubAgentTask,
-};
+use sub_agent::{spawn_sub_agent_dispatch_processor, spawn_sub_agent_task_executor, SubAgentTask};
 use wake::{spawn_wake_dispatcher, spawn_wake_processor, WakeScheduleStore};
 use worker::spawn_worker_processor;
 use worker::{DequeueFilter, SubmitDecision, WorkerDecisionRequest, WorkerQueue};
@@ -60,7 +58,7 @@ pub struct Runtime {
     queue: Arc<dyn WorkerQueue>,
     session_index: Arc<dyn SessionIndexStore>,
     session_subscriptions: session::subscriptions::SessionSubscriptions,
-    handles: Vec<JoinHandle<()>>,
+    handles: Vec<AbortHandle>,
 }
 
 pub struct SendMessage {
@@ -77,8 +75,8 @@ pub struct SendMessage {
 pub struct RuntimeError(String);
 
 impl Runtime {
-    pub fn shutdown(self) {
-        for handle in self.handles {
+    pub fn shutdown(&self) {
+        for handle in &self.handles {
             handle.abort();
         }
     }
@@ -309,6 +307,7 @@ pub fn start(
     );
     let wake_processor_handle =
         spawn_wake_processor(store.clone(), checkpoint_store, wake_store.clone());
+
     let wake_dispatcher_handle =
         spawn_wake_dispatcher(store.clone(), wake_store, config.wake_poll_interval);
 
@@ -330,7 +329,7 @@ pub fn start(
             ];
             handles.extend(llm_executor_handles);
             handles.extend(sub_agent_executor_handles);
-            handles
+            handles.into_iter().map(|h| h.abort_handle()).collect()
         },
     })
 }

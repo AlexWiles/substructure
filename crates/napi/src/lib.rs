@@ -227,6 +227,7 @@ impl JsRuntime {
         for (_, handle) in handles.drain() {
             handle.abort();
         }
+        self.inner.shutdown();
         Ok(())
     }
 }

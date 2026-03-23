@@ -32,23 +32,6 @@ export interface RetryPolicy {
     backoff_max_secs: number;
 }
 
-export class Retry implements RetryPolicy {
-    timeout_secs: number | null = null;
-    max_retries: number = 0;
-    backoff_base_secs: number = 0;
-    backoff_max_secs: number = 0;
-
-    timeout(secs: number): this { this.timeout_secs = secs; return this; }
-    retries(n: number): this { this.max_retries = n; return this; }
-    backoff(baseSecs: number, maxSecs: number): this {
-        this.backoff_base_secs = baseSecs;
-        this.backoff_max_secs = maxSecs;
-        return this;
-    }
-}
-
-export function retry(): Retry { return new Retry(); }
-
 export interface RetryState {
     attempts: number;
     next_at?: DateTime;
@@ -164,18 +147,6 @@ export interface LlmResponse {
     images?: ResponseImage[];
 }
 
-// ── Artifacts ───────────────────────────────────────────────────────────────
-
-export type Part =
-    | { kind: "text"; text: string }
-    | { kind: "data"; data: unknown };
-
-export interface Artifact {
-    name?: string;
-    description?: string;
-    parts: Part[];
-}
-
 // ── Tool Handler ────────────────────────────────────────────────────────────
 
 export type ToolHandler = "worker" | "client";
@@ -202,7 +173,7 @@ export type DecisionTrigger =
         deadline?: DateTime;
     }
     | { type: "tool_result"; result: ToolResult }
-    | { type: "sub_agent_turn_complete"; session_id: Uuid; agent_id: string; turn_id: string; artifacts: Artifact[] }
+    | { type: "sub_agent_turn_complete"; session_id: Uuid; agent_id: string; turn_id: string; data: unknown }
     | { type: "sub_agent_error"; session_id: Uuid; agent_id: string; error: string }
     | { type: "interrupt_resumed"; interrupt_id: string }
     | { type: "stall" };
@@ -236,7 +207,7 @@ export type WorkerAction =
     | { type: "resolve_remote_tool"; session_id: Uuid; tool_call_id: string; result: string }
     | { type: "spawn_sub_agent"; session_id: Uuid; agent_id: string; retry: RetryPolicy }
     | { type: "send_message"; session_id: Uuid; message: Message }
-    | { type: "done"; artifacts: Artifact[] };
+    | { type: "done"; data: unknown };
 
 // ── Event Payloads ──────────────────────────────────────────────────────────
 
@@ -395,7 +366,7 @@ export interface TurnStarted {
 export interface TurnCompleted {
     type: "turn.completed";
     turn_id: string;
-    artifacts?: Artifact[];
+    data?: unknown;
     turn_cost?: Decimal;
     turn_token_usage?: Record<string, number>;
 }
@@ -517,7 +488,7 @@ export interface SessionState {
     /** Base64-encoded opaque worker state */
     worker_state: string;
     ancestry?: Uuid[];
-    artifacts?: Artifact[];
+    data?: unknown;
     worker_retry?: RetryPolicy;
     llm_calls: Record<string, LlmCallState>;
     tool_calls: Record<string, ToolCallState>;

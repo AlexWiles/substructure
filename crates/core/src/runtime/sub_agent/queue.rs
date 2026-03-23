@@ -3,7 +3,6 @@ use uuid::Uuid;
 
 use crate::runtime::identity::ClientIdentity;
 use crate::runtime::retry::RetryPolicy;
-use crate::runtime::session::events::Artifact;
 use crate::runtime::session::message::Message;
 use crate::runtime::span::SpanContext;
 
@@ -42,7 +41,7 @@ pub enum SubAgentTask {
         child_session_id: String,
         agent_id: String,
         turn_id: String,
-        artifacts: Vec<Artifact>,
+        data: serde_json::Value,
         cost: Decimal,
         token_usage: std::collections::BTreeMap<String, u64>,
         span: SpanContext,
