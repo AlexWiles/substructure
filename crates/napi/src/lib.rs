@@ -11,10 +11,11 @@ use tracing_subscriber::EnvFilter;
 use base64::Engine;
 use substructure_core::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use substructure_core::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
-use substructure_core::providers::sqlite::SqliteStore;
+use substructure_core::providers::sqlite::{SqliteConfig, SqliteStore};
 use substructure_core::providers::worker_queue::InMemoryWorkerQueue;
 use substructure_core::worker::{DequeueFilter, SubmitDecision};
-use substructure_core::{Runtime, RuntimeConfig, SendMessage};
+use substructure_core::session::decision::ClientPayload;
+use substructure_core::{Runtime, RuntimeConfig, SubmitClientPayload};
 
 /// Configuration for creating a new Runtime.
 #[napi(object)]
@@ -46,7 +47,10 @@ impl JsRuntime {
             .try_init();
 
         let store = Arc::new(
-            SqliteStore::new(&options.db)
+            SqliteStore::new(SqliteConfig {
+                    path: options.db.clone(),
+                    busy_timeout: std::time::Duration::from_secs(5),
+                })
                 .map_err(|e| Error::from_reason(format!("failed to open database: {e}")))?,
         );
 
@@ -183,26 +187,30 @@ impl JsRuntime {
         Ok(())
     }
 
-    /// Send a message to an agent session, calling `onEvent` for each event as it arrives.
+    /// Submit a client payload to an agent session, calling `onEvent` for each event as it arrives.
     #[napi(
-        ts_args_type = "sessionId: string, tenantId: string, agentId: string, content: string, turnId: string | undefined, onEvent: (event: string) => void"
+        js_name = "submitPayload",
+        ts_args_type = "sessionId: string, tenantId: string, agentId: string, payloadJson: string, turnId: string | undefined, onEvent: (event: string) => void"
     )]
-    pub async fn send_message(
+    pub async fn submit_client_payload(
         &self,
         session_id: String,
         tenant_id: String,
         agent_id: String,
-        content: String,
+        payload_json: String,
         turn_id: Option<String>,
         on_event: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
     ) -> Result<()> {
+        let payload: ClientPayload = serde_json::from_str(&payload_json)
+            .map_err(|e| Error::from_reason(format!("invalid payloadJson: {e}")))?;
+
         let (_, mut rx) = self
             .inner
-            .send_message(SendMessage {
+            .submit_client_payload(SubmitClientPayload {
                 session_id,
                 tenant_id,
                 agent_id,
-                content,
+                payload,
                 turn_id,
             })
             .await

@@ -21,7 +21,7 @@ pub struct ClientHttpState {
 
 pub fn router(state: ClientHttpState) -> Router {
     Router::new()
-        .route("/api/machine/sessions/send", post(routes::send_message))
+        .route("/api/client/sessions/submit", post(routes::submit_client_payload))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             client_auth_middleware,

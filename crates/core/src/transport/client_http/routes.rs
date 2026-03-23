@@ -8,25 +8,25 @@ use tokio_stream::StreamExt;
 use uuid::Uuid;
 
 use crate::transport::auth::AuthPrincipal;
-use crate::SendMessage;
+use crate::SubmitClientPayload;
 
-use super::types::SendMessageRequest;
+use super::types::SubmitClientPayloadRequest;
 use super::ClientHttpState;
 
-pub async fn send_message(
+pub async fn submit_client_payload(
     State(state): State<ClientHttpState>,
     Extension(principal): Extension<AuthPrincipal>,
-    Json(req): Json<SendMessageRequest>,
+    Json(req): Json<SubmitClientPayloadRequest>,
 ) -> Response {
     let session_id = req.session_id.unwrap_or_else(|| Uuid::now_v7().to_string());
 
     let result = state
         .runtime
-        .send_message(SendMessage {
+        .submit_client_payload(SubmitClientPayload {
             session_id,
             tenant_id: principal.tenant_id,
             agent_id: req.agent_id,
-            content: req.message,
+            payload: req.payload,
             turn_id: req.turn_id,
         })
         .await;

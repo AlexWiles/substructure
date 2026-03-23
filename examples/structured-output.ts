@@ -25,6 +25,7 @@ const RETRY = {
     backoff_base_secs: 1,
     backoff_max_secs: 10,
 };
+
 const SYSTEM_MESSAGE: Message = {
     role: "system",
     content: "You extract contact information from text. When given text, identify the person's name, email, company, and role. Always call extract_contact with the structured data."

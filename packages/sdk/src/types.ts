@@ -160,8 +160,18 @@ export interface ToolResult {
     is_error: boolean;
 }
 
+export interface ClientAction {
+    name: string;
+    args?: unknown;
+}
+
+export type ClientPayload =
+    | { type: "message"; message: Message; stream?: boolean }
+    | ({ type: "action" } & ClientAction);
+
 export type DecisionTrigger =
     | { type: "user_message"; stream: boolean; message: Message }
+    | ({ type: "client_action" } & ClientAction)
     | { type: "llm_response"; call_id: string; message: Message; truncated: boolean; usage?: Record<string, unknown>; cost?: Decimal }
     | { type: "llm_error"; call_id: string; error: string }
     | {
@@ -498,9 +508,9 @@ export interface SessionState {
 
 // ── Client HTTP API ─────────────────────────────────────────────────────────
 
-export interface SendMessageRequest {
+export interface SubmitPayloadRequest {
     agent_id: string;
-    message: string;
+    payload: ClientPayload;
     tenant_id?: string;
     session_id?: Uuid;
     turn_id?: string;

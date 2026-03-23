@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 
-use super::decision::{DecisionTrigger, ToolResult, WorkerAction};
+use super::decision::{ClientPayload, DecisionTrigger, ToolResult, WorkerAction};
 use super::events::*;
 use super::message::{Content, ContentPart, ImageUrl, Message, Role};
 use super::state::{new_call_id, EffectStatus, SessionState, SessionStatus};
@@ -18,6 +18,10 @@ pub enum CommandPayload {
         auth: ClientIdentity,
         ancestry: Vec<String>,
         worker_retry: RetryPolicy,
+    },
+    SubmitClientPayload {
+        payload: ClientPayload,
+        turn_id: Option<String>,
     },
     SendMessage {
         message: Message,
@@ -147,6 +151,60 @@ impl SessionState {
     fn handle_active(&self, cmd: CommandPayload) -> Result<Vec<EventPayload>, SessionError> {
         match cmd {
             CommandPayload::CreateSession { .. } => Err(SessionError::SessionAlreadyCreated),
+
+            CommandPayload::SubmitClientPayload { payload, turn_id } => {
+                if let Some(ref tid) = turn_id {
+                    if self.completed_turn_ids.contains(tid) {
+                        return Err(SessionError::TurnAlreadyCompleted {
+                            turn_id: tid.clone(),
+                        });
+                    }
+                    if self.turn_id.as_ref() == Some(tid) {
+                        return Err(SessionError::TurnAlreadyActive {
+                            turn_id: tid.clone(),
+                        });
+                    }
+                }
+
+                let mut events: Vec<EventPayload> = Vec::new();
+                if let Some(turn_id) = turn_id {
+                    events.push(EventPayload::TurnStarted(TurnStarted { turn_id }));
+                }
+
+                match payload {
+                    ClientPayload::Message { message, stream } => {
+                        if matches!(self.status, SessionStatus::Interrupted { .. })
+                            && message.role == Role::User
+                        {
+                            return Err(SessionError::SessionInterrupted);
+                        }
+                        events.push(EventPayload::NewMessage(NewMessage {
+                            message: message.clone(),
+                        }));
+                        if message.role == Role::User {
+                            events.push(EventPayload::WorkerDecisionRequested(
+                                WorkerDecisionRequested {
+                                    decision_id: new_call_id(),
+                                    trigger: DecisionTrigger::UserMessage { stream, message },
+                                },
+                            ));
+                        }
+                    }
+                    ClientPayload::Action { action } => {
+                        events.push(EventPayload::WorkerDecisionRequested(
+                            WorkerDecisionRequested {
+                                decision_id: new_call_id(),
+                                trigger: DecisionTrigger::ClientAction {
+                                    name: action.name,
+                                    args: action.args,
+                                },
+                            },
+                        ));
+                    }
+                }
+
+                Ok(events)
+            }
 
             CommandPayload::SendMessage {
                 message,

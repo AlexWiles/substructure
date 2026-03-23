@@ -1,9 +1,11 @@
 use serde::Deserialize;
 
+use crate::runtime::session::decision::ClientPayload;
+
 #[derive(Debug, Deserialize)]
-pub struct SendMessageRequest {
+pub struct SubmitClientPayloadRequest {
     pub agent_id: String,
-    pub message: String,
+    pub payload: ClientPayload,
     #[serde(default)]
     pub session_id: Option<String>,
     #[serde(default)]

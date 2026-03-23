@@ -18,11 +18,11 @@ export class JsRuntime {
     callback: (decision: string) => Promise<string>
   ): Promise<void>;
 
-  sendMessage(
+  submitPayload(
     sessionId: string,
     tenantId: string,
     agentId: string,
-    content: string,
+    payloadJson: string,
     turnId?: string,
   ): AsyncGenerator<string, void, unknown>;
 

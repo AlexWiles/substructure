@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -10,16 +9,14 @@ use std::sync::Arc as StdArc;
 
 use tokio::sync::broadcast;
 
-use std::collections::HashMap;
 use crate::event_store::{
     AggregateFilter, AggregateSort, AggregateSummary, AppendInput, Event, EventFilter, EventStore,
     Snapshot, StoreError, Version,
 };
-use crate::processor::{
-    CheckpointError, ProcessorCheckpoint, ProcessorCheckpointStore,
-};
+use crate::processor::{CheckpointError, ProcessorCheckpoint, ProcessorCheckpointStore};
 use crate::span::SpanContext;
 use crate::wake::{WakeScheduleItem, WakeScheduleStore};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 const SCHEMA: &str = "
@@ -158,9 +155,33 @@ enum SessionIndexRows {
     TurnId,
 }
 
+pub struct SqliteConfig {
+    pub path: String,
+    pub busy_timeout: std::time::Duration,
+}
+
+#[derive(Clone)]
+struct ReaderConfig {
+    path: String,
+    busy_timeout: std::time::Duration,
+}
+
+impl ReaderConfig {
+    fn open(&self) -> Result<Connection, StoreError> {
+        let conn = Connection::open_with_flags(
+            &self.path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )
+        .map_err(|e| StoreError::Internal(e.to_string()))?;
+        conn.busy_timeout(self.busy_timeout)
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        Ok(conn)
+    }
+}
+
 pub struct SqliteStore {
     writer: Arc<Mutex<Connection>>,
-    path: String,
+    reader: ReaderConfig,
     tx: broadcast::Sender<StdArc<Vec<Event>>>,
 }
 
@@ -220,30 +241,45 @@ impl StoredEvent {
 }
 
 impl SqliteStore {
-    pub fn new(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let path_str = path.as_ref().to_string_lossy().to_string();
+    pub fn new(config: SqliteConfig) -> Result<Self, StoreError> {
+        let in_memory = config.path == ":memory:";
 
-        let writer =
-            Connection::open(&path_str).map_err(|e| StoreError::Internal(e.to_string()))?;
+        let path_str = if in_memory {
+            "file::memory:?mode=memory&cache=shared".to_string()
+        } else {
+            config.path
+        };
+
+        let open_flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_CREATE
+            | OpenFlags::SQLITE_OPEN_URI;
+
+        let writer = Connection::open_with_flags(&path_str, open_flags)
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
+
         writer
             .execute_batch(SCHEMA)
             .map_err(|e| StoreError::Internal(e.to_string()))?;
-        writer
-            .pragma_update(None, "journal_mode", "WAL")
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+
+        if !in_memory {
+            writer
+                .pragma_update(None, "journal_mode", "WAL")
+                .map_err(|e| StoreError::Internal(e.to_string()))?;
+        }
 
         let (tx, _) = broadcast::channel(1024);
 
+        let reader = ReaderConfig {
+            path: path_str,
+            busy_timeout: config.busy_timeout,
+        };
+
         Ok(Self {
             writer: Arc::new(Mutex::new(writer)),
-            path: path_str,
+            reader,
             tx,
         })
     }
-}
-
-fn open_conn_flags(path: &str, flags: OpenFlags) -> Result<Connection, StoreError> {
-    Connection::open_with_flags(path, flags).map_err(|e| StoreError::Internal(e.to_string()))
 }
 
 fn parse_dt(s: &str) -> Option<DateTime<Utc>> {
@@ -749,11 +785,11 @@ impl EventStore for SqliteStore {
     }
 
     async fn load(&self, tenant_id: &str, aggregate_id: &str) -> Result<Snapshot, StoreError> {
-        let path = self.path.clone();
+        let reader = self.reader.clone();
         let tenant_id = tenant_id.to_string();
         let aggregate_id = aggregate_id.to_string();
         tokio::task::spawn_blocking(move || {
-            let conn = open_conn_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let conn = reader.open()?;
             do_load(&conn, &tenant_id, &aggregate_id)
         })
         .await
@@ -765,9 +801,9 @@ impl EventStore for SqliteStore {
         filter: &AggregateFilter,
     ) -> Result<Vec<AggregateSummary>, StoreError> {
         let filter = filter.clone();
-        let path = self.path.clone();
+        let reader = self.reader.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = open_conn_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let conn = reader.open()?;
             do_list_aggregates(&conn, &filter)
         })
         .await
@@ -776,9 +812,9 @@ impl EventStore for SqliteStore {
 
     async fn query_events(&self, filter: &EventFilter) -> Result<Vec<Event>, StoreError> {
         let filter = filter.clone();
-        let path = self.path.clone();
+        let reader = self.reader.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = open_conn_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let conn = reader.open()?;
             do_query_events(&conn, filter)
         })
         .await
@@ -798,9 +834,9 @@ impl ProcessorCheckpointStore for SqliteStore {
         shard_id: u32,
     ) -> Result<ProcessorCheckpoint, CheckpointError> {
         let projection = projection.to_string();
-        let path = self.path.clone();
+        let reader = self.reader.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = open_conn_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            let conn = reader.open()
                 .map_err(|e| CheckpointError::Message(e.to_string()))?;
             do_load_projection_checkpoint(&conn, &projection, shard_id)
         })
@@ -873,10 +909,9 @@ impl WakeScheduleStore for SqliteStore {
         now: DateTime<Utc>,
         limit: usize,
     ) -> Result<Vec<WakeScheduleItem>, String> {
-        let path = self.path.clone();
+        let reader = self.reader.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = open_conn_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .map_err(|e| e.to_string())?;
+            let conn = reader.open().map_err(|e| e.to_string())?;
             do_list_due_wakes(&conn, now, limit)
         })
         .await
@@ -884,10 +919,9 @@ impl WakeScheduleStore for SqliteStore {
     }
 
     async fn next_wake_at(&self) -> Result<Option<DateTime<Utc>>, String> {
-        let path = self.path.clone();
+        let reader = self.reader.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = open_conn_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .map_err(|e| e.to_string())?;
+            let conn = reader.open().map_err(|e| e.to_string())?;
             do_next_wake_at(&conn)
         })
         .await
@@ -1108,9 +1142,9 @@ fn do_upsert_session_index(conn: &Connection, record: SessionIndexRecord) -> Res
 impl SessionIndexStore for SqliteStore {
     async fn list_sessions(&self, filter: &SessionFilter) -> Result<SessionPage, StoreError> {
         let filter = filter.clone();
-        let path = self.path.clone();
+        let reader = self.reader.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = open_conn_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let conn = reader.open()?;
             do_list_sessions(&conn, &filter)
         })
         .await
@@ -1185,10 +1219,9 @@ impl PushRegistrationStore for SqliteStore {
     ) -> Result<Option<PushRegistrationRecord>, String> {
         let tenant_id = tenant_id.to_string();
         let agent_id = agent_id.to_string();
-        let path = self.path.clone();
+        let reader = self.reader.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = open_conn_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .map_err(|e| e.to_string())?;
+            let conn = reader.open().map_err(|e| e.to_string())?;
             let result = conn
                 .query_row(
                     "SELECT transport_type, config FROM push_registrations
@@ -1216,10 +1249,9 @@ impl PushRegistrationStore for SqliteStore {
     }
 
     async fn list_tenants(&self) -> Result<HashMap<String, Vec<String>>, String> {
-        let path = self.path.clone();
+        let reader = self.reader.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = open_conn_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .map_err(|e| e.to_string())?;
+            let conn = reader.open().map_err(|e| e.to_string())?;
             let mut stmt = conn
                 .prepare("SELECT tenant_id, agent_id FROM push_registrations")
                 .map_err(|e| e.to_string())?;

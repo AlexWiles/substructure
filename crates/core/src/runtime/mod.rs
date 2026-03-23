@@ -13,6 +13,7 @@ use llm::{spawn_llm_dispatch_processor, spawn_llm_task_executor, LlmProviderTrai
 use processor::ProcessorCheckpointStore;
 use retry::RetryPolicy;
 use session::command::{CommandPayload, SessionError};
+use session::decision::ClientPayload;
 use session::index::{
     spawn_session_index_processor, SessionFilter, SessionIndexStore, SessionPage,
 };
@@ -61,11 +62,11 @@ pub struct Runtime {
     handles: Vec<AbortHandle>,
 }
 
-pub struct SendMessage {
+pub struct SubmitClientPayload {
     pub session_id: String,
     pub tenant_id: String,
     pub agent_id: String,
-    pub content: String,
+    pub payload: ClientPayload,
     /// Caller-provided turn ID for idempotency. Auto-generated if None.
     pub turn_id: Option<String>,
 }
@@ -85,13 +86,13 @@ impl Runtime {
         self.queue.dequeue(filter).await
     }
 
-    /// Send a message to a session and return a stream of events for that session.
+    /// Submit a client payload to a session and return a stream of events for that session.
     ///
     /// Subscribes to the event store broadcast *before* sending so no events are missed.
     /// The returned receiver yields events until the broadcast closes or the receiver is dropped.
-    pub async fn send_message(
+    pub async fn submit_client_payload(
         &self,
-        input: SendMessage,
+        input: SubmitClientPayload,
     ) -> Result<(String, mpsc::Receiver<event_store::Event>), RuntimeError> {
         let session_id = input.session_id;
         let turn_id = input.turn_id.unwrap_or_else(|| Uuid::now_v7().to_string());
@@ -126,24 +127,17 @@ impl Runtime {
             Err(e) => return Err(RuntimeError(e.to_string())),
         }
 
-        // Try to send the message (idempotency guard may reject)
+        // Try to submit the payload (idempotency guard may reject)
         let send_result = execute::<SessionState>(
             &*self.store,
             ExecuteInput {
                 aggregate_id: session_id.clone(),
                 tenant_id: input.tenant_id,
-                command: CommandPayload::SendMessage {
-                    message: session::message::Message {
-                        role: session::message::Role::User,
-                        content: Some(session::message::Content::Text(input.content)),
-                        tool_calls: None,
-                        tool_call_id: None,
-                        name: None,
-                    },
-                    stream: false,
+                command: CommandPayload::SubmitClientPayload {
+                    payload: input.payload,
                     turn_id: Some(turn_id.clone()),
                 },
-                span: span.child("send_message"),
+                span: span.child("submit_client_payload"),
             },
             &ConflictRetry::default(),
         )

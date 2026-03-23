@@ -6,7 +6,6 @@ import type {
     WorkerAction,
     ToolResult,
 } from "./types";
-import { contentText } from "./types";
 import type * as z from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import type {
@@ -126,6 +125,8 @@ export function withMessageHistory<S>(adapter: MessagesAdapter<S>): MiddlewareFn
             case "llm_response":
                 messages.push(trigger.message);
                 break;
+            case "client_action":
+                break;
             case "tool_result":
                 messages.push({
                     role: "tool",
@@ -167,6 +168,8 @@ export function withConversation<S>(adapter: MessagesAdapter<S>): MiddlewareFn<S
             case "user_message":
             case "llm_response":
                 history.push(trigger.message);
+                break;
+            case "client_action":
                 break;
             case "tool_result":
                 history.push({
@@ -301,43 +304,28 @@ export function withCallLLM<S>(
         const { trigger } = ctx;
         switch (trigger.type) {
             case "user_message":
+            case "client_action":
             case "tool_result": {
-                const messages = selection.request.messages;
-                if (!messages) {
-                    throw new Error("withCallLLM requires request.messages. Add withConversation/withMessages before it.");
-                }
                 return {
                     actions: [
                         {
                             type: "call_llm",
                             request: {
                                 ...selection.request,
-                                messages,
+                                // it is expected middleware will populate this
+                                messages: []
                             },
                             llm_client: selection.llm_client,
                             retry: selection.retry,
                             stream: selection.stream ?? false,
                         },
                     ],
-                };
-            }
-
-            case "llm_response": {
-                if (trigger.message.tool_calls?.length) {
-                    return {
-                        actions: trigger.message.tool_calls.map((tc) => ({
-                            type: "call_tool",
-                            tool_call_id: tc.id,
-                            name: tc.function.name,
-                            arguments: tc.function.arguments,
-                            handler: "worker",
-                            retry: selection.toolRetries?.[tc.function.name] ?? selection.retry,
-                        })),
-                    };
                 }
-                return {
-                    actions: [{ type: "done", data: contentText(trigger.message.content) || null }],
-                };
+            }
+            case "llm_response": {
+                if (!trigger.message.tool_calls || trigger.message.tool_calls.length === 0) {
+                    return { actions: [{ type: "done", data: trigger.message.content }] }
+                }
             }
 
             default:

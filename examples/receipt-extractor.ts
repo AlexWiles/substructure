@@ -53,16 +53,17 @@ const messagesAdapter = {
         state.messages = messages;
     },
 };
+const SYSTEM_PROMPT = `You extract structured data from payment receipts.
+Given receipt text, identify the date, vendor, total amount, and currency.
+Then call save_to_csv to record it. If the date is unclear, use your best guess.
+If the currency is not stated, assume USD.`
 
 const receiptHandler = defineAgent(RECEIPT_AGENT_ID)
     .use(withLogging())
     .use(withState<State>({ messages: [] }))
+    .use(withSystemMessage<State>(SYSTEM_PROMPT))
     .use(withConversation<State>(messagesAdapter))
-    .use(withSystemMessage<State>(`You extract structured data from payment receipts.
-Given receipt text, identify the date, vendor, total amount, and currency.
-Then call save_to_csv to record it. If the date is unclear, use your best guess.
-If the currency is not stated, assume USD.`))
-    .use(withTools<State>({ save_to_csv: saveToCSV }))
+    .use(withTools<State>({ saveToCSV }))
     .use(withCallLLM<State>((state) => ({
         request: {
             model: "arcee-ai/trinity-large-preview:free",
@@ -72,7 +73,6 @@ If the currency is not stated, assume USD.`))
     })));
 
 const sub = new Substructure({
-    db: "data.db",
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
 });
 

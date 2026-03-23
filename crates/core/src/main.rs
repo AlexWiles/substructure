@@ -5,7 +5,7 @@ use tokio::net::TcpListener;
 
 use substructure_core::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use substructure_core::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
-use substructure_core::providers::sqlite::SqliteStore;
+use substructure_core::providers::sqlite::{SqliteConfig, SqliteStore};
 use substructure_core::providers::worker_queue::SqliteWorkerQueue;
 use substructure_core::sub_agent::SubAgentTask;
 use substructure_core::transport::admin_http;
@@ -52,7 +52,10 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Serve { host, port, db } => {
-            let store = Arc::new(SqliteStore::new(&db)?);
+            let store = Arc::new(SqliteStore::new(SqliteConfig {
+                path: db.clone(),
+                busy_timeout: std::time::Duration::from_secs(5),
+            })?);
             let config = RuntimeConfig::default();
             let queue = Arc::new(SqliteWorkerQueue::new(&db).map_err(anyhow::Error::msg)?);
             let llm_task_queue: Arc<dyn TaskQueue<LlmTask>> =

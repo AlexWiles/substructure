@@ -1,6 +1,6 @@
 import type {
   Event,
-  SendMessageRequest,
+  SubmitPayloadRequest,
   Uuid,
   WorkerDecisionRequestWire,
 } from "./types";
@@ -17,11 +17,11 @@ export interface NativeRuntime {
     agentIds: string[],
     callback: (decision: string) => Promise<string>,
   ): Promise<void>;
-  sendMessage(
+  submitPayload(
     sessionId: string,
     tenantId: string,
     agentId: string,
-    content: string,
+    payloadJson: string,
     turnId?: string,
   ): AsyncGenerator<string, void, unknown>;
   shutdown(): Promise<void>;
@@ -70,9 +70,12 @@ export interface InProcessRuntimeOptions {
  * const worker = defineAgent("my-agent")
  * await runtime.register(worker, 'default')
  *
- * for await (const event of runtime.sendMessage({ agent_id: 'my-agent', message: 'hello' })) {
- *   console.log(event.payload.type)
- * }
+  * for await (const event of runtime.submitPayload({
+  *   agent_id: 'my-agent',
+  *   payload: { type: 'message', message: { role: 'user', content: 'hello' } },
+  * })) {
+  *   console.log(event.payload.type)
+  * }
  * ```
  */
 export class InProcessRuntime {
@@ -102,17 +105,17 @@ export class InProcessRuntime {
   }
 
   /**
-   * Send a message — same interface as UserClient.sendMessage().
+   * Submit a payload — same interface as UserClient.submitPayload().
    */
-  async *sendMessage(request: SendMessageRequest): AsyncGenerator<Event> {
+  async *submitPayload(request: SubmitPayloadRequest): AsyncGenerator<Event> {
     const sessionId = request.session_id ?? crypto.randomUUID();
     const tenantId = request.tenant_id ?? "default";
 
-    for await (const json of this.native.sendMessage(
+    for await (const json of this.native.submitPayload(
       sessionId,
       tenantId,
       request.agent_id,
-      request.message,
+      JSON.stringify(request.payload),
       request.turn_id,
     )) {
       yield JSON.parse(json) as Event;

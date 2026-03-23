@@ -8,6 +8,27 @@ use crate::runtime::llm::LlmRequest;
 use crate::runtime::retry::RetryPolicy;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientAction {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ClientPayload {
+    Message {
+        message: Message,
+        #[serde(default)]
+        stream: bool,
+    },
+    Action {
+        #[serde(flatten)]
+        action: ClientAction,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
     pub tool_call_id: String,
     pub name: String,
@@ -21,6 +42,11 @@ pub enum DecisionTrigger {
     UserMessage {
         stream: bool,
         message: Message,
+    },
+    ClientAction {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        args: Option<serde_json::Value>,
     },
     LlmResponse {
         call_id: String,
