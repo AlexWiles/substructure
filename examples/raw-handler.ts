@@ -187,11 +187,18 @@ const sub = new Substructure({
 
 sub.agent(weatherHandler);
 
-const stream = sub.run(
-    WEATHER_AGENT_ID,
-    "What is the sum of the current temperatures in San Francisco and New York?",
-    { sessionId: "raw-session-1", turnId: "turn-1" },
-);
+const stream = sub.submit({
+    agentId: WEATHER_AGENT_ID,
+    payload: {
+        type: "message",
+        message: {
+            role: "user",
+            content: "What is the sum of the current temperatures in San Francisco and New York?",
+        },
+    },
+    sessionId: "raw-session-1",
+    turnId: "turn-1",
+});
 
 for await (const event of stream) {
     if (event.payload.type === "message.new") {

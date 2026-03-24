@@ -1,0 +1,169 @@
+import {
+    Substructure,
+    defineAgent,
+    withState,
+    withStateSlice,
+    contentText,
+    type RunStream,
+} from "@substructure.ai/sdk/substructure";
+import type {
+    Message,
+    WorkerAction,
+} from "@substructure.ai/sdk/types";
+
+const TOOL_CATALOG = [
+    {
+        name: "add",
+        description: "Add two numbers",
+        parameters: {
+            type: "object",
+            properties: {
+                a: { type: "number" },
+                b: { type: "number" },
+            },
+            required: ["a", "b"],
+        },
+    },
+    {
+        name: "get_weather",
+        description: "Get weather by city",
+        parameters: {
+            type: "object",
+            properties: {
+                city: { type: "string" },
+            },
+            required: ["city"],
+        },
+    },
+];
+
+const actionAgent = defineAgent("action-demo")
+    .use(withState())
+    .use(withStateSlice({ messages: [] as Message[] }, (ctx, next) => {
+        if (ctx.trigger.type !== "client_action") {
+            return next(ctx);
+        }
+
+        switch (ctx.trigger.name) {
+            case "get_tools": {
+                const data = {
+                    tools: TOOL_CATALOG,
+                    count: TOOL_CATALOG.length,
+                };
+                const actions: WorkerAction[] = [{ type: "done", data }];
+                return { actions };
+            }
+
+            case "clear_context": {
+                const previousCount = ctx.state.messages.length;
+                ctx.state.messages = [];
+                const actions: WorkerAction[] = [{
+                    type: "done",
+                    data: { ok: true, cleared_messages: previousCount },
+                }];
+                return { actions };
+            }
+
+            default: {
+                const actions: WorkerAction[] = [{
+                    type: "done",
+                    data: { ok: false, error: `Unknown action: ${ctx.trigger.name}` },
+                }];
+                return { actions };
+            }
+        }
+    }))
+    .use((ctx, next) => {
+        if (ctx.trigger.type !== "user_message") {
+            return next(ctx);
+        }
+
+        ctx.state.messages.push(ctx.trigger.message);
+        const actions: WorkerAction[] = [{
+            type: "done",
+            data: {
+                message_count: ctx.state.messages.length,
+                last_message: contentText(ctx.trigger.message.content),
+            },
+        }];
+        return { actions };
+    });
+
+const sub = new Substructure({ db: "action-request-example.db" });
+sub.agent(actionAgent);
+
+function turnId(): string {
+    return crypto.randomUUID();
+}
+
+const sessionId = crypto.randomUUID();
+
+async function drainToResult(stream: RunStream) {
+    for await (const _event of stream) {
+        // Drain to completion.
+    }
+    return stream.result;
+}
+
+const firstStream = sub.submit({
+    agentId: "action-demo",
+    payload: {
+        type: "message",
+        message: {
+            role: "user",
+            content: "hello there",
+        },
+    },
+    sessionId,
+    turnId: turnId(),
+});
+const firstTurn = await drainToResult(firstStream);
+console.log("first run:", firstTurn);
+
+const secondStream = sub.submit({
+    agentId: "action-demo",
+    payload: {
+        type: "message",
+        message: {
+            role: "user",
+            content: "one more message",
+        },
+    },
+    sessionId,
+    turnId: turnId(),
+});
+const secondTurn = await drainToResult(secondStream);
+console.log("second run:", secondTurn);
+
+const toolsStream = sub.submit({
+    agentId: "action-demo",
+    payload: { type: "action", name: "get_tools" },
+    sessionId,
+});
+const tools = await drainToResult(toolsStream);
+console.log("request(get_tools):", tools.data);
+
+const clearStream = sub.submit({
+    agentId: "action-demo",
+    payload: { type: "action", name: "clear_context" },
+    sessionId,
+});
+const clear = await drainToResult(clearStream);
+console.log("request(clear_context):", clear.data);
+
+const afterClearStream = sub.submit({
+    agentId: "action-demo",
+    payload: {
+        type: "message",
+        message: {
+            role: "user",
+            content: "after clear",
+        },
+    },
+    sessionId,
+    turnId: turnId(),
+});
+const afterClear = await drainToResult(afterClearStream);
+console.log("after clear run:", afterClear);
+
+await sub.shutdown();

@@ -57,8 +57,10 @@ function callLlm(state: State): WorkerAction {
     };
 }
 
-const withMessageHistory = (): MiddlewareFn<State> => (ctx, next) => {
-    const { trigger, state } = ctx;
+const withMessageHistory = (): MiddlewareFn<unknown> => (ctx, next) => {
+    const { trigger } = ctx;
+    const state = ctx.state as State;
+    state.messages ??= [];
 
     switch (trigger.type) {
         case "user_message": {
@@ -83,8 +85,9 @@ const withMessageHistory = (): MiddlewareFn<State> => (ctx, next) => {
     return next(ctx);
 };
 
-const withStructuredOutputFlow = (): MiddlewareFn<State> => (ctx, next) => {
-    const { trigger, state } = ctx;
+const withStructuredOutputFlow = (): MiddlewareFn<unknown> => (ctx, next) => {
+    const { trigger } = ctx;
+    const state = ctx.state as State;
 
     switch (trigger.type) {
         case "user_message":
@@ -138,7 +141,7 @@ const withStructuredOutputFlow = (): MiddlewareFn<State> => (ctx, next) => {
 
 const extractor = defineAgent("contact-extractor")
     .use(withLogging())
-    .use(withState<State>({ messages: [] }))
+    .use(withState())
     .use(withMessageHistory())
     .use(withStructuredOutputFlow())
 
@@ -149,11 +152,18 @@ at Acme Corp. Shoot her a note at schen@acme.io about the integration work.`;
 
 console.log("Extracting contact from text...\n");
 
-const stream = sub.run(
-    "contact-extractor",
-    `Extract the contact info from this text:\n\n${input}`,
-    { sessionId: randomUUID(), turnId: randomUUID() },
-);
+const stream = sub.submit({
+    agentId: "contact-extractor",
+    payload: {
+        type: "message",
+        message: {
+            role: "user",
+            content: `Extract the contact info from this text:\n\n${input}`,
+        },
+    },
+    sessionId: randomUUID(),
+    turnId: randomUUID(),
+});
 
 for await (const event of stream) {
     if (event.payload.type === "tool.call.completed") {

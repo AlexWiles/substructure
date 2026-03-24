@@ -62,10 +62,9 @@ export type StateContributor<A> = MiddlewareFn<unknown, unknown> & { readonly _c
 
 export {
     withState,
+    withStateSlice,
     tool,
     withLogging,
-    withMessageHistory,
-    withMessages,
     withConversation,
     withSystemMessage,
     withTools,
@@ -76,8 +75,6 @@ export type {
     ToolFn,
     ToolDef,
     SubAgentTrack,
-    MessagesAdapter,
-    SubAgentTrackerAdapter,
     CallLlmSelection,
     ToolSelector,
     MessageSelector,

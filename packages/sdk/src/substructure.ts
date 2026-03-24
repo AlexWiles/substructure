@@ -1,4 +1,4 @@
-import type { Event, Decimal, TurnCompleted } from "./types";
+import type { Event, Decimal, TurnCompleted, ClientPayload } from "./types";
 import type { NativeRuntime } from "./runtime";
 import type { Handler } from "./worker";
 import { Worker } from "./worker";
@@ -10,10 +10,9 @@ export { contentText } from "./types";
 export {
     defineAgent,
     withState,
+    withStateSlice,
     withLogging,
     tool,
-    withMessageHistory,
-    withMessages,
     withConversation,
     withSystemMessage,
     withTools,
@@ -29,6 +28,14 @@ export interface TurnResult {
     data: unknown;
     cost: Decimal;
     tokenUsage: Record<string, number>;
+}
+
+export interface SubmitRequest {
+    agentId: string;
+    payload: ClientPayload;
+    sessionId?: string;
+    tenantId?: string;
+    turnId?: string;
 }
 
 export class RunStream {
@@ -127,7 +134,7 @@ export class Substructure {
 
     agent(handler: Handler): this {
         if (this.registered) {
-            throw new Error("Cannot register agents after run() has been called");
+            throw new Error("Cannot register agents after submit() has been called");
         }
         this.agents[handler.agentId] = handler;
         return this;
@@ -171,10 +178,10 @@ export class Substructure {
         return this.registered;
     }
 
-    run(
+    private submitPayload(
         agentId: string,
-        message: string,
-        options?: { sessionId?: string; tenantId?: string; turnId?: string },
+        payload: ClientPayload,
+        options?: Omit<SubmitRequest, "agentId" | "payload">,
     ): RunStream {
         const sessionId = options?.sessionId ?? crypto.randomUUID();
         const tenantId = options?.tenantId ?? "default";
@@ -186,7 +193,7 @@ export class Substructure {
             if (isRemote(self.config)) {
                 yield* self.userClient!.submitPayload({
                     agent_id: agentId,
-                    payload: { type: "message", message: { role: "user", content: message } },
+                    payload,
                     session_id: sessionId,
                     tenant_id: tenantId,
                     turn_id: turnId,
@@ -197,7 +204,7 @@ export class Substructure {
                     sessionId,
                     tenantId,
                     agentId,
-                    JSON.stringify({ type: "message", message: { role: "user", content: message } }),
+                    JSON.stringify(payload),
                     turnId,
                 )) {
                     yield JSON.parse(json) as Event;
@@ -206,6 +213,11 @@ export class Substructure {
         }
 
         return new RunStream(generate());
+    }
+
+    submit(request: SubmitRequest): RunStream {
+        const { agentId, payload, ...options } = request;
+        return this.submitPayload(agentId, payload, options);
     }
 
     fetchHandler(): (req: Request) => Promise<Response> {

@@ -9,8 +9,6 @@ import {
     withTools,
     withCallLLM,
 } from "@substructure.ai/sdk/substructure";
-import type { Message } from "@substructure.ai/sdk/types";
-import { z } from "zod";
 import { appendFileSync, existsSync } from "fs";
 import { randomUUID } from "crypto";
 
@@ -25,13 +23,18 @@ const receiptRetry = {
 
 const saveToCSV = tool({
     description: "Append an extracted receipt to the CSV file",
-    parameters: z.object({
-        date: z.string().describe("Payment date (YYYY-MM-DD)"),
-        vendor: z.string().describe("Vendor or merchant name"),
-        amount: z.number().describe("Payment amount"),
-        currency: z.string().describe("Currency code, e.g. USD"),
-    }),
-    execute: ({ date, vendor, amount, currency }) => {
+    parameters: {
+        type: "object",
+        properties: {
+            date: { type: "string", description: "Payment date (YYYY-MM-DD)" },
+            vendor: { type: "string", description: "Vendor or merchant name" },
+            amount: { type: "number", description: "Payment amount" },
+            currency: { type: "string", description: "Currency code, e.g. USD" },
+        },
+        required: ["date", "vendor", "amount", "currency"],
+    },
+    execute: (args: string) => {
+        const { date, vendor, amount, currency } = JSON.parse(args);
         if (!existsSync(CSV_PATH)) {
             appendFileSync(CSV_PATH, "date,vendor,amount,currency\n");
         }
@@ -43,16 +46,6 @@ const saveToCSV = tool({
 
 const RECEIPT_AGENT_ID = "receipt-extractor";
 
-type State = {
-    messages: Message[];
-};
-
-const messagesAdapter = {
-    getMessages: (state: State) => state.messages,
-    setMessages: (state: State, messages: Message[]) => {
-        state.messages = messages;
-    },
-};
 const SYSTEM_PROMPT = `You extract structured data from payment receipts.
 Given receipt text, identify the date, vendor, total amount, and currency.
 Then call save_to_csv to record it. If the date is unclear, use your best guess.
@@ -60,11 +53,11 @@ If the currency is not stated, assume USD.`
 
 const receiptHandler = defineAgent(RECEIPT_AGENT_ID)
     .use(withLogging())
-    .use(withState<State>({ messages: [] }))
-    .use(withSystemMessage<State>(SYSTEM_PROMPT))
-    .use(withConversation<State>(messagesAdapter))
-    .use(withTools<State>({ saveToCSV }))
-    .use(withCallLLM<State>((state) => ({
+    .use(withState())
+    .use(withSystemMessage(() => SYSTEM_PROMPT))
+    .use(withConversation())
+    .use(withTools(() => ({ saveToCSV })))
+    .use(withCallLLM((state) => ({
         request: {
             model: "arcee-ai/trinity-large-preview:free",
         },
@@ -107,11 +100,18 @@ const receipts = [
 for (const [i, receipt] of receipts.entries()) {
     console.log(`\n--- Processing receipt ${i + 1} ---`);
 
-    const stream = sub.run(
-        RECEIPT_AGENT_ID,
-        `Extract the payment details from this receipt:\n\n${receipt}`,
-        { sessionId: randomUUID(), turnId: randomUUID() },
-    );
+    const stream = sub.submit({
+        agentId: RECEIPT_AGENT_ID,
+        payload: {
+            type: "message",
+            message: {
+                role: "user",
+                content: `Extract the payment details from this receipt:\n\n${receipt}`,
+            },
+        },
+        sessionId: randomUUID(),
+        turnId: randomUUID(),
+    });
 
     for await (const event of stream) {
         if (event.payload.type === "tool.call.completed") {
