@@ -1,0 +1,9 @@
+{
+  "name": "@substructure.ai/example-receipt-extractor",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@substructure.ai/runtime": "workspace:*",
+    "@substructure.ai/sdk": "workspace:*"
+  }
+}
