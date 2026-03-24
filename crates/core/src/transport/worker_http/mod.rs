@@ -10,7 +10,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 
-use crate::transport::auth::{AuthCapability, AuthError, AuthResolver};
+use crate::transport::auth::{AuthError, AuthResolver};
 use crate::transport::push::PushAdapter;
 
 #[derive(Clone)]
@@ -37,7 +37,7 @@ async fn worker_auth_middleware(
 ) -> Response {
     match state
         .auth
-        .resolve(request.headers(), AuthCapability::WorkerApi)
+        .resolve(request.headers())
         .await
     {
         Ok(principal) => {

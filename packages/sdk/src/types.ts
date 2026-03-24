@@ -511,6 +511,7 @@ export interface SessionState {
 export interface SubmitPayloadRequest {
     agent_id: string;
     payload: ClientPayload;
+    auth?: ClientIdentity;
     tenant_id?: string;
     session_id?: Uuid;
     turn_id?: string;

@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -65,6 +64,7 @@ pub struct Runtime {
 pub struct SubmitClientPayload {
     pub session_id: String,
     pub tenant_id: String,
+    pub auth: ClientIdentity,
     pub agent_id: String,
     pub payload: ClientPayload,
     /// Caller-provided turn ID for idempotency. Auto-generated if None.
@@ -107,11 +107,7 @@ impl Runtime {
                 tenant_id: input.tenant_id.clone(),
                 command: CommandPayload::CreateSession {
                     agent_id: input.agent_id,
-                    auth: ClientIdentity {
-                        tenant_id: input.tenant_id.clone(),
-                        sub: None,
-                        attrs: HashMap::new(),
-                    },
+                    auth: input.auth.clone(),
                     ancestry: vec![],
                     worker_retry: RetryPolicy::no_retry(),
                 },
@@ -135,6 +131,7 @@ impl Runtime {
                 tenant_id: input.tenant_id,
                 command: CommandPayload::SubmitClientPayload {
                     payload: input.payload,
+                    auth: input.auth,
                     turn_id: Some(turn_id.clone()),
                 },
                 span: span.child("submit_client_payload"),

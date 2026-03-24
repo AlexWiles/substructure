@@ -20,9 +20,9 @@ export class JsRuntime {
 
   submitPayload(
     sessionId: string,
-    tenantId: string,
     agentId: string,
     payloadJson: string,
+    authJson: string,
     turnId?: string,
   ): AsyncGenerator<string, void, unknown>;
 

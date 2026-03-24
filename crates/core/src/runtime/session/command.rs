@@ -21,6 +21,7 @@ pub enum CommandPayload {
     },
     SubmitClientPayload {
         payload: ClientPayload,
+        auth: ClientIdentity,
         turn_id: Option<String>,
     },
     SendMessage {
@@ -119,6 +120,10 @@ pub enum SessionError {
     TurnAlreadyActive { turn_id: String },
     #[error("turn already completed: {turn_id}")]
     TurnAlreadyCompleted { turn_id: String },
+    #[error("client subject is required")]
+    MissingSubject,
+    #[error("session access denied")]
+    SessionAccessDenied,
 }
 
 impl SessionState {
@@ -152,7 +157,23 @@ impl SessionState {
         match cmd {
             CommandPayload::CreateSession { .. } => Err(SessionError::SessionAlreadyCreated),
 
-            CommandPayload::SubmitClientPayload { payload, turn_id } => {
+            CommandPayload::SubmitClientPayload {
+                payload,
+                auth,
+                turn_id,
+            } => {
+                let Some(subject) = auth.sub.as_deref() else {
+                    return Err(SessionError::MissingSubject);
+                };
+                let Some(existing_auth) = self.auth.as_ref() else {
+                    return Err(SessionError::SessionAccessDenied);
+                };
+                if existing_auth.tenant_id != auth.tenant_id
+                    || existing_auth.sub.as_deref() != Some(subject)
+                {
+                    return Err(SessionError::SessionAccessDenied);
+                }
+
                 if let Some(ref tid) = turn_id {
                     if self.completed_turn_ids.contains(tid) {
                         return Err(SessionError::TurnAlreadyCompleted {

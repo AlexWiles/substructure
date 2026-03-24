@@ -1,6 +1,6 @@
 import { Substructure, defineAgent, withState, withLogging, contentText } from "@substructure.ai/sdk/substructure";
 import type { MiddlewareFn } from "@substructure.ai/sdk/substructure";
-import type { WorkerAction, Message } from "@substructure.ai/sdk/types";
+import type { ClientIdentity, WorkerAction, Message } from "@substructure.ai/sdk/types";
 import { z } from "zod";
 import { randomUUID } from "crypto";
 
@@ -10,6 +10,11 @@ const sub = new Substructure({
     db: "data.db",
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
 });
+
+const auth: ClientIdentity = {
+    tenant_id: "default",
+    sub: "example-user",
+};
 
 const ContactSchema = z.object({
     name: z.string().describe("Full name"),
@@ -162,6 +167,7 @@ const stream = sub.submit({
         },
     },
     sessionId: randomUUID(),
+    auth,
     turnId: randomUUID(),
 });
 

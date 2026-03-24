@@ -7,6 +7,7 @@ import {
     type RunStream,
 } from "@substructure.ai/sdk/substructure";
 import type {
+    ClientIdentity,
     Message,
     WorkerAction,
 } from "@substructure.ai/sdk/types";
@@ -92,6 +93,11 @@ const actionAgent = defineAgent("action-demo")
 const sub = new Substructure({ db: "action-request-example.db" });
 sub.agent(actionAgent);
 
+const auth: ClientIdentity = {
+    tenant_id: "default",
+    sub: "example-user",
+};
+
 function turnId(): string {
     return crypto.randomUUID();
 }
@@ -115,6 +121,7 @@ const firstStream = sub.submit({
         },
     },
     sessionId,
+    auth,
     turnId: turnId(),
 });
 const firstTurn = await drainToResult(firstStream);
@@ -130,6 +137,7 @@ const secondStream = sub.submit({
         },
     },
     sessionId,
+    auth,
     turnId: turnId(),
 });
 const secondTurn = await drainToResult(secondStream);
@@ -139,6 +147,7 @@ const toolsStream = sub.submit({
     agentId: "action-demo",
     payload: { type: "action", name: "get_tools" },
     sessionId,
+    auth,
 });
 const tools = await drainToResult(toolsStream);
 console.log("request(get_tools):", tools.data);
@@ -147,6 +156,7 @@ const clearStream = sub.submit({
     agentId: "action-demo",
     payload: { type: "action", name: "clear_context" },
     sessionId,
+    auth,
 });
 const clear = await drainToResult(clearStream);
 console.log("request(clear_context):", clear.data);
@@ -161,6 +171,7 @@ const afterClearStream = sub.submit({
         },
     },
     sessionId,
+    auth,
     turnId: turnId(),
 });
 const afterClear = await drainToResult(afterClearStream);

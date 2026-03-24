@@ -51,13 +51,13 @@ export class JsRuntime {
     return this._native.registerWorker(tenantId, agentIds, callback);
   }
 
-  async *submitPayload(sessionId, tenantId, agentId, payloadJson, turnId) {
+  async *submitPayload(sessionId, agentId, payloadJson, authJson, turnId) {
     let resolve;
     let done = false;
     const buffer = [];
 
     const finished = this._native.submitPayload(
-      sessionId, tenantId, agentId, payloadJson, turnId,
+      sessionId, agentId, payloadJson, authJson, turnId,
       (json) => {
         buffer.push(json);
         resolve?.();

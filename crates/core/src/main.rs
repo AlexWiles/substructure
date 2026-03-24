@@ -9,7 +9,7 @@ use substructure_core::providers::sqlite::{SqliteConfig, SqliteStore};
 use substructure_core::providers::worker_queue::SqliteWorkerQueue;
 use substructure_core::sub_agent::SubAgentTask;
 use substructure_core::transport::admin_http;
-use substructure_core::transport::auth::{ApiKeyBinding, HashedApiKeyAuthResolver};
+use substructure_core::transport::auth::{ApiKeyBinding, AuthResolver, BearerHashedApiKeyAuthResolver};
 use substructure_core::transport::client_http::{self, ClientHttpState};
 use substructure_core::transport::dashboard;
 use substructure_core::transport::http_push::http_transport;
@@ -83,25 +83,29 @@ async fn main() -> anyhow::Result<()> {
             let transports = TransportRegistry::new(vec![http_transport()]);
             let registry = PushRegistry::new(store, transports);
             let adapter = Arc::new(PushAdapter::new(rt.clone(), registry, 16));
-            let api_auth = HashedApiKeyAuthResolver::new(vec![
-                ApiKeyBinding::new(
-                    "default",
-                    "0b42357e3654716d9915e42b3b44d9c762169d7c4c972906b45a1d8b28dbad2e",
-                    "default-dev-key",
-                ),
-            ])
-            .map_err(anyhow::Error::msg)?
-            .into_dyn();
+            let bindings = vec![ApiKeyBinding::new(
+                "default",
+                "0b42357e3654716d9915e42b3b44d9c762169d7c4c972906b45a1d8b28dbad2e",
+                "default-dev-key",
+            )];
+            let client_auth: Arc<dyn AuthResolver> = Arc::new(
+                BearerHashedApiKeyAuthResolver::new(bindings.clone())
+                    .map_err(anyhow::Error::msg)?,
+            );
+            let worker_auth: Arc<dyn AuthResolver> = Arc::new(
+                BearerHashedApiKeyAuthResolver::new(bindings)
+                    .map_err(anyhow::Error::msg)?,
+            );
             adapter.start().await;
 
             let admin_routes = admin_http::router(rt.clone());
             let client_routes = client_http::router(ClientHttpState {
                 runtime: rt.clone(),
-                auth: api_auth.clone(),
+                auth: client_auth,
             });
             let worker_routes = worker_http::router(WorkerHttpState {
                 adapter,
-                auth: api_auth,
+                auth: worker_auth,
             });
             let dashboard_routes = dashboard::router();
             let server = SubstructureServer::new(vec![

@@ -11,7 +11,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 
 use crate::Runtime;
-use crate::transport::auth::{AuthCapability, AuthError, AuthResolver};
+use crate::transport::auth::{AuthError, AuthResolver};
 
 #[derive(Clone)]
 pub struct ClientHttpState {
@@ -36,7 +36,7 @@ async fn client_auth_middleware(
 ) -> Response {
     match state
         .auth
-        .resolve(request.headers(), AuthCapability::ClientApi)
+        .resolve(request.headers())
         .await
     {
         Ok(principal) => {

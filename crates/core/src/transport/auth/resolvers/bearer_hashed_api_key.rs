@@ -1,41 +1,9 @@
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use axum::http::HeaderMap;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
-#[derive(Debug, Clone, Copy)]
-pub enum AuthCapability {
-    WorkerApi,
-    ClientApi,
-}
-
-#[derive(Debug, Clone)]
-pub struct AuthPrincipal {
-    pub tenant_id: String,
-    pub source: &'static str,
-    pub subject: Option<String>,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum AuthError {
-    #[error("missing credentials")]
-    MissingCredentials,
-    #[error("invalid credentials")]
-    InvalidCredentials,
-    #[error("auth resolver unavailable: {0}")]
-    Internal(String),
-}
-
-#[async_trait]
-pub trait AuthResolver: Send + Sync {
-    async fn resolve(
-        &self,
-        headers: &HeaderMap,
-        capability: AuthCapability,
-    ) -> Result<AuthPrincipal, AuthError>;
-}
+use crate::transport::auth::{AuthError, AuthPrincipal, AuthResolver};
 
 #[derive(Debug, Clone)]
 pub struct ApiKeyBinding {
@@ -59,58 +27,32 @@ impl ApiKeyBinding {
 }
 
 #[derive(Debug, Clone)]
-struct CompiledKeyBinding {
+struct HashedApiKeyBinding {
     tenant_id: String,
     key_hash: [u8; 32],
     key_id: String,
 }
 
-pub struct HashedApiKeyAuthResolver {
-    bindings: Vec<CompiledKeyBinding>,
+pub struct BearerHashedApiKeyAuthResolver {
+    bindings: Vec<HashedApiKeyBinding>,
 }
 
-impl HashedApiKeyAuthResolver {
+impl BearerHashedApiKeyAuthResolver {
     pub fn new(bindings: Vec<ApiKeyBinding>) -> Result<Self, String> {
-        if bindings.is_empty() {
-            return Err("at least one API key binding is required".to_string());
-        }
-
-        let mut compiled = Vec::with_capacity(bindings.len());
-        for binding in bindings {
-            if binding.key_id.trim().is_empty() {
-                return Err(format!("key_id is required for tenant {}", binding.tenant_id));
-            }
-            let raw = hex::decode(&binding.key_sha256_hex)
-                .map_err(|e| format!("invalid SHA-256 hex for tenant {}: {e}", binding.tenant_id))?;
-            let key_hash: [u8; 32] = raw.try_into().map_err(|_| {
-                format!(
-                    "invalid SHA-256 length for tenant {}: expected 32 bytes",
-                    binding.tenant_id
-                )
-            })?;
-
-            compiled.push(CompiledKeyBinding {
-                tenant_id: binding.tenant_id,
-                key_hash,
-                key_id: binding.key_id,
-            });
-        }
-
-        Ok(Self { bindings: compiled })
-    }
-
-    pub fn into_dyn(self) -> Arc<dyn AuthResolver> {
-        Arc::new(self)
+        let bindings = compile_hashed_api_key_bindings(bindings)?;
+        Ok(Self { bindings })
     }
 }
 
 #[async_trait]
-impl AuthResolver for HashedApiKeyAuthResolver {
-    async fn resolve(
-        &self,
-        headers: &HeaderMap,
-        _capability: AuthCapability,
-    ) -> Result<AuthPrincipal, AuthError> {
+impl AuthResolver for BearerHashedApiKeyAuthResolver {
+    async fn resolve(&self, headers: &HeaderMap) -> Result<AuthPrincipal, AuthError> {
+        self.resolve_headers(headers)
+    }
+}
+
+impl BearerHashedApiKeyAuthResolver {
+    fn resolve_headers(&self, headers: &HeaderMap) -> Result<AuthPrincipal, AuthError> {
         let key = extract_api_key(headers).ok_or(AuthError::MissingCredentials)?;
         let key_hash = Sha256::digest(key.as_bytes());
 
@@ -128,6 +70,37 @@ impl AuthResolver for HashedApiKeyAuthResolver {
     }
 }
 
+fn compile_hashed_api_key_bindings(
+    bindings: Vec<ApiKeyBinding>,
+) -> Result<Vec<HashedApiKeyBinding>, String> {
+    if bindings.is_empty() {
+        return Err("at least one API key binding is required".to_string());
+    }
+
+    let mut compiled = Vec::with_capacity(bindings.len());
+    for binding in bindings {
+        if binding.key_id.trim().is_empty() {
+            return Err(format!("key_id is required for tenant {}", binding.tenant_id));
+        }
+        let raw = hex::decode(&binding.key_sha256_hex)
+            .map_err(|e| format!("invalid SHA-256 hex for tenant {}: {e}", binding.tenant_id))?;
+        let key_hash: [u8; 32] = raw.try_into().map_err(|_| {
+            format!(
+                "invalid SHA-256 length for tenant {}: expected 32 bytes",
+                binding.tenant_id
+            )
+        })?;
+
+        compiled.push(HashedApiKeyBinding {
+            tenant_id: binding.tenant_id,
+            key_hash,
+            key_id: binding.key_id,
+        });
+    }
+
+    Ok(compiled)
+}
+
 fn extract_api_key(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(axum::http::header::AUTHORIZATION)
@@ -142,8 +115,8 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn resolves_valid_bearer_key() {
-        let resolver = HashedApiKeyAuthResolver::new(vec![ApiKeyBinding::new(
+    async fn resolves_valid_bearer_key_for_worker() {
+        let resolver = BearerHashedApiKeyAuthResolver::new(vec![ApiKeyBinding::new(
             "tenant-a",
             "0b42357e3654716d9915e42b3b44d9c762169d7c4c972906b45a1d8b28dbad2e",
             "tenant-a-k1",
@@ -156,15 +129,15 @@ mod tests {
         );
 
         let principal = resolver
-            .resolve(&headers, AuthCapability::WorkerApi)
+            .resolve(&headers)
             .await
             .unwrap();
         assert_eq!(principal.tenant_id, "tenant-a");
     }
 
     #[tokio::test]
-    async fn rejects_missing_key() {
-        let resolver = HashedApiKeyAuthResolver::new(vec![ApiKeyBinding::new(
+    async fn rejects_missing_key_for_client() {
+        let resolver = BearerHashedApiKeyAuthResolver::new(vec![ApiKeyBinding::new(
             "tenant-a",
             "0b42357e3654716d9915e42b3b44d9c762169d7c4c972906b45a1d8b28dbad2e",
             "tenant-a-k1",
@@ -173,7 +146,7 @@ mod tests {
         let headers = HeaderMap::new();
 
         let err = resolver
-            .resolve(&headers, AuthCapability::WorkerApi)
+            .resolve(&headers)
             .await
             .unwrap_err();
         assert!(matches!(err, AuthError::MissingCredentials));

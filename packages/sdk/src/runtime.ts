@@ -1,7 +1,6 @@
 import type {
   Event,
   SubmitPayloadRequest,
-  Uuid,
   WorkerDecisionRequestWire,
 } from "./types";
 
@@ -19,9 +18,9 @@ export interface NativeRuntime {
   ): Promise<void>;
   submitPayload(
     sessionId: string,
-    tenantId: string,
     agentId: string,
     payloadJson: string,
+    authJson: string,
     turnId?: string,
   ): AsyncGenerator<string, void, unknown>;
   shutdown(): Promise<void>;
@@ -108,14 +107,16 @@ export class InProcessRuntime {
    * Submit a payload — same interface as UserClient.submitPayload().
    */
   async *submitPayload(request: SubmitPayloadRequest): AsyncGenerator<Event> {
+    if (!request.auth?.sub) {
+      throw new Error("auth.sub is required for embedded runtime submitPayload");
+    }
     const sessionId = request.session_id ?? crypto.randomUUID();
-    const tenantId = request.tenant_id ?? "default";
 
     for await (const json of this.native.submitPayload(
       sessionId,
-      tenantId,
       request.agent_id,
       JSON.stringify(request.payload),
+      JSON.stringify(request.auth),
       request.turn_id,
     )) {
       yield JSON.parse(json) as Event;

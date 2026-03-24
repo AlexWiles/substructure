@@ -1,5 +1,6 @@
 import { Substructure, contentText } from "@substructure.ai/sdk/substructure";
 import type {
+    ClientIdentity,
     WorkerAction,
     WorkerDecisionRequestWire,
     LlmTool,
@@ -185,6 +186,11 @@ const sub = new Substructure({
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
 });
 
+const auth: ClientIdentity = {
+    tenant_id: "default",
+    sub: "example-user",
+};
+
 sub.agent(weatherHandler);
 
 const stream = sub.submit({
@@ -197,6 +203,7 @@ const stream = sub.submit({
         },
     },
     sessionId: "raw-session-1",
+    auth,
     turnId: "turn-1",
 });
 

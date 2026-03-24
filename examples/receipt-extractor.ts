@@ -9,6 +9,7 @@ import {
     withTools,
     withCallLLM,
 } from "@substructure.ai/sdk/substructure";
+import type { ClientIdentity } from "@substructure.ai/sdk/types";
 import { appendFileSync, existsSync } from "fs";
 import { randomUUID } from "crypto";
 
@@ -69,6 +70,11 @@ const sub = new Substructure({
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
 });
 
+const auth: ClientIdentity = {
+    tenant_id: "default",
+    sub: "example-user",
+};
+
 sub.agent(receiptHandler);
 
 // Sample receipts to process
@@ -110,6 +116,7 @@ for (const [i, receipt] of receipts.entries()) {
             },
         },
         sessionId: randomUUID(),
+        auth,
         turnId: randomUUID(),
     });
 

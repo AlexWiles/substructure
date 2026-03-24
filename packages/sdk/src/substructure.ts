@@ -1,4 +1,4 @@
-import type { Event, Decimal, TurnCompleted, ClientPayload } from "./types";
+import type { Event, Decimal, TurnCompleted, ClientPayload, ClientIdentity } from "./types";
 import type { NativeRuntime } from "./runtime";
 import type { Handler } from "./worker";
 import { Worker } from "./worker";
@@ -33,8 +33,8 @@ export interface TurnResult {
 export interface SubmitRequest {
     agentId: string;
     payload: ClientPayload;
+    auth?: ClientIdentity;
     sessionId?: string;
-    tenantId?: string;
     turnId?: string;
 }
 
@@ -184,27 +184,32 @@ export class Substructure {
         options?: Omit<SubmitRequest, "agentId" | "payload">,
     ): RunStream {
         const sessionId = options?.sessionId ?? crypto.randomUUID();
-        const tenantId = options?.tenantId ?? "default";
+        const auth = options?.auth;
         const turnId = options?.turnId;
 
         const self = this;
         async function* generate(): AsyncGenerator<Event> {
             await self.register();
             if (isRemote(self.config)) {
+                if (auth) {
+                    throw new Error("submit.auth is only supported for embedded runtime");
+                }
                 yield* self.userClient!.submitPayload({
                     agent_id: agentId,
                     payload,
                     session_id: sessionId,
-                    tenant_id: tenantId,
                     turn_id: turnId,
                 });
             } else {
+                if (!auth?.sub) {
+                    throw new Error("submit.auth.sub is required for embedded runtime");
+                }
                 const runtime = await self.getRuntime();
                 for await (const json of runtime.submitPayload(
                     sessionId,
-                    tenantId,
                     agentId,
                     JSON.stringify(payload),
+                    JSON.stringify(auth),
                     turnId,
                 )) {
                     yield JSON.parse(json) as Event;
