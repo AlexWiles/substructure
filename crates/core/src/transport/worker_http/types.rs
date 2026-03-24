@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::runtime::session::decision::ClientPayload;
 use crate::serde_helpers::base64_bytes;
 use crate::session::decision::WorkerAction;
 use crate::span::SpanContext;
@@ -48,4 +49,23 @@ pub struct MintClientTokenRequest {
 pub struct MintClientTokenResponse {
     pub token: String,
     pub expires_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SubmitClientPayloadRequest {
+    pub agent_id: String,
+    pub payload: ClientPayload,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub turn_id: Option<String>,
+    pub auth: SubmitClientPayloadAuth,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SubmitClientPayloadAuth {
+    pub tenant_id: String,
+    pub sub: String,
+    #[serde(default)]
+    pub attrs: std::collections::HashMap<String, String>,
 }

@@ -25,6 +25,7 @@ pub fn router(state: WorkerHttpState) -> Router {
         .route("/api/machine/workers/submit", post(routes::submit))
         .route("/api/machine/workers/register", post(routes::register))
         .route("/api/machine/client-tokens", post(routes::mint_client_token))
+        .route("/api/machine/sessions/submit", post(routes::submit_client_payload))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             worker_auth_middleware,

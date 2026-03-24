@@ -1,5 +1,7 @@
 import { BaseClient } from "./base";
 import type {
+  Event,
+  MachineSubmitPayloadRequest,
   MintClientTokenRequest,
   MintClientTokenResponse,
   WorkerAuthOptions,
@@ -20,6 +22,12 @@ export class WorkerClient extends BaseClient {
 
   async mintClientToken(request: MintClientTokenRequest, auth?: WorkerAuthOptions): Promise<MintClientTokenResponse> {
     return this.post("/api/machine/client-tokens", request, { headers: buildWorkerAuthHeaders(auth) });
+  }
+
+  async *submitClientPayload(request: MachineSubmitPayloadRequest, auth?: WorkerAuthOptions): AsyncGenerator<Event> {
+    yield* this.streamNdjson("/api/machine/sessions/submit", request, {
+      headers: buildWorkerAuthHeaders(auth),
+    });
   }
 }
 

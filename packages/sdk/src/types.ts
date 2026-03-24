@@ -530,6 +530,18 @@ export interface MintClientTokenResponse {
     expires_at: number;
 }
 
+export interface MachineSubmitPayloadRequest {
+    agent_id: string;
+    payload: ClientPayload;
+    session_id?: Uuid;
+    turn_id?: string;
+    auth: {
+        tenant_id: string;
+        sub: string;
+        attrs?: Record<string, string>;
+    };
+}
+
 // ── Worker HTTP API ─────────────────────────────────────────────────────────
 
 export interface WorkerAuthOptions {

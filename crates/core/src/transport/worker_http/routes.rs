@@ -1,18 +1,25 @@
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use std::time::Duration;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::StreamExt;
+use uuid::Uuid;
+use axum::body::Body;
+use axum::http::header;
 
+use crate::identity::ClientIdentity;
 use crate::transport::auth::AuthPrincipal;
 use crate::span::SpanContext;
 use crate::worker::push::PushRegistrationRecord;
 use crate::worker::SubmitDecision;
+use crate::SubmitClientPayload;
 
 use super::WorkerHttpState;
 use super::types::{
     MintClientTokenRequest, MintClientTokenResponse, RegisterRequest, RegisterResponse,
-    SubmitRequest, SubmitResponse,
+    SubmitClientPayloadRequest, SubmitRequest, SubmitResponse,
 };
 
 pub async fn submit(
@@ -134,5 +141,65 @@ pub async fn mint_client_token(
             Json(serde_json::json!({"error": e.to_string()})),
         )
             .into_response(),
+    }
+}
+
+pub async fn submit_client_payload(
+    State(state): State<WorkerHttpState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Json(req): Json<SubmitClientPayloadRequest>,
+) -> Response {
+    if principal.tenant_id != req.auth.tenant_id {
+        let body = serde_json::json!({"error": "tenant mismatch"});
+        return (StatusCode::FORBIDDEN, Json(body)).into_response();
+    }
+    if req.auth.sub.trim().is_empty() {
+        let body = serde_json::json!({"error": "sub is required"});
+        return (StatusCode::BAD_REQUEST, Json(body)).into_response();
+    }
+
+    let session_id = req.session_id.unwrap_or_else(|| Uuid::now_v7().to_string());
+    let auth = ClientIdentity {
+        tenant_id: req.auth.tenant_id.clone(),
+        sub: Some(req.auth.sub),
+        attrs: req.auth.attrs,
+    };
+
+    let result = state
+        .adapter
+        .runtime
+        .submit_client_payload(SubmitClientPayload {
+            session_id,
+            tenant_id: req.auth.tenant_id,
+            auth,
+            agent_id: req.agent_id,
+            payload: req.payload,
+            turn_id: req.turn_id,
+        })
+        .await;
+
+    match result {
+        Ok((_session_id, rx)) => {
+            let stream = ReceiverStream::new(rx).map(|event| {
+                let mut line = serde_json::to_string(&event).unwrap_or_default();
+                line.push('\n');
+                Ok::<_, std::convert::Infallible>(line)
+            });
+
+            Response::builder()
+                .header(header::CONTENT_TYPE, "application/x-ndjson")
+                .body(Body::from_stream(stream))
+                .unwrap()
+                .into_response()
+        }
+        Err(e) => {
+            let message = e.to_string();
+            if message.contains("client subject is required") || message.contains("session access denied") {
+                let body = serde_json::json!({"error": message});
+                return (StatusCode::FORBIDDEN, Json(body)).into_response();
+            }
+            let body = serde_json::json!({"error": message});
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
+        }
     }
 }
