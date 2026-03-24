@@ -33,3 +33,19 @@ pub struct RegisterRequest {
 pub struct RegisterResponse {
     pub ok: bool,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct MintClientTokenRequest {
+    pub tenant_id: String,
+    pub sub: String,
+    #[serde(default)]
+    pub attrs: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub ttl_seconds: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MintClientTokenResponse {
+    pub token: String,
+    pub expires_at: i64,
+}

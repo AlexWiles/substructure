@@ -2,9 +2,6 @@ import type { Event, Decimal, TurnCompleted, ClientPayload, ClientIdentity } fro
 import type { NativeRuntime } from "./runtime";
 import type { Handler } from "./worker";
 import { Worker } from "./worker";
-import { UserClient } from "./user-client";
-import { WorkerClient } from "./worker-client";
-import type { WorkerAuthOptions } from "./types";
 
 export { contentText } from "./types";
 export {
@@ -20,6 +17,8 @@ export {
     withSubAgents,
 } from "./worker";
 export type { MiddlewareFn } from "./worker";
+export { BackendClient } from "./backend-client";
+export { FrontendClient } from "./frontend-client";
 
 // ── RunStream ────────────────────────────────────────────────────────────────
 
@@ -93,43 +92,19 @@ export interface LocalConfig {
     llmPoolSize?: number;
 }
 
-export interface RemoteConfig {
-    /** Substructure server URL */
-    url: string;
-    /** Worker endpoint URL (required for HTTP push transport) */
-    workerUrl?: string;
-    /** Server API authentication for worker + send-message endpoints */
-    workerAuth?: WorkerAuthOptions;
-}
-
-export type SubstructureConfig = LocalConfig | RemoteConfig;
-
-function isRemote(config: SubstructureConfig): config is RemoteConfig {
-    return "url" in config;
-}
+export type SubstructureConfig = LocalConfig;
 
 // ── Substructure ────────────────────────────────────────────────────────────
 
 export class Substructure {
     private config: SubstructureConfig;
     private runtime: NativeRuntime | null = null;
-    private userClient: UserClient | null = null;
-    private workerClient: WorkerClient | null = null;
     private agents: Record<string, Handler> = {};
     private worker: Worker | null = null;
     private registered: Promise<void> | null = null;
 
     constructor(config: SubstructureConfig) {
         this.config = config;
-
-        if (isRemote(config)) {
-            const authHeaders = buildWorkerAuthHeaders(config.workerAuth);
-            this.workerClient = new WorkerClient({
-                baseUrl: config.url,
-                headers: authHeaders,
-            });
-            this.userClient = new UserClient({ baseUrl: config.url, headers: authHeaders });
-        }
     }
 
     agent(handler: Handler): this {
@@ -149,9 +124,6 @@ export class Substructure {
 
     private async getRuntime(): Promise<NativeRuntime> {
         if (this.runtime) return this.runtime;
-        if (isRemote(this.config)) {
-            throw new Error("Cannot get native runtime in remote mode");
-        }
         const { JsRuntime } = await import("@substructure.ai/runtime");
         this.runtime = new JsRuntime({ ...this.config, db: this.config.db ?? ":memory:" });
         return this.runtime;
@@ -161,19 +133,8 @@ export class Substructure {
         if (this.registered) return this.registered;
         this.registered = (async () => {
             const worker = this.ensureWorker();
-            if (isRemote(this.config)) {
-                if (!this.config.workerUrl) {
-                    throw new Error("workerUrl is required for remote mode registration");
-                }
-                await this.workerClient!.register({
-                    agent_ids: worker.agentIds,
-                    transport_type: "http",
-                    config: { endpoint_url: this.config.workerUrl },
-                });
-            } else {
-                const runtime = await this.getRuntime();
-                await worker.register(runtime, "default");
-            }
+            const runtime = await this.getRuntime();
+            await worker.register(runtime, "default");
         })();
         return this.registered;
     }
@@ -190,30 +151,18 @@ export class Substructure {
         const self = this;
         async function* generate(): AsyncGenerator<Event> {
             await self.register();
-            if (isRemote(self.config)) {
-                if (auth) {
-                    throw new Error("submit.auth is only supported for embedded runtime");
-                }
-                yield* self.userClient!.submitPayload({
-                    agent_id: agentId,
-                    payload,
-                    session_id: sessionId,
-                    turn_id: turnId,
-                });
-            } else {
-                if (!auth?.sub) {
-                    throw new Error("submit.auth.sub is required for embedded runtime");
-                }
-                const runtime = await self.getRuntime();
-                for await (const json of runtime.submitPayload(
-                    sessionId,
-                    agentId,
-                    JSON.stringify(payload),
-                    JSON.stringify(auth),
-                    turnId,
-                )) {
-                    yield JSON.parse(json) as Event;
-                }
+            if (!auth?.sub) {
+                throw new Error("submit.auth.sub is required for embedded runtime");
+            }
+            const runtime = await self.getRuntime();
+            for await (const json of runtime.submitPayload(
+                sessionId,
+                agentId,
+                JSON.stringify(payload),
+                JSON.stringify(auth),
+                turnId,
+            )) {
+                yield JSON.parse(json) as Event;
             }
         }
 
@@ -234,11 +183,4 @@ export class Substructure {
             await this.runtime.shutdown();
         }
     }
-}
-
-function buildWorkerAuthHeaders(auth?: WorkerAuthOptions): Record<string, string> | undefined {
-    if (!auth) {
-        return undefined;
-    }
-    return { Authorization: `Bearer ${auth.bearerToken}` };
 }

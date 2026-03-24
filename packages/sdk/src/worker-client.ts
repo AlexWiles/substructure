@@ -1,5 +1,7 @@
 import { BaseClient } from "./base";
 import type {
+  MintClientTokenRequest,
+  MintClientTokenResponse,
   WorkerAuthOptions,
   SubmitRequest,
   SubmitResponse,
@@ -14,6 +16,10 @@ export class WorkerClient extends BaseClient {
 
   async register(request: RegisterRequest, auth?: WorkerAuthOptions): Promise<RegisterResponse> {
     return this.post("/api/machine/workers/register", request, { headers: buildWorkerAuthHeaders(auth) });
+  }
+
+  async mintClientToken(request: MintClientTokenRequest, auth?: WorkerAuthOptions): Promise<MintClientTokenResponse> {
+    return this.post("/api/machine/client-tokens", request, { headers: buildWorkerAuthHeaders(auth) });
   }
 }
 

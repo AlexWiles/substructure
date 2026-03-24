@@ -511,10 +511,23 @@ export interface SessionState {
 export interface SubmitPayloadRequest {
     agent_id: string;
     payload: ClientPayload;
+    /** Required for embedded runtime; ignored/forbidden on remote HTTP submit. */
     auth?: ClientIdentity;
     tenant_id?: string;
     session_id?: Uuid;
     turn_id?: string;
+}
+
+export interface MintClientTokenRequest {
+    tenant_id: string;
+    sub: string;
+    attrs?: Record<string, string>;
+    ttl_seconds?: number;
+}
+
+export interface MintClientTokenResponse {
+    token: string;
+    expires_at: number;
 }
 
 // ── Worker HTTP API ─────────────────────────────────────────────────────────

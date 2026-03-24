@@ -2,7 +2,10 @@ use async_trait::async_trait;
 use axum::http::HeaderMap;
 
 mod resolvers;
-pub use resolvers::{ApiKeyBinding, BearerHashedApiKeyAuthResolver};
+pub use resolvers::{
+    ApiKeyBinding, BearerHashedApiKeyAuthResolver, ClientTokenClaims,
+    ClientTokenIssuerConfig, ClientTokenIssuerError, JwtHs256ClientTokenAuthResolver,
+};
 
 #[derive(Debug, Clone)]
 pub struct AuthPrincipal {

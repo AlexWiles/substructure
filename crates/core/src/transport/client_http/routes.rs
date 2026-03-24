@@ -24,10 +24,12 @@ pub async fn submit_client_payload(
         let body = serde_json::json!({"error": "client subject is required"});
         return (axum::http::StatusCode::FORBIDDEN, Json(body)).into_response();
     };
+    let mut attrs = std::collections::HashMap::new();
+    attrs.insert("source".to_string(), principal.source.to_string());
     let auth = ClientIdentity {
         tenant_id: principal.tenant_id.clone(),
         sub: Some(subject),
-        attrs: std::collections::HashMap::new(),
+        attrs,
     };
 
     let result = state

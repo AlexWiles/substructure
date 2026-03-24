@@ -6,6 +6,8 @@
   "type": "module",
   "exports": {
     ".": "./src/client.ts",
+    "./backend": "./src/backend-client.ts",
+    "./frontend": "./src/frontend-client.ts",
     "./admin": "./src/admin-client.ts",
     "./worker": "./src/worker-client.ts",
     "./user": "./src/user-client.ts",

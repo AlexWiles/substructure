@@ -10,6 +10,7 @@ import {
     withCallLLM,
     withSubAgents,
 } from "@substructure.ai/sdk/substructure";
+import { BackendClient, FrontendClient } from "@substructure.ai/sdk";
 const addRetry = {
     timeout_secs: 20,
     max_retries: 10,
@@ -94,18 +95,35 @@ const weatherHandler = defineAgent("weather-agent")
 
 const WORKER_PORT = 4444;
 
-const sub = new Substructure({
+const backend = new BackendClient({
     url: "http://localhost:8080",
-    workerUrl: `http://localhost:${WORKER_PORT}`,
-    workerAuth: { bearerToken: "dev-worker-key" },
+    apiKey: "dev-worker-key",
 });
+const clientToken = (await backend.mintClientToken({
+    tenantId: "default",
+    sub: "frontend-user",
+    ttlSeconds: 600,
+})).token;
+
+const frontend = new FrontendClient({
+    url: "http://localhost:8080",
+    token: clientToken,
+});
+
+const sub = new Substructure({ db: "remote-agent-example.db" });
 
 sub.agent(weatherHandler);
 sub.agent(mathHandler);
 
 const server = Bun.serve({ port: WORKER_PORT, fetch: sub.fetchHandler() });
 
-const stream = sub.submit({
+await backend.registerWorker({
+    agent_ids: ["weather-agent", "math-agent"],
+    transport_type: "http",
+    config: { endpoint_url: `http://localhost:${WORKER_PORT}` },
+});
+
+const stream = frontend.submit({
     agentId: "weather-agent",
     payload: {
         type: "message",

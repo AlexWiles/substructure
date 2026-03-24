@@ -21,6 +21,9 @@ export class Client {
   }
 }
 
+export { BackendClient } from "./backend-client";
+export { FrontendClient } from "./frontend-client";
+
 export { WorkerClient } from "./worker-client";
 export { AdminClient } from "./admin-client";
 export { UserClient } from "./user-client";

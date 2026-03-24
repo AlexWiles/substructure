@@ -9,7 +9,9 @@ use substructure_core::providers::sqlite::{SqliteConfig, SqliteStore};
 use substructure_core::providers::worker_queue::SqliteWorkerQueue;
 use substructure_core::sub_agent::SubAgentTask;
 use substructure_core::transport::admin_http;
-use substructure_core::transport::auth::{ApiKeyBinding, AuthResolver, BearerHashedApiKeyAuthResolver};
+use substructure_core::transport::auth::{
+    ApiKeyBinding, AuthResolver, BearerHashedApiKeyAuthResolver, JwtHs256ClientTokenAuthResolver,
+};
 use substructure_core::transport::client_http::{self, ClientHttpState};
 use substructure_core::transport::dashboard;
 use substructure_core::transport::http_push::http_transport;
@@ -83,15 +85,20 @@ async fn main() -> anyhow::Result<()> {
             let transports = TransportRegistry::new(vec![http_transport()]);
             let registry = PushRegistry::new(store, transports);
             let adapter = Arc::new(PushAdapter::new(rt.clone(), registry, 16));
+            let client_token_issuer = Arc::new(JwtHs256ClientTokenAuthResolver::new(
+                std::env::var("CLIENT_TOKEN_ISSUER")
+                    .unwrap_or_else(|_| "substructure".to_string()),
+                std::env::var("CLIENT_TOKEN_AUDIENCE")
+                    .unwrap_or_else(|_| "substructure-client".to_string()),
+                std::env::var("CLIENT_TOKEN_HS256_SECRET")
+                    .unwrap_or_else(|_| "dev-client-token-secret-change-me".to_string()),
+            ));
             let bindings = vec![ApiKeyBinding::new(
                 "default",
                 "0b42357e3654716d9915e42b3b44d9c762169d7c4c972906b45a1d8b28dbad2e",
                 "default-dev-key",
             )];
-            let client_auth: Arc<dyn AuthResolver> = Arc::new(
-                BearerHashedApiKeyAuthResolver::new(bindings.clone())
-                    .map_err(anyhow::Error::msg)?,
-            );
+            let client_auth: Arc<dyn AuthResolver> = client_token_issuer.clone();
             let worker_auth: Arc<dyn AuthResolver> = Arc::new(
                 BearerHashedApiKeyAuthResolver::new(bindings)
                     .map_err(anyhow::Error::msg)?,
@@ -106,6 +113,7 @@ async fn main() -> anyhow::Result<()> {
             let worker_routes = worker_http::router(WorkerHttpState {
                 adapter,
                 auth: worker_auth,
+                client_token_issuer,
             });
             let dashboard_routes = dashboard::router();
             let server = SubstructureServer::new(vec![

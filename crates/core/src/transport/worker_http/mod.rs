@@ -10,19 +10,21 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 
-use crate::transport::auth::{AuthError, AuthResolver};
+use crate::transport::auth::{AuthError, AuthResolver, JwtHs256ClientTokenAuthResolver};
 use crate::transport::push::PushAdapter;
 
 #[derive(Clone)]
 pub struct WorkerHttpState {
     pub adapter: Arc<PushAdapter>,
     pub auth: Arc<dyn AuthResolver>,
+    pub client_token_issuer: Arc<JwtHs256ClientTokenAuthResolver>,
 }
 
 pub fn router(state: WorkerHttpState) -> Router {
     Router::new()
         .route("/api/machine/workers/submit", post(routes::submit))
         .route("/api/machine/workers/register", post(routes::register))
+        .route("/api/machine/client-tokens", post(routes::mint_client_token))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             worker_auth_middleware,
