@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -31,7 +30,6 @@ impl std::fmt::Display for PushError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PushRegistrationRecord {
     pub tenant_id: String,
-    pub agent_id: String,
     pub transport_type: String,
     pub config: serde_json::Value,
 }
@@ -39,20 +37,16 @@ pub struct PushRegistrationRecord {
 #[async_trait]
 pub trait PushRegistrationStore: Send + Sync {
     async fn save(&self, record: &PushRegistrationRecord) -> Result<(), String>;
-    async fn remove(&self, tenant_id: &str, agent_id: &str) -> Result<(), String>;
-    async fn get(
-        &self,
-        tenant_id: &str,
-        agent_id: &str,
-    ) -> Result<Option<PushRegistrationRecord>, String>;
-    async fn list_tenants(&self) -> Result<HashMap<String, Vec<String>>, String>;
+    async fn remove(&self, tenant_id: &str) -> Result<(), String>;
+    async fn get(&self, tenant_id: &str) -> Result<Option<PushRegistrationRecord>, String>;
+    async fn list_tenants(&self) -> Result<Vec<String>, String>;
 }
 
 pub type TransportConstructor =
     Box<dyn Fn(serde_json::Value) -> Result<Arc<dyn PushTransport>, String> + Send + Sync>;
 
 pub struct TransportRegistry {
-    constructors: HashMap<String, TransportConstructor>,
+    constructors: std::collections::HashMap<String, TransportConstructor>,
 }
 
 impl TransportRegistry {
@@ -94,18 +88,18 @@ impl PushRegistry {
         self.store.save(&record).await
     }
 
-    pub async fn unregister(&self, tenant_id: &str, agent_id: &str) -> Result<(), String> {
-        self.store.remove(tenant_id, agent_id).await
+    pub async fn unregister(&self, tenant_id: &str) -> Result<(), String> {
+        self.store.remove(tenant_id).await
     }
 
-    pub async fn lookup(&self, tenant_id: &str, agent_id: &str) -> Option<Arc<dyn PushTransport>> {
-        let record = self.store.get(tenant_id, agent_id).await.ok()??;
+    pub async fn lookup(&self, tenant_id: &str) -> Option<Arc<dyn PushTransport>> {
+        let record = self.store.get(tenant_id).await.ok()??;
         self.transports
             .create(&record.transport_type, record.config)
             .ok()
     }
 
-    pub async fn tenants(&self) -> HashMap<String, Vec<String>> {
+    pub async fn tenants(&self) -> Vec<String> {
         self.store.list_tenants().await.unwrap_or_default()
     }
 }

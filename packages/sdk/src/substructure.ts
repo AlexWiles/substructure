@@ -1,6 +1,6 @@
 import type { Event, Decimal, TurnCompleted, ClientPayload, ClientIdentity } from "./types";
 import type { NativeRuntime } from "./runtime";
-import type { Handler } from "./worker";
+import type { Handler, FetchHandlerOptions } from "./worker";
 import { Worker } from "./worker";
 
 export { contentText } from "./types";
@@ -16,7 +16,8 @@ export {
     withCallLLM,
     withSubAgents,
 } from "./worker";
-export type { MiddlewareFn } from "./worker";
+export type { MiddlewareFn, FetchHandlerOptions } from "./worker";
+export { verifyWebhookSignature, WebhookVerificationError } from "./webhook";
 export { BackendClient } from "./backend-client";
 export { FrontendClient } from "./frontend-client";
 
@@ -81,37 +82,28 @@ export class RunStream {
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
-export interface LocalConfig {
-    /** SQLite database path (default: ":memory:") */
-    db?: string;
-    /** OpenRouter API base URL (default: "https://openrouter.ai/api") */
-    openrouterBaseUrl?: string;
-    /** OpenRouter API key */
-    openrouterApiKey?: string;
-    /** Number of concurrent LLM handler tasks (default: 4) */
-    llmPoolSize?: number;
+export interface SubstructureConfig {
+    /** A NativeRuntime instance (e.g. from `@substructure.ai/runtime`) */
+    runtime: NativeRuntime;
 }
-
-export type SubstructureConfig = LocalConfig;
 
 // ── Substructure ────────────────────────────────────────────────────────────
 
 export class Substructure {
-    private config: SubstructureConfig;
-    private runtime: NativeRuntime | null = null;
-    private agents: Record<string, Handler> = {};
+    private runtime: NativeRuntime;
+    private agents: Handler[] = [];
     private worker: Worker | null = null;
     private registered: Promise<void> | null = null;
 
     constructor(config: SubstructureConfig) {
-        this.config = config;
+        this.runtime = config.runtime;
     }
 
     agent(handler: Handler): this {
         if (this.registered) {
             throw new Error("Cannot register agents after submit() has been called");
         }
-        this.agents[handler.agentId] = handler;
+        this.agents.push(handler);
         return this;
     }
 
@@ -122,19 +114,11 @@ export class Substructure {
         return this.worker;
     }
 
-    private async getRuntime(): Promise<NativeRuntime> {
-        if (this.runtime) return this.runtime;
-        const { JsRuntime } = await import("@substructure.ai/runtime");
-        this.runtime = new JsRuntime({ ...this.config, db: this.config.db ?? ":memory:" });
-        return this.runtime;
-    }
-
     private register(): Promise<void> {
         if (this.registered) return this.registered;
         this.registered = (async () => {
             const worker = this.ensureWorker();
-            const runtime = await this.getRuntime();
-            await worker.register(runtime, "default");
+            await worker.register(this.runtime, "default");
         })();
         return this.registered;
     }
@@ -154,8 +138,7 @@ export class Substructure {
             if (!auth?.sub) {
                 throw new Error("submit.auth.sub is required for embedded runtime");
             }
-            const runtime = await self.getRuntime();
-            for await (const json of runtime.submitPayload(
+            for await (const json of self.runtime.submitPayload(
                 sessionId,
                 agentId,
                 JSON.stringify(payload),
@@ -174,8 +157,8 @@ export class Substructure {
         return this.submitPayload(agentId, payload, options);
     }
 
-    fetchHandler(): (req: Request) => Promise<Response> {
-        return this.ensureWorker().fetchHandler();
+    fetchHandler(options?: FetchHandlerOptions): (req: Request) => Promise<Response> {
+        return this.ensureWorker().fetchHandler(options);
     }
 
     async shutdown(): Promise<void> {

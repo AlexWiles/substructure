@@ -1,15 +1,17 @@
 import { Substructure, defineAgent, withState, withLogging, contentText } from "@substructure.ai/sdk/substructure";
 import type { MiddlewareFn } from "@substructure.ai/sdk/substructure";
 import type { ClientIdentity, WorkerAction, Message } from "@substructure.ai/sdk/types";
+import { EmbeddedRuntime } from "@substructure.ai/runtime";
 import { z } from "zod";
 import { randomUUID } from "crypto";
 
 // ── Schema ───────────────────────────────────────────────────────────────────
 //
-const sub = new Substructure({
+const runtime = new EmbeddedRuntime({
     db: "data.db",
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
 });
+const sub = new Substructure({ runtime });
 
 const auth: ClientIdentity = {
     tenant_id: "default",

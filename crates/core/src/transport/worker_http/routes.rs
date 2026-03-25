@@ -64,26 +64,51 @@ pub async fn register(
     Extension(principal): Extension<AuthPrincipal>,
     Json(req): Json<RegisterRequest>,
 ) -> impl IntoResponse {
-    for agent_id in req.agent_ids {
-        let record = PushRegistrationRecord {
-            tenant_id: principal.tenant_id.clone(),
-            agent_id,
-            transport_type: req.transport_type.clone(),
-            config: req.config.clone(),
-        };
-        if let Err(e) = state.adapter.register(record).await {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(SubmitResponse {
-                    ok: false,
-                    error: Some(e),
-                }),
-            )
-                .into_response();
+    let mut config = req.config.clone();
+    let mut signing_secret: Option<String> = None;
+
+    if req.transport_type == "http" {
+        if let Some(obj) = config.as_object_mut() {
+            let has_secret = obj
+                .get("signing_secret")
+                .is_some_and(|v| v.is_string() && !v.as_str().unwrap_or("").is_empty());
+            if has_secret {
+                signing_secret = obj
+                    .get("signing_secret")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+            } else {
+                let secret = hex::encode(rand::random::<[u8; 32]>());
+                obj.insert(
+                    "signing_secret".to_string(),
+                    serde_json::Value::String(secret.clone()),
+                );
+                signing_secret = Some(secret);
+            }
         }
     }
 
-    Json(RegisterResponse { ok: true }).into_response()
+    let record = PushRegistrationRecord {
+        tenant_id: principal.tenant_id.clone(),
+        transport_type: req.transport_type.clone(),
+        config: config.clone(),
+    };
+    if let Err(e) = state.adapter.register(record).await {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(SubmitResponse {
+                ok: false,
+                error: Some(e),
+            }),
+        )
+            .into_response();
+    }
+
+    Json(RegisterResponse {
+        ok: true,
+        signing_secret,
+    })
+    .into_response()
 }
 
 pub async fn mint_client_token(

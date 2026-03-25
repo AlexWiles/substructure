@@ -27,22 +27,19 @@ impl PushAdapter {
 
     pub async fn start(&self) {
         let tenants = self.registry.tenants().await;
-        for (tenant_id, agent_ids) in tenants {
-            self.spawn_loop(tenant_id, agent_ids);
+        for tenant_id in tenants {
+            self.spawn_loop(tenant_id);
         }
     }
 
     pub async fn register(&self, record: PushRegistrationRecord) -> Result<(), String> {
         let tenant_id = record.tenant_id.clone();
         self.registry.register(record).await?;
-        let tenants = self.registry.tenants().await;
-        if let Some(agent_ids) = tenants.get(&tenant_id) {
-            self.spawn_loop(tenant_id, agent_ids.clone());
-        }
+        self.spawn_loop(tenant_id);
         Ok(())
     }
 
-    fn spawn_loop(&self, tenant_id: String, agent_ids: Vec<String>) {
+    fn spawn_loop(&self, tenant_id: String) {
         let mut handles = self.handles.lock().unwrap();
         if let Some(existing) = handles.get(&tenant_id) {
             existing.abort();
@@ -56,7 +53,6 @@ impl PushAdapter {
         let handle = tokio::spawn(async move {
             let filter = DequeueFilter {
                 tenant_id,
-                agent_ids,
             };
 
             loop {
@@ -84,7 +80,7 @@ impl PushAdapter {
                     let _permit = permit;
 
                     let transport = match registry
-                        .lookup(&decision.tenant_id, &decision.agent_id)
+                        .lookup(&decision.tenant_id)
                         .await
                     {
                         Some(t) => t,

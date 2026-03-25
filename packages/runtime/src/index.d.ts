@@ -9,7 +9,7 @@ export interface RuntimeOptions {
   llmPoolSize?: number;
 }
 
-export class JsRuntime {
+export class EmbeddedRuntime {
   constructor(options: RuntimeOptions);
 
   registerWorker(

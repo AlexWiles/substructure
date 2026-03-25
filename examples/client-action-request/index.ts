@@ -11,6 +11,7 @@ import type {
     Message,
     WorkerAction,
 } from "@substructure.ai/sdk/types";
+import { EmbeddedRuntime } from "@substructure.ai/runtime";
 
 const TOOL_CATALOG = [
     {
@@ -90,7 +91,8 @@ const actionAgent = defineAgent("action-demo")
         return { actions };
     });
 
-const sub = new Substructure({ db: "action-request-example.db" });
+const runtime = new EmbeddedRuntime({ db: "action-request-example.db" });
+const sub = new Substructure({ runtime });
 sub.agent(actionAgent);
 
 const auth: ClientIdentity = {

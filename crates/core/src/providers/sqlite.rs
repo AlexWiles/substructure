@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -7,7 +8,7 @@ use sea_query::{Expr, ExprTrait, Iden, Order, Query, SqliteQueryBuilder};
 
 use std::sync::Arc as StdArc;
 
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Notify};
 
 use crate::event_store::{
     AggregateFilter, AggregateSort, AggregateSummary, AppendInput, Event, EventFilter, EventStore,
@@ -16,6 +17,7 @@ use crate::event_store::{
 use crate::processor::{CheckpointError, ProcessorCheckpoint, ProcessorCheckpointStore};
 use crate::span::SpanContext;
 use crate::wake::{WakeScheduleItem, WakeScheduleStore};
+use crate::worker::{DequeueFilter, WorkerDecisionRequest, WorkerQueue};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -53,11 +55,9 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_wake_at ON snapshots (wake_at);
 CREATE INDEX IF NOT EXISTS idx_snapshots_last_event ON snapshots (last_event_at);
 
 CREATE TABLE IF NOT EXISTS push_registrations (
-    tenant_id       TEXT NOT NULL,
-    agent_id        TEXT NOT NULL,
+    tenant_id       TEXT PRIMARY KEY,
     transport_type  TEXT NOT NULL,
-    config          TEXT NOT NULL,
-    PRIMARY KEY (tenant_id, agent_id)
+    config          TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS worker_queue (
@@ -183,6 +183,7 @@ pub struct SqliteStore {
     writer: Arc<Mutex<Connection>>,
     reader: ReaderConfig,
     tx: broadcast::Sender<StdArc<Vec<Event>>>,
+    worker_queue_notify: Notify,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -278,6 +279,7 @@ impl SqliteStore {
             writer: Arc::new(Mutex::new(writer)),
             reader,
             tx,
+            worker_queue_notify: Notify::new(),
         })
     }
 }
@@ -755,6 +757,117 @@ fn spawn_err(e: tokio::task::JoinError) -> StoreError {
     StoreError::Internal(format!("spawn_blocking: {e}"))
 }
 
+const WORKER_DEQUEUE_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+fn worker_queue_enqueue(conn: &Connection, decision: WorkerDecisionRequest) -> Result<(), String> {
+    let payload = serde_json::to_string(&decision).map_err(|e| e.to_string())?;
+    let enqueued_at = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO worker_queue (decision_id, tenant_id, agent_id, payload, enqueued_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(decision_id) DO UPDATE SET
+            tenant_id = excluded.tenant_id,
+            agent_id = excluded.agent_id,
+            payload = excluded.payload,
+            enqueued_at = excluded.enqueued_at",
+        rusqlite::params![
+            decision.decision_id,
+            decision.tenant_id,
+            decision.agent_id,
+            payload,
+            enqueued_at,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn worker_queue_dequeue(
+    conn: &mut Connection,
+    tenant_id: &str,
+) -> Result<Option<WorkerDecisionRequest>, String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+    let row = tx
+        .query_row(
+            "SELECT decision_id, payload
+             FROM worker_queue
+             WHERE tenant_id = ?1
+             ORDER BY enqueued_at ASC, decision_id ASC
+             LIMIT 1",
+            rusqlite::params![tenant_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+
+    let Some((decision_id, payload)) = row else {
+        tx.commit().map_err(|e| e.to_string())?;
+        return Ok(None);
+    };
+
+    tx.execute(
+        "DELETE FROM worker_queue WHERE decision_id = ?1",
+        rusqlite::params![decision_id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+
+    let decision = serde_json::from_str::<WorkerDecisionRequest>(&payload).map_err(|e| e.to_string())?;
+    Ok(Some(decision))
+}
+
+#[async_trait]
+impl WorkerQueue for SqliteStore {
+    async fn enqueue(&self, decision: WorkerDecisionRequest) {
+        let writer = self.writer.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let conn = writer.lock().map_err(|e| e.to_string())?;
+            worker_queue_enqueue(&conn, decision)
+        })
+        .await;
+
+        match result {
+            Ok(Ok(())) => self.worker_queue_notify.notify_waiters(),
+            Ok(Err(err)) => {
+                tracing::error!(error = %err, "failed to enqueue worker decision");
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "worker queue enqueue task failed");
+            }
+        }
+    }
+
+    async fn dequeue(&self, filter: &DequeueFilter) -> Option<WorkerDecisionRequest> {
+        loop {
+            let notified = self.worker_queue_notify.notified();
+            let writer = self.writer.clone();
+            let tenant_id = filter.tenant_id.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let mut conn = writer.lock().map_err(|e| e.to_string())?;
+                worker_queue_dequeue(&mut conn, &tenant_id)
+            })
+            .await;
+
+            match result {
+                Ok(Ok(Some(decision))) => return Some(decision),
+                Ok(Ok(None)) => {}
+                Ok(Err(err)) => {
+                    tracing::error!(error = %err, "failed to dequeue worker decision");
+                }
+                Err(err) => {
+                    tracing::error!(error = %err, "worker queue dequeue task failed");
+                }
+            }
+
+            tokio::select! {
+                _ = notified => {}
+                _ = tokio::time::sleep(WORKER_DEQUEUE_POLL_INTERVAL) => {}
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl EventStore for SqliteStore {
     async fn append(&self, input: AppendInput) -> Result<(), StoreError> {
@@ -1176,14 +1289,13 @@ impl PushRegistrationStore for SqliteStore {
             let conn = writer.lock().map_err(|e| e.to_string())?;
             let config_str = serde_json::to_string(&record.config).map_err(|e| e.to_string())?;
             conn.execute(
-                "INSERT INTO push_registrations (tenant_id, agent_id, transport_type, config)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(tenant_id, agent_id) DO UPDATE SET
+                "INSERT INTO push_registrations (tenant_id, transport_type, config)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(tenant_id) DO UPDATE SET
                      transport_type = excluded.transport_type,
                      config = excluded.config",
                 rusqlite::params![
                     record.tenant_id,
-                    record.agent_id,
                     record.transport_type,
                     config_str
                 ],
@@ -1195,15 +1307,14 @@ impl PushRegistrationStore for SqliteStore {
         .map_err(|e| e.to_string())?
     }
 
-    async fn remove(&self, tenant_id: &str, agent_id: &str) -> Result<(), String> {
+    async fn remove(&self, tenant_id: &str) -> Result<(), String> {
         let tenant_id = tenant_id.to_string();
-        let agent_id = agent_id.to_string();
         let writer = self.writer.clone();
         tokio::task::spawn_blocking(move || {
             let conn = writer.lock().map_err(|e| e.to_string())?;
             conn.execute(
-                "DELETE FROM push_registrations WHERE tenant_id = ?1 AND agent_id = ?2",
-                rusqlite::params![tenant_id, agent_id],
+                "DELETE FROM push_registrations WHERE tenant_id = ?1",
+                rusqlite::params![tenant_id],
             )
             .map_err(|e| e.to_string())?;
             Ok(())
@@ -1212,21 +1323,16 @@ impl PushRegistrationStore for SqliteStore {
         .map_err(|e| e.to_string())?
     }
 
-    async fn get(
-        &self,
-        tenant_id: &str,
-        agent_id: &str,
-    ) -> Result<Option<PushRegistrationRecord>, String> {
+    async fn get(&self, tenant_id: &str) -> Result<Option<PushRegistrationRecord>, String> {
         let tenant_id = tenant_id.to_string();
-        let agent_id = agent_id.to_string();
         let reader = self.reader.clone();
         tokio::task::spawn_blocking(move || {
             let conn = reader.open().map_err(|e| e.to_string())?;
             let result = conn
                 .query_row(
                     "SELECT transport_type, config FROM push_registrations
-                     WHERE tenant_id = ?1 AND agent_id = ?2",
-                    rusqlite::params![tenant_id, agent_id],
+                     WHERE tenant_id = ?1",
+                    rusqlite::params![tenant_id],
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                 )
                 .optional()
@@ -1236,7 +1342,6 @@ impl PushRegistrationStore for SqliteStore {
                     let config = serde_json::from_str(&config_str).map_err(|e| e.to_string())?;
                     Ok(Some(PushRegistrationRecord {
                         tenant_id,
-                        agent_id,
                         transport_type,
                         config,
                     }))
@@ -1248,22 +1353,19 @@ impl PushRegistrationStore for SqliteStore {
         .map_err(|e| e.to_string())?
     }
 
-    async fn list_tenants(&self) -> Result<HashMap<String, Vec<String>>, String> {
+    async fn list_tenants(&self) -> Result<Vec<String>, String> {
         let reader = self.reader.clone();
         tokio::task::spawn_blocking(move || {
             let conn = reader.open().map_err(|e| e.to_string())?;
             let mut stmt = conn
-                .prepare("SELECT tenant_id, agent_id FROM push_registrations")
+                .prepare("SELECT tenant_id FROM push_registrations")
                 .map_err(|e| e.to_string())?;
             let rows = stmt
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })
+                .query_map([], |row| row.get::<_, String>(0))
                 .map_err(|e| e.to_string())?;
-            let mut result: HashMap<String, Vec<String>> = HashMap::new();
+            let mut result = Vec::new();
             for row in rows {
-                let (tenant_id, agent_id) = row.map_err(|e| e.to_string())?;
-                result.entry(tenant_id).or_default().push(agent_id);
+                result.push(row.map_err(|e| e.to_string())?);
             }
             Ok(result)
         })

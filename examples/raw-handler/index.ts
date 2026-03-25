@@ -7,6 +7,7 @@ import type {
     Message,
     RetryPolicy,
 } from "@substructure.ai/sdk/types";
+import { EmbeddedRuntime } from "@substructure.ai/runtime";
 
 type State = {
     messages: Message[];
@@ -181,10 +182,11 @@ const weatherHandler = {
     toDecisionHandler: () => rawDecision,
 };
 
-const sub = new Substructure({
+const runtime = new EmbeddedRuntime({
     db: "data.db",
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
 });
+const sub = new Substructure({ runtime });
 
 const auth: ClientIdentity = {
     tenant_id: "default",

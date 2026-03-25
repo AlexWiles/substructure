@@ -5,6 +5,7 @@ import type {
     SpanContext,
 } from "./types";
 import type { NativeRuntime } from "./runtime";
+import { verifyWebhookSignature } from "./webhook";
 
 // ── Handler types ────────────────────────────────────────────────────────────
 
@@ -140,16 +141,25 @@ export function defineAgent(agentId: string): HandlerBuilder<{}> {
     return new HandlerBuilder(agentId);
 }
 
+// ── Fetch handler options ───────────────────────────────────────────────────
+
+export interface FetchHandlerOptions {
+    /** Webhook signing secret for signature verification */
+    signingSecret?: string;
+    /** Tolerance in seconds for timestamp validation (default: 300) */
+    tolerance?: number;
+}
+
 // ── Worker (internal) ───────────────────────────────────────────────────────
 
 export class Worker {
     readonly agentIds: string[];
     private handlers: Map<string, DecisionHandler>;
 
-    constructor(agents: Record<string, Handler>) {
+    constructor(agents: Handler[]) {
         this.handlers = new Map();
-        for (const [id, handler] of Object.entries(agents)) {
-            this.handlers.set(id, handler.toDecisionHandler());
+        for (const handler of agents) {
+            this.handlers.set(handler.agentId, handler.toDecisionHandler());
         }
         this.agentIds = [...this.handlers.keys()];
     }
@@ -170,10 +180,24 @@ export class Worker {
     /**
      * Returns a fetch-compatible handler: (Request) => Promise<Response>.
      * Works with Bun.serve, Deno.serve, Cloudflare Workers, or any Node adapter.
+     *
+     * When `options.signingSecret` is provided, incoming requests are verified
+     * against the HMAC-SHA256 signature in the `X-Substructure-Signature` header.
      */
-    fetchHandler(): (req: Request) => Promise<Response> {
+    fetchHandler(options?: FetchHandlerOptions): (req: Request) => Promise<Response> {
         return async (req: Request) => {
-            const decision = (await req.json()) as WorkerDecisionRequestWire;
+            let decision: WorkerDecisionRequestWire;
+
+            if (options?.signingSecret) {
+                decision = await verifyWebhookSignature<WorkerDecisionRequestWire>(
+                    req,
+                    options.signingSecret,
+                    { tolerance: options.tolerance },
+                );
+            } else {
+                decision = (await req.json()) as WorkerDecisionRequestWire;
+            }
+
             const submit = await this.handleDecision(decision);
             return Response.json(submit);
         };

@@ -11,6 +11,7 @@ import {
     withSubAgents,
 } from "@substructure.ai/sdk/substructure";
 import { BackendClient, FrontendClient } from "@substructure.ai/sdk";
+import { EmbeddedRuntime } from "@substructure.ai/runtime";
 const addRetry = {
     timeout_secs: 20,
     max_retries: 10,
@@ -110,7 +111,8 @@ const frontend = new FrontendClient({
     token: clientToken,
 });
 
-const sub = new Substructure({ db: "remote-agent-example.db" });
+const runtime = new EmbeddedRuntime({ db: "remote-agent-example.db" });
+const sub = new Substructure({ runtime });
 
 sub.agent(weatherHandler);
 sub.agent(mathHandler);
@@ -118,7 +120,6 @@ sub.agent(mathHandler);
 const server = Bun.serve({ port: WORKER_PORT, fetch: sub.fetchHandler() });
 
 await backend.registerWorker({
-    agent_ids: ["weather-agent", "math-agent"],
     transport_type: "http",
     config: { endpoint_url: `http://localhost:${WORKER_PORT}` },
 });

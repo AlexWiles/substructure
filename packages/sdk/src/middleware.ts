@@ -26,13 +26,10 @@ export function withState(): MiddlewareFn<unknown> {
         const raw = ctx.request.worker_state;
         ctx.state =
             raw && raw !== ""
-                ? JSON.parse(Buffer.from(raw, "base64").toString("utf-8"))
+                ? JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(raw), c => c.charCodeAt(0))))
                 : {};
         const result = await next(ctx);
-        ctx.request.worker_state = Buffer.from(
-            JSON.stringify(ctx.state),
-            "utf-8",
-        ).toString("base64");
+        ctx.request.worker_state = btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(ctx.state))));
         return result;
     };
 }
@@ -238,11 +235,32 @@ export function withTools<S>(
                 }
             }
 
-            // Track pending tool calls from LLM response
+            // Track pending tool calls from LLM response and emit call_tool actions
             if (ctx.trigger.type === "llm_response") {
                 const toolCalls = ctx.trigger.message.tool_calls;
                 if (toolCalls && toolCalls.length > 0) {
                     ctx.state.pendingToolCalls = toolCalls.map((tc) => tc.id);
+
+                    const callToolActions: WorkerAction[] = toolCalls.map((tc) => {
+                        const def = tools[tc.function.name];
+                        return {
+                            type: "call_tool" as const,
+                            tool_call_id: tc.id,
+                            name: tc.function.name,
+                            arguments: tc.function.arguments,
+                            handler: "worker" as const,
+                            retry: def?.retry ?? {
+                                timeout_secs: 120,
+                                max_retries: 3,
+                                backoff_base_secs: 1,
+                                backoff_max_secs: 10,
+                            },
+                        };
+                    });
+
+                    return {
+                        actions: [...callToolActions, ...downstream.actions],
+                    };
                 }
             }
 

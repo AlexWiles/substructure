@@ -28,7 +28,6 @@ pub struct WorkerDecisionRequest {
 
 pub struct DequeueFilter {
     pub tenant_id: String,
-    pub agent_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -7,7 +7,7 @@ import type {
 // ── Runtime interface ────────────────────────────────────────────────────────
 
 /**
- * Minimal interface that the NAPI JsRuntime must satisfy.
+ * Minimal interface that the NAPI EmbeddedRuntime must satisfy.
  * This avoids a hard dependency on @substructure.ai/runtime.
  */
 export interface NativeRuntime {
@@ -49,8 +49,8 @@ export interface InProcessRuntimeOptions {
    * The native runtime instance from @substructure.ai/runtime.
    *
    * ```ts
-   * import { JsRuntime } from '@substructure.ai/runtime'
-   * const native = new JsRuntime()
+   * import { EmbeddedRuntime } from '@substructure.ai/runtime'
+   * const native = new EmbeddedRuntime()
    * const runtime = new InProcessRuntime({ native })
    * ```
    */
@@ -61,11 +61,11 @@ export interface InProcessRuntimeOptions {
  * Wraps the NAPI runtime into the same interface as the HTTP clients.
  *
  * ```ts
- * import { JsRuntime } from '@substructure.ai/runtime'
+ * import { EmbeddedRuntime } from '@substructure.ai/runtime'
  * import { InProcessRuntime } from '@substructure.ai/sdk/runtime'
  * import { defineAgent } from '@substructure.ai/sdk/substructure'
  *
- * const runtime = new InProcessRuntime({ native: new JsRuntime() })
+ * const runtime = new InProcessRuntime({ native: new EmbeddedRuntime() })
  * const worker = defineAgent("my-agent")
  * await runtime.register(worker, 'default')
  *

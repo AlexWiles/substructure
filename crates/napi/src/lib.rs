@@ -33,13 +33,13 @@ pub struct RuntimeOptions {
 
 /// The Substructure runtime, running in-process.
 #[napi]
-pub struct JsRuntime {
+pub struct EmbeddedRuntime {
     inner: Arc<Runtime>,
     worker_handles: Mutex<HashMap<String, JoinHandle<()>>>,
 }
 
 #[napi]
-impl JsRuntime {
+impl EmbeddedRuntime {
     #[napi(constructor)]
     pub fn new(options: RuntimeOptions) -> Result<Self> {
         // Initialize tracing (ignore if already set)
@@ -101,17 +101,15 @@ impl JsRuntime {
     pub async fn register_worker(
         &self,
         tenant_id: String,
-        agent_ids: Vec<String>,
+        #[allow(unused)] agent_ids: Vec<String>,
         callback: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
     ) -> Result<()> {
         let runtime = self.inner.clone();
         let filter_tenant = tenant_id.clone();
-        let filter_agents = agent_ids.clone();
 
         let handle = tokio::spawn(async move {
             let filter = DequeueFilter {
                 tenant_id: filter_tenant,
-                agent_ids: filter_agents,
             };
 
             loop {
@@ -179,7 +177,7 @@ impl JsRuntime {
             }
         });
 
-        let key = format!("{tenant_id}:{}", agent_ids.join(","));
+        let key = tenant_id;
         let mut handles = self.worker_handles.lock().await;
         if let Some(old) = handles.insert(key, handle) {
             old.abort();

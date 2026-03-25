@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use clap::Parser;
+use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 
 use substructure_core::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use substructure_core::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
 use substructure_core::providers::sqlite::{SqliteConfig, SqliteStore};
-use substructure_core::providers::worker_queue::SqliteWorkerQueue;
 use substructure_core::sub_agent::SubAgentTask;
 use substructure_core::transport::admin_http;
 use substructure_core::transport::auth::{
@@ -18,9 +18,13 @@ use substructure_core::transport::http_push::http_transport;
 use substructure_core::transport::push::PushAdapter;
 use substructure_core::transport::server::SubstructureServer;
 use substructure_core::transport::worker_http::{self, WorkerHttpState};
-use substructure_core::worker::push::{PushRegistry, TransportRegistry};
+use substructure_core::worker::push::{PushRegistrationRecord, PushRegistry, TransportRegistry};
 use substructure_core::{start, RuntimeConfig};
 use substructure_core::llm::LlmTask;
+
+fn required_env(name: &str) -> String {
+    std::env::var(name).unwrap_or_else(|_| panic!("{name} environment variable is required"))
+}
 
 #[derive(Parser)]
 #[command(name = "substructure", version)]
@@ -39,6 +43,9 @@ enum Command {
         port: u16,
         #[arg(long, default_value = "data.db")]
         db: String,
+        /// Pre-register an HTTP worker at startup
+        #[arg(long)]
+        worker_url: Option<String>,
     },
 }
 
@@ -53,13 +60,12 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Serve { host, port, db } => {
+        Command::Serve { host, port, db, worker_url } => {
             let store = Arc::new(SqliteStore::new(SqliteConfig {
                 path: db.clone(),
                 busy_timeout: std::time::Duration::from_secs(5),
             })?);
             let config = RuntimeConfig::default();
-            let queue = Arc::new(SqliteWorkerQueue::new(&db).map_err(anyhow::Error::msg)?);
             let llm_task_queue: Arc<dyn TaskQueue<LlmTask>> =
                 Arc::new(ShardedInMemoryQueue::new(config.llm_executor_workers as u32));
             let sub_agent_task_queue: Arc<dyn TaskQueue<SubAgentTask>> =
@@ -67,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
             let llm_provider = Arc::new(OpenRouterProvider::new(OpenRouterConfig {
                 base_url: std::env::var("OPENROUTER_BASE_URL")
                     .unwrap_or_else(|_| "https://openrouter.ai/api".to_string()),
-                api_key: std::env::var("OPENROUTER_API_KEY").unwrap_or_default(),
+                api_key: required_env("OPENROUTER_API_KEY"),
             }));
 
             let rt = start(
@@ -75,7 +81,7 @@ async fn main() -> anyhow::Result<()> {
                 llm_provider,
                 llm_task_queue,
                 sub_agent_task_queue,
-                queue,
+                store.clone(),
                 store.clone(),
                 store.clone(),
                 store.clone(),
@@ -86,17 +92,17 @@ async fn main() -> anyhow::Result<()> {
             let registry = PushRegistry::new(store, transports);
             let adapter = Arc::new(PushAdapter::new(rt.clone(), registry, 16));
             let client_token_issuer = Arc::new(JwtHs256ClientTokenAuthResolver::new(
-                std::env::var("CLIENT_TOKEN_ISSUER")
-                    .unwrap_or_else(|_| "substructure".to_string()),
-                std::env::var("CLIENT_TOKEN_AUDIENCE")
-                    .unwrap_or_else(|_| "substructure-client".to_string()),
-                std::env::var("CLIENT_TOKEN_HS256_SECRET")
-                    .unwrap_or_else(|_| "dev-client-token-secret-change-me".to_string()),
+                required_env("CLIENT_TOKEN_ISSUER"),
+                required_env("CLIENT_TOKEN_AUDIENCE"),
+                required_env("CLIENT_TOKEN_HS256_SECRET"),
             ));
+
+            let worker_api_key = required_env("WORKER_API_KEY");
+            let worker_key_hash = hex::encode(Sha256::digest(worker_api_key.as_bytes()));
             let bindings = vec![ApiKeyBinding::new(
                 "default",
-                "0b42357e3654716d9915e42b3b44d9c762169d7c4c972906b45a1d8b28dbad2e",
-                "default-dev-key",
+                worker_key_hash,
+                "worker",
             )];
             let client_auth: Arc<dyn AuthResolver> = client_token_issuer.clone();
             let worker_auth: Arc<dyn AuthResolver> = Arc::new(
@@ -104,6 +110,15 @@ async fn main() -> anyhow::Result<()> {
                     .map_err(anyhow::Error::msg)?,
             );
             adapter.start().await;
+
+            if let Some(ref url) = worker_url {
+                adapter.register(PushRegistrationRecord {
+                    tenant_id: "default".into(),
+                    transport_type: "http".into(),
+                    config: serde_json::json!({ "endpoint_url": url }),
+                }).await.expect("failed to register startup worker");
+                tracing::info!(url, "startup worker registered");
+            }
 
             let admin_routes = admin_http::router(rt.clone());
             let client_routes = client_http::router(ClientHttpState {

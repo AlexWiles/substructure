@@ -40,11 +40,11 @@ function loadBinding() {
 }
 
 const binding = loadBinding();
-const NativeJsRuntime = binding.JsRuntime;
+const NativeRuntime = binding.EmbeddedRuntime;
 
-export class JsRuntime {
+export class EmbeddedRuntime {
   constructor(options) {
-    this._native = new NativeJsRuntime(options);
+    this._native = new NativeRuntime(options);
   }
 
   registerWorker(tenantId, agentIds, callback) {

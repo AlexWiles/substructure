@@ -578,11 +578,11 @@ export interface SubmitResponse {
 }
 
 export interface RegisterRequest {
-    agent_ids: string[];
     transport_type: string;
     config: unknown;
 }
 
 export interface RegisterResponse {
     ok: boolean;
+    signing_secret?: string;
 }

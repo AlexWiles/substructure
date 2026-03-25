@@ -10,6 +10,7 @@ import {
     withCallLLM,
 } from "@substructure.ai/sdk/substructure";
 import type { ClientIdentity } from "@substructure.ai/sdk/types";
+import { EmbeddedRuntime } from "@substructure.ai/runtime";
 import { appendFileSync, existsSync } from "fs";
 import { randomUUID } from "crypto";
 
@@ -66,9 +67,11 @@ const receiptHandler = defineAgent(RECEIPT_AGENT_ID)
         retry: receiptRetry,
     })));
 
-const sub = new Substructure({
+const runtime = new EmbeddedRuntime({
+    db: ":memory:",
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
 });
+const sub = new Substructure({ runtime });
 
 const auth: ClientIdentity = {
     tenant_id: "default",

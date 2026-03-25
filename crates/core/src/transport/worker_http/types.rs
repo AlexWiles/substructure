@@ -25,7 +25,6 @@ pub struct SubmitResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct RegisterRequest {
-    pub agent_ids: Vec<String>,
     pub transport_type: String,
     pub config: serde_json::Value,
 }
@@ -33,6 +32,8 @@ pub struct RegisterRequest {
 #[derive(Debug, Serialize)]
 pub struct RegisterResponse {
     pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signing_secret: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

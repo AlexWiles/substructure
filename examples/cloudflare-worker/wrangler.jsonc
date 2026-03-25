@@ -1,0 +1,10 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "substructure-worker",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-03-24",
+  "observability": {
+    "enabled": true
+  }
+  // Set secrets via: wrangler secret put SIGNING_SECRET
+}
