@@ -16,7 +16,7 @@ export {
     withCallLLM,
     withSubAgents,
 } from "./worker";
-export type { MiddlewareFn, FetchHandlerOptions } from "./worker";
+export type { AgentRequest, AgentResponse, MiddlewareFn, FetchHandlerOptions } from "./worker";
 export { verifyWebhookSignature, WebhookVerificationError } from "./webhook";
 export { BackendClient } from "./backend-client";
 export { FrontendClient } from "./frontend-client";

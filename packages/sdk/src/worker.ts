@@ -18,21 +18,23 @@ export type DecisionHandler = (
     request: WorkerDecisionRequestWire
 ) => Promise<DecisionResult>;
 
-export interface HandlerContext<S = unknown> {
+export interface AgentRequest<S = unknown> {
     agentId: string;
     trigger: WorkerDecisionRequestWire["trigger"];
     state: S;
-    request: WorkerDecisionRequestWire;
+    wire: WorkerDecisionRequestWire;
 }
 
-export interface HandlerResult {
+export interface AgentResponse {
     actions: WorkerAction[];
+    state: unknown;
+    workerState?: string;
 }
 
 /** Terminal handler: receives context with state S, returns actions. */
 export type Next<S = unknown> = (
-    ctx: HandlerContext<S>,
-) => Promise<HandlerResult> | HandlerResult;
+    req: AgentRequest<S>,
+) => Promise<AgentResponse> | AgentResponse;
 
 /**
  * Middleware function. Receives the current context and a `next` callback.
@@ -41,7 +43,7 @@ export type Next<S = unknown> = (
  * Most middleware is passthrough (In=Out). State providers transform the type.
  */
 export interface MiddlewareFn<In = unknown, Out = In> {
-    (ctx: HandlerContext<In>, next: Next<Out>): Promise<HandlerResult> | HandlerResult;
+    (req: AgentRequest<In>, next: Next<Out>): Promise<AgentResponse> | AgentResponse;
     /** Type brand carrying the output state type — never set at runtime. */
     readonly _out?: Out;
 }
@@ -59,7 +61,7 @@ export interface Handler {
  * Middleware that contributes state keys. The `_contributes` brand
  * tells the builder to intersect `A` onto the current state type.
  */
-export type StateContributor<A> = MiddlewareFn<unknown, unknown> & { readonly _contributes: A };
+export type StateContributor<A> = MiddlewareFn<any, any> & { readonly _contributes: A };
 
 export {
     withState,
@@ -87,7 +89,7 @@ export type {
 type UnknownMiddleware = MiddlewareFn<unknown, unknown>;
 type UnknownNext = Next<unknown>;
 
-const DEFAULT_FALLBACK: UnknownNext = () => ({ actions: [] });
+const DEFAULT_FALLBACK: UnknownNext = (req) => ({ actions: [], state: req.state });
 
 class HandlerBuilder<S> implements Handler {
     readonly agentId: string;
@@ -111,16 +113,16 @@ class HandlerBuilder<S> implements Handler {
         const chain = composeChain(middlewares, DEFAULT_FALLBACK);
 
         return async (request: WorkerDecisionRequestWire) => {
-            const ctx: HandlerContext<unknown> = {
+            const req: AgentRequest<unknown> = {
                 agentId: request.agent_id,
                 trigger: request.trigger,
                 state: undefined,
-                request,
+                wire: request,
             };
-            const result = await chain(ctx);
+            const result = await chain(req);
             return {
                 actions: result.actions,
-                state: ctx.request.worker_state,
+                state: result.workerState ?? request.worker_state,
             };
         };
     }
@@ -136,8 +138,7 @@ function composeChain(middlewares: UnknownMiddleware[], handle: UnknownNext): Un
     return fn;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-empty-object-type
-export function defineAgent(agentId: string): HandlerBuilder<{}> {
+export function defineAgent(agentId: string): HandlerBuilder<unknown> {
     return new HandlerBuilder(agentId);
 }
 

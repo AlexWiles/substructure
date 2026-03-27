@@ -64,9 +64,9 @@ function callLlm(state: State): WorkerAction {
     };
 }
 
-const withMessageHistory = (): MiddlewareFn<unknown> => (ctx, next) => {
-    const { trigger } = ctx;
-    const state = ctx.state as State;
+const withMessageHistory = (): MiddlewareFn<unknown> => (req, next) => {
+    const { trigger } = req;
+    const state = req.state as State;
     state.messages ??= [];
 
     switch (trigger.type) {
@@ -89,16 +89,16 @@ const withMessageHistory = (): MiddlewareFn<unknown> => (ctx, next) => {
         }
     }
 
-    return next(ctx);
+    return next({ ...req, state });
 };
 
-const withStructuredOutputFlow = (): MiddlewareFn<unknown> => (ctx, next) => {
-    const { trigger } = ctx;
-    const state = ctx.state as State;
+const withStructuredOutputFlow = (): MiddlewareFn<unknown> => (req, next) => {
+    const { trigger } = req;
+    const state = req.state as State;
 
     switch (trigger.type) {
         case "user_message":
-            return { actions: [callLlm(state)] };
+            return { actions: [callLlm(state)], state };
 
         case "llm_response": {
             if (trigger.message.tool_calls?.length) {
@@ -111,11 +111,12 @@ const withStructuredOutputFlow = (): MiddlewareFn<unknown> => (ctx, next) => {
                         handler: "worker" as const,
                         retry: RETRY,
                     })),
+                    state,
                 };
             }
 
             const text = contentText(trigger.message.content);
-            return { actions: [{ type: "done", data: text ?? null }] };
+            return { actions: [{ type: "done", data: text ?? null }], state };
         }
 
         case "tool_execute": {
@@ -127,6 +128,7 @@ const withStructuredOutputFlow = (): MiddlewareFn<unknown> => (ctx, next) => {
                         type: "done",
                         data: contact,
                     }],
+                    state,
                 };
             } catch (e: any) {
                 return {
@@ -137,12 +139,13 @@ const withStructuredOutputFlow = (): MiddlewareFn<unknown> => (ctx, next) => {
                         retryable: false,
                         attempt: trigger.attempt,
                     }],
+                    state,
                 };
             }
         }
 
         default:
-            return next(ctx);
+            return next({ ...req, state });
     }
 };
 

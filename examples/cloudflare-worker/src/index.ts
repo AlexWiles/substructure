@@ -1,7 +1,6 @@
 import {
     Worker,
     defineAgent,
-    withState,
     withLogging,
     withConversation,
     withSystemMessage,
@@ -9,6 +8,11 @@ import {
     withCallLLM,
     tool,
 } from "@substructure.ai/sdk/worker-handler";
+import { AgentState, withDurableObjectState } from "./state";
+
+export { AgentState };
+
+let workerEnv: WorkerEnv;
 
 const retry = {
     timeout_secs: 120,
@@ -94,7 +98,7 @@ const SYSTEM_PROMPT =
 
 const webAgent = defineAgent("web-agent")
     .use(withLogging())
-    .use(withState())
+    .use(withDurableObjectState(() => workerEnv.AGENT_STATE))
     .use(withConversation())
     .use(withSystemMessage(() => SYSTEM_PROMPT))
     .use(withTools(() => ({ fetchUrl, extractFromHtml })))
@@ -117,13 +121,13 @@ const webAgent = defineAgent("web-agent")
 
 const worker = new Worker([webAgent]);
 
-// Extend the generated Env with secrets (set via `wrangler secret put`)
 interface WorkerEnv extends Env {
     SIGNING_SECRET?: string;
 }
 
 export default {
     async fetch(request: Request, env: WorkerEnv): Promise<Response> {
+        workerEnv = env;
         const handler = worker.fetchHandler({
             signingSecret: env.SIGNING_SECRET,
         });

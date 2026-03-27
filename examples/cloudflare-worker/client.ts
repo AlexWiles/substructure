@@ -11,7 +11,7 @@ const stream = backend.submit({
         type: "message",
         message: {
             role: "user",
-            content: "What is the price of Brent Crude right now?",
+            content: "What are the headlines today?",
         },
     },
     auth: { tenant_id: "default", sub: "test-user" },

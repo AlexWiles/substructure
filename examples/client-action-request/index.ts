@@ -53,7 +53,7 @@ const actionAgent = defineAgent("action-demo")
                     count: TOOL_CATALOG.length,
                 };
                 const actions: WorkerAction[] = [{ type: "done", data }];
-                return { actions };
+                return { actions, state: ctx.state };
             }
 
             case "clear_context": {
@@ -63,7 +63,7 @@ const actionAgent = defineAgent("action-demo")
                     type: "done",
                     data: { ok: true, cleared_messages: previousCount },
                 }];
-                return { actions };
+                return { actions, state: ctx.state };
             }
 
             default: {
@@ -71,7 +71,7 @@ const actionAgent = defineAgent("action-demo")
                     type: "done",
                     data: { ok: false, error: `Unknown action: ${ctx.trigger.name}` },
                 }];
-                return { actions };
+                return { actions, state: ctx.state };
             }
         }
     }))
@@ -88,7 +88,7 @@ const actionAgent = defineAgent("action-demo")
                 last_message: contentText(ctx.trigger.message.content),
             },
         }];
-        return { actions };
+        return { actions, state: ctx.state };
     });
 
 const runtime = new EmbeddedRuntime({ db: "action-request-example.db" });

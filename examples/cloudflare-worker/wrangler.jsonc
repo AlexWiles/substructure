@@ -5,6 +5,14 @@
   "compatibility_date": "2026-03-24",
   "observability": {
     "enabled": true
-  }
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "AGENT_STATE", "class_name": "AgentState" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_classes": ["AgentState"] }
+  ]
   // Set secrets via: wrangler secret put SIGNING_SECRET
 }
