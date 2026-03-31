@@ -1,14 +1,14 @@
 import {
     Substructure,
     defineAgent,
-    withState,
-    withLogging,
+    state,
+    logging,
     tool,
-    withConversation,
-    withSystemMessage,
-    withTools,
-    withCallLLM,
-    withSubAgents,
+    messageHistory,
+    systemMessage,
+    tools,
+    llmLoop,
+    subAgents,
 } from "@substructure.ai/sdk/substructure";
 import { BackendClient, FrontendClient } from "@substructure.ai/sdk";
 import { EmbeddedRuntime } from "@substructure.ai/runtime";
@@ -51,12 +51,12 @@ const add = tool({
 });
 
 const mathHandler = defineAgent("math-agent")
-    .use(withLogging())
-    .use(withState())
-    .use(withConversation())
-    .use(withSystemMessage(() => "You are a math assistant. Compute whatever is asked. Be concise, return only the result."))
-    .use(withTools(() => ({ add })))
-    .use(withCallLLM((_state) => ({
+    .use(logging())
+    .use(state())
+    .use(messageHistory())
+    .use(systemMessage(() => "You are a math assistant. Compute whatever is asked. Be concise, return only the result."))
+    .use(tools(() => ({ add })))
+    .use(llmLoop((_state) => ({
         request: { model: "arcee-ai/trinity-large-preview:free" },
         llm_client: "openrouter",
         retry: mathRetry,
@@ -79,16 +79,16 @@ const getWeather = tool({
 });
 
 const weatherHandler = defineAgent("weather-agent")
-    .use(withLogging())
-    .use(withState())
-    .use(withConversation())
-    .use(withSystemMessage(() => "You are a weather assistant. Use tools when appropriate. Be concise."))
-    .use(withTools(() => ({ getWeather })))
-    .use(withSubAgents({
+    .use(logging())
+    .use(state())
+    .use(messageHistory())
+    .use(systemMessage(() => "You are a weather assistant. Use tools when appropriate. Be concise."))
+    .use(tools(() => ({ getWeather })))
+    .use(subAgents({
         delegates: [mathHandler],
         retry: weatherRetry,
     }))
-    .use(withCallLLM((_state) => ({
+    .use(llmLoop((_state) => ({
         request: { model: "arcee-ai/trinity-large-preview:free" },
         llm_client: "openrouter",
         retry: weatherRetry,

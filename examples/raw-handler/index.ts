@@ -44,11 +44,11 @@ function decodeState(raw: string): State {
     if (!raw) {
         return { messages: [] };
     }
-    return JSON.parse(Buffer.from(raw, "base64").toString("utf-8")) as State;
+    return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(raw), c => c.charCodeAt(0)))) as State;
 }
 
 function encodeState(state: State): string {
-    return Buffer.from(JSON.stringify(state), "utf-8").toString("base64");
+    return btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(state))));
 }
 
 function callLlmAction(state: State): WorkerAction {

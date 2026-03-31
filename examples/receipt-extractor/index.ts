@@ -1,13 +1,13 @@
 import {
     Substructure,
     defineAgent,
-    withState,
-    withLogging,
+    state,
+    logging,
     tool,
-    withConversation,
-    withSystemMessage,
-    withTools,
-    withCallLLM,
+    messageHistory,
+    systemMessage,
+    tools,
+    llmLoop,
 } from "@substructure.ai/sdk/substructure";
 import type { ClientIdentity } from "@substructure.ai/sdk/types";
 import { EmbeddedRuntime } from "@substructure.ai/runtime";
@@ -54,12 +54,12 @@ Then call save_to_csv to record it. If the date is unclear, use your best guess.
 If the currency is not stated, assume USD.`
 
 const receiptHandler = defineAgent(RECEIPT_AGENT_ID)
-    .use(withLogging())
-    .use(withState())
-    .use(withSystemMessage(() => SYSTEM_PROMPT))
-    .use(withConversation())
-    .use(withTools(() => ({ saveToCSV })))
-    .use(withCallLLM((state) => ({
+    .use(logging())
+    .use(state())
+    .use(systemMessage(() => SYSTEM_PROMPT))
+    .use(messageHistory())
+    .use(tools(() => ({ saveToCSV })))
+    .use(llmLoop((state) => ({
         request: {
             model: "arcee-ai/trinity-large-preview:free",
         },

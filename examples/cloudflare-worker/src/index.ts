@@ -1,14 +1,14 @@
 import {
     Worker,
     defineAgent,
-    withLogging,
-    withConversation,
-    withSystemMessage,
-    withTools,
-    withCallLLM,
+    logging,
+    messageHistory,
+    systemMessage,
+    tools,
+    llmLoop,
     tool,
 } from "@substructure.ai/sdk/worker-handler";
-import { AgentState, withDurableObjectState } from "./state";
+import { AgentState, durableObjectState } from "./state";
 
 export { AgentState };
 
@@ -97,13 +97,13 @@ const SYSTEM_PROMPT =
     "Be concise and summarize what you find.";
 
 const webAgent = defineAgent("web-agent")
-    .use(withLogging())
-    .use(withDurableObjectState(() => workerEnv.AGENT_STATE))
-    .use(withConversation())
-    .use(withSystemMessage(() => SYSTEM_PROMPT))
-    .use(withTools(() => ({ fetchUrl, extractFromHtml })))
+    .use(logging())
+    .use(durableObjectState(() => workerEnv.AGENT_STATE))
+    .use(messageHistory())
+    .use(systemMessage(() => SYSTEM_PROMPT))
+    .use(tools(() => ({ fetchUrl, extractFromHtml })))
     .use(
-        withCallLLM(() => ({
+        llmLoop(() => ({
             request: { model: "arcee-ai/trinity-large-preview:free" },
             llm_client: "openrouter",
             retry,

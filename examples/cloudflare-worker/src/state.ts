@@ -26,7 +26,7 @@ export class AgentState extends DurableObject {
  *
  * The runtime receives only a minimal reference; the full state lives in the DO.
  */
-export function withDurableObjectState(
+export function durableObjectState(
     getNamespace: () => DurableObjectNamespace<AgentState>,
 ): MiddlewareFn<unknown> {
     return async (req: AgentRequest<unknown>, next: Next<unknown>) => {

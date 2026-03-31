@@ -64,21 +64,21 @@ export interface Handler {
 export type StateContributor<A> = MiddlewareFn<any, any> & { readonly _contributes: A };
 
 export {
-    withState,
-    withStateSlice,
+    state,
+    stateSlice,
     tool,
-    withLogging,
-    withConversation,
-    withSystemMessage,
-    withTools,
-    withCallLLM,
-    withSubAgents,
+    logging,
+    messageHistory,
+    systemMessage,
+    tools,
+    llmLoop,
+    subAgents,
 } from "./middleware";
 export type {
     ToolFn,
     ToolDef,
     SubAgentTrack,
-    CallLlmSelection,
+    LlmLoopSelection,
     ToolSelector,
     MessageSelector,
     SystemMessageSelector,

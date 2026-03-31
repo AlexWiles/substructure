@@ -1,8 +1,8 @@
 import {
     Substructure,
     defineAgent,
-    withState,
-    withStateSlice,
+    state,
+    stateSlice,
     contentText,
     type RunStream,
 } from "@substructure.ai/sdk/substructure";
@@ -40,8 +40,8 @@ const TOOL_CATALOG = [
 ];
 
 const actionAgent = defineAgent("action-demo")
-    .use(withState())
-    .use(withStateSlice({ messages: [] as Message[] }, (ctx, next) => {
+    .use(state())
+    .use(stateSlice({ messages: [] as Message[] }, (ctx, next) => {
         if (ctx.trigger.type !== "client_action") {
             return next(ctx);
         }

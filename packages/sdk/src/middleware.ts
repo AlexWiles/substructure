@@ -29,7 +29,7 @@ function encodeWorkerState(value: unknown): string {
  * Decodes `wire.worker_state` into `req.state` (falling back to `{}`),
  * runs the chain, then encodes `res.state` back into `workerState`.
  */
-export function withState(): MiddlewareFn<unknown> {
+export function state(): MiddlewareFn<unknown> {
     return async (req: AgentRequest<unknown>, next: Next<unknown>) => {
         const enriched: AgentRequest<unknown> = {
             ...req,
@@ -48,7 +48,7 @@ export function withState(): MiddlewareFn<unknown> {
  * The `init` object provides default values and the TypeScript type brand.
  * The middleware function receives a fully typed `req.state`.
  */
-export function withStateSlice<A extends object>(
+export function stateSlice<A extends object>(
     init: A,
     fn: (req: AgentRequest<A>, next: Next<A>) => Promise<AgentResponse> | AgentResponse,
 ): StateContributor<A> & MiddlewareFn<unknown, A> {
@@ -95,7 +95,7 @@ export function tool(config: {
     };
 }
 
-export function withLogging(label?: string): MiddlewareFn<unknown, unknown> {
+export function logging(label?: string): MiddlewareFn<unknown, unknown> {
     const prefix = label ? `[${label}]` : "[handler]";
     return async (req, next) => {
         const t = req.trigger;
@@ -117,8 +117,8 @@ export type MessageSelector<S> = (state: S, req: AgentRequest<S>) => Message[];
  * Conversation history middleware. Contributes `{ messages: Message[] }` to state.
  * Records incoming messages and augments `call_llm` actions with the full history.
  */
-export function withConversation(): StateContributor<{ messages: Message[] }> & MiddlewareFn<unknown, { messages: Message[] }> {
-    return withStateSlice({ messages: [] as Message[] }, async (req, next) => {
+export function messageHistory(): StateContributor<{ messages: Message[] }> & MiddlewareFn<unknown, { messages: Message[] }> {
+    return stateSlice({ messages: [] as Message[] }, async (req, next) => {
         const history = req.state.messages;
         const { trigger } = req;
 
@@ -158,7 +158,7 @@ export function withConversation(): StateContributor<{ messages: Message[] }> & 
 
 export type SystemMessageSelector<S> = (state: S, req: AgentRequest<S>) => string;
 
-export function withSystemMessage<S>(
+export function systemMessage<S>(
     selector: SystemMessageSelector<S>,
 ): MiddlewareFn<S> {
     return async (req, next) => {
@@ -190,10 +190,10 @@ export type ToolSelector<S> = (state: S, req: AgentRequest<S>) => Record<string,
  * On `tool_result`: removes the ID. Suppresses `call_llm` until all results are in.
  * On `tool_execute`: executes the tool and prepends the result to downstream actions.
  */
-export function withTools<S>(
+export function tools<S>(
     selector: ToolSelector<S>,
 ): StateContributor<{ pendingToolCalls: string[] }> & MiddlewareFn<unknown, { pendingToolCalls: string[] }> {
-    return withStateSlice({ pendingToolCalls: [] as string[] },
+    return stateSlice({ pendingToolCalls: [] as string[] },
         async (req, next) => {
             const tools = selector(req.state as S, req as unknown as AgentRequest<S>);
 
@@ -329,7 +329,7 @@ export function withTools<S>(
     );
 }
 
-export interface CallLlmSelection {
+export interface LlmLoopSelection {
     request: Omit<LlmRequest, "messages"> & { messages?: Message[] };
     llm_client: string;
     retry: RetryPolicy;
@@ -337,8 +337,8 @@ export interface CallLlmSelection {
     toolRetries?: Record<string, RetryPolicy>;
 }
 
-export function withCallLLM<S>(
-    selector: (state: S, req: AgentRequest<S>) => CallLlmSelection,
+export function llmLoop<S>(
+    selector: (state: S, req: AgentRequest<S>) => LlmLoopSelection,
 ): MiddlewareFn<S> {
     return async (req, next) => {
         const selection = selector(req.state, req);
@@ -397,7 +397,7 @@ export interface SubAgentTrack {
  * Sub-agent delegation middleware.
  * Contributes `{ subAgentTracker: Record<string, SubAgentTrack> }` to state.
  */
-export function withSubAgents<S>(config: {
+export function subAgents<S>(config: {
     delegates: Handler[];
     retry: RetryPolicy;
 }): StateContributor<{ subAgentTracker: Record<string, SubAgentTrack> }> & MiddlewareFn<unknown, { subAgentTracker: Record<string, SubAgentTrack> }> {
@@ -406,7 +406,7 @@ export function withSubAgents<S>(config: {
         subAgents[handler.agentId] = { agentId: handler.agentId };
     }
 
-    return withStateSlice(
+    return stateSlice(
         { subAgentTracker: {} as Record<string, SubAgentTrack> },
         async (req, next) => {
             const tracker = req.state.subAgentTracker;

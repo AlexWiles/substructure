@@ -6,15 +6,15 @@ import { Worker } from "./worker";
 export { contentText } from "./types";
 export {
     defineAgent,
-    withState,
-    withStateSlice,
-    withLogging,
+    state,
+    stateSlice,
+    logging,
     tool,
-    withConversation,
-    withSystemMessage,
-    withTools,
-    withCallLLM,
-    withSubAgents,
+    messageHistory,
+    systemMessage,
+    tools,
+    llmLoop,
+    subAgents,
 } from "./worker";
 export type { AgentRequest, AgentResponse, MiddlewareFn, FetchHandlerOptions } from "./worker";
 export { verifyWebhookSignature, WebhookVerificationError } from "./webhook";

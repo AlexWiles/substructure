@@ -1,4 +1,4 @@
-import { Substructure, defineAgent, withState, withLogging, contentText } from "@substructure.ai/sdk/substructure";
+import { Substructure, defineAgent, state, logging, contentText } from "@substructure.ai/sdk/substructure";
 import type { MiddlewareFn } from "@substructure.ai/sdk/substructure";
 import type { ClientIdentity, WorkerAction, Message } from "@substructure.ai/sdk/types";
 import { EmbeddedRuntime } from "@substructure.ai/runtime";
@@ -150,8 +150,8 @@ const withStructuredOutputFlow = (): MiddlewareFn<unknown> => (req, next) => {
 };
 
 const extractor = defineAgent("contact-extractor")
-    .use(withLogging())
-    .use(withState())
+    .use(logging())
+    .use(state())
     .use(withMessageHistory())
     .use(withStructuredOutputFlow())
 
