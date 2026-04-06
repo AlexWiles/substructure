@@ -159,8 +159,9 @@ export function messageHistory(): StateContributor<{ messages: Message[] }> & Mi
 export type SystemMessageSelector<S> = (state: S, req: AgentRequest<S>) => string;
 
 export function systemMessage<S>(
-    selector: SystemMessageSelector<S>,
+    selectorOrValue: SystemMessageSelector<S> | string,
 ): MiddlewareFn<S> {
+    const selector: SystemMessageSelector<S> = typeof selectorOrValue === "function" ? selectorOrValue : () => selectorOrValue;
     return async (req, next) => {
         const systemMessage: Message = { role: "system", content: selector(req.state, req) };
 
@@ -191,8 +192,9 @@ export type ToolSelector<S> = (state: S, req: AgentRequest<S>) => Record<string,
  * On `tool_execute`: executes the tool and prepends the result to downstream actions.
  */
 export function tools<S>(
-    selector: ToolSelector<S>,
+    selectorOrValue: ToolSelector<S> | Record<string, ToolDef>,
 ): StateContributor<{ pendingToolCalls: string[] }> & MiddlewareFn<unknown, { pendingToolCalls: string[] }> {
+    const selector: ToolSelector<S> = typeof selectorOrValue === "function" ? selectorOrValue : () => selectorOrValue;
     return stateSlice({ pendingToolCalls: [] as string[] },
         async (req, next) => {
             const tools = selector(req.state as S, req as unknown as AgentRequest<S>);
@@ -338,8 +340,9 @@ export interface LlmLoopSelection {
 }
 
 export function llmLoop<S>(
-    selector: (state: S, req: AgentRequest<S>) => LlmLoopSelection,
+    selectorOrValue: ((state: S, req: AgentRequest<S>) => LlmLoopSelection) | LlmLoopSelection,
 ): MiddlewareFn<S> {
+    const selector: (state: S, req: AgentRequest<S>) => LlmLoopSelection = typeof selectorOrValue === "function" ? selectorOrValue : () => selectorOrValue;
     return async (req, next) => {
         const selection = selector(req.state, req);
         const downstream = await next(req);

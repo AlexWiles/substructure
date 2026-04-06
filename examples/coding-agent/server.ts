@@ -1,6 +1,6 @@
 import { EmbeddedRuntime } from "@substructure.ai/runtime";
-import { Substructure } from "@substructure.ai/sdk/substructure";
-import type { Event } from "@substructure.ai/sdk/types";
+import { Substructure } from "@substructure.ai/sdk";
+import type { Event } from "@substructure.ai/sdk";
 import { codingAgent, AGENT_ID } from "./worker";
 
 // ── Substructure Runtime ─────────────────────────────────────────────────────

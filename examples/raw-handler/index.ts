@@ -1,4 +1,4 @@
-import { Substructure, contentText } from "@substructure.ai/sdk/substructure";
+import { Substructure, contentText } from "@substructure.ai/sdk";
 import type {
     ClientIdentity,
     WorkerAction,
@@ -6,7 +6,7 @@ import type {
     LlmTool,
     Message,
     RetryPolicy,
-} from "@substructure.ai/sdk/types";
+} from "@substructure.ai/sdk";
 import { EmbeddedRuntime } from "@substructure.ai/runtime";
 
 type State = {

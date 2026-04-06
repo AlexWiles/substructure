@@ -5,5 +5,8 @@
   "dependencies": {
     "@substructure.ai/runtime": "workspace:*",
     "@substructure.ai/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.11"
   }
 }

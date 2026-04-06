@@ -6,7 +6,7 @@ import {
     Loader,
     ProcessTerminal,
 } from "@mariozechner/pi-tui";
-import type { Event } from "@substructure.ai/sdk/types";
+import type { Event } from "@substructure.ai/sdk";
 
 // ── Config ───────────────────────────────────────────────────────────────────
 

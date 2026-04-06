@@ -1,13 +1,13 @@
 import {
     defineAgent,
-    withState,
-    withLogging,
+    state,
+    logging,
     tool,
-    withConversation,
-    withSystemMessage,
-    withTools,
-    withCallLLM,
-} from "@substructure.ai/sdk/substructure";
+    messageHistory,
+    systemMessage,
+    tools,
+    llmLoop,
+} from "@substructure.ai/sdk/agent";
 import { readFileSync, writeFileSync, readdirSync, statSync, existsSync } from "fs";
 import { resolve, relative } from "path";
 import { execSync } from "child_process";
@@ -146,12 +146,12 @@ Guidelines:
 export const AGENT_ID = "coding-agent";
 
 export const codingAgent = defineAgent(AGENT_ID)
-    .use(withLogging("coding"))
-    .use(withState())
-    .use(withSystemMessage(() => SYSTEM_PROMPT))
-    .use(withConversation())
-    .use(withTools(() => ({ readFile, writeFile, listFiles, runCommand })))
-    .use(withCallLLM(() => ({
+    .use(logging("coding"))
+    .use(state())
+    .use(messageHistory())
+    .use(systemMessage(() => SYSTEM_PROMPT))
+    .use(tools(() => ({ readFile, writeFile, listFiles, runCommand })))
+    .use(llmLoop(() => ({
         request: {
             model: "anthropic/claude-sonnet-4",
         },

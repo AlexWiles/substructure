@@ -41,4 +41,4 @@ EXPOSE 8080
 
 ENV RUST_LOG=info
 
-ENTRYPOINT ["substructure", "serve", "--host", "0.0.0.0", "--port", "8080", "--db", "/data/substructure.db"]
+ENTRYPOINT ["substructure", "start", "--host", "0.0.0.0", "--port", "8080", "--db", "/data/substructure.db"]

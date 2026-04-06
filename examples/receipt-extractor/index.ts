@@ -1,5 +1,4 @@
 import {
-    Substructure,
     defineAgent,
     state,
     logging,
@@ -8,8 +7,9 @@ import {
     systemMessage,
     tools,
     llmLoop,
-} from "@substructure.ai/sdk/substructure";
-import type { ClientIdentity } from "@substructure.ai/sdk/types";
+} from "@substructure.ai/sdk/agent";
+import { Substructure } from "@substructure.ai/sdk";
+import type { ClientIdentity } from "@substructure.ai/sdk";
 import { EmbeddedRuntime } from "@substructure.ai/runtime";
 import { appendFileSync, existsSync } from "fs";
 import { randomUUID } from "crypto";
@@ -56,16 +56,16 @@ If the currency is not stated, assume USD.`
 const receiptHandler = defineAgent(RECEIPT_AGENT_ID)
     .use(logging())
     .use(state())
-    .use(systemMessage(() => SYSTEM_PROMPT))
+    .use(systemMessage(SYSTEM_PROMPT))
     .use(messageHistory())
-    .use(tools(() => ({ saveToCSV })))
-    .use(llmLoop((state) => ({
+    .use(tools({ saveToCSV }))
+    .use(llmLoop({
         request: {
             model: "arcee-ai/trinity-large-preview:free",
         },
         llm_client: "openrouter",
         retry: receiptRetry,
-    })));
+    }));
 
 const runtime = new EmbeddedRuntime({
     db: ":memory:",

@@ -1,5 +1,4 @@
 import {
-    Worker,
     defineAgent,
     logging,
     messageHistory,
@@ -7,7 +6,8 @@ import {
     tools,
     llmLoop,
     tool,
-} from "@substructure.ai/sdk/worker-handler";
+} from "@substructure.ai/sdk/agent";
+import { Worker } from "@substructure.ai/sdk";
 import { AgentState, durableObjectState } from "./state";
 
 export { AgentState };
@@ -100,14 +100,14 @@ const webAgent = defineAgent("web-agent")
     .use(logging())
     .use(durableObjectState(() => workerEnv.AGENT_STATE))
     .use(messageHistory())
-    .use(systemMessage(() => SYSTEM_PROMPT))
-    .use(tools(() => ({ fetchUrl, extractFromHtml })))
+    .use(systemMessage(SYSTEM_PROMPT))
+    .use(tools({ fetchUrl, extractFromHtml }))
     .use(
-        llmLoop(() => ({
+        llmLoop({
             request: { model: "arcee-ai/trinity-large-preview:free" },
             llm_client: "openrouter",
             retry,
-        })),
+        }),
     );
 
 // Register this worker with the backend via the API:

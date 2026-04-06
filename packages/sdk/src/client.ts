@@ -21,10 +21,56 @@ export class Client {
   }
 }
 
+// ── Clients ────────────────────────────────────────────────────────────────
+
 export { BackendClient } from "./backend-client";
 export { FrontendClient } from "./frontend-client";
-
 export { WorkerClient } from "./worker-client";
 export { AdminClient } from "./admin-client";
 export { UserClient } from "./user-client";
 export { BaseClient, type RequestOptions } from "./base";
+
+// ── Worker (server) ────────────────────────────────────────────────────────
+
+export { Worker } from "./worker";
+export type { FetchHandlerOptions } from "./worker";
+
+// ── Substructure ───────────────────────────────────────────────────────────
+
+export { Substructure, RunStream } from "./substructure";
+export type { SubstructureConfig, SubmitRequest as SubstructureSubmitRequest, TurnResult } from "./substructure";
+
+// ── Runtime ────────────────────────────────────────────────────────────────
+
+export { InProcessRuntime } from "./runtime";
+export type { NativeRuntime, InProcessRuntimeOptions } from "./runtime";
+
+// ── Webhook ────────────────────────────────────────────────────────────────
+
+export { verifyWebhookSignature, WebhookVerificationError } from "./webhook";
+
+// ── Types ──────────────────────────────────────────────────────────────────
+
+export { contentText } from "./types";
+export type {
+  ClientIdentity,
+  RetryPolicy,
+  Message,
+  Content,
+  ContentPart,
+  Role,
+  ToolCall,
+  LlmTool,
+  LlmRequest,
+  LlmResponse,
+  ToolResult,
+  ClientAction,
+  ClientPayload,
+  DecisionTrigger,
+  WorkerAction,
+  WorkerDecisionRequestWire,
+  Event,
+  EventPayload,
+  SessionStatus,
+  SessionState,
+} from "./types";

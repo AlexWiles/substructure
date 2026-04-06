@@ -36,7 +36,7 @@ struct Cli {
 #[derive(clap::Subcommand)]
 enum Command {
     /// Start the server
-    Serve {
+    Start {
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
         #[arg(long, default_value_t = 8080)]
@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Serve { host, port, db, worker_url } => {
+        Command::Start { host, port, db, worker_url } => {
             let store = Arc::new(SqliteStore::new(SqliteConfig {
                 path: db.clone(),
                 busy_timeout: std::time::Duration::from_secs(5),

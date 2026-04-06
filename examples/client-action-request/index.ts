@@ -1,16 +1,18 @@
 import {
-    Substructure,
     defineAgent,
     state,
     stateSlice,
+} from "@substructure.ai/sdk/agent";
+import {
+    Substructure,
     contentText,
     type RunStream,
-} from "@substructure.ai/sdk/substructure";
+} from "@substructure.ai/sdk";
 import type {
     ClientIdentity,
     Message,
     WorkerAction,
-} from "@substructure.ai/sdk/types";
+} from "@substructure.ai/sdk";
 import { EmbeddedRuntime } from "@substructure.ai/runtime";
 
 const TOOL_CATALOG = [

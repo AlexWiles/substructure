@@ -1,6 +1,7 @@
-import { Substructure, defineAgent, state, logging, contentText } from "@substructure.ai/sdk/substructure";
-import type { MiddlewareFn } from "@substructure.ai/sdk/substructure";
-import type { ClientIdentity, WorkerAction, Message } from "@substructure.ai/sdk/types";
+import { defineAgent, state, logging } from "@substructure.ai/sdk/agent";
+import type { MiddlewareFn } from "@substructure.ai/sdk/agent";
+import { Substructure, contentText } from "@substructure.ai/sdk";
+import type { ClientIdentity, WorkerAction, Message } from "@substructure.ai/sdk";
 import { EmbeddedRuntime } from "@substructure.ai/runtime";
 import { z } from "zod";
 import { randomUUID } from "crypto";

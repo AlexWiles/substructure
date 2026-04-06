@@ -63,7 +63,7 @@ export interface InProcessRuntimeOptions {
  * ```ts
  * import { EmbeddedRuntime } from '@substructure.ai/runtime'
  * import { InProcessRuntime } from '@substructure.ai/sdk/runtime'
- * import { defineAgent } from '@substructure.ai/sdk/substructure'
+ * import { defineAgent } from '@substructure.ai/sdk/agent'
  *
  * const runtime = new InProcessRuntime({ native: new EmbeddedRuntime() })
  * const worker = defineAgent("my-agent")

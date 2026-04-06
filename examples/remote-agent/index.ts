@@ -1,5 +1,4 @@
 import {
-    Substructure,
     defineAgent,
     state,
     logging,
@@ -9,8 +8,8 @@ import {
     tools,
     llmLoop,
     subAgents,
-} from "@substructure.ai/sdk/substructure";
-import { BackendClient, FrontendClient } from "@substructure.ai/sdk";
+} from "@substructure.ai/sdk/agent";
+import { Substructure, BackendClient, FrontendClient } from "@substructure.ai/sdk";
 import { EmbeddedRuntime } from "@substructure.ai/runtime";
 const addRetry = {
     timeout_secs: 20,
@@ -54,13 +53,13 @@ const mathHandler = defineAgent("math-agent")
     .use(logging())
     .use(state())
     .use(messageHistory())
-    .use(systemMessage(() => "You are a math assistant. Compute whatever is asked. Be concise, return only the result."))
-    .use(tools(() => ({ add })))
-    .use(llmLoop((_state) => ({
+    .use(systemMessage("You are a math assistant. Compute whatever is asked. Be concise, return only the result."))
+    .use(tools({ add }))
+    .use(llmLoop({
         request: { model: "arcee-ai/trinity-large-preview:free" },
         llm_client: "openrouter",
         retry: mathRetry,
-    })));
+    }));
 
 const getWeather = tool({
     description: "Get the current weather for a city. Returns temperature in fahrenheit.",
@@ -82,17 +81,17 @@ const weatherHandler = defineAgent("weather-agent")
     .use(logging())
     .use(state())
     .use(messageHistory())
-    .use(systemMessage(() => "You are a weather assistant. Use tools when appropriate. Be concise."))
-    .use(tools(() => ({ getWeather })))
+    .use(systemMessage("You are a weather assistant. Use tools when appropriate. Be concise."))
+    .use(tools({ getWeather }))
     .use(subAgents({
         delegates: [mathHandler],
         retry: weatherRetry,
     }))
-    .use(llmLoop((_state) => ({
+    .use(llmLoop({
         request: { model: "arcee-ai/trinity-large-preview:free" },
         llm_client: "openrouter",
         retry: weatherRetry,
-    })));
+    }));
 
 const WORKER_PORT = 4444;
 
