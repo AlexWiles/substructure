@@ -1,0 +1,10 @@
+pre-commit:
+  parallel: true
+  jobs:
+    - name: biome format
+      glob: "*.{ts,tsx}"
+      run: npx biome format --write {staged_files} && git add {staged_files}
+
+    - name: cargo fmt
+      glob: "*.rs"
+      run: cargo fmt

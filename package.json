@@ -14,9 +14,13 @@
     "format": "biome format --write .",
     "format:check": "biome format ."
   },
+  "pnpm": {
+    "onlyBuiltDependencies": ["lefthook"]
+  },
   "devDependencies": {
     "@biomejs/biome": "^2.4.10",
     "@napi-rs/cli": "^3.5.1",
+    "lefthook": "^2.1.5",
     "nx": "latest",
     "typescript": "^5.9.3"
   }

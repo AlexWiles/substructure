@@ -2,3 +2,11 @@ packages:
   - packages/*
   - examples/*
   - examples/web-ui/web
+allowBuilds:
+  e: true
+  f: true
+  h: true
+  k: true
+  l: true
+  o: true
+  t: true
