@@ -8,7 +8,7 @@ import type { AgentRequest, Next, MiddlewareFn } from "@substructure.ai/sdk";
 export class AgentState extends DurableObject {
     async fetch(request: Request): Promise<Response> {
         if (request.method === "GET") {
-            const state = await this.ctx.storage.get("state") ?? {};
+            const state = (await this.ctx.storage.get("state")) ?? {};
             return Response.json(state);
         }
         if (request.method === "PUT") {
@@ -26,9 +26,7 @@ export class AgentState extends DurableObject {
  *
  * The runtime receives only a minimal reference; the full state lives in the DO.
  */
-export function durableObjectState(
-    getNamespace: () => DurableObjectNamespace<AgentState>,
-): MiddlewareFn<unknown> {
+export function durableObjectState(getNamespace: () => DurableObjectNamespace<AgentState>): MiddlewareFn<unknown> {
     return async (req: AgentRequest<unknown>, next: Next<unknown>) => {
         const sessionId = req.wire.session_id;
         const ns = getNamespace();
@@ -37,15 +35,17 @@ export function durableObjectState(
 
         // Read state from DO
         const resp = await stub.fetch(new Request("https://state/"));
-        const state = await resp.json() as Record<string, unknown>;
+        const state = (await resp.json()) as Record<string, unknown>;
 
         const result = await next({ ...req, state });
 
         // Write state back to DO
-        await stub.fetch(new Request("https://state/", {
-            method: "PUT",
-            body: JSON.stringify(result.state),
-        }));
+        await stub.fetch(
+            new Request("https://state/", {
+                method: "PUT",
+                body: JSON.stringify(result.state),
+            }),
+        );
 
         // Return minimal reference to runtime
         return {

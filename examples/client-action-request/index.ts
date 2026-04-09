@@ -33,53 +33,61 @@ const TOOL_CATALOG = [
 
 const actionAgent = agent({ id: "action-demo" })
     .use(agent.state())
-    .use(agent.stateSlice({ messages: [] as Message[] }, (ctx, next) => {
-        if (ctx.trigger.type !== "client.action") {
-            return next(ctx);
-        }
-
-        switch (ctx.trigger.name) {
-            case "get_tools": {
-                const data = {
-                    tools: TOOL_CATALOG,
-                    count: TOOL_CATALOG.length,
-                };
-                const actions: WorkerAction[] = [{ type: "done", data }];
-                return { actions, state: ctx.state };
+    .use(
+        agent.stateSlice({ messages: [] as Message[] }, (ctx, next) => {
+            if (ctx.trigger.type !== "client.action") {
+                return next(ctx);
             }
 
-            case "clear_context": {
-                const previousCount = ctx.state.messages.length;
-                ctx.state.messages = [];
-                const actions: WorkerAction[] = [{
-                    type: "done",
-                    data: { ok: true, cleared_messages: previousCount },
-                }];
-                return { actions, state: ctx.state };
-            }
+            switch (ctx.trigger.name) {
+                case "get_tools": {
+                    const data = {
+                        tools: TOOL_CATALOG,
+                        count: TOOL_CATALOG.length,
+                    };
+                    const actions: WorkerAction[] = [{ type: "done", data }];
+                    return { actions, state: ctx.state };
+                }
 
-            default: {
-                const actions: WorkerAction[] = [{
-                    type: "done",
-                    data: { ok: false, error: `Unknown action: ${ctx.trigger.name}` },
-                }];
-                return { actions, state: ctx.state };
+                case "clear_context": {
+                    const previousCount = ctx.state.messages.length;
+                    ctx.state.messages = [];
+                    const actions: WorkerAction[] = [
+                        {
+                            type: "done",
+                            data: { ok: true, cleared_messages: previousCount },
+                        },
+                    ];
+                    return { actions, state: ctx.state };
+                }
+
+                default: {
+                    const actions: WorkerAction[] = [
+                        {
+                            type: "done",
+                            data: { ok: false, error: `Unknown action: ${ctx.trigger.name}` },
+                        },
+                    ];
+                    return { actions, state: ctx.state };
+                }
             }
-        }
-    }))
+        }),
+    )
     .use((ctx, next) => {
         if (ctx.trigger.type !== "user.message") {
             return next(ctx);
         }
 
         ctx.state.messages.push(ctx.trigger.message);
-        const actions: WorkerAction[] = [{
-            type: "done",
-            data: {
-                message_count: ctx.state.messages.length,
-                last_message: contentText(ctx.trigger.message.content),
+        const actions: WorkerAction[] = [
+            {
+                type: "done",
+                data: {
+                    message_count: ctx.state.messages.length,
+                    last_message: contentText(ctx.trigger.message.content),
+                },
             },
-        }];
+        ];
         return { actions, state: ctx.state };
     });
 

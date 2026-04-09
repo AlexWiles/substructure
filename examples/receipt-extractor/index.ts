@@ -44,7 +44,7 @@ const RECEIPT_AGENT_ID = "receipt-extractor";
 const SYSTEM_PROMPT = `You extract structured data from payment receipts.
 Given receipt text, identify the date, vendor, total amount, and currency.
 Then call save_to_csv to record it. If the date is unclear, use your best guess.
-If the currency is not stated, assume USD.`
+If the currency is not stated, assume USD.`;
 
 const receiptHandler = agent({ id: RECEIPT_AGENT_ID })
     .use(agent.logging())
@@ -52,13 +52,15 @@ const receiptHandler = agent({ id: RECEIPT_AGENT_ID })
     .use(agent.systemMessage(SYSTEM_PROMPT))
     .use(agent.messageHistory())
     .use(agent.tools({ saveToCSV }))
-    .use(agent.llmLoop({
-        request: {
-            model: "arcee-ai/trinity-large-preview:free",
-        },
-        llm_client: "openrouter",
-        retry: receiptRetry,
-    }));
+    .use(
+        agent.llmLoop({
+            request: {
+                model: "arcee-ai/trinity-large-preview:free",
+            },
+            llm_client: "openrouter",
+            retry: receiptRetry,
+        }),
+    );
 
 const runtime = new EmbeddedRuntime({
     db: ":memory:",

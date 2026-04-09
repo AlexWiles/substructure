@@ -1,23 +1,9 @@
-import type {
-    Message,
-    LlmTool,
-    LlmRequest,
-    RetryPolicy,
-    WorkerAction,
-    ToolResult,
-} from "./types";
-import type {
-    Handler,
-    AgentRequest,
-    AgentResponse,
-    MiddlewareFn,
-    Next,
-    StateContributor,
-} from "./worker";
+import type { Message, LlmTool, LlmRequest, RetryPolicy, WorkerAction, ToolResult } from "./types";
+import type { Handler, AgentRequest, AgentResponse, MiddlewareFn, Next, StateContributor } from "./worker";
 
 function decodeWorkerState(raw: string): unknown {
     if (!raw || raw === "") return {};
-    return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(raw), c => c.charCodeAt(0))));
+    return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(raw), (c) => c.charCodeAt(0))));
 }
 
 function encodeWorkerState(value: unknown): string {
@@ -57,9 +43,7 @@ export function stateSlice<A extends object>(
             const rawState = req.state;
             const state = (rawState && typeof rawState === "object" ? rawState : {}) as Record<string, unknown>;
             for (const key of Object.keys(init)) {
-                state[key] ??= structuredClone(
-                    (init as Record<string, unknown>)[key],
-                );
+                state[key] ??= structuredClone((init as Record<string, unknown>)[key]);
             }
             const typedReq: AgentRequest<A> = {
                 ...req,
@@ -104,9 +88,7 @@ export function logging(label?: string): MiddlewareFn<unknown, unknown> {
         const start = performance.now();
         const result = await next(req);
         const ms = (performance.now() - start).toFixed(1);
-        console.log(
-            `${prefix} ${tag} -> ${result.actions.map((a) => a.type).join(", ")} (${ms}ms)`,
-        );
+        console.log(`${prefix} ${tag} -> ${result.actions.map((a) => a.type).join(", ")} (${ms}ms)`);
         return result;
     };
 }
@@ -117,7 +99,8 @@ export type MessageSelector<S> = (state: S, req: AgentRequest<S>) => Message[];
  * Conversation history middleware. Contributes `{ messages: Message[] }` to state.
  * Records incoming messages and augments `call_llm` actions with the full history.
  */
-export function messageHistory(): StateContributor<{ messages: Message[] }> & MiddlewareFn<unknown, { messages: Message[] }> {
+export function messageHistory(): StateContributor<{ messages: Message[] }> &
+    MiddlewareFn<unknown, { messages: Message[] }> {
     return stateSlice({ messages: [] as Message[] }, async (req, next) => {
         const history = req.state.messages;
         const { trigger } = req;
@@ -158,10 +141,9 @@ export function messageHistory(): StateContributor<{ messages: Message[] }> & Mi
 
 export type SystemMessageSelector<S> = (state: S, req: AgentRequest<S>) => string;
 
-export function systemMessage<S>(
-    selectorOrValue: SystemMessageSelector<S> | string,
-): MiddlewareFn<S> {
-    const selector: SystemMessageSelector<S> = typeof selectorOrValue === "function" ? selectorOrValue : () => selectorOrValue;
+export function systemMessage<S>(selectorOrValue: SystemMessageSelector<S> | string): MiddlewareFn<S> {
+    const selector: SystemMessageSelector<S> =
+        typeof selectorOrValue === "function" ? selectorOrValue : () => selectorOrValue;
     return async (req, next) => {
         const systemMessage: Message = { role: "system", content: selector(req.state, req) };
 
@@ -195,140 +177,130 @@ export function tools<S>(
     selectorOrValue: ToolSelector<S> | Record<string, ToolDef>,
 ): StateContributor<{ pendingToolCalls: string[] }> & MiddlewareFn<unknown, { pendingToolCalls: string[] }> {
     const selector: ToolSelector<S> = typeof selectorOrValue === "function" ? selectorOrValue : () => selectorOrValue;
-    return stateSlice({ pendingToolCalls: [] as string[] },
-        async (req, next) => {
-            const tools = selector(req.state as S, req as unknown as AgentRequest<S>);
+    return stateSlice({ pendingToolCalls: [] as string[] }, async (req, next) => {
+        const tools = selector(req.state as S, req as unknown as AgentRequest<S>);
 
-            const downstream = await next(req);
+        const downstream = await next(req);
 
-            // Handle tool execution
-            if (req.trigger.type === "tool.execute") {
-                const tool = tools[req.trigger.name];
-                if (!tool) {
-                    return {
-                        ...downstream,
-                        actions: [
-                            {
-                                type: "return.tool.error" as const,
-                                tool_call_id: req.trigger.tool_call_id,
-                                error: `Unknown tool: ${req.trigger.name}`,
-                                retryable: false,
-                                attempt: req.trigger.attempt,
-                            },
-                            ...downstream.actions,
-                        ],
-                    };
-                }
-
-                try {
-                    const output = await tool.execute(req.trigger.arguments);
-                    return {
-                        ...downstream,
-                        actions: [
-                            {
-                                type: "return.tool.result" as const,
-                                tool_call_id: req.trigger.tool_call_id,
-                                result:
-                                    typeof output === "string"
-                                        ? output
-                                        : JSON.stringify(output),
-                                attempt: req.trigger.attempt,
-                            },
-                            ...downstream.actions,
-                        ],
-                    };
-                } catch (error: unknown) {
-                    return {
-                        ...downstream,
-                        actions: [
-                            {
-                                type: "return.tool.error" as const,
-                                tool_call_id: req.trigger.tool_call_id,
-                                error: error instanceof Error ? error.message : String(error),
-                                retryable: false,
-                                attempt: req.trigger.attempt,
-                            },
-                            ...downstream.actions,
-                        ],
-                    };
-                }
+        // Handle tool execution
+        if (req.trigger.type === "tool.execute") {
+            const tool = tools[req.trigger.name];
+            if (!tool) {
+                return {
+                    ...downstream,
+                    actions: [
+                        {
+                            type: "return.tool.error" as const,
+                            tool_call_id: req.trigger.tool_call_id,
+                            error: `Unknown tool: ${req.trigger.name}`,
+                            retryable: false,
+                            attempt: req.trigger.attempt,
+                        },
+                        ...downstream.actions,
+                    ],
+                };
             }
 
-            // Track pending tool calls from LLM response and emit call_tool actions
-            if (req.trigger.type === "llm.response") {
-                const toolCalls = req.trigger.message.tool_calls;
-                if (toolCalls && toolCalls.length > 0) {
-                    req.state.pendingToolCalls = toolCalls.map((tc) => tc.id);
-
-                    const callToolActions: WorkerAction[] = toolCalls.map((tc) => {
-                        const def = tools[tc.function.name];
-                        return {
-                            type: "call.tool" as const,
-                            tool_call_id: tc.id,
-                            name: tc.function.name,
-                            arguments: tc.function.arguments,
-                            handler: "worker" as const,
-                            retry: def?.retry ?? {
-                                timeout_secs: 120,
-                                max_retries: 3,
-                                backoff_base_secs: 1,
-                                backoff_max_secs: 10,
-                            },
-                        };
-                    });
-
-                    return {
-                        ...downstream,
-                        actions: [...callToolActions, ...downstream.actions],
-                    };
-                }
+            try {
+                const output = await tool.execute(req.trigger.arguments);
+                return {
+                    ...downstream,
+                    actions: [
+                        {
+                            type: "return.tool.result" as const,
+                            tool_call_id: req.trigger.tool_call_id,
+                            result: typeof output === "string" ? output : JSON.stringify(output),
+                            attempt: req.trigger.attempt,
+                        },
+                        ...downstream.actions,
+                    ],
+                };
+            } catch (error: unknown) {
+                return {
+                    ...downstream,
+                    actions: [
+                        {
+                            type: "return.tool.error" as const,
+                            tool_call_id: req.trigger.tool_call_id,
+                            error: error instanceof Error ? error.message : String(error),
+                            retryable: false,
+                            attempt: req.trigger.attempt,
+                        },
+                        ...downstream.actions,
+                    ],
+                };
             }
+        }
 
-            // Augment actions with tool definitions and retry policies
-            const actions = downstream.actions.map((action) => {
-                if (action.type === "call.llm") {
+        // Track pending tool calls from LLM response and emit call_tool actions
+        if (req.trigger.type === "llm.response") {
+            const toolCalls = req.trigger.message.tool_calls;
+            if (toolCalls && toolCalls.length > 0) {
+                req.state.pendingToolCalls = toolCalls.map((tc) => tc.id);
+
+                const callToolActions: WorkerAction[] = toolCalls.map((tc) => {
+                    const def = tools[tc.function.name];
                     return {
-                        ...action,
-                        request: {
-                            ...action.request,
-                            tools: mergeTools(
-                                action.request.tools,
-                                Object.entries(tools).map(([name, def]) => ({
-                                    function: { name, description: def.description, parameters: def.parameters },
-                                })),
-                            ),
+                        type: "call.tool" as const,
+                        tool_call_id: tc.id,
+                        name: tc.function.name,
+                        arguments: tc.function.arguments,
+                        handler: "worker" as const,
+                        retry: def?.retry ?? {
+                            timeout_secs: 120,
+                            max_retries: 3,
+                            backoff_base_secs: 1,
+                            backoff_max_secs: 10,
                         },
                     };
-                }
-                if (action.type === "call.tool") {
-                    const def = tools[action.name];
-                    if (def?.retry) {
-                        return { ...action, retry: def.retry };
-                    }
-                }
-                return action;
-            });
+                });
 
-            // Suppress call_llm until all tool results are in
-            if (req.trigger.type === "tool.result") {
-                const resultId = req.trigger.result.tool_call_id;
-                req.state.pendingToolCalls =
-                    req.state.pendingToolCalls.filter(
-                        (id) => id !== resultId,
-                    );
-                if (req.state.pendingToolCalls.length > 0) {
-                    return {
-                        ...downstream,
-                        actions: actions.filter(
-                            (a) => a.type !== "call.llm",
+                return {
+                    ...downstream,
+                    actions: [...callToolActions, ...downstream.actions],
+                };
+            }
+        }
+
+        // Augment actions with tool definitions and retry policies
+        const actions = downstream.actions.map((action) => {
+            if (action.type === "call.llm") {
+                return {
+                    ...action,
+                    request: {
+                        ...action.request,
+                        tools: mergeTools(
+                            action.request.tools,
+                            Object.entries(tools).map(([name, def]) => ({
+                                function: { name, description: def.description, parameters: def.parameters },
+                            })),
                         ),
-                    };
+                    },
+                };
+            }
+            if (action.type === "call.tool") {
+                const def = tools[action.name];
+                if (def?.retry) {
+                    return { ...action, retry: def.retry };
                 }
             }
+            return action;
+        });
 
-            return { ...downstream, actions };
-        },
-    );
+        // Suppress call_llm until all tool results are in
+        if (req.trigger.type === "tool.result") {
+            const resultId = req.trigger.result.tool_call_id;
+            req.state.pendingToolCalls = req.state.pendingToolCalls.filter((id) => id !== resultId);
+            if (req.state.pendingToolCalls.length > 0) {
+                return {
+                    ...downstream,
+                    actions: actions.filter((a) => a.type !== "call.llm"),
+                };
+            }
+        }
+
+        return { ...downstream, actions };
+    });
 }
 
 export interface LlmLoopSelection {
@@ -342,7 +314,8 @@ export interface LlmLoopSelection {
 export function llmLoop<S>(
     selectorOrValue: ((state: S, req: AgentRequest<S>) => LlmLoopSelection) | LlmLoopSelection,
 ): MiddlewareFn<S> {
-    const selector: (state: S, req: AgentRequest<S>) => LlmLoopSelection = typeof selectorOrValue === "function" ? selectorOrValue : () => selectorOrValue;
+    const selector: (state: S, req: AgentRequest<S>) => LlmLoopSelection =
+        typeof selectorOrValue === "function" ? selectorOrValue : () => selectorOrValue;
     return async (req, next) => {
         const selection = selector(req.state, req);
         const downstream = await next(req);
@@ -371,16 +344,10 @@ export function llmLoop<S>(
                 };
             }
             case "llm.response": {
-                if (
-                    !trigger.message.tool_calls ||
-                    trigger.message.tool_calls.length === 0
-                ) {
+                if (!trigger.message.tool_calls || trigger.message.tool_calls.length === 0) {
                     return {
                         ...downstream,
-                        actions: [
-                            { type: "done", data: trigger.message.content },
-                            ...downstream.actions,
-                        ],
+                        actions: [{ type: "done", data: trigger.message.content }, ...downstream.actions],
                     };
                 }
             }
@@ -403,146 +370,136 @@ export interface SubAgentTrack {
 export function subAgents<S>(config: {
     delegates: Handler[];
     retry: RetryPolicy;
-}): StateContributor<{ subAgentTracker: Record<string, SubAgentTrack> }> & MiddlewareFn<unknown, { subAgentTracker: Record<string, SubAgentTrack> }> {
+}): StateContributor<{ subAgentTracker: Record<string, SubAgentTrack> }> &
+    MiddlewareFn<unknown, { subAgentTracker: Record<string, SubAgentTrack> }> {
     const subAgents: Record<string, { agentId: string }> = {};
     for (const handler of config.delegates) {
         subAgents[handler.agentId] = { agentId: handler.agentId };
     }
 
-    return stateSlice(
-        { subAgentTracker: {} as Record<string, SubAgentTrack> },
-        async (req, next) => {
-            const tracker = req.state.subAgentTracker;
+    return stateSlice({ subAgentTracker: {} as Record<string, SubAgentTrack> }, async (req, next) => {
+        const tracker = req.state.subAgentTracker;
 
-            switch (req.trigger.type) {
-                case "llm.response": {
-                    const downstream = await next(req);
-                    const actions: WorkerAction[] = [];
-                    for (const action of downstream.actions) {
-                        if (action.type === "call.tool") {
-                            const sub = subAgents[action.name];
-                            if (sub) {
-                                const childSessionId = crypto.randomUUID();
-                                let message = action.arguments;
-                                try {
-                                    const args = JSON.parse(action.arguments);
-                                    if (typeof args?.message === "string") {
-                                        message = args.message;
-                                    }
-                                } catch {
-                                    // no-op
+        switch (req.trigger.type) {
+            case "llm.response": {
+                const downstream = await next(req);
+                const actions: WorkerAction[] = [];
+                for (const action of downstream.actions) {
+                    if (action.type === "call.tool") {
+                        const sub = subAgents[action.name];
+                        if (sub) {
+                            const childSessionId = crypto.randomUUID();
+                            let message = action.arguments;
+                            try {
+                                const args = JSON.parse(action.arguments);
+                                if (typeof args?.message === "string") {
+                                    message = args.message;
                                 }
-                                tracker[childSessionId] = {
-                                    toolCallId: action.tool_call_id,
-                                    name: action.name,
-                                };
-                                actions.push(
-                                    {
-                                        type: "spawn.sub_agent",
-                                        session_id: childSessionId,
-                                        agent_id: sub.agentId,
-                                        retry: config.retry,
-                                    },
-                                    {
-                                        type: "send.message",
-                                        session_id: childSessionId,
-                                        message: {
-                                            role: "user",
-                                            content: message,
-                                        },
-                                    },
-                                );
-                                continue;
+                            } catch {
+                                // no-op
                             }
-                        }
-                        if (action.type === "call.llm") {
-                            actions.push({
-                                ...action,
-                                request: {
-                                    ...action.request,
-                                    tools: mergeTools(
-                                        action.request.tools,
-                                        handlersToLlmTools(config.delegates),
-                                    ),
+                            tracker[childSessionId] = {
+                                toolCallId: action.tool_call_id,
+                                name: action.name,
+                            };
+                            actions.push(
+                                {
+                                    type: "spawn.sub_agent",
+                                    session_id: childSessionId,
+                                    agent_id: sub.agentId,
+                                    retry: config.retry,
                                 },
-                            });
+                                {
+                                    type: "send.message",
+                                    session_id: childSessionId,
+                                    message: {
+                                        role: "user",
+                                        content: message,
+                                    },
+                                },
+                            );
                             continue;
                         }
-                        actions.push(action);
                     }
-                    return { ...downstream, actions };
-                }
-
-                case "sub_agent.turn.complete": {
-                    const tracked = tracker[req.trigger.session_id];
-                    if (!tracked) {
-                        return next(req);
-                    }
-                    delete tracker[req.trigger.session_id];
-
-                    const content =
-                        typeof req.trigger.data === "string"
-                            ? req.trigger.data
-                            : JSON.stringify(req.trigger.data);
-                    const result: ToolResult = {
-                        tool_call_id: tracked.toolCallId,
-                        name: tracked.name,
-                        content,
-                        is_error: false,
-                    };
-
-                    return next({
-                        ...req,
-                        trigger: {
-                            type: "tool.result",
-                            result,
-                        },
-                    });
-                }
-
-                case "sub_agent.error": {
-                    const tracked = tracker[req.trigger.session_id];
-                    if (!tracked) {
-                        return next(req);
-                    }
-                    delete tracker[req.trigger.session_id];
-
-                    const result: ToolResult = {
-                        tool_call_id: tracked.toolCallId,
-                        name: tracked.name,
-                        content: `Sub-agent ${req.trigger.agent_id} failed: ${req.trigger.error}`,
-                        is_error: true,
-                    };
-
-                    return next({
-                        ...req,
-                        trigger: {
-                            type: "tool.result",
-                            result,
-                        },
-                    });
-                }
-
-                default: {
-                    const downstream = await next(req);
-                    const actions = downstream.actions.map((action) => {
-                        if (action.type !== "call.llm") return action;
-                        return {
+                    if (action.type === "call.llm") {
+                        actions.push({
                             ...action,
                             request: {
                                 ...action.request,
-                                tools: mergeTools(
-                                    action.request.tools,
-                                    handlersToLlmTools(config.delegates),
-                                ),
+                                tools: mergeTools(action.request.tools, handlersToLlmTools(config.delegates)),
                             },
-                        };
-                    });
-                    return { ...downstream, actions };
+                        });
+                        continue;
+                    }
+                    actions.push(action);
                 }
+                return { ...downstream, actions };
             }
-        },
-    );
+
+            case "sub_agent.turn.complete": {
+                const tracked = tracker[req.trigger.session_id];
+                if (!tracked) {
+                    return next(req);
+                }
+                delete tracker[req.trigger.session_id];
+
+                const content =
+                    typeof req.trigger.data === "string" ? req.trigger.data : JSON.stringify(req.trigger.data);
+                const result: ToolResult = {
+                    tool_call_id: tracked.toolCallId,
+                    name: tracked.name,
+                    content,
+                    is_error: false,
+                };
+
+                return next({
+                    ...req,
+                    trigger: {
+                        type: "tool.result",
+                        result,
+                    },
+                });
+            }
+
+            case "sub_agent.error": {
+                const tracked = tracker[req.trigger.session_id];
+                if (!tracked) {
+                    return next(req);
+                }
+                delete tracker[req.trigger.session_id];
+
+                const result: ToolResult = {
+                    tool_call_id: tracked.toolCallId,
+                    name: tracked.name,
+                    content: `Sub-agent ${req.trigger.agent_id} failed: ${req.trigger.error}`,
+                    is_error: true,
+                };
+
+                return next({
+                    ...req,
+                    trigger: {
+                        type: "tool.result",
+                        result,
+                    },
+                });
+            }
+
+            default: {
+                const downstream = await next(req);
+                const actions = downstream.actions.map((action) => {
+                    if (action.type !== "call.llm") return action;
+                    return {
+                        ...action,
+                        request: {
+                            ...action.request,
+                            tools: mergeTools(action.request.tools, handlersToLlmTools(config.delegates)),
+                        },
+                    };
+                });
+                return { ...downstream, actions };
+            }
+        }
+    });
 }
 
 function handlersToLlmTools(handlers: Handler[]): LlmTool[] {
@@ -564,10 +521,7 @@ function handlersToLlmTools(handlers: Handler[]): LlmTool[] {
     }));
 }
 
-function mergeTools(
-    existing: LlmTool[] | undefined,
-    added: LlmTool[],
-): LlmTool[] {
+function mergeTools(existing: LlmTool[] | undefined, added: LlmTool[]): LlmTool[] {
     const byName = new Map<string, LlmTool>();
     for (const tool of existing ?? []) {
         byName.set(tool.function.name, tool);

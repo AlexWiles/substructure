@@ -1,10 +1,6 @@
 import { useState } from "react";
 
-const SUGGESTIONS = [
-    "Quantum Computing",
-    "Rust Programming Language",
-    "Climate Change Solutions",
-];
+const SUGGESTIONS = ["Quantum Computing", "Rust Programming Language", "Climate Change Solutions"];
 
 interface TaskInputProps {
     onSubmit: (topic: string) => void;

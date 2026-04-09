@@ -46,7 +46,7 @@ function decodeState(raw: string): State {
     if (!raw) {
         return { messages: [] };
     }
-    return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(raw), c => c.charCodeAt(0)))) as State;
+    return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)))) as State;
 }
 
 function encodeState(state: State): string {
@@ -84,9 +84,7 @@ function appendMessageForTrigger(state: State, trigger: WorkerDecisionRequestWir
     }
 }
 
-const rawDecision = async (
-    request: WorkerDecisionRequestWire,
-): Promise<{ actions: WorkerAction[]; state: string }> => {
+const rawDecision = async (request: WorkerDecisionRequestWire): Promise<{ actions: WorkerAction[]; state: string }> => {
     const state = decodeState(request.worker_state);
     const trigger = request.trigger;
 
@@ -124,13 +122,15 @@ const rawDecision = async (
         case "tool.execute": {
             if (trigger.name !== "get_weather") {
                 return {
-                    actions: [{
-                        type: "return.tool.error",
-                        tool_call_id: trigger.tool_call_id,
-                        error: `Unknown tool: ${trigger.name}`,
-                        retryable: false,
-                        attempt: trigger.attempt,
-                    }],
+                    actions: [
+                        {
+                            type: "return.tool.error",
+                            tool_call_id: trigger.tool_call_id,
+                            error: `Unknown tool: ${trigger.name}`,
+                            retryable: false,
+                            attempt: trigger.attempt,
+                        },
+                    ],
                     state: encodeState(state),
                 };
             }
@@ -149,23 +149,27 @@ const rawDecision = async (
                 };
 
                 return {
-                    actions: [{
-                        type: "return.tool.result",
-                        tool_call_id: trigger.tool_call_id,
-                        result: JSON.stringify(result),
-                        attempt: trigger.attempt,
-                    }],
+                    actions: [
+                        {
+                            type: "return.tool.result",
+                            tool_call_id: trigger.tool_call_id,
+                            result: JSON.stringify(result),
+                            attempt: trigger.attempt,
+                        },
+                    ],
                     state: encodeState(state),
                 };
             } catch (error) {
                 return {
-                    actions: [{
-                        type: "return.tool.error",
-                        tool_call_id: trigger.tool_call_id,
-                        error: error instanceof Error ? error.message : String(error),
-                        retryable: false,
-                        attempt: trigger.attempt,
-                    }],
+                    actions: [
+                        {
+                            type: "return.tool.error",
+                            tool_call_id: trigger.tool_call_id,
+                            error: error instanceof Error ? error.message : String(error),
+                            retryable: false,
+                            attempt: trigger.attempt,
+                        },
+                    ],
                     state: encodeState(state),
                 };
             }

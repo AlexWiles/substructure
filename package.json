@@ -10,9 +10,12 @@
     "build": "nx run-many -t build",
     "dev": "nx run-many -t dev",
     "lint": "nx run-many -t lint",
-    "test": "nx run-many -t test"
+    "test": "nx run-many -t test",
+    "format": "biome format --write .",
+    "format:check": "biome format ."
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.4.10",
     "@napi-rs/cli": "^3.5.1",
     "nx": "latest",
     "typescript": "^5.9.3"

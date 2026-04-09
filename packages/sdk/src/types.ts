@@ -172,16 +172,23 @@ export type ClientPayload =
 export type DecisionTrigger =
     | { type: "user.message"; stream: boolean; message: Message }
     | ({ type: "client.action" } & ClientAction)
-    | { type: "llm.response"; call_id: string; message: Message; truncated: boolean; usage?: Record<string, unknown>; cost?: Decimal }
+    | {
+          type: "llm.response";
+          call_id: string;
+          message: Message;
+          truncated: boolean;
+          usage?: Record<string, unknown>;
+          cost?: Decimal;
+      }
     | { type: "llm.error"; call_id: string; error: string }
     | {
-        type: "tool.execute";
-        tool_call_id: string;
-        name: string;
-        arguments: string;
-        attempt: number;
-        deadline?: DateTime;
-    }
+          type: "tool.execute";
+          tool_call_id: string;
+          name: string;
+          arguments: string;
+          attempt: number;
+          deadline?: DateTime;
+      }
     | { type: "tool.result"; result: ToolResult }
     | { type: "sub_agent.turn.complete"; session_id: Uuid; agent_id: string; turn_id: string; data: unknown }
     | { type: "sub_agent.error"; session_id: Uuid; agent_id: string; error: string }
@@ -192,28 +199,28 @@ export type DecisionTrigger =
 
 export type WorkerAction =
     | {
-        type: "call.llm";
-        request: LlmRequest;
-        stream: boolean;
-        llm_client: string;
-        retry: RetryPolicy;
-    }
+          type: "call.llm";
+          request: LlmRequest;
+          stream: boolean;
+          llm_client: string;
+          retry: RetryPolicy;
+      }
     | {
-        type: "call.tool";
-        tool_call_id: string;
-        name: string;
-        arguments: string;
-        handler: ToolHandler;
-        retry: RetryPolicy;
-    }
+          type: "call.tool";
+          tool_call_id: string;
+          name: string;
+          arguments: string;
+          handler: ToolHandler;
+          retry: RetryPolicy;
+      }
     | { type: "return.tool.result"; tool_call_id: string; result: string; attempt: number }
     | {
-        type: "return.tool.error";
-        tool_call_id: string;
-        error: string;
-        retryable: boolean;
-        attempt: number;
-    }
+          type: "return.tool.error";
+          tool_call_id: string;
+          error: string;
+          retryable: boolean;
+          attempt: number;
+      }
     | { type: "spawn.sub_agent"; session_id: Uuid; agent_id: string; retry: RetryPolicy }
     | { type: "send.message"; session_id: Uuid; message: Message }
     | { type: "done"; data: unknown };
@@ -432,10 +439,7 @@ export interface Event {
 
 // ── Session State ───────────────────────────────────────────────────────────
 
-export type SessionStatus =
-    | "idle"
-    | { interrupted: { interrupt_id: string } }
-    | "done";
+export type SessionStatus = "idle" | { interrupted: { interrupt_id: string } } | "done";
 
 export type EffectStatus = "pending" | "completed" | "failed" | "retry_scheduled";
 

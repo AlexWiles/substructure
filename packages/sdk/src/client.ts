@@ -1,7 +1,12 @@
 // ── Default export ────────────────────────────────────────────────────────
 
 export { Substructure as default, Substructure } from "./substructure";
-export type { AgentOptions, AgentFactory, EmbeddedOptions, SubmitRequest as SubstructureSubmitRequest } from "./substructure";
+export type {
+    AgentOptions,
+    AgentFactory,
+    EmbeddedOptions,
+    SubmitRequest as SubstructureSubmitRequest,
+} from "./substructure";
 export { EmbeddedInstance } from "./substructure";
 
 // ── RunStream ─────────────────────────────────────────────────────────────
@@ -12,7 +17,12 @@ export type { TurnResult } from "./run-stream";
 // ── Clients ───────────────────────────────────────────────────────────────
 
 export { BackendClient } from "./backend-client";
-export type { BackendClientOptions, BackendSubmitRequest, IssueClientTokenRequest, IssueClientTokenResponse } from "./backend-client";
+export type {
+    BackendClientOptions,
+    BackendSubmitRequest,
+    IssueClientTokenRequest,
+    IssueClientTokenResponse,
+} from "./backend-client";
 export { FrontendClient } from "./frontend-client";
 export type { FrontendClientOptions, FrontendSubmitRequest } from "./frontend-client";
 export { WorkerClient } from "./worker-client";
@@ -23,7 +33,17 @@ export { BaseClient, type RequestOptions } from "./base";
 // ── Worker & Agent ────────────────────────────────────────────────────────
 
 export { Worker, defineAgent, HandlerBuilder } from "./worker";
-export type { Handler, AgentRequest, AgentResponse, MiddlewareFn, Next, FetchHandlerOptions, StateContributor, DecisionHandler, DecisionResult } from "./worker";
+export type {
+    Handler,
+    AgentRequest,
+    AgentResponse,
+    MiddlewareFn,
+    Next,
+    FetchHandlerOptions,
+    StateContributor,
+    DecisionHandler,
+    DecisionResult,
+} from "./worker";
 
 // ── Middleware ─────────────────────────────────────────────────────────────
 
@@ -38,7 +58,15 @@ export {
     llmLoop,
     subAgents,
 } from "./worker";
-export type { ToolFn, ToolDef, SubAgentTrack, LlmLoopSelection, ToolSelector, MessageSelector, SystemMessageSelector } from "./worker";
+export type {
+    ToolFn,
+    ToolDef,
+    SubAgentTrack,
+    LlmLoopSelection,
+    ToolSelector,
+    MessageSelector,
+    SystemMessageSelector,
+} from "./worker";
 
 // ── Runtime ───────────────────────────────────────────────────────────────
 

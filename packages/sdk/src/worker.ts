@@ -1,9 +1,4 @@
-import type {
-    WorkerDecisionRequestWire,
-    WorkerAction,
-    SubmitRequest,
-    SpanContext,
-} from "./types";
+import type { WorkerDecisionRequestWire, WorkerAction, SubmitRequest, SpanContext } from "./types";
 import type { NativeRuntime } from "./runtime";
 import { verifyWebhookSignature } from "./webhook";
 
@@ -14,9 +9,7 @@ export interface DecisionResult {
     state: string;
 }
 
-export type DecisionHandler = (
-    request: WorkerDecisionRequestWire
-) => Promise<DecisionResult>;
+export type DecisionHandler = (request: WorkerDecisionRequestWire) => Promise<DecisionResult>;
 
 export interface AgentRequest<S = unknown> {
     agentId: string;
@@ -32,9 +25,7 @@ export interface AgentResponse {
 }
 
 /** Terminal handler: receives context with state S, returns actions. */
-export type Next<S = unknown> = (
-    req: AgentRequest<S>,
-) => Promise<AgentResponse> | AgentResponse;
+export type Next<S = unknown> = (req: AgentRequest<S>) => Promise<AgentResponse> | AgentResponse;
 
 /**
  * Middleware function. Receives the current context and a `next` callback.
@@ -167,15 +158,11 @@ export class Worker {
 
     async register(runtime: NativeRuntime, tenantId: string): Promise<void> {
         const self = this;
-        await runtime.registerWorker(
-            tenantId,
-            this.agentIds,
-            async (decisionJson: string) => {
-                const request: WorkerDecisionRequestWire = JSON.parse(decisionJson);
-                const submit = await self.handleDecision(request);
-                return JSON.stringify(submit);
-            },
-        );
+        await runtime.registerWorker(tenantId, this.agentIds, async (decisionJson: string) => {
+            const request: WorkerDecisionRequestWire = JSON.parse(decisionJson);
+            const submit = await self.handleDecision(request);
+            return JSON.stringify(submit);
+        });
     }
 
     /**
@@ -190,11 +177,9 @@ export class Worker {
             let decision: WorkerDecisionRequestWire;
 
             if (options?.signingSecret) {
-                decision = await verifyWebhookSignature<WorkerDecisionRequestWire>(
-                    req,
-                    options.signingSecret,
-                    { tolerance: options.tolerance },
-                );
+                decision = await verifyWebhookSignature<WorkerDecisionRequestWire>(req, options.signingSecret, {
+                    tolerance: options.tolerance,
+                });
             } else {
                 decision = (await req.json()) as WorkerDecisionRequestWire;
             }

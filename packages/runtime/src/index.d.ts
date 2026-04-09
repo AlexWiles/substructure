@@ -1,30 +1,30 @@
 export interface RuntimeOptions {
-  /** SQLite database path */
-  db: string;
-  /** OpenRouter API base URL (default: "https://openrouter.ai/api") */
-  openrouterBaseUrl?: string;
-  /** OpenRouter API key */
-  openrouterApiKey?: string;
-  /** Number of concurrent LLM handler tasks (default: 4) */
-  llmPoolSize?: number;
+    /** SQLite database path */
+    db: string;
+    /** OpenRouter API base URL (default: "https://openrouter.ai/api") */
+    openrouterBaseUrl?: string;
+    /** OpenRouter API key */
+    openrouterApiKey?: string;
+    /** Number of concurrent LLM handler tasks (default: 4) */
+    llmPoolSize?: number;
 }
 
 export class EmbeddedRuntime {
-  constructor(options: RuntimeOptions);
+    constructor(options: RuntimeOptions);
 
-  registerWorker(
-    tenantId: string,
-    agentIds: string[],
-    callback: (decision: string) => Promise<string>
-  ): Promise<void>;
+    registerWorker(
+        tenantId: string,
+        agentIds: string[],
+        callback: (decision: string) => Promise<string>,
+    ): Promise<void>;
 
-  submitPayload(
-    sessionId: string,
-    agentId: string,
-    payloadJson: string,
-    authJson: string,
-    turnId?: string,
-  ): AsyncGenerator<string, void, unknown>;
+    submitPayload(
+        sessionId: string,
+        agentId: string,
+        payloadJson: string,
+        authJson: string,
+        turnId?: string,
+    ): AsyncGenerator<string, void, unknown>;
 
-  shutdown(): Promise<void>;
+    shutdown(): Promise<void>;
 }

@@ -1,11 +1,4 @@
-import {
-    TUI,
-    Text,
-    Markdown,
-    Editor,
-    Loader,
-    ProcessTerminal,
-} from "@mariozechner/pi-tui";
+import { TUI, Text, Markdown, Editor, Loader, ProcessTerminal } from "@mariozechner/pi-tui";
 import type { Event } from "@substructure.ai/sdk";
 
 // ── Config ───────────────────────────────────────────────────────────────────
@@ -62,11 +55,7 @@ const editorTheme = {
 const terminal = new ProcessTerminal();
 const tui = new TUI(terminal);
 
-const header = new Text(
-    `${bold(cyan("coding-agent"))} ${dim("— session " + sessionId.slice(0, 8))}`,
-    1,
-    0,
-);
+const header = new Text(`${bold(cyan("coding-agent"))} ${dim("— session " + sessionId.slice(0, 8))}`, 1, 0);
 tui.addChild(header);
 tui.addChild(new Text(dim("─".repeat(60)), 1, 0));
 
@@ -91,22 +80,16 @@ function addAssistantMessage(content: string) {
 
 function addToolCall(name: string, args: string) {
     const argsShort = args.length > 120 ? args.slice(0, 120) + "…" : args;
-    tui.addChild(
-        new Text(`  ${yellow("⚡")} ${bold(yellow(name))} ${dim(argsShort)}`, 0, 0),
-    );
+    tui.addChild(new Text(`  ${yellow("⚡")} ${bold(yellow(name))} ${dim(argsShort)}`, 0, 0));
 }
 
 function addToolResult(name: string, result: string) {
     const resultShort = result.length > 200 ? result.slice(0, 200) + "…" : result;
-    tui.addChild(
-        new Text(`  ${green("✓")} ${dim(name)} ${gray(resultShort)}`, 0, 0),
-    );
+    tui.addChild(new Text(`  ${green("✓")} ${dim(name)} ${gray(resultShort)}`, 0, 0));
 }
 
 function addToolError(name: string, error: string) {
-    tui.addChild(
-        new Text(`  ${red("✗")} ${dim(name)} ${red(error)}`, 0, 0),
-    );
+    tui.addChild(new Text(`  ${red("✗")} ${dim(name)} ${red(error)}`, 0, 0));
 }
 
 function addError(message: string) {
@@ -241,13 +224,7 @@ editor.onSubmit = async (text: string) => {
     }
 };
 
-tui.addChild(
-    new Text(
-        dim("Type a message and press Enter to send. /quit to exit."),
-        1,
-        0,
-    ),
-);
+tui.addChild(new Text(dim("Type a message and press Enter to send. /quit to exit."), 1, 0));
 
 tui.addChild(editor);
 tui.setFocus(editor);
@@ -255,7 +232,8 @@ tui.setFocus(editor);
 // ── Start ────────────────────────────────────────────────────────────────────
 
 tui.addInputListener((data) => {
-    if (data === "\x03") { // Ctrl+C
+    if (data === "\x03") {
+        // Ctrl+C
         tui.stop();
         process.exit(0);
     }

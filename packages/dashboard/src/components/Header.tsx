@@ -1,5 +1,5 @@
-import { Link } from '@tanstack/react-router'
-import ThemeToggle from './ThemeToggle'
+import { Link } from "@tanstack/react-router";
+import ThemeToggle from "./ThemeToggle";
 
 export default function Header() {
     return (
@@ -11,7 +11,7 @@ export default function Header() {
                 <Link
                     to="/sessions"
                     className="font-mono text-xs text-[var(--color-text-secondary)] no-underline hover:text-[var(--color-text)]"
-                    activeProps={{ className: 'font-mono text-xs text-[var(--color-text)] no-underline' }}
+                    activeProps={{ className: "font-mono text-xs text-[var(--color-text)] no-underline" }}
                 >
                     sessions
                 </Link>
@@ -20,5 +20,5 @@ export default function Header() {
                 </div>
             </nav>
         </header>
-    )
+    );
 }

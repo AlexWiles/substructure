@@ -26,7 +26,6 @@ const ContactSchema = z.object({
     role: z.string().describe("Job title or role"),
 });
 
-
 const RETRY = {
     timeout_secs: 120,
     max_retries: 3,
@@ -36,8 +35,9 @@ const RETRY = {
 
 const SYSTEM_MESSAGE: Message = {
     role: "system",
-    content: "You extract contact information from text. When given text, identify the person's name, email, company, and role. Always call extract_contact with the structured data."
-}
+    content:
+        "You extract contact information from text. When given text, identify the person's name, email, company, and role. Always call extract_contact with the structured data.",
+};
 
 interface State {
     messages: Message[];
@@ -54,10 +54,11 @@ function callLlm(state: State): WorkerAction {
                 {
                     function: {
                         name: "extract_contact",
-                        description: "Save the extracted contact information. You must call this tool with the structured data.",
+                        description:
+                            "Save the extracted contact information. You must call this tool with the structured data.",
                         parameters: z.toJSONSchema(ContactSchema, { target: "draft-2020-12" }),
-                    }
-                }
+                    },
+                },
             ],
         },
         stream: false,
@@ -125,21 +126,25 @@ const withStructuredOutputFlow = (): MiddlewareFn<unknown> => (req, next) => {
                 const args = JSON.parse(trigger.arguments);
                 const contact = ContactSchema.parse(args);
                 return {
-                    actions: [{
-                        type: "done",
-                        data: contact,
-                    }],
+                    actions: [
+                        {
+                            type: "done",
+                            data: contact,
+                        },
+                    ],
                     state,
                 };
             } catch (e: any) {
                 return {
-                    actions: [{
-                        type: "return.tool.error",
-                        tool_call_id: trigger.tool_call_id,
-                        error: e.message,
-                        retryable: false,
-                        attempt: trigger.attempt,
-                    }],
+                    actions: [
+                        {
+                            type: "return.tool.error",
+                            tool_call_id: trigger.tool_call_id,
+                            error: e.message,
+                            retryable: false,
+                            attempt: trigger.attempt,
+                        },
+                    ],
                     state,
                 };
             }
@@ -154,7 +159,7 @@ const extractor = agent({ id: "contact-extractor" })
     .use(agent.logging())
     .use(agent.state())
     .use(withMessageHistory())
-    .use(withStructuredOutputFlow())
+    .use(withStructuredOutputFlow());
 
 const embedded = await sub.embedded({ agents: [extractor], runtime });
 

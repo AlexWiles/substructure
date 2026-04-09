@@ -61,18 +61,12 @@ const apiServer = Bun.serve({
                 sub: "web-user",
                 ttlSeconds: 600,
             });
-            return Response.json(
-                { token, expiresAt },
-                { headers: corsHeaders() },
-            );
+            return Response.json({ token, expiresAt }, { headers: corsHeaders() });
         }
 
         // GET /api/config — tell the frontend where the Substructure server is
         if (url.pathname === "/api/config" && req.method === "GET") {
-            return Response.json(
-                { serverUrl: SERVER_URL, agentId: AGENT_ID },
-                { headers: corsHeaders() },
-            );
+            return Response.json({ serverUrl: SERVER_URL, agentId: AGENT_ID }, { headers: corsHeaders() });
         }
 
         return new Response("Not found", { status: 404, headers: corsHeaders() });

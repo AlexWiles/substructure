@@ -52,8 +52,7 @@ const searchWeb = agent.tool({
 });
 
 const readArticle = agent.tool({
-    description:
-        "Read the full content of an article given its URL. Returns the article text.",
+    description: "Read the full content of an article given its URL. Returns the article text.",
     parameters: {
         type: "object",
         properties: {
@@ -88,8 +87,7 @@ const readArticle = agent.tool({
 });
 
 const takeNotes = agent.tool({
-    description:
-        "Save research notes for later reference. Use this to record key findings from articles you've read.",
+    description: "Save research notes for later reference. Use this to record key findings from articles you've read.",
     parameters: {
         type: "object",
         properties: {

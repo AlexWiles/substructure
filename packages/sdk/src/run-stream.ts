@@ -29,8 +29,7 @@ export class RunStream {
                 yield event;
             }
             const tc = this.events.findLast(
-                (e): e is Event & { payload: TurnCompleted } =>
-                    e.payload.type === "turn.completed",
+                (e): e is Event & { payload: TurnCompleted } => e.payload.type === "turn.completed",
             );
             if (tc) {
                 this.resolveResult({

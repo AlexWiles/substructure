@@ -39,12 +39,8 @@ export function EventCard({ event }: EventCardProps) {
                         <span className="animate-spin text-sm">~</span>
                     </div>
                     <div className="min-w-0">
-                        <p className="text-sm font-medium text-purple-700">
-                            Thinking...
-                        </p>
-                        <p className="text-xs text-purple-500">
-                            {p.request.model}
-                        </p>
+                        <p className="text-sm font-medium text-purple-700">Thinking...</p>
+                        <p className="text-xs text-purple-500">{p.request.model}</p>
                     </div>
                 </div>
             );
@@ -56,9 +52,7 @@ export function EventCard({ event }: EventCardProps) {
                         <span className="text-sm">&#10003;</span>
                     </div>
                     <div className="min-w-0">
-                        <p className="text-sm font-medium text-purple-700">
-                            LLM response received
-                        </p>
+                        <p className="text-sm font-medium text-purple-700">LLM response received</p>
                         <p className="text-xs text-purple-500">
                             {p.response.model} &middot; {p.response.finish_reason}
                         </p>
@@ -73,12 +67,8 @@ export function EventCard({ event }: EventCardProps) {
                         <span className="text-sm">!</span>
                     </div>
                     <div className="min-w-0">
-                        <p className="text-sm font-medium text-red-700">
-                            LLM Error
-                        </p>
-                        <p className="text-xs text-red-500">
-                            {truncate(p.error, 200)}
-                        </p>
+                        <p className="text-sm font-medium text-red-700">LLM Error</p>
+                        <p className="text-xs text-red-500">{truncate(p.error, 200)}</p>
                     </div>
                 </div>
             );
@@ -90,12 +80,8 @@ export function EventCard({ event }: EventCardProps) {
                         <span className="text-sm">&#9881;</span>
                     </div>
                     <div className="min-w-0">
-                        <p className="text-sm font-medium text-blue-700">
-                            {p.name}
-                        </p>
-                        <p className="text-xs text-blue-500 font-mono break-all">
-                            {truncate(p.arguments, 150)}
-                        </p>
+                        <p className="text-sm font-medium text-blue-700">{p.name}</p>
+                        <p className="text-xs text-blue-500 font-mono break-all">{truncate(p.arguments, 150)}</p>
                     </div>
                 </div>
             );
@@ -107,12 +93,8 @@ export function EventCard({ event }: EventCardProps) {
                         <span className="text-sm">&#10003;</span>
                     </div>
                     <div className="min-w-0">
-                        <p className="text-sm font-medium text-green-700">
-                            {p.name}
-                        </p>
-                        <p className="text-xs text-green-600 font-mono break-all">
-                            {truncate(p.result, 200)}
-                        </p>
+                        <p className="text-sm font-medium text-green-700">{p.name}</p>
+                        <p className="text-xs text-green-600 font-mono break-all">{truncate(p.result, 200)}</p>
                     </div>
                 </div>
             );
@@ -124,12 +106,8 @@ export function EventCard({ event }: EventCardProps) {
                         <span className="text-sm">&#10007;</span>
                     </div>
                     <div className="min-w-0">
-                        <p className="text-sm font-medium text-red-700">
-                            {p.name} failed
-                        </p>
-                        <p className="text-xs text-red-500">
-                            {truncate(p.error, 200)}
-                        </p>
+                        <p className="text-sm font-medium text-red-700">{p.name} failed</p>
+                        <p className="text-xs text-red-500">{truncate(p.error, 200)}</p>
                     </div>
                 </div>
             );
@@ -142,21 +120,13 @@ export function EventCard({ event }: EventCardProps) {
             return (
                 <div
                     className={`rounded-lg border px-4 py-3 ${
-                        isUser
-                            ? "bg-gray-50 border-gray-200"
-                            : "bg-white border-gray-200"
+                        isUser ? "bg-gray-50 border-gray-200" : "bg-white border-gray-200"
                     }`}
                 >
-                    <p
-                        className={`text-xs font-semibold mb-1 ${
-                            isUser ? "text-gray-500" : "text-gray-700"
-                        }`}
-                    >
+                    <p className={`text-xs font-semibold mb-1 ${isUser ? "text-gray-500" : "text-gray-700"}`}>
                         {isUser ? "User" : "Assistant"}
                     </p>
-                    <p className="text-sm text-gray-800 whitespace-pre-wrap">
-                        {content}
-                    </p>
+                    <p className="text-sm text-gray-800 whitespace-pre-wrap">{content}</p>
                 </div>
             );
         }

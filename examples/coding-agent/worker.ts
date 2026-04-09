@@ -145,10 +145,12 @@ export const codingAgent = agent({ id: AGENT_ID })
     .use(agent.messageHistory())
     .use(agent.systemMessage(() => SYSTEM_PROMPT))
     .use(agent.tools(() => ({ readFile, writeFile, listFiles, runCommand })))
-    .use(agent.llmLoop(() => ({
-        request: {
-            model: "anthropic/claude-sonnet-4",
-        },
-        llm_client: "openrouter",
-        retry,
-    })));
+    .use(
+        agent.llmLoop(() => ({
+            request: {
+                model: "anthropic/claude-sonnet-4",
+            },
+            llm_client: "openrouter",
+            retry,
+        })),
+    );

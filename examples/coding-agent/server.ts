@@ -46,16 +46,10 @@ const server = Bun.serve({
                 async start(controller) {
                     try {
                         for await (const event of stream) {
-                            controller.enqueue(
-                                encoder.encode(JSON.stringify(event) + "\n"),
-                            );
+                            controller.enqueue(encoder.encode(JSON.stringify(event) + "\n"));
                         }
                     } catch (err) {
-                        controller.enqueue(
-                            encoder.encode(
-                                JSON.stringify({ error: String(err) }) + "\n",
-                            ),
-                        );
+                        controller.enqueue(encoder.encode(JSON.stringify({ error: String(err) }) + "\n"));
                     } finally {
                         controller.close();
                     }

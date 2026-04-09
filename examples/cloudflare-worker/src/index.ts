@@ -16,8 +16,7 @@ const retry = {
 };
 
 const fetchUrl = agent.tool({
-    description:
-        "Fetch a URL and return its content. Use for APIs, web pages, or checking if a site is up.",
+    description: "Fetch a URL and return its content. Use for APIs, web pages, or checking if a site is up.",
     parameters: {
         type: "object",
         properties: {
@@ -53,8 +52,7 @@ const extractFromHtml = agent.tool({
             url: { type: "string", description: "The URL to fetch" },
             selector: {
                 type: "string",
-                description:
-                    "CSS selector to match elements (e.g. 'h1', '.price', 'article p')",
+                description: "CSS selector to match elements (e.g. 'h1', '.price', 'article p')",
             },
         },
         required: ["url", "selector"],

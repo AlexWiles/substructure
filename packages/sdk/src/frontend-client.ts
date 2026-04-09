@@ -6,36 +6,36 @@ export { RunStream } from "./run-stream";
 export type { TurnResult } from "./run-stream";
 
 export interface FrontendClientOptions {
-  url: string;
-  token: string;
+    url: string;
+    token: string;
 }
 
 export interface FrontendSubmitRequest {
-  agentId: string;
-  payload: ClientPayload;
-  sessionId?: string;
-  turnId?: string;
+    agentId: string;
+    payload: ClientPayload;
+    sessionId?: string;
+    turnId?: string;
 }
 
 export class FrontendClient {
-  private user: UserClient;
+    private user: UserClient;
 
-  constructor(options: FrontendClientOptions) {
-    this.user = new UserClient({
-      baseUrl: options.url,
-      headers: { Authorization: `Bearer ${options.token}` },
-    });
-  }
+    constructor(options: FrontendClientOptions) {
+        this.user = new UserClient({
+            baseUrl: options.url,
+            headers: { Authorization: `Bearer ${options.token}` },
+        });
+    }
 
-  submit(request: FrontendSubmitRequest): RunStream {
-    const sessionId = request.sessionId ?? crypto.randomUUID();
-    const turnId = request.turnId;
-    const stream = this.user.submitPayload({
-      agent_id: request.agentId,
-      payload: request.payload,
-      session_id: sessionId,
-      turn_id: turnId,
-    });
-    return new RunStream(stream);
-  }
+    submit(request: FrontendSubmitRequest): RunStream {
+        const sessionId = request.sessionId ?? crypto.randomUUID();
+        const turnId = request.turnId;
+        const stream = this.user.submitPayload({
+            agent_id: request.agentId,
+            payload: request.payload,
+            session_id: sessionId,
+            turn_id: turnId,
+        });
+        return new RunStream(stream);
+    }
 }

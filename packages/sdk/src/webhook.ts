@@ -53,15 +53,8 @@ export async function verifyWebhookSignature<T = unknown>(
         false,
         ["sign"],
     );
-    const mac = await crypto.subtle.sign(
-        "HMAC",
-        key,
-        new TextEncoder().encode(signingPayload),
-    );
-    const expectedSig = Array.from(
-        new Uint8Array(mac),
-        (b) => b.toString(16).padStart(2, "0"),
-    ).join("");
+    const mac = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(signingPayload));
+    const expectedSig = Array.from(new Uint8Array(mac), (b) => b.toString(16).padStart(2, "0")).join("");
 
     if (!timingSafeEqual(receivedSig, expectedSig)) {
         throw new WebhookVerificationError("Signature mismatch");

@@ -10,12 +10,9 @@ export function App() {
         <div className="mx-auto flex h-screen max-w-2xl flex-col px-4 py-8">
             {/* Header */}
             <div className="mb-6">
-                <h1 className="text-xl font-bold text-gray-900">
-                    Research Agent
-                </h1>
+                <h1 className="text-xl font-bold text-gray-900">Research Agent</h1>
                 <p className="text-sm text-gray-500">
-                    Enter a topic and watch the agent search, read, and
-                    summarize — powered by{" "}
+                    Enter a topic and watch the agent search, read, and summarize — powered by{" "}
                     <span className="font-medium">Substructure</span> +{" "}
                     <span className="font-medium">FrontendClient</span>
                 </p>
