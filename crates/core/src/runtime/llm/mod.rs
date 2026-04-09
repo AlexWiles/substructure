@@ -7,6 +7,6 @@ pub use executor::spawn_llm_task_executor;
 pub use projection::spawn_llm_dispatch_processor;
 pub use queue::LlmTask;
 pub use types::{
-    LlmCallError, LlmCallable, LlmProviderTrait, LlmRequest, LlmResponse, LlmTool,
-    ResponseImage, StreamDelta,
+    LlmCallError, LlmCallable, LlmProviderTrait, LlmRequest, LlmResponse, LlmTool, ResponseImage,
+    StreamDelta,
 };

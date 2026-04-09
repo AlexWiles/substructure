@@ -67,8 +67,8 @@ impl EventProcessor for WakeScheduleProjection {
         if event.aggregate_type != SessionState::AGGREGATE_TYPE {
             return Ok(());
         }
-        let event =
-            DomainEvent::<SessionState>::from_raw(event).map_err(|e| ProcessorError::Apply(e.to_string()))?;
+        let event = DomainEvent::<SessionState>::from_raw(event)
+            .map_err(|e| ProcessorError::Apply(e.to_string()))?;
         match event.derived.and_then(|d| d.wake_at) {
             Some(wake_at) => self
                 .wake_store

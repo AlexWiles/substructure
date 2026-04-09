@@ -40,10 +40,7 @@ pub struct ToolResult {
 #[serde(tag = "type")]
 pub enum DecisionTrigger {
     #[serde(rename = "user.message")]
-    UserMessage {
-        stream: bool,
-        message: Message,
-    },
+    UserMessage { stream: bool, message: Message },
     #[serde(rename = "client.action")]
     ClientAction {
         name: String,
@@ -62,10 +59,7 @@ pub enum DecisionTrigger {
         cost: Option<Decimal>,
     },
     #[serde(rename = "llm.error")]
-    LlmError {
-        call_id: String,
-        error: String,
-    },
+    LlmError { call_id: String, error: String },
     #[serde(rename = "tool.execute")]
     ToolExecute {
         tool_call_id: String,
@@ -75,9 +69,7 @@ pub enum DecisionTrigger {
         deadline: Option<DateTime<Utc>>,
     },
     #[serde(rename = "tool.result")]
-    ToolResult {
-        result: ToolResult,
-    },
+    ToolResult { result: ToolResult },
     #[serde(rename = "sub_agent.done")]
     SubAgentDone {
         session_id: String,
@@ -98,9 +90,7 @@ pub enum DecisionTrigger {
         error: String,
     },
     #[serde(rename = "interrupt.resumed")]
-    InterruptResumed {
-        interrupt_id: String,
-    },
+    InterruptResumed { interrupt_id: String },
     #[serde(rename = "stall")]
     Stall,
 }
@@ -149,7 +139,5 @@ pub enum WorkerAction {
         message: Message,
     },
     #[serde(rename = "done")]
-    Done {
-        data: serde_json::Value,
-    },
+    Done { data: serde_json::Value },
 }

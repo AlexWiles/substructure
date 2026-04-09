@@ -10,8 +10,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 
-use crate::Runtime;
 use crate::transport::auth::{AuthError, AuthResolver};
+use crate::Runtime;
 
 #[derive(Clone)]
 pub struct ClientHttpState {
@@ -21,7 +21,10 @@ pub struct ClientHttpState {
 
 pub fn router(state: ClientHttpState) -> Router {
     Router::new()
-        .route("/api/client/sessions/submit", post(routes::submit_client_payload))
+        .route(
+            "/api/client/sessions/submit",
+            post(routes::submit_client_payload),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             client_auth_middleware,
@@ -34,11 +37,7 @@ async fn client_auth_middleware(
     mut request: axum::http::Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    match state
-        .auth
-        .resolve(request.headers())
-        .await
-    {
+    match state.auth.resolve(request.headers()).await {
         Ok(principal) => {
             request.extensions_mut().insert(principal);
             next.run(request).await

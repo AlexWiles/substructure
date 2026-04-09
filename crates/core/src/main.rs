@@ -4,6 +4,7 @@ use clap::Parser;
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 
+use substructure_core::llm::LlmTask;
 use substructure_core::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use substructure_core::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
 use substructure_core::providers::sqlite::{SqliteConfig, SqliteStore};
@@ -20,7 +21,6 @@ use substructure_core::transport::server::SubstructureServer;
 use substructure_core::transport::worker_http::{self, WorkerHttpState};
 use substructure_core::worker::push::{PushRegistrationRecord, PushRegistry, TransportRegistry};
 use substructure_core::{start, RuntimeConfig};
-use substructure_core::llm::LlmTask;
 
 fn required_env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} environment variable is required"))
@@ -63,16 +63,24 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Start { host, port, db, worker_url, signing_secret } => {
+        Command::Start {
+            host,
+            port,
+            db,
+            worker_url,
+            signing_secret,
+        } => {
             let store = Arc::new(SqliteStore::new(SqliteConfig {
                 path: db.clone(),
                 busy_timeout: std::time::Duration::from_secs(5),
             })?);
             let config = RuntimeConfig::default();
-            let llm_task_queue: Arc<dyn TaskQueue<LlmTask>> =
-                Arc::new(ShardedInMemoryQueue::new(config.llm_executor_workers as u32));
-            let sub_agent_task_queue: Arc<dyn TaskQueue<SubAgentTask>> =
-                Arc::new(ShardedInMemoryQueue::new(config.sub_agent_executor_workers as u32));
+            let llm_task_queue: Arc<dyn TaskQueue<LlmTask>> = Arc::new(ShardedInMemoryQueue::new(
+                config.llm_executor_workers as u32,
+            ));
+            let sub_agent_task_queue: Arc<dyn TaskQueue<SubAgentTask>> = Arc::new(
+                ShardedInMemoryQueue::new(config.sub_agent_executor_workers as u32),
+            );
             let llm_provider = Arc::new(OpenRouterProvider::new(OpenRouterConfig {
                 base_url: std::env::var("OPENROUTER_BASE_URL")
                     .unwrap_or_else(|_| "https://openrouter.ai/api".to_string()),
@@ -102,28 +110,27 @@ async fn main() -> anyhow::Result<()> {
 
             let worker_api_key = required_env("WORKER_API_KEY");
             let worker_key_hash = hex::encode(Sha256::digest(worker_api_key.as_bytes()));
-            let bindings = vec![ApiKeyBinding::new(
-                "default",
-                worker_key_hash,
-                "worker",
-            )];
+            let bindings = vec![ApiKeyBinding::new("default", worker_key_hash, "worker")];
             let client_auth: Arc<dyn AuthResolver> = client_token_issuer.clone();
             let worker_auth: Arc<dyn AuthResolver> = Arc::new(
-                BearerHashedApiKeyAuthResolver::new(bindings)
-                    .map_err(anyhow::Error::msg)?,
+                BearerHashedApiKeyAuthResolver::new(bindings).map_err(anyhow::Error::msg)?,
             );
             adapter.start().await;
 
             if let Some(ref url) = worker_url {
-                let secret = signing_secret.unwrap_or_else(|| hex::encode(rand::random::<[u8; 32]>()));
-                adapter.register(PushRegistrationRecord {
-                    tenant_id: "default".into(),
-                    transport_type: "http".into(),
-                    config: serde_json::json!({
-                        "endpoint_url": url,
-                        "signing_secret": secret,
-                    }),
-                }).await.expect("failed to register startup worker");
+                let secret =
+                    signing_secret.unwrap_or_else(|| hex::encode(rand::random::<[u8; 32]>()));
+                adapter
+                    .register(PushRegistrationRecord {
+                        tenant_id: "default".into(),
+                        transport_type: "http".into(),
+                        config: serde_json::json!({
+                            "endpoint_url": url,
+                            "signing_secret": secret,
+                        }),
+                    })
+                    .await
+                    .expect("failed to register startup worker");
                 tracing::info!(url, "startup worker registered (signing enabled)");
             }
 

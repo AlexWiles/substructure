@@ -813,7 +813,8 @@ fn worker_queue_dequeue(
     .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
 
-    let decision = serde_json::from_str::<WorkerDecisionRequest>(&payload).map_err(|e| e.to_string())?;
+    let decision =
+        serde_json::from_str::<WorkerDecisionRequest>(&payload).map_err(|e| e.to_string())?;
     Ok(Some(decision))
 }
 
@@ -949,7 +950,8 @@ impl ProcessorCheckpointStore for SqliteStore {
         let projection = projection.to_string();
         let reader = self.reader.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = reader.open()
+            let conn = reader
+                .open()
                 .map_err(|e| CheckpointError::Message(e.to_string()))?;
             do_load_projection_checkpoint(&conn, &projection, shard_id)
         })
@@ -1294,11 +1296,7 @@ impl PushRegistrationStore for SqliteStore {
                  ON CONFLICT(tenant_id) DO UPDATE SET
                      transport_type = excluded.transport_type,
                      config = excluded.config",
-                rusqlite::params![
-                    record.tenant_id,
-                    record.transport_type,
-                    config_str
-                ],
+                rusqlite::params![record.tenant_id, record.transport_type, config_str],
             )
             .map_err(|e| e.to_string())?;
             Ok(())

@@ -80,7 +80,10 @@ fn compile_hashed_api_key_bindings(
     let mut compiled = Vec::with_capacity(bindings.len());
     for binding in bindings {
         if binding.key_id.trim().is_empty() {
-            return Err(format!("key_id is required for tenant {}", binding.tenant_id));
+            return Err(format!(
+                "key_id is required for tenant {}",
+                binding.tenant_id
+            ));
         }
         let raw = hex::decode(&binding.key_sha256_hex)
             .map_err(|e| format!("invalid SHA-256 hex for tenant {}: {e}", binding.tenant_id))?;
@@ -128,10 +131,7 @@ mod tests {
             "Bearer dev-worker-key".parse().unwrap(),
         );
 
-        let principal = resolver
-            .resolve(&headers)
-            .await
-            .unwrap();
+        let principal = resolver.resolve(&headers).await.unwrap();
         assert_eq!(principal.tenant_id, "tenant-a");
     }
 
@@ -145,10 +145,7 @@ mod tests {
         .unwrap();
         let headers = HeaderMap::new();
 
-        let err = resolver
-            .resolve(&headers)
-            .await
-            .unwrap_err();
+        let err = resolver.resolve(&headers).await.unwrap_err();
         assert!(matches!(err, AuthError::MissingCredentials));
     }
 }

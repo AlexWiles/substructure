@@ -1,5 +1,5 @@
-use std::collections::VecDeque;
 use async_trait::async_trait;
+use std::collections::VecDeque;
 use tokio::sync::{oneshot, Mutex};
 
 use crate::worker::{DequeueFilter, WorkerDecisionRequest, WorkerQueue};
@@ -55,7 +55,11 @@ impl WorkerQueue for InMemoryWorkerQueue {
         let rx = {
             let mut inner = self.inner.lock().await;
             // Check buffered items first
-            if let Some(idx) = inner.items.iter().position(|d| d.tenant_id == filter.tenant_id) {
+            if let Some(idx) = inner
+                .items
+                .iter()
+                .position(|d| d.tenant_id == filter.tenant_id)
+            {
                 return inner.items.remove(idx);
             }
             // No match — register as a waiter

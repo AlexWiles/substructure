@@ -101,12 +101,12 @@ impl EventProcessor for SessionIndexProjection {
             return Ok(());
         }
 
-        let event =
-            DomainEvent::<SessionState>::from_raw(event).map_err(|e| ProcessorError::Apply(e.to_string()))?;
+        let event = DomainEvent::<SessionState>::from_raw(event)
+            .map_err(|e| ProcessorError::Apply(e.to_string()))?;
 
-        let derived = event
-            .derived
-            .ok_or_else(|| ProcessorError::Apply("missing derived state for session event".into()))?;
+        let derived = event.derived.ok_or_else(|| {
+            ProcessorError::Apply("missing derived state for session event".into())
+        })?;
 
         let record = SessionIndexRecord {
             tenant_id: event.tenant_id,
@@ -127,7 +127,7 @@ impl EventProcessor for SessionIndexProjection {
             .upsert_session_index(record)
             .await
             .map_err(ProcessorError::Apply)
-}
+    }
 }
 
 pub fn spawn_session_index_processor(

@@ -8,9 +8,7 @@ use serde::Deserialize;
 use sha2::Sha256;
 
 use crate::transport::worker_http::types::SubmitRequest;
-use crate::worker::push::{
-    PushError, PushResponse, PushTransport, TransportConstructor,
-};
+use crate::worker::push::{PushError, PushResponse, PushTransport, TransportConstructor};
 use crate::worker::WorkerDecisionRequest;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -23,7 +21,11 @@ pub struct HttpPushTransport {
 }
 
 impl HttpPushTransport {
-    pub fn new(endpoint_url: String, timeout: Option<Duration>, signing_secret: Option<String>) -> Self {
+    pub fn new(
+        endpoint_url: String,
+        timeout: Option<Duration>,
+        signing_secret: Option<String>,
+    ) -> Self {
         Self {
             http: Client::new(),
             endpoint_url,
@@ -52,8 +54,8 @@ impl PushTransport for HttpPushTransport {
             let body_str = String::from_utf8_lossy(&body);
             let signing_payload = format!("{timestamp}.{body_str}");
 
-            let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-                .expect("HMAC accepts any key length");
+            let mut mac =
+                HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
             mac.update(signing_payload.as_bytes());
             let signature = hex::encode(mac.finalize().into_bytes());
 
@@ -103,7 +105,11 @@ pub fn http_transport() -> (&'static str, TransportConstructor) {
             let c: HttpTransportConfig =
                 serde_json::from_value(config).map_err(|e| e.to_string())?;
             let timeout = c.timeout_secs.map(Duration::from_secs);
-            Ok(Arc::new(HttpPushTransport::new(c.endpoint_url, timeout, c.signing_secret)))
+            Ok(Arc::new(HttpPushTransport::new(
+                c.endpoint_url,
+                timeout,
+                c.signing_secret,
+            )))
         }),
     )
 }

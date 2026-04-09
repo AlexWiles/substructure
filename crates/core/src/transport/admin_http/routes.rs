@@ -186,11 +186,15 @@ pub async fn stream_session_events(
     let stream = ReceiverStream::new(rx).map(|event| {
         let event_type = event.payload_type().to_owned();
         let data = serde_json::to_string(&event).unwrap_or_default();
-        Ok::<_, std::convert::Infallible>(SseEvent::default()
-            .id(event.sequence.to_string())
-            .event(event_type)
-            .data(data))
+        Ok::<_, std::convert::Infallible>(
+            SseEvent::default()
+                .id(event.sequence.to_string())
+                .event(event_type)
+                .data(data),
+        )
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }

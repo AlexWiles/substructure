@@ -9,13 +9,13 @@ use tokio::task::JoinHandle;
 use tracing_subscriber::EnvFilter;
 
 use base64::Engine;
+use substructure_core::identity::ClientIdentity;
 use substructure_core::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use substructure_core::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
 use substructure_core::providers::sqlite::{SqliteConfig, SqliteStore};
 use substructure_core::providers::worker_queue::InMemoryWorkerQueue;
-use substructure_core::identity::ClientIdentity;
-use substructure_core::worker::{DequeueFilter, SubmitDecision};
 use substructure_core::session::decision::ClientPayload;
+use substructure_core::worker::{DequeueFilter, SubmitDecision};
 use substructure_core::{Runtime, RuntimeConfig, SubmitClientPayload};
 
 /// Configuration for creating a new Runtime.
@@ -49,10 +49,10 @@ impl EmbeddedRuntime {
 
         let store = Arc::new(
             SqliteStore::new(SqliteConfig {
-                    path: options.db.clone(),
-                    busy_timeout: std::time::Duration::from_secs(5),
-                })
-                .map_err(|e| Error::from_reason(format!("failed to open database: {e}")))?,
+                path: options.db.clone(),
+                busy_timeout: std::time::Duration::from_secs(5),
+            })
+            .map_err(|e| Error::from_reason(format!("failed to open database: {e}")))?,
         );
 
         let config = RuntimeConfig {
@@ -61,10 +61,13 @@ impl EmbeddedRuntime {
         };
 
         let queue = Arc::new(InMemoryWorkerQueue::new());
-        let llm_task_queue: Arc<dyn TaskQueue<substructure_core::llm::LlmTask>> =
-            Arc::new(ShardedInMemoryQueue::new(config.llm_executor_workers as u32));
+        let llm_task_queue: Arc<dyn TaskQueue<substructure_core::llm::LlmTask>> = Arc::new(
+            ShardedInMemoryQueue::new(config.llm_executor_workers as u32),
+        );
         let sub_agent_task_queue: Arc<dyn TaskQueue<substructure_core::sub_agent::SubAgentTask>> =
-            Arc::new(ShardedInMemoryQueue::new(config.sub_agent_executor_workers as u32));
+            Arc::new(ShardedInMemoryQueue::new(
+                config.sub_agent_executor_workers as u32,
+            ));
         let llm_provider = Arc::new(OpenRouterProvider::new(OpenRouterConfig {
             base_url: options
                 .openrouter_base_url

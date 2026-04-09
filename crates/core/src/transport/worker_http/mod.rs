@@ -24,8 +24,14 @@ pub fn router(state: WorkerHttpState) -> Router {
     Router::new()
         .route("/api/machine/workers/submit", post(routes::submit))
         .route("/api/machine/workers/register", post(routes::register))
-        .route("/api/machine/client-tokens", post(routes::mint_client_token))
-        .route("/api/machine/sessions/submit", post(routes::submit_client_payload))
+        .route(
+            "/api/machine/client-tokens",
+            post(routes::mint_client_token),
+        )
+        .route(
+            "/api/machine/sessions/submit",
+            post(routes::submit_client_payload),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             worker_auth_middleware,
@@ -38,11 +44,7 @@ async fn worker_auth_middleware(
     mut request: axum::http::Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    match state
-        .auth
-        .resolve(request.headers())
-        .await
-    {
+    match state.auth.resolve(request.headers()).await {
         Ok(principal) => {
             request.extensions_mut().insert(principal);
             next.run(request).await

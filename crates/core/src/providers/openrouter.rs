@@ -10,8 +10,8 @@ use rust_decimal::Decimal;
 
 use crate::identity::ClientIdentity;
 use crate::llm::{
-    LlmCallError, LlmCallable, LlmProviderTrait, LlmRequest, LlmResponse, LlmTool,
-    ResponseImage, StreamDelta,
+    LlmCallError, LlmCallable, LlmProviderTrait, LlmRequest, LlmResponse, LlmTool, ResponseImage,
+    StreamDelta,
 };
 use crate::session::message::{ToolCall, ToolCallFunction};
 

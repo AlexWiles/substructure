@@ -40,8 +40,8 @@ impl EventProcessor for SubAgentDispatchProjection {
             return Ok(());
         }
 
-        let event =
-            DomainEvent::<SessionState>::from_raw(raw).map_err(|e| ProcessorError::Apply(e.to_string()))?;
+        let event = DomainEvent::<SessionState>::from_raw(raw)
+            .map_err(|e| ProcessorError::Apply(e.to_string()))?;
 
         let shard_key = raw.aggregate_id.clone();
 

@@ -51,9 +51,7 @@ impl PushAdapter {
         let tid = tenant_id.clone();
 
         let handle = tokio::spawn(async move {
-            let filter = DequeueFilter {
-                tenant_id,
-            };
+            let filter = DequeueFilter { tenant_id };
 
             loop {
                 let decision = match runtime.dequeue_decision(&filter).await {
@@ -79,10 +77,7 @@ impl PushAdapter {
                 tokio::spawn(async move {
                     let _permit = permit;
 
-                    let transport = match registry
-                        .lookup(&decision.tenant_id)
-                        .await
-                    {
+                    let transport = match registry.lookup(&decision.tenant_id).await {
                         Some(t) => t,
                         None => return,
                     };

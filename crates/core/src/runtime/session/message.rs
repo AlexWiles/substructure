@@ -50,14 +50,24 @@ pub struct VideoUrl {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentPart {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     #[serde(rename = "image_url")]
-    ImageUrl { image_url: ImageUrl },
-    File { file: FileData },
+    ImageUrl {
+        image_url: ImageUrl,
+    },
+    File {
+        file: FileData,
+    },
     #[serde(rename = "input_audio")]
-    InputAudio { input_audio: AudioData },
+    InputAudio {
+        input_audio: AudioData,
+    },
     #[serde(rename = "video_url")]
-    VideoUrl { video_url: VideoUrl },
+    VideoUrl {
+        video_url: VideoUrl,
+    },
 }
 
 /// Message content: either a plain string or an array of typed parts.

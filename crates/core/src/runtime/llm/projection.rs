@@ -40,8 +40,8 @@ impl EventProcessor for LlmDispatchProjection {
             return Ok(());
         }
 
-        let event =
-            DomainEvent::<SessionState>::from_raw(raw).map_err(|e| ProcessorError::Apply(e.to_string()))?;
+        let event = DomainEvent::<SessionState>::from_raw(raw)
+            .map_err(|e| ProcessorError::Apply(e.to_string()))?;
 
         let req = match &event.payload {
             EventPayload::LlmCallRequested(req) => req,

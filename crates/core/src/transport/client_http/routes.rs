@@ -48,17 +48,23 @@ pub async fn submit_client_payload(
             let stream = ReceiverStream::new(rx).map(|event| {
                 let event_type = event.payload_type().to_owned();
                 let data = serde_json::to_string(&event).unwrap_or_default();
-                Ok::<_, std::convert::Infallible>(SseEvent::default()
-                    .id(event.sequence.to_string())
-                    .event(event_type)
-                    .data(data))
+                Ok::<_, std::convert::Infallible>(
+                    SseEvent::default()
+                        .id(event.sequence.to_string())
+                        .event(event_type)
+                        .data(data),
+                )
             });
 
-            Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
+            Sse::new(stream)
+                .keep_alive(KeepAlive::default())
+                .into_response()
         }
         Err(e) => {
             let message = e.to_string();
-            if message.contains("client subject is required") || message.contains("session access denied") {
+            if message.contains("client subject is required")
+                || message.contains("session access denied")
+            {
                 let body = serde_json::json!({"error": message});
                 return (axum::http::StatusCode::FORBIDDEN, Json(body)).into_response();
             }
