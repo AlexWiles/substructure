@@ -37,17 +37,20 @@ pub struct ToolResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type")]
 pub enum DecisionTrigger {
+    #[serde(rename = "user.message")]
     UserMessage {
         stream: bool,
         message: Message,
     },
+    #[serde(rename = "client.action")]
     ClientAction {
         name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         args: Option<serde_json::Value>,
     },
+    #[serde(rename = "llm.response")]
     LlmResponse {
         call_id: String,
         message: Message,
@@ -58,10 +61,12 @@ pub enum DecisionTrigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cost: Option<Decimal>,
     },
+    #[serde(rename = "llm.error")]
     LlmError {
         call_id: String,
         error: String,
     },
+    #[serde(rename = "tool.execute")]
     ToolExecute {
         tool_call_id: String,
         name: String,
@@ -69,41 +74,49 @@ pub enum DecisionTrigger {
         attempt: u32,
         deadline: Option<DateTime<Utc>>,
     },
+    #[serde(rename = "tool.result")]
     ToolResult {
         result: ToolResult,
     },
+    #[serde(rename = "sub_agent.done")]
     SubAgentDone {
         session_id: String,
         agent_id: String,
         data: serde_json::Value,
     },
+    #[serde(rename = "sub_agent.turn.complete")]
     SubAgentTurnComplete {
         session_id: String,
         agent_id: String,
         turn_id: String,
         data: serde_json::Value,
     },
+    #[serde(rename = "sub_agent.error")]
     SubAgentError {
         session_id: String,
         agent_id: String,
         error: String,
     },
+    #[serde(rename = "interrupt.resumed")]
     InterruptResumed {
         interrupt_id: String,
     },
+    #[serde(rename = "stall")]
     Stall,
 }
 
 /// Actions a worker can request as part of a decision.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type")]
 pub enum WorkerAction {
+    #[serde(rename = "call.llm")]
     CallLlm {
         request: LlmRequest,
         stream: bool,
         llm_client: String,
         retry: RetryPolicy,
     },
+    #[serde(rename = "call.tool")]
     CallTool {
         tool_call_id: String,
         name: String,
@@ -111,31 +124,31 @@ pub enum WorkerAction {
         handler: ToolHandler,
         retry: RetryPolicy,
     },
+    #[serde(rename = "return.tool.result")]
     ReturnToolResult {
         tool_call_id: String,
         result: String,
         attempt: u32,
     },
+    #[serde(rename = "return.tool.error")]
     ReturnToolError {
         tool_call_id: String,
         error: String,
         retryable: bool,
         attempt: u32,
     },
-    ResolveRemoteTool {
-        session_id: String,
-        tool_call_id: String,
-        result: String,
-    },
+    #[serde(rename = "spawn.sub_agent")]
     SpawnSubAgent {
         session_id: String,
         agent_id: String,
         retry: RetryPolicy,
     },
+    #[serde(rename = "send.message")]
     SendMessage {
         session_id: String,
         message: Message,
     },
+    #[serde(rename = "done")]
     Done {
         data: serde_json::Value,
     },

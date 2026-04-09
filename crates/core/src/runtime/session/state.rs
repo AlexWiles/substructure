@@ -392,7 +392,6 @@ impl SessionState {
                 }
             }
             EventPayload::SessionMessageRequested(_) => {}
-            EventPayload::ToolCallResolutionRequested(_) => {}
             EventPayload::WorkerStateUpdated(p) => {
                 self.worker_state = p.state.clone();
             }

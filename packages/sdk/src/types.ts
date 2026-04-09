@@ -170,53 +170,52 @@ export type ClientPayload =
     | ({ type: "action" } & ClientAction);
 
 export type DecisionTrigger =
-    | { type: "user_message"; stream: boolean; message: Message }
-    | ({ type: "client_action" } & ClientAction)
-    | { type: "llm_response"; call_id: string; message: Message; truncated: boolean; usage?: Record<string, unknown>; cost?: Decimal }
-    | { type: "llm_error"; call_id: string; error: string }
+    | { type: "user.message"; stream: boolean; message: Message }
+    | ({ type: "client.action" } & ClientAction)
+    | { type: "llm.response"; call_id: string; message: Message; truncated: boolean; usage?: Record<string, unknown>; cost?: Decimal }
+    | { type: "llm.error"; call_id: string; error: string }
     | {
-        type: "tool_execute";
+        type: "tool.execute";
         tool_call_id: string;
         name: string;
         arguments: string;
         attempt: number;
         deadline?: DateTime;
     }
-    | { type: "tool_result"; result: ToolResult }
-    | { type: "sub_agent_turn_complete"; session_id: Uuid; agent_id: string; turn_id: string; data: unknown }
-    | { type: "sub_agent_error"; session_id: Uuid; agent_id: string; error: string }
-    | { type: "interrupt_resumed"; interrupt_id: string }
+    | { type: "tool.result"; result: ToolResult }
+    | { type: "sub_agent.turn.complete"; session_id: Uuid; agent_id: string; turn_id: string; data: unknown }
+    | { type: "sub_agent.error"; session_id: Uuid; agent_id: string; error: string }
+    | { type: "interrupt.resumed"; interrupt_id: string }
     | { type: "stall" };
 
 // ── Worker Actions ──────────────────────────────────────────────────────────
 
 export type WorkerAction =
     | {
-        type: "call_llm";
+        type: "call.llm";
         request: LlmRequest;
         stream: boolean;
         llm_client: string;
         retry: RetryPolicy;
     }
     | {
-        type: "call_tool";
+        type: "call.tool";
         tool_call_id: string;
         name: string;
         arguments: string;
         handler: ToolHandler;
         retry: RetryPolicy;
     }
-    | { type: "return_tool_result"; tool_call_id: string; result: string; attempt: number }
+    | { type: "return.tool.result"; tool_call_id: string; result: string; attempt: number }
     | {
-        type: "return_tool_error";
+        type: "return.tool.error";
         tool_call_id: string;
         error: string;
         retryable: boolean;
         attempt: number;
     }
-    | { type: "resolve_remote_tool"; session_id: Uuid; tool_call_id: string; result: string }
-    | { type: "spawn_sub_agent"; session_id: Uuid; agent_id: string; retry: RetryPolicy }
-    | { type: "send_message"; session_id: Uuid; message: Message }
+    | { type: "spawn.sub_agent"; session_id: Uuid; agent_id: string; retry: RetryPolicy }
+    | { type: "send.message"; session_id: Uuid; message: Message }
     | { type: "done"; data: unknown };
 
 // ── Event Payloads ──────────────────────────────────────────────────────────
@@ -355,13 +354,6 @@ export interface SessionMessageRequested {
     message: Message;
 }
 
-export interface ToolCallResolutionRequested {
-    type: "tool_call.resolution_requested";
-    target_session_id: Uuid;
-    tool_call_id: string;
-    result: string;
-}
-
 export interface WorkerStateUpdated {
     type: "worker.state.updated";
     /** Base64-encoded opaque worker state */
@@ -402,7 +394,6 @@ export type EventPayload =
     | WorkerDecisionCompleted
     | WorkerDecisionErrored
     | SessionMessageRequested
-    | ToolCallResolutionRequested
     | WorkerStateUpdated
     | SessionCancelled
     | SessionDone

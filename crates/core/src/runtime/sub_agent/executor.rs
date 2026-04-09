@@ -128,38 +128,6 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
                 );
             }
         }
-        SubAgentTask::ResolveToolCall {
-            tenant_id,
-            target_session_id,
-            tool_call_id,
-            result,
-            span,
-            ..
-        } => {
-            let exec = execute::<SessionState>(
-                store,
-                ExecuteInput {
-                    aggregate_id: target_session_id.clone(),
-                    tenant_id,
-                    command: CommandPayload::CompleteToolCall {
-                        tool_call_id,
-                        result,
-                        worker_state: None,
-                    },
-                    span: span.child("resolve_tool_call"),
-                },
-                &ConflictRetry::default(),
-            )
-            .await;
-
-            if let Err(err) = exec {
-                tracing::error!(
-                    target_session_id = %target_session_id,
-                    error = %err,
-                    "failed to resolve cross-session tool call"
-                );
-            }
-        }
         SubAgentTask::CompleteSubAgentTurn {
             parent_session_id,
             tenant_id,

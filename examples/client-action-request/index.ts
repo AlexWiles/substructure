@@ -44,7 +44,7 @@ const TOOL_CATALOG = [
 const actionAgent = defineAgent("action-demo")
     .use(state())
     .use(stateSlice({ messages: [] as Message[] }, (ctx, next) => {
-        if (ctx.trigger.type !== "client_action") {
+        if (ctx.trigger.type !== "client.action") {
             return next(ctx);
         }
 
@@ -78,7 +78,7 @@ const actionAgent = defineAgent("action-demo")
         }
     }))
     .use((ctx, next) => {
-        if (ctx.trigger.type !== "user_message") {
+        if (ctx.trigger.type !== "user.message") {
             return next(ctx);
         }
 

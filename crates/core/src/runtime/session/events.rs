@@ -47,8 +47,6 @@ pub enum EventPayload {
     WorkerDecisionErrored(WorkerDecisionErrored),
     #[serde(rename = "session.message_requested")]
     SessionMessageRequested(SessionMessageRequested),
-    #[serde(rename = "tool_call.resolution_requested")]
-    ToolCallResolutionRequested(ToolCallResolutionRequested),
     #[serde(rename = "worker.state.updated")]
     WorkerStateUpdated(WorkerStateUpdated),
     #[serde(rename = "sub_agent.turn_completed")]
@@ -207,13 +205,6 @@ pub struct WorkerDecisionErrored {
 pub struct SessionMessageRequested {
     pub target_session_id: String,
     pub message: Message,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCallResolutionRequested {
-    pub target_session_id: String,
-    pub tool_call_id: String,
-    pub result: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

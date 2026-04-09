@@ -45,7 +45,7 @@ interface State {
 
 function callLlm(state: State): WorkerAction {
     return {
-        type: "call_llm",
+        type: "call.llm",
         llm_client: "openrouter",
         request: {
             model: "arcee-ai/trinity-large-preview:free",
@@ -71,15 +71,15 @@ const withMessageHistory = (): MiddlewareFn<unknown> => (req, next) => {
     state.messages ??= [];
 
     switch (trigger.type) {
-        case "user_message": {
+        case "user.message": {
             state.messages.push(trigger.message);
             break;
         }
-        case "llm_response": {
+        case "llm.response": {
             state.messages.push(trigger.message);
             break;
         }
-        case "tool_result": {
+        case "tool.result": {
             state.messages.push({
                 role: "tool",
                 content: trigger.result.content,
@@ -98,14 +98,14 @@ const withStructuredOutputFlow = (): MiddlewareFn<unknown> => (req, next) => {
     const state = req.state as State;
 
     switch (trigger.type) {
-        case "user_message":
+        case "user.message":
             return { actions: [callLlm(state)], state };
 
-        case "llm_response": {
+        case "llm.response": {
             if (trigger.message.tool_calls?.length) {
                 return {
                     actions: trigger.message.tool_calls.map((tc) => ({
-                        type: "call_tool" as const,
+                        type: "call.tool" as const,
                         tool_call_id: tc.id,
                         name: tc.function.name,
                         arguments: tc.function.arguments,
@@ -120,7 +120,7 @@ const withStructuredOutputFlow = (): MiddlewareFn<unknown> => (req, next) => {
             return { actions: [{ type: "done", data: text ?? null }], state };
         }
 
-        case "tool_execute": {
+        case "tool.execute": {
             try {
                 const args = JSON.parse(trigger.arguments);
                 const contact = ContactSchema.parse(args);
@@ -134,7 +134,7 @@ const withStructuredOutputFlow = (): MiddlewareFn<unknown> => (req, next) => {
             } catch (e: any) {
                 return {
                     actions: [{
-                        type: "return_tool_error",
+                        type: "return.tool.error",
                         tool_call_id: trigger.tool_call_id,
                         error: e.message,
                         retryable: false,

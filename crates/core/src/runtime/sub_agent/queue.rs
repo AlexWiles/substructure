@@ -26,14 +26,6 @@ pub enum SubAgentTask {
         message: Message,
         span: SpanContext,
     },
-    ResolveToolCall {
-        source_event_id: Uuid,
-        tenant_id: String,
-        target_session_id: String,
-        tool_call_id: String,
-        result: String,
-        span: SpanContext,
-    },
     CompleteSubAgentTurn {
         source_event_id: Uuid,
         parent_session_id: String,
@@ -64,14 +56,6 @@ impl SubAgentTask {
                 target_session_id,
                 ..
             } => format!("subagent:send_message:{target_session_id}:{source_event_id}"),
-            SubAgentTask::ResolveToolCall {
-                source_event_id,
-                target_session_id,
-                tool_call_id,
-                ..
-            } => format!(
-                "subagent:resolve_tool:{target_session_id}:{tool_call_id}:{source_event_id}"
-            ),
             SubAgentTask::CompleteSubAgentTurn {
                 source_event_id,
                 parent_session_id,

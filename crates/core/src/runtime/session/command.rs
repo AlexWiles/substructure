@@ -737,17 +737,6 @@ impl SessionState {
                             }
                             _ => Ok(vec![]),
                         },
-                        WorkerAction::ResolveRemoteTool {
-                            session_id,
-                            tool_call_id,
-                            result,
-                        } => Ok(vec![EventPayload::ToolCallResolutionRequested(
-                            ToolCallResolutionRequested {
-                                target_session_id: session_id,
-                                tool_call_id,
-                                result,
-                            },
-                        )]),
                         WorkerAction::Done { data } => {
                             self.handle(CommandPayload::MarkDone { data })
                         }

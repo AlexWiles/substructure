@@ -53,7 +53,7 @@ function encodeState(state: State): string {
 
 function callLlmAction(state: State): WorkerAction {
     return {
-        type: "call_llm",
+        type: "call.llm",
         llm_client: "openrouter",
         request: {
             model: "arcee-ai/trinity-large-preview:free",
@@ -67,11 +67,11 @@ function callLlmAction(state: State): WorkerAction {
 
 function appendMessageForTrigger(state: State, trigger: WorkerDecisionRequestWire["trigger"]): void {
     switch (trigger.type) {
-        case "user_message":
-        case "llm_response":
+        case "user.message":
+        case "llm.response":
             state.messages.push(trigger.message);
             break;
-        case "tool_result":
+        case "tool.result":
             state.messages.push({
                 role: "tool",
                 content: trigger.result.content,
@@ -91,18 +91,18 @@ const rawDecision = async (
     appendMessageForTrigger(state, trigger);
 
     switch (trigger.type) {
-        case "user_message":
-        case "tool_result":
+        case "user.message":
+        case "tool.result":
             return {
                 actions: [callLlmAction(state)],
                 state: encodeState(state),
             };
 
-        case "llm_response": {
+        case "llm.response": {
             if (trigger.message.tool_calls?.length) {
                 return {
                     actions: trigger.message.tool_calls.map((tc) => ({
-                        type: "call_tool",
+                        type: "call.tool",
                         tool_call_id: tc.id,
                         name: tc.function.name,
                         arguments: tc.function.arguments,
@@ -119,11 +119,11 @@ const rawDecision = async (
             };
         }
 
-        case "tool_execute": {
+        case "tool.execute": {
             if (trigger.name !== "get_weather") {
                 return {
                     actions: [{
-                        type: "return_tool_error",
+                        type: "return.tool.error",
                         tool_call_id: trigger.tool_call_id,
                         error: `Unknown tool: ${trigger.name}`,
                         retryable: false,
@@ -148,7 +148,7 @@ const rawDecision = async (
 
                 return {
                     actions: [{
-                        type: "return_tool_result",
+                        type: "return.tool.result",
                         tool_call_id: trigger.tool_call_id,
                         result: JSON.stringify(result),
                         attempt: trigger.attempt,
@@ -158,7 +158,7 @@ const rawDecision = async (
             } catch (error) {
                 return {
                     actions: [{
-                        type: "return_tool_error",
+                        type: "return.tool.error",
                         tool_call_id: trigger.tool_call_id,
                         error: error instanceof Error ? error.message : String(error),
                         retryable: false,

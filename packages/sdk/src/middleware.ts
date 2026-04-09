@@ -99,7 +99,7 @@ export function logging(label?: string): MiddlewareFn<unknown, unknown> {
     const prefix = label ? `[${label}]` : "[handler]";
     return async (req, next) => {
         const t = req.trigger;
-        const tag = t.type === "tool_execute" ? `${t.type}:${t.name}` : t.type;
+        const tag = t.type === "tool.execute" ? `${t.type}:${t.name}` : t.type;
         console.log(`${prefix} ${tag}`);
         const start = performance.now();
         const result = await next(req);
@@ -123,13 +123,13 @@ export function messageHistory(): StateContributor<{ messages: Message[] }> & Mi
         const { trigger } = req;
 
         switch (trigger.type) {
-            case "user_message":
-            case "llm_response":
+            case "user.message":
+            case "llm.response":
                 history.push(trigger.message);
                 break;
-            case "client_action":
+            case "client.action":
                 break;
-            case "tool_result":
+            case "tool.result":
                 history.push({
                     role: "tool",
                     content: trigger.result.content,
@@ -142,7 +142,7 @@ export function messageHistory(): StateContributor<{ messages: Message[] }> & Mi
         const result = await next(req);
 
         const actions = result.actions.map((action) => {
-            if (action.type !== "call_llm") return action;
+            if (action.type !== "call.llm") return action;
             return {
                 ...action,
                 request: {
@@ -167,7 +167,7 @@ export function systemMessage<S>(
 
         const result = await next(req);
         const actions = result.actions.map((action) => {
-            if (action.type !== "call_llm") return action;
+            if (action.type !== "call.llm") return action;
             return {
                 ...action,
                 request: {
@@ -202,14 +202,14 @@ export function tools<S>(
             const downstream = await next(req);
 
             // Handle tool execution
-            if (req.trigger.type === "tool_execute") {
+            if (req.trigger.type === "tool.execute") {
                 const tool = tools[req.trigger.name];
                 if (!tool) {
                     return {
                         ...downstream,
                         actions: [
                             {
-                                type: "return_tool_error" as const,
+                                type: "return.tool.error" as const,
                                 tool_call_id: req.trigger.tool_call_id,
                                 error: `Unknown tool: ${req.trigger.name}`,
                                 retryable: false,
@@ -226,7 +226,7 @@ export function tools<S>(
                         ...downstream,
                         actions: [
                             {
-                                type: "return_tool_result" as const,
+                                type: "return.tool.result" as const,
                                 tool_call_id: req.trigger.tool_call_id,
                                 result:
                                     typeof output === "string"
@@ -242,7 +242,7 @@ export function tools<S>(
                         ...downstream,
                         actions: [
                             {
-                                type: "return_tool_error" as const,
+                                type: "return.tool.error" as const,
                                 tool_call_id: req.trigger.tool_call_id,
                                 error: error instanceof Error ? error.message : String(error),
                                 retryable: false,
@@ -255,7 +255,7 @@ export function tools<S>(
             }
 
             // Track pending tool calls from LLM response and emit call_tool actions
-            if (req.trigger.type === "llm_response") {
+            if (req.trigger.type === "llm.response") {
                 const toolCalls = req.trigger.message.tool_calls;
                 if (toolCalls && toolCalls.length > 0) {
                     req.state.pendingToolCalls = toolCalls.map((tc) => tc.id);
@@ -263,7 +263,7 @@ export function tools<S>(
                     const callToolActions: WorkerAction[] = toolCalls.map((tc) => {
                         const def = tools[tc.function.name];
                         return {
-                            type: "call_tool" as const,
+                            type: "call.tool" as const,
                             tool_call_id: tc.id,
                             name: tc.function.name,
                             arguments: tc.function.arguments,
@@ -286,7 +286,7 @@ export function tools<S>(
 
             // Augment actions with tool definitions and retry policies
             const actions = downstream.actions.map((action) => {
-                if (action.type === "call_llm") {
+                if (action.type === "call.llm") {
                     return {
                         ...action,
                         request: {
@@ -300,7 +300,7 @@ export function tools<S>(
                         },
                     };
                 }
-                if (action.type === "call_tool") {
+                if (action.type === "call.tool") {
                     const def = tools[action.name];
                     if (def?.retry) {
                         return { ...action, retry: def.retry };
@@ -310,7 +310,7 @@ export function tools<S>(
             });
 
             // Suppress call_llm until all tool results are in
-            if (req.trigger.type === "tool_result") {
+            if (req.trigger.type === "tool.result") {
                 const resultId = req.trigger.result.tool_call_id;
                 req.state.pendingToolCalls =
                     req.state.pendingToolCalls.filter(
@@ -320,7 +320,7 @@ export function tools<S>(
                     return {
                         ...downstream,
                         actions: actions.filter(
-                            (a) => a.type !== "call_llm",
+                            (a) => a.type !== "call.llm",
                         ),
                     };
                 }
@@ -349,14 +349,14 @@ export function llmLoop<S>(
 
         const { trigger } = req;
         switch (trigger.type) {
-            case "user_message":
-            case "client_action":
-            case "tool_result": {
+            case "user.message":
+            case "client.action":
+            case "tool.result": {
                 return {
                     ...downstream,
                     actions: [
                         {
-                            type: "call_llm",
+                            type: "call.llm",
                             request: {
                                 ...selection.request,
                                 // it is expected middleware will populate this
@@ -370,7 +370,7 @@ export function llmLoop<S>(
                     ],
                 };
             }
-            case "llm_response": {
+            case "llm.response": {
                 if (
                     !trigger.message.tool_calls ||
                     trigger.message.tool_calls.length === 0
@@ -415,11 +415,11 @@ export function subAgents<S>(config: {
             const tracker = req.state.subAgentTracker;
 
             switch (req.trigger.type) {
-                case "llm_response": {
+                case "llm.response": {
                     const downstream = await next(req);
                     const actions: WorkerAction[] = [];
                     for (const action of downstream.actions) {
-                        if (action.type === "call_tool") {
+                        if (action.type === "call.tool") {
                             const sub = subAgents[action.name];
                             if (sub) {
                                 const childSessionId = crypto.randomUUID();
@@ -438,13 +438,13 @@ export function subAgents<S>(config: {
                                 };
                                 actions.push(
                                     {
-                                        type: "spawn_sub_agent",
+                                        type: "spawn.sub_agent",
                                         session_id: childSessionId,
                                         agent_id: sub.agentId,
                                         retry: config.retry,
                                     },
                                     {
-                                        type: "send_message",
+                                        type: "send.message",
                                         session_id: childSessionId,
                                         message: {
                                             role: "user",
@@ -455,7 +455,7 @@ export function subAgents<S>(config: {
                                 continue;
                             }
                         }
-                        if (action.type === "call_llm") {
+                        if (action.type === "call.llm") {
                             actions.push({
                                 ...action,
                                 request: {
@@ -473,7 +473,7 @@ export function subAgents<S>(config: {
                     return { ...downstream, actions };
                 }
 
-                case "sub_agent_turn_complete": {
+                case "sub_agent.turn.complete": {
                     const tracked = tracker[req.trigger.session_id];
                     if (!tracked) {
                         return next(req);
@@ -494,13 +494,13 @@ export function subAgents<S>(config: {
                     return next({
                         ...req,
                         trigger: {
-                            type: "tool_result",
+                            type: "tool.result",
                             result,
                         },
                     });
                 }
 
-                case "sub_agent_error": {
+                case "sub_agent.error": {
                     const tracked = tracker[req.trigger.session_id];
                     if (!tracked) {
                         return next(req);
@@ -517,7 +517,7 @@ export function subAgents<S>(config: {
                     return next({
                         ...req,
                         trigger: {
-                            type: "tool_result",
+                            type: "tool.result",
                             result,
                         },
                     });
@@ -526,7 +526,7 @@ export function subAgents<S>(config: {
                 default: {
                     const downstream = await next(req);
                     const actions = downstream.actions.map((action) => {
-                        if (action.type !== "call_llm") return action;
+                        if (action.type !== "call.llm") return action;
                         return {
                             ...action,
                             request: {

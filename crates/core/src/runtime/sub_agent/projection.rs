@@ -82,14 +82,6 @@ impl EventProcessor for SubAgentDispatchProjection {
                 message: req.message.clone(),
                 span: event.span,
             }),
-            EventPayload::ToolCallResolutionRequested(req) => Some(SubAgentTask::ResolveToolCall {
-                source_event_id: event.id,
-                tenant_id: event.tenant_id,
-                target_session_id: req.target_session_id.clone(),
-                tool_call_id: req.tool_call_id.clone(),
-                result: req.result.clone(),
-                span: event.span,
-            }),
             EventPayload::TurnCompleted(tc) => {
                 let derived = event
                     .derived
