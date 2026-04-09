@@ -1,16 +1,10 @@
-import {
-    defineAgent,
-    state,
-    logging,
-    tool,
-    messageHistory,
-    systemMessage,
-    tools,
-    llmLoop,
-} from "@substructure.ai/sdk/agent";
+import Substructure from "@substructure.ai/sdk";
 import { readFileSync, writeFileSync, readdirSync, statSync, existsSync } from "fs";
 import { resolve, relative } from "path";
 import { execSync } from "child_process";
+
+const sub = new Substructure();
+const { agent } = sub;
 
 // ── Tools ────────────────────────────────────────────────────────────────────
 
@@ -23,7 +17,7 @@ const retry = {
     backoff_max_secs: 10,
 };
 
-const readFile = tool({
+const readFile = agent.tool({
     description: "Read the contents of a file. Returns the file content as a string.",
     parameters: {
         type: "object",
@@ -44,7 +38,7 @@ const readFile = tool({
     retry,
 });
 
-const writeFile = tool({
+const writeFile = agent.tool({
     description: "Write content to a file. Creates the file if it doesn't exist, overwrites if it does.",
     parameters: {
         type: "object",
@@ -63,7 +57,7 @@ const writeFile = tool({
     retry,
 });
 
-const listFiles = tool({
+const listFiles = agent.tool({
     description: "List files and directories at a given path. Returns names, types, and sizes.",
     parameters: {
         type: "object",
@@ -95,7 +89,7 @@ const listFiles = tool({
     retry,
 });
 
-const runCommand = tool({
+const runCommand = agent.tool({
     description: "Execute a shell command and return its output. Use for running tests, builds, git commands, etc.",
     parameters: {
         type: "object",
@@ -145,13 +139,13 @@ Guidelines:
 
 export const AGENT_ID = "coding-agent";
 
-export const codingAgent = defineAgent(AGENT_ID)
-    .use(logging("coding"))
-    .use(state())
-    .use(messageHistory())
-    .use(systemMessage(() => SYSTEM_PROMPT))
-    .use(tools(() => ({ readFile, writeFile, listFiles, runCommand })))
-    .use(llmLoop(() => ({
+export const codingAgent = agent({ id: AGENT_ID })
+    .use(agent.logging("coding"))
+    .use(agent.state())
+    .use(agent.messageHistory())
+    .use(agent.systemMessage(() => SYSTEM_PROMPT))
+    .use(agent.tools(() => ({ readFile, writeFile, listFiles, runCommand })))
+    .use(agent.llmLoop(() => ({
         request: {
             model: "anthropic/claude-sonnet-4",
         },

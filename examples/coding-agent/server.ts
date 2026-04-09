@@ -1,5 +1,5 @@
 import { EmbeddedRuntime } from "@substructure.ai/runtime";
-import { Substructure } from "@substructure.ai/sdk";
+import Substructure from "@substructure.ai/sdk";
 import type { Event } from "@substructure.ai/sdk";
 import { codingAgent, AGENT_ID } from "./worker";
 
@@ -10,9 +10,8 @@ const runtime = new EmbeddedRuntime({
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
 });
 
-const sub = new Substructure({ runtime });
-
-sub.agent(codingAgent);
+const sub = new Substructure();
+const embedded = await sub.embedded({ agents: [codingAgent], runtime });
 
 // ── HTTP Server ──────────────────────────────────────────────────────────────
 
@@ -31,7 +30,7 @@ const server = Bun.serve({
                 sessionId: string;
             };
 
-            const stream = sub.submit({
+            const stream = embedded.submit({
                 agentId: AGENT_ID,
                 payload: {
                     type: "message",
@@ -88,6 +87,6 @@ console.log(`Working directory: ${process.cwd()}`);
 process.on("SIGINT", async () => {
     console.log("\nShutting down...");
     server.stop();
-    await sub.shutdown();
+    await embedded.shutdown();
     process.exit(0);
 });

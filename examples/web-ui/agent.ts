@@ -1,13 +1,7 @@
-import {
-    defineAgent,
-    state,
-    logging,
-    tool,
-    messageHistory,
-    systemMessage,
-    tools,
-    llmLoop,
-} from "@substructure.ai/sdk/agent";
+import Substructure from "@substructure.ai/sdk";
+
+const sub = new Substructure();
+const { agent } = sub;
 
 // ── Tools ────────────────────────────────────────────────────────────────────
 
@@ -20,7 +14,7 @@ const retry = {
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const searchWeb = tool({
+const searchWeb = agent.tool({
     description:
         "Search the web for information on a topic. Returns a list of relevant results with titles, URLs, and snippets.",
     parameters: {
@@ -57,7 +51,7 @@ const searchWeb = tool({
     retry,
 });
 
-const readArticle = tool({
+const readArticle = agent.tool({
     description:
         "Read the full content of an article given its URL. Returns the article text.",
     parameters: {
@@ -93,7 +87,7 @@ const readArticle = tool({
     retry,
 });
 
-const takeNotes = tool({
+const takeNotes = agent.tool({
     description:
         "Save research notes for later reference. Use this to record key findings from articles you've read.",
     parameters: {
@@ -118,7 +112,7 @@ const takeNotes = tool({
     retry,
 });
 
-const writeSummary = tool({
+const writeSummary = agent.tool({
     description:
         "Write a final research summary based on your notes. Call this once you have gathered enough information.",
     parameters: {
@@ -160,14 +154,14 @@ Be thorough but concise. Always complete all four steps.`;
 
 export const AGENT_ID = "research-agent";
 
-export const researchAgent = defineAgent(AGENT_ID)
-    .use(logging("research"))
-    .use(state())
-    .use(messageHistory())
-    .use(systemMessage(() => SYSTEM_PROMPT))
-    .use(tools(() => ({ searchWeb, readArticle, takeNotes, writeSummary })))
+export const researchAgent = agent({ id: AGENT_ID })
+    .use(agent.logging("research"))
+    .use(agent.state())
+    .use(agent.messageHistory())
+    .use(agent.systemMessage(() => SYSTEM_PROMPT))
+    .use(agent.tools(() => ({ searchWeb, readArticle, takeNotes, writeSummary })))
     .use(
-        llmLoop(() => ({
+        agent.llmLoop(() => ({
             request: {
                 model: "anthropic/claude-sonnet-4",
             },

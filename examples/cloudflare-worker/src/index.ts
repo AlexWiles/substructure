@@ -1,14 +1,8 @@
-import {
-    defineAgent,
-    logging,
-    messageHistory,
-    systemMessage,
-    tools,
-    llmLoop,
-    tool,
-} from "@substructure.ai/sdk/agent";
-import { Worker } from "@substructure.ai/sdk";
+import Substructure from "@substructure.ai/sdk";
 import { AgentState, durableObjectState } from "./state";
+
+const sub = new Substructure();
+const { agent } = sub;
 
 export { AgentState };
 
@@ -21,7 +15,7 @@ const retry = {
     backoff_max_secs: 10,
 };
 
-const fetchUrl = tool({
+const fetchUrl = agent.tool({
     description:
         "Fetch a URL and return its content. Use for APIs, web pages, or checking if a site is up.",
     parameters: {
@@ -49,7 +43,7 @@ const fetchUrl = tool({
     retry,
 });
 
-const extractFromHtml = tool({
+const extractFromHtml = agent.tool({
     description:
         "Fetch a webpage and extract text content matching a CSS selector. " +
         "Returns an array of matched text strings.",
@@ -96,14 +90,14 @@ const SYSTEM_PROMPT =
     "You can fetch URLs and extract content from web pages using CSS selectors. " +
     "Be concise and summarize what you find.";
 
-const webAgent = defineAgent("web-agent")
-    .use(logging())
+const webAgent = agent({ id: "web-agent" })
+    .use(agent.logging())
     .use(durableObjectState(() => workerEnv.AGENT_STATE))
-    .use(messageHistory())
-    .use(systemMessage(SYSTEM_PROMPT))
-    .use(tools({ fetchUrl, extractFromHtml }))
+    .use(agent.messageHistory())
+    .use(agent.systemMessage(SYSTEM_PROMPT))
+    .use(agent.tools({ fetchUrl, extractFromHtml }))
     .use(
-        llmLoop({
+        agent.llmLoop({
             request: { model: "arcee-ai/trinity-large-preview:free" },
             llm_client: "openrouter",
             retry,
@@ -119,7 +113,7 @@ const webAgent = defineAgent("web-agent")
 //
 // Or start the server with: --worker-url https://your-worker.workers.dev
 
-const worker = new Worker([webAgent]);
+const worker = sub.worker({ agents: [webAgent] });
 
 interface WorkerEnv extends Env {
     SIGNING_SECRET?: string;

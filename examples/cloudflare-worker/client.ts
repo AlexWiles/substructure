@@ -1,6 +1,7 @@
-import { BackendClient } from "@substructure.ai/sdk";
+import Substructure from "@substructure.ai/sdk";
 
-const backend = new BackendClient({
+const sub = new Substructure();
+const backend = sub.backend.client({
     url: "http://localhost:8080",
     apiKey: "dev-worker-key",
 });

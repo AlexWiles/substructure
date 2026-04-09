@@ -1,76 +1,76 @@
-import type { BaseClientOptions } from "./base";
-import { WorkerClient } from "./worker-client";
-import { AdminClient } from "./admin-client";
-import { UserClient } from "./user-client";
+// ── Default export ────────────────────────────────────────────────────────
 
-export type { BaseClientOptions as ClientOptions };
+export { Substructure as default, Substructure } from "./substructure";
+export type { AgentOptions, AgentFactory, EmbeddedOptions, SubmitRequest as SubstructureSubmitRequest } from "./substructure";
+export { EmbeddedInstance } from "./substructure";
 
-/**
- * Combined client for convenience — wraps all three scoped clients.
- * Prefer using WorkerClient, AdminClient, or UserClient directly.
- */
-export class Client {
-  readonly worker: WorkerClient;
-  readonly admin: AdminClient;
-  readonly user: UserClient;
+// ── RunStream ─────────────────────────────────────────────────────────────
 
-  constructor(options: BaseClientOptions) {
-    this.worker = new WorkerClient(options);
-    this.admin = new AdminClient(options);
-    this.user = new UserClient(options);
-  }
-}
+export { RunStream } from "./run-stream";
+export type { TurnResult } from "./run-stream";
 
-// ── Clients ────────────────────────────────────────────────────────────────
+// ── Clients ───────────────────────────────────────────────────────────────
 
 export { BackendClient } from "./backend-client";
+export type { BackendClientOptions, BackendSubmitRequest, IssueClientTokenRequest, IssueClientTokenResponse } from "./backend-client";
 export { FrontendClient } from "./frontend-client";
+export type { FrontendClientOptions, FrontendSubmitRequest } from "./frontend-client";
 export { WorkerClient } from "./worker-client";
 export { AdminClient } from "./admin-client";
 export { UserClient } from "./user-client";
 export { BaseClient, type RequestOptions } from "./base";
 
-// ── Worker (server) ────────────────────────────────────────────────────────
+// ── Worker & Agent ────────────────────────────────────────────────────────
 
-export { Worker } from "./worker";
-export type { FetchHandlerOptions } from "./worker";
+export { Worker, defineAgent, HandlerBuilder } from "./worker";
+export type { Handler, AgentRequest, AgentResponse, MiddlewareFn, Next, FetchHandlerOptions, StateContributor, DecisionHandler, DecisionResult } from "./worker";
 
-// ── Substructure ───────────────────────────────────────────────────────────
+// ── Middleware ─────────────────────────────────────────────────────────────
 
-export { Substructure, RunStream } from "./substructure";
-export type { SubstructureConfig, SubmitRequest as SubstructureSubmitRequest, TurnResult } from "./substructure";
+export {
+    state,
+    stateSlice,
+    tool,
+    logging,
+    messageHistory,
+    systemMessage,
+    tools,
+    llmLoop,
+    subAgents,
+} from "./worker";
+export type { ToolFn, ToolDef, SubAgentTrack, LlmLoopSelection, ToolSelector, MessageSelector, SystemMessageSelector } from "./worker";
 
-// ── Runtime ────────────────────────────────────────────────────────────────
+// ── Runtime ───────────────────────────────────────────────────────────────
 
 export { InProcessRuntime } from "./runtime";
 export type { NativeRuntime, InProcessRuntimeOptions } from "./runtime";
 
-// ── Webhook ────────────────────────────────────────────────────────────────
+// ── Webhook ───────────────────────────────────────────────────────────────
 
 export { verifyWebhookSignature, WebhookVerificationError } from "./webhook";
 
-// ── Types ──────────────────────────────────────────────────────────────────
+// ── Types ─────────────────────────────────────────────────────────────────
 
 export { contentText } from "./types";
 export type {
-  ClientIdentity,
-  RetryPolicy,
-  Message,
-  Content,
-  ContentPart,
-  Role,
-  ToolCall,
-  LlmTool,
-  LlmRequest,
-  LlmResponse,
-  ToolResult,
-  ClientAction,
-  ClientPayload,
-  DecisionTrigger,
-  WorkerAction,
-  WorkerDecisionRequestWire,
-  Event,
-  EventPayload,
-  SessionStatus,
-  SessionState,
+    ClientIdentity,
+    RetryPolicy,
+    Message,
+    Content,
+    ContentPart,
+    Role,
+    ToolCall,
+    LlmTool,
+    LlmRequest,
+    LlmResponse,
+    ToolResult,
+    ClientAction,
+    ClientPayload,
+    DecisionTrigger,
+    WorkerAction,
+    WorkerDecisionRequestWire,
+    Event,
+    EventPayload,
+    SessionStatus,
+    SessionState,
 } from "./types";

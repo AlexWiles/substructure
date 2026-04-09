@@ -1,4 +1,4 @@
-import { Substructure, contentText } from "@substructure.ai/sdk";
+import Substructure, { contentText } from "@substructure.ai/sdk";
 import type {
     ClientIdentity,
     WorkerAction,
@@ -8,6 +8,8 @@ import type {
     RetryPolicy,
 } from "@substructure.ai/sdk";
 import { EmbeddedRuntime } from "@substructure.ai/runtime";
+
+const sub = new Substructure();
 
 type State = {
     messages: Message[];
@@ -186,16 +188,15 @@ const runtime = new EmbeddedRuntime({
     db: "data.db",
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
 });
-const sub = new Substructure({ runtime });
+
+const embedded = await sub.embedded({ agents: [weatherHandler], runtime });
 
 const auth: ClientIdentity = {
     tenant_id: "default",
     sub: "example-user",
 };
 
-sub.agent(weatherHandler);
-
-const stream = sub.submit({
+const stream = embedded.submit({
     agentId: WEATHER_AGENT_ID,
     payload: {
         type: "message",
@@ -220,4 +221,4 @@ for await (const event of stream) {
 const result = await stream.result;
 console.log(result.data);
 
-await sub.shutdown();
+await embedded.shutdown();

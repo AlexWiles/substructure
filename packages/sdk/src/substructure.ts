@@ -1,33 +1,81 @@
-import type { Event, Decimal, TurnCompleted, ClientPayload, ClientIdentity } from "./types";
+import type { ClientPayload, ClientIdentity, Event } from "./types";
 import type { NativeRuntime } from "./runtime";
-import type { Handler, FetchHandlerOptions } from "./worker";
-import { Worker } from "./worker";
-
-export { contentText } from "./types";
-export {
-    defineAgent,
+import type { FetchHandlerOptions } from "./worker";
+import { Worker, HandlerBuilder } from "./worker";
+import type { Handler } from "./worker";
+import { RunStream } from "./run-stream";
+import { BackendClient } from "./backend-client";
+import type { BackendClientOptions } from "./backend-client";
+import { FrontendClient } from "./frontend-client";
+import type { FrontendClientOptions } from "./frontend-client";
+import {
     state,
     stateSlice,
-    logging,
     tool,
+    logging,
     messageHistory,
     systemMessage,
     tools,
     llmLoop,
     subAgents,
-} from "./worker";
-export type { AgentRequest, AgentResponse, MiddlewareFn, FetchHandlerOptions } from "./worker";
-export { verifyWebhookSignature, WebhookVerificationError } from "./webhook";
-export { BackendClient } from "./backend-client";
-export { FrontendClient } from "./frontend-client";
+} from "./middleware";
 
-// ── RunStream ────────────────────────────────────────────────────────────────
+// ── Agent factory ───────────────────────────────────────────────────────────
 
-export interface TurnResult {
-    turnId: string;
-    data: unknown;
-    cost: Decimal;
-    tokenUsage: Record<string, number>;
+export interface AgentOptions {
+    id: string;
+}
+
+export interface AgentFactory {
+    (options: AgentOptions): HandlerBuilder<unknown>;
+    state: typeof state;
+    stateSlice: typeof stateSlice;
+    tool: typeof tool;
+    logging: typeof logging;
+    messageHistory: typeof messageHistory;
+    systemMessage: typeof systemMessage;
+    tools: typeof tools;
+    llmLoop: typeof llmLoop;
+    subAgents: typeof subAgents;
+}
+
+function createAgentFactory(): AgentFactory {
+    const factory = ((options: AgentOptions) => {
+        return new HandlerBuilder(options.id);
+    }) as AgentFactory;
+
+    factory.state = state;
+    factory.stateSlice = stateSlice;
+    factory.tool = tool;
+    factory.logging = logging;
+    factory.messageHistory = messageHistory;
+    factory.systemMessage = systemMessage;
+    factory.tools = tools;
+    factory.llmLoop = llmLoop;
+    factory.subAgents = subAgents;
+
+    return factory;
+}
+
+// ── Namespace objects ───────────────────────────────────────────────────────
+
+class BackendNamespace {
+    client(options: BackendClientOptions): BackendClient {
+        return new BackendClient(options);
+    }
+}
+
+class FrontendNamespace {
+    client(options: FrontendClientOptions): FrontendClient {
+        return new FrontendClient(options);
+    }
+}
+
+// ── Embedded instance ───────────────────────────────────────────────────────
+
+export interface EmbeddedOptions {
+    agents: Handler[];
+    runtime: NativeRuntime;
 }
 
 export interface SubmitRequest {
@@ -38,110 +86,32 @@ export interface SubmitRequest {
     turnId?: string;
 }
 
-export class RunStream {
-    readonly result: Promise<TurnResult>;
-    private events: Event[] = [];
-    private resolveResult!: (r: TurnResult) => void;
-    private rejectResult!: (e: Error) => void;
-    private source: AsyncGenerator<Event>;
-
-    constructor(source: AsyncGenerator<Event>) {
-        this.source = source;
-        this.result = new Promise<TurnResult>((resolve, reject) => {
-            this.resolveResult = resolve;
-            this.rejectResult = reject;
-        });
-    }
-
-    async *[Symbol.asyncIterator](): AsyncGenerator<Event> {
-        try {
-            for await (const event of this.source) {
-                this.events.push(event);
-                yield event;
-            }
-            const tc = this.events.findLast(
-                (e): e is Event & { payload: TurnCompleted } =>
-                    e.payload.type === "turn.completed",
-            );
-            if (tc) {
-                this.resolveResult({
-                    turnId: tc.payload.turn_id,
-                    data: tc.payload.data,
-                    cost: tc.payload.turn_cost ?? "0",
-                    tokenUsage: tc.payload.turn_token_usage ?? {},
-                });
-            } else {
-                this.rejectResult(new Error("stream ended without turn.completed"));
-            }
-        } catch (err) {
-            this.rejectResult(err instanceof Error ? err : new Error(String(err)));
-            throw err;
-        }
-    }
-}
-
-// ── Config ──────────────────────────────────────────────────────────────────
-
-export interface SubstructureConfig {
-    /** A NativeRuntime instance (e.g. from `@substructure.ai/runtime`) */
-    runtime: NativeRuntime;
-}
-
-// ── Substructure ────────────────────────────────────────────────────────────
-
-export class Substructure {
+export class EmbeddedInstance {
     private runtime: NativeRuntime;
-    private agents: Handler[] = [];
-    private worker: Worker | null = null;
-    private registered: Promise<void> | null = null;
+    private worker: Worker;
+    private registered: Promise<void>;
 
-    constructor(config: SubstructureConfig) {
-        this.runtime = config.runtime;
+    constructor(runtime: NativeRuntime, agents: Handler[]) {
+        this.runtime = runtime;
+        this.worker = new Worker(agents);
+        this.registered = this.worker.register(runtime, "default");
     }
 
-    agent(handler: Handler): this {
-        if (this.registered) {
-            throw new Error("Cannot register agents after submit() has been called");
-        }
-        this.agents.push(handler);
-        return this;
-    }
-
-    private ensureWorker(): Worker {
-        if (!this.worker) {
-            this.worker = new Worker(this.agents);
-        }
-        return this.worker;
-    }
-
-    private register(): Promise<void> {
-        if (this.registered) return this.registered;
-        this.registered = (async () => {
-            const worker = this.ensureWorker();
-            await worker.register(this.runtime, "default");
-        })();
-        return this.registered;
-    }
-
-    private submitPayload(
-        agentId: string,
-        payload: ClientPayload,
-        options?: Omit<SubmitRequest, "agentId" | "payload">,
-    ): RunStream {
-        const sessionId = options?.sessionId ?? crypto.randomUUID();
-        const auth = options?.auth;
-        const turnId = options?.turnId;
+    submit(request: SubmitRequest): RunStream {
+        const sessionId = request.sessionId ?? crypto.randomUUID();
+        const auth = request.auth;
+        const turnId = request.turnId;
 
         const self = this;
         async function* generate(): AsyncGenerator<Event> {
-            await self.register();
+            await self.registered;
             if (!auth?.sub) {
                 throw new Error("submit.auth.sub is required for embedded runtime");
             }
             for await (const json of self.runtime.submitPayload(
                 sessionId,
-                agentId,
-                JSON.stringify(payload),
+                request.agentId,
+                JSON.stringify(request.payload),
                 JSON.stringify(auth),
                 turnId,
             )) {
@@ -152,18 +122,34 @@ export class Substructure {
         return new RunStream(generate());
     }
 
-    submit(request: SubmitRequest): RunStream {
-        const { agentId, payload, ...options } = request;
-        return this.submitPayload(agentId, payload, options);
-    }
-
     fetchHandler(options?: FetchHandlerOptions): (req: Request) => Promise<Response> {
-        return this.ensureWorker().fetchHandler(options);
+        return this.worker.fetchHandler(options);
     }
 
     async shutdown(): Promise<void> {
-        if (this.runtime) {
-            await this.runtime.shutdown();
-        }
+        await this.runtime.shutdown();
+    }
+}
+
+// ── Substructure ────────────────────────────────────────────────────────────
+
+export class Substructure {
+    readonly backend: BackendNamespace;
+    readonly frontend: FrontendNamespace;
+    readonly agent: AgentFactory;
+
+    constructor() {
+        this.backend = new BackendNamespace();
+        this.frontend = new FrontendNamespace();
+        this.agent = createAgentFactory();
+    }
+
+    worker(options: { agents: Handler[] }): Worker {
+        return new Worker(options.agents);
+    }
+
+    async embedded(options: EmbeddedOptions): Promise<EmbeddedInstance> {
+        const instance = new EmbeddedInstance(options.runtime, options.agents);
+        return instance;
     }
 }

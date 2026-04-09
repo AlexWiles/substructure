@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import type { AgentRequest, Next, MiddlewareFn } from "@substructure.ai/sdk/agent";
+import type { AgentRequest, Next, MiddlewareFn } from "@substructure.ai/sdk";
 
 /**
  * Durable Object that stores agent state per session.

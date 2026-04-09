@@ -420,6 +420,7 @@ export interface Event {
     aggregate_type: string;
     aggregate_id: Uuid;
     sequence: number;
+    event_type: string;
     span: SpanContext;
     occurred_at: DateTime;
     payload: EventPayload;

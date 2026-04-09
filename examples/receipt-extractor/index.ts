@@ -1,18 +1,11 @@
-import {
-    defineAgent,
-    state,
-    logging,
-    tool,
-    messageHistory,
-    systemMessage,
-    tools,
-    llmLoop,
-} from "@substructure.ai/sdk/agent";
-import { Substructure } from "@substructure.ai/sdk";
+import Substructure from "@substructure.ai/sdk";
 import type { ClientIdentity } from "@substructure.ai/sdk";
 import { EmbeddedRuntime } from "@substructure.ai/runtime";
 import { appendFileSync, existsSync } from "fs";
 import { randomUUID } from "crypto";
+
+const sub = new Substructure();
+const { agent } = sub;
 
 const CSV_PATH = "receipts.csv";
 
@@ -23,7 +16,7 @@ const receiptRetry = {
     backoff_max_secs: 10,
 };
 
-const saveToCSV = tool({
+const saveToCSV = agent.tool({
     description: "Append an extracted receipt to the CSV file",
     parameters: {
         type: "object",
@@ -53,13 +46,13 @@ Given receipt text, identify the date, vendor, total amount, and currency.
 Then call save_to_csv to record it. If the date is unclear, use your best guess.
 If the currency is not stated, assume USD.`
 
-const receiptHandler = defineAgent(RECEIPT_AGENT_ID)
-    .use(logging())
-    .use(state())
-    .use(systemMessage(SYSTEM_PROMPT))
-    .use(messageHistory())
-    .use(tools({ saveToCSV }))
-    .use(llmLoop({
+const receiptHandler = agent({ id: RECEIPT_AGENT_ID })
+    .use(agent.logging())
+    .use(agent.state())
+    .use(agent.systemMessage(SYSTEM_PROMPT))
+    .use(agent.messageHistory())
+    .use(agent.tools({ saveToCSV }))
+    .use(agent.llmLoop({
         request: {
             model: "arcee-ai/trinity-large-preview:free",
         },
@@ -71,14 +64,13 @@ const runtime = new EmbeddedRuntime({
     db: ":memory:",
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
 });
-const sub = new Substructure({ runtime });
+
+const embedded = await sub.embedded({ agents: [receiptHandler], runtime });
 
 const auth: ClientIdentity = {
     tenant_id: "default",
     sub: "example-user",
 };
-
-sub.agent(receiptHandler);
 
 // Sample receipts to process
 const receipts = [
@@ -109,7 +101,7 @@ const receipts = [
 for (const [i, receipt] of receipts.entries()) {
     console.log(`\n--- Processing receipt ${i + 1} ---`);
 
-    const stream = sub.submit({
+    const stream = embedded.submit({
         agentId: RECEIPT_AGENT_ID,
         payload: {
             type: "message",
@@ -133,4 +125,4 @@ for (const [i, receipt] of receipts.entries()) {
 }
 
 console.log(`\nDone! Results written to ${CSV_PATH}`);
-await sub.shutdown();
+await embedded.shutdown();

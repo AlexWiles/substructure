@@ -1,18 +1,18 @@
-import { defineAgent, state, logging } from "@substructure.ai/sdk/agent";
-import type { MiddlewareFn } from "@substructure.ai/sdk/agent";
-import { Substructure, contentText } from "@substructure.ai/sdk";
-import type { ClientIdentity, WorkerAction, Message } from "@substructure.ai/sdk";
+import Substructure, { contentText } from "@substructure.ai/sdk";
+import type { MiddlewareFn, ClientIdentity, WorkerAction, Message } from "@substructure.ai/sdk";
 import { EmbeddedRuntime } from "@substructure.ai/runtime";
 import { z } from "zod";
 import { randomUUID } from "crypto";
 
 // ── Schema ───────────────────────────────────────────────────────────────────
 //
+const sub = new Substructure();
+const { agent } = sub;
+
 const runtime = new EmbeddedRuntime({
     db: "data.db",
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
 });
-const sub = new Substructure({ runtime });
 
 const auth: ClientIdentity = {
     tenant_id: "default",
@@ -150,20 +150,20 @@ const withStructuredOutputFlow = (): MiddlewareFn<unknown> => (req, next) => {
     }
 };
 
-const extractor = defineAgent("contact-extractor")
-    .use(logging())
-    .use(state())
+const extractor = agent({ id: "contact-extractor" })
+    .use(agent.logging())
+    .use(agent.state())
     .use(withMessageHistory())
     .use(withStructuredOutputFlow())
 
-sub.agent(extractor);
+const embedded = await sub.embedded({ agents: [extractor], runtime });
 
 const input = `Hey! Just met Sarah Chen at the conference. She's a Senior Engineer
 at Acme Corp. Shoot her a note at schen@acme.io about the integration work.`;
 
 console.log("Extracting contact from text...\n");
 
-const stream = sub.submit({
+const stream = embedded.submit({
     agentId: "contact-extractor",
     payload: {
         type: "message",
@@ -189,4 +189,4 @@ for await (const event of stream) {
 const result = await stream.result;
 console.log(result.data);
 
-await sub.shutdown();
+await embedded.shutdown();

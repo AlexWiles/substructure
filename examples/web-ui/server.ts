@@ -1,5 +1,5 @@
 import { EmbeddedRuntime } from "@substructure.ai/runtime";
-import { Substructure, BackendClient } from "@substructure.ai/sdk";
+import Substructure from "@substructure.ai/sdk";
 import { researchAgent, AGENT_ID } from "./agent";
 
 // ── Config ──────────────────────────────────────────────────────────────────
@@ -11,22 +11,23 @@ const API_PORT = Number(process.env.API_PORT ?? 3001);
 
 // ── Runtime & Worker ────────────────────────────────────────────────────────
 
+const sub = new Substructure();
+
 const runtime = new EmbeddedRuntime({
     db: "web-ui-example.db",
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
 });
 
-const sub = new Substructure({ runtime });
-sub.agent(researchAgent);
+const embedded = await sub.embedded({ agents: [researchAgent], runtime });
 
 const workerServer = Bun.serve({
     port: WORKER_PORT,
-    fetch: sub.fetchHandler(),
+    fetch: embedded.fetchHandler(),
 });
 
 // ── Register worker with Substructure server ────────────────────────────────
 
-const backend = new BackendClient({ url: SERVER_URL, apiKey: API_KEY });
+const backend = sub.backend.client({ url: SERVER_URL, apiKey: API_KEY });
 
 await backend.registerWorker({
     transport_type: "http",
@@ -89,6 +90,6 @@ process.on("SIGINT", async () => {
     console.log("\nShutting down...");
     workerServer.stop();
     apiServer.stop();
-    await sub.shutdown();
+    await embedded.shutdown();
     process.exit(0);
 });

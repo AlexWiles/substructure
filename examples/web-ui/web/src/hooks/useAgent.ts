@@ -1,6 +1,8 @@
 import { useCallback, useReducer, useRef } from "react";
-import { FrontendClient } from "@substructure.ai/sdk";
+import Substructure from "@substructure.ai/sdk";
 import type { Event } from "@substructure.ai/sdk";
+
+const sub = new Substructure();
 
 interface TurnResult {
     turnId: string;
@@ -70,7 +72,7 @@ export function useAgent() {
             const { token } = await tokenRes.json();
             tokenRef.current = token;
 
-            const frontend = new FrontendClient({
+            const frontend = sub.frontend.client({
                 url: configRef.current!.serverUrl,
                 token,
             });

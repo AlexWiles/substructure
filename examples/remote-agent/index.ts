@@ -1,16 +1,8 @@
-import {
-    defineAgent,
-    state,
-    logging,
-    tool,
-    messageHistory,
-    systemMessage,
-    tools,
-    llmLoop,
-    subAgents,
-} from "@substructure.ai/sdk/agent";
-import { Substructure, BackendClient, FrontendClient } from "@substructure.ai/sdk";
+import Substructure from "@substructure.ai/sdk";
 import { EmbeddedRuntime } from "@substructure.ai/runtime";
+
+const sub = new Substructure();
+const { agent } = sub;
 const addRetry = {
     timeout_secs: 20,
     max_retries: 10,
@@ -32,7 +24,7 @@ const weatherRetry = {
     backoff_max_secs: 10,
 };
 
-const add = tool({
+const add = agent.tool({
     description: "Add two numbers",
     parameters: {
         type: "object",
@@ -49,19 +41,19 @@ const add = tool({
     retry: addRetry,
 });
 
-const mathHandler = defineAgent("math-agent")
-    .use(logging())
-    .use(state())
-    .use(messageHistory())
-    .use(systemMessage("You are a math assistant. Compute whatever is asked. Be concise, return only the result."))
-    .use(tools({ add }))
-    .use(llmLoop({
+const mathHandler = agent({ id: "math-agent" })
+    .use(agent.logging())
+    .use(agent.state())
+    .use(agent.messageHistory())
+    .use(agent.systemMessage("You are a math assistant. Compute whatever is asked. Be concise, return only the result."))
+    .use(agent.tools({ add }))
+    .use(agent.llmLoop({
         request: { model: "arcee-ai/trinity-large-preview:free" },
         llm_client: "openrouter",
         retry: mathRetry,
     }));
 
-const getWeather = tool({
+const getWeather = agent.tool({
     description: "Get the current weather for a city. Returns temperature in fahrenheit.",
     parameters: {
         type: "object",
@@ -77,17 +69,17 @@ const getWeather = tool({
     retry: weatherRetry,
 });
 
-const weatherHandler = defineAgent("weather-agent")
-    .use(logging())
-    .use(state())
-    .use(messageHistory())
-    .use(systemMessage("You are a weather assistant. Use tools when appropriate. Be concise."))
-    .use(tools({ getWeather }))
-    .use(subAgents({
+const weatherHandler = agent({ id: "weather-agent" })
+    .use(agent.logging())
+    .use(agent.state())
+    .use(agent.messageHistory())
+    .use(agent.systemMessage("You are a weather assistant. Use tools when appropriate. Be concise."))
+    .use(agent.tools({ getWeather }))
+    .use(agent.subAgents({
         delegates: [mathHandler],
         retry: weatherRetry,
     }))
-    .use(llmLoop({
+    .use(agent.llmLoop({
         request: { model: "arcee-ai/trinity-large-preview:free" },
         llm_client: "openrouter",
         retry: weatherRetry,
@@ -95,7 +87,7 @@ const weatherHandler = defineAgent("weather-agent")
 
 const WORKER_PORT = 4444;
 
-const backend = new BackendClient({
+const backend = sub.backend.client({
     url: "http://localhost:8080",
     apiKey: "dev-worker-key",
 });
@@ -105,18 +97,15 @@ const clientToken = (await backend.mintClientToken({
     ttlSeconds: 600,
 })).token;
 
-const frontend = new FrontendClient({
+const frontend = sub.frontend.client({
     url: "http://localhost:8080",
     token: clientToken,
 });
 
 const runtime = new EmbeddedRuntime({ db: "remote-agent-example.db" });
-const sub = new Substructure({ runtime });
+const embedded = await sub.embedded({ agents: [weatherHandler, mathHandler], runtime });
 
-sub.agent(weatherHandler);
-sub.agent(mathHandler);
-
-const server = Bun.serve({ port: WORKER_PORT, fetch: sub.fetchHandler() });
+const server = Bun.serve({ port: WORKER_PORT, fetch: embedded.fetchHandler() });
 
 await backend.registerWorker({
     transport_type: "http",
@@ -147,5 +136,5 @@ for await (const event of stream) {
 const result = await stream.result;
 console.log("\nTurn result:", result.data);
 
-await sub.shutdown();
+await embedded.shutdown();
 server.stop();

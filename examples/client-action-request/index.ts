@@ -1,19 +1,9 @@
-import {
-    defineAgent,
-    state,
-    stateSlice,
-} from "@substructure.ai/sdk/agent";
-import {
-    Substructure,
-    contentText,
-    type RunStream,
-} from "@substructure.ai/sdk";
-import type {
-    ClientIdentity,
-    Message,
-    WorkerAction,
-} from "@substructure.ai/sdk";
+import Substructure, { contentText, type RunStream } from "@substructure.ai/sdk";
+import type { ClientIdentity, Message, WorkerAction } from "@substructure.ai/sdk";
 import { EmbeddedRuntime } from "@substructure.ai/runtime";
+
+const sub = new Substructure();
+const { agent } = sub;
 
 const TOOL_CATALOG = [
     {
@@ -41,9 +31,9 @@ const TOOL_CATALOG = [
     },
 ];
 
-const actionAgent = defineAgent("action-demo")
-    .use(state())
-    .use(stateSlice({ messages: [] as Message[] }, (ctx, next) => {
+const actionAgent = agent({ id: "action-demo" })
+    .use(agent.state())
+    .use(agent.stateSlice({ messages: [] as Message[] }, (ctx, next) => {
         if (ctx.trigger.type !== "client.action") {
             return next(ctx);
         }
@@ -94,8 +84,7 @@ const actionAgent = defineAgent("action-demo")
     });
 
 const runtime = new EmbeddedRuntime({ db: "action-request-example.db" });
-const sub = new Substructure({ runtime });
-sub.agent(actionAgent);
+const embedded = await sub.embedded({ agents: [actionAgent], runtime });
 
 const auth: ClientIdentity = {
     tenant_id: "default",
@@ -115,7 +104,7 @@ async function drainToResult(stream: RunStream) {
     return stream.result;
 }
 
-const firstStream = sub.submit({
+const firstStream = embedded.submit({
     agentId: "action-demo",
     payload: {
         type: "message",
@@ -131,7 +120,7 @@ const firstStream = sub.submit({
 const firstTurn = await drainToResult(firstStream);
 console.log("first run:", firstTurn);
 
-const secondStream = sub.submit({
+const secondStream = embedded.submit({
     agentId: "action-demo",
     payload: {
         type: "message",
@@ -147,7 +136,7 @@ const secondStream = sub.submit({
 const secondTurn = await drainToResult(secondStream);
 console.log("second run:", secondTurn);
 
-const toolsStream = sub.submit({
+const toolsStream = embedded.submit({
     agentId: "action-demo",
     payload: { type: "action", name: "get_tools" },
     sessionId,
@@ -156,7 +145,7 @@ const toolsStream = sub.submit({
 const tools = await drainToResult(toolsStream);
 console.log("request(get_tools):", tools.data);
 
-const clearStream = sub.submit({
+const clearStream = embedded.submit({
     agentId: "action-demo",
     payload: { type: "action", name: "clear_context" },
     sessionId,
@@ -165,7 +154,7 @@ const clearStream = sub.submit({
 const clear = await drainToResult(clearStream);
 console.log("request(clear_context):", clear.data);
 
-const afterClearStream = sub.submit({
+const afterClearStream = embedded.submit({
     agentId: "action-demo",
     payload: {
         type: "message",
@@ -181,4 +170,4 @@ const afterClearStream = sub.submit({
 const afterClear = await drainToResult(afterClearStream);
 console.log("after clear run:", afterClear);
 
-await sub.shutdown();
+await embedded.shutdown();

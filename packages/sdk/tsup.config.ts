@@ -11,6 +11,7 @@ export default defineConfig({
     "src/types.ts",
     "src/worker.ts",
     "src/runtime.ts",
+    "src/run-stream.ts",
     "src/substructure.ts",
   ],
   format: ["esm"],

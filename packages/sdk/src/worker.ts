@@ -91,7 +91,7 @@ type UnknownNext = Next<unknown>;
 
 const DEFAULT_FALLBACK: UnknownNext = (req) => ({ actions: [], state: req.state });
 
-class HandlerBuilder<S> implements Handler {
+export class HandlerBuilder<S> implements Handler {
     readonly agentId: string;
     private middlewares: UnknownMiddleware[] = [];
 
