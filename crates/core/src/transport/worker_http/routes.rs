@@ -1,13 +1,12 @@
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use std::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use uuid::Uuid;
-use axum::body::Body;
-use axum::http::header;
 
 use crate::identity::ClientIdentity;
 use crate::transport::auth::AuthPrincipal;
@@ -206,16 +205,15 @@ pub async fn submit_client_payload(
     match result {
         Ok((_session_id, rx)) => {
             let stream = ReceiverStream::new(rx).map(|event| {
-                let mut line = serde_json::to_string(&event).unwrap_or_default();
-                line.push('\n');
-                Ok::<_, std::convert::Infallible>(line)
+                let event_type = event.payload_type().to_owned();
+                let data = serde_json::to_string(&event).unwrap_or_default();
+                Ok::<_, std::convert::Infallible>(SseEvent::default()
+                    .id(event.sequence.to_string())
+                    .event(event_type)
+                    .data(data))
             });
 
-            Response::builder()
-                .header(header::CONTENT_TYPE, "application/x-ndjson")
-                .body(Body::from_stream(stream))
-                .unwrap()
-                .into_response()
+            Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
         }
         Err(e) => {
             let message = e.to_string();

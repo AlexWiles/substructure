@@ -6,6 +6,6 @@ import type {
 
 export class UserClient extends BaseClient {
   async *submitPayload(request: SubmitPayloadRequest): AsyncGenerator<Event> {
-    yield* this.streamNdjson("/api/client/sessions/submit", request);
+    yield* this.streamSSE("/api/client/sessions/submit", request);
   }
 }

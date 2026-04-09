@@ -25,7 +25,7 @@ export class WorkerClient extends BaseClient {
   }
 
   async *submitClientPayload(request: MachineSubmitPayloadRequest, auth?: WorkerAuthOptions): AsyncGenerator<Event> {
-    yield* this.streamNdjson("/api/machine/sessions/submit", request, {
+    yield* this.streamSSE("/api/machine/sessions/submit", request, {
       headers: buildWorkerAuthHeaders(auth),
     });
   }

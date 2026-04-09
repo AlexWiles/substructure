@@ -46,6 +46,9 @@ enum Command {
         /// Pre-register an HTTP worker at startup
         #[arg(long)]
         worker_url: Option<String>,
+        /// Signing secret for the pre-registered HTTP worker (auto-generated if omitted)
+        #[arg(long, requires = "worker_url")]
+        signing_secret: Option<String>,
     },
 }
 
@@ -60,7 +63,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Start { host, port, db, worker_url } => {
+        Command::Start { host, port, db, worker_url, signing_secret } => {
             let store = Arc::new(SqliteStore::new(SqliteConfig {
                 path: db.clone(),
                 busy_timeout: std::time::Duration::from_secs(5),
@@ -112,12 +115,16 @@ async fn main() -> anyhow::Result<()> {
             adapter.start().await;
 
             if let Some(ref url) = worker_url {
+                let secret = signing_secret.unwrap_or_else(|| hex::encode(rand::random::<[u8; 32]>()));
                 adapter.register(PushRegistrationRecord {
                     tenant_id: "default".into(),
                     transport_type: "http".into(),
-                    config: serde_json::json!({ "endpoint_url": url }),
+                    config: serde_json::json!({
+                        "endpoint_url": url,
+                        "signing_secret": secret,
+                    }),
                 }).await.expect("failed to register startup worker");
-                tracing::info!(url, "startup worker registered");
+                tracing::info!(url, "startup worker registered (signing enabled)");
             }
 
             let admin_routes = admin_http::router(rt.clone());

@@ -89,7 +89,7 @@ export class AdminClient extends BaseClient {
   }
 
   async *streamSessionEvents(sessionId: Uuid, params?: SessionEventsParams, opts?: RequestOptions): AsyncGenerator<Event> {
-    yield* this.streamNdjsonGet<Event>(`/admin/sessions/${sessionId}/events/stream`, {
+    yield* this.streamSSEGet<Event>(`/admin/sessions/${sessionId}/events/stream`, {
       sequence_after: params?.sequence_after?.toString(),
       limit: params?.limit?.toString(),
     }, opts);

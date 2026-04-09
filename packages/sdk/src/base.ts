@@ -66,25 +66,25 @@ export class BaseClient {
     return (await resp.json()) as T;
   }
 
-  protected async *streamNdjsonGet<T>(path: string, params?: Record<string, string | undefined>, opts?: RequestOptions): AsyncGenerator<T> {
+  protected async *streamSSEGet<T>(path: string, params?: Record<string, string | undefined>, opts?: RequestOptions): AsyncGenerator<T> {
     const resp = await this.fetch(this.buildUrl(path, params), {
       signal: opts?.signal,
-      headers: this.mergeHeaders(opts?.headers),
+      headers: this.mergeHeaders({ Accept: "text/event-stream", ...opts?.headers }),
     });
-    yield* this.readNdjson<T>(resp);
+    yield* this.readSSE<T>(resp);
   }
 
-  protected async *streamNdjson<T>(path: string, body: unknown, opts?: RequestOptions): AsyncGenerator<T> {
+  protected async *streamSSE<T>(path: string, body: unknown, opts?: RequestOptions): AsyncGenerator<T> {
     const resp = await this.fetch(this.buildUrl(path), {
       method: "POST",
-      headers: this.mergeHeaders({ "Content-Type": "application/json", ...opts?.headers }),
+      headers: this.mergeHeaders({ "Content-Type": "application/json", Accept: "text/event-stream", ...opts?.headers }),
       body: JSON.stringify(body),
       signal: opts?.signal,
     });
-    yield* this.readNdjson<T>(resp);
+    yield* this.readSSE<T>(resp);
   }
 
-  private async *readNdjson<T>(resp: Response): AsyncGenerator<T> {
+  private async *readSSE<T>(resp: Response): AsyncGenerator<T> {
     const body = resp.body;
     if (!body) throw new Error("Response body is null");
 
@@ -97,17 +97,24 @@ export class BaseClient {
         const { done, value } = await reader.read();
         if (done) break;
         buf += decoder.decode(value, { stream: true });
-        const lines = buf.split("\n");
-        buf = lines.pop()!;
-        for (const line of lines) {
-          if (line.length > 0) {
-            yield JSON.parse(line) as T;
+
+        const messages = buf.split("\n\n");
+        buf = messages.pop()!;
+
+        for (const msg of messages) {
+          if (!msg.trim()) continue;
+          let data = "";
+          for (const line of msg.split("\n")) {
+            if (line.startsWith("data: ")) {
+              data += line.slice(6);
+            } else if (line.startsWith("data:")) {
+              data += line.slice(5);
+            }
+          }
+          if (data) {
+            yield JSON.parse(data) as T;
           }
         }
-      }
-
-      if (buf.length > 0) {
-        yield JSON.parse(buf) as T;
       }
     } finally {
       reader.releaseLock();

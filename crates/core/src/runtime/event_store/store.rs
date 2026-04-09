@@ -36,6 +36,16 @@ pub struct Event {
     pub end_time: DateTime<Utc>,
 }
 
+impl Event {
+    /// Extract the `"type"` tag from the payload JSON value.
+    pub fn payload_type(&self) -> &str {
+        self.payload
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Version(pub u64);
 
