@@ -18,6 +18,7 @@ const retry = {
 };
 
 const readFile = agent.tool({
+    name: "read_file",
     description: "Read the contents of a file. Returns the file content as a string.",
     parameters: {
         type: "object",
@@ -39,6 +40,7 @@ const readFile = agent.tool({
 });
 
 const writeFile = agent.tool({
+    name: "write_file",
     description: "Write content to a file. Creates the file if it doesn't exist, overwrites if it does.",
     parameters: {
         type: "object",
@@ -58,6 +60,7 @@ const writeFile = agent.tool({
 });
 
 const listFiles = agent.tool({
+    name: "list_files",
     description: "List files and directories at a given path. Returns names, types, and sizes.",
     parameters: {
         type: "object",
@@ -90,6 +93,7 @@ const listFiles = agent.tool({
 });
 
 const runCommand = agent.tool({
+    name: "run_command",
     description: "Execute a shell command and return its output. Use for running tests, builds, git commands, etc.",
     parameters: {
         type: "object",
@@ -142,7 +146,7 @@ export const codingAgent = agent({ id: "coding-agent" })
     .use(agent.state())
     .use(agent.messageHistory())
     .use(agent.systemMessage(() => SYSTEM_PROMPT))
-    .use(agent.tools(() => ({ readFile, writeFile, listFiles, runCommand })))
+    .use(agent.tools(() => [readFile, writeFile, listFiles, runCommand]))
     .use(
         agent.llmLoop(() => ({
             request: {

@@ -24,6 +24,7 @@ const weatherRetry = {
 };
 
 const add = agent.tool({
+    name: "add",
     description: "Add two numbers",
     parameters: {
         type: "object",
@@ -47,7 +48,7 @@ const mathHandler = agent({ id: "math-agent" })
     .use(
         agent.systemMessage("You are a math assistant. Compute whatever is asked. Be concise, return only the result."),
     )
-    .use(agent.tools({ add }))
+    .use(agent.tools([add]))
     .use(
         agent.llmLoop({
             request: { model: "arcee-ai/trinity-large-preview:free" },
@@ -57,6 +58,7 @@ const mathHandler = agent({ id: "math-agent" })
     );
 
 const getWeather = agent.tool({
+    name: "get_weather",
     description: "Get the current weather for a city. Returns temperature in fahrenheit.",
     parameters: {
         type: "object",
@@ -77,7 +79,7 @@ const weatherHandler = agent({ id: "weather-agent" })
     .use(agent.state())
     .use(agent.messageHistory())
     .use(agent.systemMessage("You are a weather assistant. Use tools when appropriate. Be concise."))
-    .use(agent.tools({ getWeather }))
+    .use(agent.tools([getWeather]))
     .use(
         agent.subAgents({
             delegates: [mathHandler],

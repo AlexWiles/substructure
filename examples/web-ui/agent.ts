@@ -15,6 +15,7 @@ const retry = {
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const searchWeb = agent.tool({
+    name: "search_web",
     description:
         "Search the web for information on a topic. Returns a list of relevant results with titles, URLs, and snippets.",
     parameters: {
@@ -52,6 +53,7 @@ const searchWeb = agent.tool({
 });
 
 const readArticle = agent.tool({
+    name: "read_article",
     description: "Read the full content of an article given its URL. Returns the article text.",
     parameters: {
         type: "object",
@@ -87,6 +89,7 @@ const readArticle = agent.tool({
 });
 
 const takeNotes = agent.tool({
+    name: "take_notes",
     description: "Save research notes for later reference. Use this to record key findings from articles you've read.",
     parameters: {
         type: "object",
@@ -111,6 +114,7 @@ const takeNotes = agent.tool({
 });
 
 const writeSummary = agent.tool({
+    name: "write_summary",
     description:
         "Write a final research summary based on your notes. Call this once you have gathered enough information.",
     parameters: {
@@ -155,7 +159,7 @@ export const researchAgent = agent({ id: "research-agent" })
     .use(agent.state())
     .use(agent.messageHistory())
     .use(agent.systemMessage(() => SYSTEM_PROMPT))
-    .use(agent.tools(() => ({ searchWeb, readArticle, takeNotes, writeSummary })))
+    .use(agent.tools(() => [searchWeb, readArticle, takeNotes, writeSummary]))
     .use(
         agent.llmLoop(() => ({
             request: {

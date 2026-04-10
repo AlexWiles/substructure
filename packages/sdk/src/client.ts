@@ -26,6 +26,7 @@ export type {
 // ── Middleware ─────────────────────────────────────────────────────────────
 
 export {
+    DEFAULT_RETRY,
     state,
     stateSlice,
     tool,
@@ -39,11 +40,15 @@ export {
 export type {
     ToolFn,
     ToolDef,
+    ToolInput,
     SubAgentTrack,
     LlmLoopSelection,
     ToolSelector,
     MessageSelector,
     SystemMessageSelector,
+    LogLevel,
+    Logger,
+    LoggingOptions,
 } from "./middleware";
 
 // ── Webhook ───────────────────────────────────────────────────────────────

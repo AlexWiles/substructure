@@ -1,6 +1,13 @@
 import type { Message, LlmTool, LlmRequest, RetryPolicy, WorkerAction, ToolResult } from "./types";
 import type { Handler, AgentRequest, AgentResponse, MiddlewareFn, Next, StateContributor } from "./worker";
 
+export const DEFAULT_RETRY: RetryPolicy = {
+    timeout_secs: 120,
+    max_retries: 0,
+    backoff_base_secs: 1,
+    backoff_max_secs: 10,
+};
+
 function decodeWorkerState(raw: string): unknown {
     if (!raw || raw === "") return {};
     return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(raw), (c) => c.charCodeAt(0))));
@@ -58,6 +65,7 @@ export function stateSlice<A extends object>(
 export type ToolFn = (args: string) => Promise<unknown>;
 
 export interface ToolDef {
+    name: string;
     description: string;
     parameters: unknown;
     execute: ToolFn;
@@ -66,12 +74,14 @@ export interface ToolDef {
 
 /** Define a tool from plain data. */
 export function tool(config: {
+    name: string;
     description: string;
     parameters: unknown;
     execute: (args: string) => unknown | Promise<unknown>;
     retry?: RetryPolicy;
 }): ToolDef {
     return {
+        name: config.name,
         description: config.description,
         parameters: config.parameters,
         execute: async (args: string) => config.execute(args),
@@ -79,17 +89,74 @@ export function tool(config: {
     };
 }
 
-export function logging(label?: string): MiddlewareFn<unknown, unknown> {
-    const prefix = label ? `[${label}]` : "[handler]";
+export type LogLevel = "debug" | "info" | "warn" | "error";
+
+export interface Logger {
+    debug(msg: string, data?: Record<string, unknown>): void;
+    info(msg: string, data?: Record<string, unknown>): void;
+    warn(msg: string, data?: Record<string, unknown>): void;
+    error(msg: string, data?: Record<string, unknown>): void;
+}
+
+export interface LoggingOptions {
+    label?: string;
+    logger?: Logger;
+    level?: LogLevel;
+}
+
+const LOG_LEVELS: Record<LogLevel, number> = { debug: 0, info: 1, warn: 2, error: 3 };
+
+function defaultLogger(minLevel: LogLevel): Logger {
+    const min = LOG_LEVELS[minLevel];
+    const noop = () => {};
+    const emit = (level: LogLevel) => {
+        if (LOG_LEVELS[level] < min) return noop;
+        return (msg: string, data?: Record<string, unknown>) => {
+            console.log(JSON.stringify({ level, msg, ...data, ts: new Date().toISOString() }));
+        };
+    };
+    return { debug: emit("debug"), info: emit("info"), warn: emit("warn"), error: emit("error") };
+}
+
+export function logging(options?: string | LoggingOptions): MiddlewareFn<unknown, unknown> {
+    const opts: LoggingOptions = typeof options === "string" ? { label: options } : (options ?? {});
+    const level = opts.level ?? "info";
+    const log = opts.logger ?? defaultLogger(level);
+    const label = opts.label;
+
     return async (req, next) => {
         const t = req.trigger;
         const tag = t.type === "tool.execute" ? `${t.type}:${t.name}` : t.type;
-        console.log(`${prefix} ${tag}`);
+        const ctx: Record<string, unknown> = {
+            agent: req.agentId,
+            session: req.wire.session_id,
+            decision: req.wire.decision_id,
+            trigger: tag,
+        };
+        if (label) ctx.label = label;
+
+        log.info("decision.start", ctx);
+        log.debug("decision.trigger", { ...ctx, payload: t });
+
         const start = performance.now();
-        const result = await next(req);
-        const ms = (performance.now() - start).toFixed(1);
-        console.log(`${prefix} ${tag} -> ${result.actions.map((a) => a.type).join(", ")} (${ms}ms)`);
-        return result;
+        try {
+            const result = await next(req);
+            const durationMs = Number((performance.now() - start).toFixed(1));
+            const actionTypes = result.actions.map((a) => a.type);
+
+            log.info("decision.end", { ...ctx, actions: actionTypes, durationMs });
+            log.debug("decision.actions", { ...ctx, actions: result.actions, durationMs });
+
+            return result;
+        } catch (err) {
+            const durationMs = Number((performance.now() - start).toFixed(1));
+            log.error("decision.error", {
+                ...ctx,
+                error: err instanceof Error ? err.message : String(err),
+                durationMs,
+            });
+            throw err;
+        }
     };
 }
 
@@ -163,7 +230,19 @@ export function systemMessage<S>(selectorOrValue: SystemMessageSelector<S> | str
     };
 }
 
-export type ToolSelector<S> = (state: S, req: AgentRequest<S>) => Record<string, ToolDef>;
+export type ToolInput = Record<string, ToolDef> | ToolDef[];
+export type ToolSelector<S> = (state: S, req: AgentRequest<S>) => ToolInput;
+
+function resolveTools(input: ToolInput): Record<string, ToolDef> {
+    if (Array.isArray(input)) {
+        const record: Record<string, ToolDef> = {};
+        for (const def of input) {
+            record[def.name] = def;
+        }
+        return record;
+    }
+    return input;
+}
 
 /**
  * Tool execution and pending-tracking middleware.
@@ -174,11 +253,11 @@ export type ToolSelector<S> = (state: S, req: AgentRequest<S>) => Record<string,
  * On `tool_execute`: executes the tool and prepends the result to downstream actions.
  */
 export function tools<S>(
-    selectorOrValue: ToolSelector<S> | Record<string, ToolDef>,
+    selectorOrValue: ToolSelector<S> | ToolInput,
 ): StateContributor<{ pendingToolCalls: string[] }> & MiddlewareFn<unknown, { pendingToolCalls: string[] }> {
     const selector: ToolSelector<S> = typeof selectorOrValue === "function" ? selectorOrValue : () => selectorOrValue;
     return stateSlice({ pendingToolCalls: [] as string[] }, async (req, next) => {
-        const tools = selector(req.state as S, req as unknown as AgentRequest<S>);
+        const tools = resolveTools(selector(req.state as S, req as unknown as AgentRequest<S>));
 
         const downstream = await next(req);
 
@@ -246,12 +325,7 @@ export function tools<S>(
                         name: tc.function.name,
                         arguments: tc.function.arguments,
                         handler: "worker" as const,
-                        retry: def?.retry ?? {
-                            timeout_secs: 120,
-                            max_retries: 3,
-                            backoff_base_secs: 1,
-                            backoff_max_secs: 10,
-                        },
+                        retry: def?.retry ?? DEFAULT_RETRY,
                     };
                 });
 
@@ -306,7 +380,7 @@ export function tools<S>(
 export interface LlmLoopSelection {
     request: Omit<LlmRequest, "messages"> & { messages?: Message[] };
     llm_client: string;
-    retry: RetryPolicy;
+    retry?: RetryPolicy;
     stream?: boolean;
     toolRetries?: Record<string, RetryPolicy>;
 }
@@ -336,7 +410,7 @@ export function llmLoop<S>(
                                 messages: [],
                             },
                             llm_client: selection.llm_client,
-                            retry: selection.retry,
+                            retry: selection.retry ?? DEFAULT_RETRY,
                             stream: selection.stream ?? false,
                         },
                         ...downstream.actions,
@@ -369,7 +443,7 @@ export interface SubAgentTrack {
  */
 export function subAgents<S>(config: {
     delegates: Handler[];
-    retry: RetryPolicy;
+    retry?: RetryPolicy;
 }): StateContributor<{ subAgentTracker: Record<string, SubAgentTrack> }> &
     MiddlewareFn<unknown, { subAgentTracker: Record<string, SubAgentTrack> }> {
     const subAgents: Record<string, { agentId: string }> = {};
@@ -407,7 +481,7 @@ export function subAgents<S>(config: {
                                     type: "spawn.sub_agent",
                                     session_id: childSessionId,
                                     agent_id: sub.agentId,
-                                    retry: config.retry,
+                                    retry: config.retry ?? DEFAULT_RETRY,
                                 },
                                 {
                                     type: "send.message",

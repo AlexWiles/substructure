@@ -16,6 +16,7 @@ const retry = {
 };
 
 const fetchUrl = agent.tool({
+    name: "fetch_url",
     description: "Fetch a URL and return its content. Use for APIs, web pages, or checking if a site is up.",
     parameters: {
         type: "object",
@@ -43,6 +44,7 @@ const fetchUrl = agent.tool({
 });
 
 const extractFromHtml = agent.tool({
+    name: "extract_from_html",
     description:
         "Fetch a webpage and extract text content matching a CSS selector. " +
         "Returns an array of matched text strings.",
@@ -93,7 +95,7 @@ const webAgent = agent({ id: "web-agent" })
     .use(durableObjectState(() => workerEnv.AGENT_STATE))
     .use(agent.messageHistory())
     .use(agent.systemMessage(SYSTEM_PROMPT))
-    .use(agent.tools({ fetchUrl, extractFromHtml }))
+    .use(agent.tools([fetchUrl, extractFromHtml]))
     .use(
         agent.llmLoop({
             request: { model: "arcee-ai/trinity-large-preview:free" },

@@ -1,10 +1,7 @@
-import Substructure, { contentText } from "@substructure.ai/sdk";
-import type { MiddlewareFn, ClientIdentity, WorkerAction, Message } from "@substructure.ai/sdk";
-import { z } from "zod";
+import Substructure from "@substructure.ai/sdk";
+import type { MiddlewareFn, ClientIdentity } from "@substructure.ai/sdk";
 import { randomUUID } from "crypto";
 
-// ── Schema ───────────────────────────────────────────────────────────────────
-//
 const sub = new Substructure();
 const { agent } = sub;
 
@@ -13,147 +10,48 @@ const auth: ClientIdentity = {
     sub: "example-user",
 };
 
-const ContactSchema = z.object({
-    name: z.string().describe("Full name"),
-    email: z.string().describe("Email address"),
-    company: z.string().describe("Company or organization"),
-    role: z.string().describe("Job title or role"),
+const SYSTEM_PROMPT =
+    "You extract contact information from text. When given text, identify the person's name, email, company, and role. Always call extract_contact with the structured data.";
+
+const extractContact = agent.tool({
+    name: "extract_contact",
+    description: "Save the extracted contact information. You must call this tool with the structured data.",
+    parameters: {
+        type: "object",
+        properties: {
+            name: { type: "string", description: "Full name" },
+            email: { type: "string", description: "Email address" },
+            company: { type: "string", description: "Company or organization" },
+            role: { type: "string", description: "Job title or role" },
+        },
+        required: ["name", "email", "company", "role"],
+    },
+    execute: (args: string) => JSON.parse(args),
 });
 
-const RETRY = {
-    timeout_secs: 120,
-    max_retries: 3,
-    backoff_base_secs: 1,
-    backoff_max_secs: 10,
-};
-
-const SYSTEM_MESSAGE: Message = {
-    role: "system",
-    content:
-        "You extract contact information from text. When given text, identify the person's name, email, company, and role. Always call extract_contact with the structured data.",
-};
-
-interface State {
-    messages: Message[];
-}
-
-function callLlm(state: State): WorkerAction {
-    return {
-        type: "call.llm",
-        llm_client: "openrouter",
-        request: {
-            model: "arcee-ai/trinity-large-preview:free",
-            messages: [SYSTEM_MESSAGE, ...state.messages],
-            tools: [
-                {
-                    function: {
-                        name: "extract_contact",
-                        description:
-                            "Save the extracted contact information. You must call this tool with the structured data.",
-                        parameters: z.toJSONSchema(ContactSchema, { target: "draft-2020-12" }),
-                    },
-                },
-            ],
-        },
-        stream: false,
-        retry: RETRY,
-    };
-}
-
-const withMessageHistory = (): MiddlewareFn<unknown> => (req, next) => {
-    const { trigger } = req;
-    const state = req.state as State;
-    state.messages ??= [];
-
-    switch (trigger.type) {
-        case "user.message": {
-            state.messages.push(trigger.message);
-            break;
-        }
-        case "llm.response": {
-            state.messages.push(trigger.message);
-            break;
-        }
-        case "tool.result": {
-            state.messages.push({
-                role: "tool",
-                content: trigger.result.content,
-                tool_call_id: trigger.result.tool_call_id,
-                name: trigger.result.name,
-            });
-            break;
-        }
+// Short-circuit: when the tool result comes back, emit done with the
+// parsed data instead of sending it back to the LLM for another turn.
+const doneOnExtraction: MiddlewareFn<unknown> = (req, next) => {
+    if (req.trigger.type === "tool.result" && req.trigger.result.name === extractContact.name) {
+        const data = JSON.parse(req.trigger.result.content);
+        return { actions: [{ type: "done", data }], state: req.state };
     }
-
-    return next({ ...req, state });
-};
-
-const withStructuredOutputFlow = (): MiddlewareFn<unknown> => (req, next) => {
-    const { trigger } = req;
-    const state = req.state as State;
-
-    switch (trigger.type) {
-        case "user.message":
-            return { actions: [callLlm(state)], state };
-
-        case "llm.response": {
-            if (trigger.message.tool_calls?.length) {
-                return {
-                    actions: trigger.message.tool_calls.map((tc) => ({
-                        type: "call.tool" as const,
-                        tool_call_id: tc.id,
-                        name: tc.function.name,
-                        arguments: tc.function.arguments,
-                        handler: "worker" as const,
-                        retry: RETRY,
-                    })),
-                    state,
-                };
-            }
-
-            const text = contentText(trigger.message.content);
-            return { actions: [{ type: "done", data: text ?? null }], state };
-        }
-
-        case "tool.execute": {
-            try {
-                const args = JSON.parse(trigger.arguments);
-                const contact = ContactSchema.parse(args);
-                return {
-                    actions: [
-                        {
-                            type: "done",
-                            data: contact,
-                        },
-                    ],
-                    state,
-                };
-            } catch (e: any) {
-                return {
-                    actions: [
-                        {
-                            type: "return.tool.error",
-                            tool_call_id: trigger.tool_call_id,
-                            error: e.message,
-                            retryable: false,
-                            attempt: trigger.attempt,
-                        },
-                    ],
-                    state,
-                };
-            }
-        }
-
-        default:
-            return next({ ...req, state });
-    }
+    return next(req);
 };
 
 const extractor = agent({ id: "contact-extractor" })
     .use(agent.logging())
     .use(agent.state())
-    .use(withMessageHistory())
-    .use(withStructuredOutputFlow());
+    .use(agent.messageHistory())
+    .use(agent.systemMessage(SYSTEM_PROMPT))
+    .use(agent.tools([extractContact]))
+    .use(doneOnExtraction)
+    .use(
+        agent.llmLoop({
+            request: { model: "arcee-ai/trinity-large-preview:free" },
+            llm_client: "openrouter",
+        }),
+    );
 
 const embedded = await sub.embedded({
     agents: [extractor],
@@ -164,10 +62,8 @@ const embedded = await sub.embedded({
 const input = `Hey! Just met Sarah Chen at the conference. She's a Senior Engineer
 at Acme Corp. Shoot her a note at schen@acme.io about the integration work.`;
 
-console.log("Extracting contact from text...\n");
-
 const stream = embedded.submit({
-    agentId: "contact-extractor",
+    agentId: extractor.agentId,
     payload: {
         type: "message",
         message: {

@@ -16,6 +16,7 @@ const receiptRetry = {
 };
 
 const saveToCSV = agent.tool({
+    name: "save_to_csv",
     description: "Append an extracted receipt to the CSV file",
     parameters: {
         type: "object",
@@ -48,7 +49,7 @@ const receiptHandler = agent({ id: receiptHandler.agentId })
     .use(agent.state())
     .use(agent.systemMessage(SYSTEM_PROMPT))
     .use(agent.messageHistory())
-    .use(agent.tools({ saveToCSV }))
+    .use(agent.tools([saveToCSV]))
     .use(
         agent.llmLoop({
             request: {
