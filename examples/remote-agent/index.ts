@@ -1,5 +1,4 @@
 import Substructure from "@substructure.ai/sdk";
-import { EmbeddedRuntime } from "@substructure.ai/runtime";
 
 const sub = new Substructure();
 const { agent } = sub;
@@ -112,8 +111,7 @@ const frontend = sub.frontend.client({
     token: clientToken,
 });
 
-const runtime = new EmbeddedRuntime({ db: "remote-agent-example.db" });
-const embedded = await sub.embedded({ agents: [weatherHandler, mathHandler], runtime });
+const embedded = await sub.embedded({ agents: [weatherHandler, mathHandler], db: "remote-agent-example.db" });
 
 const server = Bun.serve({ port: WORKER_PORT, fetch: embedded.fetchHandler() });
 

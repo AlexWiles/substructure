@@ -1,6 +1,5 @@
 import type { ClientPayload, ClientIdentity, Event } from "./types";
-import type { NativeRuntime } from "./runtime";
-import type { FetchHandlerOptions } from "./worker";
+import type { FetchHandlerOptions, NativeRuntime } from "./worker";
 import { Worker, HandlerBuilder } from "./worker";
 import type { Handler } from "./worker";
 import { RunStream } from "./run-stream";
@@ -75,7 +74,14 @@ class FrontendNamespace {
 
 export interface EmbeddedOptions {
     agents: Handler[];
-    runtime: NativeRuntime;
+    /** SQLite database path */
+    db: string;
+    /** OpenRouter API base URL (default: "https://openrouter.ai/api") */
+    openrouterBaseUrl?: string;
+    /** OpenRouter API key */
+    openrouterApiKey?: string;
+    /** Number of concurrent LLM handler tasks (default: 4) */
+    llmPoolSize?: number;
 }
 
 export interface SubmitRequest {
@@ -149,7 +155,14 @@ export class Substructure {
     }
 
     async embedded(options: EmbeddedOptions): Promise<EmbeddedInstance> {
-        const instance = new EmbeddedInstance(options.runtime, options.agents);
+        const { EmbeddedRuntime } = await import("@substructure.ai/runtime");
+        const runtime = new EmbeddedRuntime({
+            db: options.db,
+            openrouterBaseUrl: options.openrouterBaseUrl,
+            openrouterApiKey: options.openrouterApiKey,
+            llmPoolSize: options.llmPoolSize,
+        });
+        const instance = new EmbeddedInstance(runtime, options.agents);
         return instance;
     }
 }

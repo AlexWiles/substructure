@@ -1,6 +1,5 @@
-import { EmbeddedRuntime } from "@substructure.ai/runtime";
 import Substructure from "@substructure.ai/sdk";
-import { researchAgent, AGENT_ID } from "./agent";
+import { researchAgent } from "./agent";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -13,12 +12,11 @@ const API_PORT = Number(process.env.API_PORT ?? 3001);
 
 const sub = new Substructure();
 
-const runtime = new EmbeddedRuntime({
+const embedded = await sub.embedded({
+    agents: [researchAgent],
     db: "web-ui-example.db",
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
 });
-
-const embedded = await sub.embedded({ agents: [researchAgent], runtime });
 
 const workerServer = Bun.serve({
     port: WORKER_PORT,
@@ -66,7 +64,7 @@ const apiServer = Bun.serve({
 
         // GET /api/config — tell the frontend where the Substructure server is
         if (url.pathname === "/api/config" && req.method === "GET") {
-            return Response.json({ serverUrl: SERVER_URL, agentId: AGENT_ID }, { headers: corsHeaders() });
+            return Response.json({ serverUrl: SERVER_URL, agentId: researchAgent.agentId }, { headers: corsHeaders() });
         }
 
         return new Response("Not found", { status: 404, headers: corsHeaders() });
@@ -76,7 +74,7 @@ const apiServer = Bun.serve({
 console.log(`Worker server running on http://localhost:${workerServer.port}`);
 console.log(`API server running on http://localhost:${apiServer.port}`);
 console.log(`Substructure server: ${SERVER_URL}`);
-console.log(`Agent: ${AGENT_ID}`);
+console.log(`Agent: ${researchAgent.agentId}`);
 
 // ── Graceful shutdown ───────────────────────────────────────────────────────
 

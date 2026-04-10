@@ -137,9 +137,7 @@ Guidelines:
 
 // ── Agent Handler ────────────────────────────────────────────────────────────
 
-export const AGENT_ID = "coding-agent";
-
-export const codingAgent = agent({ id: AGENT_ID })
+export const codingAgent = agent({ id: "coding-agent" })
     .use(agent.logging("coding"))
     .use(agent.state())
     .use(agent.messageHistory())

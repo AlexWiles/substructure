@@ -1,5 +1,19 @@
 import type { WorkerDecisionRequestWire, WorkerAction, SubmitRequest, SpanContext } from "./types";
-import type { NativeRuntime } from "./runtime";
+export interface NativeRuntime {
+    registerWorker(
+        tenantId: string,
+        agentIds: string[],
+        callback: (decision: string) => Promise<string>,
+    ): Promise<void>;
+    submitPayload(
+        sessionId: string,
+        agentId: string,
+        payloadJson: string,
+        authJson: string,
+        turnId?: string,
+    ): AsyncGenerator<string, void, unknown>;
+    shutdown(): Promise<void>;
+}
 import { verifyWebhookSignature } from "./webhook";
 
 // ── Handler types ────────────────────────────────────────────────────────────
@@ -54,27 +68,6 @@ export interface Handler {
  */
 export type StateContributor<A> = MiddlewareFn<any, any> & { readonly _contributes: A };
 
-export {
-    state,
-    stateSlice,
-    tool,
-    logging,
-    messageHistory,
-    systemMessage,
-    tools,
-    llmLoop,
-    subAgents,
-} from "./middleware";
-export type {
-    ToolFn,
-    ToolDef,
-    SubAgentTrack,
-    LlmLoopSelection,
-    ToolSelector,
-    MessageSelector,
-    SystemMessageSelector,
-} from "./middleware";
-
 // ── HandlerBuilder ──────────────────────────────────────────────────────────
 
 type UnknownMiddleware = MiddlewareFn<unknown, unknown>;
@@ -127,10 +120,6 @@ function composeChain(middlewares: UnknownMiddleware[], handle: UnknownNext): Un
         fn = (ctx) => mw(ctx, next);
     }
     return fn;
-}
-
-export function defineAgent(agentId: string): HandlerBuilder<unknown> {
-    return new HandlerBuilder(agentId);
 }
 
 // ── Fetch handler options ───────────────────────────────────────────────────

@@ -1,17 +1,15 @@
-import { EmbeddedRuntime } from "@substructure.ai/runtime";
 import Substructure from "@substructure.ai/sdk";
 import type { Event } from "@substructure.ai/sdk";
-import { codingAgent, AGENT_ID } from "./worker";
+import { codingAgent } from "./worker";
 
 // ── Substructure Runtime ─────────────────────────────────────────────────────
 
-const runtime = new EmbeddedRuntime({
+const sub = new Substructure();
+const embedded = await sub.embedded({
+    agents: [codingAgent],
     db: "coding-agent.db",
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
 });
-
-const sub = new Substructure();
-const embedded = await sub.embedded({ agents: [codingAgent], runtime });
 
 // ── HTTP Server ──────────────────────────────────────────────────────────────
 
@@ -31,7 +29,7 @@ const server = Bun.serve({
             };
 
             const stream = embedded.submit({
-                agentId: AGENT_ID,
+                agentId: codingAgent.agentId,
                 payload: {
                     type: "message",
                     message: { role: "user", content: body.message },
@@ -66,7 +64,7 @@ const server = Bun.serve({
 
         // GET /health
         if (url.pathname === "/health") {
-            return Response.json({ ok: true, agent: AGENT_ID });
+            return Response.json({ ok: true, agent: codingAgent.agentId });
         }
 
         return new Response("Not found", { status: 404 });
@@ -74,7 +72,7 @@ const server = Bun.serve({
 });
 
 console.log(`Coding agent server running on http://localhost:${server.port}`);
-console.log(`Agent: ${AGENT_ID}`);
+console.log(`Agent: ${codingAgent.agentId}`);
 console.log(`Working directory: ${process.cwd()}`);
 
 // Graceful shutdown

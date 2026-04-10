@@ -1,6 +1,5 @@
 import Substructure, { contentText, type RunStream } from "@substructure.ai/sdk";
 import type { ClientIdentity, Message, WorkerAction } from "@substructure.ai/sdk";
-import { EmbeddedRuntime } from "@substructure.ai/runtime";
 
 const sub = new Substructure();
 const { agent } = sub;
@@ -91,8 +90,7 @@ const actionAgent = agent({ id: "action-demo" })
         return { actions, state: ctx.state };
     });
 
-const runtime = new EmbeddedRuntime({ db: "action-request-example.db" });
-const embedded = await sub.embedded({ agents: [actionAgent], runtime });
+const embedded = await sub.embedded({ agents: [actionAgent], db: "action-request-example.db" });
 
 const auth: ClientIdentity = {
     tenant_id: "default",

@@ -7,7 +7,6 @@ import type {
     Message,
     RetryPolicy,
 } from "@substructure.ai/sdk";
-import { EmbeddedRuntime } from "@substructure.ai/runtime";
 
 const sub = new Substructure();
 
@@ -15,7 +14,6 @@ type State = {
     messages: Message[];
 };
 
-const WEATHER_AGENT_ID = "weather-agent";
 const RETRY: RetryPolicy = {
     timeout_secs: 120,
     max_retries: 3,
@@ -184,16 +182,15 @@ const rawDecision = async (request: WorkerDecisionRequestWire): Promise<{ action
 };
 
 const weatherHandler = {
-    agentId: WEATHER_AGENT_ID,
+    agentId: "weather-agent",
     toDecisionHandler: () => rawDecision,
 };
 
-const runtime = new EmbeddedRuntime({
+const embedded = await sub.embedded({
+    agents: [weatherHandler],
     db: "data.db",
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
 });
-
-const embedded = await sub.embedded({ agents: [weatherHandler], runtime });
 
 const auth: ClientIdentity = {
     tenant_id: "default",
@@ -201,7 +198,7 @@ const auth: ClientIdentity = {
 };
 
 const stream = embedded.submit({
-    agentId: WEATHER_AGENT_ID,
+    agentId: weatherHandler.agentId,
     payload: {
         type: "message",
         message: {

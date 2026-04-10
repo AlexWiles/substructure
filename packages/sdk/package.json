@@ -5,8 +5,7 @@
   "license": "MIT",
   "type": "module",
   "exports": {
-    ".": "./src/client.ts",
-    "./agent": "./src/agent.ts"
+    ".": "./src/client.ts"
   },
   "scripts": {
     "build": "tsup",

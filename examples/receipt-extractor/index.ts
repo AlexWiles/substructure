@@ -1,6 +1,5 @@
 import Substructure from "@substructure.ai/sdk";
 import type { ClientIdentity } from "@substructure.ai/sdk";
-import { EmbeddedRuntime } from "@substructure.ai/runtime";
 import { appendFileSync, existsSync } from "fs";
 import { randomUUID } from "crypto";
 
@@ -39,14 +38,12 @@ const saveToCSV = agent.tool({
     },
 });
 
-const RECEIPT_AGENT_ID = "receipt-extractor";
-
 const SYSTEM_PROMPT = `You extract structured data from payment receipts.
 Given receipt text, identify the date, vendor, total amount, and currency.
 Then call save_to_csv to record it. If the date is unclear, use your best guess.
 If the currency is not stated, assume USD.`;
 
-const receiptHandler = agent({ id: RECEIPT_AGENT_ID })
+const receiptHandler = agent({ id: receiptHandler.agentId })
     .use(agent.logging())
     .use(agent.state())
     .use(agent.systemMessage(SYSTEM_PROMPT))
@@ -62,12 +59,11 @@ const receiptHandler = agent({ id: RECEIPT_AGENT_ID })
         }),
     );
 
-const runtime = new EmbeddedRuntime({
+const embedded = await sub.embedded({
+    agents: [receiptHandler],
     db: ":memory:",
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
 });
-
-const embedded = await sub.embedded({ agents: [receiptHandler], runtime });
 
 const auth: ClientIdentity = {
     tenant_id: "default",
@@ -104,7 +100,7 @@ for (const [i, receipt] of receipts.entries()) {
     console.log(`\n--- Processing receipt ${i + 1} ---`);
 
     const stream = embedded.submit({
-        agentId: RECEIPT_AGENT_ID,
+        agentId: receiptHandler.agentId,
         payload: {
             type: "message",
             message: {

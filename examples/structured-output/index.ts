@@ -1,6 +1,5 @@
 import Substructure, { contentText } from "@substructure.ai/sdk";
 import type { MiddlewareFn, ClientIdentity, WorkerAction, Message } from "@substructure.ai/sdk";
-import { EmbeddedRuntime } from "@substructure.ai/runtime";
 import { z } from "zod";
 import { randomUUID } from "crypto";
 
@@ -8,11 +7,6 @@ import { randomUUID } from "crypto";
 //
 const sub = new Substructure();
 const { agent } = sub;
-
-const runtime = new EmbeddedRuntime({
-    db: "data.db",
-    openrouterApiKey: process.env.OPENROUTER_API_KEY,
-});
 
 const auth: ClientIdentity = {
     tenant_id: "default",
@@ -161,7 +155,11 @@ const extractor = agent({ id: "contact-extractor" })
     .use(withMessageHistory())
     .use(withStructuredOutputFlow());
 
-const embedded = await sub.embedded({ agents: [extractor], runtime });
+const embedded = await sub.embedded({
+    agents: [extractor],
+    db: "data.db",
+    openrouterApiKey: process.env.OPENROUTER_API_KEY,
+});
 
 const input = `Hey! Just met Sarah Chen at the conference. She's a Senior Engineer
 at Acme Corp. Shoot her a note at schen@acme.io about the integration work.`;

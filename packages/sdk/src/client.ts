@@ -1,38 +1,16 @@
 // ── Default export ────────────────────────────────────────────────────────
 
 export { Substructure as default, Substructure } from "./substructure";
-export type {
-    AgentOptions,
-    AgentFactory,
-    EmbeddedOptions,
-    SubmitRequest as SubstructureSubmitRequest,
-} from "./substructure";
-export { EmbeddedInstance } from "./substructure";
+export type { AgentOptions, AgentFactory, EmbeddedOptions } from "./substructure";
 
 // ── RunStream ─────────────────────────────────────────────────────────────
 
 export { RunStream } from "./run-stream";
 export type { TurnResult } from "./run-stream";
 
-// ── Clients ───────────────────────────────────────────────────────────────
-
-export { BackendClient } from "./backend-client";
-export type {
-    BackendClientOptions,
-    BackendSubmitRequest,
-    IssueClientTokenRequest,
-    IssueClientTokenResponse,
-} from "./backend-client";
-export { FrontendClient } from "./frontend-client";
-export type { FrontendClientOptions, FrontendSubmitRequest } from "./frontend-client";
-export { WorkerClient } from "./worker-client";
-export { AdminClient } from "./admin-client";
-export { UserClient } from "./user-client";
-export { BaseClient, type RequestOptions } from "./base";
-
 // ── Worker & Agent ────────────────────────────────────────────────────────
 
-export { Worker, defineAgent, HandlerBuilder } from "./worker";
+export { HandlerBuilder } from "./worker";
 export type {
     Handler,
     AgentRequest,
@@ -57,7 +35,7 @@ export {
     tools,
     llmLoop,
     subAgents,
-} from "./worker";
+} from "./middleware";
 export type {
     ToolFn,
     ToolDef,
@@ -66,12 +44,7 @@ export type {
     ToolSelector,
     MessageSelector,
     SystemMessageSelector,
-} from "./worker";
-
-// ── Runtime ───────────────────────────────────────────────────────────────
-
-export { InProcessRuntime } from "./runtime";
-export type { NativeRuntime, InProcessRuntimeOptions } from "./runtime";
+} from "./middleware";
 
 // ── Webhook ───────────────────────────────────────────────────────────────
 

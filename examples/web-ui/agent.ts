@@ -150,9 +150,7 @@ Be thorough but concise. Always complete all four steps.`;
 
 // ── Agent ────────────────────────────────────────────────────────────────────
 
-export const AGENT_ID = "research-agent";
-
-export const researchAgent = agent({ id: AGENT_ID })
+export const researchAgent = agent({ id: "research-agent" })
     .use(agent.logging("research"))
     .use(agent.state())
     .use(agent.messageHistory())
