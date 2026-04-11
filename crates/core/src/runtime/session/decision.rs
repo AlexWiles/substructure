@@ -139,5 +139,8 @@ pub enum WorkerAction {
         message: Message,
     },
     #[serde(rename = "done")]
-    Done { data: serde_json::Value },
+    Done {
+        #[serde(default)]
+        data: serde_json::Value,
+    },
 }
