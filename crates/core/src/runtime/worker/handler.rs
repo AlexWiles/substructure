@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::runtime::aggregate::{AggregateState, DomainEvent};
 use crate::runtime::event_store::{Event, EventStore};
 use crate::runtime::processor::{
@@ -53,6 +55,7 @@ pub fn spawn_worker_processor(
     store: Arc<dyn EventStore>,
     checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
     queue: Arc<dyn WorkerQueue>,
+    cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     let projection = Arc::new(WorkerDecisionProjection::new(queue));
     EventProcessorRunner::new(
@@ -60,6 +63,7 @@ pub fn spawn_worker_processor(
         checkpoint_store,
         projection,
         EventProcessorRunnerConfig::default(),
+        cancel,
     )
     .spawn()
 }

@@ -4,6 +4,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::runtime::event_store::{Event, EventFilter, EventStore};
@@ -80,6 +81,7 @@ pub struct EventProcessorRunner {
     checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
     processor: Arc<dyn EventProcessor>,
     config: EventProcessorRunnerConfig,
+    cancel: CancellationToken,
 }
 
 enum BatchProcessError {
@@ -92,6 +94,7 @@ impl EventProcessorRunner {
         checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
         processor: Arc<dyn EventProcessor>,
         config: EventProcessorRunnerConfig,
+        cancel: CancellationToken,
     ) -> Self {
         assert!(config.shard_count > 0, "processor shard_count must be > 0");
         assert!(
@@ -103,6 +106,7 @@ impl EventProcessorRunner {
             checkpoint_store,
             processor,
             config,
+            cancel,
         }
     }
 
@@ -136,6 +140,10 @@ impl EventProcessorRunner {
         let mut wake_rx = self.store.subscribe();
 
         loop {
+            if self.cancel.is_cancelled() {
+                break;
+            }
+
             let events = match self
                 .store
                 .query_events(&EventFilter {
@@ -162,6 +170,7 @@ impl EventProcessorRunner {
                 tokio::select! {
                     _ = tokio::time::sleep(self.config.idle_poll_interval) => {}
                     _ = wake_rx.recv() => {}
+                    _ = self.cancel.cancelled() => break,
                 }
                 continue;
             }

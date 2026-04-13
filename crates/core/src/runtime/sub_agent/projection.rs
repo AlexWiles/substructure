@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::providers::memory_queue::TaskQueue;
 use crate::runtime::aggregate::{AggregateState, DomainEvent};
 use crate::runtime::event_store::{Event, EventStore};
@@ -129,9 +131,10 @@ pub fn spawn_sub_agent_dispatch_processor(
     store: Arc<dyn EventStore>,
     checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
     queue: Arc<dyn TaskQueue<SubAgentTask>>,
+    cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     let projection = Arc::new(SubAgentDispatchProjection::new(queue));
     let mut config = EventProcessorRunnerConfig::default();
     config.owner_id = Some("sub_agent_dispatch".to_string());
-    EventProcessorRunner::new(store, checkpoint_store, projection, config).spawn()
+    EventProcessorRunner::new(store, checkpoint_store, projection, config, cancel).spawn()
 }

@@ -243,7 +243,7 @@ impl EmbeddedRuntime {
         for (_, handle) in handles.drain() {
             handle.abort();
         }
-        self.inner.shutdown();
+        self.inner.shutdown().await;
         Ok(())
     }
 }

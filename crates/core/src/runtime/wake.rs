@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::runtime::aggregate::{
     execute, AggregateState, ConflictRetry, DomainEvent, ExecuteInput,
@@ -88,6 +89,7 @@ pub fn spawn_wake_processor(
     store: Arc<dyn EventStore>,
     checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
     wake_store: Arc<dyn WakeScheduleStore>,
+    cancel: CancellationToken,
 ) -> JoinHandle<()> {
     let projection = Arc::new(WakeScheduleProjection::new(wake_store));
     EventProcessorRunner::new(
@@ -95,6 +97,7 @@ pub fn spawn_wake_processor(
         checkpoint_store,
         projection,
         EventProcessorRunnerConfig::default(),
+        cancel,
     )
     .spawn()
 }
@@ -103,10 +106,14 @@ pub fn spawn_wake_dispatcher(
     store: Arc<dyn EventStore>,
     wake_store: Arc<dyn WakeScheduleStore>,
     poll_interval: Duration,
+    cancel: CancellationToken,
 ) -> JoinHandle<()> {
     let mut rx = store.subscribe();
     tokio::spawn(async move {
         loop {
+            if cancel.is_cancelled() {
+                break;
+            }
             let now = Utc::now();
             fire_due(&store, &wake_store, now).await;
             let next_wake = wake_store.next_wake_at().await.unwrap_or(None);
@@ -129,6 +136,7 @@ pub fn spawn_wake_dispatcher(
                         }
                     }
                 }
+                _ = cancel.cancelled() => break,
             }
         }
     })

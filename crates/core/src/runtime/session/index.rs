@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 use crate::runtime::aggregate::{AggregateState, DomainEvent};
 use crate::runtime::event_store::{AggregateSort, Event, EventStore, StoreError};
@@ -134,10 +135,11 @@ pub fn spawn_session_index_processor(
     event_store: Arc<dyn EventStore>,
     checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
     session_index_store: Arc<dyn SessionIndexStore>,
+    cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     let projection = Arc::new(SessionIndexProjection::new(session_index_store));
     let mut config = EventProcessorRunnerConfig::default();
     config.batch_size = 512;
     config.owner_id = Some("session_index".to_string());
-    EventProcessorRunner::new(event_store, checkpoint_store, projection, config).spawn()
+    EventProcessorRunner::new(event_store, checkpoint_store, projection, config, cancel).spawn()
 }

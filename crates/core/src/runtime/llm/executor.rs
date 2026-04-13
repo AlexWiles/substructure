@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::providers::memory_queue::TaskQueue;
 use crate::runtime::aggregate::{execute, ConflictRetry, ExecuteInput};
@@ -15,6 +16,7 @@ pub fn spawn_llm_task_executor(
     provider: Arc<dyn LlmProviderTrait>,
     queue: Arc<dyn TaskQueue<LlmTask>>,
     worker_count: usize,
+    cancel: CancellationToken,
 ) -> Vec<JoinHandle<()>> {
     let worker_count = worker_count.max(1);
     let mut handles = Vec::with_capacity(worker_count);
@@ -22,8 +24,17 @@ pub fn spawn_llm_task_executor(
         let store = store.clone();
         let provider = provider.clone();
         let mut rx = queue.subscribe();
+        let cancel = cancel.clone();
         handles.push(tokio::spawn(async move {
-            while let Some(task) = rx.recv().await {
+            loop {
+                let task = tokio::select! {
+                    t = rx.recv() => match t {
+                        Some(t) => t,
+                        None => break,
+                    },
+                    _ = cancel.cancelled() => break,
+                };
+
                 let resolved = provider.resolve(&task.llm_client, &task.auth).await;
 
                 let command = match resolved {

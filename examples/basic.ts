@@ -94,8 +94,9 @@ async function turn(message: string) {
     }
 }
 
-await turn("Add buy groceries and walk the dog to my list");
+await turn("Add buy groceries to my list");
 await turn("What's on my list?");
-await turn("Mark buy groceries as done, then show me the list");
+await turn("Mark buy groceries as done");
+await turn("What's on my list?");
 
 await embedded.shutdown();

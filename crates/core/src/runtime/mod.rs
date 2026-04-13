@@ -1,7 +1,9 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::mpsc;
-use tokio::task::AbortHandle;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::providers::memory_queue::TaskQueue;
@@ -41,6 +43,7 @@ pub struct RuntimeConfig {
     pub llm_executor_workers: usize,
     pub sub_agent_executor_workers: usize,
     pub wake_poll_interval: std::time::Duration,
+    pub shutdown_timeout: std::time::Duration,
 }
 
 impl Default for RuntimeConfig {
@@ -49,6 +52,7 @@ impl Default for RuntimeConfig {
             llm_executor_workers: 4,
             sub_agent_executor_workers: 2,
             wake_poll_interval: std::time::Duration::from_secs(30),
+            shutdown_timeout: std::time::Duration::from_secs(5),
         }
     }
 }
@@ -58,7 +62,9 @@ pub struct Runtime {
     queue: Arc<dyn WorkerQueue>,
     session_index: Arc<dyn SessionIndexStore>,
     session_subscriptions: session::subscriptions::SessionSubscriptions,
-    handles: Vec<AbortHandle>,
+    cancel: CancellationToken,
+    handles: tokio::sync::Mutex<Vec<JoinHandle<()>>>,
+    shutdown_timeout: Duration,
 }
 
 pub struct SubmitClientPayload {
@@ -76,9 +82,29 @@ pub struct SubmitClientPayload {
 pub struct RuntimeError(String);
 
 impl Runtime {
-    pub fn shutdown(&self) {
-        for handle in &self.handles {
-            handle.abort();
+    pub async fn shutdown(&self) {
+        self.cancel.cancel();
+
+        let mut guard = self.handles.lock().await;
+        let handles: Vec<_> = guard.drain(..).collect();
+        drop(guard);
+
+        let abort_handles: Vec<_> = handles.iter().map(|h| h.abort_handle()).collect();
+
+        let join_all = async {
+            for handle in handles {
+                let _ = handle.await;
+            }
+        };
+
+        if tokio::time::timeout(self.shutdown_timeout, join_all)
+            .await
+            .is_err()
+        {
+            tracing::warn!("shutdown timed out, aborting remaining tasks");
+            for handle in &abort_handles {
+                handle.abort();
+            }
         }
     }
 
@@ -263,64 +289,81 @@ pub fn start(
     wake_store: Arc<dyn WakeScheduleStore>,
     config: RuntimeConfig,
 ) -> Arc<Runtime> {
+    let cancel = CancellationToken::new();
+
     let llm_processor_handle = spawn_llm_dispatch_processor(
         store.clone(),
         checkpoint_store.clone(),
         llm_task_queue.clone(),
+        cancel.clone(),
     );
     let llm_executor_handles = spawn_llm_task_executor(
         store.clone(),
         llm_provider,
         llm_task_queue,
         config.llm_executor_workers,
+        cancel.clone(),
     );
 
     let sub_agent_processor_handle = spawn_sub_agent_dispatch_processor(
         store.clone(),
         checkpoint_store.clone(),
         sub_agent_task_queue.clone(),
+        cancel.clone(),
     );
     let sub_agent_executor_handles = spawn_sub_agent_task_executor(
         store.clone(),
         sub_agent_task_queue,
         config.sub_agent_executor_workers,
+        cancel.clone(),
     );
 
     let worker_handle = spawn_worker_processor(
         store.clone(),
         checkpoint_store.clone(),
         worker_queue.clone(),
+        cancel.clone(),
     );
     let session_index_processor_handle = spawn_session_index_processor(
         store.clone(),
         checkpoint_store.clone(),
         session_index_store.clone(),
+        cancel.clone(),
     );
-    let wake_processor_handle =
-        spawn_wake_processor(store.clone(), checkpoint_store, wake_store.clone());
+    let wake_processor_handle = spawn_wake_processor(
+        store.clone(),
+        checkpoint_store,
+        wake_store.clone(),
+        cancel.clone(),
+    );
 
-    let wake_dispatcher_handle =
-        spawn_wake_dispatcher(store.clone(), wake_store, config.wake_poll_interval);
+    let wake_dispatcher_handle = spawn_wake_dispatcher(
+        store.clone(),
+        wake_store,
+        config.wake_poll_interval,
+        cancel.clone(),
+    );
 
     let session_subscriptions = session::subscriptions::SessionSubscriptions::new(store.clone());
+
+    let mut handles = vec![
+        llm_processor_handle,
+        sub_agent_processor_handle,
+        worker_handle,
+        session_index_processor_handle,
+        wake_processor_handle,
+        wake_dispatcher_handle,
+    ];
+    handles.extend(llm_executor_handles);
+    handles.extend(sub_agent_executor_handles);
 
     Arc::new(Runtime {
         store,
         queue: worker_queue,
         session_index: session_index_store,
         session_subscriptions,
-        handles: {
-            let mut handles = vec![
-                llm_processor_handle,
-                sub_agent_processor_handle,
-                worker_handle,
-                session_index_processor_handle,
-                wake_processor_handle,
-                wake_dispatcher_handle,
-            ];
-            handles.extend(llm_executor_handles);
-            handles.extend(sub_agent_executor_handles);
-            handles.into_iter().map(|h| h.abort_handle()).collect()
-        },
+        cancel,
+        handles: tokio::sync::Mutex::new(handles),
+        shutdown_timeout: config.shutdown_timeout,
     })
 }
