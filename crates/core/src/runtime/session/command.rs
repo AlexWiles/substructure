@@ -153,6 +153,21 @@ impl SessionState {
         }
     }
 
+    fn emit_decision_request(&self, trigger: DecisionTrigger) -> EventPayload {
+        let decision_id = new_call_id();
+        if self.has_pending_worker_decision() {
+            EventPayload::DecisionRequestQueued(DecisionRequestQueued {
+                decision_id,
+                trigger,
+            })
+        } else {
+            EventPayload::WorkerDecisionRequested(WorkerDecisionRequested {
+                decision_id,
+                trigger,
+            })
+        }
+    }
+
     fn handle_active(&self, cmd: CommandPayload) -> Result<Vec<EventPayload>, SessionError> {
         match cmd {
             CommandPayload::CreateSession { .. } => Err(SessionError::SessionAlreadyCreated),
@@ -203,24 +218,17 @@ impl SessionState {
                             message: message.clone(),
                         }));
                         if message.role == Role::User {
-                            events.push(EventPayload::WorkerDecisionRequested(
-                                WorkerDecisionRequested {
-                                    decision_id: new_call_id(),
-                                    trigger: DecisionTrigger::UserMessage { stream, message },
-                                },
-                            ));
+                            events.push(self.emit_decision_request(DecisionTrigger::UserMessage {
+                                stream,
+                                message,
+                            }));
                         }
                     }
                     ClientPayload::Action { action } => {
-                        events.push(EventPayload::WorkerDecisionRequested(
-                            WorkerDecisionRequested {
-                                decision_id: new_call_id(),
-                                trigger: DecisionTrigger::ClientAction {
-                                    name: action.name,
-                                    args: action.args,
-                                },
-                            },
-                        ));
+                        events.push(self.emit_decision_request(DecisionTrigger::ClientAction {
+                            name: action.name,
+                            args: action.args,
+                        }));
                     }
                 }
 
@@ -258,12 +266,10 @@ impl SessionState {
                             events.push(EventPayload::TurnStarted(TurnStarted { turn_id }));
                         }
                         if message.role == Role::User {
-                            events.push(EventPayload::WorkerDecisionRequested(
-                                WorkerDecisionRequested {
-                                    decision_id: new_call_id(),
-                                    trigger: DecisionTrigger::UserMessage { stream, message },
-                                },
-                            ));
+                            events.push(self.emit_decision_request(DecisionTrigger::UserMessage {
+                                stream,
+                                message,
+                            }));
                         }
                         Ok(events)
                     }
@@ -339,15 +345,12 @@ impl SessionState {
                             EventPayload::NewMessage(NewMessage {
                                 message: message.clone(),
                             }),
-                            EventPayload::WorkerDecisionRequested(WorkerDecisionRequested {
-                                decision_id: new_call_id(),
-                                trigger: DecisionTrigger::LlmResponse {
-                                    call_id,
-                                    message,
-                                    truncated,
-                                    usage,
-                                    cost,
-                                },
+                            self.emit_decision_request(DecisionTrigger::LlmResponse {
+                                call_id,
+                                message,
+                                truncated,
+                                usage,
+                                cost,
                             }),
                         ])
                     }
@@ -377,12 +380,9 @@ impl SessionState {
                     .retry_policy
                     .exhausted(&call.tracking.retry, retryable)
                 {
-                    events.push(EventPayload::WorkerDecisionRequested(
-                        WorkerDecisionRequested {
-                            decision_id: new_call_id(),
-                            trigger: DecisionTrigger::LlmError { call_id, error },
-                        },
-                    ));
+                    events.push(
+                        self.emit_decision_request(DecisionTrigger::LlmError { call_id, error }),
+                    );
                 }
                 Ok(events)
             }
@@ -404,18 +404,13 @@ impl SessionState {
                         retry: retry.clone(),
                     })];
                     if handler == ToolHandler::Worker {
-                        events.push(EventPayload::WorkerDecisionRequested(
-                            WorkerDecisionRequested {
-                                decision_id: new_call_id(),
-                                trigger: DecisionTrigger::ToolExecute {
-                                    tool_call_id,
-                                    name,
-                                    arguments,
-                                    attempt: 0,
-                                    deadline: retry.deadline(chrono::Utc::now()),
-                                },
-                            },
-                        ));
+                        events.push(self.emit_decision_request(DecisionTrigger::ToolExecute {
+                            tool_call_id,
+                            name,
+                            arguments,
+                            attempt: 0,
+                            deadline: retry.deadline(chrono::Utc::now()),
+                        }));
                     }
                     Ok(events)
                 }
@@ -454,19 +449,14 @@ impl SessionState {
                         state: ws,
                     }));
                 }
-                events.push(EventPayload::WorkerDecisionRequested(
-                    WorkerDecisionRequested {
-                        decision_id: new_call_id(),
-                        trigger: DecisionTrigger::ToolResult {
-                            result: ToolResult {
-                                tool_call_id,
-                                name,
-                                content: result,
-                                is_error: false,
-                            },
-                        },
+                events.push(self.emit_decision_request(DecisionTrigger::ToolResult {
+                    result: ToolResult {
+                        tool_call_id,
+                        name,
+                        content: result,
+                        is_error: false,
                     },
-                ));
+                }));
                 Ok(events)
             }
 
@@ -499,19 +489,14 @@ impl SessionState {
                     .retry_policy
                     .exhausted(&tc.tracking.retry, retryable)
                 {
-                    events.push(EventPayload::WorkerDecisionRequested(
-                        WorkerDecisionRequested {
-                            decision_id: new_call_id(),
-                            trigger: DecisionTrigger::ToolResult {
-                                result: ToolResult {
-                                    tool_call_id,
-                                    name,
-                                    content: error,
-                                    is_error: true,
-                                },
-                            },
+                    events.push(self.emit_decision_request(DecisionTrigger::ToolResult {
+                        result: ToolResult {
+                            tool_call_id,
+                            name,
+                            content: error,
+                            is_error: true,
                         },
-                    ));
+                    }));
                 }
                 Ok(events)
             }
@@ -565,16 +550,11 @@ impl SessionState {
                     .retry_policy
                     .exhausted(&sa.tracking.retry, retryable)
                 {
-                    events.push(EventPayload::WorkerDecisionRequested(
-                        WorkerDecisionRequested {
-                            decision_id: new_call_id(),
-                            trigger: DecisionTrigger::SubAgentError {
-                                session_id,
-                                agent_id: sa.agent_id.clone(),
-                                error,
-                            },
-                        },
-                    ));
+                    events.push(self.emit_decision_request(DecisionTrigger::SubAgentError {
+                        session_id,
+                        agent_id: sa.agent_id.clone(),
+                        error,
+                    }));
                 }
                 Ok(events)
             }
@@ -595,14 +575,11 @@ impl SessionState {
                             cost,
                             token_usage,
                         }),
-                        EventPayload::WorkerDecisionRequested(WorkerDecisionRequested {
-                            decision_id: new_call_id(),
-                            trigger: DecisionTrigger::SubAgentTurnComplete {
-                                session_id,
-                                agent_id,
-                                turn_id,
-                                data,
-                            },
+                        self.emit_decision_request(DecisionTrigger::SubAgentTurnComplete {
+                            session_id,
+                            agent_id,
+                            turn_id,
+                            data,
                         }),
                     ])
                 } else {
@@ -632,10 +609,7 @@ impl SessionState {
                         interrupt_id: interrupt_id.clone(),
                         payload,
                     }),
-                    EventPayload::WorkerDecisionRequested(WorkerDecisionRequested {
-                        decision_id: new_call_id(),
-                        trigger: DecisionTrigger::InterruptResumed { interrupt_id },
-                    }),
+                    self.emit_decision_request(DecisionTrigger::InterruptResumed { interrupt_id }),
                 ]),
                 _ => Ok(vec![]),
             },
@@ -745,6 +719,30 @@ impl SessionState {
                         events.extend(sub);
                     }
                 }
+
+                // Promote the next queued decision inline so it dispatches
+                // in the same commit rather than waiting for a wake cycle.
+                let next_decision = self
+                    .next_queued_decision()
+                    .map(|d| (d.decision_id.clone(), d.trigger.clone()))
+                    .or_else(|| {
+                        events.iter().find_map(|e| match e {
+                            EventPayload::DecisionRequestQueued(q) => {
+                                Some((q.decision_id.clone(), q.trigger.clone()))
+                            }
+                            _ => None,
+                        })
+                    });
+
+                if let Some((decision_id, trigger)) = next_decision {
+                    events.push(EventPayload::WorkerDecisionRequested(
+                        WorkerDecisionRequested {
+                            decision_id,
+                            trigger,
+                        },
+                    ));
+                }
+
                 Ok(events)
             }
 
@@ -827,18 +825,13 @@ impl SessionState {
                             retry: tc.tracking.retry_policy.clone(),
                         })];
                         if tc.handler == ToolHandler::Worker {
-                            events.push(EventPayload::WorkerDecisionRequested(
-                                WorkerDecisionRequested {
-                                    decision_id: new_call_id(),
-                                    trigger: DecisionTrigger::ToolExecute {
-                                        tool_call_id: tc.tool_call_id.clone(),
-                                        name: tc.name.clone(),
-                                        arguments: tc.arguments.clone(),
-                                        attempt: tc.tracking.retry.attempts + 1,
-                                        deadline: tc.tracking.retry_policy.deadline(now),
-                                    },
-                                },
-                            ));
+                            events.push(self.emit_decision_request(DecisionTrigger::ToolExecute {
+                                tool_call_id: tc.tool_call_id.clone(),
+                                name: tc.name.clone(),
+                                arguments: tc.arguments.clone(),
+                                attempt: tc.tracking.retry.attempts + 1,
+                                deadline: tc.tracking.retry_policy.deadline(now),
+                            }));
                         }
                         return Ok(events);
                     }
@@ -905,8 +898,21 @@ impl SessionState {
             }
         }
 
-        // 9. All tools done, no next step → stall recovery
-        if self.all_tools_resolved() && !self.has_pending_llm() {
+        // 9. Promote the next queued worker decision
+        if let Some(wd) = self.next_queued_decision() {
+            return Ok(vec![EventPayload::WorkerDecisionRequested(
+                WorkerDecisionRequested {
+                    decision_id: wd.decision_id.clone(),
+                    trigger: wd.trigger.clone(),
+                },
+            )]);
+        }
+
+        // 10. All tools done, no next step → stall recovery
+        if self.all_tools_resolved()
+            && !self.has_pending_llm()
+            && !self.has_queued_worker_decision()
+        {
             return Ok(vec![EventPayload::WorkerDecisionRequested(
                 WorkerDecisionRequested {
                     decision_id: new_call_id(),

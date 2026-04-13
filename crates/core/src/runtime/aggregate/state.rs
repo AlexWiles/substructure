@@ -10,6 +10,7 @@ use crate::runtime::span::SpanContext;
 
 pub struct ApplyContext {
     pub occurred_at: DateTime<Utc>,
+    pub sequence: u64,
 }
 
 /// A typed domain event, parameterized by aggregate state.

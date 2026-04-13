@@ -32,6 +32,7 @@ pub enum EffectStatus {
     Completed,
     Failed,
     RetryScheduled,
+    Queued,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +51,15 @@ impl EffectTracking {
             retry: RetryState::default(),
             retry_policy,
             deadline,
+        }
+    }
+
+    pub fn new_queued(retry_policy: RetryPolicy) -> Self {
+        Self {
+            status: EffectStatus::Queued,
+            retry: RetryState::default(),
+            retry_policy,
+            deadline: None,
         }
     }
 
@@ -123,6 +133,8 @@ pub struct WorkerDecisionState {
     pub decision_id: String,
     pub tracking: EffectTracking,
     pub trigger: DecisionTrigger,
+    #[serde(default)]
+    pub source_event_sequence: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -375,6 +387,7 @@ impl SessionState {
                             decision_id: p.decision_id.clone(),
                             tracking: EffectTracking::new(retry_policy, now),
                             trigger: p.trigger.clone(),
+                            source_event_sequence: ctx.sequence,
                         },
                     );
                 }
@@ -392,6 +405,18 @@ impl SessionState {
                 }
             }
             EventPayload::SessionMessageRequested(_) => {}
+            EventPayload::DecisionRequestQueued(p) => {
+                let retry_policy = self.worker_retry.clone().unwrap_or(RetryPolicy::no_retry());
+                self.worker_decisions.insert(
+                    p.decision_id.clone(),
+                    WorkerDecisionState {
+                        decision_id: p.decision_id.clone(),
+                        tracking: EffectTracking::new_queued(retry_policy),
+                        trigger: p.trigger.clone(),
+                        source_event_sequence: ctx.sequence,
+                    },
+                );
+            }
             EventPayload::WorkerStateUpdated(p) => {
                 self.worker_state = p.state.clone();
             }
@@ -450,10 +475,32 @@ impl SessionState {
             .any(|c| c.tracking.status == EffectStatus::Pending)
     }
 
+    pub fn has_pending_worker_decision(&self) -> bool {
+        self.worker_decisions
+            .values()
+            .any(|wd| wd.tracking.status == EffectStatus::Pending)
+    }
+
+    pub fn next_queued_decision(&self) -> Option<&WorkerDecisionState> {
+        self.worker_decisions
+            .values()
+            .filter(|wd| wd.tracking.status == EffectStatus::Queued)
+            .min_by_key(|wd| wd.source_event_sequence)
+    }
+
+    pub fn has_queued_worker_decision(&self) -> bool {
+        self.worker_decisions
+            .values()
+            .any(|wd| wd.tracking.status == EffectStatus::Queued)
+    }
+
     pub fn wake_at(&self) -> Option<DateTime<Utc>> {
         match self.status {
             SessionStatus::Done | SessionStatus::Interrupted { .. } => return None,
             _ => {}
+        }
+        if self.has_queued_worker_decision() && !self.has_pending_worker_decision() {
+            return Some(Utc::now());
         }
         self.llm_calls
             .values()

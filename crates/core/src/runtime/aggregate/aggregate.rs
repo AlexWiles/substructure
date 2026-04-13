@@ -78,6 +78,7 @@ impl<R: AggregateState> Aggregate<R> {
         }
         let ctx = ApplyContext {
             occurred_at: event.occurred_at,
+            sequence: event.sequence,
         };
         self.state.apply(&event.payload, &ctx);
         self.last_applied = Some(event.sequence);
@@ -104,14 +105,14 @@ impl<R: AggregateState> Aggregate<R> {
             self.trace_id = Some(ctx.span.trace_id);
         }
 
-        let apply_ctx = ApplyContext {
-            occurred_at: ctx.occurred_at,
-        };
-
         let mut domain_events = Vec::with_capacity(events.len());
 
         for payload in events {
             self.stream_version += 1;
+            let apply_ctx = ApplyContext {
+                occurred_at: ctx.occurred_at,
+                sequence: self.stream_version,
+            };
             self.state.apply(&payload, &apply_ctx);
             self.last_applied = Some(self.stream_version);
             if self.first_event_at.is_none() {

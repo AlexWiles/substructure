@@ -51,6 +51,8 @@ pub enum EventPayload {
     WorkerStateUpdated(WorkerStateUpdated),
     #[serde(rename = "sub_agent.turn_completed")]
     SubAgentTurnCompleted(SubAgentTurnCompleted),
+    #[serde(rename = "decision_request.queued")]
+    DecisionRequestQueued(DecisionRequestQueued),
     #[serde(rename = "session.cancelled")]
     SessionCancelled,
     #[serde(rename = "session.done")]
@@ -227,6 +229,12 @@ pub struct TurnCompleted {
     pub turn_cost: Decimal,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub turn_token_usage: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionRequestQueued {
+    pub decision_id: String,
+    pub trigger: DecisionTrigger,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
