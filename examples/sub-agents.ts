@@ -1,48 +1,10 @@
 import Substructure from "@substructure.ai/sdk";
+import { randomUUID } from "crypto";
 
 const sub = new Substructure();
 const { agent } = sub;
 
-const retry = {
-    timeout_secs: 120,
-    max_retries: 3,
-    backoff_base_secs: 1,
-    backoff_max_secs: 10,
-};
-
-const add = agent.tool({
-    name: "add",
-    description: "Add two numbers",
-    parameters: {
-        type: "object",
-        properties: {
-            a: { type: "number" },
-            b: { type: "number" },
-        },
-        required: ["a", "b"],
-    },
-    execute: (args: string) => {
-        const { a, b } = JSON.parse(args);
-        return { result: a + b };
-    },
-    retry,
-});
-
-const mathHandler = agent({ id: "math-agent" })
-    .use(agent.logging())
-    .use(agent.jsonState())
-    .use(agent.messageHistory())
-    .use(
-        agent.systemMessage("You are a math assistant. Compute whatever is asked. Be concise, return only the result."),
-    )
-    .use(agent.tools([add]))
-    .use(
-        agent.llmLoop({
-            request: { model: "arcee-ai/trinity-large-preview:free" },
-            llm_client: "openrouter",
-            retry,
-        }),
-    );
+// --- Weather sub-agent with its own tools ---
 
 const getWeather = agent.tool({
     name: "get_weather",
@@ -58,78 +20,67 @@ const getWeather = agent.tool({
         const { city } = JSON.parse(args);
         return { city, temp_f: city === "San Francisco" ? 62 : 78, condition: "sunny" };
     },
-    retry,
 });
 
-const weatherHandler = agent({ id: "weather-agent" })
-    .use(agent.logging())
+const weatherAgent = agent({ id: "weather-agent" })
+    //.use(agent.logging())
     .use(agent.jsonState())
     .use(agent.messageHistory())
-    .use(agent.systemMessage("You are a weather assistant. Use tools when appropriate. Be concise."))
+    .use(agent.systemMessage("You are a weather assistant. Look up the weather when asked. Be concise."))
     .use(agent.tools([getWeather]))
-    .use(agent.subAgents({ delegates: [mathHandler], retry }))
     .use(
         agent.llmLoop({
-            request: { model: "arcee-ai/trinity-large-preview:free" },
+            request: { model: "anthropic/claude-sonnet-4" },
             llm_client: "openrouter",
-            retry,
+        }),
+    );
+
+// --- Parent assistant that delegates weather questions to the sub-agent ---
+
+const assistant = agent({ id: "assistant" })
+    //.use(agent.logging())
+    .use(agent.jsonState())
+    .use(agent.messageHistory())
+    .use(agent.systemMessage("You are a helpful assistant. Use the weather-agent when the user asks about weather."))
+    .use(agent.subAgents({ agents: [weatherAgent] }))
+    .use(
+        agent.llmLoop({
+            request: { model: "anthropic/claude-sonnet-4" },
+            llm_client: "openrouter",
         }),
     );
 
 const embedded = await sub.embedded({
-    agents: [weatherHandler, mathHandler],
+    agents: [assistant, weatherAgent],
+    openrouterApiKey: process.env.OPENROUTER_API_KEY,
 });
 
-const WORKER_PORT = 4444;
-const server = Bun.serve({ port: WORKER_PORT, fetch: embedded.fetchHandler() });
+const sessionId = randomUUID();
+const auth = { tenant_id: "default", sub: "example-user" };
 
-const backend = sub.backend.client({
-    url: "http://localhost:8080",
-    apiKey: "dev-worker-key",
-});
-
-await backend.registerWorker({
-    transport_type: "http",
-    config: { endpoint_url: `http://localhost:${WORKER_PORT}` },
-});
-
-const clientToken = (
-    await backend.mintClientToken({
-        tenantId: "default",
-        sub: "frontend-user",
-        ttlSeconds: 600,
-    })
-).token;
-
-const frontend = sub.frontend.client({
-    url: "http://localhost:8080",
-    token: clientToken,
-});
-
-const stream = frontend.submit({
-    agentId: "weather-agent",
-    payload: {
-        type: "message",
-        message: {
-            role: "user",
-            content:
-                "What is the cube of the sum - the square of the diff of the current temperatures in San Francisco and New York?",
-        },
-    },
-    sessionId: "raw-session-6",
-    turnId: "turn-1",
-});
-
-for await (const event of stream) {
-    if (event.payload.type === "message.new") {
-        console.log(event.payload.message.role, event.payload.message.content?.slice(0, 100));
-    } else if (event.payload.type === "llm.call.errored") {
-        console.log("LLM ERROR:", event.payload.error);
+async function turn(message: string) {
+    console.log(`\n> ${message}`);
+    const stream = embedded.submit({
+        agentId: assistant.agentId,
+        payload: { type: "message", message: { role: "user", content: message } },
+        sessionId,
+        auth,
+        turnId: randomUUID(),
+    });
+    for await (const event of stream) {
+        if (
+            event.payload.type === "message.new" &&
+            event.payload.message.role === "assistant" &&
+            event.payload.message.content
+        ) {
+            console.log(event.payload.message.content);
+        } else if (event.payload.type === "llm.call.errored") {
+            console.log("LLM ERROR:", event.payload.error);
+        }
     }
 }
 
-const result = await stream.result;
-console.log("\nTurn result:", result.data);
+await turn("What's the weather in San Francisco?");
+await turn("How about New York?");
 
 await embedded.shutdown();
-server.stop();

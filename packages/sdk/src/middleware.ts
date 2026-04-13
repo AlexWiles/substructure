@@ -246,7 +246,7 @@ export function messageHistory(): StateContributor<{ messages: Message[] }> &
                     ...action,
                     request: {
                         ...action.request,
-                        messages: history,
+                        messages: [...history, ...action.request.messages],
                     },
                 };
             });
@@ -376,12 +376,14 @@ export function tools<S>(
             }
 
             // Track pending tool calls from LLM response and emit call_tool actions
+            // Only emit call.tool for tools this middleware knows about.
             if (req.trigger.type === "llm.response") {
                 const toolCalls = req.trigger.message.tool_calls;
                 if (toolCalls && toolCalls.length > 0) {
-                    req.state.pendingToolCalls = toolCalls.map((tc) => tc.id);
+                    const known = toolCalls.filter((tc) => tc.function.name in toolMap);
+                    req.state.pendingToolCalls = known.map((tc) => tc.id);
 
-                    const callToolActions: WorkerAction[] = toolCalls.map((tc) => {
+                    const callToolActions: WorkerAction[] = known.map((tc) => {
                         const def = toolMap[tc.function.name];
                         return {
                             type: "call.tool" as const,
@@ -513,12 +515,12 @@ export interface SubAgentTrack {
  * Contributes `{ subAgentTracker: Record<string, SubAgentTrack> }` to state.
  */
 export function subAgents<S>(config: {
-    delegates: Handler[];
+    agents: Handler[];
     retry?: RetryPolicy;
 }): StateContributor<{ subAgentTracker: Record<string, SubAgentTrack> }> &
     MiddlewareFn<unknown, { subAgentTracker: Record<string, SubAgentTrack> }> {
     const subAgentMap: Record<string, { agentId: string }> = {};
-    for (const handler of config.delegates) {
+    for (const handler of config.agents) {
         subAgentMap[handler.agentId] = { agentId: handler.agentId };
     }
 
@@ -529,58 +531,70 @@ export function subAgents<S>(config: {
 
             switch (req.trigger.type) {
                 case "llm.response": {
+                    // Intercept tool calls destined for sub-agents directly from
+                    // the trigger, so this middleware works with or without
+                    // agent.tools() in the chain.
+                    const spawnActions: WorkerAction[] = [];
+                    const toolCalls = req.trigger.message.tool_calls ?? [];
+                    for (const tc of toolCalls) {
+                        const sub = subAgentMap[tc.function.name];
+                        if (!sub) continue;
+
+                        const childSessionId = crypto.randomUUID();
+                        let message = tc.function.arguments;
+                        try {
+                            const args = JSON.parse(tc.function.arguments);
+                            if (typeof args?.message === "string") {
+                                message = args.message;
+                            }
+                        } catch {
+                            // no-op
+                        }
+                        tracker[childSessionId] = {
+                            toolCallId: tc.id,
+                            name: tc.function.name,
+                        };
+                        spawnActions.push(
+                            {
+                                type: "spawn.sub_agent",
+                                session_id: childSessionId,
+                                agent_id: sub.agentId,
+                                retry: config.retry ?? DEFAULT_RETRY,
+                            },
+                            {
+                                type: "send.message",
+                                session_id: childSessionId,
+                                message: {
+                                    role: "user",
+                                    content: message,
+                                },
+                            },
+                        );
+                    }
+
                     const downstream = await next(req);
+
+                    // Merge sub-agent tool defs into any call.llm actions, and
+                    // filter out call.tool actions that we already spawned above.
                     const actions: WorkerAction[] = [];
                     for (const action of downstream.actions) {
-                        if (action.type === "call.tool") {
-                            const sub = subAgentMap[action.name];
-                            if (sub) {
-                                const childSessionId = crypto.randomUUID();
-                                let message = action.arguments;
-                                try {
-                                    const args = JSON.parse(action.arguments);
-                                    if (typeof args?.message === "string") {
-                                        message = args.message;
-                                    }
-                                } catch {
-                                    // no-op
-                                }
-                                tracker[childSessionId] = {
-                                    toolCallId: action.tool_call_id,
-                                    name: action.name,
-                                };
-                                actions.push(
-                                    {
-                                        type: "spawn.sub_agent",
-                                        session_id: childSessionId,
-                                        agent_id: sub.agentId,
-                                        retry: config.retry ?? DEFAULT_RETRY,
-                                    },
-                                    {
-                                        type: "send.message",
-                                        session_id: childSessionId,
-                                        message: {
-                                            role: "user",
-                                            content: message,
-                                        },
-                                    },
-                                );
-                                continue;
-                            }
+                        if (action.type === "call.tool" && subAgentMap[action.name]) {
+                            continue; // already handled via spawn above
                         }
                         if (action.type === "call.llm") {
                             actions.push({
                                 ...action,
                                 request: {
                                     ...action.request,
-                                    tools: mergeTools(action.request.tools, handlersToLlmTools(config.delegates)),
+                                    tools: mergeTools(action.request.tools, handlersToLlmTools(config.agents)),
                                 },
                             });
                             continue;
                         }
                         actions.push(action);
                     }
-                    return { ...downstream, actions };
+
+                    return { ...downstream, actions: [...spawnActions, ...actions] };
                 }
 
                 case "sub_agent.turn.complete": {
@@ -599,13 +613,10 @@ export function subAgents<S>(config: {
                         is_error: false,
                     };
 
-                    return next({
-                        ...req,
-                        trigger: {
-                            type: "tool.result",
-                            result,
-                        },
-                    });
+                    return appendToolResultToLlmCalls(
+                        await next({ ...req, trigger: { type: "tool.result", result } }),
+                        result,
+                    );
                 }
 
                 case "sub_agent.error": {
@@ -622,13 +633,10 @@ export function subAgents<S>(config: {
                         is_error: true,
                     };
 
-                    return next({
-                        ...req,
-                        trigger: {
-                            type: "tool.result",
-                            result,
-                        },
-                    });
+                    return appendToolResultToLlmCalls(
+                        await next({ ...req, trigger: { type: "tool.result", result } }),
+                        result,
+                    );
                 }
 
                 default: {
@@ -639,7 +647,7 @@ export function subAgents<S>(config: {
                             ...action,
                             request: {
                                 ...action.request,
-                                tools: mergeTools(action.request.tools, handlersToLlmTools(config.delegates)),
+                                tools: mergeTools(action.request.tools, handlersToLlmTools(config.agents)),
                             },
                         };
                     });
@@ -669,6 +677,27 @@ function handlersToLlmTools(handlers: Handler[]): LlmTool[] {
             },
         },
     }));
+}
+
+/** Append a tool result message to any `call.llm` actions in the response. */
+function appendToolResultToLlmCalls(response: AgentResponse, result: ToolResult): AgentResponse {
+    const toolMsg: Message = {
+        role: "tool",
+        content: result.content,
+        tool_call_id: result.tool_call_id,
+        name: result.name,
+    };
+    const actions = response.actions.map((action) => {
+        if (action.type !== "call.llm") return action;
+        return {
+            ...action,
+            request: {
+                ...action.request,
+                messages: [...action.request.messages, toolMsg],
+            },
+        };
+    });
+    return { ...response, actions };
 }
 
 function mergeTools(existing: LlmTool[] | undefined, added: LlmTool[]): LlmTool[] {
