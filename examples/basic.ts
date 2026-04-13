@@ -1,13 +1,25 @@
+// Substructure SDK – Todo List Agent Example
+// This example builds a simple conversational todo-list agent that persists
+// state across turns using Substructure's embedded runtime.
+
 import Substructure, { type RunStream } from "@substructure.ai/sdk";
 import { randomUUID } from "crypto";
 
+// Create a Substructure instance – the entry point for building agents.
 const sub = new Substructure();
 const { agent } = sub;
 
+// Define the shape of our agent's state. A state slice is a typed, mutable
+// piece of data that tools can read and write during execution.
 type Todo = { id: string; title: string; done: boolean };
 type TodoList = { todos: Todo[] };
 
 const todoState = agent.stateSlice<TodoList>({ todos: [] });
+
+// --- Tools ---
+// Tools give the LLM actions it can take. Each tool declares a JSON Schema for
+// its parameters, binds to a state slice, and provides an execute function.
+// The execute function receives the raw JSON args string and the current state.
 
 const addTask = agent.tool({
     name: "add_task",
@@ -56,12 +68,22 @@ const completeTask = agent.tool({
     },
 });
 
+// --- Agent Definition ---
+// Compose the agent by chaining middleware with `.use()`. Middleware runs in
+// order for each turn and handles concerns like state persistence, message
+// history, tool registration, and the LLM request/response loop.
+
 const todoAgent = agent({ id: "todo-agent" })
+    // Log all agent req/responses
     .use(agent.logging())
+    // Serialize/deserialize state as JSON between turns
     .use(agent.jsonState())
     .use(agent.systemMessage("You are a todo list assistant. Use the provided tools to manage tasks. Be concise."))
+    // Automatically track conversation history in state
     .use(agent.messageHistory())
+    // Setup tool execution
     .use(agent.tools([addTask, listTasks, completeTask]))
+    // Drives the loop, calling the LLM and requesting tool execution.
     .use(
         agent.llmLoop({
             request: { model: "anthropic/claude-sonnet-4" },
@@ -71,7 +93,6 @@ const todoAgent = agent({ id: "todo-agent" })
 
 const embedded = await sub.embedded({
     agents: [todoAgent],
-    db: ":memory:",
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
 });
 
@@ -88,7 +109,11 @@ async function turn(message: string) {
         turnId: randomUUID(),
     });
     for await (const event of stream) {
-        if (event.payload.type === "message.new" && event.payload.message.role === "assistant") {
+        if (
+            event.payload.type === "message.new" &&
+            event.payload.message.role === "assistant" &&
+            event.payload.message.content
+        ) {
             console.log(event.payload.message.content);
         }
     }

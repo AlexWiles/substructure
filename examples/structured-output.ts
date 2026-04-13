@@ -51,7 +51,6 @@ const extractor = agent({ id: "contact-extractor" })
 
 const embedded = await sub.embedded({
     agents: [extractor],
-    db: ":memory:",
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
 });
 

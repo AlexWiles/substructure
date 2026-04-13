@@ -188,7 +188,6 @@ const weatherHandler = {
 
 const embedded = await sub.embedded({
     agents: [weatherHandler],
-    db: ":memory:",
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
 });
 

@@ -79,7 +79,7 @@ const actionAgent = agent({ id: "action-demo" })
         return { actions, state: ctx.state };
     });
 
-const embedded = await sub.embedded({ agents: [actionAgent], db: ":memory:" });
+const embedded = await sub.embedded({ agents: [actionAgent] });
 
 const auth: ClientIdentity = { tenant_id: "default", sub: "example-user" };
 const sessionId = crypto.randomUUID();

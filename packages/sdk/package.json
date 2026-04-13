@@ -6,6 +6,7 @@
   "type": "module",
   "exports": {
     ".": {
+      "@source": "./src/client.ts",
       "types": "./dist/client.d.ts",
       "import": "./dist/client.js"
     }

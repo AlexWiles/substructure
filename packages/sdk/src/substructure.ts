@@ -74,8 +74,8 @@ class FrontendNamespace {
 
 export interface EmbeddedOptions {
     agents: Handler[];
-    /** SQLite database path */
-    db: string;
+    /** SQLite database path (default: ":memory:") */
+    db?: string;
     /** OpenRouter API base URL (default: "https://openrouter.ai/api") */
     openrouterBaseUrl?: string;
     /** OpenRouter API key */
@@ -157,7 +157,7 @@ export class Substructure {
     async embedded(options: EmbeddedOptions): Promise<EmbeddedInstance> {
         const { EmbeddedRuntime } = await import("@substructure.ai/runtime");
         const runtime = new EmbeddedRuntime({
-            db: options.db,
+            db: options.db ?? ":memory:",
             openrouterBaseUrl: options.openrouterBaseUrl,
             openrouterApiKey: options.openrouterApiKey,
             llmPoolSize: options.llmPoolSize,

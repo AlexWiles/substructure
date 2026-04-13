@@ -78,7 +78,6 @@ const weatherHandler = agent({ id: "weather-agent" })
 
 const embedded = await sub.embedded({
     agents: [weatherHandler, mathHandler],
-    db: ":memory:",
 });
 
 const WORKER_PORT = 4444;
