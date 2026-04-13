@@ -1,7 +1,7 @@
 packages:
   - packages/*
+  - examples
   - examples/*
-  - examples/web-ui/web
 allowBuilds:
   e: true
   f: true

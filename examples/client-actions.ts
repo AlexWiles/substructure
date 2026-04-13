@@ -10,10 +10,7 @@ const TOOL_CATALOG = [
         description: "Add two numbers",
         parameters: {
             type: "object",
-            properties: {
-                a: { type: "number" },
-                b: { type: "number" },
-            },
+            properties: { a: { type: "number" }, b: { type: "number" } },
             required: ["a", "b"],
         },
     },
@@ -22,9 +19,7 @@ const TOOL_CATALOG = [
         description: "Get weather by city",
         parameters: {
             type: "object",
-            properties: {
-                city: { type: "string" },
-            },
+            properties: { city: { type: "string" } },
             required: ["city"],
         },
     },
@@ -40,10 +35,7 @@ const actionAgent = agent({ id: "action-demo" })
 
             switch (ctx.trigger.name) {
                 case "get_tools": {
-                    const data = {
-                        tools: TOOL_CATALOG,
-                        count: TOOL_CATALOG.length,
-                    };
+                    const data = { tools: TOOL_CATALOG, count: TOOL_CATALOG.length };
                     const actions: WorkerAction[] = [{ type: "done", data }];
                     return { actions, state: ctx.state };
                 }
@@ -52,20 +44,14 @@ const actionAgent = agent({ id: "action-demo" })
                     const previousCount = ctx.state.messages.length;
                     ctx.state.messages = [];
                     const actions: WorkerAction[] = [
-                        {
-                            type: "done",
-                            data: { ok: true, cleared_messages: previousCount },
-                        },
+                        { type: "done", data: { ok: true, cleared_messages: previousCount } },
                     ];
                     return { actions, state: ctx.state };
                 }
 
                 default: {
                     const actions: WorkerAction[] = [
-                        {
-                            type: "done",
-                            data: { ok: false, error: `Unknown action: ${ctx.trigger.name}` },
-                        },
+                        { type: "done", data: { ok: false, error: `Unknown action: ${ctx.trigger.name}` } },
                     ];
                     return { actions, state: ctx.state };
                 }
@@ -90,90 +76,68 @@ const actionAgent = agent({ id: "action-demo" })
         return { actions, state: ctx.state };
     });
 
-const embedded = await sub.embedded({ agents: [actionAgent], db: "action-request-example.db" });
+const embedded = await sub.embedded({ agents: [actionAgent], db: ":memory:" });
 
-const auth: ClientIdentity = {
-    tenant_id: "default",
-    sub: "example-user",
-};
-
-function turnId(): string {
-    return crypto.randomUUID();
-}
-
+const auth: ClientIdentity = { tenant_id: "default", sub: "example-user" };
 const sessionId = crypto.randomUUID();
 
 async function drainToResult(stream: RunStream) {
     for await (const _event of stream) {
-        // Drain to completion.
     }
     return stream.result;
 }
 
-const firstStream = embedded.submit({
-    agentId: "action-demo",
-    payload: {
-        type: "message",
-        message: {
-            role: "user",
-            content: "hello there",
-        },
-    },
-    sessionId,
-    auth,
-    turnId: turnId(),
-});
-const firstTurn = await drainToResult(firstStream);
+const firstTurn = await drainToResult(
+    embedded.submit({
+        agentId: "action-demo",
+        payload: { type: "message", message: { role: "user", content: "hello there" } },
+        sessionId,
+        auth,
+        turnId: crypto.randomUUID(),
+    }),
+);
 console.log("first run:", firstTurn);
 
-const secondStream = embedded.submit({
-    agentId: "action-demo",
-    payload: {
-        type: "message",
-        message: {
-            role: "user",
-            content: "one more message",
-        },
-    },
-    sessionId,
-    auth,
-    turnId: turnId(),
-});
-const secondTurn = await drainToResult(secondStream);
+const secondTurn = await drainToResult(
+    embedded.submit({
+        agentId: "action-demo",
+        payload: { type: "message", message: { role: "user", content: "one more message" } },
+        sessionId,
+        auth,
+        turnId: crypto.randomUUID(),
+    }),
+);
 console.log("second run:", secondTurn);
 
-const toolsStream = embedded.submit({
-    agentId: "action-demo",
-    payload: { type: "action", name: "get_tools" },
-    sessionId,
-    auth,
-});
-const tools = await drainToResult(toolsStream);
+const tools = await drainToResult(
+    embedded.submit({
+        agentId: "action-demo",
+        payload: { type: "action", name: "get_tools" },
+        sessionId,
+        auth,
+    }),
+);
 console.log("request(get_tools):", tools.data);
 
-const clearStream = embedded.submit({
-    agentId: "action-demo",
-    payload: { type: "action", name: "clear_context" },
-    sessionId,
-    auth,
-});
-const clear = await drainToResult(clearStream);
+const clear = await drainToResult(
+    embedded.submit({
+        agentId: "action-demo",
+        payload: { type: "action", name: "clear_context" },
+        sessionId,
+        auth,
+    }),
+);
 console.log("request(clear_context):", clear.data);
 
-const afterClearStream = embedded.submit({
-    agentId: "action-demo",
-    payload: {
-        type: "message",
-        message: {
-            role: "user",
-            content: "after clear",
-        },
-    },
-    sessionId,
-    auth,
-    turnId: turnId(),
-});
-const afterClear = await drainToResult(afterClearStream);
+const afterClear = await drainToResult(
+    embedded.submit({
+        agentId: "action-demo",
+        payload: { type: "message", message: { role: "user", content: "after clear" } },
+        sessionId,
+        auth,
+        turnId: crypto.randomUUID(),
+    }),
+);
 console.log("after clear run:", afterClear);
 
 await embedded.shutdown();

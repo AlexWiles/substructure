@@ -188,14 +188,11 @@ const weatherHandler = {
 
 const embedded = await sub.embedded({
     agents: [weatherHandler],
-    db: "data.db",
+    db: ":memory:",
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
 });
 
-const auth: ClientIdentity = {
-    tenant_id: "default",
-    sub: "example-user",
-};
+const auth: ClientIdentity = { tenant_id: "default", sub: "example-user" };
 
 const stream = embedded.submit({
     agentId: weatherHandler.agentId,

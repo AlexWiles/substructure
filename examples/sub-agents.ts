@@ -2,21 +2,8 @@ import Substructure from "@substructure.ai/sdk";
 
 const sub = new Substructure();
 const { agent } = sub;
-const addRetry = {
-    timeout_secs: 20,
-    max_retries: 10,
-    backoff_base_secs: 1,
-    backoff_max_secs: 10,
-};
 
-const mathRetry = {
-    timeout_secs: 20,
-    max_retries: 10,
-    backoff_base_secs: 1,
-    backoff_max_secs: 10,
-};
-
-const weatherRetry = {
+const retry = {
     timeout_secs: 120,
     max_retries: 3,
     backoff_base_secs: 1,
@@ -38,7 +25,7 @@ const add = agent.tool({
         const { a, b } = JSON.parse(args);
         return { result: a + b };
     },
-    retry: addRetry,
+    retry,
 });
 
 const mathHandler = agent({ id: "math-agent" })
@@ -53,7 +40,7 @@ const mathHandler = agent({ id: "math-agent" })
         agent.llmLoop({
             request: { model: "arcee-ai/trinity-large-preview:free" },
             llm_client: "openrouter",
-            retry: mathRetry,
+            retry,
         }),
     );
 
@@ -71,7 +58,7 @@ const getWeather = agent.tool({
         const { city } = JSON.parse(args);
         return { city, temp_f: city === "San Francisco" ? 62 : 78, condition: "sunny" };
     },
-    retry: weatherRetry,
+    retry,
 });
 
 const weatherHandler = agent({ id: "weather-agent" })
@@ -80,26 +67,33 @@ const weatherHandler = agent({ id: "weather-agent" })
     .use(agent.messageHistory())
     .use(agent.systemMessage("You are a weather assistant. Use tools when appropriate. Be concise."))
     .use(agent.tools([getWeather]))
-    .use(
-        agent.subAgents({
-            delegates: [mathHandler],
-            retry: weatherRetry,
-        }),
-    )
+    .use(agent.subAgents({ delegates: [mathHandler], retry }))
     .use(
         agent.llmLoop({
             request: { model: "arcee-ai/trinity-large-preview:free" },
             llm_client: "openrouter",
-            retry: weatherRetry,
+            retry,
         }),
     );
 
+const embedded = await sub.embedded({
+    agents: [weatherHandler, mathHandler],
+    db: ":memory:",
+});
+
 const WORKER_PORT = 4444;
+const server = Bun.serve({ port: WORKER_PORT, fetch: embedded.fetchHandler() });
 
 const backend = sub.backend.client({
     url: "http://localhost:8080",
     apiKey: "dev-worker-key",
 });
+
+await backend.registerWorker({
+    transport_type: "http",
+    config: { endpoint_url: `http://localhost:${WORKER_PORT}` },
+});
+
 const clientToken = (
     await backend.mintClientToken({
         tenantId: "default",
@@ -111,15 +105,6 @@ const clientToken = (
 const frontend = sub.frontend.client({
     url: "http://localhost:8080",
     token: clientToken,
-});
-
-const embedded = await sub.embedded({ agents: [weatherHandler, mathHandler], db: "remote-agent-example.db" });
-
-const server = Bun.serve({ port: WORKER_PORT, fetch: embedded.fetchHandler() });
-
-await backend.registerWorker({
-    transport_type: "http",
-    config: { endpoint_url: `http://localhost:${WORKER_PORT}` },
 });
 
 const stream = frontend.submit({

@@ -105,19 +105,6 @@ for await (const event of stream) {
 - **Multi-tenant** -- Sessions scoped by tenant and user. JWT auth for browser clients.
 - **Portable** -- Workers are HTTP handlers. Deploy anywhere: Cloudflare Workers, Fly.io, bare metal, wherever.
 
-## Examples
-
-| Example | Description |
-| --- | --- |
-| [receipt-extractor](examples/receipt-extractor) | Extract structured data from receipts using tools |
-| [coding-agent](examples/coding-agent) | File I/O agent with shell access and HTTP streaming |
-| [remote-agent](examples/remote-agent) | Multi-agent delegation with sub-agents |
-| [client-action-request](examples/client-action-request) | Custom client actions beyond chat messages |
-| [structured-output](examples/structured-output) | JSON schema validated outputs |
-| [cloudflare-worker](examples/cloudflare-worker) | Deploy a worker to Cloudflare |
-| [fly-deploy](examples/fly-deploy) | Deploy to Fly.io |
-| [raw-handler](examples/raw-handler) | Low-level handler without middleware DSL |
-
 ## Packages
 
 | Package | Description |

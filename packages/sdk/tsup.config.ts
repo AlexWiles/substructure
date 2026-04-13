@@ -14,6 +14,7 @@ export default defineConfig({
         "src/run-stream.ts",
         "src/substructure.ts",
     ],
+    external: ["@substructure.ai/runtime"],
     format: ["esm"],
     dts: true,
     clean: true,

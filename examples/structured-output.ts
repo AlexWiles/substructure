@@ -1,17 +1,9 @@
 import Substructure from "@substructure.ai/sdk";
-import type { MiddlewareFn, ClientIdentity } from "@substructure.ai/sdk";
+import type { MiddlewareFn } from "@substructure.ai/sdk";
 import { randomUUID } from "crypto";
 
 const sub = new Substructure();
 const { agent } = sub;
-
-const auth: ClientIdentity = {
-    tenant_id: "default",
-    sub: "example-user",
-};
-
-const SYSTEM_PROMPT =
-    "You extract contact information from text. When given text, identify the person's name, email, company, and role. Always call extract_contact with the structured data.";
 
 const extractContact = agent.tool({
     name: "extract_contact",
@@ -43,7 +35,11 @@ const extractor = agent({ id: "contact-extractor" })
     .use(agent.logging())
     .use(agent.state())
     .use(agent.messageHistory())
-    .use(agent.systemMessage(SYSTEM_PROMPT))
+    .use(
+        agent.systemMessage(
+            "You extract contact information from text. When given text, identify the person's name, email, company, and role. Always call extract_contact with the structured data.",
+        ),
+    )
     .use(agent.tools([extractContact]))
     .use(doneOnExtraction)
     .use(
@@ -55,7 +51,7 @@ const extractor = agent({ id: "contact-extractor" })
 
 const embedded = await sub.embedded({
     agents: [extractor],
-    db: "data.db",
+    db: ":memory:",
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
 });
 
@@ -66,13 +62,10 @@ const stream = embedded.submit({
     agentId: extractor.agentId,
     payload: {
         type: "message",
-        message: {
-            role: "user",
-            content: `Extract the contact info from this text:\n\n${input}`,
-        },
+        message: { role: "user", content: `Extract the contact info from this text:\n\n${input}` },
     },
     sessionId: randomUUID(),
-    auth,
+    auth: { tenant_id: "default", sub: "example-user" },
     turnId: randomUUID(),
 });
 
