@@ -27,7 +27,8 @@ export type {
 
 export {
     DEFAULT_RETRY,
-    state,
+    middleware,
+    jsonState,
     stateSlice,
     tool,
     logging,
@@ -38,6 +39,7 @@ export {
     subAgents,
 } from "./middleware";
 export type {
+    StateSliceMw,
     ToolFn,
     ToolDef,
     ToolInput,

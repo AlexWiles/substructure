@@ -1,85 +1,101 @@
-import Substructure from "@substructure.ai/sdk";
-import { appendFileSync, existsSync } from "fs";
+import Substructure, { type RunStream } from "@substructure.ai/sdk";
 import { randomUUID } from "crypto";
 
 const sub = new Substructure();
 const { agent } = sub;
 
-const CSV_PATH = "receipts.csv";
+type Todo = { id: string; title: string; done: boolean };
+type TodoList = { todos: Todo[] };
 
-const saveToCSV = agent.tool({
-    name: "save_to_csv",
-    description: "Append an extracted receipt to the CSV file",
+const todoState = agent.stateSlice<TodoList>({ todos: [] });
+
+const addTask = agent.tool({
+    name: "add_task",
+    description: "Add a new task to the todo list",
     parameters: {
         type: "object",
         properties: {
-            date: { type: "string", description: "Payment date (YYYY-MM-DD)" },
-            vendor: { type: "string", description: "Vendor or merchant name" },
-            amount: { type: "number", description: "Payment amount" },
-            currency: { type: "string", description: "Currency code, e.g. USD" },
+            title: { type: "string", description: "Task title" },
         },
-        required: ["date", "vendor", "amount", "currency"],
+        required: ["title"],
     },
-    execute: (args: string) => {
-        const { date, vendor, amount, currency } = JSON.parse(args);
-        if (!existsSync(CSV_PATH)) {
-            appendFileSync(CSV_PATH, "date,vendor,amount,currency\n");
-        }
-        const row = `${date},"${vendor.replace(/"/g, '""')}",${amount},${currency}\n`;
-        appendFileSync(CSV_PATH, row);
-        return { saved: true, row: { date, vendor, amount, currency } };
+    state: todoState,
+    execute: (args, state) => {
+        const { title } = JSON.parse(args);
+        const task: Todo = { id: randomUUID().slice(0, 8), title, done: false };
+        state.todos.push(task);
+        return task;
     },
 });
 
-const receiptHandler = agent({ id: "receipt-agent" })
+const listTasks = agent.tool({
+    name: "list_tasks",
+    description: "List all tasks on the todo list",
+    parameters: { type: "object", properties: {} },
+    state: todoState,
+    execute: (_args, state) => ({ tasks: state.todos, total: state.todos.length }),
+});
+
+const completeTask = agent.tool({
+    name: "complete_task",
+    description: "Mark a task as done by its id",
+    parameters: {
+        type: "object",
+        properties: {
+            id: { type: "string", description: "Task id to complete" },
+        },
+        required: ["id"],
+    },
+    state: todoState,
+    execute: (args, state) => {
+        const { id } = JSON.parse(args);
+        const task = state.todos.find((t) => t.id === id);
+        if (!task) return { error: `Task "${id}" not found` };
+        task.done = true;
+        return task;
+    },
+});
+
+const todoAgent = agent({ id: "todo-agent" })
     .use(agent.logging())
-    .use(agent.state())
-    .use(
-        agent.systemMessage(`You extract structured data from payment receipts.
-Given receipt text, identify the date, vendor, total amount, and currency.
-Then call save_to_csv to record it. If the date is unclear, use your best guess.
-If the currency is not stated, assume USD.`),
-    )
+    .use(agent.jsonState())
+    .use(agent.systemMessage("You are a todo list assistant. Use the provided tools to manage tasks. Be concise."))
     .use(agent.messageHistory())
-    .use(agent.tools([saveToCSV]))
+    .use(agent.tools([addTask, listTasks, completeTask]))
     .use(
         agent.llmLoop({
-            request: { model: "deepseek/deepseek-v3.2" },
+            request: { model: "anthropic/claude-sonnet-4" },
             llm_client: "openrouter",
         }),
     );
 
 const embedded = await sub.embedded({
-    agents: [receiptHandler],
+    agents: [todoAgent],
     db: ":memory:",
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
 });
 
-const receipt = `RECEIPT #4821
-Acme Cloud Services
-Date: 2026-03-15
-Monthly subscription: $49.99
-Tax: $4.50
-Total: $54.49
-Paid via Visa ending 4242`;
+const sessionId = randomUUID();
+const auth = { tenant_id: "default", sub: "example-user" };
 
-const stream = embedded.submit({
-    auth: { tenant_id: "default", sub: "example-user" },
-    agentId: receiptHandler.agentId,
-    payload: {
-        type: "message",
-        message: { role: "user", content: receipt },
-    },
-    sessionId: randomUUID(),
-    turnId: randomUUID(),
-});
-
-for await (const event of stream) {
-    console.log(event);
+async function turn(message: string) {
+    console.log(`\n> ${message}`);
+    const stream = embedded.submit({
+        agentId: todoAgent.agentId,
+        payload: { type: "message", message: { role: "user", content: message } },
+        sessionId,
+        auth,
+        turnId: randomUUID(),
+    });
+    for await (const event of stream) {
+        if (event.payload.type === "message.new" && event.payload.message.role === "assistant") {
+            console.log(event.payload.message.content);
+        }
+    }
 }
 
-const result = await stream.result;
-console.log(`Result:\n${result}`);
-console.log(`\nDone! Results written to ${CSV_PATH}`);
+await turn("Add buy groceries and walk the dog to my list");
+await turn("What's on my list?");
+await turn("Mark buy groceries as done, then show me the list");
 
 await embedded.shutdown();

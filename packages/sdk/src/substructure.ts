@@ -8,7 +8,7 @@ import type { BackendClientOptions } from "./backend-client";
 import { FrontendClient } from "./frontend-client";
 import type { FrontendClientOptions } from "./frontend-client";
 import {
-    state,
+    jsonState,
     stateSlice,
     tool,
     logging,
@@ -27,7 +27,7 @@ export interface AgentOptions {
 
 export interface AgentFactory {
     (options: AgentOptions): HandlerBuilder<unknown>;
-    state: typeof state;
+    jsonState: typeof jsonState;
     stateSlice: typeof stateSlice;
     tool: typeof tool;
     logging: typeof logging;
@@ -43,7 +43,7 @@ function createAgentFactory(): AgentFactory {
         return new HandlerBuilder(options.id);
     }) as AgentFactory;
 
-    factory.state = state;
+    factory.jsonState = jsonState;
     factory.stateSlice = stateSlice;
     factory.tool = tool;
     factory.logging = logging;

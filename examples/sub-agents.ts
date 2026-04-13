@@ -30,7 +30,7 @@ const add = agent.tool({
 
 const mathHandler = agent({ id: "math-agent" })
     .use(agent.logging())
-    .use(agent.state())
+    .use(agent.jsonState())
     .use(agent.messageHistory())
     .use(
         agent.systemMessage("You are a math assistant. Compute whatever is asked. Be concise, return only the result."),
@@ -63,7 +63,7 @@ const getWeather = agent.tool({
 
 const weatherHandler = agent({ id: "weather-agent" })
     .use(agent.logging())
-    .use(agent.state())
+    .use(agent.jsonState())
     .use(agent.messageHistory())
     .use(agent.systemMessage("You are a weather assistant. Use tools when appropriate. Be concise."))
     .use(agent.tools([getWeather]))

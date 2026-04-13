@@ -33,7 +33,7 @@ const doneOnExtraction: MiddlewareFn<unknown> = (req, next) => {
 
 const extractor = agent({ id: "contact-extractor" })
     .use(agent.logging())
-    .use(agent.state())
+    .use(agent.jsonState())
     .use(agent.messageHistory())
     .use(
         agent.systemMessage(

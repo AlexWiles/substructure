@@ -1,4 +1,4 @@
-import Substructure, { contentText, type RunStream } from "@substructure.ai/sdk";
+import Substructure, { contentText, middleware, type RunStream } from "@substructure.ai/sdk";
 import type { ClientIdentity, Message, WorkerAction } from "@substructure.ai/sdk";
 
 const sub = new Substructure();
@@ -26,36 +26,39 @@ const TOOL_CATALOG = [
 ];
 
 const actionAgent = agent({ id: "action-demo" })
-    .use(agent.state())
+    .use(agent.jsonState())
     .use(
-        agent.stateSlice({ messages: [] as Message[] }, (ctx, next) => {
-            if (ctx.trigger.type !== "client.action") {
-                return next(ctx);
-            }
-
-            switch (ctx.trigger.name) {
-                case "get_tools": {
-                    const data = { tools: TOOL_CATALOG, count: TOOL_CATALOG.length };
-                    const actions: WorkerAction[] = [{ type: "done", data }];
-                    return { actions, state: ctx.state };
+        middleware({
+            state: { messages: [] as Message[] },
+            handler: (ctx, next) => {
+                if (ctx.trigger.type !== "client.action") {
+                    return next(ctx);
                 }
 
-                case "clear_context": {
-                    const previousCount = ctx.state.messages.length;
-                    ctx.state.messages = [];
-                    const actions: WorkerAction[] = [
-                        { type: "done", data: { ok: true, cleared_messages: previousCount } },
-                    ];
-                    return { actions, state: ctx.state };
-                }
+                switch (ctx.trigger.name) {
+                    case "get_tools": {
+                        const data = { tools: TOOL_CATALOG, count: TOOL_CATALOG.length };
+                        const actions: WorkerAction[] = [{ type: "done", data }];
+                        return { actions, state: ctx.state };
+                    }
 
-                default: {
-                    const actions: WorkerAction[] = [
-                        { type: "done", data: { ok: false, error: `Unknown action: ${ctx.trigger.name}` } },
-                    ];
-                    return { actions, state: ctx.state };
+                    case "clear_context": {
+                        const previousCount = ctx.state.messages.length;
+                        ctx.state.messages = [];
+                        const actions: WorkerAction[] = [
+                            { type: "done", data: { ok: true, cleared_messages: previousCount } },
+                        ];
+                        return { actions, state: ctx.state };
+                    }
+
+                    default: {
+                        const actions: WorkerAction[] = [
+                            { type: "done", data: { ok: false, error: `Unknown action: ${ctx.trigger.name}` } },
+                        ];
+                        return { actions, state: ctx.state };
+                    }
                 }
-            }
+            },
         }),
     )
     .use((ctx, next) => {

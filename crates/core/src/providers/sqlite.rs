@@ -259,6 +259,10 @@ impl SqliteStore {
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
         writer
+            .busy_timeout(config.busy_timeout)
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
+
+        writer
             .execute_batch(SCHEMA)
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
