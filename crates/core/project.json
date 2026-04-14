@@ -2,12 +2,10 @@
   "name": "server",
   "targets": {
     "build": {
-      "dependsOn": ["@substructure.ai/dashboard:build"],
       "command": "cargo build --release -p substructure-core",
       "cache": false
     },
     "dev": {
-      "dependsOn": ["@substructure.ai/dashboard:build"],
       "command": "cargo run -p substructure-core -- start"
     },
     "check": {

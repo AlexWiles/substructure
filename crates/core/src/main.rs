@@ -14,7 +14,6 @@ use substructure_core::transport::auth::{
     ApiKeyBinding, AuthResolver, BearerHashedApiKeyAuthResolver, JwtHs256ClientTokenAuthResolver,
 };
 use substructure_core::transport::client_http::{self, ClientHttpState};
-use substructure_core::transport::dashboard;
 use substructure_core::transport::http_push::http_transport;
 use substructure_core::transport::push::PushAdapter;
 use substructure_core::transport::server::SubstructureServer;
@@ -144,12 +143,10 @@ async fn main() -> anyhow::Result<()> {
                 auth: worker_auth,
                 client_token_issuer,
             });
-            let dashboard_routes = dashboard::router();
             let server = SubstructureServer::new(vec![
                 admin_routes,
                 client_routes,
                 worker_routes,
-                dashboard_routes,
             ]);
 
             let addr = format!("{host}:{port}");
