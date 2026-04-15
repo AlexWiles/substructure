@@ -7,7 +7,10 @@ use tokio::net::TcpListener;
 use substructure_core::llm::LlmTask;
 use substructure_core::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use substructure_core::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
-use substructure_core::providers::sqlite::{SqliteConfig, SqliteStore};
+use substructure_core::providers::sqlite::{
+    SqliteCheckpointStore, SqliteDb, SqliteEventStore, SqlitePushStore, SqliteSessionIndexStore,
+    SqliteWakeStore, SqliteWorkerQueue,
+};
 use substructure_core::sub_agent::SubAgentTask;
 use substructure_core::transport::admin_http;
 use substructure_core::transport::auth::{
@@ -69,10 +72,15 @@ async fn main() -> anyhow::Result<()> {
             worker_url,
             signing_secret,
         } => {
-            let store = Arc::new(SqliteStore::new(SqliteConfig {
-                path: db.clone(),
-                busy_timeout: std::time::Duration::from_secs(5),
-            })?);
+            let db = SqliteDb::open(&db, std::time::Duration::from_secs(5))?;
+
+            let event_store = Arc::new(SqliteEventStore::new(db.clone())?);
+            let worker_queue = Arc::new(SqliteWorkerQueue::new(db.clone())?);
+            let checkpoint_store = Arc::new(SqliteCheckpointStore::new(db.clone())?);
+            let wake_store = Arc::new(SqliteWakeStore::new(db.clone())?);
+            let session_index_store = Arc::new(SqliteSessionIndexStore::new(db.clone())?);
+            let push_store = Arc::new(SqlitePushStore::new(db)?);
+
             let config = RuntimeConfig::default();
             let llm_task_queue: Arc<dyn TaskQueue<LlmTask>> = Arc::new(ShardedInMemoryQueue::new(
                 config.llm_executor_workers as u32,
@@ -87,19 +95,19 @@ async fn main() -> anyhow::Result<()> {
             }));
 
             let rt = start(
-                store.clone(),
+                event_store.clone(),
                 llm_provider,
                 llm_task_queue,
                 sub_agent_task_queue,
-                store.clone(),
-                store.clone(),
-                store.clone(),
-                store.clone(),
+                worker_queue,
+                session_index_store,
+                checkpoint_store,
+                wake_store,
                 config,
             );
 
             let transports = TransportRegistry::new(vec![http_transport()]);
-            let registry = PushRegistry::new(store, transports);
+            let registry = PushRegistry::new(push_store, transports);
             let adapter = Arc::new(PushAdapter::new(rt.clone(), registry, 16));
             let client_token_issuer = Arc::new(JwtHs256ClientTokenAuthResolver::new(
                 required_env("CLIENT_TOKEN_ISSUER"),
@@ -143,11 +151,7 @@ async fn main() -> anyhow::Result<()> {
                 auth: worker_auth,
                 client_token_issuer,
             });
-            let server = SubstructureServer::new(vec![
-                admin_routes,
-                client_routes,
-                worker_routes,
-            ]);
+            let server = SubstructureServer::new(vec![admin_routes, client_routes, worker_routes]);
 
             let addr = format!("{host}:{port}");
             tracing::info!(%addr, "listening");

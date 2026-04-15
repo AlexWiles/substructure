@@ -12,7 +12,9 @@ use base64::Engine;
 use substructure_core::identity::ClientIdentity;
 use substructure_core::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use substructure_core::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
-use substructure_core::providers::sqlite::{SqliteConfig, SqliteStore};
+use substructure_core::providers::sqlite::{
+    SqliteCheckpointStore, SqliteDb, SqliteEventStore, SqliteSessionIndexStore, SqliteWakeStore,
+};
 use substructure_core::providers::worker_queue::InMemoryWorkerQueue;
 use substructure_core::session::decision::ClientPayload;
 use substructure_core::worker::{DequeueFilter, SubmitDecision};
@@ -47,12 +49,24 @@ impl EmbeddedRuntime {
             .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
             .try_init();
 
-        let store = Arc::new(
-            SqliteStore::new(SqliteConfig {
-                path: options.db.clone(),
-                busy_timeout: std::time::Duration::from_secs(5),
-            })
-            .map_err(|e| Error::from_reason(format!("failed to open database: {e}")))?,
+        let db = SqliteDb::open(&options.db, std::time::Duration::from_secs(5))
+            .map_err(|e| Error::from_reason(format!("failed to open database: {e}")))?;
+
+        let event_store = Arc::new(
+            SqliteEventStore::new(db.clone())
+                .map_err(|e| Error::from_reason(format!("failed to init event store: {e}")))?,
+        );
+        let checkpoint_store = Arc::new(
+            SqliteCheckpointStore::new(db.clone())
+                .map_err(|e| Error::from_reason(format!("failed to init checkpoint store: {e}")))?,
+        );
+        let wake_store = Arc::new(
+            SqliteWakeStore::new(db.clone())
+                .map_err(|e| Error::from_reason(format!("failed to init wake store: {e}")))?,
+        );
+        let session_index_store = Arc::new(
+            SqliteSessionIndexStore::new(db)
+                .map_err(|e| Error::from_reason(format!("failed to init session index: {e}")))?,
         );
 
         let config = RuntimeConfig {
@@ -79,14 +93,14 @@ impl EmbeddedRuntime {
         let rt = tokio::runtime::Handle::current();
         let inner = rt.block_on(async {
             substructure_core::start(
-                store.clone(),
+                event_store,
                 llm_provider,
                 llm_task_queue,
                 sub_agent_task_queue,
                 queue,
-                store.clone(),
-                store.clone(),
-                store.clone(),
+                session_index_store,
+                checkpoint_store,
+                wake_store,
                 config,
             )
         });
