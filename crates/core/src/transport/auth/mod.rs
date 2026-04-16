@@ -4,7 +4,7 @@ use axum::http::HeaderMap;
 mod resolvers;
 pub use resolvers::{
     ApiKeyBinding, BearerHashedApiKeyAuthResolver, ClientTokenClaims, ClientTokenIssuerConfig,
-    ClientTokenIssuerError, JwtHs256ClientTokenAuthResolver,
+    ClientTokenIssuerError, JwtHs256ClientTokenAuthResolver, NoopAuthResolver,
 };
 
 #[derive(Debug, Clone)]

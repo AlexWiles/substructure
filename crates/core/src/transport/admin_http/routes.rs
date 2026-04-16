@@ -1,10 +1,8 @@
-use std::sync::Arc;
-
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
+use axum::{Extension, Json};
 use base64::Engine;
 use serde::Deserialize;
 use tokio_stream::wrappers::ReceiverStream;
@@ -12,9 +10,9 @@ use tokio_stream::StreamExt;
 
 use crate::event_store::{AggregateSort, EventFilter};
 use crate::session::index::{SessionCursor, SessionFilter};
-use crate::Runtime;
+use crate::transport::auth::AuthPrincipal;
 
-use crate::transport::extractors::TenantId;
+use super::AdminHttpState;
 
 #[derive(Debug, Deserialize)]
 pub struct ListSessionsParams {
@@ -31,10 +29,11 @@ fn default_true() -> bool {
 }
 
 pub async fn list_sessions(
-    State(runtime): State<Arc<Runtime>>,
-    TenantId(tenant_id): TenantId,
+    State(state): State<AdminHttpState>,
+    Extension(principal): Extension<AuthPrincipal>,
     Query(params): Query<ListSessionsParams>,
 ) -> impl IntoResponse {
+    let tenant_id = principal.tenant_id;
     let cursor = match params.cursor {
         Some(ref encoded) => match decode_cursor(encoded) {
             Ok(c) => Some(c),
@@ -57,7 +56,7 @@ pub async fn list_sessions(
         cursor,
     };
 
-    match runtime.list_sessions(&filter).await {
+    match state.runtime.list_sessions(&filter).await {
         Ok(page) => {
             let next_cursor = page
                 .next_cursor
@@ -90,11 +89,11 @@ fn decode_cursor(encoded: &str) -> Result<SessionCursor, String> {
 }
 
 pub async fn get_session(
-    State(runtime): State<Arc<Runtime>>,
-    TenantId(tenant_id): TenantId,
+    State(state): State<AdminHttpState>,
+    Extension(principal): Extension<AuthPrincipal>,
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
-    match runtime.get_session(&tenant_id, &session_id).await {
+    match state.runtime.get_session(&principal.tenant_id, &session_id).await {
         Ok((snapshot, state)) => Json(serde_json::json!({
             "stream_version": snapshot.stream_version,
             "first_event_at": snapshot.first_event_at,
@@ -117,7 +116,7 @@ pub struct SessionEventsParams {
 }
 
 pub async fn get_session_events(
-    State(runtime): State<Arc<Runtime>>,
+    State(state): State<AdminHttpState>,
     Path(session_id): Path<String>,
     Query(params): Query<SessionEventsParams>,
 ) -> impl IntoResponse {
@@ -127,7 +126,7 @@ pub async fn get_session_events(
         limit: params.limit,
         ..Default::default()
     };
-    match runtime.get_session_events(&filter).await {
+    match state.runtime.get_session_events(&filter).await {
         Ok(events) => Json(events).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -138,12 +137,12 @@ pub async fn get_session_events(
 }
 
 pub async fn stream_session_events(
-    State(runtime): State<Arc<Runtime>>,
+    State(state): State<AdminHttpState>,
     Path(session_id): Path<String>,
     Query(params): Query<SessionEventsParams>,
 ) -> Response {
     // Subscribe BEFORE querying historical events so we don't miss anything
-    let live_rx = runtime.subscribe_session_admin(session_id.clone());
+    let live_rx = state.runtime.subscribe_session_admin(session_id.clone());
 
     // Query historical events
     let filter = EventFilter {
@@ -152,7 +151,8 @@ pub async fn stream_session_events(
         limit: None,
         ..Default::default()
     };
-    let historical = runtime
+    let historical = state
+        .runtime
         .get_session_events(&filter)
         .await
         .unwrap_or_default();

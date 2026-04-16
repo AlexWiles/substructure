@@ -15,6 +15,7 @@ use substructure_core::sub_agent::SubAgentTask;
 use substructure_core::transport::admin_http;
 use substructure_core::transport::auth::{
     ApiKeyBinding, AuthResolver, BearerHashedApiKeyAuthResolver, JwtHs256ClientTokenAuthResolver,
+    NoopAuthResolver,
 };
 use substructure_core::transport::client_http::{self, ClientHttpState};
 use substructure_core::transport::http_push::http_transport;
@@ -141,7 +142,10 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!(url, "startup worker registered (signing enabled)");
             }
 
-            let admin_routes = admin_http::router(rt.clone());
+            let admin_routes = admin_http::router(admin_http::AdminHttpState {
+                runtime: rt.clone(),
+                auth: Arc::new(NoopAuthResolver),
+            });
             let client_routes = client_http::router(ClientHttpState {
                 runtime: rt.clone(),
                 auth: client_auth,
