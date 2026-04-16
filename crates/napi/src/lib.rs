@@ -56,10 +56,10 @@ impl EmbeddedRuntime {
             SqliteEventStore::new(db.clone())
                 .map_err(|e| Error::from_reason(format!("failed to init event store: {e}")))?,
         );
-        let checkpoint_store = Arc::new(
-            SqliteCheckpointStore::new(db.clone())
-                .map_err(|e| Error::from_reason(format!("failed to init checkpoint store: {e}")))?,
-        );
+        let checkpoint_store =
+            Arc::new(SqliteCheckpointStore::new(db.clone()).map_err(|e| {
+                Error::from_reason(format!("failed to init checkpoint store: {e}"))
+            })?);
         let wake_store = Arc::new(
             SqliteWakeStore::new(db.clone())
                 .map_err(|e| Error::from_reason(format!("failed to init wake store: {e}")))?,

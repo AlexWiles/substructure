@@ -21,13 +21,13 @@ pub use wake::SqliteWakeStore;
 pub use worker_queue::SqliteWorkerQueue;
 
 #[derive(Clone)]
-pub(crate) struct ReaderConfig {
+pub struct ReaderConfig {
     path: String,
     busy_timeout: Duration,
 }
 
 impl ReaderConfig {
-    pub(crate) fn open(&self) -> Result<Connection, StoreError> {
+    pub fn open(&self) -> Result<Connection, StoreError> {
         let conn = Connection::open_with_flags(
             &self.path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
@@ -45,8 +45,8 @@ impl ReaderConfig {
 /// Each store struct holds one of these.
 #[derive(Clone)]
 pub struct SqliteDb {
-    pub(crate) writer: Arc<Mutex<Connection>>,
-    pub(crate) reader: ReaderConfig,
+    pub writer: Arc<Mutex<Connection>>,
+    pub reader: ReaderConfig,
 }
 
 impl SqliteDb {
@@ -91,7 +91,10 @@ impl SqliteDb {
 
     /// Runs an idempotent DDL schema string on the writer connection.
     pub fn run_schema(&self, schema: &str) -> Result<(), StoreError> {
-        let conn = self.writer.lock().map_err(|e| StoreError::Internal(e.to_string()))?;
+        let conn = self
+            .writer
+            .lock()
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
         conn.execute_batch(schema)
             .map_err(|e| StoreError::Internal(e.to_string()))?;
         Ok(())
