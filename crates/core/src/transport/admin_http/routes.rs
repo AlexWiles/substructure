@@ -93,7 +93,11 @@ pub async fn get_session(
     Extension(principal): Extension<AuthPrincipal>,
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
-    match state.runtime.get_session(&principal.tenant_id, &session_id).await {
+    match state
+        .runtime
+        .get_session(&principal.tenant_id, &session_id)
+        .await
+    {
         Ok((snapshot, state)) => Json(serde_json::json!({
             "stream_version": snapshot.stream_version,
             "first_event_at": snapshot.first_event_at,
