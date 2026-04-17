@@ -15,7 +15,7 @@ const stream = backend.submit({
             content: "What are the headlines today?",
         },
     },
-    auth: { tenant_id: "default", sub: "test-user" },
+    auth: { sub: "test-user" },
 });
 
 for await (const event of stream) {

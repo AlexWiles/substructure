@@ -515,7 +515,6 @@ export interface SubmitPayloadRequest {
 }
 
 export interface MintClientTokenRequest {
-    tenant_id: string;
     sub: string;
     attrs?: Record<string, string>;
     ttl_seconds?: number;
@@ -532,7 +531,6 @@ export interface MachineSubmitPayloadRequest {
     session_id?: Uuid;
     turn_id?: string;
     auth: {
-        tenant_id: string;
         sub: string;
         attrs?: Record<string, string>;
     };

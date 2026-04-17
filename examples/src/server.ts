@@ -59,7 +59,6 @@ const backend = sub.backend.client({
 
 const clientToken = (
     await backend.mintClientToken({
-        tenantId: "default",
         sub: "frontend-user",
         ttlSeconds: 600,
     })

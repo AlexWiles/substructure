@@ -25,7 +25,6 @@ pub struct SubmitResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct MintClientTokenRequest {
-    pub tenant_id: String,
     pub sub: String,
     #[serde(default)]
     pub attrs: std::collections::HashMap<String, String>,
@@ -52,7 +51,6 @@ pub struct SubmitClientPayloadRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct SubmitClientPayloadAuth {
-    pub tenant_id: String,
     pub sub: String,
     #[serde(default)]
     pub attrs: std::collections::HashMap<String, String>,

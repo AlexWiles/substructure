@@ -62,13 +62,6 @@ pub async fn mint_client_token(
     Extension(principal): Extension<AuthPrincipal>,
     Json(req): Json<MintClientTokenRequest>,
 ) -> impl IntoResponse {
-    if principal.tenant_id != req.tenant_id {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "tenant mismatch"})),
-        )
-            .into_response();
-    }
     if principal.source != "api_key" {
         return (
             StatusCode::FORBIDDEN,
@@ -101,7 +94,7 @@ pub async fn mint_client_token(
     }
 
     match state.client_token_issuer.issue_token(
-        req.tenant_id,
+        principal.tenant_id,
         req.sub,
         req.attrs,
         Duration::from_secs(ttl_secs),
@@ -122,10 +115,6 @@ pub async fn submit_client_payload(
     Extension(principal): Extension<AuthPrincipal>,
     Json(req): Json<SubmitClientPayloadRequest>,
 ) -> Response {
-    if principal.tenant_id != req.auth.tenant_id {
-        let body = serde_json::json!({"error": "tenant mismatch"});
-        return (StatusCode::FORBIDDEN, Json(body)).into_response();
-    }
     if req.auth.sub.trim().is_empty() {
         let body = serde_json::json!({"error": "sub is required"});
         return (StatusCode::BAD_REQUEST, Json(body)).into_response();
@@ -133,7 +122,7 @@ pub async fn submit_client_payload(
 
     let session_id = req.session_id.unwrap_or_else(|| Uuid::now_v7().to_string());
     let auth = ClientIdentity {
-        tenant_id: req.auth.tenant_id.clone(),
+        tenant_id: principal.tenant_id.clone(),
         sub: Some(req.auth.sub),
         attrs: req.auth.attrs,
     };
@@ -143,7 +132,7 @@ pub async fn submit_client_payload(
         .runtime
         .submit_client_payload(SubmitClientPayload {
             session_id,
-            tenant_id: req.auth.tenant_id,
+            tenant_id: principal.tenant_id,
             auth,
             agent_id: req.agent_id,
             payload: req.payload,
