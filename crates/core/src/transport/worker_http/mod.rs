@@ -23,7 +23,6 @@ pub struct WorkerHttpState {
 pub fn router(state: WorkerHttpState) -> Router {
     Router::new()
         .route("/api/machine/workers/submit", post(routes::submit))
-        .route("/api/machine/workers/register", post(routes::register))
         .route(
             "/api/machine/client-tokens",
             post(routes::mint_client_token),

@@ -104,14 +104,7 @@ const webAgent = agent({ id: "web-agent" })
         }),
     );
 
-// Register this worker with the backend via the API:
-//
-//   backend.registerWorker({
-//     transport_type: "http",
-//     config: { endpoint_url: "https://your-worker.workers.dev" },
-//   });
-//
-// Or start the server with: --worker-url https://your-worker.workers.dev
+// Start the backend server with: --worker-url https://your-worker.workers.dev
 
 const worker = sub.worker({ agents: [webAgent] });
 

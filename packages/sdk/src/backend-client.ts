@@ -1,13 +1,6 @@
 import { WorkerClient } from "./worker-client";
 import { RunStream } from "./run-stream";
-import type {
-    ClientPayload,
-    MintClientTokenRequest,
-    RegisterRequest,
-    RegisterResponse,
-    SubmitRequest,
-    SubmitResponse,
-} from "./types";
+import type { ClientPayload, MintClientTokenRequest, SubmitRequest, SubmitResponse } from "./types";
 
 export { RunStream } from "./run-stream";
 export type { TurnResult } from "./run-stream";
@@ -59,10 +52,6 @@ export class BackendClient {
             ttl_seconds: request.ttlSeconds,
         } as MintClientTokenRequest);
         return { token: response.token, expiresAt: response.expires_at };
-    }
-
-    async registerWorker(request: RegisterRequest): Promise<RegisterResponse> {
-        return this.worker.register(request);
     }
 
     async submitWorkerDecision(request: SubmitRequest): Promise<SubmitResponse> {

@@ -24,19 +24,6 @@ pub struct SubmitResponse {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct RegisterRequest {
-    pub transport_type: String,
-    pub config: serde_json::Value,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RegisterResponse {
-    pub ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub signing_secret: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct MintClientTokenRequest {
     pub tenant_id: String,
     pub sub: String,

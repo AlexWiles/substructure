@@ -1,7 +1,8 @@
 // Substructure SDK – HTTP Worker Server Example
 // This example shows how to run agents as an HTTP worker that connects to a
 // Substructure backend server, rather than using the embedded runtime.
-// Requires a running Substructure backend at http://localhost:8080.
+// Requires a running Substructure backend at http://localhost:8080 started
+// with `--worker-url http://localhost:4444` so it pushes decisions here.
 
 import Substructure from "@substructure.ai/sdk";
 import { randomUUID } from "crypto";
@@ -49,20 +50,12 @@ const WORKER_PORT = 4444;
 const server = Bun.serve({ port: WORKER_PORT, fetch: worker.fetchHandler() });
 console.log(`Worker listening on http://localhost:${WORKER_PORT}`);
 
-// --- Register with the backend ---
+// --- Mint a client token and submit via the frontend client ---
 
 const backend = sub.backend.client({
     url: "http://localhost:8080",
     apiKey: "dev-worker-key",
 });
-
-await backend.registerWorker({
-    transport_type: "http",
-    config: { endpoint_url: `http://localhost:${WORKER_PORT}` },
-});
-console.log("Registered with backend");
-
-// --- Mint a client token and submit via the frontend client ---
 
 const clientToken = (
     await backend.mintClientToken({

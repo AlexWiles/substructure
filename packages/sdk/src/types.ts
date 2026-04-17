@@ -572,13 +572,3 @@ export interface SubmitResponse {
     ok: boolean;
     error?: string;
 }
-
-export interface RegisterRequest {
-    transport_type: string;
-    config: unknown;
-}
-
-export interface RegisterResponse {
-    ok: boolean;
-    signing_secret?: string;
-}
