@@ -68,5 +68,14 @@ impl RetryPolicy {
 
 #[async_trait]
 pub trait WorkerRetryResolver: Send + Sync {
-    async fn resolve(&self, tenant_id: &str) -> Option<RetryPolicy>;
+    async fn resolve(&self, tenant_id: &str) -> RetryPolicy;
+}
+
+pub struct NoRetryResolver;
+
+#[async_trait]
+impl WorkerRetryResolver for NoRetryResolver {
+    async fn resolve(&self, _tenant_id: &str) -> RetryPolicy {
+        RetryPolicy::no_retry()
+    }
 }
