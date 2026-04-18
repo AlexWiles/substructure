@@ -141,7 +141,7 @@ pub struct WorkerDecisionState {
 pub struct DerivedState {
     pub status: SessionStatus,
     pub wake_at: Option<DateTime<Utc>>,
-    pub auth: Option<ClientIdentity>,
+    pub identity: Option<ClientIdentity>,
     pub agent_id: Option<String>,
     #[serde(default)]
     pub worker_state: Vec<u8>,
@@ -175,7 +175,7 @@ pub struct SessionState {
     pub session_id: String,
     pub status: SessionStatus,
     pub agent_id: Option<String>,
-    pub auth: Option<ClientIdentity>,
+    pub identity: Option<ClientIdentity>,
     pub token_usage: BTreeMap<String, u64>,
 
     /// Accumulated cost across all LLM calls in this session.
@@ -229,7 +229,7 @@ impl SessionState {
             session_id,
             status: SessionStatus::Done,
             agent_id: None,
-            auth: None,
+            identity: None,
             token_usage: BTreeMap::new(),
             cost: Decimal::ZERO,
             sub_agent_cost: Decimal::ZERO,
@@ -255,7 +255,7 @@ impl SessionState {
             EventPayload::SessionCreated(payload) => {
                 self.status = SessionStatus::Idle;
                 self.agent_id = Some(payload.agent_id.clone());
-                self.auth = Some(payload.auth.clone());
+                self.identity = Some(payload.identity.clone());
                 self.ancestry = payload.ancestry.clone();
                 self.worker_retry = Some(payload.worker_retry.clone());
             }
@@ -527,7 +527,7 @@ impl SessionState {
         DerivedState {
             status: self.status.clone(),
             wake_at: self.wake_at(),
-            auth: self.auth.clone(),
+            identity: self.identity.clone(),
             agent_id: self.agent_id.clone(),
             worker_state: self.worker_state.clone(),
             ancestry: self.ancestry.clone(),

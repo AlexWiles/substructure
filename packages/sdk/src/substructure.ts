@@ -87,7 +87,7 @@ export interface EmbeddedOptions {
 export interface SubmitRequest {
     agentId: string;
     payload: ClientPayload;
-    auth?: ClientIdentity;
+    identity?: ClientIdentity;
     sessionId?: string;
     turnId?: string;
 }
@@ -105,20 +105,20 @@ export class EmbeddedInstance {
 
     submit(request: SubmitRequest): RunStream {
         const sessionId = request.sessionId ?? crypto.randomUUID();
-        const auth = request.auth;
+        const identity = request.identity;
         const turnId = request.turnId;
 
         const self = this;
         async function* generate(): AsyncGenerator<Event> {
             await self.registered;
-            if (!auth?.sub) {
-                throw new Error("submit.auth.sub is required for embedded runtime");
+            if (!identity?.id) {
+                throw new Error("submit.identity.id is required for embedded runtime");
             }
             for await (const json of self.runtime.submitPayload(
                 sessionId,
                 request.agentId,
                 JSON.stringify(request.payload),
-                JSON.stringify(auth),
+                JSON.stringify(identity),
                 turnId,
             )) {
                 yield JSON.parse(json) as Event;

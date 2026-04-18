@@ -69,10 +69,10 @@ pub async fn mint_client_token(
         )
             .into_response();
     }
-    if req.sub.trim().is_empty() {
+    if req.identity.id.trim().is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "sub is required"})),
+            Json(serde_json::json!({"error": "identity.id is required"})),
         )
             .into_response();
     }
@@ -95,8 +95,8 @@ pub async fn mint_client_token(
 
     match state.client_token_issuer.issue_token(
         principal.tenant_id,
-        req.sub,
-        req.attrs,
+        req.identity.id,
+        req.identity.metadata,
         Duration::from_secs(ttl_secs),
     ) {
         Ok((token, expires_at)) => {
@@ -115,16 +115,16 @@ pub async fn submit_client_payload(
     Extension(principal): Extension<AuthPrincipal>,
     Json(req): Json<SubmitClientPayloadRequest>,
 ) -> Response {
-    if req.auth.sub.trim().is_empty() {
-        let body = serde_json::json!({"error": "sub is required"});
+    if req.identity.id.trim().is_empty() {
+        let body = serde_json::json!({"error": "id is required"});
         return (StatusCode::BAD_REQUEST, Json(body)).into_response();
     }
 
     let session_id = req.session_id.unwrap_or_else(|| Uuid::now_v7().to_string());
-    let auth = ClientIdentity {
+    let identity = ClientIdentity {
         tenant_id: principal.tenant_id.clone(),
-        sub: Some(req.auth.sub),
-        attrs: req.auth.attrs,
+        id: Some(req.identity.id),
+        metadata: req.identity.metadata,
     };
 
     let result = state
@@ -133,7 +133,7 @@ pub async fn submit_client_payload(
         .submit_client_payload(SubmitClientPayload {
             session_id,
             tenant_id: principal.tenant_id,
-            auth,
+            identity,
             agent_id: req.agent_id,
             payload: req.payload,
             turn_id: req.turn_id,

@@ -9,7 +9,7 @@ pub struct LlmTask {
     pub call_id: String,
     pub llm_client: String,
     pub request: LlmRequest,
-    pub auth: ClientIdentity,
+    pub identity: ClientIdentity,
     pub span: SpanContext,
 }
 

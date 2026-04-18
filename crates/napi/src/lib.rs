@@ -206,31 +206,31 @@ impl EmbeddedRuntime {
     /// Submit a client payload to an agent session, calling `onEvent` for each event as it arrives.
     #[napi(
         js_name = "submitPayload",
-        ts_args_type = "sessionId: string, agentId: string, payloadJson: string, authJson: string, turnId: string | undefined, onEvent: (event: string) => void"
+        ts_args_type = "sessionId: string, agentId: string, payloadJson: string, identityJson: string, turnId: string | undefined, onEvent: (event: string) => void"
     )]
     pub async fn submit_client_payload(
         &self,
         session_id: String,
         agent_id: String,
         payload_json: String,
-        auth_json: String,
+        identity_json: String,
         turn_id: Option<String>,
         on_event: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
     ) -> Result<()> {
         let payload: ClientPayload = serde_json::from_str(&payload_json)
             .map_err(|e| Error::from_reason(format!("invalid payloadJson: {e}")))?;
-        let auth: ClientIdentity = serde_json::from_str(&auth_json)
-            .map_err(|e| Error::from_reason(format!("invalid authJson: {e}")))?;
-        if auth.sub.as_deref().is_none_or(str::is_empty) {
-            return Err(Error::from_reason("auth.sub is required"));
+        let identity: ClientIdentity = serde_json::from_str(&identity_json)
+            .map_err(|e| Error::from_reason(format!("invalid identityJson: {e}")))?;
+        if identity.id.as_deref().is_none_or(str::is_empty) {
+            return Err(Error::from_reason("identity.id is required"));
         }
 
         let (_, mut rx) = self
             .inner
             .submit_client_payload(SubmitClientPayload {
                 session_id,
-                tenant_id: auth.tenant_id.clone(),
-                auth,
+                tenant_id: identity.tenant_id.clone(),
+                identity,
                 agent_id,
                 payload,
                 turn_id,

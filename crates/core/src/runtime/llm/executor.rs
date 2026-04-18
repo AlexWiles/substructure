@@ -35,7 +35,7 @@ pub fn spawn_llm_task_executor(
                     _ = cancel.cancelled() => break,
                 };
 
-                let resolved = provider.resolve(&task.llm_client, &task.auth).await;
+                let resolved = provider.resolve(&task.llm_client, &task.identity).await;
 
                 let command = match resolved {
                     Ok(client) => {

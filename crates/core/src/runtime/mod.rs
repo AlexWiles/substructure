@@ -70,7 +70,7 @@ pub struct Runtime {
 pub struct SubmitClientPayload {
     pub session_id: String,
     pub tenant_id: String,
-    pub auth: ClientIdentity,
+    pub identity: ClientIdentity,
     pub agent_id: String,
     pub payload: ClientPayload,
     /// Caller-provided turn ID for idempotency. Auto-generated if None.
@@ -133,7 +133,7 @@ impl Runtime {
                 tenant_id: input.tenant_id.clone(),
                 command: CommandPayload::CreateSession {
                     agent_id: input.agent_id,
-                    auth: input.auth.clone(),
+                    identity: input.identity.clone(),
                     ancestry: vec![],
                     worker_retry: RetryPolicy::no_retry(),
                 },
@@ -157,7 +157,7 @@ impl Runtime {
                 tenant_id: input.tenant_id,
                 command: CommandPayload::SubmitClientPayload {
                     payload: input.payload,
-                    auth: input.auth,
+                    identity: input.identity,
                     turn_id: Some(turn_id.clone()),
                 },
                 span: span.child("submit_client_payload"),

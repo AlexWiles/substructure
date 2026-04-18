@@ -51,13 +51,13 @@ export class EmbeddedRuntime {
     return this._native.registerWorker(tenantId, agentIds, callback);
   }
 
-  async *submitPayload(sessionId, agentId, payloadJson, authJson, turnId) {
+  async *submitPayload(sessionId, agentId, payloadJson, identityJson, turnId) {
     let resolve;
     let done = false;
     const buffer = [];
 
     const finished = this._native.submitPayload(
-      sessionId, agentId, payloadJson, authJson, turnId,
+      sessionId, agentId, payloadJson, identityJson, turnId,
       (json) => {
         buffer.push(json);
         resolve?.();

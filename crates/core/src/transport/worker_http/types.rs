@@ -25,11 +25,16 @@ pub struct SubmitResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct MintClientTokenRequest {
-    pub sub: String,
-    #[serde(default)]
-    pub attrs: std::collections::HashMap<String, String>,
+    pub identity: MintClientTokenIdentity,
     #[serde(default)]
     pub ttl_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MintClientTokenIdentity {
+    pub id: String,
+    #[serde(default)]
+    pub metadata: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -46,12 +51,12 @@ pub struct SubmitClientPayloadRequest {
     pub session_id: Option<String>,
     #[serde(default)]
     pub turn_id: Option<String>,
-    pub auth: SubmitClientPayloadAuth,
+    pub identity: SubmitClientPayloadIdentity,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct SubmitClientPayloadAuth {
-    pub sub: String,
+pub struct SubmitClientPayloadIdentity {
+    pub id: String,
     #[serde(default)]
-    pub attrs: std::collections::HashMap<String, String>,
+    pub metadata: std::collections::HashMap<String, String>,
 }

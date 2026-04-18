@@ -15,7 +15,7 @@ const stream = backend.submit({
             content: "What are the headlines today?",
         },
     },
-    auth: { sub: "test-user" },
+    identity: { id: "test-user" },
 });
 
 for await (const event of stream) {

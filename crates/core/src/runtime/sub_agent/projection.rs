@@ -49,13 +49,13 @@ impl EventProcessor for SubAgentDispatchProjection {
 
         let task = match &event.payload {
             EventPayload::SubAgentRequested(req) => {
-                let auth = event
+                let identity = event
                     .derived
                     .as_ref()
-                    .and_then(|d| d.auth.as_ref())
+                    .and_then(|d| d.identity.as_ref())
                     .cloned()
                     .ok_or_else(|| {
-                        ProcessorError::Apply("missing auth in derived state".to_string())
+                        ProcessorError::Apply("missing identity in derived state".to_string())
                     })?;
 
                 let mut ancestry = event
@@ -71,7 +71,7 @@ impl EventProcessor for SubAgentDispatchProjection {
                     tenant_id: event.tenant_id,
                     child_session_id: req.session_id.clone(),
                     agent_id: req.agent_id.clone(),
-                    auth,
+                    identity,
                     ancestry,
                     retry: req.retry.clone(),
                     span: event.span,

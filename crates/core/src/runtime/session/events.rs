@@ -66,7 +66,7 @@ pub enum EventPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionCreated {
     pub agent_id: String,
-    pub auth: ClientIdentity,
+    pub identity: ClientIdentity,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ancestry: Vec<String>,
     pub worker_retry: RetryPolicy,

@@ -50,12 +50,14 @@ impl EventProcessor for LlmDispatchProjection {
             _ => return Ok(()),
         };
 
-        let auth = event
+        let identity = event
             .derived
             .as_ref()
-            .and_then(|d| d.auth.as_ref())
+            .and_then(|d| d.identity.as_ref())
             .cloned()
-            .ok_or_else(|| ProcessorError::Apply("missing auth in derived state".to_string()))?;
+            .ok_or_else(|| {
+                ProcessorError::Apply("missing identity in derived state".to_string())
+            })?;
 
         let shard_key = raw.aggregate_id.clone();
 
@@ -65,7 +67,7 @@ impl EventProcessor for LlmDispatchProjection {
             call_id: req.call_id.clone(),
             llm_client: req.llm_client.clone(),
             request: req.request.clone(),
-            auth,
+            identity,
             span: event.span,
         };
 

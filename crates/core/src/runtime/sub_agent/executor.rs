@@ -47,7 +47,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
             tenant_id,
             child_session_id,
             agent_id,
-            auth,
+            identity,
             ancestry,
             retry,
             span,
@@ -60,7 +60,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
                     tenant_id: tenant_id.clone(),
                     command: CommandPayload::CreateSession {
                         agent_id,
-                        auth,
+                        identity,
                         ancestry,
                         worker_retry: retry,
                     },

@@ -59,7 +59,7 @@ const backend = sub.backend.client({
 
 const clientToken = (
     await backend.mintClientToken({
-        sub: "frontend-user",
+        identity: { id: "frontend-user" },
         ttlSeconds: 600,
     })
 ).token;

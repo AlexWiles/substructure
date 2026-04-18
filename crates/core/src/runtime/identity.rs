@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 pub struct ClientIdentity {
     pub tenant_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub sub: Option<String>,
+    pub id: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub attrs: HashMap<String, String>,
+    pub metadata: HashMap<String, String>,
 }

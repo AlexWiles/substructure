@@ -11,8 +11,10 @@ export interface BackendClientOptions {
 }
 
 export interface IssueClientTokenRequest {
-    sub: string;
-    attrs?: Record<string, string>;
+    identity: {
+        id: string;
+        metadata?: Record<string, string>;
+    };
     ttlSeconds?: number;
 }
 
@@ -24,9 +26,9 @@ export interface IssueClientTokenResponse {
 export interface BackendSubmitRequest {
     agentId: string;
     payload: ClientPayload;
-    auth: {
-        sub: string;
-        attrs?: Record<string, string>;
+    identity: {
+        id: string;
+        metadata?: Record<string, string>;
     };
     sessionId?: string;
     turnId?: string;
@@ -44,8 +46,7 @@ export class BackendClient {
 
     async mintClientToken(request: IssueClientTokenRequest): Promise<IssueClientTokenResponse> {
         const response = await this.worker.mintClientToken({
-            sub: request.sub,
-            attrs: request.attrs,
+            identity: request.identity,
             ttl_seconds: request.ttlSeconds,
         });
         return { token: response.token, expiresAt: response.expires_at };
@@ -59,7 +60,7 @@ export class BackendClient {
         const stream = this.worker.submitClientPayload({
             agent_id: request.agentId,
             payload: request.payload,
-            auth: request.auth,
+            identity: request.identity,
             session_id: request.sessionId,
             turn_id: request.turnId,
         });

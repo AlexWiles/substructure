@@ -19,8 +19,8 @@ export type SpanId = string;
 
 export interface ClientIdentity {
     tenant_id: string;
-    sub?: string;
-    attrs?: Record<string, string>;
+    id?: string;
+    metadata?: Record<string, string>;
 }
 
 // ── Retry ───────────────────────────────────────────────────────────────────
@@ -230,7 +230,7 @@ export type WorkerAction =
 export interface SessionCreated {
     type: "session.created";
     agent_id: string;
-    auth: ClientIdentity;
+    identity: ClientIdentity;
     ancestry?: Uuid[];
     worker_retry: RetryPolicy;
 }
@@ -484,7 +484,7 @@ export interface SessionState {
     session_id: Uuid;
     status: SessionStatus;
     agent_id?: string;
-    auth?: ClientIdentity;
+    identity?: ClientIdentity;
     token_usage: Record<string, number>;
     cost: Decimal;
     sub_agent_cost: Decimal;
@@ -508,15 +508,17 @@ export interface SubmitPayloadRequest {
     agent_id: string;
     payload: ClientPayload;
     /** Required for embedded runtime; ignored/forbidden on remote HTTP submit. */
-    auth?: ClientIdentity;
+    identity?: ClientIdentity;
     tenant_id?: string;
     session_id?: Uuid;
     turn_id?: string;
 }
 
 export interface MintClientTokenRequest {
-    sub: string;
-    attrs?: Record<string, string>;
+    identity: {
+        id: string;
+        metadata?: Record<string, string>;
+    };
     ttl_seconds?: number;
 }
 
@@ -530,9 +532,9 @@ export interface MachineSubmitPayloadRequest {
     payload: ClientPayload;
     session_id?: Uuid;
     turn_id?: string;
-    auth: {
-        sub: string;
-        attrs?: Record<string, string>;
+    identity: {
+        id: string;
+        metadata?: Record<string, string>;
     };
 }
 
@@ -547,7 +549,7 @@ export interface WorkerDecisionRequestWire {
     tenant_id: string;
     decision_id: string;
     agent_id: string;
-    auth: ClientIdentity;
+    identity: ClientIdentity;
     trigger: DecisionTrigger;
     /** Base64-encoded opaque worker state */
     worker_state: string;

@@ -468,7 +468,7 @@ impl LlmProviderTrait for OpenRouterProvider {
     async fn resolve(
         &self,
         _client_id: &str,
-        _auth: &ClientIdentity,
+        _identity: &ClientIdentity,
     ) -> Result<Arc<dyn LlmCallable>, String> {
         Ok(self.client.clone())
     }

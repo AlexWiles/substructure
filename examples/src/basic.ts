@@ -97,7 +97,7 @@ const embedded = await sub.embedded({
 });
 
 const sessionId = randomUUID();
-const auth = { tenant_id: "default", sub: "example-user" };
+const identity = { tenant_id: "default", id: "example-user" };
 
 async function turn(message: string) {
     console.log(`\n> ${message}`);
@@ -105,7 +105,7 @@ async function turn(message: string) {
         agentId: todoAgent.agentId,
         payload: { type: "message", message: { role: "user", content: message } },
         sessionId,
-        auth,
+        identity,
         turnId: randomUUID(),
     });
     for await (const event of stream) {

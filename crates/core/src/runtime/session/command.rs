@@ -15,13 +15,13 @@ use crate::runtime::retry::RetryPolicy;
 pub enum CommandPayload {
     CreateSession {
         agent_id: String,
-        auth: ClientIdentity,
+        identity: ClientIdentity,
         ancestry: Vec<String>,
         worker_retry: RetryPolicy,
     },
     SubmitClientPayload {
         payload: ClientPayload,
-        auth: ClientIdentity,
+        identity: ClientIdentity,
         turn_id: Option<String>,
     },
     SendMessage {
@@ -133,14 +133,14 @@ impl SessionState {
                 None,
                 CommandPayload::CreateSession {
                     agent_id,
-                    auth,
+                    identity,
                     ancestry,
                     worker_retry,
                 },
             ) => Ok(vec![EventPayload::SessionCreated(Box::new(
                 SessionCreated {
                     agent_id,
-                    auth,
+                    identity,
                     ancestry,
                     worker_retry,
                 },
@@ -174,17 +174,17 @@ impl SessionState {
 
             CommandPayload::SubmitClientPayload {
                 payload,
-                auth,
+                identity,
                 turn_id,
             } => {
-                let Some(subject) = auth.sub.as_deref() else {
+                let Some(subject) = identity.id.as_deref() else {
                     return Err(SessionError::MissingSubject);
                 };
-                let Some(existing_auth) = self.auth.as_ref() else {
+                let Some(existing) = self.identity.as_ref() else {
                     return Err(SessionError::SessionAccessDenied);
                 };
-                if existing_auth.tenant_id != auth.tenant_id
-                    || existing_auth.sub.as_deref() != Some(subject)
+                if existing.tenant_id != identity.tenant_id
+                    || existing.id.as_deref() != Some(subject)
                 {
                     return Err(SessionError::SessionAccessDenied);
                 }

@@ -22,7 +22,7 @@ export class EmbeddedRuntime {
         sessionId: string,
         agentId: string,
         payloadJson: string,
-        authJson: string,
+        identityJson: string,
         turnId?: string,
     ): AsyncGenerator<string, void, unknown>;
 

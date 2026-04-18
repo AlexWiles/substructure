@@ -14,7 +14,7 @@ pub enum SubAgentTask {
         tenant_id: String,
         child_session_id: String,
         agent_id: String,
-        auth: ClientIdentity,
+        identity: ClientIdentity,
         ancestry: Vec<String>,
         retry: RetryPolicy,
         span: SpanContext,

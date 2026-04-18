@@ -64,7 +64,7 @@ pub trait LlmProviderTrait: Send + Sync {
     async fn resolve(
         &self,
         client_id: &str,
-        auth: &ClientIdentity,
+        identity: &ClientIdentity,
     ) -> Result<Arc<dyn LlmCallable>, String>;
 }
 

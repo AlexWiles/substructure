@@ -15,7 +15,7 @@ pub struct WorkerDecisionRequest {
     pub tenant_id: String,
     pub decision_id: String,
     pub agent_id: String,
-    pub auth: ClientIdentity,
+    pub identity: ClientIdentity,
     pub trigger: DecisionTrigger,
     #[serde(with = "base64_bytes")]
     pub worker_state: Vec<u8>,
