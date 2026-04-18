@@ -12,7 +12,7 @@ use event_store::EventStore;
 use identity::ClientIdentity;
 use llm::{spawn_llm_dispatch_processor, spawn_llm_task_executor, LlmProviderTrait, LlmTask};
 use processor::ProcessorCheckpointStore;
-use retry::RetryPolicy;
+use retry::{RetryPolicy, WorkerRetryResolver};
 use session::command::{CommandPayload, SessionError};
 use session::decision::ClientPayload;
 use session::index::{
@@ -44,6 +44,7 @@ pub struct RuntimeConfig {
     pub sub_agent_executor_workers: usize,
     pub wake_poll_interval: std::time::Duration,
     pub shutdown_timeout: std::time::Duration,
+    pub worker_retry_resolver: Option<Arc<dyn WorkerRetryResolver>>,
 }
 
 impl Default for RuntimeConfig {
@@ -53,6 +54,7 @@ impl Default for RuntimeConfig {
             sub_agent_executor_workers: 2,
             wake_poll_interval: std::time::Duration::from_secs(30),
             shutdown_timeout: std::time::Duration::from_secs(5),
+            worker_retry_resolver: None,
         }
     }
 }
@@ -65,6 +67,7 @@ pub struct Runtime {
     cancel: CancellationToken,
     handles: tokio::sync::Mutex<Vec<JoinHandle<()>>>,
     shutdown_timeout: Duration,
+    worker_retry_resolver: Option<Arc<dyn WorkerRetryResolver>>,
 }
 
 pub struct SubmitClientPayload {
@@ -125,6 +128,14 @@ impl Runtime {
 
         let span = SpanContext::root();
 
+        let worker_retry = match &self.worker_retry_resolver {
+            Some(resolver) => resolver
+                .resolve(&input.tenant_id)
+                .await
+                .unwrap_or_else(RetryPolicy::no_retry),
+            None => RetryPolicy::no_retry(),
+        };
+
         // Create session (ignore if already exists)
         let create_result = execute::<SessionState>(
             &*self.store,
@@ -135,7 +146,7 @@ impl Runtime {
                     agent_id: input.agent_id,
                     identity: input.identity.clone(),
                     ancestry: vec![],
-                    worker_retry: RetryPolicy::no_retry(),
+                    worker_retry,
                 },
                 span: span.child("create_session"),
             },
@@ -365,5 +376,6 @@ pub fn start(
         cancel,
         handles: tokio::sync::Mutex::new(handles),
         shutdown_timeout: config.shutdown_timeout,
+        worker_retry_resolver: config.worker_retry_resolver,
     })
 }

@@ -1,5 +1,6 @@
 use std::cmp::min;
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -63,4 +64,9 @@ impl RetryPolicy {
         self.backoff_secs(attempts)
             .map(|b| now + chrono::Duration::seconds(i64::from(b)))
     }
+}
+
+#[async_trait]
+pub trait WorkerRetryResolver: Send + Sync {
+    async fn resolve(&self, tenant_id: &str) -> Option<RetryPolicy>;
 }
