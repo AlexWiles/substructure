@@ -13,6 +13,7 @@ import {
     tool,
     logging,
     messageHistory,
+    messageHistoryCurrentTurn,
     systemMessage,
     tools,
     llmLoop,
@@ -32,6 +33,7 @@ export interface AgentFactory {
     tool: typeof tool;
     logging: typeof logging;
     messageHistory: typeof messageHistory;
+    messageHistoryCurrentTurn: typeof messageHistoryCurrentTurn;
     systemMessage: typeof systemMessage;
     tools: typeof tools;
     llmLoop: typeof llmLoop;
@@ -48,6 +50,7 @@ function createAgentFactory(): AgentFactory {
     factory.tool = tool;
     factory.logging = logging;
     factory.messageHistory = messageHistory;
+    factory.messageHistoryCurrentTurn = messageHistoryCurrentTurn;
     factory.systemMessage = systemMessage;
     factory.tools = tools;
     factory.llmLoop = llmLoop;

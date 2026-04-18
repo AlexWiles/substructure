@@ -256,6 +256,65 @@ export function messageHistory(): StateContributor<{ messages: Message[] }> &
     });
 }
 
+/**
+ * Like `messageHistory`, but only retains messages from the current turn.
+ * Resets the buffer whenever `req.wire.turn_id` changes.
+ *
+ * Requires callers to supply a distinct `turn_id` per submit. If `turn_id` is
+ * omitted by the caller, this degrades to the same behavior as `messageHistory`.
+ */
+export function messageHistoryCurrentTurn(): StateContributor<{
+    messages: Message[];
+    lastTurnId?: string;
+}> &
+    MiddlewareFn<unknown, { messages: Message[]; lastTurnId?: string }> {
+    return middleware({
+        state: { messages: [] as Message[], lastTurnId: undefined as string | undefined },
+        handler: async (req, next) => {
+            const turnId = req.wire.turn_id;
+            if (turnId !== req.state.lastTurnId) {
+                req.state.messages = [];
+                req.state.lastTurnId = turnId;
+            }
+
+            const history = req.state.messages;
+            const { trigger } = req;
+
+            switch (trigger.type) {
+                case "user.message":
+                case "llm.response":
+                    history.push(trigger.message);
+                    break;
+                case "client.action":
+                    break;
+                case "tool.result":
+                    history.push({
+                        role: "tool",
+                        content: trigger.result.content,
+                        tool_call_id: trigger.result.tool_call_id,
+                        name: trigger.result.name,
+                    });
+                    break;
+            }
+
+            const result = await next(req);
+
+            const actions = result.actions.map((action) => {
+                if (action.type !== "call.llm") return action;
+                return {
+                    ...action,
+                    request: {
+                        ...action.request,
+                        messages: [...history, ...action.request.messages],
+                    },
+                };
+            });
+
+            return { ...result, actions };
+        },
+    });
+}
+
 // ── System message ─────────────────────────────────────────────────────────
 
 export type SystemMessageSelector<S> = (state: S, req: AgentRequest<S>) => string;

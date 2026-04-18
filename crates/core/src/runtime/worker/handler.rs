@@ -94,5 +94,6 @@ fn try_extract(raw: &Event) -> Option<WorkerDecisionRequest> {
         span: event.span.clone(),
         attempts: wd.tracking.retry.attempts,
         deadline: wd.tracking.deadline,
+        turn_id: derived.turn_id.clone(),
     })
 }

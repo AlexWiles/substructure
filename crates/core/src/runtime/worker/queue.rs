@@ -24,6 +24,8 @@ pub struct WorkerDecisionRequest {
     pub span: SpanContext,
     pub attempts: u32,
     pub deadline: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
 }
 
 pub struct DequeueFilter {

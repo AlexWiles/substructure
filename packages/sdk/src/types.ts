@@ -557,6 +557,7 @@ export interface WorkerDecisionRequestWire {
     span: SpanContext;
     attempts: number;
     deadline?: DateTime;
+    turn_id?: string;
 }
 
 export interface SubmitRequest {
