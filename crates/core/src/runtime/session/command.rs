@@ -8,7 +8,7 @@ use super::events::*;
 use super::message::{Content, ContentPart, ImageUrl, Message, Role};
 use super::state::{new_call_id, EffectStatus, SessionState, SessionStatus};
 use crate::runtime::identity::ClientIdentity;
-use crate::runtime::llm::{LlmRequest, LlmResponse};
+use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse};
 use crate::runtime::retry::RetryPolicy;
 
 #[derive(Debug, Clone)]
@@ -45,6 +45,8 @@ pub enum CommandPayload {
         call_id: String,
         error: String,
         retryable: bool,
+        code: Option<ErrorCode>,
+        detail: Option<serde_json::Value>,
     },
     RequestToolCall {
         tool_call_id: String,
@@ -362,6 +364,8 @@ impl SessionState {
                 call_id,
                 error,
                 retryable,
+                code,
+                detail,
             } => {
                 let Some(call) = self.llm_calls.get(&call_id) else {
                     return Ok(vec![]);
@@ -373,16 +377,20 @@ impl SessionState {
                     call_id: call_id.clone(),
                     error: error.clone(),
                     retryable,
-                    source: None,
+                    code: code.clone(),
+                    detail: detail.clone(),
                 })];
                 if call
                     .tracking
                     .retry_policy
                     .exhausted(&call.tracking.retry, retryable)
                 {
-                    events.push(
-                        self.emit_decision_request(DecisionTrigger::LlmError { call_id, error }),
-                    );
+                    events.push(self.emit_decision_request(DecisionTrigger::LlmError {
+                        call_id,
+                        error,
+                        code,
+                        detail,
+                    }));
                 }
                 Ok(events)
             }
@@ -776,7 +784,8 @@ impl SessionState {
                     call_id: call.call_id.clone(),
                     error: "deadline exceeded".to_string(),
                     retryable: true,
-                    source: None,
+                    code: Some(ErrorCode::DeadlineExceeded),
+                    detail: None,
                 })]);
             }
         }

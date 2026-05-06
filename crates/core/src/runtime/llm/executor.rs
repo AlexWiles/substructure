@@ -9,7 +9,7 @@ use crate::runtime::event_store::EventStore;
 use crate::runtime::session::command::CommandPayload;
 use crate::runtime::session::state::SessionState;
 
-use super::{LlmProviderTrait, LlmTask};
+use super::{CallContext, ErrorCode, LlmProviderTrait, LlmTask};
 
 pub fn spawn_llm_task_executor(
     store: Arc<dyn EventStore>,
@@ -39,8 +39,16 @@ pub fn spawn_llm_task_executor(
 
                 let command = match resolved {
                     Ok(client) => {
-                        let result = client.call(&task.request).await;
-                        match result {
+                        let ctx = CallContext {
+                            session_id: &task.session_id,
+                            tenant_id: &task.tenant_id,
+                            agent_id: &task.agent_id,
+                            call_id: &task.call_id,
+                            llm_client: &task.llm_client,
+                            identity: &task.identity,
+                            ancestry: &task.ancestry,
+                        };
+                        match client.call(&task.request, &ctx).await {
                             Ok(response) => CommandPayload::CompleteLlmCall {
                                 call_id: task.call_id.clone(),
                                 response,
@@ -49,6 +57,8 @@ pub fn spawn_llm_task_executor(
                                 call_id: task.call_id.clone(),
                                 error: err.message,
                                 retryable: err.retryable,
+                                code: err.code,
+                                detail: err.detail,
                             },
                         }
                     }
@@ -56,6 +66,8 @@ pub fn spawn_llm_task_executor(
                         call_id: task.call_id.clone(),
                         error: err,
                         retryable: false,
+                        code: Some(ErrorCode::ProviderError),
+                        detail: None,
                     },
                 };
 

@@ -68,10 +68,30 @@ pub trait LlmProviderTrait: Send + Sync {
     ) -> Result<Arc<dyn LlmCallable>, String>;
 }
 
+/// Call-site context. Carries everything a decorator might need beyond the
+/// request itself. Constructed by the runtime; non-exhaustive so we can add
+/// fields later without breaking external `LlmCallable` impls.
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub struct CallContext<'a> {
+    pub session_id: &'a str,
+    pub tenant_id: &'a str,
+    pub agent_id: &'a str,
+    pub call_id: &'a str,
+    pub llm_client: &'a str,
+    pub identity: &'a ClientIdentity,
+    /// Parent chain, root-last. Empty for top-level sessions.
+    pub ancestry: &'a [String],
+}
+
 /// Trait for calling an LLM (single call or streaming).
 #[async_trait]
 pub trait LlmCallable: Send + Sync + 'static {
-    async fn call(&self, request: &LlmRequest) -> Result<LlmResponse, LlmCallError>;
+    async fn call(
+        &self,
+        request: &LlmRequest,
+        ctx: &CallContext<'_>,
+    ) -> Result<LlmResponse, LlmCallError>;
 
     /// Streaming variant — sends deltas through `tx` while the call is
     /// in progress, then returns the final assembled response.
@@ -79,16 +99,29 @@ pub trait LlmCallable: Send + Sync + 'static {
     async fn call_streaming(
         &self,
         request: &LlmRequest,
+        ctx: &CallContext<'_>,
         _tx: tokio::sync::mpsc::UnboundedSender<StreamDelta>,
     ) -> Result<LlmResponse, LlmCallError> {
-        self.call(request).await
+        self.call(request, ctx).await
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    ProviderError,
+    RateLimited,
+    Refused,
+    BudgetExceeded,
+    DeadlineExceeded,
 }
 
 #[derive(Debug, Clone)]
 pub struct LlmCallError {
     pub message: String,
     pub retryable: bool,
+    pub code: Option<ErrorCode>,
+    pub detail: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]

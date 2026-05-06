@@ -180,7 +180,7 @@ export type DecisionTrigger =
           usage?: Record<string, unknown>;
           cost?: Decimal;
       }
-    | { type: "llm.error"; call_id: string; error: string }
+    | { type: "llm.error"; call_id: string; error: string; code?: string; detail?: unknown }
     | {
           type: "tool.execute";
           tool_call_id: string;
@@ -269,7 +269,8 @@ export interface LlmCallErrored {
     call_id: string;
     error: string;
     retryable: boolean;
-    source?: unknown;
+    code?: string;
+    detail?: unknown;
 }
 
 export interface ToolCallRequested {

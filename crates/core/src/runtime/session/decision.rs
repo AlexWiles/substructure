@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::events::ToolHandler;
 use super::message::Message;
-use crate::runtime::llm::LlmRequest;
+use crate::runtime::llm::{ErrorCode, LlmRequest};
 use crate::runtime::retry::RetryPolicy;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,7 +59,14 @@ pub enum DecisionTrigger {
         cost: Option<Decimal>,
     },
     #[serde(rename = "llm.error")]
-    LlmError { call_id: String, error: String },
+    LlmError {
+        call_id: String,
+        error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<ErrorCode>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<serde_json::Value>,
+    },
     #[serde(rename = "tool.execute")]
     ToolExecute {
         tool_call_id: String,

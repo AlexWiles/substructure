@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use super::decision::DecisionTrigger;
 use super::message::Message;
 use crate::runtime::identity::ClientIdentity;
-use crate::runtime::llm::{LlmRequest, LlmResponse};
+use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse};
 use crate::runtime::retry::RetryPolicy;
 use crate::runtime::serde_helpers::base64_bytes;
 
@@ -109,7 +109,9 @@ pub struct LlmCallErrored {
     #[serde(default = "default_true")]
     pub retryable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<serde_json::Value>,
+    pub code: Option<ErrorCode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

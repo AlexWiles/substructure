@@ -10,8 +10,8 @@ use rust_decimal::Decimal;
 
 use crate::identity::ClientIdentity;
 use crate::llm::{
-    LlmCallError, LlmCallable, LlmProviderTrait, LlmRequest, LlmResponse, LlmTool, ResponseImage,
-    StreamDelta,
+    CallContext, ErrorCode, LlmCallError, LlmCallable, LlmProviderTrait, LlmRequest, LlmResponse,
+    LlmTool, ResponseImage, StreamDelta,
 };
 use crate::session::message::{ToolCall, ToolCallFunction};
 
@@ -283,6 +283,8 @@ impl OpenRouterClient {
             .map_err(|e| LlmCallError {
                 message: format!("HTTP request failed: {e}"),
                 retryable: e.is_timeout() || e.is_connect(),
+                code: Some(ErrorCode::ProviderError),
+                detail: None,
             })
     }
 }
@@ -290,20 +292,33 @@ impl OpenRouterClient {
 fn classify_error(status: reqwest::StatusCode, body: &str) -> LlmCallError {
     let status_code = status.as_u16();
     let retryable = status.is_server_error() || status_code == 408 || status_code == 429;
+    let code = if status_code == 429 {
+        ErrorCode::RateLimited
+    } else {
+        ErrorCode::ProviderError
+    };
     LlmCallError {
         message: format!("OpenRouter API error {status}: {body}"),
         retryable,
+        code: Some(code),
+        detail: None,
     }
 }
 
 #[async_trait]
 impl LlmCallable for OpenRouterClient {
-    async fn call(&self, request: &LlmRequest) -> Result<LlmResponse, LlmCallError> {
+    async fn call(
+        &self,
+        request: &LlmRequest,
+        _ctx: &CallContext<'_>,
+    ) -> Result<LlmResponse, LlmCallError> {
         let resp = self.post_chat_completion(request, false).await?;
         let status = resp.status();
         let body = resp.text().await.map_err(|e| LlmCallError {
             message: format!("read body: {e}"),
             retryable: true,
+            code: Some(ErrorCode::ProviderError),
+            detail: None,
         })?;
 
         if !status.is_success() {
@@ -314,6 +329,8 @@ impl LlmCallable for OpenRouterClient {
             serde_json::from_str(&body).map_err(|e| LlmCallError {
                 message: format!("parse response: {e}"),
                 retryable: false,
+                code: Some(ErrorCode::ProviderError),
+                detail: None,
             })?;
 
         Ok(parsed.into_llm_response())
@@ -322,6 +339,7 @@ impl LlmCallable for OpenRouterClient {
     async fn call_streaming(
         &self,
         request: &LlmRequest,
+        _ctx: &CallContext<'_>,
         chunk_tx: UnboundedSender<StreamDelta>,
     ) -> Result<LlmResponse, LlmCallError> {
         let resp = self.post_chat_completion(request, true).await?;
@@ -331,6 +349,8 @@ impl LlmCallable for OpenRouterClient {
             let body = resp.text().await.map_err(|e| LlmCallError {
                 message: format!("read body: {e}"),
                 retryable: true,
+                code: Some(ErrorCode::ProviderError),
+                detail: None,
             })?;
             return Err(classify_error(status, &body));
         }
@@ -350,6 +370,8 @@ impl LlmCallable for OpenRouterClient {
             let bytes = chunk_result.map_err(|e| LlmCallError {
                 message: format!("stream read: {e}"),
                 retryable: true,
+                code: Some(ErrorCode::ProviderError),
+                detail: None,
             })?;
             line_buf.push_str(&String::from_utf8_lossy(&bytes));
 

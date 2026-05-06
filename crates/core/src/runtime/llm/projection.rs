@@ -50,24 +50,28 @@ impl EventProcessor for LlmDispatchProjection {
             _ => return Ok(()),
         };
 
-        let identity = event
-            .derived
-            .as_ref()
-            .and_then(|d| d.identity.as_ref())
-            .cloned()
-            .ok_or_else(|| {
-                ProcessorError::Apply("missing identity in derived state".to_string())
-            })?;
+        let derived = event.derived.as_ref().ok_or_else(|| {
+            ProcessorError::Apply("missing derived state on llm event".to_string())
+        })?;
+        let identity = derived.identity.clone().ok_or_else(|| {
+            ProcessorError::Apply("missing identity in derived state".to_string())
+        })?;
+        let agent_id = derived.agent_id.clone().ok_or_else(|| {
+            ProcessorError::Apply("missing agent_id in derived state".to_string())
+        })?;
+        let ancestry = derived.ancestry.clone();
 
         let shard_key = raw.aggregate_id.clone();
 
         let task = LlmTask {
             session_id: event.aggregate_id,
             tenant_id: event.tenant_id,
+            agent_id,
             call_id: req.call_id.clone(),
             llm_client: req.llm_client.clone(),
             request: req.request.clone(),
             identity,
+            ancestry,
             span: event.span,
         };
 

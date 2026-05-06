@@ -6,10 +6,13 @@ use crate::runtime::span::SpanContext;
 pub struct LlmTask {
     pub session_id: String,
     pub tenant_id: String,
+    pub agent_id: String,
     pub call_id: String,
     pub llm_client: String,
     pub request: LlmRequest,
     pub identity: ClientIdentity,
+    /// Parent chain, root-last. Empty for top-level sessions.
+    pub ancestry: Vec<String>,
     pub span: SpanContext,
 }
 
