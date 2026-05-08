@@ -68,10 +68,6 @@ pub trait LlmProviderTrait: Send + Sync {
     ) -> Result<Arc<dyn LlmCallable>, String>;
 }
 
-/// Call-site context. Carries everything a decorator might need beyond the
-/// request itself. Constructed by the runtime; non-exhaustive so we can add
-/// fields later without breaking external `LlmCallable` impls.
-#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct CallContext<'a> {
     pub session_id: &'a str,
