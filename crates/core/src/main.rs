@@ -142,24 +142,6 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!(url, "startup worker registered (signing enabled)");
             }
 
-            let admin_routes = admin_http::router(admin_http::AdminHttpState {
-                runtime: rt.clone(),
-                auth: Arc::new(NoopAuthResolver),
-            });
-            let client_routes = client_http::router(ClientHttpState {
-                runtime: rt.clone(),
-                auth: client_auth,
-            });
-            let worker_routes = worker_http::router(WorkerHttpState {
-                runtime: rt.clone(),
-                auth: worker_auth,
-                client_token_issuer,
-            });
-            let server = SubstructureServer::new(vec![admin_routes, client_routes, worker_routes]);
-
-            let addr = format!("{host}:{port}");
-            tracing::info!(%addr, "listening");
-            let listener = TcpListener::bind(&addr).await?;
             let shutdown = tokio_util::sync::CancellationToken::new();
             let signal_token = shutdown.clone();
             tokio::spawn(async move {
@@ -167,6 +149,28 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!("shutdown signal received");
                 signal_token.cancel();
             });
+
+            let admin_routes = admin_http::router(admin_http::AdminHttpState {
+                runtime: rt.clone(),
+                auth: Arc::new(NoopAuthResolver),
+                shutdown: shutdown.clone(),
+            });
+            let client_routes = client_http::router(ClientHttpState {
+                runtime: rt.clone(),
+                auth: client_auth,
+                shutdown: shutdown.clone(),
+            });
+            let worker_routes = worker_http::router(WorkerHttpState {
+                runtime: rt.clone(),
+                auth: worker_auth,
+                client_token_issuer,
+                shutdown: shutdown.clone(),
+            });
+            let server = SubstructureServer::new(vec![admin_routes, client_routes, worker_routes]);
+
+            let addr = format!("{host}:{port}");
+            tracing::info!(%addr, "listening");
+            let listener = TcpListener::bind(&addr).await?;
             server.serve(listener, shutdown).await
         }
     }

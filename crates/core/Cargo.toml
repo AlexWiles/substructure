@@ -16,6 +16,7 @@ axum = { version = "0.8", features = ["default"] }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
+futures-util = "0.3"
 hex = "0.4"
 hmac = "0.12"
 jsonwebtoken = "9"

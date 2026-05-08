@@ -4,9 +4,9 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use base64::Engine;
+use futures_util::StreamExt;
 use serde::Deserialize;
 use tokio_stream::wrappers::ReceiverStream;
-use tokio_stream::StreamExt;
 
 use crate::event_store::{AggregateSort, EventFilter};
 use crate::session::index::{SessionCursor, SessionFilter};
@@ -187,16 +187,18 @@ pub async fn stream_session_events(
         }
     });
 
-    let stream = ReceiverStream::new(rx).map(|event| {
-        let event_type = event.payload_type().to_owned();
-        let data = serde_json::to_string(&event).unwrap_or_default();
-        Ok::<_, std::convert::Infallible>(
-            SseEvent::default()
-                .id(event.sequence.to_string())
-                .event(event_type)
-                .data(data),
-        )
-    });
+    let stream = ReceiverStream::new(rx)
+        .take_until(state.shutdown.clone().cancelled_owned())
+        .map(|event| {
+            let event_type = event.payload_type().to_owned();
+            let data = serde_json::to_string(&event).unwrap_or_default();
+            Ok::<_, std::convert::Infallible>(
+                SseEvent::default()
+                    .id(event.sequence.to_string())
+                    .event(event_type)
+                    .data(data),
+            )
+        });
 
     Sse::new(stream)
         .keep_alive(KeepAlive::default())

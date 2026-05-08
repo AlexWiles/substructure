@@ -9,6 +9,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 
+use tokio_util::sync::CancellationToken;
+
 use crate::transport::auth::{AuthError, AuthResolver};
 use crate::Runtime;
 
@@ -16,6 +18,7 @@ use crate::Runtime;
 pub struct AdminHttpState {
     pub runtime: Arc<Runtime>,
     pub auth: Arc<dyn AuthResolver>,
+    pub shutdown: CancellationToken,
 }
 
 pub fn router(state: AdminHttpState) -> Router {
