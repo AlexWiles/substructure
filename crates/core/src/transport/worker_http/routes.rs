@@ -31,7 +31,6 @@ pub async fn submit(
         .child("worker_submit");
 
     let result = state
-        .adapter
         .runtime
         .submit_decision(SubmitDecision {
             session_id: req.session_id,
@@ -128,7 +127,6 @@ pub async fn submit_client_payload(
     };
 
     let result = state
-        .adapter
         .runtime
         .submit_client_payload(SubmitClientPayload {
             session_id,

@@ -151,7 +151,7 @@ async fn main() -> anyhow::Result<()> {
                 auth: client_auth,
             });
             let worker_routes = worker_http::router(WorkerHttpState {
-                adapter,
+                runtime: rt.clone(),
                 auth: worker_auth,
                 client_token_issuer,
             });

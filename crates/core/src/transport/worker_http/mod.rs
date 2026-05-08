@@ -11,11 +11,11 @@ use axum::routing::post;
 use axum::{Json, Router};
 
 use crate::transport::auth::{AuthError, AuthResolver, JwtHs256ClientTokenAuthResolver};
-use crate::transport::push::PushAdapter;
+use crate::Runtime;
 
 #[derive(Clone)]
 pub struct WorkerHttpState {
-    pub adapter: Arc<PushAdapter>,
+    pub runtime: Arc<Runtime>,
     pub auth: Arc<dyn AuthResolver>,
     pub client_token_issuer: Arc<JwtHs256ClientTokenAuthResolver>,
 }
