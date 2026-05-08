@@ -35,7 +35,7 @@ CREATE INDEX IF NOT EXISTS idx_session_index_wake_at
 ";
 
 #[derive(Iden)]
-enum SessionIndexRows {
+enum SessionIndex {
     Table,
     SessionId,
     TenantId,
@@ -98,25 +98,25 @@ fn do_list_sessions(
 
     let (order_col, order_dir, cursor_predicate, session_id_order) = match filter.sort {
         AggregateSort::LastEventDesc => (
-            SessionIndexRows::LastEventAt,
+            SessionIndex::LastEventAt,
             Order::Desc,
             "(last_event_at < ? OR (last_event_at = ? AND session_id < ?))",
             Order::Desc,
         ),
         AggregateSort::FirstEventAsc => (
-            SessionIndexRows::FirstEventAt,
+            SessionIndex::FirstEventAt,
             Order::Asc,
             "(first_event_at > ? OR (first_event_at = ? AND session_id > ?))",
             Order::Asc,
         ),
         AggregateSort::FirstEventDesc => (
-            SessionIndexRows::FirstEventAt,
+            SessionIndex::FirstEventAt,
             Order::Desc,
             "(first_event_at < ? OR (first_event_at = ? AND session_id < ?))",
             Order::Desc,
         ),
         AggregateSort::WakeAtAsc => (
-            SessionIndexRows::WakeAt,
+            SessionIndex::WakeAt,
             Order::Asc,
             "(wake_at > ? OR (wake_at = ? AND session_id > ?))",
             Order::Asc,
@@ -125,27 +125,27 @@ fn do_list_sessions(
 
     let mut q = Query::select()
         .columns([
-            SessionIndexRows::SessionId,
-            SessionIndexRows::TenantId,
-            SessionIndexRows::StreamVersion,
-            SessionIndexRows::FirstEventAt,
-            SessionIndexRows::LastEventAt,
-            SessionIndexRows::WakeAt,
-            SessionIndexRows::TopLevel,
-            SessionIndexRows::AgentId,
-            SessionIndexRows::Cost,
-            SessionIndexRows::SubAgentCost,
-            SessionIndexRows::StatusJson,
-            SessionIndexRows::TurnId,
+            SessionIndex::SessionId,
+            SessionIndex::TenantId,
+            SessionIndex::StreamVersion,
+            SessionIndex::FirstEventAt,
+            SessionIndex::LastEventAt,
+            SessionIndex::WakeAt,
+            SessionIndex::TopLevel,
+            SessionIndex::AgentId,
+            SessionIndex::Cost,
+            SessionIndex::SubAgentCost,
+            SessionIndex::StatusJson,
+            SessionIndex::TurnId,
         ])
-        .from(SessionIndexRows::Table)
+        .from(SessionIndex::Table)
         .apply_if(filter.tenant_id.as_ref(), |q, v| {
-            q.and_where(Expr::col(SessionIndexRows::TenantId).eq(v));
+            q.and_where(Expr::col(SessionIndex::TenantId).eq(v));
         })
         .take();
 
     if filter.top_level {
-        q.and_where(Expr::col(SessionIndexRows::TopLevel).eq(1));
+        q.and_where(Expr::col(SessionIndex::TopLevel).eq(1));
     }
 
     if let Some(ref cursor) = filter.cursor {
@@ -158,7 +158,7 @@ fn do_list_sessions(
     }
 
     q.order_by(order_col, order_dir);
-    q.order_by(SessionIndexRows::SessionId, session_id_order);
+    q.order_by(SessionIndex::SessionId, session_id_order);
     q.limit((fetch_limit + 1) as u64);
 
     let (sql, values) = q.build(SqliteQueryBuilder);
