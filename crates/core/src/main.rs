@@ -160,7 +160,14 @@ async fn main() -> anyhow::Result<()> {
             let addr = format!("{host}:{port}");
             tracing::info!(%addr, "listening");
             let listener = TcpListener::bind(&addr).await?;
-            server.serve(listener).await
+            let shutdown = tokio_util::sync::CancellationToken::new();
+            let signal_token = shutdown.clone();
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                tracing::info!("shutdown signal received");
+                signal_token.cancel();
+            });
+            server.serve(listener, shutdown).await
         }
     }
 }

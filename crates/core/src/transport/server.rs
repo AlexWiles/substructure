@@ -1,5 +1,6 @@
 use axum::Router;
 use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 
 pub struct SubstructureServer {
     router: Router,
@@ -14,12 +15,18 @@ impl SubstructureServer {
         Self { router }
     }
 
-    pub async fn serve(self, listener: TcpListener) -> anyhow::Result<()> {
+    pub async fn serve(
+        self,
+        listener: TcpListener,
+        shutdown: CancellationToken,
+    ) -> anyhow::Result<()> {
         let app = self
             .router
             .layer(tower_http::cors::CorsLayer::permissive())
             .layer(tower_http::trace::TraceLayer::new_for_http());
-        axum::serve(listener, app).await?;
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown.cancelled_owned())
+            .await?;
         Ok(())
     }
 }
