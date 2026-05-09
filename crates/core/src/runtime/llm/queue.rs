@@ -8,6 +8,7 @@ pub struct LlmTask {
     pub tenant_id: String,
     pub agent_id: String,
     pub call_id: String,
+    pub attempt: u32,
     pub llm_client: String,
     pub request: LlmRequest,
     pub identity: ClientIdentity,

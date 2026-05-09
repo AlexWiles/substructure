@@ -39,10 +39,12 @@ pub enum CommandPayload {
     },
     CompleteLlmCall {
         call_id: String,
+        attempt: u32,
         response: LlmResponse,
     },
     FailLlmCall {
         call_id: String,
+        attempt: u32,
         error: String,
         retryable: bool,
         code: Option<ErrorCode>,
@@ -295,6 +297,7 @@ impl SessionState {
                 if issue {
                     Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {
                         call_id,
+                        attempt: 0,
                         request,
                         stream,
                         llm_client,
@@ -305,7 +308,11 @@ impl SessionState {
                 }
             }
 
-            CommandPayload::CompleteLlmCall { call_id, response } => {
+            CommandPayload::CompleteLlmCall {
+                call_id,
+                attempt,
+                response,
+            } => {
                 match self.llm_calls.get(&call_id).map(|c| &c.tracking.status) {
                     Some(&EffectStatus::Pending) => {
                         let truncated = response.finish_reason.as_deref() == Some("length");
@@ -342,6 +349,7 @@ impl SessionState {
                         Ok(vec![
                             EventPayload::LlmCallCompleted(LlmCallCompleted {
                                 call_id: call_id.clone(),
+                                attempt,
                                 response,
                             }),
                             EventPayload::NewMessage(NewMessage {
@@ -362,6 +370,7 @@ impl SessionState {
 
             CommandPayload::FailLlmCall {
                 call_id,
+                attempt,
                 error,
                 retryable,
                 code,
@@ -375,6 +384,7 @@ impl SessionState {
                 }
                 let mut events = vec![EventPayload::LlmCallErrored(LlmCallErrored {
                     call_id: call_id.clone(),
+                    attempt,
                     error: error.clone(),
                     retryable,
                     code: code.clone(),
@@ -782,6 +792,7 @@ impl SessionState {
             {
                 return Ok(vec![EventPayload::LlmCallErrored(LlmCallErrored {
                     call_id: call.call_id.clone(),
+                    attempt: call.tracking.retry.attempts,
                     error: "deadline exceeded".to_string(),
                     retryable: true,
                     code: Some(ErrorCode::DeadlineExceeded),
@@ -811,6 +822,7 @@ impl SessionState {
                     if next_at <= now {
                         return Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {
                             call_id: call.call_id.clone(),
+                            attempt: call.tracking.retry.attempts,
                             request: call.request.clone(),
                             stream: call.stream,
                             llm_client: call.llm_client.clone(),

@@ -84,6 +84,7 @@ pub struct NewMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmCallRequested {
     pub call_id: String,
+    pub attempt: u32,
     pub request: LlmRequest,
     pub stream: bool,
     /// Which LLM provider to use (e.g. "openrouter", "mock").
@@ -95,6 +96,7 @@ pub struct LlmCallRequested {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmCallCompleted {
     pub call_id: String,
+    pub attempt: u32,
     pub response: LlmResponse,
 }
 
@@ -105,6 +107,7 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmCallErrored {
     pub call_id: String,
+    pub attempt: u32,
     pub error: String,
     #[serde(default = "default_true")]
     pub retryable: bool,

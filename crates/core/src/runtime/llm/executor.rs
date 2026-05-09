@@ -51,10 +51,12 @@ pub fn spawn_llm_task_executor(
                         match client.call(&task.request, &ctx).await {
                             Ok(response) => CommandPayload::CompleteLlmCall {
                                 call_id: task.call_id.clone(),
+                                attempt: task.attempt,
                                 response,
                             },
                             Err(err) => CommandPayload::FailLlmCall {
                                 call_id: task.call_id.clone(),
+                                attempt: task.attempt,
                                 error: err.message,
                                 retryable: err.retryable,
                                 code: err.code,
@@ -64,6 +66,7 @@ pub fn spawn_llm_task_executor(
                     }
                     Err(err) => CommandPayload::FailLlmCall {
                         call_id: task.call_id.clone(),
+                        attempt: task.attempt,
                         error: err,
                         retryable: false,
                         code: Some(ErrorCode::ProviderError),

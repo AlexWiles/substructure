@@ -68,6 +68,7 @@ impl EventProcessor for LlmDispatchProjection {
             tenant_id: event.tenant_id,
             agent_id,
             call_id: req.call_id.clone(),
+            attempt: req.attempt,
             llm_client: req.llm_client.clone(),
             request: req.request.clone(),
             identity,
