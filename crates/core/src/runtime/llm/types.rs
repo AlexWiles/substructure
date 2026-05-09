@@ -74,6 +74,7 @@ pub struct CallContext<'a> {
     pub tenant_id: &'a str,
     pub agent_id: &'a str,
     pub call_id: &'a str,
+    pub attempt: u32,
     pub llm_client: &'a str,
     pub identity: &'a ClientIdentity,
     /// Parent chain, root-last. Empty for top-level sessions.

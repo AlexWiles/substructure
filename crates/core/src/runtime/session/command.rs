@@ -312,61 +312,59 @@ impl SessionState {
                 call_id,
                 attempt,
                 response,
-            } => {
-                match self.llm_calls.get(&call_id).map(|c| &c.tracking.status) {
-                    Some(&EffectStatus::Pending) => {
-                        let truncated = response.finish_reason.as_deref() == Some("length");
-                        let usage = response.usage.clone();
-                        let cost = response.cost;
-                        let tool_calls = if response.tool_calls.is_empty() {
-                            None
-                        } else {
-                            Some(response.tool_calls.clone())
-                        };
-                        let content = if response.images.is_empty() {
-                            response.content.clone().map(Content::Text)
-                        } else {
-                            let mut parts: Vec<ContentPart> = Vec::new();
-                            if let Some(text) = &response.content {
-                                parts.push(ContentPart::Text { text: text.clone() });
-                            }
-                            for img in &response.images {
-                                parts.push(ContentPart::ImageUrl {
-                                    image_url: ImageUrl {
-                                        url: img.url.clone(),
-                                    },
-                                });
-                            }
-                            Some(Content::Parts(parts))
-                        };
-                        let message = Message {
-                            role: Role::Assistant,
-                            content,
-                            tool_calls,
-                            tool_call_id: None,
-                            name: None,
-                        };
-                        Ok(vec![
-                            EventPayload::LlmCallCompleted(LlmCallCompleted {
-                                call_id: call_id.clone(),
-                                attempt,
-                                response,
-                            }),
-                            EventPayload::NewMessage(NewMessage {
-                                message: message.clone(),
-                            }),
-                            self.emit_decision_request(DecisionTrigger::LlmResponse {
-                                call_id,
-                                message,
-                                truncated,
-                                usage,
-                                cost,
-                            }),
-                        ])
-                    }
-                    _ => Ok(vec![]),
+            } => match self.llm_calls.get(&call_id).map(|c| &c.tracking.status) {
+                Some(&EffectStatus::Pending) => {
+                    let truncated = response.finish_reason.as_deref() == Some("length");
+                    let usage = response.usage.clone();
+                    let cost = response.cost;
+                    let tool_calls = if response.tool_calls.is_empty() {
+                        None
+                    } else {
+                        Some(response.tool_calls.clone())
+                    };
+                    let content = if response.images.is_empty() {
+                        response.content.clone().map(Content::Text)
+                    } else {
+                        let mut parts: Vec<ContentPart> = Vec::new();
+                        if let Some(text) = &response.content {
+                            parts.push(ContentPart::Text { text: text.clone() });
+                        }
+                        for img in &response.images {
+                            parts.push(ContentPart::ImageUrl {
+                                image_url: ImageUrl {
+                                    url: img.url.clone(),
+                                },
+                            });
+                        }
+                        Some(Content::Parts(parts))
+                    };
+                    let message = Message {
+                        role: Role::Assistant,
+                        content,
+                        tool_calls,
+                        tool_call_id: None,
+                        name: None,
+                    };
+                    Ok(vec![
+                        EventPayload::LlmCallCompleted(LlmCallCompleted {
+                            call_id: call_id.clone(),
+                            attempt,
+                            response,
+                        }),
+                        EventPayload::NewMessage(NewMessage {
+                            message: message.clone(),
+                        }),
+                        self.emit_decision_request(DecisionTrigger::LlmResponse {
+                            call_id,
+                            message,
+                            truncated,
+                            usage,
+                            cost,
+                        }),
+                    ])
                 }
-            }
+                _ => Ok(vec![]),
+            },
 
             CommandPayload::FailLlmCall {
                 call_id,

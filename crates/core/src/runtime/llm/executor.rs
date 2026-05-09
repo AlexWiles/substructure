@@ -44,6 +44,7 @@ pub fn spawn_llm_task_executor(
                             tenant_id: &task.tenant_id,
                             agent_id: &task.agent_id,
                             call_id: &task.call_id,
+                            attempt: task.attempt,
                             llm_client: &task.llm_client,
                             identity: &task.identity,
                             ancestry: &task.ancestry,
