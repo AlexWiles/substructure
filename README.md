@@ -1,8 +1,8 @@
 # substructure.ai
 
-A durable runtime for AI agents. You own the agent logic and tool execution -- Substructure handles state persistence, retries, cost tracking, sub-agent orchestration, and client connections.
+A durable runtime for AI agents. You own the agent logic and tool execution. Substructure handles state persistence, retries, cost tracking, sub-agent orchestration, and client connections.
 
-The runtime runs a decision loop: it sends your handler a trigger (user message, LLM response, tool result) and your handler returns actions (call an LLM, execute a tool, spawn a sub-agent, finish). Every decision and result is persisted. If something crashes, the runtime replays the event log and picks up where it left off.
+The runtime executes a decision loop: it sends your handler a trigger (user message, LLM response, tool result) and your handler returns actions (call an LLM, execute a tool, spawn a sub-agent, finish). Every decision and result is persisted. If something crashes, the runtime replays the event log and picks up where it left off.
 
 ## How it works
 
@@ -10,7 +10,7 @@ Three components:
 
 - **Server** -- Orchestration layer written in Rust. Persists state, retries failures, tracks costs, manages sub-agents. Runs standalone or embeds in your process.
 - **Workers** -- Your agent logic as an HTTP handler. Receives a decision trigger, returns actions. Runs in your codebase with your dependencies.
-- **Clients** -- Submit work and stream events back. Works service-to-service from backends or real-time from browsers with JWT auth.
+- **Clients** -- Submit work and stream events back. Works service-to-service from backends or real-time from browsers.
 
 ## Install
 
