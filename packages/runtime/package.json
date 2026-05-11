@@ -32,8 +32,7 @@
       "aarch64-apple-darwin",
       "x86_64-apple-darwin",
       "aarch64-unknown-linux-gnu",
-      "x86_64-unknown-linux-gnu",
-      "x86_64-pc-windows-msvc"
+      "x86_64-unknown-linux-gnu"
     ]
   },
   "scripts": {
@@ -46,7 +45,6 @@
     "@substructure.ai/runtime-darwin-arm64": "0.1.0",
     "@substructure.ai/runtime-darwin-x64": "0.1.0",
     "@substructure.ai/runtime-linux-arm64": "0.1.0",
-    "@substructure.ai/runtime-linux-x64": "0.1.0",
-    "@substructure.ai/runtime-win32-x64": "0.1.0"
+    "@substructure.ai/runtime-linux-x64": "0.1.0"
   }
 }

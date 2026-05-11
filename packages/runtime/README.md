@@ -12,7 +12,7 @@ npm i @substructure.ai/runtime
 
 This pulls a platform-specific native binding for your OS and architecture.
 
-Supported platforms: macOS (arm64, x64), Linux (arm64, x64), Windows (x64).
+Supported platforms: macOS (arm64, x64), Linux (arm64, x64).
 
 ## Usage
 

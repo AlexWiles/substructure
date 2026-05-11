@@ -6,7 +6,6 @@ const PLATFORMS = {
   "darwin-x64": "@substructure.ai/runtime-darwin-x64",
   "linux-arm64": "@substructure.ai/runtime-linux-arm64",
   "linux-x64": "@substructure.ai/runtime-linux-x64",
-  "win32-x64": "@substructure.ai/runtime-win32-x64",
 };
 
 function loadBinding() {

@@ -39,10 +39,6 @@ jobs:
             platform: linux-arm64
             bin: substructure
             cross: true
-          - target: x86_64-pc-windows-msvc
-            host: windows-2025
-            platform: win32-x64
-            bin: substructure.exe
 
     runs-on: ${{ matrix.host }}
 

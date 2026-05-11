@@ -20,7 +20,6 @@ const TARGETS = {
   "x86_64-apple-darwin":       { platform: "darwin-x64",   os: "darwin", cpu: "x64",   binName: "substructure" },
   "aarch64-unknown-linux-gnu": { platform: "linux-arm64",  os: "linux",  cpu: "arm64", binName: "substructure", libc: "glibc" },
   "x86_64-unknown-linux-gnu":  { platform: "linux-x64",    os: "linux",  cpu: "x64",   binName: "substructure", libc: "glibc" },
-  "x86_64-pc-windows-msvc":    { platform: "win32-x64",    os: "win32",  cpu: "x64",   binName: "substructure.exe" },
 };
 
 function parseArgs(argv) {
@@ -61,7 +60,7 @@ mkdirSync(binDir, { recursive: true });
 
 const destBinary = join(binDir, meta.binName);
 copyFileSync(sourceBinary, destBinary);
-if (meta.os !== "win32") chmodSync(destBinary, 0o755);
+chmodSync(destBinary, 0o755);
 
 const pkg = {
   name: `@substructure.ai/cli-${meta.platform}`,

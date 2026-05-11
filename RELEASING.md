@@ -28,7 +28,6 @@ Pushing the tag triggers `.github/workflows/release.yml`, which:
 1. Builds the Rust CLI binary and the NAPI `.node` for each of:
    - `aarch64-apple-darwin`, `x86_64-apple-darwin`
    - `aarch64-unknown-linux-gnu` (cross-compiled), `x86_64-unknown-linux-gnu`
-   - `x86_64-pc-windows-msvc`
 2. For each target, builds an `@substructure.ai/cli-<platform>` package directory containing the binary.
 3. Publishes everything in order: runtime platform packages → `@substructure.ai/runtime` → CLI platform packages → `@substructure.ai/cli` → `@substructure.ai/sdk`.
 
