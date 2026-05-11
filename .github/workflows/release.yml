@@ -171,6 +171,10 @@ jobs:
           path: packages/cli/npm
 
       # ── Publish runtime (platform packages + main wrapper) ────────────────
+      - name: Scaffold runtime npm/<triple> dirs
+        working-directory: packages/runtime
+        run: pnpm exec napi create-npm-dirs
+
       - name: Stage runtime platform packages
         working-directory: packages/runtime
         run: pnpm exec napi artifacts --output-dir ./artifacts

@@ -2,16 +2,17 @@ import { platform, arch } from "os";
 import { createRequire } from "module";
 
 const PLATFORMS = {
-  "darwin-arm64": "@substructure.ai/runtime-darwin-arm64",
-  "darwin-x64": "@substructure.ai/runtime-darwin-x64",
-  "linux-arm64": "@substructure.ai/runtime-linux-arm64",
-  "linux-x64": "@substructure.ai/runtime-linux-x64",
+  "darwin-arm64": { pkg: "@substructure.ai/runtime-darwin-arm64", suffix: "darwin-arm64" },
+  "darwin-x64": { pkg: "@substructure.ai/runtime-darwin-x64", suffix: "darwin-x64" },
+  "linux-arm64": { pkg: "@substructure.ai/runtime-linux-arm64-gnu", suffix: "linux-arm64-gnu" },
+  "linux-x64": { pkg: "@substructure.ai/runtime-linux-x64-gnu", suffix: "linux-x64-gnu" },
 };
 
 function loadBinding() {
   const require = createRequire(import.meta.url);
   const key = `${platform()}-${arch()}`;
-  const localFile = `substructure-napi.${key}.node`;
+  const entry = PLATFORMS[key];
+  const localFile = entry ? `substructure-napi.${entry.suffix}.node` : `substructure-napi.${key}.node`;
   const errors = [];
 
   // Local build output first (development)
@@ -22,10 +23,9 @@ function loadBinding() {
   }
 
   // Platform-specific npm package (production)
-  const pkg = PLATFORMS[key];
-  if (pkg) {
+  if (entry) {
     try {
-      return require(pkg);
+      return require(entry.pkg);
     } catch (e) {
       errors.push(e);
     }
