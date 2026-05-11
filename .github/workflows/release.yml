@@ -129,6 +129,7 @@ jobs:
     needs: build
     if: github.event_name == 'push' || inputs.dry_run == false
     runs-on: ubuntu-24.04
+    environment: Publish
     permissions:
       contents: read
       id-token: write
@@ -186,7 +187,7 @@ jobs:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           # napi prepublish publishes each npm/<triple>/ subpackage
-          pnpm exec napi prepublish -t npm
+          pnpm exec napi prepublish -t npm --no-gh-release
           # then publish the main wrapper
           npm publish --access public
 
