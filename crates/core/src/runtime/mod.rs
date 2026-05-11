@@ -236,6 +236,13 @@ impl Runtime {
             .map_err(|e| RuntimeError(e.to_string()))
     }
 
+    pub async fn count_sessions(&self, filter: &SessionFilter) -> Result<u64, RuntimeError> {
+        self.session_index
+            .count_sessions(filter)
+            .await
+            .map_err(|e| RuntimeError(e.to_string()))
+    }
+
     pub async fn get_session(
         &self,
         tenant_id: &str,

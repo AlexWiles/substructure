@@ -71,6 +71,7 @@ pub struct SessionIndexRecord {
 #[async_trait]
 pub trait SessionIndexStore: Send + Sync {
     async fn list_sessions(&self, filter: &SessionFilter) -> Result<SessionPage, StoreError>;
+    async fn count_sessions(&self, filter: &SessionFilter) -> Result<u64, StoreError>;
     async fn upsert_session_index(&self, record: SessionIndexRecord) -> Result<(), String>;
 }
 

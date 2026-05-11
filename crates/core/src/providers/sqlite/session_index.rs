@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::Utc;
-use sea_query::{Expr, ExprTrait, Iden, Order, Query, SqliteQueryBuilder};
+use sea_query::{Expr, ExprTrait, Func, Iden, Order, Query, SqliteQueryBuilder};
 
 use crate::event_store::{AggregateSort, StoreError};
 use crate::session::index::{
@@ -70,6 +70,17 @@ impl SessionIndexStore for SqliteSessionIndexStore {
         tokio::task::spawn_blocking(move || {
             let conn = reader.open()?;
             do_list_sessions(&conn, &filter)
+        })
+        .await
+        .map_err(spawn_err)?
+    }
+
+    async fn count_sessions(&self, filter: &SessionFilter) -> Result<u64, StoreError> {
+        let filter = filter.clone();
+        let reader = self.db.reader.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = reader.open()?;
+            do_count_sessions(&conn, &filter)
         })
         .await
         .map_err(spawn_err)?
@@ -242,6 +253,33 @@ fn do_list_sessions(
     };
 
     Ok(SessionPage { items, next_cursor })
+}
+
+fn do_count_sessions(
+    conn: &rusqlite::Connection,
+    filter: &SessionFilter,
+) -> Result<u64, StoreError> {
+    let mut q = Query::select()
+        .expr(Func::count(Expr::col(SessionIndex::SessionId)))
+        .from(SessionIndex::Table)
+        .apply_if(filter.tenant_id.as_ref(), |q, v| {
+            q.and_where(Expr::col(SessionIndex::TenantId).eq(v));
+        })
+        .take();
+
+    if filter.top_level {
+        q.and_where(Expr::col(SessionIndex::TopLevel).eq(1));
+    }
+
+    let (sql, values) = q.build(SqliteQueryBuilder);
+    let params = sea_params(values);
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+    let count: i64 = conn
+        .query_row(&sql, param_refs.as_slice(), |row| row.get(0))
+        .map_err(|e| StoreError::Internal(e.to_string()))?;
+
+    u64::try_from(count).map_err(|e| StoreError::Internal(e.to_string()))
 }
 
 fn do_upsert_session_index(
