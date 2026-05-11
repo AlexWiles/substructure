@@ -16,6 +16,8 @@ use crate::runtime::session::state::{SessionState, SessionStatus};
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SessionFilter {
     pub tenant_id: Option<String>,
+    pub session_id: Option<String>,
+    pub agent_id: Option<String>,
     #[serde(default)]
     pub top_level: bool,
     #[serde(default)]

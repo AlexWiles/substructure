@@ -22,6 +22,8 @@ pub struct ListSessionsParams {
     pub sort: AggregateSort,
     pub limit: Option<usize>,
     pub cursor: Option<String>,
+    pub session_id: Option<String>,
+    pub agent_id: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -50,6 +52,8 @@ pub async fn list_sessions(
 
     let filter = SessionFilter {
         tenant_id: Some(tenant_id),
+        session_id: params.session_id,
+        agent_id: params.agent_id,
         top_level: params.top_level,
         sort: params.sort,
         limit: params.limit,

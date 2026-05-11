@@ -153,6 +153,12 @@ fn do_list_sessions(
         .apply_if(filter.tenant_id.as_ref(), |q, v| {
             q.and_where(Expr::col(SessionIndex::TenantId).eq(v));
         })
+        .apply_if(filter.session_id.as_ref(), |q, v| {
+            q.and_where(Expr::col(SessionIndex::SessionId).eq(v));
+        })
+        .apply_if(filter.agent_id.as_ref(), |q, v| {
+            q.and_where(Expr::col(SessionIndex::AgentId).eq(v));
+        })
         .take();
 
     if filter.top_level {
@@ -264,6 +270,12 @@ fn do_count_sessions(
         .from(SessionIndex::Table)
         .apply_if(filter.tenant_id.as_ref(), |q, v| {
             q.and_where(Expr::col(SessionIndex::TenantId).eq(v));
+        })
+        .apply_if(filter.session_id.as_ref(), |q, v| {
+            q.and_where(Expr::col(SessionIndex::SessionId).eq(v));
+        })
+        .apply_if(filter.agent_id.as_ref(), |q, v| {
+            q.and_where(Expr::col(SessionIndex::AgentId).eq(v));
         })
         .take();
 
