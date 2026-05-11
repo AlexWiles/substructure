@@ -1,0 +1,217 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build only, do not publish'
+        type: boolean
+        default: true
+
+env:
+  PNPM_VERSION: 10.32.1
+  NODE_VERSION: 24
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            host: macos-14
+            platform: darwin-arm64
+            bin: substructure
+          - target: x86_64-apple-darwin
+            host: macos-14
+            platform: darwin-x64
+            bin: substructure
+          - target: x86_64-unknown-linux-gnu
+            host: ubuntu-22.04
+            platform: linux-x64
+            bin: substructure
+          - target: aarch64-unknown-linux-gnu
+            host: ubuntu-22.04
+            platform: linux-arm64
+            bin: substructure
+            cross: true
+          - target: x86_64-pc-windows-msvc
+            host: windows-2022
+            platform: win32-x64
+            bin: substructure.exe
+
+    runs-on: ${{ matrix.host }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross-compile deps (linux-arm64)
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Configure cross-compile env (linux-arm64)
+        if: matrix.cross
+        run: |
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> "$GITHUB_ENV"
+
+      - name: Install workspace deps
+        run: pnpm install --frozen-lockfile
+
+      # ── NAPI runtime build ───────────────────────────────────────────────
+      - name: Build NAPI runtime
+        working-directory: packages/runtime
+        run: |
+          pnpm exec napi build \
+            --manifest-path ../../crates/napi/Cargo.toml \
+            --platform \
+            --release \
+            --target ${{ matrix.target }} \
+            --js false \
+            --dts false \
+            --output-dir ./artifacts
+
+      - name: Upload NAPI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: napi-${{ matrix.platform }}
+          path: packages/runtime/artifacts/*.node
+          if-no-files-found: error
+
+      # ── CLI binary build ────────────────────────────────────────────────
+      - name: Build CLI binary
+        run: cargo build --release --bin substructure -p substructure-core --target ${{ matrix.target }}
+
+      - name: Build CLI platform package
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "$GITHUB_REF_NAME" ]; then
+            VERSION=$(node -p "require('./packages/cli/package.json').version")
+          fi
+          node scripts/build-cli-platform-package.mjs \
+            --target ${{ matrix.target }} \
+            --binary target/${{ matrix.target }}/release/${{ matrix.bin }} \
+            --version "$VERSION" \
+            --out-dir packages/cli/npm/${{ matrix.platform }}
+
+      - name: Upload CLI platform package
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.platform }}
+          path: packages/cli/npm/${{ matrix.platform }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish to npm
+    needs: build
+    if: github.event_name == 'push' || inputs.dry_run == false
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Resolve version
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "$GITHUB_REF_NAME" ]; then
+            VERSION=$(node -p "require('./packages/cli/package.json').version")
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing version $VERSION"
+
+      - name: Download NAPI artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: napi-*
+          path: packages/runtime/artifacts
+          merge-multiple: true
+
+      - name: Download CLI platform packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cli-*
+          path: packages/cli/npm
+
+      # ── Publish runtime (platform packages + main wrapper) ────────────────
+      - name: Stage runtime platform packages
+        working-directory: packages/runtime
+        run: pnpm exec napi artifacts --output-dir ./artifacts
+
+      - name: Publish runtime platform packages and main
+        working-directory: packages/runtime
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          # napi prepublish publishes each npm/<triple>/ subpackage
+          pnpm exec napi prepublish -t npm
+          # then publish the main wrapper
+          npm publish --access public
+
+      # ── Publish CLI platform packages and main wrapper ───────────────────
+      - name: Publish CLI platform packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for d in packages/cli/npm/*/; do
+            echo "Publishing $d"
+            (cd "$d" && npm publish --access public)
+          done
+
+      - name: Publish CLI main wrapper
+        working-directory: packages/cli
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
+
+      # ── Publish SDK ──────────────────────────────────────────────────────
+      - name: Publish SDK
+        working-directory: packages/sdk
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: pnpm publish --access public --no-git-checks

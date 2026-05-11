@@ -2,12 +2,27 @@
   "name": "@substructure.ai/runtime",
   "version": "0.1.0",
   "description": "In-process Substructure runtime for Node.js",
-  "license": "MIT",
+  "license": "FSL-1.1-ALv2",
   "type": "module",
-  "main": "./src/index.js",
-  "types": "./src/index.d.ts",
+  "homepage": "https://github.com/substructureai/substructure#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/substructureai/substructure.git",
+    "directory": "packages/runtime"
+  },
+  "bugs": {
+    "url": "https://github.com/substructureai/substructure/issues"
+  },
+  "keywords": ["substructure", "ai", "agents", "llm", "durable", "runtime", "napi"],
+  "publishConfig": {
+    "access": "public"
+  },
+  "main": "./index.js",
+  "types": "./index.d.ts",
   "files": [
-    "src",
+    "index.js",
+    "index.d.ts",
+    "LICENSE",
     "README.md"
   ],
   "napi": {
@@ -22,9 +37,10 @@
     ]
   },
   "scripts": {
-    "build": "napi build --manifest-path ../../crates/napi/Cargo.toml --platform --js false --dts false --output-dir ./src",
-    "prepublish": "napi prepublish --skip-gh-release",
-    "artifacts": "napi artifacts"
+    "build": "napi build --manifest-path ../../crates/napi/Cargo.toml --platform --js false --dts false --output-dir .",
+    "build:release": "napi build --manifest-path ../../crates/napi/Cargo.toml --platform --release --js false --dts false --output-dir .",
+    "artifacts": "napi artifacts --output-dir ./artifacts",
+    "prepublish:platforms": "napi prepublish -t npm"
   },
   "optionalDependencies": {
     "@substructure.ai/runtime-darwin-arm64": "0.1.0",

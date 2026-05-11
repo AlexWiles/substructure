@@ -2,8 +2,21 @@
   "name": "@substructure.ai/cli",
   "version": "0.1.0",
   "description": "CLI for Substructure",
-  "license": "MIT",
+  "license": "FSL-1.1-ALv2",
   "type": "module",
+  "homepage": "https://github.com/substructureai/substructure#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/substructureai/substructure.git",
+    "directory": "packages/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/substructureai/substructure/issues"
+  },
+  "keywords": ["substructure", "ai", "agents", "llm", "durable", "cli", "server"],
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "substructure": "./bin/substructure.js"
   },
@@ -11,6 +24,7 @@
   "files": [
     "bin",
     "src",
+    "LICENSE",
     "README.md"
   ],
   "optionalDependencies": {

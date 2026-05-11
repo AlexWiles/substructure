@@ -4,6 +4,24 @@
   "description": "TypeScript SDK for Substructure",
   "license": "MIT",
   "type": "module",
+  "homepage": "https://github.com/substructureai/substructure#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/substructureai/substructure.git",
+    "directory": "packages/sdk"
+  },
+  "bugs": {
+    "url": "https://github.com/substructureai/substructure/issues"
+  },
+  "keywords": ["substructure", "ai", "agents", "llm", "durable", "sdk"],
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
   "exports": {
     ".": {
       "@source": "./src/client.ts",

@@ -12,7 +12,8 @@
     "lint": "nx run-many -t lint",
     "test": "nx run-many -t test",
     "format": "biome format --write .",
-    "format:check": "biome format ."
+    "format:check": "biome format .",
+    "release": "scripts/release.sh"
   },
   "pnpm": {
     "onlyBuiltDependencies": ["lefthook"]
