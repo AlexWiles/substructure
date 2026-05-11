@@ -13,7 +13,15 @@
   "bugs": {
     "url": "https://github.com/substructureai/substructure/issues"
   },
-  "keywords": ["substructure", "ai", "agents", "llm", "durable", "runtime", "napi"],
+  "keywords": [
+    "substructure",
+    "ai",
+    "agents",
+    "llm",
+    "durable",
+    "runtime",
+    "napi"
+  ],
   "publishConfig": {
     "access": "public"
   },
