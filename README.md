@@ -23,36 +23,51 @@ npm i -g @substructure.ai/cli
 Start the server:
 
 ```sh
-substructure serve --worker-url http://localhost:4444
+substructure start --port 9000 --worker-url http://localhost:4444
 ```
 
 Define an agent with the middleware DSL. Each `.use()` adds a capability -- state, message history, tools, LLM routing:
 
 ```typescript
-import { defineAgent, state, systemMessage, messageHistory, tools, llmLoop } from "@substructure.ai/sdk/agent";
-import { Worker } from "@substructure.ai/sdk";
+import Substructure from "@substructure.ai/sdk";
 
-const agent = defineAgent("weather-agent")
-  .use(state())
-  .use(systemMessage("You are a helpful weather assistant."))
-  .use(messageHistory())
-  .use(tools({ getWeather }))
-  .use(llmLoop({
-    request: { model: "anthropic/claude-sonnet-4" },
+const sub = new Substructure();
+const { agent } = sub;
+
+const getWeather = agent.tool({
+  name: "get_weather",
+  description: "Get the current weather for a city.",
+  parameters: {
+    type: "object",
+    properties: { city: { type: "string" } },
+    required: ["city"],
+  },
+  execute: (args: string) => {
+    const { city } = JSON.parse(args);
+    return { city, temp_f: 62, condition: "sunny" };
+  },
+});
+
+const weatherAgent = agent({ id: "weather-agent" })
+  .use(agent.jsonState())
+  .use(agent.systemMessage("You are a helpful weather assistant."))
+  .use(agent.messageHistory())
+  .use(agent.tools([getWeather]))
+  .use(agent.llmLoop({
+    request: { model: "anthropic/claude-sonnet-4-5" },
     llm_client: "openrouter",
-    retry: { timeout_secs: 120, max_retries: 3 },
   }));
 
-const worker = new Worker([agent]);
-Bun.serve({ port: 4444, fetch: worker.fetchHandler() });
+Bun.serve({ port: 4444, fetch: sub.worker({ agents: [weatherAgent] }).fetchHandler() });
 ```
 
 Submit a message and stream events:
 
 ```typescript
-import { BackendClient } from "@substructure.ai/sdk";
+import Substructure from "@substructure.ai/sdk";
 
-const client = new BackendClient({ url: "http://localhost:9000", apiKey });
+const sub = new Substructure();
+const client = sub.backend.client({ url: "http://localhost:9000", apiKey: "your-api-key" });
 
 const stream = client.submit({
   agentId: "weather-agent",
@@ -60,7 +75,7 @@ const stream = client.submit({
     type: "message",
     message: { role: "user", content: "What's the weather in SF?" },
   },
-  auth: { tenant_id: "default", sub: "user-1" },
+  identity: { id: "user-1" },
 });
 
 for await (const event of stream) {
@@ -73,22 +88,18 @@ const result = await stream.result;
 You can also skip the server and run everything in-process with the embedded runtime:
 
 ```typescript
-import { Substructure } from "@substructure.ai/sdk";
-import { EmbeddedRuntime } from "@substructure.ai/runtime";
+import Substructure from "@substructure.ai/sdk";
 
-const runtime = new EmbeddedRuntime({ db: "agent.db" });
-const sub = new Substructure({ runtime });
-sub.agent(agent);
+const sub = new Substructure();
+const instance = await sub.embedded({ agents: [weatherAgent], db: "agent.db" });
 
-const stream = sub.submit({
+const stream = instance.submit({
   agentId: "weather-agent",
   payload: {
     type: "message",
     message: { role: "user", content: "What's the weather in SF?" },
   },
-  sessionId: crypto.randomUUID(),
-  auth: { tenant_id: "default", sub: "user-1" },
-  turnId: crypto.randomUUID(),
+  identity: { tenant_id: "default", id: "user-1" },
 });
 
 for await (const event of stream) {
