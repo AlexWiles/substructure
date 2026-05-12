@@ -25,6 +25,8 @@ use substructure_core::transport::worker_http::{self, WorkerHttpState};
 use substructure_core::worker::push::{PushRegistrationRecord, PushRegistry, TransportRegistry};
 use substructure_core::{start, RuntimeConfig};
 
+const DEFAULT_TENANT: &str = "default";
+
 #[derive(Copy, Clone, ValueEnum)]
 enum LlmProviderArg {
     Openrouter,
@@ -72,6 +74,7 @@ struct AuthEnvVars {
     client_token_audience: String,
     client_token_hs256_secret: String,
     worker_api_key: String,
+    admin_api_key: String,
 }
 
 struct EnvVars {
@@ -98,6 +101,10 @@ impl EnvVars {
             (
                 "WORKER_API_KEY",
                 "Bearer API key that workers present to the server",
+            ),
+            (
+                "ADMIN_API_KEY",
+                "Bearer API key for the admin HTTP API",
             ),
         ];
 
@@ -147,6 +154,7 @@ impl EnvVars {
                 client_token_audience: it.next().unwrap(),
                 client_token_hs256_secret: it.next().unwrap(),
                 worker_api_key: it.next().unwrap(),
+                admin_api_key: it.next().unwrap(),
             })
         };
 
@@ -157,6 +165,7 @@ impl EnvVars {
 struct AuthWiring {
     client: Arc<dyn AuthResolver>,
     worker: Arc<dyn AuthResolver>,
+    admin: Arc<dyn AuthResolver>,
     issuer: Arc<JwtHs256ClientTokenAuthResolver>,
 }
 
@@ -171,6 +180,7 @@ impl AuthWiring {
         Self {
             client: Arc::new(NoopAuthResolver),
             worker: Arc::new(NoopAuthResolver),
+            admin: Arc::new(NoopAuthResolver),
             issuer,
         }
     }
@@ -181,17 +191,23 @@ impl AuthWiring {
             env.client_token_audience,
             env.client_token_hs256_secret,
         ));
-        let worker_key_hash = hex::encode(Sha256::digest(env.worker_api_key.as_bytes()));
-        let bindings = vec![ApiKeyBinding::new("default", worker_key_hash, "worker")];
-        let worker: Arc<dyn AuthResolver> = Arc::new(
-            BearerHashedApiKeyAuthResolver::new(bindings).map_err(anyhow::Error::msg)?,
-        );
+        let worker = bearer_resolver(&env.worker_api_key, "worker")?;
+        let admin = bearer_resolver(&env.admin_api_key, "admin")?;
         Ok(Self {
             client: issuer.clone(),
             worker,
+            admin,
             issuer,
         })
     }
+}
+
+fn bearer_resolver(api_key: &str, role: &'static str) -> anyhow::Result<Arc<dyn AuthResolver>> {
+    let hash = hex::encode(Sha256::digest(api_key.as_bytes()));
+    let bindings = vec![ApiKeyBinding::new(DEFAULT_TENANT, hash, role)];
+    Ok(Arc::new(
+        BearerHashedApiKeyAuthResolver::new(bindings).map_err(anyhow::Error::msg)?,
+    ))
 }
 
 #[tokio::main]
@@ -273,7 +289,7 @@ async fn main() -> anyhow::Result<()> {
                     signing_secret.unwrap_or_else(|| hex::encode(rand::random::<[u8; 32]>()));
                 adapter
                     .register(PushRegistrationRecord {
-                        tenant_id: "default".into(),
+                        tenant_id: DEFAULT_TENANT.into(),
                         transport_type: "http".into(),
                         config: serde_json::json!({
                             "endpoint_url": url,
@@ -295,7 +311,7 @@ async fn main() -> anyhow::Result<()> {
 
             let admin_routes = admin_http::router(admin_http::AdminHttpState {
                 runtime: rt.clone(),
-                auth: Arc::new(NoopAuthResolver),
+                auth: auth.admin,
                 shutdown: shutdown.clone(),
             });
             let client_routes = client_http::router(ClientHttpState {
