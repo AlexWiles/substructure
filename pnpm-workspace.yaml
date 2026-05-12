@@ -6,3 +6,4 @@ allowBuilds:
   esbuild: true
   lefthook: true
   nx: true
+minimumReleaseAge: 10080
