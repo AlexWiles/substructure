@@ -12,6 +12,6 @@
     "@substructure.ai/sdk": "workspace:*"
   },
   "devDependencies": {
-    "wrangler": "^4.0.0"
+    "wrangler": "4.90.1"
   }
 }

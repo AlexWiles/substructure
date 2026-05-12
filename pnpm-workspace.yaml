@@ -6,13 +6,3 @@ allowBuilds:
   esbuild: true
   lefthook: true
   nx: true
-minimumReleaseAge: 10080
-minimumReleaseAgeExclude:
-  - "@substructure.ai/runtime-darwin-x64"
-  - "@substructure.ai/runtime-darwin-arm64"
-  - "@substructure.ai/runtime-linux-x64-gnu"
-  - "@substructure.ai/runtime-linux-arm64-gnu"
-  - "@substructure.ai/cli-darwin-x64"
-  - "@substructure.ai/cli-darwin-arm64"
-  - "@substructure.ai/cli-linux-x64"
-  - "@substructure.ai/cli-linux-arm64"
