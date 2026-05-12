@@ -102,10 +102,7 @@ impl EnvVars {
                 "WORKER_API_KEY",
                 "Bearer API key that workers present to the server",
             ),
-            (
-                "ADMIN_API_KEY",
-                "Bearer API key for the admin HTTP API",
-            ),
+            ("ADMIN_API_KEY", "Bearer API key for the admin HTTP API"),
         ];
 
         let mut missing: Vec<(&'static str, &'static str)> = Vec::new();
@@ -178,9 +175,9 @@ impl AuthWiring {
             &secret,
         ));
         Self {
-            client: Arc::new(NoopAuthResolver),
-            worker: Arc::new(NoopAuthResolver),
-            admin: Arc::new(NoopAuthResolver),
+            client: Arc::new(NoopAuthResolver::new(DEFAULT_TENANT)),
+            worker: Arc::new(NoopAuthResolver::new(DEFAULT_TENANT)),
+            admin: Arc::new(NoopAuthResolver::new(DEFAULT_TENANT)),
             issuer,
         }
     }

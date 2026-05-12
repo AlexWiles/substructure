@@ -85,6 +85,8 @@ export interface EmbeddedOptions {
     openrouterApiKey?: string;
     /** Number of concurrent LLM handler tasks (default: 4) */
     llmPoolSize?: number;
+    /** Tenant id under which to register the worker (default: "default") */
+    tenantId?: string;
 }
 
 export interface SubmitRequest {
@@ -100,10 +102,10 @@ export class EmbeddedInstance {
     private worker: Worker;
     private registered: Promise<void>;
 
-    constructor(runtime: NativeRuntime, agents: Handler[]) {
+    constructor(runtime: NativeRuntime, agents: Handler[], tenantId: string) {
         this.runtime = runtime;
         this.worker = new Worker(agents);
-        this.registered = this.worker.register(runtime, "default");
+        this.registered = this.worker.register(runtime, tenantId);
     }
 
     submit(request: SubmitRequest): RunStream {
@@ -165,7 +167,7 @@ export class Substructure {
             openrouterApiKey: options.openrouterApiKey,
             llmPoolSize: options.llmPoolSize,
         });
-        const instance = new EmbeddedInstance(runtime, options.agents);
+        const instance = new EmbeddedInstance(runtime, options.agents, options.tenantId ?? "default");
         return instance;
     }
 }
