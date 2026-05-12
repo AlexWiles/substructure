@@ -1,5 +1,6 @@
 pub mod runtime;
 
+pub mod cli;
 pub mod providers;
 pub mod transport;
 

@@ -18,13 +18,16 @@ Three components:
 npm i -g @substructure.ai/cli
 ```
 
-## Usage
+## Local Usage
 
-Start the server:
+Start a server:
 
 ```sh
-substructure start --port 9000 --worker-url http://localhost:4444
+export OPENROUTER_API_KEY=sk-or-...   # https://openrouter.ai/keys
+substructure start --dev --provider openrouter --port 9000 --worker-url http://localhost:4444
 ```
+
+For production startup, drop `--dev` and set `CLIENT_TOKEN_ISSUER`, `CLIENT_TOKEN_AUDIENCE`, `CLIENT_TOKEN_HS256_SECRET`, `WORKER_API_KEY`, and `ADMIN_API_KEY`. See `substructure start --help`.
 
 Define an agent with the middleware DSL. Each `.use()` adds a capability -- state, message history, tools, LLM routing:
 

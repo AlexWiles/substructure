@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
 use clap::Parser;
-use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 
+use substructure_core::cli::auth::AuthWiring;
+use substructure_core::cli::env::{EnvVars, LlmProviderArg, ProviderEnv};
+use substructure_core::cli::register_startup_worker;
 use substructure_core::llm::LlmTask;
 use substructure_core::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use substructure_core::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
@@ -12,22 +14,14 @@ use substructure_core::providers::sqlite::{
     SqliteWakeStore, SqliteWorkerQueue,
 };
 use substructure_core::sub_agent::SubAgentTask;
-use substructure_core::transport::admin_http;
-use substructure_core::transport::auth::{
-    ApiKeyBinding, AuthResolver, BearerHashedApiKeyAuthResolver, JwtHs256ClientTokenAuthResolver,
-    NoopAuthResolver,
-};
+use substructure_core::transport::admin_http::{self, AdminHttpState};
 use substructure_core::transport::client_http::{self, ClientHttpState};
 use substructure_core::transport::http_push::http_transport;
 use substructure_core::transport::push::PushAdapter;
 use substructure_core::transport::server::SubstructureServer;
 use substructure_core::transport::worker_http::{self, WorkerHttpState};
-use substructure_core::worker::push::{PushRegistrationRecord, PushRegistry, TransportRegistry};
+use substructure_core::worker::push::{PushRegistry, TransportRegistry};
 use substructure_core::{start, RuntimeConfig};
-
-fn required_env(name: &str) -> String {
-    std::env::var(name).unwrap_or_else(|_| panic!("{name} environment variable is required"))
-}
 
 #[derive(Parser)]
 #[command(name = "substructure", version)]
@@ -52,6 +46,13 @@ enum Command {
         /// Signing secret for the pre-registered HTTP worker (auto-generated if omitted)
         #[arg(long, requires = "worker_url")]
         signing_secret: Option<String>,
+        /// LLM provider. Determines which API key env var is required
+        /// (e.g. `openrouter` needs OPENROUTER_API_KEY).
+        #[arg(long, value_enum)]
+        provider: LlmProviderArg,
+        /// Disable client and worker authentication. For local development only.
+        #[arg(long)]
+        dev: bool,
     },
 }
 
@@ -72,7 +73,14 @@ async fn main() -> anyhow::Result<()> {
             db,
             worker_url,
             signing_secret,
+            provider,
+            dev,
         } => {
+            let env = match EnvVars::load(provider, dev) {
+                Ok(e) => e,
+                Err(_) => std::process::exit(2),
+            };
+
             let db = SqliteDb::open(&db, std::time::Duration::from_secs(5))?;
 
             let event_store = Arc::new(SqliteEventStore::new(db.clone())?);
@@ -89,11 +97,15 @@ async fn main() -> anyhow::Result<()> {
             let sub_agent_task_queue: Arc<dyn TaskQueue<SubAgentTask>> = Arc::new(
                 ShardedInMemoryQueue::new(config.sub_agent_executor_workers as u32),
             );
-            let llm_provider = Arc::new(OpenRouterProvider::new(OpenRouterConfig {
-                base_url: std::env::var("OPENROUTER_BASE_URL")
-                    .unwrap_or_else(|_| "https://openrouter.ai/api".to_string()),
-                api_key: required_env("OPENROUTER_API_KEY"),
-            }));
+            let llm_provider = match env.provider {
+                ProviderEnv::Openrouter { api_key } => {
+                    Arc::new(OpenRouterProvider::new(OpenRouterConfig {
+                        base_url: std::env::var("OPENROUTER_BASE_URL")
+                            .unwrap_or_else(|_| "https://openrouter.ai/api".to_string()),
+                        api_key,
+                    }))
+                }
+            };
 
             let rt = start(
                 event_store.clone(),
@@ -110,65 +122,57 @@ async fn main() -> anyhow::Result<()> {
             let transports = TransportRegistry::new(vec![http_transport()]);
             let registry = PushRegistry::new(push_store, transports);
             let adapter = Arc::new(PushAdapter::new(rt.clone(), registry, 16));
-            let client_token_issuer = Arc::new(JwtHs256ClientTokenAuthResolver::new(
-                required_env("CLIENT_TOKEN_ISSUER"),
-                required_env("CLIENT_TOKEN_AUDIENCE"),
-                required_env("CLIENT_TOKEN_HS256_SECRET"),
-            ));
 
-            let worker_api_key = required_env("WORKER_API_KEY");
-            let worker_key_hash = hex::encode(Sha256::digest(worker_api_key.as_bytes()));
-            let bindings = vec![ApiKeyBinding::new("default", worker_key_hash, "worker")];
-            let client_auth: Arc<dyn AuthResolver> = client_token_issuer.clone();
-            let worker_auth: Arc<dyn AuthResolver> = Arc::new(
-                BearerHashedApiKeyAuthResolver::new(bindings).map_err(anyhow::Error::msg)?,
-            );
+            let auth = match env.auth {
+                Some(a) => AuthWiring::from_env(a)?,
+                None => AuthWiring::dev(),
+            };
+
             adapter.start().await;
 
             if let Some(ref url) = worker_url {
-                let secret =
-                    signing_secret.unwrap_or_else(|| hex::encode(rand::random::<[u8; 32]>()));
-                adapter
-                    .register(PushRegistrationRecord {
-                        tenant_id: "default".into(),
-                        transport_type: "http".into(),
-                        config: serde_json::json!({
-                            "endpoint_url": url,
-                            "signing_secret": secret,
-                        }),
-                    })
-                    .await
-                    .expect("failed to register startup worker");
-                tracing::info!(url, "startup worker registered (signing enabled)");
+                register_startup_worker(&adapter, url, signing_secret).await?;
             }
 
             let shutdown = tokio_util::sync::CancellationToken::new();
+
             let signal_token = shutdown.clone();
+
             tokio::spawn(async move {
                 let _ = tokio::signal::ctrl_c().await;
                 tracing::info!("shutdown signal received");
                 signal_token.cancel();
             });
 
-            let admin_routes = admin_http::router(admin_http::AdminHttpState {
+            let admin_routes = admin_http::router(AdminHttpState {
                 runtime: rt.clone(),
-                auth: Arc::new(NoopAuthResolver),
+                auth: auth.admin,
                 shutdown: shutdown.clone(),
             });
+
             let client_routes = client_http::router(ClientHttpState {
                 runtime: rt.clone(),
-                auth: client_auth,
+                auth: auth.client,
                 shutdown: shutdown.clone(),
             });
+
             let worker_routes = worker_http::router(WorkerHttpState {
                 runtime: rt.clone(),
-                auth: worker_auth,
-                client_token_issuer,
+                auth: auth.worker,
+                client_token_issuer: auth.issuer,
                 shutdown: shutdown.clone(),
             });
+
             let server = SubstructureServer::new(vec![admin_routes, client_routes, worker_routes]);
 
             let addr = format!("{host}:{port}");
+            if dev {
+                eprintln!();
+                eprintln!("  DEV MODE - authentication is disabled.");
+                eprintln!("  Do not use in production or expose to untrusted networks.");
+                eprintln!();
+            }
+
             tracing::info!(%addr, "listening");
             let listener = TcpListener::bind(&addr).await?;
             server.serve(listener, shutdown).await
