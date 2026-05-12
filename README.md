@@ -18,9 +18,9 @@ Three components:
 npm i -g @substructure.ai/cli
 ```
 
-## Usage
+## Local Usage
 
-Start the server in dev mode (auth disabled):
+Start a server:
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...   # https://openrouter.ai/keys

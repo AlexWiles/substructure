@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
-use clap::{Parser, ValueEnum};
-use sha2::{Digest, Sha256};
+use clap::Parser;
 use tokio::net::TcpListener;
 
+use substructure_core::cli::auth::AuthWiring;
+use substructure_core::cli::env::{EnvVars, LlmProviderArg, ProviderEnv};
+use substructure_core::cli::register_startup_worker;
 use substructure_core::llm::LlmTask;
 use substructure_core::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use substructure_core::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
@@ -12,25 +14,14 @@ use substructure_core::providers::sqlite::{
     SqliteWakeStore, SqliteWorkerQueue,
 };
 use substructure_core::sub_agent::SubAgentTask;
-use substructure_core::transport::admin_http;
-use substructure_core::transport::auth::{
-    ApiKeyBinding, AuthResolver, BearerHashedApiKeyAuthResolver, JwtHs256ClientTokenAuthResolver,
-    NoopAuthResolver,
-};
+use substructure_core::transport::admin_http::{self, AdminHttpState};
 use substructure_core::transport::client_http::{self, ClientHttpState};
 use substructure_core::transport::http_push::http_transport;
 use substructure_core::transport::push::PushAdapter;
 use substructure_core::transport::server::SubstructureServer;
 use substructure_core::transport::worker_http::{self, WorkerHttpState};
-use substructure_core::worker::push::{PushRegistrationRecord, PushRegistry, TransportRegistry};
+use substructure_core::worker::push::{PushRegistry, TransportRegistry};
 use substructure_core::{start, RuntimeConfig};
-
-const DEFAULT_TENANT: &str = "default";
-
-#[derive(Copy, Clone, ValueEnum)]
-enum LlmProviderArg {
-    Openrouter,
-}
 
 #[derive(Parser)]
 #[command(name = "substructure", version)]
@@ -63,148 +54,6 @@ enum Command {
         #[arg(long)]
         dev: bool,
     },
-}
-
-enum ProviderEnv {
-    Openrouter { api_key: String },
-}
-
-struct AuthEnvVars {
-    client_token_issuer: String,
-    client_token_audience: String,
-    client_token_hs256_secret: String,
-    worker_api_key: String,
-    admin_api_key: String,
-}
-
-struct EnvVars {
-    provider: ProviderEnv,
-    auth: Option<AuthEnvVars>,
-}
-
-impl EnvVars {
-    fn load(provider: LlmProviderArg, dev: bool) -> Result<Self, ()> {
-        let provider_specs: &[(&str, &str)] = match provider {
-            LlmProviderArg::Openrouter => &[(
-                "OPENROUTER_API_KEY",
-                "API key for OpenRouter (https://openrouter.ai/keys)",
-            )],
-        };
-
-        let auth_specs: &[(&str, &str)] = &[
-            ("CLIENT_TOKEN_ISSUER", "JWT 'iss' claim for client tokens"),
-            ("CLIENT_TOKEN_AUDIENCE", "JWT 'aud' claim for client tokens"),
-            (
-                "CLIENT_TOKEN_HS256_SECRET",
-                "HS256 secret used to sign client tokens",
-            ),
-            (
-                "WORKER_API_KEY",
-                "Bearer API key that workers present to the server",
-            ),
-            ("ADMIN_API_KEY", "Bearer API key for the admin HTTP API"),
-        ];
-
-        let mut missing: Vec<(&'static str, &'static str)> = Vec::new();
-        let mut provider_values: Vec<String> = Vec::with_capacity(provider_specs.len());
-        let mut auth_values: Vec<String> = Vec::with_capacity(auth_specs.len());
-
-        for (name, desc) in provider_specs {
-            match std::env::var(name) {
-                Ok(v) => provider_values.push(v),
-                Err(_) => missing.push((name, desc)),
-            }
-        }
-        if !dev {
-            for (name, desc) in auth_specs {
-                match std::env::var(name) {
-                    Ok(v) => auth_values.push(v),
-                    Err(_) => missing.push((name, desc)),
-                }
-            }
-        }
-
-        if !missing.is_empty() {
-            eprintln!("error: missing required environment variable(s):");
-            for (name, desc) in &missing {
-                eprintln!("  - {name}: {desc}");
-            }
-            eprintln!("\nSet them and try again, e.g.:");
-            for (name, _) in &missing {
-                eprintln!("  export {name}=...");
-            }
-            return Err(());
-        }
-
-        let provider = match provider {
-            LlmProviderArg::Openrouter => ProviderEnv::Openrouter {
-                api_key: provider_values.into_iter().next().unwrap(),
-            },
-        };
-
-        let auth = if dev {
-            None
-        } else {
-            let mut it = auth_values.into_iter();
-            Some(AuthEnvVars {
-                client_token_issuer: it.next().unwrap(),
-                client_token_audience: it.next().unwrap(),
-                client_token_hs256_secret: it.next().unwrap(),
-                worker_api_key: it.next().unwrap(),
-                admin_api_key: it.next().unwrap(),
-            })
-        };
-
-        Ok(Self { provider, auth })
-    }
-}
-
-struct AuthWiring {
-    client: Arc<dyn AuthResolver>,
-    worker: Arc<dyn AuthResolver>,
-    admin: Arc<dyn AuthResolver>,
-    issuer: Arc<JwtHs256ClientTokenAuthResolver>,
-}
-
-impl AuthWiring {
-    fn dev() -> Self {
-        let secret = hex::encode(rand::random::<[u8; 32]>());
-        let issuer = Arc::new(JwtHs256ClientTokenAuthResolver::new(
-            "substructure-dev",
-            "substructure-dev",
-            &secret,
-        ));
-        Self {
-            client: Arc::new(NoopAuthResolver::new(DEFAULT_TENANT)),
-            worker: Arc::new(NoopAuthResolver::new(DEFAULT_TENANT)),
-            admin: Arc::new(NoopAuthResolver::new(DEFAULT_TENANT)),
-            issuer,
-        }
-    }
-
-    fn from_env(env: AuthEnvVars) -> anyhow::Result<Self> {
-        let issuer = Arc::new(JwtHs256ClientTokenAuthResolver::new(
-            env.client_token_issuer,
-            env.client_token_audience,
-            env.client_token_hs256_secret,
-        ));
-        let worker = bearer_resolver(&env.worker_api_key, "worker")?;
-        let admin = bearer_resolver(&env.admin_api_key, "admin")?;
-        Ok(Self {
-            client: issuer.clone(),
-            worker,
-            admin,
-            issuer,
-        })
-    }
-}
-
-fn bearer_resolver(api_key: &str, role: &'static str) -> anyhow::Result<Arc<dyn AuthResolver>> {
-    let hash = hex::encode(Sha256::digest(api_key.as_bytes()));
-    let bindings = vec![ApiKeyBinding::new(DEFAULT_TENANT, hash, role)];
-    Ok(Arc::new(
-        BearerHashedApiKeyAuthResolver::new(bindings).map_err(anyhow::Error::msg)?,
-    ))
 }
 
 #[tokio::main]
@@ -282,55 +131,48 @@ async fn main() -> anyhow::Result<()> {
             adapter.start().await;
 
             if let Some(ref url) = worker_url {
-                let secret =
-                    signing_secret.unwrap_or_else(|| hex::encode(rand::random::<[u8; 32]>()));
-                adapter
-                    .register(PushRegistrationRecord {
-                        tenant_id: DEFAULT_TENANT.into(),
-                        transport_type: "http".into(),
-                        config: serde_json::json!({
-                            "endpoint_url": url,
-                            "signing_secret": secret,
-                        }),
-                    })
-                    .await
-                    .expect("failed to register startup worker");
-                tracing::info!(url, "startup worker registered (signing enabled)");
+                register_startup_worker(&adapter, url, signing_secret).await?;
             }
 
             let shutdown = tokio_util::sync::CancellationToken::new();
+
             let signal_token = shutdown.clone();
+
             tokio::spawn(async move {
                 let _ = tokio::signal::ctrl_c().await;
                 tracing::info!("shutdown signal received");
                 signal_token.cancel();
             });
 
-            let admin_routes = admin_http::router(admin_http::AdminHttpState {
+            let admin_routes = admin_http::router(AdminHttpState {
                 runtime: rt.clone(),
                 auth: auth.admin,
                 shutdown: shutdown.clone(),
             });
+
             let client_routes = client_http::router(ClientHttpState {
                 runtime: rt.clone(),
                 auth: auth.client,
                 shutdown: shutdown.clone(),
             });
+
             let worker_routes = worker_http::router(WorkerHttpState {
                 runtime: rt.clone(),
                 auth: auth.worker,
                 client_token_issuer: auth.issuer,
                 shutdown: shutdown.clone(),
             });
+
             let server = SubstructureServer::new(vec![admin_routes, client_routes, worker_routes]);
 
             let addr = format!("{host}:{port}");
             if dev {
                 eprintln!();
-                eprintln!("  DEV MODE -- authentication is disabled.");
+                eprintln!("  DEV MODE - authentication is disabled.");
                 eprintln!("  Do not use in production or expose to untrusted networks.");
                 eprintln!();
             }
+
             tracing::info!(%addr, "listening");
             let listener = TcpListener::bind(&addr).await?;
             server.serve(listener, shutdown).await
