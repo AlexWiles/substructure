@@ -171,6 +171,9 @@ jobs:
           pattern: cli-*
           path: packages/cli/npm
 
+      - name: Restore executable bit on CLI binaries
+        run: chmod +x packages/cli/npm/*/bin/substructure
+
       # ── Publish runtime (platform packages + main wrapper) ────────────────
       - name: Scaffold runtime npm/<triple> dirs
         working-directory: packages/runtime
