@@ -14,5 +14,5 @@ minimumReleaseAgeExclude:
   - "@substructure.ai/runtime-linux-arm64-gnu"
   - "@substructure.ai/cli-darwin-x64"
   - "@substructure.ai/cli-darwin-arm64"
-  - "@substructure.ai/cli-linux-x64-gnu"
-  - "@substructure.ai/cli-linux-arm64-gnu"
+  - "@substructure.ai/cli-linux-x64"
+  - "@substructure.ai/cli-linux-arm64"
