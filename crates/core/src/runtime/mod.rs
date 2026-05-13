@@ -121,8 +121,9 @@ impl Runtime {
     }
 
     /// Submit a client payload to a session. Returns immediately with the
-    /// resolved turn id and whether the turn is already completed (idempotent
-    /// re-submission of a finished turn). Use `stream` to observe events.
+    /// resolved session and turn ids; an idempotent re-submission resolves to
+    /// the existing turn id. Use `stream` to observe events, including
+    /// completion of an already-finished turn.
     pub async fn submit_client_payload(
         &self,
         input: SubmitClientPayload,

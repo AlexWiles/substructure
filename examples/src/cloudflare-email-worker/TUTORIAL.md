@@ -218,23 +218,23 @@ async email(message, env, ctx) {
 
   // Submit and forget. The agent's send_reply tool will dispatch any
   // reply via env.EMAIL.send() from a subsequent fetch() invocation.
-  ctx.waitUntil(
-    runAgent(env, sessionIdForThread(message.headers), message.from, userContent),
-  );
+  const client = sub.backend.client({
+    url: env.SUBSTRUCTURE_URL,
+    apiKey: env.SUBSTRUCTURE_API_KEY,
+  });
+  await client.startTurn({
+    agentId: emailAgent.agentId,
+    sessionId: sessionIdForThread(message.headers),
+    payload: { type: "message", message: { role: "user", content: userContent } },
+    identity: { id: message.from },
+  });
 }
 ```
 
-`ctx.waitUntil()` keeps the Worker alive long enough for `runAgent` to
-finish without blocking the email-handler return. The body of `runAgent`
-shrinks to just draining the stream:
-
-```ts
-async function runAgent(env, sessionId, from, userContent) {
-  const stream = client.submit({ ... });
-  for await (const _ of stream) { /* drain */ }
-  await stream.result;
-}
-```
+`startTurn` returns as soon as the turn is enqueued — the agent runs
+asynchronously in a separate Worker invocation, and `send_reply` calls
+`env.EMAIL.send()` from there. No `ctx.waitUntil` or stream draining
+needed in the email handler.
 
 The DO method does the upsert with `RETURNING id`:
 

@@ -19,7 +19,8 @@ interface WorkerEnv extends Env {
 
 let workerEnv: WorkerEnv;
 
-const WHITELIST = new Set<string>(["alice@example.com", "bob@example.com"]);
+const EMAIL_WHITELIST = ["alice@example.com", "bob@example.com"];
+const WHITELIST = new Set(EMAIL_WHITELIST.map((a) => a.toLowerCase()));
 
 const db = () => workerEnv.DATABASE.get(workerEnv.DATABASE.idFromName("global"));
 
@@ -67,7 +68,7 @@ const sendReplyTool = agent.tool({
     parameters: {
         type: "object",
         properties: {
-            emailId: {
+            email_id: {
                 type: "number",
                 description: "Row id of the email to reply to",
             },
@@ -76,13 +77,13 @@ const sendReplyTool = agent.tool({
         required: ["email_id", "body"],
     },
     execute: async (args) => {
-        const { emailId, body } = JSON.parse(args) as {
-            emailId: number;
+        const { email_id, body } = JSON.parse(args) as {
+            email_id: number;
             body: string;
         };
 
-        const email = await db().getEmail(emailId);
-        if (!email) throw new Error(`email_id ${emailId} not found`);
+        const email = await db().getEmail(email_id);
+        if (!email) throw new Error(`email_id ${email_id} not found`);
 
         const mime = createMimeMessage();
         if (email.message_id) mime.setHeader("In-Reply-To", `<${email.message_id}>`);
