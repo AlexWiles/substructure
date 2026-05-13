@@ -23,7 +23,6 @@
     { "tag": "v2", "new_sqlite_classes": ["Database"] }
   ]
   // Set secrets via:
-  //   wrangler secret put SIGNING_SECRET
-  //   wrangler secret put SUBSTRUCTURE_URL
   //   wrangler secret put SUBSTRUCTURE_API_KEY
+  //   wrangler secret put SIGNING_SECRET
 }

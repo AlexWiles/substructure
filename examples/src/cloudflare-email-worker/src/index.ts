@@ -12,13 +12,13 @@ interface WorkerEnv extends Env {
     AGENT_STATE: DurableObjectNamespace<AgentState>;
     DATABASE: DurableObjectNamespace<Database>;
     EMAIL: SendEmail;
-    SUBSTRUCTURE_URL: string;
     SUBSTRUCTURE_API_KEY: string;
     SIGNING_SECRET?: string;
 }
 
 let workerEnv: WorkerEnv;
 
+const SUBSTRUCTURE_URL = "https://api.substructure.ai";
 const EMAIL_WHITELIST = ["alice@example.com", "bob@example.com"];
 const WHITELIST = new Set(EMAIL_WHITELIST.map((a) => a.toLowerCase()));
 
@@ -184,7 +184,7 @@ export default {
             `From: ${message.from}\nSubject: ${subject}\n\n${body}`;
 
         const client = sub.backend.client({
-            url: env.SUBSTRUCTURE_URL,
+            url: SUBSTRUCTURE_URL,
             apiKey: env.SUBSTRUCTURE_API_KEY,
         });
 
