@@ -2,7 +2,8 @@ import type { ClientPayload, ClientIdentity, Event } from "./types";
 import type { FetchHandlerOptions, NativeRuntime } from "./worker";
 import { Worker, HandlerBuilder } from "./worker";
 import type { Handler } from "./worker";
-import { RunStream } from "./run-stream";
+import { drainToTurnResult } from "./turn";
+import type { SessionScope, TurnResult } from "./turn";
 import { BackendClient } from "./backend-client";
 import type { BackendClientOptions } from "./backend-client";
 import { FrontendClient } from "./frontend-client";
@@ -89,7 +90,7 @@ export interface EmbeddedOptions {
     tenantId?: string;
 }
 
-export interface SubmitRequest {
+export interface StartTurnRequest {
     agentId: string;
     payload: ClientPayload;
     identity?: ClientIdentity;
@@ -97,13 +98,7 @@ export interface SubmitRequest {
     turnId?: string;
 }
 
-export interface SubmitResult {
-    sessionId: string;
-    turnId: string;
-}
-
-export interface ListenOptions {
-    turnId?: string;
+export interface StreamOptions {
     sequenceAfter?: number;
 }
 
@@ -118,12 +113,12 @@ export class EmbeddedInstance {
         this.registered = this.worker.register(runtime, tenantId);
     }
 
-    /** Fire-and-forget: enqueue a payload, return as soon as it's accepted. */
-    async submit(request: SubmitRequest): Promise<SubmitResult> {
+    /** Fire-and-forget: enqueue a turn, return as soon as it's accepted. */
+    async startTurn(request: StartTurnRequest): Promise<SessionScope> {
         await this.registered;
         const identity = request.identity;
         if (!identity?.id) {
-            throw new Error("submit.identity.id is required for embedded runtime");
+            throw new Error("startTurn.identity.id is required for embedded runtime");
         }
         const sessionId = request.sessionId ?? crypto.randomUUID();
         return this.runtime.submitPayload(
@@ -135,22 +130,20 @@ export class EmbeddedInstance {
         );
     }
 
-    /** Stream events for a session, optionally scoped to a turn and/or
-     *  replayed from a sequence cursor. */
-    async *listen(sessionId: string, options?: ListenOptions): AsyncGenerator<Event> {
-        for await (const json of this.runtime.streamSession(sessionId, options?.turnId, options?.sequenceAfter)) {
+    /** Stream events for a session. If `scope.turnId` is set, the stream is
+     *  filtered to that turn and auto-closes on completion. */
+    async *stream(scope: SessionScope, options?: StreamOptions): AsyncGenerator<Event> {
+        for await (const json of this.runtime.streamSession(scope.sessionId, scope.turnId, options?.sequenceAfter)) {
             yield JSON.parse(json) as Event;
         }
     }
 
-    /** Sugar: submit and immediately listen for events on the resulting turn. */
-    submitAndListen(request: SubmitRequest): RunStream {
-        const self = this;
-        const source = (async function* () {
-            const { sessionId, turnId } = await self.submit(request);
-            yield* self.listen(sessionId, { turnId, sequenceAfter: 0 });
-        })();
-        return new RunStream(source);
+    /** Stream a turn to completion and return its result. Requires `scope.turnId`. */
+    turnResult(scope: SessionScope): Promise<TurnResult> {
+        if (!scope.turnId) {
+            throw new Error("turnResult requires scope.turnId");
+        }
+        return drainToTurnResult(this.stream(scope));
     }
 
     fetchHandler(options?: FetchHandlerOptions): (req: Request) => Promise<Response> {

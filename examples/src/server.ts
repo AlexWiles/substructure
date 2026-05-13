@@ -69,7 +69,7 @@ const frontend = sub.frontend.client({
     token: clientToken,
 });
 
-const stream = frontend.submitAndListen({
+const scope = await frontend.startTurn({
     agentId: "todo-agent",
     payload: {
         type: "message",
@@ -79,7 +79,7 @@ const stream = frontend.submitAndListen({
     turnId: randomUUID(),
 });
 
-for await (const event of stream) {
+for await (const event of frontend.stream(scope)) {
     if (
         event.payload.type === "message.new" &&
         event.payload.message.role === "assistant" &&

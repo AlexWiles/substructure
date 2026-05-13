@@ -3,10 +3,9 @@
 export { Substructure as default, Substructure } from "./substructure";
 export type { AgentOptions, AgentFactory, EmbeddedOptions } from "./substructure";
 
-// ── RunStream ─────────────────────────────────────────────────────────────
+// ── Turns ────────────────────────────────────────────────────────────────
 
-export { RunStream } from "./run-stream";
-export type { TurnResult } from "./run-stream";
+export type { SessionScope, TurnResult } from "./turn";
 
 // ── Worker & Agent ────────────────────────────────────────────────────────
 

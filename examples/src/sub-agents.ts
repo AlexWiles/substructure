@@ -60,14 +60,14 @@ const identity = { tenant_id: "default", id: "example-user" };
 
 async function turn(message: string) {
     console.log(`\n> ${message}`);
-    const stream = embedded.submitAndListen({
+    const scope = await embedded.startTurn({
         agentId: assistant.agentId,
         payload: { type: "message", message: { role: "user", content: message } },
         sessionId,
         identity,
         turnId: randomUUID(),
     });
-    for await (const event of stream) {
+    for await (const event of embedded.stream(scope)) {
         if (
             event.payload.type === "message.new" &&
             event.payload.message.role === "assistant" &&

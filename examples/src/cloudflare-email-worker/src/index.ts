@@ -58,21 +58,6 @@ const recordExpense = agent.tool({
     },
 });
 
-// Dispatches the reply via the EMAIL send binding. Threads via In-Reply-To.
-async function dispatchReply(emailId: number, body: string): Promise<void> {
-    const email = await db().getEmail(emailId);
-    if (!email) throw new Error(`email_id ${emailId} not found`);
-
-    const mime = createMimeMessage();
-    if (email.message_id) mime.setHeader("In-Reply-To", `<${email.message_id}>`);
-    mime.setSender({ name: "Inbox agent", addr: email.to_addr });
-    mime.setRecipient(email.from_addr);
-    mime.setSubject(`Re: ${email.subject}`);
-    mime.addMessage({ contentType: "text/plain", data: body });
-
-    await workerEnv.EMAIL.send(new EmailMessage(email.to_addr, email.from_addr, mime.asRaw()));
-}
-
 const sendReplyTool = agent.tool({
     name: "send_reply",
     description:
@@ -82,7 +67,7 @@ const sendReplyTool = agent.tool({
     parameters: {
         type: "object",
         properties: {
-            email_id: {
+            emailId: {
                 type: "number",
                 description: "Row id of the email to reply to",
             },
@@ -91,12 +76,25 @@ const sendReplyTool = agent.tool({
         required: ["email_id", "body"],
     },
     execute: async (args) => {
-        const { email_id, body } = JSON.parse(args) as {
-            email_id: number;
+        const { emailId, body } = JSON.parse(args) as {
+            emailId: number;
             body: string;
         };
-        await dispatchReply(email_id, body);
-        return { ok: true };
+
+        const email = await db().getEmail(emailId);
+        if (!email) throw new Error(`email_id ${emailId} not found`);
+
+        const mime = createMimeMessage();
+        if (email.message_id) mime.setHeader("In-Reply-To", `<${email.message_id}>`);
+        mime.setSender({ name: "Inbox agent", addr: email.to_addr });
+        mime.setRecipient(email.from_addr);
+        mime.setSubject(`Re: ${email.subject}`);
+        mime.addMessage({ contentType: "text/plain", data: body });
+
+        const message = new EmailMessage(email.to_addr, email.from_addr, mime.asRaw());
+        await workerEnv.EMAIL.send(message);
+
+        return "message sent";
     },
 });
 
@@ -157,21 +155,6 @@ const emailAgent = agent({ id: "email-agent" })
 
 const worker = sub.worker({ agents: [emailAgent] });
 
-// ── Email handler ──────────────────────────────────────────────────────────
-
-async function runAgent(env: WorkerEnv, sessionId: string, from: string, userContent: string): Promise<void> {
-    const client = sub.backend.client({
-        url: env.SUBSTRUCTURE_URL,
-        apiKey: env.SUBSTRUCTURE_API_KEY,
-    });
-    await client.submit({
-        agentId: emailAgent.agentId,
-        sessionId,
-        payload: { type: "message", message: { role: "user", content: userContent } },
-        identity: { id: from },
-    });
-}
-
 export default {
     async email(message: ForwardableEmailMessage, env: WorkerEnv, ctx: ExecutionContext): Promise<void> {
         workerEnv = env;
@@ -199,9 +182,19 @@ export default {
             `now: ${new Date(now).toISOString()}\n` +
             `From: ${message.from}\nSubject: ${subject}\n\n${body}`;
 
-        // Submit and forget. The agent's send_reply tool will dispatch any
-        // reply via env.EMAIL.send() from a subsequent fetch() invocation.
-        ctx.waitUntil(runAgent(env, sessionIdForThread(message.headers), message.from, userContent));
+        const client = sub.backend.client({
+            url: env.SUBSTRUCTURE_URL,
+            apiKey: env.SUBSTRUCTURE_API_KEY,
+        });
+
+        const sessionId = sessionIdForThread(message.headers);
+
+        await client.startTurn({
+            agentId: emailAgent.agentId,
+            sessionId,
+            payload: { type: "message", message: { role: "user", content: userContent } },
+            identity: { id: message.from },
+        });
     },
 
     async fetch(request: Request, env: WorkerEnv): Promise<Response> {

@@ -1,29 +1,23 @@
 import { UserClient } from "./user-client";
-import { RunStream } from "./run-stream";
+import { drainToTurnResult } from "./turn";
+import type { SessionScope, TurnResult } from "./turn";
 import type { ClientPayload, Event } from "./types";
 
-export { RunStream } from "./run-stream";
-export type { TurnResult } from "./run-stream";
+export type { SessionScope, TurnResult } from "./turn";
 
 export interface FrontendClientOptions {
     url: string;
     token: string;
 }
 
-export interface FrontendSubmitRequest {
+export interface StartTurnRequest {
     agentId: string;
     payload: ClientPayload;
     sessionId?: string;
     turnId?: string;
 }
 
-export interface FrontendSubmitResult {
-    sessionId: string;
-    turnId: string;
-}
-
-export interface FrontendListenOptions {
-    turnId?: string;
+export interface StreamOptions {
     sequenceAfter?: number;
 }
 
@@ -37,8 +31,8 @@ export class FrontendClient {
         });
     }
 
-    /** Fire-and-forget: enqueue a payload, return as soon as it's accepted. */
-    async submit(request: FrontendSubmitRequest): Promise<FrontendSubmitResult> {
+    /** Fire-and-forget: enqueue a turn, return as soon as it's accepted. */
+    async startTurn(request: StartTurnRequest): Promise<SessionScope> {
         const response = await this.user.submitPayload({
             agent_id: request.agentId,
             payload: request.payload,
@@ -48,22 +42,20 @@ export class FrontendClient {
         return { sessionId: response.session_id, turnId: response.turn_id };
     }
 
-    /** Stream events for a session, optionally scoped to a turn and/or
-     *  replayed from a sequence cursor. */
-    listen(sessionId: string, options?: FrontendListenOptions): AsyncGenerator<Event> {
-        return this.user.streamSessionEvents(sessionId, {
-            turn_id: options?.turnId,
+    /** Stream events for a session. If `scope.turnId` is set, the stream is
+     *  filtered to that turn and auto-closes on completion. */
+    stream(scope: SessionScope, options?: StreamOptions): AsyncGenerator<Event> {
+        return this.user.streamSessionEvents(scope.sessionId, {
+            turn_id: scope.turnId,
             sequence_after: options?.sequenceAfter,
         });
     }
 
-    /** Sugar: submit and immediately listen for events on the resulting turn. */
-    submitAndListen(request: FrontendSubmitRequest): RunStream {
-        const self = this;
-        const source = (async function* () {
-            const { sessionId, turnId } = await self.submit(request);
-            yield* self.listen(sessionId, { turnId, sequenceAfter: 0 });
-        })();
-        return new RunStream(source);
+    /** Stream a turn to completion and return its result. Requires `scope.turnId`. */
+    turnResult(scope: SessionScope): Promise<TurnResult> {
+        if (!scope.turnId) {
+            throw new Error("turnResult requires scope.turnId");
+        }
+        return drainToTurnResult(this.stream(scope));
     }
 }

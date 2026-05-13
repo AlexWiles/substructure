@@ -2,7 +2,7 @@
 // This example builds a simple conversational todo-list agent that persists
 // state across turns using Substructure's embedded runtime.
 
-import Substructure, { type RunStream } from "@substructure.ai/sdk";
+import Substructure from "@substructure.ai/sdk";
 import { randomUUID } from "crypto";
 
 // Create a Substructure instance – the entry point for building agents.
@@ -101,14 +101,14 @@ const identity = { tenant_id: "default", id: "example-user" };
 
 async function turn(message: string) {
     console.log(`\n> ${message}`);
-    const stream = embedded.submitAndListen({
+    const scope = await embedded.startTurn({
         agentId: todoAgent.agentId,
         payload: { type: "message", message: { role: "user", content: message } },
         sessionId,
         identity,
         turnId: randomUUID(),
     });
-    for await (const event of stream) {
+    for await (const event of embedded.stream(scope)) {
         if (
             event.payload.type === "message.new" &&
             event.payload.message.role === "assistant" &&
