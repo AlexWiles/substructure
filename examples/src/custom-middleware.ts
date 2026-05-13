@@ -76,7 +76,6 @@ const assistant = agent({ id: "assistant" })
     .use(
         agent.llmLoop({
             request: { model: "anthropic/claude-sonnet-4" },
-            llm_client: "openrouter",
         }),
     );
 

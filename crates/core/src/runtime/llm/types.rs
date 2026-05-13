@@ -61,11 +61,7 @@ pub struct LlmResponse {
 /// Trait for LLM client providers (resolved by the runtime).
 #[async_trait]
 pub trait LlmProviderTrait: Send + Sync {
-    async fn resolve(
-        &self,
-        client_id: &str,
-        identity: &ClientIdentity,
-    ) -> Result<Arc<dyn LlmCallable>, String>;
+    async fn resolve(&self, identity: &ClientIdentity) -> Result<Arc<dyn LlmCallable>, String>;
 }
 
 #[derive(Debug, Clone)]
@@ -75,7 +71,6 @@ pub struct CallContext<'a> {
     pub agent_id: &'a str,
     pub call_id: &'a str,
     pub attempt: u32,
-    pub llm_client: &'a str,
     pub identity: &'a ClientIdentity,
     /// Parent chain, root-last. Empty for top-level sessions.
     pub ancestry: &'a [String],

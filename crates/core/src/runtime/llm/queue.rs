@@ -9,7 +9,6 @@ pub struct LlmTask {
     pub agent_id: String,
     pub call_id: String,
     pub attempt: u32,
-    pub llm_client: String,
     pub request: LlmRequest,
     pub identity: ClientIdentity,
     /// Parent chain, root-last. Empty for top-level sessions.

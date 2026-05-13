@@ -58,7 +58,6 @@ const weatherAgent = agent({ id: "weather-agent" })
   .use(agent.tools([getWeather]))
   .use(agent.llmLoop({
     request: { model: "anthropic/claude-sonnet-4-5" },
-    llm_client: "openrouter",
   }));
 
 Bun.serve({ port: 4444, fetch: sub.worker({ agents: [weatherAgent] }).fetchHandler() });

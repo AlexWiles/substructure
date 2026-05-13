@@ -150,7 +150,6 @@ const emailAgent = agent({ id: "email-agent" })
     .use(
         agent.llmLoop({
             request: { model: "anthropic/claude-sonnet-4-6" },
-            llm_client: "openrouter",
         }),
     );
 

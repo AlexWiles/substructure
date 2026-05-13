@@ -202,7 +202,6 @@ export type WorkerAction =
           type: "call.llm";
           request: LlmRequest;
           stream: boolean;
-          llm_client: string;
           retry: RetryPolicy;
       }
     | {
@@ -254,7 +253,6 @@ export interface LlmCallRequested {
     call_id: string;
     request: LlmRequest;
     stream: boolean;
-    llm_client: string;
     retry: RetryPolicy;
 }
 
@@ -493,7 +491,6 @@ export interface LlmCallState {
     tracking: EffectTracking;
     request: LlmRequest;
     stream: boolean;
-    llm_client: string;
 }
 
 export interface ToolCallState {

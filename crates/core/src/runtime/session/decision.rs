@@ -110,7 +110,6 @@ pub enum WorkerAction {
     CallLlm {
         request: LlmRequest,
         stream: bool,
-        llm_client: String,
         retry: RetryPolicy,
     },
     #[serde(rename = "call.tool")]

@@ -99,9 +99,6 @@ pub struct LlmCallState {
     /// Original request, stored for retries and crash recovery.
     pub request: LlmRequest,
     pub stream: bool,
-    /// Which LLM provider to use (e.g. "openrouter", "mock").
-    #[serde(default)]
-    pub llm_client: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -278,7 +275,6 @@ impl SessionState {
                             tracking: EffectTracking::new(payload.retry.clone(), now),
                             request: payload.request.clone(),
                             stream: payload.stream,
-                            llm_client: payload.llm_client.clone(),
                         },
                     );
                 }
