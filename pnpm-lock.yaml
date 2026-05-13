@@ -59,16 +59,6 @@ importers:
         specifier: 4.90.1
         version: 4.90.1
 
-  examples/src/cloudflare-worker:
-    dependencies:
-      '@substructure.ai/sdk':
-        specifier: workspace:*
-        version: link:../../../packages/sdk
-    devDependencies:
-      wrangler:
-        specifier: 4.90.1
-        version: 4.90.1
-
   packages/cli:
     optionalDependencies:
       '@substructure.ai/cli-darwin-arm64':
