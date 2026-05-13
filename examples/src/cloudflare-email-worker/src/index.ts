@@ -148,7 +148,7 @@ const emailAgent = agent({ id: "email-agent" })
     .use(agent.tools([recordExpense, querySql, sendReplyTool]))
     .use(
         agent.llmLoop({
-            request: { model: "anthropic/claude-sonnet-4-5" },
+            request: { model: "anthropic/claude-sonnet-4-6" },
             llm_client: "openrouter",
         }),
     );

@@ -1,9 +1,8 @@
+import type { ClientPayload, Event, SessionScope, TurnResult } from "./types";
+import { drainToTurnResult } from "./types";
 import { UserClient } from "./user-client";
-import { drainToTurnResult } from "./turn";
-import type { SessionScope, TurnResult } from "./turn";
-import type { ClientPayload, Event } from "./types";
 
-export type { SessionScope, TurnResult } from "./turn";
+export type { SessionScope, TurnResult } from "./types";
 
 export interface FrontendClientOptions {
     url: string;

@@ -1,9 +1,8 @@
 import { WorkerClient } from "./worker-client";
-import { drainToTurnResult } from "./turn";
-import type { SessionScope, TurnResult } from "./turn";
-import type { ClientPayload, Event, SubmitRequest, SubmitResponse } from "./types";
+import { drainToTurnResult } from "./types";
+import type { ClientPayload, Event, SessionScope, SubmitRequest, SubmitResponse, TurnResult } from "./types";
 
-export type { SessionScope, TurnResult } from "./turn";
+export type { SessionScope, TurnResult } from "./types";
 
 export interface BackendClientOptions {
     url: string;
