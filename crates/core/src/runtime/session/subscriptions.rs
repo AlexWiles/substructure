@@ -58,7 +58,6 @@ impl SessionSubscriptionSpec {
             Self::All { .. } => false,
         }
     }
-
 }
 
 impl SessionSubscriptions {
@@ -121,18 +120,17 @@ impl SessionSubscriptions {
         };
 
         let max_seq = historical.last().map(|e| e.sequence).unwrap_or(0);
-        let already_complete = matches!(&spec, SessionSubscriptionSpec::Turn { .. })
-            && historical.iter().any(|e| is_turn_completed_for(e, &spec));
 
         let (tx, rx) = mpsc::channel(64);
         tokio::spawn(async move {
             for event in historical {
+                let terminal = is_turn_completed_for(&event, &spec);
                 if tx.send(event).await.is_err() {
                     return;
                 }
-            }
-            if already_complete {
-                return;
+                if terminal {
+                    return;
+                }
             }
             let mut live = live_rx;
             while let Some(event) = live.recv().await {
@@ -166,10 +164,7 @@ impl SessionSubscriptions {
 }
 
 fn is_turn_completed_for(raw: &Event, spec: &SessionSubscriptionSpec) -> bool {
-    let Some(event) = decode_session_event(raw) else {
-        return false;
-    };
-    spec.is_terminal(&event)
+    decode_session_event(raw).is_some_and(|e| spec.is_terminal(&e))
 }
 
 fn filter_by_spec(events: Vec<Event>, spec: &SessionSubscriptionSpec) -> Vec<Event> {

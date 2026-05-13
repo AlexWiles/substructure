@@ -92,7 +92,7 @@ const identity = { tenant_id: "default", id: "alice" };
 
 async function turn(message: string) {
     console.log(`\n> ${message}`);
-    const stream = embedded.submit({
+    const stream = embedded.submitAndListen({
         agentId: assistant.agentId,
         payload: { type: "message", message: { role: "user", content: message } },
         sessionId,

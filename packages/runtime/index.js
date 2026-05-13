@@ -50,13 +50,17 @@ export class EmbeddedRuntime {
     return this._native.registerWorker(tenantId, agentIds, callback);
   }
 
-  async *submitPayload(sessionId, agentId, payloadJson, identityJson, turnId) {
+  submitPayload(sessionId, agentId, payloadJson, identityJson, turnId) {
+    return this._native.submitPayload(sessionId, agentId, payloadJson, identityJson, turnId);
+  }
+
+  async *streamSession(sessionId, turnId, sequenceAfter) {
     let resolve;
     let done = false;
     const buffer = [];
 
-    const finished = this._native.submitPayload(
-      sessionId, agentId, payloadJson, identityJson, turnId,
+    const finished = this._native.streamSession(
+      sessionId, turnId, sequenceAfter,
       (json) => {
         buffer.push(json);
         resolve?.();

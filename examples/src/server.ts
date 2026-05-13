@@ -69,7 +69,7 @@ const frontend = sub.frontend.client({
     token: clientToken,
 });
 
-const stream = frontend.submit({
+const stream = frontend.submitAndListen({
     agentId: "todo-agent",
     payload: {
         type: "message",

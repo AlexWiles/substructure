@@ -539,6 +539,16 @@ export interface MachineSubmitPayloadRequest {
     };
 }
 
+export interface SubmitClientPayloadResponse {
+    session_id: Uuid;
+    turn_id: string;
+}
+
+export interface StreamSessionEventsParams {
+    turn_id?: string;
+    sequence_after?: number;
+}
+
 // ── Worker HTTP API ─────────────────────────────────────────────────────────
 
 export interface WorkerAuthOptions {

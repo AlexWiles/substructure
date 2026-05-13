@@ -97,6 +97,16 @@ export interface SubmitRequest {
     turnId?: string;
 }
 
+export interface SubmitResult {
+    sessionId: string;
+    turnId: string;
+}
+
+export interface ListenOptions {
+    turnId?: string;
+    sequenceAfter?: number;
+}
+
 export class EmbeddedInstance {
     private runtime: NativeRuntime;
     private worker: Worker;
@@ -108,29 +118,39 @@ export class EmbeddedInstance {
         this.registered = this.worker.register(runtime, tenantId);
     }
 
-    submit(request: SubmitRequest): RunStream {
-        const sessionId = request.sessionId ?? crypto.randomUUID();
+    /** Fire-and-forget: enqueue a payload, return as soon as it's accepted. */
+    async submit(request: SubmitRequest): Promise<SubmitResult> {
+        await this.registered;
         const identity = request.identity;
-        const turnId = request.turnId;
-
-        const self = this;
-        async function* generate(): AsyncGenerator<Event> {
-            await self.registered;
-            if (!identity?.id) {
-                throw new Error("submit.identity.id is required for embedded runtime");
-            }
-            for await (const json of self.runtime.submitPayload(
-                sessionId,
-                request.agentId,
-                JSON.stringify(request.payload),
-                JSON.stringify(identity),
-                turnId,
-            )) {
-                yield JSON.parse(json) as Event;
-            }
+        if (!identity?.id) {
+            throw new Error("submit.identity.id is required for embedded runtime");
         }
+        const sessionId = request.sessionId ?? crypto.randomUUID();
+        return this.runtime.submitPayload(
+            sessionId,
+            request.agentId,
+            JSON.stringify(request.payload),
+            JSON.stringify(identity),
+            request.turnId,
+        );
+    }
 
-        return new RunStream(generate());
+    /** Stream events for a session, optionally scoped to a turn and/or
+     *  replayed from a sequence cursor. */
+    async *listen(sessionId: string, options?: ListenOptions): AsyncGenerator<Event> {
+        for await (const json of this.runtime.streamSession(sessionId, options?.turnId, options?.sequenceAfter)) {
+            yield JSON.parse(json) as Event;
+        }
+    }
+
+    /** Sugar: submit and immediately listen for events on the resulting turn. */
+    submitAndListen(request: SubmitRequest): RunStream {
+        const self = this;
+        const source = (async function* () {
+            const { sessionId, turnId } = await self.submit(request);
+            yield* self.listen(sessionId, { turnId, sequenceAfter: 0 });
+        })();
+        return new RunStream(source);
     }
 
     fetchHandler(options?: FetchHandlerOptions): (req: Request) => Promise<Response> {

@@ -164,16 +164,12 @@ async function runAgent(env: WorkerEnv, sessionId: string, from: string, userCon
         url: env.SUBSTRUCTURE_URL,
         apiKey: env.SUBSTRUCTURE_API_KEY,
     });
-    const stream = client.submit({
+    await client.submit({
         agentId: emailAgent.agentId,
         sessionId,
         payload: { type: "message", message: { role: "user", content: userContent } },
         identity: { id: from },
     });
-    for await (const _event of stream) {
-        /* drain */
-    }
-    await stream.result;
 }
 
 export default {

@@ -6,7 +6,7 @@ const backend = sub.backend.client({
     apiKey: "dev-worker-key",
 });
 
-const stream = backend.submit({
+const stream = backend.submitAndListen({
     agentId: "web-agent",
     payload: {
         type: "message",
