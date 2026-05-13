@@ -87,9 +87,6 @@ pub struct LlmCallRequested {
     pub attempt: u32,
     pub request: LlmRequest,
     pub stream: bool,
-    /// Which LLM provider to use (e.g. "openrouter", "mock").
-    #[serde(default)]
-    pub llm_client: String,
     pub retry: RetryPolicy,
 }
 

@@ -507,7 +507,6 @@ export function tools<S>(
 
 export interface LlmLoopSelection {
     request: Omit<LlmRequest, "messages"> & { messages?: Message[] };
-    llm_client: string;
     retry?: RetryPolicy;
     stream?: boolean;
     toolRetries?: Record<string, RetryPolicy>;
@@ -538,7 +537,6 @@ export function llmLoop<S>(
                                     ...selection.request,
                                     messages: [],
                                 },
-                                llm_client: selection.llm_client,
                                 retry: selection.retry ?? DEFAULT_RETRY,
                                 stream: selection.stream ?? false,
                             },

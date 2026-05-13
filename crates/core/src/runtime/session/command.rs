@@ -34,7 +34,6 @@ pub enum CommandPayload {
         call_id: String,
         request: LlmRequest,
         stream: bool,
-        llm_client: String,
         retry: RetryPolicy,
     },
     CompleteLlmCall {
@@ -284,7 +283,6 @@ impl SessionState {
                 call_id,
                 request,
                 stream,
-                llm_client,
                 retry,
             } => {
                 if self.has_pending_llm() {
@@ -300,7 +298,6 @@ impl SessionState {
                         attempt: 0,
                         request,
                         stream,
-                        llm_client,
                         retry,
                     })])
                 } else {
@@ -651,13 +648,11 @@ impl SessionState {
                         WorkerAction::CallLlm {
                             request,
                             stream,
-                            llm_client,
                             retry,
                         } => self.handle(CommandPayload::RequestLlmCall {
                             call_id: new_call_id(),
                             request,
                             stream,
-                            llm_client,
                             retry,
                         }),
                         WorkerAction::CallTool {
@@ -823,7 +818,6 @@ impl SessionState {
                             attempt: call.tracking.retry.attempts,
                             request: call.request.clone(),
                             stream: call.stream,
-                            llm_client: call.llm_client.clone(),
                             retry: call.tracking.retry_policy.clone(),
                         })]);
                     }

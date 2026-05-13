@@ -487,11 +487,7 @@ impl OpenRouterProvider {
 
 #[async_trait]
 impl LlmProviderTrait for OpenRouterProvider {
-    async fn resolve(
-        &self,
-        _client_id: &str,
-        _identity: &ClientIdentity,
-    ) -> Result<Arc<dyn LlmCallable>, String> {
+    async fn resolve(&self, _identity: &ClientIdentity) -> Result<Arc<dyn LlmCallable>, String> {
         Ok(self.client.clone())
     }
 }

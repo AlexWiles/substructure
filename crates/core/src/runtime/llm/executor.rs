@@ -35,7 +35,7 @@ pub fn spawn_llm_task_executor(
                     _ = cancel.cancelled() => break,
                 };
 
-                let resolved = provider.resolve(&task.llm_client, &task.identity).await;
+                let resolved = provider.resolve(&task.identity).await;
 
                 let command = match resolved {
                     Ok(client) => {
@@ -45,7 +45,6 @@ pub fn spawn_llm_task_executor(
                             agent_id: &task.agent_id,
                             call_id: &task.call_id,
                             attempt: task.attempt,
-                            llm_client: &task.llm_client,
                             identity: &task.identity,
                             ancestry: &task.ancestry,
                         };
