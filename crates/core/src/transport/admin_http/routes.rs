@@ -10,6 +10,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::event_store::{AggregateSort, EventFilter};
 use crate::session::index::{SessionCursor, SessionFilter};
+use crate::session::subscriptions::SessionSubscriptionSpec;
 use crate::transport::auth::AuthPrincipal;
 
 use super::AdminHttpState;
@@ -149,47 +150,12 @@ pub async fn stream_session_events(
     Path(session_id): Path<String>,
     Query(params): Query<SessionEventsParams>,
 ) -> Response {
-    // Subscribe BEFORE querying historical events so we don't miss anything
-    let live_rx = state.runtime.subscribe_session_admin(session_id.clone());
-
-    // Query historical events
-    let filter = EventFilter {
-        aggregate_id: Some(session_id),
-        sequence_after: params.sequence_after,
-        limit: None,
-        ..Default::default()
+    let spec = SessionSubscriptionSpec::All {
+        root_session_id: session_id,
     };
-    let historical = state
-        .runtime
-        .get_session_events(&filter)
-        .await
-        .unwrap_or_default();
-
-    // Track last sequence sent to deduplicate overlap between historical and live
-    let last_historical_seq = historical.last().map(|e| e.sequence).unwrap_or(0);
-
-    // Create a channel that combines historical + live
-    let (tx, rx) = tokio::sync::mpsc::channel(64);
-
-    tokio::spawn(async move {
-        // Send historical events first
-        for event in historical {
-            if tx.send(event).await.is_err() {
-                return;
-            }
-        }
-
-        // Then stream live events, deduplicating
-        let mut live_stream = ReceiverStream::new(live_rx);
-        while let Some(event) = live_stream.next().await {
-            if event.sequence <= last_historical_seq {
-                continue;
-            }
-            if tx.send(event).await.is_err() {
-                return;
-            }
-        }
-    });
+    // Admin endpoint defaults to full-history replay (sequence_after defaults to 0).
+    let sequence_after = Some(params.sequence_after.unwrap_or(0));
+    let rx = state.runtime.stream(spec, sequence_after).await;
 
     let stream = ReceiverStream::new(rx)
         .take_until(state.shutdown.clone().cancelled_owned())
