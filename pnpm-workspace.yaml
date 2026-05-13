@@ -4,9 +4,6 @@ packages:
   - examples/*
   - examples/src/*
 allowBuilds:
-  core-js-pure: set this to true or false
   esbuild: true
   lefthook: true
   nx: true
-  sharp: set this to true or false
-  workerd: set this to true or false
