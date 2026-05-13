@@ -7,7 +7,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 
 use tokio_util::sync::CancellationToken;
@@ -33,6 +33,10 @@ pub fn router(state: WorkerHttpState) -> Router {
         .route(
             "/api/machine/sessions/submit",
             post(routes::submit_client_payload),
+        )
+        .route(
+            "/api/machine/sessions/{session_id}/events/stream",
+            get(routes::stream_session_events),
         )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),

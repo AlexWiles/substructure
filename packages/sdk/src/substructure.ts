@@ -1,24 +1,23 @@
-import type { ClientPayload, ClientIdentity, Event } from "./types";
-import type { FetchHandlerOptions, NativeRuntime } from "./worker";
-import { Worker, HandlerBuilder } from "./worker";
-import type { Handler } from "./worker";
-import { RunStream } from "./run-stream";
-import { BackendClient } from "./backend-client";
 import type { BackendClientOptions } from "./backend-client";
-import { FrontendClient } from "./frontend-client";
+import { BackendClient } from "./backend-client";
 import type { FrontendClientOptions } from "./frontend-client";
+import { FrontendClient } from "./frontend-client";
 import {
     jsonState,
-    stateSlice,
-    tool,
+    llmLoop,
     logging,
     messageHistory,
     messageHistoryCurrentTurn,
-    systemMessage,
-    tools,
-    llmLoop,
+    stateSlice,
     subAgents,
+    systemMessage,
+    tool,
+    tools,
 } from "./middleware";
+import type { ClientIdentity, ClientPayload, Event, SessionScope, TurnResult } from "./types";
+import { drainToTurnResult } from "./types";
+import type { FetchHandlerOptions, Handler, NativeRuntime } from "./worker";
+import { HandlerBuilder, Worker } from "./worker";
 
 // ── Agent factory ───────────────────────────────────────────────────────────
 
@@ -89,12 +88,16 @@ export interface EmbeddedOptions {
     tenantId?: string;
 }
 
-export interface SubmitRequest {
+export interface StartTurnRequest {
     agentId: string;
     payload: ClientPayload;
     identity?: ClientIdentity;
     sessionId?: string;
     turnId?: string;
+}
+
+export interface StreamOptions {
+    sequenceAfter?: number;
 }
 
 export class EmbeddedInstance {
@@ -108,29 +111,37 @@ export class EmbeddedInstance {
         this.registered = this.worker.register(runtime, tenantId);
     }
 
-    submit(request: SubmitRequest): RunStream {
-        const sessionId = request.sessionId ?? crypto.randomUUID();
+    /** Fire-and-forget: enqueue a turn, return as soon as it's accepted. */
+    async startTurn(request: StartTurnRequest): Promise<SessionScope> {
+        await this.registered;
         const identity = request.identity;
-        const turnId = request.turnId;
-
-        const self = this;
-        async function* generate(): AsyncGenerator<Event> {
-            await self.registered;
-            if (!identity?.id) {
-                throw new Error("submit.identity.id is required for embedded runtime");
-            }
-            for await (const json of self.runtime.submitPayload(
-                sessionId,
-                request.agentId,
-                JSON.stringify(request.payload),
-                JSON.stringify(identity),
-                turnId,
-            )) {
-                yield JSON.parse(json) as Event;
-            }
+        if (!identity?.id) {
+            throw new Error("startTurn.identity.id is required for embedded runtime");
         }
+        const sessionId = request.sessionId ?? crypto.randomUUID();
+        return this.runtime.submitPayload(
+            sessionId,
+            request.agentId,
+            JSON.stringify(request.payload),
+            JSON.stringify(identity),
+            request.turnId,
+        );
+    }
 
-        return new RunStream(generate());
+    /** Stream events for a session. If `scope.turnId` is set, the stream is
+     *  filtered to that turn and auto-closes on completion. */
+    async *stream(scope: SessionScope, options?: StreamOptions): AsyncGenerator<Event> {
+        for await (const json of this.runtime.streamSession(scope.sessionId, scope.turnId, options?.sequenceAfter)) {
+            yield JSON.parse(json) as Event;
+        }
+    }
+
+    /** Stream a turn to completion and return its result. Requires `scope.turnId`. */
+    turnResult(scope: SessionScope): Promise<TurnResult> {
+        if (!scope.turnId) {
+            throw new Error("turnResult requires scope.turnId");
+        }
+        return drainToTurnResult(this.stream(scope));
     }
 
     fetchHandler(options?: FetchHandlerOptions): (req: Request) => Promise<Response> {

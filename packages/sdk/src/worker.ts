@@ -11,7 +11,8 @@ export interface NativeRuntime {
         payloadJson: string,
         identityJson: string,
         turnId?: string,
-    ): AsyncGenerator<string, void, unknown>;
+    ): Promise<{ sessionId: string; turnId: string }>;
+    streamSession(sessionId: string, turnId?: string, sequenceAfter?: number): AsyncGenerator<string, void, unknown>;
     shutdown(): Promise<void>;
 }
 import { verifyWebhookSignature } from "./webhook";

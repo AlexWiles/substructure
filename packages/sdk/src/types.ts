@@ -438,6 +438,43 @@ export interface Event {
     end_time: DateTime;
 }
 
+// ── Turns ───────────────────────────────────────────────────────────────────
+
+/** Scope of events to observe within a session. With `turnId` omitted, the
+ *  scope is the whole session. `startTurn` always returns one with `turnId`
+ *  set; `turnResult` requires it at runtime. */
+export interface SessionScope {
+    sessionId: string;
+    turnId?: string;
+}
+
+export interface TurnResult {
+    turnId: string;
+    data: unknown;
+    cost: Decimal;
+    tokenUsage: Record<string, number>;
+}
+
+/** Drain a turn event stream to completion and return the turn result.
+ *  Throws if the stream ends without a `turn.completed` event. */
+export async function drainToTurnResult(stream: AsyncIterable<Event>): Promise<TurnResult> {
+    let completed: TurnCompleted | undefined;
+    for await (const event of stream) {
+        if (event.payload.type === "turn.completed") {
+            completed = event.payload;
+        }
+    }
+    if (!completed) {
+        throw new Error("stream ended without turn.completed");
+    }
+    return {
+        turnId: completed.turn_id,
+        data: completed.data,
+        cost: completed.turn_cost ?? "0",
+        tokenUsage: completed.turn_token_usage ?? {},
+    };
+}
+
 // ── Session State ───────────────────────────────────────────────────────────
 
 export type SessionStatus = "idle" | { interrupted: { interrupt_id: string } } | "done";
@@ -537,6 +574,16 @@ export interface MachineSubmitPayloadRequest {
         id: string;
         metadata?: Record<string, string>;
     };
+}
+
+export interface SubmitClientPayloadResponse {
+    session_id: Uuid;
+    turn_id: string;
+}
+
+export interface StreamSessionEventsParams {
+    turn_id?: string;
+    sequence_after?: number;
 }
 
 // ── Worker HTTP API ─────────────────────────────────────────────────────────

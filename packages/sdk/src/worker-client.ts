@@ -4,9 +4,11 @@ import type {
     MachineSubmitPayloadRequest,
     MintClientTokenRequest,
     MintClientTokenResponse,
-    WorkerAuthOptions,
+    StreamSessionEventsParams,
+    SubmitClientPayloadResponse,
     SubmitRequest,
     SubmitResponse,
+    WorkerAuthOptions,
 } from "./types";
 
 export class WorkerClient extends BaseClient {
@@ -18,10 +20,28 @@ export class WorkerClient extends BaseClient {
         return this.post("/api/machine/client-tokens", request, { headers: buildWorkerAuthHeaders(auth) });
     }
 
-    async *submitClientPayload(request: MachineSubmitPayloadRequest, auth?: WorkerAuthOptions): AsyncGenerator<Event> {
-        yield* this.streamSSE("/api/machine/sessions/submit", request, {
+    async submitClientPayload(
+        request: MachineSubmitPayloadRequest,
+        auth?: WorkerAuthOptions,
+    ): Promise<SubmitClientPayloadResponse> {
+        return this.post("/api/machine/sessions/submit", request, {
             headers: buildWorkerAuthHeaders(auth),
         });
+    }
+
+    async *streamSessionEvents(
+        sessionId: string,
+        params?: StreamSessionEventsParams,
+        auth?: WorkerAuthOptions,
+    ): AsyncGenerator<Event> {
+        yield* this.streamSSEGet<Event>(
+            `/api/machine/sessions/${sessionId}/events/stream`,
+            {
+                turn_id: params?.turn_id,
+                sequence_after: params?.sequence_after?.toString(),
+            },
+            { headers: buildWorkerAuthHeaders(auth) },
+        );
     }
 }
 

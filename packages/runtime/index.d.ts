@@ -9,6 +9,11 @@ export interface RuntimeOptions {
     llmPoolSize?: number;
 }
 
+export interface SubmitPayloadResult {
+    sessionId: string;
+    turnId: string;
+}
+
 export class EmbeddedRuntime {
     constructor(options: RuntimeOptions);
 
@@ -24,7 +29,9 @@ export class EmbeddedRuntime {
         payloadJson: string,
         identityJson: string,
         turnId?: string,
-    ): AsyncGenerator<string, void, unknown>;
+    ): Promise<SubmitPayloadResult>;
+
+    streamSession(sessionId: string, turnId?: string, sequenceAfter?: number): AsyncGenerator<string, void, unknown>;
 
     shutdown(): Promise<void>;
 }

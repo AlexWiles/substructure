@@ -60,3 +60,17 @@ pub struct SubmitClientPayloadIdentity {
     #[serde(default)]
     pub metadata: std::collections::HashMap<String, String>,
 }
+
+#[derive(Debug, Serialize)]
+pub struct SubmitClientPayloadResponse {
+    pub session_id: String,
+    pub turn_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StreamSessionEventsParams {
+    #[serde(default)]
+    pub turn_id: Option<String>,
+    #[serde(default)]
+    pub sequence_after: Option<u64>,
+}

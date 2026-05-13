@@ -6,7 +6,6 @@ use crate::runtime::aggregate::{AggregateState, DomainEvent};
 use crate::runtime::event_store::{Event, EventFilter, EventStore};
 use crate::runtime::session::events::EventPayload;
 use crate::runtime::session::state::SessionState;
-use crate::runtime::RuntimeError;
 
 /// Manages event subscriptions for sessions: live streaming, catchup replay,
 /// and combined catchup-then-live flows.
@@ -59,16 +58,6 @@ impl SessionSubscriptionSpec {
             Self::All { .. } => false,
         }
     }
-
-    fn turn_scope(&self) -> Option<(&str, &str)> {
-        match self {
-            Self::Turn {
-                root_session_id,
-                turn_id,
-            } => Some((root_session_id.as_str(), turn_id.as_str())),
-            Self::All { .. } => None,
-        }
-    }
 }
 
 impl SessionSubscriptions {
@@ -108,33 +97,38 @@ impl SessionSubscriptions {
         event_rx
     }
 
-    /// Catchup + live: load historical events for a turn, then chain with
-    /// a live subscription. Deduplicates by sequence number since we subscribe
-    /// before querying to avoid gaps.
-    pub async fn catchup(
+    /// Unified stream: live subscription, optionally preceded by historical
+    /// replay from `sequence_after`. Works for both Turn and All specs.
+    ///
+    /// - If `sequence_after` is `None`, yields live events only.
+    /// - If `sequence_after` is `Some(n)`, replays historical events with
+    ///   `sequence > n` first, then streams live (deduped against historical).
+    /// - For Turn specs, auto-closes when the turn completes. If historical
+    ///   replay already contains the TurnCompleted event, live is skipped.
+    pub async fn stream(
         &self,
         spec: SessionSubscriptionSpec,
-    ) -> Result<(String, mpsc::Receiver<Event>), RuntimeError> {
-        let (session_id, turn_id) = match spec.turn_scope() {
-            Some((session_id, turn_id)) => (session_id.to_string(), turn_id.to_string()),
-            None => {
-                return Err(RuntimeError(
-                    "catchup currently requires turn-scoped session subscription".into(),
-                ));
-            }
-        };
-
-        // Subscribe FIRST to capture future events, then load historical.
+        sequence_after: Option<u64>,
+    ) -> mpsc::Receiver<Event> {
+        // Subscribe live FIRST so we don't miss anything between historical
+        // load and live attach.
         let live_rx = self.subscribe(spec.clone());
 
-        let historical = self.load_turn_events(session_id.clone(), &turn_id).await;
+        let historical = match sequence_after {
+            Some(cursor) => self.load_historical(&spec, cursor).await,
+            None => Vec::new(),
+        };
+
         let max_seq = historical.last().map(|e| e.sequence).unwrap_or(0);
 
         let (tx, rx) = mpsc::channel(64);
-        let sid = session_id.clone();
         tokio::spawn(async move {
             for event in historical {
+                let terminal = is_turn_completed_for(&event, &spec);
                 if tx.send(event).await.is_err() {
+                    return;
+                }
+                if terminal {
                     return;
                 }
             }
@@ -148,53 +142,29 @@ impl SessionSubscriptions {
                 }
             }
         });
-        Ok((sid, rx))
+        rx
     }
 
-    /// Replay historical events for a completed turn (no live subscription).
-    pub async fn replay(
+    async fn load_historical(
         &self,
-        spec: SessionSubscriptionSpec,
-    ) -> Result<(String, mpsc::Receiver<Event>), RuntimeError> {
-        let (session_id, turn_id) = match spec.turn_scope() {
-            Some((session_id, turn_id)) => (session_id.to_string(), turn_id.to_string()),
-            None => {
-                return Err(RuntimeError(
-                    "replay currently requires turn-scoped session subscription".into(),
-                ));
-            }
-        };
-
-        let sid = session_id.clone();
-        let historical = self.load_turn_events(session_id, &turn_id).await;
-
-        let (tx, rx) = mpsc::channel(64);
-        tokio::spawn(async move {
-            for event in historical {
-                if tx.send(event).await.is_err() {
-                    return;
-                }
-            }
-        });
-        Ok((sid, rx))
-    }
-
-    /// Load events for a session filtered to a specific turn.
-    async fn load_turn_events(&self, session_id: String, turn_id: &str) -> Vec<Event> {
-        let all_events = self
+        spec: &SessionSubscriptionSpec,
+        sequence_after: u64,
+    ) -> Vec<Event> {
+        let events = self
             .store
             .query_events(&EventFilter {
-                aggregate_id: Some(session_id.clone()),
+                aggregate_id: Some(spec.root_session_id().to_string()),
+                sequence_after: Some(sequence_after),
                 ..Default::default()
             })
             .await
             .unwrap_or_default();
-        let spec = SessionSubscriptionSpec::Turn {
-            root_session_id: session_id,
-            turn_id: turn_id.to_string(),
-        };
-        filter_by_spec(all_events, &spec)
+        filter_by_spec(events, spec)
     }
+}
+
+fn is_turn_completed_for(raw: &Event, spec: &SessionSubscriptionSpec) -> bool {
+    decode_session_event(raw).is_some_and(|e| spec.is_terminal(&e))
 }
 
 fn filter_by_spec(events: Vec<Event>, spec: &SessionSubscriptionSpec) -> Vec<Event> {

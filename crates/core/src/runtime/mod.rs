@@ -80,6 +80,11 @@ pub struct SubmitClientPayload {
     pub turn_id: Option<String>,
 }
 
+pub struct SubmitClientPayloadOutput {
+    pub session_id: String,
+    pub turn_id: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct RuntimeError(String);
@@ -115,14 +120,14 @@ impl Runtime {
         self.queue.dequeue(filter).await
     }
 
-    /// Submit a client payload to a session and return a stream of events for that session.
-    ///
-    /// Subscribes to the event store broadcast *before* sending so no events are missed.
-    /// The returned receiver yields events until the broadcast closes or the receiver is dropped.
+    /// Submit a client payload to a session. Returns immediately with the
+    /// resolved session and turn ids; an idempotent re-submission resolves to
+    /// the existing turn id. Use `stream` to observe events, including
+    /// completion of an already-finished turn.
     pub async fn submit_client_payload(
         &self,
         input: SubmitClientPayload,
-    ) -> Result<(String, mpsc::Receiver<event_store::Event>), RuntimeError> {
+    ) -> Result<SubmitClientPayloadOutput, RuntimeError> {
         let session_id = input.session_id;
         let turn_id = input.turn_id.unwrap_or_else(|| Uuid::now_v7().to_string());
 
@@ -171,60 +176,30 @@ impl Runtime {
         )
         .await;
 
-        // Determine effective turn_id and whether the turn is already completed
-        let (effective_turn_id, is_completed) = match send_result {
-            Ok(_) => (turn_id, false),
-            Err(ExecuteError::Command(SessionError::TurnAlreadyActive { turn_id })) => {
-                (turn_id, false)
-            }
-            Err(ExecuteError::Command(SessionError::TurnAlreadyCompleted { turn_id })) => {
-                (turn_id, true)
-            }
+        let effective_turn_id = match send_result {
+            Ok(_) => turn_id,
+            Err(ExecuteError::Command(SessionError::TurnAlreadyActive { turn_id })) => turn_id,
+            Err(ExecuteError::Command(SessionError::TurnAlreadyCompleted { turn_id })) => turn_id,
             Err(e) => return Err(RuntimeError(e.to_string())),
         };
 
-        // Build event stream: replay historical + live (if active)
-        if is_completed {
-            self.session_subscriptions
-                .replay(SessionSubscriptionSpec::Turn {
-                    root_session_id: session_id,
-                    turn_id: effective_turn_id,
-                })
-                .await
-        } else {
-            self.session_subscriptions
-                .catchup(SessionSubscriptionSpec::Turn {
-                    root_session_id: session_id,
-                    turn_id: effective_turn_id,
-                })
-                .await
-        }
+        Ok(SubmitClientPayloadOutput {
+            session_id,
+            turn_id: effective_turn_id,
+        })
     }
 
-    /// Subscribe to events for a session, filtered by session ID.
-    /// Closes when the given turn completes.
-    pub fn subscribe_session(
+    /// Unified event stream. `spec` selects which events to observe (a single
+    /// turn or the whole session); `sequence_after` optionally replays
+    /// historical events with `sequence > N` before streaming live.
+    pub async fn stream(
         &self,
-        session_id: String,
-        turn_id: String,
+        spec: SessionSubscriptionSpec,
+        sequence_after: Option<u64>,
     ) -> mpsc::Receiver<event_store::Event> {
         self.session_subscriptions
-            .subscribe(SessionSubscriptionSpec::Turn {
-                root_session_id: session_id,
-                turn_id,
-            })
-    }
-
-    /// Subscribe to all events for a session (and descendants).
-    /// Never auto-closes — stays open until the receiver is dropped.
-    pub fn subscribe_session_admin(
-        &self,
-        session_id: String,
-    ) -> mpsc::Receiver<event_store::Event> {
-        self.session_subscriptions
-            .subscribe(SessionSubscriptionSpec::All {
-                root_session_id: session_id,
-            })
+            .stream(spec, sequence_after)
+            .await
     }
 
     // ---- Admin / inspection methods ----

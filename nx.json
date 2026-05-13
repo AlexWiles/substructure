@@ -2,7 +2,9 @@
   "$schema": "https://nx.dev/reference/nx-json",
   "targetDefaults": {
     "build": {
-      "dependsOn": ["^build"],
+      "dependsOn": [
+        "^build"
+      ],
       "cache": true
     },
     "dev": {
@@ -14,5 +16,6 @@
     "test": {
       "cache": true
     }
-  }
+  },
+  "analytics": true
 }

@@ -1,9 +1,8 @@
 import { WorkerClient } from "./worker-client";
-import { RunStream } from "./run-stream";
-import type { ClientPayload, SubmitRequest, SubmitResponse } from "./types";
+import { drainToTurnResult } from "./types";
+import type { ClientPayload, Event, SessionScope, SubmitRequest, SubmitResponse, TurnResult } from "./types";
 
-export { RunStream } from "./run-stream";
-export type { TurnResult } from "./run-stream";
+export type { SessionScope, TurnResult } from "./types";
 
 export interface BackendClientOptions {
     url: string;
@@ -23,7 +22,7 @@ export interface IssueClientTokenResponse {
     expiresAt: number;
 }
 
-export interface BackendSubmitRequest {
+export interface StartTurnRequest {
     agentId: string;
     payload: ClientPayload;
     identity: {
@@ -32,6 +31,10 @@ export interface BackendSubmitRequest {
     };
     sessionId?: string;
     turnId?: string;
+}
+
+export interface StreamOptions {
+    sequenceAfter?: number;
 }
 
 export class BackendClient {
@@ -56,14 +59,32 @@ export class BackendClient {
         return this.worker.submit(request);
     }
 
-    submit(request: BackendSubmitRequest): RunStream {
-        const stream = this.worker.submitClientPayload({
+    /** Fire-and-forget: enqueue a turn, return as soon as it's accepted. */
+    async startTurn(request: StartTurnRequest): Promise<SessionScope> {
+        const response = await this.worker.submitClientPayload({
             agent_id: request.agentId,
             payload: request.payload,
             identity: request.identity,
             session_id: request.sessionId,
             turn_id: request.turnId,
         });
-        return new RunStream(stream);
+        return { sessionId: response.session_id, turnId: response.turn_id };
+    }
+
+    /** Stream events for a session. If `scope.turnId` is set, the stream is
+     *  filtered to that turn and auto-closes on completion. */
+    stream(scope: SessionScope, options?: StreamOptions): AsyncGenerator<Event> {
+        return this.worker.streamSessionEvents(scope.sessionId, {
+            turn_id: scope.turnId,
+            sequence_after: options?.sequenceAfter,
+        });
+    }
+
+    /** Stream a turn to completion and return its result. Requires `scope.turnId`. */
+    turnResult(scope: SessionScope): Promise<TurnResult> {
+        if (!scope.turnId) {
+            throw new Error("turnResult requires scope.turnId");
+        }
+        return drainToTurnResult(this.stream(scope));
     }
 }

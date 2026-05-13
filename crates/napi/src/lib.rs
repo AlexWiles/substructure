@@ -20,6 +20,13 @@ use substructure_core::session::decision::ClientPayload;
 use substructure_core::worker::{DequeueFilter, SubmitDecision};
 use substructure_core::{Runtime, RuntimeConfig, SubmitClientPayload};
 
+/// Result returned by `submitPayload`.
+#[napi(object)]
+pub struct SubmitPayloadResult {
+    pub session_id: String,
+    pub turn_id: String,
+}
+
 /// Configuration for creating a new Runtime.
 #[napi(object)]
 pub struct RuntimeOptions {
@@ -203,10 +210,11 @@ impl EmbeddedRuntime {
         Ok(())
     }
 
-    /// Submit a client payload to an agent session, calling `onEvent` for each event as it arrives.
+    /// Submit a client payload to an agent session. Returns immediately;
+    /// use `streamSession` to observe events.
     #[napi(
         js_name = "submitPayload",
-        ts_args_type = "sessionId: string, agentId: string, payloadJson: string, identityJson: string, turnId: string | undefined, onEvent: (event: string) => void"
+        ts_args_type = "sessionId: string, agentId: string, payloadJson: string, identityJson: string, turnId: string | undefined"
     )]
     pub async fn submit_client_payload(
         &self,
@@ -215,8 +223,7 @@ impl EmbeddedRuntime {
         payload_json: String,
         identity_json: String,
         turn_id: Option<String>,
-        on_event: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
-    ) -> Result<()> {
+    ) -> Result<SubmitPayloadResult> {
         let payload: ClientPayload = serde_json::from_str(&payload_json)
             .map_err(|e| Error::from_reason(format!("invalid payloadJson: {e}")))?;
         let identity: ClientIdentity = serde_json::from_str(&identity_json)
@@ -225,7 +232,7 @@ impl EmbeddedRuntime {
             return Err(Error::from_reason("identity.id is required"));
         }
 
-        let (_, mut rx) = self
+        let output = self
             .inner
             .submit_client_payload(SubmitClientPayload {
                 session_id,
@@ -237,6 +244,41 @@ impl EmbeddedRuntime {
             })
             .await
             .map_err(|e| Error::from_reason(e.to_string()))?;
+
+        Ok(SubmitPayloadResult {
+            session_id: output.session_id,
+            turn_id: output.turn_id,
+        })
+    }
+
+    /// Stream events for a session. If `turnId` is provided, events are
+    /// filtered to that turn and the stream auto-closes on completion;
+    /// otherwise all events for the session are streamed. `sequenceAfter`
+    /// optionally replays historical events with `sequence > N` first.
+    #[napi(
+        js_name = "streamSession",
+        ts_args_type = "sessionId: string, turnId: string | undefined, sequenceAfter: number | undefined, onEvent: (event: string) => void"
+    )]
+    pub async fn stream_session(
+        &self,
+        session_id: String,
+        turn_id: Option<String>,
+        sequence_after: Option<i64>,
+        on_event: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
+    ) -> Result<()> {
+        use substructure_core::session::subscriptions::SessionSubscriptionSpec;
+
+        let spec = match turn_id {
+            Some(tid) => SessionSubscriptionSpec::Turn {
+                root_session_id: session_id,
+                turn_id: tid,
+            },
+            None => SessionSubscriptionSpec::All {
+                root_session_id: session_id,
+            },
+        };
+        let cursor = sequence_after.map(|n| n.max(0) as u64);
+        let mut rx = self.inner.stream(spec, cursor).await;
 
         while let Some(event) = rx.recv().await {
             let json =
