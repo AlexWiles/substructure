@@ -9,7 +9,7 @@
     "noEmit": true,
     "strict": true,
     "skipLibCheck": true,
-    "types": ["./worker-configuration.d.ts"]
+    "types": ["./worker-configuration.d.ts", "node"]
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "client.ts"]
 }

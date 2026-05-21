@@ -1,8 +1,6 @@
 packages:
   - packages/*
-  - examples
   - examples/*
-  - examples/src/*
 allowBuilds:
   core-js-pure: true
   esbuild: true

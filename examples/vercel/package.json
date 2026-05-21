@@ -1,0 +1,19 @@
+{
+  "name": "@substructure.ai/example-vercel",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "deploy": "vercel deploy",
+    "client": "tsx client.ts"
+  },
+  "dependencies": {
+    "@substructure.ai/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.2",
+    "tsx": "4.21.1",
+    "typescript": "5.9.3",
+    "vercel": "54.0.0"
+  }
+}
