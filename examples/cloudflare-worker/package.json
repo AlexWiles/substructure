@@ -1,0 +1,20 @@
+{
+  "name": "@substructure.ai/example-cloudflare-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types",
+    "client": "tsx client.ts"
+  },
+  "dependencies": {
+    "@substructure.ai/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.2",
+    "tsx": "4.21.1",
+    "typescript": "5.9.3",
+    "wrangler": "4.90.1"
+  }
+}
