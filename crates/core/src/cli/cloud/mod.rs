@@ -2,14 +2,15 @@
 // Talks to /api/v1/* on the cloud backend with a bearer token persisted in
 // ~/.config/subs/config.toml.
 
-pub mod config;
 mod apps;
+pub mod config;
 mod context;
 mod http;
 mod keys;
 mod login;
 mod logout;
 mod orgs;
+mod print;
 mod sessions;
 mod webhook;
 mod whoami;
@@ -27,6 +28,9 @@ pub struct CloudGlobals {
     /// Override the config file path (default: ~/.config/subs/config.toml).
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
+    /// Emit machine-readable JSON instead of the human-readable table/text.
+    #[arg(long, global = true)]
+    pub json: bool,
 }
 
 #[derive(Subcommand)]
@@ -74,7 +78,7 @@ pub async fn run(command: CloudCommand) -> anyhow::Result<()> {
     match command {
         CloudCommand::Login { globals } => login::run(globals.url, globals.config).await,
         CloudCommand::Logout { globals } => logout::run(globals.url, globals.config).await,
-        CloudCommand::Whoami { globals } => whoami::run(globals.url, globals.config).await,
+        CloudCommand::Whoami { globals } => whoami::run(globals).await,
         CloudCommand::Orgs { command } => orgs::run(command).await,
         CloudCommand::Apps { command } => apps::run(command).await,
         CloudCommand::Keys { command } => keys::run(command).await,

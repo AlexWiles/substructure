@@ -55,12 +55,20 @@ impl CloudClient {
 
     /// GET <path> → T. Errors with the server's error envelope when present.
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
-        let res = self.request(Method::GET, path).send().await.context("HTTP send")?;
+        let res = self
+            .request(Method::GET, path)
+            .send()
+            .await
+            .context("HTTP send")?;
         decode(res).await
     }
 
     /// POST <path> with JSON body → T.
-    pub async fn post_json<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
+    pub async fn post_json<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
         let res = self
             .request(Method::POST, path)
             .json(body)
@@ -71,7 +79,11 @@ impl CloudClient {
     }
 
     /// PATCH <path> with JSON body → T.
-    pub async fn patch_json<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
+    pub async fn patch_json<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
         let res = self
             .request(Method::PATCH, path)
             .json(body)
@@ -82,7 +94,11 @@ impl CloudClient {
     }
 
     /// PUT <path> with JSON body → T.
-    pub async fn put_json<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
+    pub async fn put_json<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
         let res = self
             .request(Method::PUT, path)
             .json(body)
@@ -94,7 +110,11 @@ impl CloudClient {
 
     /// DELETE <path> → T.
     pub async fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
-        let res = self.request(Method::DELETE, path).send().await.context("HTTP send")?;
+        let res = self
+            .request(Method::DELETE, path)
+            .send()
+            .await
+            .context("HTTP send")?;
         decode(res).await
     }
 

@@ -91,16 +91,20 @@ async fn start_server(
     let push_store = Arc::new(SqlitePushStore::new(db)?);
 
     let config = RuntimeConfig::default();
-    let llm_task_queue: Arc<dyn TaskQueue<LlmTask>> =
-        Arc::new(ShardedInMemoryQueue::new(config.llm_executor_workers as u32));
-    let sub_agent_task_queue: Arc<dyn TaskQueue<SubAgentTask>> =
-        Arc::new(ShardedInMemoryQueue::new(config.sub_agent_executor_workers as u32));
+    let llm_task_queue: Arc<dyn TaskQueue<LlmTask>> = Arc::new(ShardedInMemoryQueue::new(
+        config.llm_executor_workers as u32,
+    ));
+    let sub_agent_task_queue: Arc<dyn TaskQueue<SubAgentTask>> = Arc::new(
+        ShardedInMemoryQueue::new(config.sub_agent_executor_workers as u32),
+    );
     let llm_provider = match env.provider {
-        ProviderEnv::Openrouter { api_key } => Arc::new(OpenRouterProvider::new(OpenRouterConfig {
-            base_url: std::env::var("OPENROUTER_BASE_URL")
-                .unwrap_or_else(|_| "https://openrouter.ai/api".to_string()),
-            api_key,
-        })),
+        ProviderEnv::Openrouter { api_key } => {
+            Arc::new(OpenRouterProvider::new(OpenRouterConfig {
+                base_url: std::env::var("OPENROUTER_BASE_URL")
+                    .unwrap_or_else(|_| "https://openrouter.ai/api".to_string()),
+                api_key,
+            }))
+        }
     };
 
     let rt = start(

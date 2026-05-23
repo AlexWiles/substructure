@@ -5,6 +5,7 @@ use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 
 use super::context::Context;
+use super::print;
 use super::CloudGlobals;
 
 #[derive(Subcommand)]
@@ -41,7 +42,7 @@ pub enum KeysCommand {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ApiKeyRow {
     key_id: String,
     label: String,
@@ -51,9 +52,21 @@ struct ApiKeyRow {
     last_used_at: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct CreateKeyResponse {
     api_key: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateOutput<'a> {
+    label: &'a str,
+    api_key: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct RevokeResult<'a> {
+    revoked: bool,
+    key_id: &'a str,
 }
 
 #[derive(Debug, Serialize)]
@@ -77,6 +90,10 @@ async fn list(org_flag: Option<String>, app_flag: Option<String>, globals: Cloud
         .client
         .get(&format!("/api/v1/orgs/{org}/apps/{app}/api-keys"))
         .await?;
+
+    if globals.json {
+        return print::json(&keys);
+    }
 
     println!("{:<40} {:<30} {:<25} {}", "KEY_ID", "LABEL", "CREATED", "LAST USED");
     for k in &keys {
@@ -102,6 +119,11 @@ async fn create(label: String, org_flag: Option<String>, app_flag: Option<String
             &LabelPayload { label: &label },
         )
         .await?;
+
+    if globals.json {
+        return print::json(&CreateOutput { label: &label, api_key: &res.api_key });
+    }
+
     println!("API key created");
     println!("  label:    {}", label);
     println!("  api_key:  {}", res.api_key);
@@ -117,6 +139,11 @@ async fn revoke(key_id: String, org_flag: Option<String>, app_flag: Option<Strin
         .client
         .delete(&format!("/api/v1/orgs/{org}/apps/{app}/api-keys/{key_id}"))
         .await?;
+
+    if globals.json {
+        return print::json(&RevokeResult { revoked: true, key_id: &key_id });
+    }
+
     println!("Key {key_id} revoked");
     Ok(())
 }

@@ -5,6 +5,7 @@ use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 
 use super::context::Context;
+use super::print;
 use super::CloudGlobals;
 
 #[derive(Subcommand)]
@@ -12,7 +13,6 @@ pub enum AppsCommand {
     /// List apps in the current org.
     #[command(name = "list", visible_alias = "ls")]
     List {
-        /// Override the default org.
         #[arg(long)]
         org: Option<String>,
         #[command(flatten)]
@@ -61,31 +61,39 @@ pub enum AppsCommand {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct AppRecord {
     id: String,
     #[serde(rename = "organizationId")]
     organization_id: String,
     name: String,
-    #[serde(rename = "shardId")]
-    #[serde(default)]
+    #[serde(rename = "shardId", default)]
     shard_id: Option<i64>,
-    #[serde(rename = "createdAt")]
-    #[serde(default)]
+    #[serde(rename = "createdAt", default)]
     created_at: Option<String>,
-    #[serde(rename = "balanceUsd")]
-    #[serde(default)]
+    #[serde(rename = "balanceUsd", default)]
     balance_usd: Option<String>,
-    #[serde(rename = "sessionCount")]
-    #[serde(default)]
+    #[serde(rename = "sessionCount", default)]
     session_count: Option<i64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct CreateAppResponse {
     app: AppRecord,
     #[serde(rename = "signingSecret")]
     signing_secret: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DeleteResult<'a> {
+    deleted: bool,
+    id: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct UseResult<'a> {
+    org_id: &'a str,
+    default_app: &'a AppRecord,
 }
 
 #[derive(Debug, Serialize)]
@@ -108,8 +116,12 @@ async fn list(org_flag: Option<String>, globals: CloudGlobals) -> Result<()> {
     let ctx = Context::load(&globals)?;
     let org = ctx.require_org(org_flag.as_deref())?;
     let apps: Vec<AppRecord> = ctx.client.get(&format!("/api/v1/orgs/{org}/apps")).await?;
-    let default = ctx.config.resolve_app(&org, None);
 
+    if globals.json {
+        return print::json(&apps);
+    }
+
+    let default = ctx.config.resolve_app(&org, None);
     println!("{:<38} {:<30} {:>10} {:>10}", "ID", "NAME", "SESSIONS", "BALANCE");
     for a in &apps {
         let marker = if default.as_deref() == Some(&a.id) { "*" } else { " " };
@@ -127,6 +139,11 @@ async fn create(name: String, org_flag: Option<String>, globals: CloudGlobals) -
         .client
         .post_json(&format!("/api/v1/orgs/{org}/apps"), &NamePayload { name: &name })
         .await?;
+
+    if globals.json {
+        return print::json(&res);
+    }
+
     println!("App created");
     println!("  id:              {}", res.app.id);
     println!("  name:            {}", res.app.name);
@@ -141,6 +158,11 @@ async fn show(app_id: String, org_flag: Option<String>, globals: CloudGlobals) -
     let ctx = Context::load(&globals)?;
     let org = ctx.require_org(org_flag.as_deref())?;
     let a: AppRecord = ctx.client.get(&format!("/api/v1/orgs/{org}/apps/{app_id}")).await?;
+
+    if globals.json {
+        return print::json(&a);
+    }
+
     println!("id:              {}", a.id);
     println!("name:            {}", a.name);
     println!("organization_id: {}", a.organization_id);
@@ -169,6 +191,11 @@ async fn rename(app_id: String, new_name: String, org_flag: Option<String>, glob
             &NamePayload { name: &new_name },
         )
         .await?;
+
+    if globals.json {
+        return print::json(&a);
+    }
+
     println!("App renamed to \"{}\"", a.name);
     Ok(())
 }
@@ -180,11 +207,15 @@ async fn delete(app_id: String, org_flag: Option<String>, globals: CloudGlobals)
         .client
         .delete(&format!("/api/v1/orgs/{org}/apps/{app_id}"))
         .await?;
-    // Clear default app if it was the one we just deleted.
     if ctx.config.resolve_app(&org, None).as_deref() == Some(&app_id) {
         ctx.config.clear_default_app(&org);
         ctx.save()?;
     }
+
+    if globals.json {
+        return print::json(&DeleteResult { deleted: true, id: &app_id });
+    }
+
     println!("App {app_id} deleted");
     Ok(())
 }
@@ -192,13 +223,17 @@ async fn delete(app_id: String, org_flag: Option<String>, globals: CloudGlobals)
 async fn use_app(app_id: String, org_flag: Option<String>, globals: CloudGlobals) -> Result<()> {
     let mut ctx = Context::load(&globals)?;
     let org = ctx.require_org(org_flag.as_deref())?;
-    // Verify the app exists in this org before pinning.
     let a: AppRecord = ctx.client.get(&format!("/api/v1/orgs/{org}/apps/{app_id}")).await?;
     if a.organization_id != org {
         bail!("app {app_id} belongs to a different org");
     }
     ctx.config.set_default_app(&org, a.id.clone());
     ctx.save()?;
+
+    if globals.json {
+        return print::json(&UseResult { org_id: &org, default_app: &a });
+    }
+
     println!("Default app for org {org} set to \"{}\" ({})", a.name, a.id);
     Ok(())
 }

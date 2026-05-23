@@ -58,10 +58,7 @@ pub async fn run(url_flag: Option<String>, config_path: Option<PathBuf>) -> Resu
     let res = client
         .post_form_raw(
             "/api/auth/device/code",
-            &[
-                ("client_id", CLIENT_ID),
-                ("scope", "openid profile email"),
-            ],
+            &[("client_id", CLIENT_ID), ("scope", "openid profile email")],
         )
         .await?;
     if !res.status().is_success() {
@@ -76,7 +73,10 @@ pub async fn run(url_flag: Option<String>, config_path: Option<PathBuf>) -> Resu
     if let Some(complete) = device.verification_uri_complete.as_deref() {
         println!("  {}", complete);
         println!();
-        println!("Or open {} and enter code: {}", device.verification_uri, device.user_code);
+        println!(
+            "Or open {} and enter code: {}",
+            device.verification_uri, device.user_code
+        );
     } else {
         println!("  {}", device.verification_uri);
         println!("Enter code: {}", device.user_code);
@@ -125,7 +125,9 @@ pub async fn run(url_flag: Option<String>, config_path: Option<PathBuf>) -> Resu
             "expired_token" => bail!("login expired — run `subs cloud login` again"),
             other => bail!(
                 "OAuth error `{other}`: {}",
-                err.error_description.as_deref().unwrap_or("(no description)")
+                err.error_description
+                    .as_deref()
+                    .unwrap_or("(no description)")
             ),
         }
     };

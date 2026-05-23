@@ -51,7 +51,9 @@ pub fn resolve_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
 /// missing. Errors only on read/parse failure.
 pub fn load(path: &Path) -> Result<Config> {
     match fs::read_to_string(path) {
-        Ok(s) => toml::from_str::<Config>(&s).with_context(|| format!("parsing {}", path.display())),
+        Ok(s) => {
+            toml::from_str::<Config>(&s).with_context(|| format!("parsing {}", path.display()))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     }
@@ -81,7 +83,8 @@ pub fn save(path: &Path, config: &Config) -> Result<()> {
         f.write_all(serialized.as_bytes())?;
         f.sync_all()?;
     }
-    fs::rename(&tmp, path).with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()))?;
+    fs::rename(&tmp, path)
+        .with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()))?;
     // The mode flag on create above only applies on first creation; reset
     // explicitly so a pre-existing file with looser perms gets tightened.
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
@@ -105,7 +108,8 @@ impl Config {
 
     /// Resolved org id: flag > config.default_org. Returns None if unset.
     pub fn resolve_org(&self, flag: Option<&str>) -> Option<String> {
-        flag.map(str::to_string).or_else(|| self.default_org.clone())
+        flag.map(str::to_string)
+            .or_else(|| self.default_org.clone())
     }
 
     /// Resolved app id for a given org: flag > orgs[org].default_app.
@@ -115,10 +119,7 @@ impl Config {
     }
 
     pub fn set_default_app(&mut self, org_id: &str, app_id: String) {
-        self.orgs
-            .entry(org_id.to_string())
-            .or_default()
-            .default_app = Some(app_id);
+        self.orgs.entry(org_id.to_string()).or_default().default_app = Some(app_id);
     }
 
     pub fn clear_default_app(&mut self, org_id: &str) {
@@ -175,7 +176,13 @@ mod tests {
         assert_eq!(loaded.api_url.as_deref(), Some("https://api.example.com"));
         assert_eq!(loaded.token.as_deref(), Some("ba_secret"));
         assert_eq!(loaded.default_org.as_deref(), Some("org-1"));
-        assert_eq!(loaded.orgs.get("org-1").and_then(|o| o.default_app.as_deref()), Some("app-1"));
+        assert_eq!(
+            loaded
+                .orgs
+                .get("org-1")
+                .and_then(|o| o.default_app.as_deref()),
+            Some("app-1")
+        );
     }
 
     #[test]
@@ -198,11 +205,17 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(cfg.resolve_api_url(Some("https://flag.example")), "https://flag.example");
+        assert_eq!(
+            cfg.resolve_api_url(Some("https://flag.example")),
+            "https://flag.example"
+        );
         assert_eq!(cfg.resolve_api_url(None), "https://configured.example");
         assert_eq!(Config::default().resolve_api_url(None), DEFAULT_API_URL);
 
-        assert_eq!(cfg.resolve_org(Some("flag-org")).as_deref(), Some("flag-org"));
+        assert_eq!(
+            cfg.resolve_org(Some("flag-org")).as_deref(),
+            Some("flag-org")
+        );
         assert_eq!(cfg.resolve_org(None).as_deref(), Some("cfg-org"));
     }
 }

@@ -2,9 +2,10 @@
 
 use anyhow::{bail, Result};
 use clap::Subcommand;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::context::Context;
+use super::print;
 use super::CloudGlobals;
 
 #[derive(Subcommand)]
@@ -24,11 +25,16 @@ pub enum OrgsCommand {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct OrgRef {
     id: String,
     name: String,
     role: String,
+}
+
+#[derive(Debug, Serialize)]
+struct UseResult<'a> {
+    default_org: &'a OrgRef,
 }
 
 pub async fn run(command: OrgsCommand) -> Result<()> {
@@ -41,6 +47,11 @@ pub async fn run(command: OrgsCommand) -> Result<()> {
 async fn list(globals: CloudGlobals) -> Result<()> {
     let ctx = Context::load(&globals)?;
     let orgs: Vec<OrgRef> = ctx.client.get("/api/v1/orgs").await?;
+
+    if globals.json {
+        return print::json(&orgs);
+    }
+
     let default = ctx.config.default_org.as_deref();
     println!("{:<38} {:<30} {}", "ID", "NAME", "ROLE");
     for o in &orgs {
@@ -52,13 +63,17 @@ async fn list(globals: CloudGlobals) -> Result<()> {
 
 async fn use_org(org_id: String, globals: CloudGlobals) -> Result<()> {
     let mut ctx = Context::load(&globals)?;
-    // Verify membership before pinning — friendlier than a 403 on the next call.
     let orgs: Vec<OrgRef> = ctx.client.get("/api/v1/orgs").await?;
     let Some(matched) = orgs.iter().find(|o| o.id == org_id) else {
         bail!("you are not a member of org {org_id}");
     };
     ctx.config.default_org = Some(org_id.clone());
     ctx.save()?;
+
+    if globals.json {
+        return print::json(&UseResult { default_org: matched });
+    }
+
     println!("Default org set to \"{}\" ({})", matched.name, matched.id);
     Ok(())
 }

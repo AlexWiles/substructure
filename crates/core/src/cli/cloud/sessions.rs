@@ -2,9 +2,10 @@
 
 use anyhow::Result;
 use clap::Args;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::context::Context;
+use super::print;
 use super::CloudGlobals;
 
 #[derive(Args)]
@@ -25,7 +26,7 @@ pub struct SessionsCommand {
     pub globals: CloudGlobals,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct SessionRow {
     #[serde(default)]
     id: Option<String>,
@@ -37,7 +38,7 @@ struct SessionRow {
     created_at: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct Page {
     items: Vec<SessionRow>,
     #[serde(default)]
@@ -49,8 +50,7 @@ pub async fn run(cmd: SessionsCommand) -> Result<()> {
     let org = ctx.require_org(cmd.org.as_deref())?;
     let app = ctx.require_app(&org, cmd.app.as_deref())?;
 
-    let mut qs: Vec<(&str, String)> = Vec::new();
-    qs.push(("limit", cmd.limit.to_string()));
+    let mut qs: Vec<(&str, String)> = vec![("limit", cmd.limit.to_string())];
     if let Some(c) = cmd.cursor.as_ref() {
         qs.push(("cursor", c.clone()));
     }
@@ -65,6 +65,11 @@ pub async fn run(cmd: SessionsCommand) -> Result<()> {
     let path = format!("/api/v1/orgs/{org}/apps/{app}/sessions?{query}");
 
     let page: Page = ctx.client.get(&path).await?;
+
+    if cmd.globals.json {
+        return print::json(&page);
+    }
+
     println!("{:<40} {:<30} {}", "SESSION_ID", "AGENT", "CREATED");
     for s in &page.items {
         let sid = s.session_id.as_deref().or(s.id.as_deref()).unwrap_or("—");

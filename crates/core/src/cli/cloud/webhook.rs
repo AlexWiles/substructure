@@ -6,6 +6,7 @@ use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 
 use super::context::Context;
+use super::print;
 use super::CloudGlobals;
 
 #[derive(Subcommand)]
@@ -49,7 +50,7 @@ pub enum WebhookCommand {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct WorkerConfig {
     #[serde(default)]
     endpoint_url: Option<String>,
@@ -93,6 +94,10 @@ async fn show(org_flag: Option<String>, app_flag: Option<String>, globals: Cloud
     let org = ctx.require_org(org_flag.as_deref())?;
     let app = ctx.require_app(&org, app_flag.as_deref())?;
     let w: WorkerConfig = ctx.client.get(&format!("/api/v1/orgs/{org}/apps/{app}/worker")).await?;
+
+    if globals.json {
+        return print::json(&w);
+    }
     print_config(&w, false);
     Ok(())
 }
@@ -111,6 +116,10 @@ async fn set(url: String, org_flag: Option<String>, app_flag: Option<String>, gl
             },
         )
         .await?;
+
+    if globals.json {
+        return print::json(&w);
+    }
     print_config(&w, false);
     Ok(())
 }
@@ -129,6 +138,10 @@ async fn disable(org_flag: Option<String>, app_flag: Option<String>, globals: Cl
             },
         )
         .await?;
+
+    if globals.json {
+        return print::json(&w);
+    }
     print_config(&w, false);
     Ok(())
 }
@@ -142,6 +155,10 @@ async fn rotate(org_flag: Option<String>, app_flag: Option<String>, globals: Clo
         .client
         .post_json(&format!("/api/v1/orgs/{org}/apps/{app}/worker/rotate-secret"), &empty)
         .await?;
+
+    if globals.json {
+        return print::json(&w);
+    }
     print_config(&w, true);
     Ok(())
 }
