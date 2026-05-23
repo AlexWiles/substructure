@@ -55,7 +55,11 @@ async fn list(globals: CloudGlobals) -> Result<()> {
     let default = ctx.config.default_org.as_deref();
     println!("{:<38} {:<30} {}", "ID", "NAME", "ROLE");
     for o in &orgs {
-        let marker = if Some(o.id.as_str()) == default { "*" } else { " " };
+        let marker = if Some(o.id.as_str()) == default {
+            "*"
+        } else {
+            " "
+        };
         println!("{marker} {:<36} {:<30} {}", o.id, o.name, o.role);
     }
     Ok(())
@@ -71,7 +75,9 @@ async fn use_org(org_id: String, globals: CloudGlobals) -> Result<()> {
     ctx.save()?;
 
     if globals.json {
-        return print::json(&UseResult { default_org: matched });
+        return print::json(&UseResult {
+            default_org: matched,
+        });
     }
 
     println!("Default org set to \"{}\" ({})", matched.name, matched.id);

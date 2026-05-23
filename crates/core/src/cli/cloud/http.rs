@@ -108,23 +108,37 @@ impl CloudClient {
         decode(res).await
     }
 
-    /// DELETE <path> → T.
-    pub async fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+    /// DELETE <path>, discarding any response body. For endpoints that return
+    /// 204 or an envelope the caller doesn't care about.
+    pub async fn delete_discard(&self, path: &str) -> Result<()> {
         let res = self
             .request(Method::DELETE, path)
+            .send()
+            .await
+            .context("HTTP send")?;
+        check_status(res).await?;
+        Ok(())
+    }
+
+    /// POST <path> with no body → T. For action endpoints with no payload.
+    pub async fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let res = self
+            .request(Method::POST, path)
+            .header(header::CONTENT_LENGTH, "0")
             .send()
             .await
             .context("HTTP send")?;
         decode(res).await
     }
 
-    /// POST <path> as application/x-www-form-urlencoded → raw Response so the
-    /// caller can branch on status (used by the OAuth device-flow polling).
-    pub async fn post_form_raw(&self, path: &str, form: &[(&str, &str)]) -> Result<Response> {
-        let body = serde_urlencoded::to_string(form).context("encoding form body")?;
+    /// POST <path> with a JSON body → raw Response so the caller can branch
+    /// on status (used by the OAuth device-flow polling, where 400 + an
+    /// `authorization_pending` body means "keep polling", not "fail").
+    /// Better Auth's device endpoints accept JSON only — sending
+    /// form-encoded bodies yields `UNSUPPORTED_MEDIA_TYPE`.
+    pub async fn post_json_raw<B: Serialize>(&self, path: &str, body: &B) -> Result<Response> {
         self.request(Method::POST, path)
-            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(body)
+            .json(body)
             .send()
             .await
             .context("HTTP send")
@@ -132,9 +146,16 @@ impl CloudClient {
 }
 
 async fn decode<T: DeserializeOwned>(res: Response) -> Result<T> {
+    let res = check_status(res).await?;
+    res.json::<T>().await.context("decoding response JSON")
+}
+
+/// Return `res` unchanged on success, otherwise format the server's error
+/// envelope (or fall back to the raw body) into an `anyhow` error.
+async fn check_status(res: Response) -> Result<Response> {
     let status = res.status();
     if status.is_success() {
-        return res.json::<T>().await.context("decoding response JSON");
+        return Ok(res);
     }
 
     let body_text = res.text().await.unwrap_or_default();
@@ -147,7 +168,6 @@ async fn decode<T: DeserializeOwned>(res: Response) -> Result<T> {
     let hint = match status {
         StatusCode::UNAUTHORIZED => " — run `subs cloud login`",
         StatusCode::FORBIDDEN => " — your account doesn't have access",
-        StatusCode::NOT_FOUND => "",
         _ => "",
     };
 

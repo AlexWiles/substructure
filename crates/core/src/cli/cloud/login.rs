@@ -56,9 +56,12 @@ pub async fn run(url_flag: Option<String>, config_path: Option<PathBuf>) -> Resu
     // either way, but the granted scope is reflected back in the token
     // response, which is useful for diagnostics.
     let res = client
-        .post_form_raw(
+        .post_json_raw(
             "/api/auth/device/code",
-            &[("client_id", CLIENT_ID), ("scope", "openid profile email")],
+            &serde_json::json!({
+                "client_id": CLIENT_ID,
+                "scope": "openid profile email",
+            }),
         )
         .await?;
     if !res.status().is_success() {
@@ -96,13 +99,13 @@ pub async fn run(url_flag: Option<String>, config_path: Option<PathBuf>) -> Resu
         sleep(interval).await;
 
         let res = client
-            .post_form_raw(
+            .post_json_raw(
                 "/api/auth/device/token",
-                &[
-                    ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-                    ("device_code", &device.device_code),
-                    ("client_id", CLIENT_ID),
-                ],
+                &serde_json::json!({
+                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                    "device_code": device.device_code,
+                    "client_id": CLIENT_ID,
+                }),
             )
             .await?;
 

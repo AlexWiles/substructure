@@ -6,39 +6,27 @@ use serde::{Deserialize, Serialize};
 
 use super::context::Context;
 use super::print;
-use super::CloudGlobals;
+use super::AppScope;
 
 #[derive(Subcommand)]
 pub enum KeysCommand {
     /// List API keys for the current app.
     #[command(name = "list", visible_alias = "ls")]
     List {
-        #[arg(long)]
-        org: Option<String>,
-        #[arg(long)]
-        app: Option<String>,
         #[command(flatten)]
-        globals: CloudGlobals,
+        scope: AppScope,
     },
     /// Issue a new API key. The plaintext is shown once.
     Create {
         label: String,
-        #[arg(long)]
-        org: Option<String>,
-        #[arg(long)]
-        app: Option<String>,
         #[command(flatten)]
-        globals: CloudGlobals,
+        scope: AppScope,
     },
     /// Revoke an API key (owner only).
     Revoke {
         key_id: String,
-        #[arg(long)]
-        org: Option<String>,
-        #[arg(long)]
-        app: Option<String>,
         #[command(flatten)]
-        globals: CloudGlobals,
+        scope: AppScope,
     },
 }
 
@@ -76,26 +64,27 @@ struct LabelPayload<'a> {
 
 pub async fn run(command: KeysCommand) -> Result<()> {
     match command {
-        KeysCommand::List { org, app, globals } => list(org, app, globals).await,
-        KeysCommand::Create { label, org, app, globals } => create(label, org, app, globals).await,
-        KeysCommand::Revoke { key_id, org, app, globals } => revoke(key_id, org, app, globals).await,
+        KeysCommand::List { scope } => list(scope).await,
+        KeysCommand::Create { label, scope } => create(label, scope).await,
+        KeysCommand::Revoke { key_id, scope } => revoke(key_id, scope).await,
     }
 }
 
-async fn list(org_flag: Option<String>, app_flag: Option<String>, globals: CloudGlobals) -> Result<()> {
-    let ctx = Context::load(&globals)?;
-    let org = ctx.require_org(org_flag.as_deref())?;
-    let app = ctx.require_app(&org, app_flag.as_deref())?;
+async fn list(scope: AppScope) -> Result<()> {
+    let (ctx, org, app) = Context::from_app(&scope)?;
     let keys: Vec<ApiKeyRow> = ctx
         .client
         .get(&format!("/api/v1/orgs/{org}/apps/{app}/api-keys"))
         .await?;
 
-    if globals.json {
+    if scope.globals.json {
         return print::json(&keys);
     }
 
-    println!("{:<40} {:<30} {:<25} {}", "KEY_ID", "LABEL", "CREATED", "LAST USED");
+    println!(
+        "{:<40} {:<30} {:<25} {}",
+        "KEY_ID", "LABEL", "CREATED", "LAST USED"
+    );
     for k in &keys {
         println!(
             "{:<40} {:<30} {:<25} {}",
@@ -108,10 +97,8 @@ async fn list(org_flag: Option<String>, app_flag: Option<String>, globals: Cloud
     Ok(())
 }
 
-async fn create(label: String, org_flag: Option<String>, app_flag: Option<String>, globals: CloudGlobals) -> Result<()> {
-    let ctx = Context::load(&globals)?;
-    let org = ctx.require_org(org_flag.as_deref())?;
-    let app = ctx.require_app(&org, app_flag.as_deref())?;
+async fn create(label: String, scope: AppScope) -> Result<()> {
+    let (ctx, org, app) = Context::from_app(&scope)?;
     let res: CreateKeyResponse = ctx
         .client
         .post_json(
@@ -120,8 +107,11 @@ async fn create(label: String, org_flag: Option<String>, app_flag: Option<String
         )
         .await?;
 
-    if globals.json {
-        return print::json(&CreateOutput { label: &label, api_key: &res.api_key });
+    if scope.globals.json {
+        return print::json(&CreateOutput {
+            label: &label,
+            api_key: &res.api_key,
+        });
     }
 
     println!("API key created");
@@ -131,17 +121,17 @@ async fn create(label: String, org_flag: Option<String>, app_flag: Option<String
     Ok(())
 }
 
-async fn revoke(key_id: String, org_flag: Option<String>, app_flag: Option<String>, globals: CloudGlobals) -> Result<()> {
-    let ctx = Context::load(&globals)?;
-    let org = ctx.require_org(org_flag.as_deref())?;
-    let app = ctx.require_app(&org, app_flag.as_deref())?;
-    let _: serde_json::Value = ctx
-        .client
-        .delete(&format!("/api/v1/orgs/{org}/apps/{app}/api-keys/{key_id}"))
+async fn revoke(key_id: String, scope: AppScope) -> Result<()> {
+    let (ctx, org, app) = Context::from_app(&scope)?;
+    ctx.client
+        .delete_discard(&format!("/api/v1/orgs/{org}/apps/{app}/api-keys/{key_id}"))
         .await?;
 
-    if globals.json {
-        return print::json(&RevokeResult { revoked: true, key_id: &key_id });
+    if scope.globals.json {
+        return print::json(&RevokeResult {
+            revoked: true,
+            key_id: &key_id,
+        });
     }
 
     println!("Key {key_id} revoked");

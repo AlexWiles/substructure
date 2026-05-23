@@ -33,6 +33,26 @@ pub struct CloudGlobals {
     pub json: bool,
 }
 
+/// Flags shared by every org-scoped subcommand: `--org` plus the globals.
+#[derive(Debug, clap::Args, Clone)]
+pub struct OrgScope {
+    #[arg(long)]
+    pub org: Option<String>,
+    #[command(flatten)]
+    pub globals: CloudGlobals,
+}
+
+/// Flags shared by every app-scoped subcommand: `--org`, `--app`, plus globals.
+#[derive(Debug, clap::Args, Clone)]
+pub struct AppScope {
+    #[arg(long)]
+    pub org: Option<String>,
+    #[arg(long)]
+    pub app: Option<String>,
+    #[command(flatten)]
+    pub globals: CloudGlobals,
+}
+
 #[derive(Subcommand)]
 pub enum CloudCommand {
     /// Authenticate via the OAuth device flow and persist the token locally.
@@ -66,7 +86,10 @@ pub enum CloudCommand {
         command: keys::KeysCommand,
     },
     /// List debug sessions (per-app).
-    Sessions(sessions::SessionsCommand),
+    Sessions {
+        #[command(flatten)]
+        args: sessions::SessionsCommand,
+    },
     /// Manage the webhook (worker) config (per-app).
     Webhook {
         #[command(subcommand)]
@@ -82,7 +105,7 @@ pub async fn run(command: CloudCommand) -> anyhow::Result<()> {
         CloudCommand::Orgs { command } => orgs::run(command).await,
         CloudCommand::Apps { command } => apps::run(command).await,
         CloudCommand::Keys { command } => keys::run(command).await,
-        CloudCommand::Sessions(cmd) => sessions::run(cmd).await,
+        CloudCommand::Sessions { args } => sessions::run(args).await,
         CloudCommand::Webhook { command } => webhook::run(command).await,
     }
 }

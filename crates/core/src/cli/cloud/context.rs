@@ -8,7 +8,7 @@ use anyhow::{bail, Result};
 
 use super::config::{self, Config};
 use super::http::CloudClient;
-use super::CloudGlobals;
+use super::{AppScope, CloudGlobals, OrgScope};
 
 pub struct Context {
     pub config_path: PathBuf,
@@ -28,6 +28,21 @@ impl Context {
             config,
             client,
         })
+    }
+
+    /// Load + resolve an org id from an `OrgScope` in one call.
+    pub fn from_org(scope: &OrgScope) -> Result<(Self, String)> {
+        let ctx = Self::load(&scope.globals)?;
+        let org = ctx.require_org(scope.org.as_deref())?;
+        Ok((ctx, org))
+    }
+
+    /// Load + resolve org and app ids from an `AppScope` in one call.
+    pub fn from_app(scope: &AppScope) -> Result<(Self, String, String)> {
+        let ctx = Self::load(&scope.globals)?;
+        let org = ctx.require_org(scope.org.as_deref())?;
+        let app = ctx.require_app(&org, scope.app.as_deref())?;
+        Ok((ctx, org, app))
     }
 
     pub fn save(&self) -> Result<()> {

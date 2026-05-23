@@ -7,46 +7,31 @@ use serde::{Deserialize, Serialize};
 
 use super::context::Context;
 use super::print;
-use super::CloudGlobals;
+use super::AppScope;
 
 #[derive(Subcommand)]
 pub enum WebhookCommand {
     /// Show the current webhook config.
     Show {
-        #[arg(long)]
-        org: Option<String>,
-        #[arg(long)]
-        app: Option<String>,
         #[command(flatten)]
-        globals: CloudGlobals,
+        scope: AppScope,
     },
     /// Set the webhook URL (implies state=enabled).
     Set {
-        url: String,
-        #[arg(long)]
-        org: Option<String>,
-        #[arg(long)]
-        app: Option<String>,
+        #[arg(value_name = "URL")]
+        endpoint: String,
         #[command(flatten)]
-        globals: CloudGlobals,
+        scope: AppScope,
     },
     /// Disable webhook delivery (does not delete the URL).
     Disable {
-        #[arg(long)]
-        org: Option<String>,
-        #[arg(long)]
-        app: Option<String>,
         #[command(flatten)]
-        globals: CloudGlobals,
+        scope: AppScope,
     },
     /// Rotate the signing secret (owner only). The new secret is shown once.
     RotateSecret {
-        #[arg(long)]
-        org: Option<String>,
-        #[arg(long)]
-        app: Option<String>,
         #[command(flatten)]
-        globals: CloudGlobals,
+        scope: AppScope,
     },
 }
 
@@ -61,8 +46,9 @@ struct WorkerConfig {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct UpsertBody<'a> {
-    #[serde(rename = "endpointUrl", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     endpoint_url: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     state: Option<&'a str>,
@@ -70,16 +56,22 @@ struct UpsertBody<'a> {
 
 pub async fn run(command: WebhookCommand) -> Result<()> {
     match command {
-        WebhookCommand::Show { org, app, globals } => show(org, app, globals).await,
-        WebhookCommand::Set { url, org, app, globals } => set(url, org, app, globals).await,
-        WebhookCommand::Disable { org, app, globals } => disable(org, app, globals).await,
-        WebhookCommand::RotateSecret { org, app, globals } => rotate(org, app, globals).await,
+        WebhookCommand::Show { scope } => show(scope).await,
+        WebhookCommand::Set { endpoint, scope } => set(endpoint, scope).await,
+        WebhookCommand::Disable { scope } => disable(scope).await,
+        WebhookCommand::RotateSecret { scope } => rotate(scope).await,
     }
 }
 
 fn print_config(w: &WorkerConfig, show_secret: bool) {
-    println!("endpoint_url:  {}", w.endpoint_url.as_deref().unwrap_or("(unset)"));
-    println!("state:         {}", w.state.as_deref().unwrap_or("(unknown)"));
+    println!(
+        "endpoint_url:  {}",
+        w.endpoint_url.as_deref().unwrap_or("(unset)")
+    );
+    println!(
+        "state:         {}",
+        w.state.as_deref().unwrap_or("(unknown)")
+    );
     if show_secret {
         if let Some(s) = &w.signing_secret {
             println!();
@@ -89,45 +81,42 @@ fn print_config(w: &WorkerConfig, show_secret: bool) {
     }
 }
 
-async fn show(org_flag: Option<String>, app_flag: Option<String>, globals: CloudGlobals) -> Result<()> {
-    let ctx = Context::load(&globals)?;
-    let org = ctx.require_org(org_flag.as_deref())?;
-    let app = ctx.require_app(&org, app_flag.as_deref())?;
-    let w: WorkerConfig = ctx.client.get(&format!("/api/v1/orgs/{org}/apps/{app}/worker")).await?;
+async fn show(scope: AppScope) -> Result<()> {
+    let (ctx, org, app) = Context::from_app(&scope)?;
+    let w: WorkerConfig = ctx
+        .client
+        .get(&format!("/api/v1/orgs/{org}/apps/{app}/worker"))
+        .await?;
 
-    if globals.json {
+    if scope.globals.json {
         return print::json(&w);
     }
     print_config(&w, false);
     Ok(())
 }
 
-async fn set(url: String, org_flag: Option<String>, app_flag: Option<String>, globals: CloudGlobals) -> Result<()> {
-    let ctx = Context::load(&globals)?;
-    let org = ctx.require_org(org_flag.as_deref())?;
-    let app = ctx.require_app(&org, app_flag.as_deref())?;
+async fn set(endpoint: String, scope: AppScope) -> Result<()> {
+    let (ctx, org, app) = Context::from_app(&scope)?;
     let w: WorkerConfig = ctx
         .client
         .put_json(
             &format!("/api/v1/orgs/{org}/apps/{app}/worker"),
             &UpsertBody {
-                endpoint_url: Some(&url),
+                endpoint_url: Some(&endpoint),
                 state: Some("enabled"),
             },
         )
         .await?;
 
-    if globals.json {
+    if scope.globals.json {
         return print::json(&w);
     }
     print_config(&w, false);
     Ok(())
 }
 
-async fn disable(org_flag: Option<String>, app_flag: Option<String>, globals: CloudGlobals) -> Result<()> {
-    let ctx = Context::load(&globals)?;
-    let org = ctx.require_org(org_flag.as_deref())?;
-    let app = ctx.require_app(&org, app_flag.as_deref())?;
+async fn disable(scope: AppScope) -> Result<()> {
+    let (ctx, org, app) = Context::from_app(&scope)?;
     let w: WorkerConfig = ctx
         .client
         .put_json(
@@ -139,24 +128,23 @@ async fn disable(org_flag: Option<String>, app_flag: Option<String>, globals: Cl
         )
         .await?;
 
-    if globals.json {
+    if scope.globals.json {
         return print::json(&w);
     }
     print_config(&w, false);
     Ok(())
 }
 
-async fn rotate(org_flag: Option<String>, app_flag: Option<String>, globals: CloudGlobals) -> Result<()> {
-    let ctx = Context::load(&globals)?;
-    let org = ctx.require_org(org_flag.as_deref())?;
-    let app = ctx.require_app(&org, app_flag.as_deref())?;
-    let empty: serde_json::Value = serde_json::json!({});
+async fn rotate(scope: AppScope) -> Result<()> {
+    let (ctx, org, app) = Context::from_app(&scope)?;
     let w: WorkerConfig = ctx
         .client
-        .post_json(&format!("/api/v1/orgs/{org}/apps/{app}/worker/rotate-secret"), &empty)
+        .post_empty(&format!(
+            "/api/v1/orgs/{org}/apps/{app}/worker/rotate-secret"
+        ))
         .await?;
 
-    if globals.json {
+    if scope.globals.json {
         return print::json(&w);
     }
     print_config(&w, true);

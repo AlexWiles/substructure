@@ -4,16 +4,16 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use super::config;
-use super::http::CloudClient;
+use super::context::Context;
 use super::print;
 use super::CloudGlobals;
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Me {
     id: String,
     email: String,
-    #[serde(default, rename = "isSuperAdmin")]
+    #[serde(default)]
     is_super_admin: bool,
     #[serde(default)]
     organizations: Vec<OrgRef>,
@@ -35,20 +35,12 @@ struct WhoamiOutput<'a> {
 }
 
 pub async fn run(globals: CloudGlobals) -> Result<()> {
-    let path = config::resolve_path(globals.config)?;
-    let cfg = config::load(&path)?;
-    let token = cfg.require_token()?.to_string();
-    let api_url = cfg.resolve_api_url(globals.url.as_deref());
+    let ctx = Context::load(&globals)?;
+    let me: Me = ctx.client.get("/api/v1/me").await?;
 
-    let client = CloudClient::new(&api_url, Some(token));
-    let me: Me = client.get("/api/v1/me").await?;
-
-    let default_org = cfg.default_org.as_deref();
-    let default_app = default_org.and_then(|org| {
-        cfg.orgs
-            .get(org)
-            .and_then(|o| o.default_app.as_deref())
-    });
+    let default_org = ctx.config.default_org.as_deref();
+    let default_app =
+        default_org.and_then(|org| ctx.config.orgs.get(org).and_then(|o| o.default_app.as_deref()));
 
     if globals.json {
         return print::json(&WhoamiOutput {
@@ -63,7 +55,12 @@ pub async fn run(globals: CloudGlobals) -> Result<()> {
         println!("Role: super-admin");
     }
 
-    let default_org_name = default_org.and_then(|id| me.organizations.iter().find(|o| o.id == id).map(|o| o.name.as_str()));
+    let default_org_name = default_org.and_then(|id| {
+        me.organizations
+            .iter()
+            .find(|o| o.id == id)
+            .map(|o| o.name.as_str())
+    });
     match (default_org, default_org_name) {
         (Some(id), Some(name)) => println!("Default org: {name} ({id})"),
         (Some(id), None) => println!("Default org: {id} (not in your memberships?)"),
@@ -77,7 +74,11 @@ pub async fn run(globals: CloudGlobals) -> Result<()> {
     println!();
     println!("Organizations ({}):", me.organizations.len());
     for o in &me.organizations {
-        let marker = if Some(o.id.as_str()) == default_org { "* " } else { "  " };
+        let marker = if Some(o.id.as_str()) == default_org {
+            "* "
+        } else {
+            "  "
+        };
         println!("{marker}{}  {}  ({})", o.id, o.name, o.role);
     }
 
