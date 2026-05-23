@@ -1,13 +1,23 @@
-use anyhow::{Context as _, Result};
-use clap::Args;
+use anyhow::{bail, Context as _, Result};
+use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 
 use super::context::Context;
 use super::print;
 use super::AppScope;
 
+#[derive(Subcommand)]
+pub enum SessionsCommand {
+    /// List debug sessions for an app.
+    #[command(name = "list", visible_alias = "ls")]
+    List(ListCommand),
+    /// Stream events for a session as they arrive. Default starts from
+    /// sequence 0 (full history + live). Ctrl-C to stop.
+    Events(EventsCommand),
+}
+
 #[derive(Args)]
-pub struct SessionsCommand {
+pub struct ListCommand {
     #[arg(long)]
     pub cursor: Option<String>,
     #[arg(long, default_value_t = 50)]
@@ -18,6 +28,24 @@ pub struct SessionsCommand {
     pub agent_id: Option<String>,
     #[command(flatten)]
     pub scope: AppScope,
+}
+
+#[derive(Args)]
+pub struct EventsCommand {
+    /// Session id. If omitted, you'll be prompted to pick from recent sessions.
+    pub session_id: Option<String>,
+    /// Only stream events with sequence > this value (defaults to 0 = full history).
+    #[arg(long, default_value_t = 0)]
+    pub from: u64,
+    #[command(flatten)]
+    pub scope: AppScope,
+}
+
+pub async fn run(command: SessionsCommand) -> Result<()> {
+    match command {
+        SessionsCommand::List(cmd) => list(cmd).await,
+        SessionsCommand::Events(cmd) => events(cmd).await,
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -50,7 +78,7 @@ struct Query<'a> {
     agent_id: Option<&'a str>,
 }
 
-pub async fn run(cmd: SessionsCommand) -> Result<()> {
+async fn list(cmd: ListCommand) -> Result<()> {
     let (ctx, app) = Context::from_app(&cmd.scope).await?;
 
     let query = serde_urlencoded::to_string(&Query {
@@ -85,4 +113,26 @@ pub async fn run(cmd: SessionsCommand) -> Result<()> {
         println!("Next page: --cursor {c}");
     }
     Ok(())
+}
+
+async fn events(cmd: EventsCommand) -> Result<()> {
+    let (ctx, app) = Context::from_app(&cmd.scope).await?;
+    let session_id = match cmd.session_id {
+        Some(id) => id,
+        None => bail!("missing <SESSION_ID>. (Session picker not yet implemented.)"),
+    };
+    let path = format!(
+        "/api/v1/apps/{app}/sessions/{session_id}/events/stream?sequence_after={}",
+        cmd.from
+    );
+    ctx.client.stream_sse(&path, |line| {
+        // SSE frames: each event is a series of lines, blank-line separated.
+        // Print as-is so users can pipe into jq / awk / less. Comments
+        // (lines starting with `:`) and keep-alives are suppressed.
+        if line.starts_with(':') {
+            return;
+        }
+        println!("{line}");
+    })
+    .await
 }

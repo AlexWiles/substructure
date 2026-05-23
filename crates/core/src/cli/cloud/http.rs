@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use futures_util::StreamExt;
 use reqwest::{header, Method, Response, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -104,6 +105,36 @@ impl CloudClient {
     // Better Auth's device endpoints require JSON (form-encoded yields UNSUPPORTED_MEDIA_TYPE).
     pub async fn post_json_raw<B: Serialize>(&self, path: &str, body: &B) -> Result<Response> {
         Ok(self.request(Method::POST, path).json(body).send().await?)
+    }
+
+    /// Open an SSE stream and invoke `on_line` for each non-empty line
+    /// (caller decides which lines to keep — e.g. `data:` payloads).
+    /// Runs until the server closes the stream or the caller hits Ctrl-C.
+    pub async fn stream_sse<F>(&self, path: &str, mut on_line: F) -> Result<()>
+    where
+        F: FnMut(&str),
+    {
+        let res = self
+            .request(Method::GET, path)
+            .header(header::ACCEPT, "text/event-stream")
+            .send()
+            .await?;
+        let res = check_status(res).await?;
+
+        let mut stream = res.bytes_stream();
+        let mut buf: Vec<u8> = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            buf.extend_from_slice(&chunk.context("reading SSE chunk")?);
+            // Lines are terminated by \n; \r is tolerated and stripped.
+            while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                let line: Vec<u8> = buf.drain(..=pos).collect();
+                let s = std::str::from_utf8(&line[..line.len() - 1])
+                    .context("non-UTF8 in SSE stream")?
+                    .trim_end_matches('\r');
+                on_line(s);
+            }
+        }
+        Ok(())
     }
 }
 

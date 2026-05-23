@@ -94,11 +94,29 @@ pub enum CloudCommand {
         #[command(subcommand)]
         command: orgs::OrgsCommand,
     },
-    /// Manage apps and their per-app resources (keys, sessions, webhook).
+    /// Manage apps.
     #[command(after_help = GLOBAL_FLAGS_HELP)]
     Apps {
         #[command(subcommand)]
         command: apps::AppsCommand,
+    },
+    /// Manage API keys for an app.
+    #[command(after_help = GLOBAL_FLAGS_HELP)]
+    Keys {
+        #[command(subcommand)]
+        command: keys::KeysCommand,
+    },
+    /// Inspect sessions for an app (list, stream events).
+    #[command(after_help = GLOBAL_FLAGS_HELP)]
+    Sessions {
+        #[command(subcommand)]
+        command: sessions::SessionsCommand,
+    },
+    /// Manage the webhook (worker) config for an app.
+    #[command(after_help = GLOBAL_FLAGS_HELP)]
+    Webhook {
+        #[command(subcommand)]
+        command: webhook::WebhookCommand,
     },
     /// Write a `subs.toml` in the current directory pinning org (and app)
     /// so commands run from this tree pick them up automatically.
@@ -120,6 +138,9 @@ pub async fn run(command: CloudCommand) -> anyhow::Result<()> {
         CloudCommand::Whoami { globals } => whoami::run(globals).await,
         CloudCommand::Orgs { command } => orgs::run(command).await,
         CloudCommand::Apps { command } => apps::run(command).await,
+        CloudCommand::Keys { command } => keys::run(command).await,
+        CloudCommand::Sessions { command } => sessions::run(command).await,
+        CloudCommand::Webhook { command } => webhook::run(command).await,
         CloudCommand::Init(cmd) => init::run(cmd).await,
     }
 }

@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 
@@ -25,7 +25,13 @@ pub enum WebhookCommand {
         #[command(flatten)]
         scope: AppScope,
     },
-    /// Rotate the signing secret (owner only). The new secret is shown once.
+    /// Print the current signing secret to stdout (raw, pipe-friendly).
+    /// E.g. `subs cloud webhook secret | wrangler secret put SUBS_SIGNING_SECRET`.
+    Secret {
+        #[command(flatten)]
+        scope: AppScope,
+    },
+    /// Rotate the signing secret (owner only). The new secret is printed to stdout.
     RotateSecret {
         #[command(flatten)]
         scope: AppScope,
@@ -56,6 +62,7 @@ pub async fn run(command: WebhookCommand) -> Result<()> {
         WebhookCommand::Show { scope } => show(scope).await,
         WebhookCommand::Set { endpoint, scope } => set(endpoint, scope).await,
         WebhookCommand::Disable { scope } => disable(scope).await,
+        WebhookCommand::Secret { scope } => secret(scope).await,
         WebhookCommand::RotateSecret { scope } => rotate(scope).await,
     }
 }
@@ -128,6 +135,21 @@ async fn disable(scope: AppScope) -> Result<()> {
     Ok(())
 }
 
+async fn secret(scope: AppScope) -> Result<()> {
+    let (ctx, app) = Context::from_app(&scope).await?;
+    let w: WorkerConfig = ctx
+        .client
+        .get(&format!("/api/v1/apps/{app}/worker"))
+        .await?;
+    match w.signing_secret {
+        Some(s) => {
+            println!("{s}");
+            Ok(())
+        }
+        None => bail!("no signing secret configured for this app"),
+    }
+}
+
 async fn rotate(scope: AppScope) -> Result<()> {
     let (ctx, app) = Context::from_app(&scope).await?;
     let w: WorkerConfig = ctx
@@ -138,7 +160,12 @@ async fn rotate(scope: AppScope) -> Result<()> {
     if scope.globals.json {
         return print::json(&w);
     }
-    println!("Signing secret rotated");
-    print_config(&w);
-    Ok(())
+    match &w.signing_secret {
+        Some(s) => {
+            eprintln!("Signing secret rotated.");
+            println!("{s}");
+            Ok(())
+        }
+        None => bail!("rotate succeeded but server returned no signing secret"),
+    }
 }

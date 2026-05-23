@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 
@@ -15,9 +15,10 @@ pub enum KeysCommand {
         #[command(flatten)]
         scope: AppScope,
     },
-    /// Issue a new API key. The plaintext is shown once.
+    /// Issue a new API key. The plaintext is printed to stdout and shown once.
+    /// Pipe-friendly: `subs cloud keys create --label foo | wrangler secret put X`.
     Create {
-        label: String,
+        label: Option<String>,
         #[command(flatten)]
         scope: AppScope,
     },
@@ -96,8 +97,17 @@ async fn list(scope: AppScope) -> Result<()> {
     Ok(())
 }
 
-async fn create(label: String, scope: AppScope) -> Result<()> {
+async fn create(label: Option<String>, scope: AppScope) -> Result<()> {
     let (ctx, app) = Context::from_app(&scope).await?;
+    let label = match label {
+        Some(l) => l,
+        None => {
+            if !pickers::interactive(&scope.globals) {
+                bail!("missing <LABEL>");
+            }
+            pickers::prompt_text("Key label")?
+        }
+    };
     let res: CreateKeyResponse = ctx
         .client
         .post_json(
@@ -113,11 +123,9 @@ async fn create(label: String, scope: AppScope) -> Result<()> {
         });
     }
 
-    println!("API key created");
-    println!("  label:    {}", label);
-    println!("  api_key:  {}", res.api_key);
-    println!();
-    println!("Save this now. It will not be shown again.");
+    // stdout = the value (pipe-safe). stderr = human chatter.
+    eprintln!("API key '{label}' created — save now, will not be shown again.");
+    println!("{}", res.api_key);
     Ok(())
 }
 
@@ -127,7 +135,7 @@ async fn revoke(key_id: Option<String>, scope: AppScope) -> Result<()> {
         Some(id) => id,
         None => {
             if !pickers::interactive(&scope.globals) {
-                anyhow::bail!("missing <KEY_ID>");
+                bail!("missing <KEY_ID>");
             }
             pickers::pick_api_key(&ctx, &app).await?
         }

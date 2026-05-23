@@ -61,6 +61,7 @@ pub async fn run(cmd: InitCommand) -> Result<()> {
     let project = ProjectConfig {
         org: Some(org.clone()),
         app: app.clone(),
+        url: cmd.globals.url.clone(),
     };
     project_config::write(&target, &project)?;
 
@@ -69,6 +70,7 @@ pub async fn run(cmd: InitCommand) -> Result<()> {
             "wrote": target,
             "org": org,
             "app": app,
+            "url": project.url,
         }));
     }
 
@@ -76,7 +78,11 @@ pub async fn run(cmd: InitCommand) -> Result<()> {
     println!("  org = {org}");
     if let Some(a) = &app {
         println!("  app = {a}");
-    } else {
+    }
+    if let Some(u) = &project.url {
+        println!("  url = {u}");
+    }
+    if app.is_none() {
         println!();
         println!("No app pinned. Commands that target an app will need --app.");
     }

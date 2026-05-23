@@ -3,12 +3,9 @@ use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 
 use super::context::Context;
-use super::keys;
 use super::pickers;
 use super::print;
-use super::sessions;
-use super::webhook;
-use super::{AppScope, OrgScope, GLOBAL_FLAGS_HELP};
+use super::{AppScope, OrgScope};
 
 #[derive(Subcommand)]
 pub enum AppsCommand {
@@ -42,23 +39,6 @@ pub enum AppsCommand {
         app_id: Option<String>,
         #[command(flatten)]
         scope: AppScope,
-    },
-    /// Manage API keys for an app.
-    #[command(after_help = GLOBAL_FLAGS_HELP)]
-    Keys {
-        #[command(subcommand)]
-        command: keys::KeysCommand,
-    },
-    /// List debug sessions for an app.
-    Sessions {
-        #[command(flatten)]
-        args: sessions::SessionsCommand,
-    },
-    /// Manage the webhook (worker) config for an app.
-    #[command(after_help = GLOBAL_FLAGS_HELP)]
-    Webhook {
-        #[command(subcommand)]
-        command: webhook::WebhookCommand,
     },
 }
 
@@ -105,9 +85,6 @@ pub async fn run(command: AppsCommand) -> Result<()> {
             scope,
         } => rename(app_id, new_name, scope).await,
         AppsCommand::Delete { app_id, scope } => delete(app_id, scope).await,
-        AppsCommand::Keys { command } => keys::run(command).await,
-        AppsCommand::Sessions { args } => sessions::run(args).await,
-        AppsCommand::Webhook { command } => webhook::run(command).await,
     }
 }
 

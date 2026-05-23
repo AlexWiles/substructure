@@ -12,6 +12,11 @@ pub const FILENAME: &str = "subs.toml";
 pub struct ProjectConfig {
     pub org: Option<String>,
     pub app: Option<String>,
+    /// Override the cloud API URL for commands run from this tree. Written
+    /// when `subs cloud init --url <URL>` is used; respected by all later
+    /// commands unless a `--url` flag or `$SUBS_API_URL` overrides it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone)]

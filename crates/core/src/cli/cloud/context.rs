@@ -25,13 +25,18 @@ impl Context {
     pub fn load(globals: &CloudGlobals) -> Result<Self> {
         let credentials_path = credentials::resolve_path(globals.credentials.clone())?;
         let creds = credentials::load(&credentials_path)?;
-        let api_url = credentials::resolve_api_url(globals.url.as_deref());
-        let token = creds.require_token()?.to_string();
-        let client = CloudClient::new(api_url, Some(token));
         let project = match globals.config.as_deref() {
             Some(p) => Some(project_config::load_explicit(p)?.config),
             None => project_config::find()?.map(|f| f.config),
         };
+        // Precedence: --url flag > project subs.toml url > $SUBS_API_URL > default.
+        let url_override = globals
+            .url
+            .as_deref()
+            .or_else(|| project.as_ref().and_then(|p| p.url.as_deref()));
+        let api_url = credentials::resolve_api_url(url_override);
+        let token = creds.require_token()?.to_string();
+        let client = CloudClient::new(api_url, Some(token));
         Ok(Self {
             project,
             client,
