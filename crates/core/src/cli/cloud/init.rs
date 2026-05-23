@@ -58,7 +58,10 @@ pub async fn run(cmd: InitCommand) -> Result<()> {
     let cwd = env::current_dir().context("could not determine cwd")?;
     let target: PathBuf = cwd.join(FILENAME);
     if target.exists() && !cmd.force {
-        bail!("{} already exists. Pass --force to overwrite.", target.display());
+        bail!(
+            "{} already exists. Pass --force to overwrite.",
+            target.display()
+        );
     }
 
     let ctx = Context::load(&cmd.globals)?;
@@ -133,7 +136,10 @@ async fn pick_org(ctx: &Context) -> Result<String> {
         .and_then(|d| orgs.iter().position(|o| o.id == d))
         .unwrap_or(0);
 
-    let items: Vec<String> = orgs.iter().map(|o| format!("{}  ({})", o.name, o.id)).collect();
+    let items: Vec<String> = orgs
+        .iter()
+        .map(|o| format!("{}  ({})", o.name, o.id))
+        .collect();
     let pick = Select::with_theme(&ColorfulTheme::default())
         .with_prompt("Which org?")
         .items(&items)

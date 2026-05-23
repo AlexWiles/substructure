@@ -55,10 +55,7 @@ impl CloudClient {
 
     /// GET <path> → T. Errors with the server's error envelope when present.
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
-        let res = self
-            .request(Method::GET, path)
-            .send()
-            .await?;
+        let res = self.request(Method::GET, path).send().await?;
         decode(res).await
     }
 
@@ -68,11 +65,7 @@ impl CloudClient {
         path: &str,
         body: &B,
     ) -> Result<T> {
-        let res = self
-            .request(Method::POST, path)
-            .json(body)
-            .send()
-            .await?;
+        let res = self.request(Method::POST, path).json(body).send().await?;
         decode(res).await
     }
 
@@ -82,11 +75,7 @@ impl CloudClient {
         path: &str,
         body: &B,
     ) -> Result<T> {
-        let res = self
-            .request(Method::PATCH, path)
-            .json(body)
-            .send()
-            .await?;
+        let res = self.request(Method::PATCH, path).json(body).send().await?;
         decode(res).await
     }
 
@@ -96,11 +85,7 @@ impl CloudClient {
         path: &str,
         body: &B,
     ) -> Result<T> {
-        let res = self
-            .request(Method::PUT, path)
-            .json(body)
-            .send()
-            .await?;
+        let res = self.request(Method::PUT, path).json(body).send().await?;
         decode(res).await
     }
 

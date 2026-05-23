@@ -72,8 +72,17 @@ pub async fn run(
         let status = res.status();
         let body = res.text().await.unwrap_or_default();
         // Trim huge bodies so the error stays scannable.
-        let snippet = body.lines().next().unwrap_or("").chars().take(200).collect::<String>();
-        bail!("could not request device code (HTTP {}): {snippet}", status.as_u16());
+        let snippet = body
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(200)
+            .collect::<String>();
+        bail!(
+            "could not request device code (HTTP {}): {snippet}",
+            status.as_u16()
+        );
     }
     let device: DeviceCodeResponse = res.json().await.context("decoding device-code response")?;
 

@@ -46,8 +46,8 @@ pub fn find_from(start: &Path) -> Result<Option<Found>> {
         if candidate.is_file() {
             let s = fs::read_to_string(&candidate)
                 .with_context(|| format!("reading {}", candidate.display()))?;
-            let config: ProjectConfig = toml::from_str(&s)
-                .with_context(|| format!("parsing {}", candidate.display()))?;
+            let config: ProjectConfig =
+                toml::from_str(&s).with_context(|| format!("parsing {}", candidate.display()))?;
             return Ok(Some(Found {
                 config,
                 path: candidate,
@@ -129,7 +129,11 @@ mod tests {
         let nested = root.join("inner");
         fs::create_dir_all(&nested).unwrap();
         fs::write(root.join("subs.toml"), "org = \"outer\"\n").unwrap();
-        fs::write(nested.join("subs.toml"), "org = \"inner\"\napp = \"app-i\"\n").unwrap();
+        fs::write(
+            nested.join("subs.toml"),
+            "org = \"inner\"\napp = \"app-i\"\n",
+        )
+        .unwrap();
 
         let found = find_from(&nested).unwrap().unwrap();
         assert_eq!(found.config.org.as_deref(), Some("inner"));
