@@ -72,8 +72,6 @@ struct AppRecord {
     organization_id: String,
     name: String,
     #[serde(default)]
-    shard_id: Option<i64>,
-    #[serde(default)]
     created_at: Option<String>,
     #[serde(default)]
     balance_usd: Option<String>,
@@ -187,9 +185,6 @@ async fn show(app_id: String, scope: OrgScope) -> Result<()> {
     println!("id:              {}", a.id);
     println!("name:            {}", a.name);
     println!("organization_id: {}", a.organization_id);
-    if let Some(shard) = a.shard_id {
-        println!("shard_id:        {shard}");
-    }
     if let Some(ca) = &a.created_at {
         println!("created_at:      {ca}");
     }

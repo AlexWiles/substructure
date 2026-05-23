@@ -10,26 +10,64 @@ Substructure backend).
 
 ## Deploy
 
-1. Deploy the cloudflare worker and copy its URL.
+1. Deploy the worker and copy its URL.
    ```sh
    pnpm deploy
    ```
-2. In the substructure.ai dashboard, create an app.
-   Set the worker URL to the copied worker URL.
-   Copy the signing secret.
-3. Put the signing secret in the cloudflare worker env.
+
+2. Log in to Substructure.
+   ```sh
+   subs cloud login
    ```
+
+3. Find your org id.
+   ```sh
+   subs cloud orgs list
+   ```
+
+4. Create an app. Save the printed `signing_secret` — it isn't shown again
+   in this form (you can rotate later, but not re-read this one).
+   ```sh
+   subs cloud apps create my-worker --org <ORG_ID>
+   ```
+
+5. Pin this directory to the org + app so subsequent commands don't need
+   `--org` / `--app`.
+   ```sh
+   subs cloud init --org <ORG_ID> --app <APP_ID>
+   ```
+
+6. Put the signing secret in the worker env.
+   ```sh
    wrangler secret put SIGNING_SECRET
    ```
-3. Enable the worker in the substructure dashboard.
+
+7. Point the app at the worker URL (this also enables delivery).
+   ```sh
+   subs cloud apps webhook set https://<your-worker>.workers.dev
+   ```
 
 ## Trigger a turn
 
-Create an API key in the substructure dashboard.
+Mint an API key for the app:
+
+```sh
+subs cloud apps keys create local-dev
+```
 
 `client.ts` submits a turn against the hosted backend:
 
 ```sh
-export SUBSTRUCTURE_API_KEY=...
+export SUBSTRUCTURE_API_KEY=<api_key from previous step>
 pnpm client
+```
+
+## Useful commands
+
+```sh
+subs cloud apps webhook show          # current endpoint + signing secret + state
+subs cloud apps webhook rotate-secret # rotate the signing secret
+subs cloud apps webhook disable       # pause delivery (keeps URL)
+subs cloud apps sessions              # recent debug sessions
+subs cloud apps keys list             # active API keys
 ```

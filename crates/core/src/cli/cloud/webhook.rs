@@ -63,22 +63,17 @@ pub async fn run(command: WebhookCommand) -> Result<()> {
     }
 }
 
-fn print_config(w: &WorkerConfig, show_secret: bool) {
+fn print_config(w: &WorkerConfig) {
     println!(
-        "endpoint_url:  {}",
+        "endpoint_url:    {}",
         w.endpoint_url.as_deref().unwrap_or("(unset)")
     );
     println!(
-        "state:         {}",
+        "state:           {}",
         w.state.as_deref().unwrap_or("(unknown)")
     );
-    if show_secret {
-        if let Some(s) = &w.signing_secret {
-            println!();
-            println!("signing_secret: {s}");
-            println!();
-            println!("Save this now. It will not be shown again.");
-        }
+    if let Some(s) = &w.signing_secret {
+        println!("signing_secret:  {s}");
     }
 }
 
@@ -92,7 +87,7 @@ async fn show(scope: AppScope) -> Result<()> {
     if scope.globals.json {
         return print::json(&w);
     }
-    print_config(&w, false);
+    print_config(&w);
     Ok(())
 }
 
@@ -112,7 +107,7 @@ async fn set(endpoint: String, scope: AppScope) -> Result<()> {
     if scope.globals.json {
         return print::json(&w);
     }
-    print_config(&w, false);
+    print_config(&w);
     Ok(())
 }
 
@@ -132,7 +127,7 @@ async fn disable(scope: AppScope) -> Result<()> {
     if scope.globals.json {
         return print::json(&w);
     }
-    print_config(&w, false);
+    print_config(&w);
     Ok(())
 }
 
@@ -148,6 +143,7 @@ async fn rotate(scope: AppScope) -> Result<()> {
     if scope.globals.json {
         return print::json(&w);
     }
-    print_config(&w, true);
+    println!("Signing secret rotated");
+    print_config(&w);
     Ok(())
 }
