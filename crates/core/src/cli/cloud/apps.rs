@@ -1,11 +1,18 @@
-// `subs cloud apps {list,create,show,rename,delete,use}`.
+// `subs cloud apps {list,create,show,rename,delete,keys,sessions,webhook}`.
+//
+// The collection commands (list/create/...) act on the org's apps as a
+// group. The nested subsystems (keys/sessions/webhook) act on a single app,
+// resolved from `--app` or the pinned app in the project subs.toml.
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 
 use super::context::Context;
+use super::keys;
 use super::print;
+use super::sessions;
+use super::webhook;
 use super::OrgScope;
 
 #[derive(Subcommand)]
@@ -16,7 +23,7 @@ pub enum AppsCommand {
         #[command(flatten)]
         scope: OrgScope,
     },
-    /// Create a new app. The signing secret is printed once — save it.
+    /// Create a new app. The signing secret is printed once. Save it now.
     Create {
         name: String,
         #[command(flatten)]
@@ -41,11 +48,20 @@ pub enum AppsCommand {
         #[command(flatten)]
         scope: OrgScope,
     },
-    /// Set the default app for subsequent commands (per-org).
-    Use {
-        app_id: String,
+    /// Manage API keys for an app.
+    Keys {
+        #[command(subcommand)]
+        command: keys::KeysCommand,
+    },
+    /// List debug sessions for an app.
+    Sessions {
         #[command(flatten)]
-        scope: OrgScope,
+        args: sessions::SessionsCommand,
+    },
+    /// Manage the webhook (worker) config for an app.
+    Webhook {
+        #[command(subcommand)]
+        command: webhook::WebhookCommand,
     },
 }
 
@@ -79,12 +95,6 @@ struct DeleteResult<'a> {
 }
 
 #[derive(Debug, Serialize)]
-struct UseResult<'a> {
-    org_id: &'a str,
-    default_app: &'a AppRecord,
-}
-
-#[derive(Debug, Serialize)]
 struct NamePayload<'a> {
     name: &'a str,
 }
@@ -100,7 +110,9 @@ pub async fn run(command: AppsCommand) -> Result<()> {
             scope,
         } => rename(app_id, new_name, scope).await,
         AppsCommand::Delete { app_id, scope } => delete(app_id, scope).await,
-        AppsCommand::Use { app_id, scope } => use_app(app_id, scope).await,
+        AppsCommand::Keys { command } => keys::run(command).await,
+        AppsCommand::Sessions { args } => sessions::run(args).await,
+        AppsCommand::Webhook { command } => webhook::run(command).await,
     }
 }
 
@@ -112,13 +124,13 @@ async fn list(scope: OrgScope) -> Result<()> {
         return print::json(&apps);
     }
 
-    let default = ctx.config.resolve_app(&org, None);
+    let pinned = ctx.project.as_ref().and_then(|p| p.app.as_deref());
     println!(
         "{:<38} {:<30} {:>10} {:>10}",
         "ID", "NAME", "SESSIONS", "BALANCE"
     );
     for a in &apps {
-        let marker = if default.as_deref() == Some(&a.id) {
+        let marker = if pinned == Some(a.id.as_str()) {
             "*"
         } else {
             " "
@@ -126,8 +138,8 @@ async fn list(scope: OrgScope) -> Result<()> {
         let sessions = a
             .session_count
             .map(|n| n.to_string())
-            .unwrap_or_else(|| "—".into());
-        let balance = a.balance_usd.as_deref().unwrap_or("—");
+            .unwrap_or_else(|| "-".into());
+        let balance = a.balance_usd.as_deref().unwrap_or("-");
         println!(
             "{marker} {:<36} {:<30} {:>10} {:>10}",
             a.id, a.name, sessions, balance
@@ -156,7 +168,8 @@ async fn create(name: String, scope: OrgScope) -> Result<()> {
     println!("  organization_id: {}", res.app.organization_id);
     println!();
     println!("  signing_secret:  {}", res.signing_secret);
-    println!("  ^ save this — it is shown only once");
+    println!();
+    println!("Save this now. It will not be shown again.");
     Ok(())
 }
 
@@ -208,14 +221,10 @@ async fn rename(app_id: String, new_name: String, scope: OrgScope) -> Result<()>
 }
 
 async fn delete(app_id: String, scope: OrgScope) -> Result<()> {
-    let (mut ctx, org) = Context::from_org(&scope)?;
+    let (ctx, org) = Context::from_org(&scope)?;
     ctx.client
         .delete_discard(&format!("/api/v1/orgs/{org}/apps/{app_id}"))
         .await?;
-    if ctx.config.resolve_app(&org, None).as_deref() == Some(&app_id) {
-        ctx.config.clear_default_app(&org);
-        ctx.save()?;
-    }
 
     if scope.globals.json {
         return print::json(&DeleteResult {
@@ -225,28 +234,5 @@ async fn delete(app_id: String, scope: OrgScope) -> Result<()> {
     }
 
     println!("App {app_id} deleted");
-    Ok(())
-}
-
-async fn use_app(app_id: String, scope: OrgScope) -> Result<()> {
-    let (mut ctx, org) = Context::from_org(&scope)?;
-    let a: AppRecord = ctx
-        .client
-        .get(&format!("/api/v1/orgs/{org}/apps/{app_id}"))
-        .await?;
-    if a.organization_id != org {
-        bail!("app {app_id} belongs to a different org");
-    }
-    ctx.config.set_default_app(&org, a.id.clone());
-    ctx.save()?;
-
-    if scope.globals.json {
-        return print::json(&UseResult {
-            org_id: &org,
-            default_app: &a,
-        });
-    }
-
-    println!("Default app for org {org} set to \"{}\" ({})", a.name, a.id);
     Ok(())
 }

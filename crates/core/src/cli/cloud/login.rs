@@ -44,14 +44,18 @@ struct OauthError {
     error_description: Option<String>,
 }
 
-pub async fn run(url_flag: Option<String>, config_path: Option<PathBuf>) -> Result<()> {
+pub async fn run(
+    url_flag: Option<String>,
+    config_path: Option<PathBuf>,
+    no_browser: bool,
+) -> Result<()> {
     let path = config::resolve_path(config_path)?;
     let mut cfg = config::load(&path)?;
     let api_url = cfg.resolve_api_url(url_flag.as_deref());
 
     let client = CloudClient::new(&api_url, None);
 
-    // 1. Request a device code. We ask for `openid profile email` — the
+    // 1. Request a device code. We ask for `openid profile email`; the
     // device-flow handler in better-auth issues a session-backed access token
     // either way, but the granted scope is reflected back in the token
     // response, which is useful for diagnostics.
@@ -65,12 +69,19 @@ pub async fn run(url_flag: Option<String>, config_path: Option<PathBuf>) -> Resu
         )
         .await?;
     if !res.status().is_success() {
+        let status = res.status();
         let body = res.text().await.unwrap_or_default();
-        bail!("device-code request failed: {body}");
+        // Trim huge bodies so the error stays scannable.
+        let snippet = body.lines().next().unwrap_or("").chars().take(200).collect::<String>();
+        bail!("could not request device code (HTTP {}): {snippet}", status.as_u16());
     }
     let device: DeviceCodeResponse = res.json().await.context("decoding device-code response")?;
 
     // 2. Prompt the user.
+    let open_url = device
+        .verification_uri_complete
+        .as_deref()
+        .unwrap_or(&device.verification_uri);
     println!();
     println!("To authenticate, visit:");
     if let Some(complete) = device.verification_uri_complete.as_deref() {
@@ -84,6 +95,12 @@ pub async fn run(url_flag: Option<String>, config_path: Option<PathBuf>) -> Resu
         println!("  {}", device.verification_uri);
         println!("Enter code: {}", device.user_code);
     }
+    // Best-effort browser launch. If it fails (headless env, missing
+    // BROWSER, etc.) we silently fall back to the printed URL above.
+    if !no_browser && webbrowser::open(open_url).is_ok() {
+        println!();
+        println!("Opened in your browser.");
+    }
     println!();
     println!("Waiting for approval…");
 
@@ -94,7 +111,7 @@ pub async fn run(url_flag: Option<String>, config_path: Option<PathBuf>) -> Resu
 
     let token = loop {
         if started.elapsed() > total_window {
-            bail!("login expired before approval — run `subs cloud login` again");
+            bail!("login expired before approval. Run `subs cloud login` to start over.");
         }
         sleep(interval).await;
 
@@ -124,8 +141,8 @@ pub async fn run(url_flag: Option<String>, config_path: Option<PathBuf>) -> Resu
                 interval += Duration::from_secs(5);
                 continue;
             }
-            "access_denied" => bail!("login denied"),
-            "expired_token" => bail!("login expired — run `subs cloud login` again"),
+            "access_denied" => bail!("login denied by user"),
+            "expired_token" => bail!("login code expired. Run `subs cloud login` to start over."),
             other => bail!(
                 "OAuth error `{other}`: {}",
                 err.error_description

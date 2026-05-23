@@ -1,5 +1,5 @@
-// `subs cloud webhook {show,set,disable,rotate-secret}` — per-app worker
-// (webhook) configuration.
+// `subs cloud apps webhook {show,set,disable,rotate-secret}`: per-app
+// worker (webhook) configuration.
 
 use anyhow::Result;
 use clap::Subcommand;
@@ -76,7 +76,8 @@ fn print_config(w: &WorkerConfig, show_secret: bool) {
         if let Some(s) = &w.signing_secret {
             println!();
             println!("signing_secret: {s}");
-            println!("^ save this — it is shown only once");
+            println!();
+            println!("Save this now. It will not be shown again.");
         }
     }
 }

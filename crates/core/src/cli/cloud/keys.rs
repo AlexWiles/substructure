@@ -1,4 +1,4 @@
-// `subs cloud keys {list,create,revoke}` — per-app API keys.
+// `subs cloud apps keys {list,create,revoke}`: per-app API keys.
 
 use anyhow::Result;
 use clap::Subcommand;
@@ -90,8 +90,8 @@ async fn list(scope: AppScope) -> Result<()> {
             "{:<40} {:<30} {:<25} {}",
             k.key_id,
             k.label,
-            k.created_at.as_deref().unwrap_or("—"),
-            k.last_used_at.as_deref().unwrap_or("—"),
+            k.created_at.as_deref().unwrap_or("-"),
+            k.last_used_at.as_deref().unwrap_or("-"),
         );
     }
     Ok(())
@@ -117,7 +117,8 @@ async fn create(label: String, scope: AppScope) -> Result<()> {
     println!("API key created");
     println!("  label:    {}", label);
     println!("  api_key:  {}", res.api_key);
-    println!("  ^ save this — it is shown only once");
+    println!();
+    println!("Save this now. It will not be shown again.");
     Ok(())
 }
 

@@ -1,4 +1,4 @@
-// `subs cloud sessions` — list debug sessions for the current app.
+// `subs cloud apps sessions`: list debug sessions for the current app.
 
 use anyhow::{Context as _, Result};
 use clap::Args;
@@ -65,9 +65,7 @@ pub async fn run(cmd: SessionsCommand) -> Result<()> {
 
     let page: Page = ctx
         .client
-        .get(&format!(
-            "/api/v1/orgs/{org}/apps/{app}/sessions?{query}"
-        ))
+        .get(&format!("/api/v1/orgs/{org}/apps/{app}/sessions?{query}"))
         .await?;
 
     if cmd.scope.globals.json {
@@ -76,12 +74,12 @@ pub async fn run(cmd: SessionsCommand) -> Result<()> {
 
     println!("{:<40} {:<30} {}", "SESSION_ID", "AGENT", "CREATED");
     for s in &page.items {
-        let sid = s.session_id.as_deref().or(s.id.as_deref()).unwrap_or("—");
+        let sid = s.session_id.as_deref().or(s.id.as_deref()).unwrap_or("-");
         println!(
             "{:<40} {:<30} {}",
             sid,
-            s.agent_id.as_deref().unwrap_or("—"),
-            s.created_at.as_deref().unwrap_or("—"),
+            s.agent_id.as_deref().unwrap_or("-"),
+            s.created_at.as_deref().unwrap_or("-"),
         );
     }
     if let Some(c) = page.next_cursor {

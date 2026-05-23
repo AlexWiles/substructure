@@ -1,6 +1,6 @@
 // Thin HTTP client wrapper for the cloud API. Adds the bearer token, maps
 // status codes to typed errors, and parses JSON bodies. Kept deliberately
-// small — no retry, no pagination, no codegen.
+// small: no retry, no pagination, no codegen.
 
 use anyhow::{bail, Context, Result};
 use reqwest::{header, Method, Response, StatusCode};
@@ -58,8 +58,7 @@ impl CloudClient {
         let res = self
             .request(Method::GET, path)
             .send()
-            .await
-            .context("HTTP send")?;
+            .await?;
         decode(res).await
     }
 
@@ -73,8 +72,7 @@ impl CloudClient {
             .request(Method::POST, path)
             .json(body)
             .send()
-            .await
-            .context("HTTP send")?;
+            .await?;
         decode(res).await
     }
 
@@ -88,8 +86,7 @@ impl CloudClient {
             .request(Method::PATCH, path)
             .json(body)
             .send()
-            .await
-            .context("HTTP send")?;
+            .await?;
         decode(res).await
     }
 
@@ -103,19 +100,14 @@ impl CloudClient {
             .request(Method::PUT, path)
             .json(body)
             .send()
-            .await
-            .context("HTTP send")?;
+            .await?;
         decode(res).await
     }
 
     /// DELETE <path>, discarding any response body. For endpoints that return
     /// 204 or an envelope the caller doesn't care about.
     pub async fn delete_discard(&self, path: &str) -> Result<()> {
-        let res = self
-            .request(Method::DELETE, path)
-            .send()
-            .await
-            .context("HTTP send")?;
+        let res = self.request(Method::DELETE, path).send().await?;
         check_status(res).await?;
         Ok(())
     }
@@ -126,22 +118,17 @@ impl CloudClient {
             .request(Method::POST, path)
             .header(header::CONTENT_LENGTH, "0")
             .send()
-            .await
-            .context("HTTP send")?;
+            .await?;
         decode(res).await
     }
 
     /// POST <path> with a JSON body → raw Response so the caller can branch
     /// on status (used by the OAuth device-flow polling, where 400 + an
     /// `authorization_pending` body means "keep polling", not "fail").
-    /// Better Auth's device endpoints accept JSON only — sending
+    /// Better Auth's device endpoints accept JSON only: sending
     /// form-encoded bodies yields `UNSUPPORTED_MEDIA_TYPE`.
     pub async fn post_json_raw<B: Serialize>(&self, path: &str, body: &B) -> Result<Response> {
-        self.request(Method::POST, path)
-            .json(body)
-            .send()
-            .await
-            .context("HTTP send")
+        Ok(self.request(Method::POST, path).json(body).send().await?)
     }
 }
 
@@ -165,18 +152,17 @@ async fn check_status(res: Response) -> Result<Response> {
         .map(|e| (e.code, e.message))
         .unwrap_or((None, None));
 
-    let hint = match status {
-        StatusCode::UNAUTHORIZED => " — run `subs cloud login`",
-        StatusCode::FORBIDDEN => " — your account doesn't have access",
+    let raw_msg = message.unwrap_or_else(|| body_text.lines().next().unwrap_or("").to_string());
+    let msg = raw_msg.trim_end_matches('.');
+    let prefix = match code.as_deref() {
+        Some(c) if !c.is_empty() => format!("HTTP {} {}", status.as_u16(), c),
+        _ => format!("HTTP {}", status.as_u16()),
+    };
+    let suffix = match status {
+        StatusCode::UNAUTHORIZED => " Run `subs cloud login` to authenticate.",
+        StatusCode::FORBIDDEN => " Your account does not have access to this resource.",
         _ => "",
     };
 
-    let msg = message.unwrap_or_else(|| body_text.lines().next().unwrap_or("").to_string());
-    let code_label = code.as_deref().unwrap_or("");
-
-    if code_label.is_empty() {
-        bail!("HTTP {}{}: {}", status.as_u16(), hint, msg);
-    } else {
-        bail!("HTTP {} {}{}: {}", status.as_u16(), code_label, hint, msg);
-    }
+    bail!("{prefix}: {msg}.{suffix}")
 }
