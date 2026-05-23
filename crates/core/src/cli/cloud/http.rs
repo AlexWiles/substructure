@@ -1,7 +1,3 @@
-// Thin HTTP client wrapper for the cloud API. Adds the bearer token, maps
-// status codes to typed errors, and parses JSON bodies. Kept deliberately
-// small: no retry, no pagination, no codegen.
-
 use anyhow::{bail, Context, Result};
 use reqwest::{header, Method, Response, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
@@ -53,13 +49,11 @@ impl CloudClient {
         req
     }
 
-    /// GET <path> → T. Errors with the server's error envelope when present.
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let res = self.request(Method::GET, path).send().await?;
         decode(res).await
     }
 
-    /// POST <path> with JSON body → T.
     pub async fn post_json<B: Serialize, T: DeserializeOwned>(
         &self,
         path: &str,
@@ -69,7 +63,6 @@ impl CloudClient {
         decode(res).await
     }
 
-    /// PATCH <path> with JSON body → T.
     pub async fn patch_json<B: Serialize, T: DeserializeOwned>(
         &self,
         path: &str,
@@ -79,7 +72,6 @@ impl CloudClient {
         decode(res).await
     }
 
-    /// PUT <path> with JSON body → T.
     pub async fn put_json<B: Serialize, T: DeserializeOwned>(
         &self,
         path: &str,
@@ -89,15 +81,12 @@ impl CloudClient {
         decode(res).await
     }
 
-    /// DELETE <path>, discarding any response body. For endpoints that return
-    /// 204 or an envelope the caller doesn't care about.
     pub async fn delete_discard(&self, path: &str) -> Result<()> {
         let res = self.request(Method::DELETE, path).send().await?;
         check_status(res).await?;
         Ok(())
     }
 
-    /// POST <path> with no body → T. For action endpoints with no payload.
     pub async fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let res = self
             .request(Method::POST, path)
@@ -107,11 +96,8 @@ impl CloudClient {
         decode(res).await
     }
 
-    /// POST <path> with a JSON body → raw Response so the caller can branch
-    /// on status (used by the OAuth device-flow polling, where 400 + an
-    /// `authorization_pending` body means "keep polling", not "fail").
-    /// Better Auth's device endpoints accept JSON only: sending
-    /// form-encoded bodies yields `UNSUPPORTED_MEDIA_TYPE`.
+    // Raw Response: OAuth device-flow polling treats 400 `authorization_pending` as "keep polling".
+    // Better Auth's device endpoints require JSON (form-encoded yields UNSUPPORTED_MEDIA_TYPE).
     pub async fn post_json_raw<B: Serialize>(&self, path: &str, body: &B) -> Result<Response> {
         Ok(self.request(Method::POST, path).json(body).send().await?)
     }
@@ -122,8 +108,6 @@ async fn decode<T: DeserializeOwned>(res: Response) -> Result<T> {
     res.json::<T>().await.context("decoding response JSON")
 }
 
-/// Return `res` unchanged on success, otherwise format the server's error
-/// envelope (or fall back to the raw body) into an `anyhow` error.
 async fn check_status(res: Response) -> Result<Response> {
     let status = res.status();
     if status.is_success() {

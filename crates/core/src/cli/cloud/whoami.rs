@@ -1,7 +1,3 @@
-// `subs cloud whoami`: calls /api/v1/me and shows the user. Also shows
-// the org/app pinned by the project subs.toml (if any) so users can tell
-// at a glance which app `keys list` etc. would target.
-
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 

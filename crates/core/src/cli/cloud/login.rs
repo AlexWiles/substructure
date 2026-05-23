@@ -1,12 +1,4 @@
-// OAuth 2.0 Device Authorization Grant (RFC 8628). The cloud's `subs-cli`
-// public OAuth client is pre-seeded server-side; this flow asks for a
-// device_code, prompts the user to visit a verification URL in their
-// browser, and polls /api/auth/device/token until they approve or it
-// expires.
-//
-// The resulting access_token is persisted as the bearer token in
-// ~/.config/subs/config.toml. All subsequent `subs cloud …` commands send
-// it in `Authorization: Bearer …`.
+// OAuth 2.0 Device Authorization Grant (RFC 8628).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -55,10 +47,6 @@ pub async fn run(
 
     let client = CloudClient::new(&api_url, None);
 
-    // 1. Request a device code. We ask for `openid profile email`; the
-    // device-flow handler in better-auth issues a session-backed access token
-    // either way, but the granted scope is reflected back in the token
-    // response, which is useful for diagnostics.
     let res = client
         .post_json_raw(
             "/api/auth/device/code",
@@ -71,7 +59,6 @@ pub async fn run(
     if !res.status().is_success() {
         let status = res.status();
         let body = res.text().await.unwrap_or_default();
-        // Trim huge bodies so the error stays scannable.
         let snippet = body
             .lines()
             .next()
@@ -86,7 +73,6 @@ pub async fn run(
     }
     let device: DeviceCodeResponse = res.json().await.context("decoding device-code response")?;
 
-    // 2. Prompt the user.
     let open_url = device
         .verification_uri_complete
         .as_deref()
@@ -104,8 +90,6 @@ pub async fn run(
         println!("  {}", device.verification_uri);
         println!("Enter code: {}", device.user_code);
     }
-    // Best-effort browser launch. If it fails (headless env, missing
-    // BROWSER, etc.) we silently fall back to the printed URL above.
     if !no_browser && webbrowser::open(open_url).is_ok() {
         println!();
         println!("Opened in your browser.");
@@ -113,7 +97,6 @@ pub async fn run(
     println!();
     println!("Waiting for approval…");
 
-    // 3. Poll the token endpoint.
     let mut interval = Duration::from_secs(device.interval.max(1));
     let started = std::time::Instant::now();
     let total_window = Duration::from_secs(device.expires_in).min(MAX_POLL_WINDOW);
@@ -161,11 +144,8 @@ pub async fn run(
         }
     };
 
-    // 4. Persist.
     cfg.token = Some(token);
     if cfg.api_url.is_none() && url_flag.is_some() {
-        // First-time login with an explicit --url: pin it so subsequent
-        // commands don't need the flag.
         cfg.api_url = Some(api_url.clone());
     }
     config::save(&path, &cfg)?;

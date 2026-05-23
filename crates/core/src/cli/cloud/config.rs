@@ -1,9 +1,3 @@
-// User-level credentials at ~/.config/subs/config.toml. Single file, 0600
-// perms, written atomically. Holds the bearer token and (optionally) a
-// pinned API URL: that's it. Org/app pinning lives in project-local
-// `subs.toml` (see project_config.rs); commands run outside a project
-// tree must pass `--org`/`--app` explicitly.
-
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -12,8 +6,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// Hardcoded fallback if the user hasn't pinned an `api_url` in the
-/// credentials file and hasn't passed `--url`. Update when prod moves.
 pub const DEFAULT_API_URL: &str = "https://api.substructure.ai";
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -23,15 +15,12 @@ pub struct Config {
     pub token: Option<String>,
 }
 
-/// Default config path: `~/.config/subs/config.toml`. Honors `XDG_CONFIG_HOME`
-/// on Linux via `dirs::config_dir()`.
 pub fn default_path() -> Result<PathBuf> {
     let base = dirs::config_dir()
         .context("could not determine config dir (HOME/XDG_CONFIG_HOME unset)")?;
     Ok(base.join("subs").join("config.toml"))
 }
 
-/// Resolve the config path: explicit override, otherwise the default.
 pub fn resolve_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
     match explicit {
         Some(p) => Ok(p),
@@ -39,8 +28,6 @@ pub fn resolve_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
-/// Load the config from `path`, returning `Default::default()` if the file is
-/// missing. Errors only on read/parse failure.
 pub fn load(path: &Path) -> Result<Config> {
     match fs::read_to_string(path) {
         Ok(s) => {
@@ -51,13 +38,9 @@ pub fn load(path: &Path) -> Result<Config> {
     }
 }
 
-/// Atomically persist `config` to `path` with 0600 perms. Creates the parent
-/// dir (0700) on first write.
 pub fn save(path: &Path, config: &Config) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-        // Best-effort: tighten dir perms even on subsequent saves. Skip on
-        // failure (e.g. user has a custom umask we shouldn't fight).
         let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
     }
 
@@ -77,21 +60,18 @@ pub fn save(path: &Path, config: &Config) -> Result<()> {
     }
     fs::rename(&tmp, path)
         .with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()))?;
-    // The mode flag on create above only applies on first creation; reset
-    // explicitly so a pre-existing file with looser perms gets tightened.
+    // O_CREAT mode only applies on first creation; reset so pre-existing loose perms get tightened.
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     Ok(())
 }
 
 impl Config {
-    /// Resolved API URL: flag > config > hardcoded default.
     pub fn resolve_api_url(&self, flag: Option<&str>) -> String {
         flag.map(str::to_string)
             .or_else(|| self.api_url.clone())
             .unwrap_or_else(|| DEFAULT_API_URL.to_string())
     }
 
-    /// Resolved bearer token. Errors if neither is set.
     pub fn require_token(&self) -> Result<&str> {
         self.token
             .as_deref()

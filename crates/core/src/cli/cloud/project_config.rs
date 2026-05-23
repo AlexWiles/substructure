@@ -1,16 +1,3 @@
-// Optional, committable project-local pointers: `subs.toml` at the project
-// root holds `org` and `app` ids so teammates running `subs cloud apps
-// keys list` in the repo all hit the same app without each setting their
-// own user-level defaults. Contains NO credentials; only pointer fields.
-//
-// Discovery walks upward from cwd until a `subs.toml` is found or the
-// filesystem root is reached, mirroring how git finds `.git/`.
-//
-// Precedence (used by Context::require_org / require_app):
-//   1. explicit --org / --app flag
-//   2. project subs.toml (this file)
-//   3. user config (~/.config/subs/config.toml) defaults
-
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -27,9 +14,6 @@ pub struct ProjectConfig {
     pub app: Option<String>,
 }
 
-/// Result of discovery: the loaded config and the path it came from. The
-/// path is kept so future diagnostics (e.g. `whoami` could mention "from
-/// ./subs.toml") can surface it; tests assert on it directly.
 #[derive(Debug, Clone)]
 pub struct Found {
     pub config: ProjectConfig,
@@ -37,8 +21,6 @@ pub struct Found {
     pub path: PathBuf,
 }
 
-/// Walk upward from `start` looking for `subs.toml`. Returns the first hit
-/// or `None` if we reach the filesystem root.
 pub fn find_from(start: &Path) -> Result<Option<Found>> {
     let mut dir: &Path = start;
     loop {
@@ -60,14 +42,11 @@ pub fn find_from(start: &Path) -> Result<Option<Found>> {
     }
 }
 
-/// Convenience: discover from `std::env::current_dir()`.
 pub fn find() -> Result<Option<Found>> {
     let cwd = env::current_dir().context("could not determine cwd for subs.toml lookup")?;
     find_from(&cwd)
 }
 
-/// Load a specific project config file (errors if missing). Used when the
-/// caller passed `-c/--config` to override discovery.
 pub fn load_explicit(path: &Path) -> Result<Found> {
     let s = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let config: ProjectConfig =
@@ -78,7 +57,6 @@ pub fn load_explicit(path: &Path) -> Result<Found> {
     })
 }
 
-/// Write `config` to `path` as TOML. Used by `subs cloud init`.
 pub fn write(path: &Path, config: &ProjectConfig) -> Result<()> {
     let serialized = toml::to_string_pretty(config).context("serializing subs.toml")?;
     fs::write(path, serialized).with_context(|| format!("writing {}", path.display()))?;
@@ -115,8 +93,6 @@ mod tests {
 
     #[test]
     fn find_returns_none_when_no_subs_toml_anywhere() {
-        // Use a deep tmp dir that won't accidentally collide with a real
-        // subs.toml on the host.
         let root = tmpdir().join("isolated");
         fs::create_dir_all(&root).unwrap();
         let found = find_from(&root).unwrap();

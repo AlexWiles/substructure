@@ -1,9 +1,3 @@
-// `subs cloud logout`: clears the bearer token from the credentials
-// file. Local-only by design: the Better Auth `deviceAuthorization`
-// plugin doesn't document a server-side revocation API for device-flow
-// sessions. To kill the session before it expires (7 days idle), revoke
-// it from the web UI's active-sessions list.
-
 use std::path::PathBuf;
 
 use anyhow::Result;

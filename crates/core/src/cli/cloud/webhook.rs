@@ -1,6 +1,3 @@
-// `subs cloud apps webhook {show,set,disable,rotate-secret}`: per-app
-// worker (webhook) configuration.
-
 use anyhow::Result;
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};

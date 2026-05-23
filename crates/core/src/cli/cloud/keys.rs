@@ -1,5 +1,3 @@
-// `subs cloud apps keys {list,create,revoke}`: per-app API keys.
-
 use anyhow::Result;
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};

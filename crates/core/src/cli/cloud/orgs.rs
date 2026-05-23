@@ -1,7 +1,3 @@
-// `subs cloud orgs list`: list the orgs you belong to. There is no
-// `orgs use`: pinning happens via `subs cloud init`, which writes a
-// project-local `subs.toml`. Pass `--org <id>` for one-off overrides.
-
 use anyhow::Result;
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};

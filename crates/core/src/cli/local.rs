@@ -1,7 +1,3 @@
-// Local-server commands. Today only `start` exists; this is the namespace
-// future inspection/debug commands (events tail, sessions list, etc.) will
-// land under without colliding with cloud commands.
-
 use std::sync::Arc;
 
 use clap::Subcommand;

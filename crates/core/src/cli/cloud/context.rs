@@ -1,8 +1,3 @@
-// Per-command setup: load the credentials file and (optionally) the
-// project-local `subs.toml`, build the HTTP client with the bearer token,
-// and provide org/app resolution. Every resource command starts by
-// calling `Context::load`.
-
 use anyhow::{bail, Result};
 
 use super::config;
@@ -11,9 +6,6 @@ use super::project_config::{self, ProjectConfig};
 use super::{AppScope, CloudGlobals, OrgScope};
 
 pub struct Context {
-    /// Project-local `subs.toml`, either pointed at explicitly with
-    /// `-c/--config` or discovered by walking up from cwd. Holds the
-    /// org/app pointers for this directory tree.
     pub project: Option<ProjectConfig>,
     pub client: CloudClient,
 }
@@ -32,14 +24,12 @@ impl Context {
         Ok(Self { project, client })
     }
 
-    /// Load + resolve an org id from an `OrgScope` in one call.
     pub fn from_org(scope: &OrgScope) -> Result<(Self, String)> {
         let ctx = Self::load(&scope.globals)?;
         let org = ctx.require_org(scope.org.as_deref())?;
         Ok((ctx, org))
     }
 
-    /// Load + resolve org and app ids from an `AppScope` in one call.
     pub fn from_app(scope: &AppScope) -> Result<(Self, String, String)> {
         let ctx = Self::load(&scope.globals)?;
         let org = ctx.require_org(scope.org.as_deref())?;
@@ -47,8 +37,6 @@ impl Context {
         Ok((ctx, org, app))
     }
 
-    /// Resolved org id: flag > project subs.toml. There is no user-level
-    /// default. To pin an org for a directory tree, run `subs cloud init`.
     pub fn require_org(&self, flag: Option<&str>) -> Result<String> {
         if let Some(s) = flag {
             return Ok(s.to_string());
@@ -61,7 +49,6 @@ impl Context {
         )
     }
 
-    /// Resolved app id: flag > project subs.toml.
     pub fn require_app(&self, _org_id: &str, flag: Option<&str>) -> Result<String> {
         if let Some(s) = flag {
             return Ok(s.to_string());

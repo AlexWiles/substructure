@@ -1,9 +1,3 @@
-// `subs cloud apps {list,create,show,rename,delete,keys,sessions,webhook}`.
-//
-// The collection commands (list/create/...) act on the org's apps as a
-// group. The nested subsystems (keys/sessions/webhook) act on a single app,
-// resolved from `--app` or the pinned app in the project subs.toml.
-
 use anyhow::Result;
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};

@@ -1,7 +1,3 @@
-// Hosted-cloud commands: auth + org/app/key/session/webhook management.
-// Talks to /api/v1/* on the cloud backend with a bearer token persisted in
-// ~/.config/subs/config.toml.
-
 mod apps;
 pub mod config;
 mod context;
@@ -21,7 +17,6 @@ use std::path::PathBuf;
 
 use clap::Subcommand;
 
-/// Global flags accepted by every cloud subcommand.
 #[derive(Debug, clap::Args, Clone, Default)]
 pub struct CloudGlobals {
     /// Override the cloud API URL (default: configured value, else prod).
@@ -40,7 +35,6 @@ pub struct CloudGlobals {
     pub json: bool,
 }
 
-/// Flags shared by every org-scoped subcommand: `--org` plus the globals.
 #[derive(Debug, clap::Args, Clone)]
 pub struct OrgScope {
     #[arg(long)]
@@ -49,7 +43,6 @@ pub struct OrgScope {
     pub globals: CloudGlobals,
 }
 
-/// Flags shared by every app-scoped subcommand: `--org`, `--app`, plus globals.
 #[derive(Debug, clap::Args, Clone)]
 pub struct AppScope {
     #[arg(long)]

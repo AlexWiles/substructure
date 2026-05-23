@@ -1,15 +1,3 @@
-// `subs cloud init`: write a project-local `subs.toml` pinning the org
-// (and optionally the app) for this directory tree.
-//
-// Two modes:
-//   * Interactive (default): prompt the user to pick an org and app from
-//     pickers populated by the API.
-//   * Non-interactive: when `--org` is passed, or when stdin isn't a TTY
-//     (coding agent / CI), skip prompts. `--yes` is an alias that just
-//     forces non-interactive mode. If a required value can't be resolved
-//     non-interactively, error with a clear message telling the agent
-//     which flags to pass.
-
 use std::env;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -67,7 +55,6 @@ pub async fn run(cmd: InitCommand) -> Result<()> {
     let ctx = Context::load(&cmd.globals)?;
     let interactive = !cmd.yes && std::io::stdin().is_terminal() && cmd.org.is_none();
 
-    // --- org ----------------------------------------------------------------
     let org = if let Some(o) = cmd.org.clone() {
         o
     } else if interactive {
@@ -78,8 +65,7 @@ pub async fn run(cmd: InitCommand) -> Result<()> {
         )
     };
 
-    // --- app ----------------------------------------------------------------
-    // Explicit `--app=` (empty string) means "pin only the org".
+    // `--app=` (empty string) pins only the org.
     let app: Option<String> = match cmd.app.clone() {
         Some(s) if s.is_empty() => None,
         Some(s) => Some(s),
@@ -87,7 +73,6 @@ pub async fn run(cmd: InitCommand) -> Result<()> {
             if interactive {
                 pick_app(&ctx, &org).await?
             } else {
-                // Non-interactive with no --app: pin only the org.
                 None
             }
         }
@@ -128,7 +113,6 @@ async fn pick_org(ctx: &Context) -> Result<String> {
         return Ok(orgs[0].id.clone());
     }
 
-    // Default the picker cursor to an existing pinned org, if any.
     let default_idx = ctx
         .project
         .as_ref()
@@ -166,8 +150,6 @@ async fn pick_app(ctx: &Context, org_id: &str) -> Result<Option<String>> {
         .and_then(|d| apps.iter().position(|a| a.id == d))
         .unwrap_or(0);
 
-    // Append a "(skip)" sentinel as the last item: picking it pins the
-    // org without pinning any app.
     let mut items: Vec<String> = apps
         .iter()
         .map(|a| format!("{}  ({})", a.name, a.id))

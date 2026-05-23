@@ -1,5 +1,3 @@
-// `subs cloud apps sessions`: list debug sessions for the current app.
-
 use anyhow::{Context as _, Result};
 use clap::Args;
 use serde::{Deserialize, Serialize};
