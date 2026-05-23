@@ -38,7 +38,7 @@ async fn list(globals: CloudGlobals) -> Result<()> {
     }
 
     let pinned = ctx.project.as_ref().and_then(|p| p.org.as_deref());
-    println!("{:<38} {:<30} {}", "ID", "NAME", "ROLE");
+    println!("  {:<36} {:<30} {}", "ID", "NAME", "ROLE");
     for o in &orgs {
         let marker = if Some(o.id.as_str()) == pinned {
             "*"

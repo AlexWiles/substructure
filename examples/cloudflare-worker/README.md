@@ -25,8 +25,8 @@ Substructure backend).
    subs cloud orgs list
    ```
 
-4. Create an app. Save the printed `signing_secret` — it isn't shown again
-   in this form (you can rotate later, but not re-read this one).
+4. Create an app. The printed `signing_secret` can be re-read later with
+   `subs cloud apps webhook show`, or rotated with `webhook rotate-secret`.
    ```sh
    subs cloud apps create my-worker --org <ORG_ID>
    ```

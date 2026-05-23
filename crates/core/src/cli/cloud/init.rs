@@ -3,8 +3,8 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use anyhow::{bail, Context as _, Result};
-use dialoguer::{theme::ColorfulTheme, Select};
-use serde::Deserialize;
+use dialoguer::{theme::ColorfulTheme, Input, Select};
+use serde::{Deserialize, Serialize};
 
 use super::context::Context;
 use super::project_config::{self, ProjectConfig, FILENAME};
@@ -138,8 +138,21 @@ async fn pick_app(ctx: &Context, org_id: &str) -> Result<Option<String>> {
         .client
         .get(&format!("/api/v1/orgs/{org_id}/apps"))
         .await?;
+
+    const CREATE_LABEL: &str = "(create new app…)";
+    const SKIP_LABEL: &str = "(skip)";
+
     if apps.is_empty() {
-        println!("No apps in this org yet. Skipping app pinning.");
+        let items = vec![CREATE_LABEL, SKIP_LABEL];
+        let pick = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("No apps in this org yet")
+            .items(&items)
+            .default(0)
+            .interact()
+            .context("app picker")?;
+        if pick == 0 {
+            return create_app(ctx, org_id).await.map(Some);
+        }
         return Ok(None);
     }
 
@@ -154,7 +167,10 @@ async fn pick_app(ctx: &Context, org_id: &str) -> Result<Option<String>> {
         .iter()
         .map(|a| format!("{}  ({})", a.name, a.id))
         .collect();
-    items.push("(skip)".into());
+    let create_idx = items.len();
+    items.push(CREATE_LABEL.into());
+    let skip_idx = items.len();
+    items.push(SKIP_LABEL.into());
 
     let pick = Select::with_theme(&ColorfulTheme::default())
         .with_prompt("Which app?")
@@ -162,9 +178,48 @@ async fn pick_app(ctx: &Context, org_id: &str) -> Result<Option<String>> {
         .default(default_idx)
         .interact()
         .context("app picker")?;
-    if pick == apps.len() {
+    if pick == create_idx {
+        create_app(ctx, org_id).await.map(Some)
+    } else if pick == skip_idx {
         Ok(None)
     } else {
         Ok(Some(apps[pick].id.clone()))
     }
+}
+
+#[derive(Debug, Serialize)]
+struct NamePayload<'a> {
+    name: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateAppResponse {
+    app: AppRef,
+    signing_secret: String,
+}
+
+async fn create_app(ctx: &Context, org_id: &str) -> Result<String> {
+    let name: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("App name")
+        .interact_text()
+        .context("app name prompt")?;
+
+    let res: CreateAppResponse = ctx
+        .client
+        .post_json(
+            &format!("/api/v1/orgs/{org_id}/apps"),
+            &NamePayload { name: &name },
+        )
+        .await?;
+
+    println!();
+    println!("App created");
+    println!("  id:              {}", res.app.id);
+    println!("  name:            {}", res.app.name);
+    println!();
+    println!("  signing_secret:  {}", res.signing_secret);
+    println!();
+
+    Ok(res.app.id)
 }

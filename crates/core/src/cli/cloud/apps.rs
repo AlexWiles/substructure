@@ -118,7 +118,7 @@ async fn list(scope: OrgScope) -> Result<()> {
 
     let pinned = ctx.project.as_ref().and_then(|p| p.app.as_deref());
     println!(
-        "{:<38} {:<30} {:>10} {:>10}",
+        "  {:<36} {:<30} {:>10} {:>10}",
         "ID", "NAME", "SESSIONS", "BALANCE"
     );
     for a in &apps {
@@ -160,8 +160,6 @@ async fn create(name: String, scope: OrgScope) -> Result<()> {
     println!("  organization_id: {}", res.app.organization_id);
     println!();
     println!("  signing_secret:  {}", res.signing_secret);
-    println!();
-    println!("Save this now. It will not be shown again.");
     Ok(())
 }
 
