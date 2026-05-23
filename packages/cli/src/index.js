@@ -10,7 +10,7 @@ const PLATFORMS = {
 };
 
 export function resolve() {
-  if (process.env.SUBSTRUCTURE_BIN) return process.env.SUBSTRUCTURE_BIN;
+  if (process.env.SUBS_BIN) return process.env.SUBS_BIN;
 
   const key = `${platform()}-${arch()}`;
   const pkg = PLATFORMS[key];
@@ -24,11 +24,11 @@ export function resolve() {
 
   try {
     const pkgJson = require.resolve(`${pkg}/package.json`);
-    return join(pkgJson, "..", "bin", "substructure");
+    return join(pkgJson, "..", "bin", "subs");
   } catch {
     throw new Error(
       `Could not find package ${pkg}. Make sure it's installed.\n` +
-      `If you're developing locally, run the server directly with: cargo run -p substructure`
+      `If you're developing locally, build the Rust binary with: cargo build -p substructure-core --bin subs`
     );
   }
 }

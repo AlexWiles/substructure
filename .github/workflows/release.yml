@@ -25,19 +25,19 @@ jobs:
           - target: aarch64-apple-darwin
             host: macos-15
             platform: darwin-arm64
-            bin: substructure
+            bin: subs
           - target: x86_64-apple-darwin
             host: macos-15
             platform: darwin-x64
-            bin: substructure
+            bin: subs
           - target: x86_64-unknown-linux-gnu
             host: ubuntu-24.04
             platform: linux-x64
-            bin: substructure
+            bin: subs
           - target: aarch64-unknown-linux-gnu
             host: ubuntu-24.04
             platform: linux-arm64
-            bin: substructure
+            bin: subs
             cross: true
 
     runs-on: ${{ matrix.host }}
@@ -102,7 +102,7 @@ jobs:
 
       # ── CLI binary build ────────────────────────────────────────────────
       - name: Build CLI binary
-        run: cargo build --release --bin substructure -p substructure-core --target ${{ matrix.target }}
+        run: cargo build --release --bin subs -p substructure-core --target ${{ matrix.target }}
 
       - name: Build CLI platform package
         shell: bash
@@ -172,7 +172,7 @@ jobs:
           path: packages/cli/npm
 
       - name: Restore executable bit on CLI binaries
-        run: chmod +x packages/cli/npm/*/bin/substructure
+        run: chmod +x packages/cli/npm/*/bin/subs
 
       # ── Publish runtime (platform packages + main wrapper) ────────────────
       - name: Scaffold runtime npm/<triple> dirs

@@ -6,11 +6,14 @@ description = "Core runtime for Substructure"
 license-file = "LICENSE"
 
 [[bin]]
-name = "substructure"
+name = "subs"
 path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+dirs = "5"
+serde_urlencoded = "0.7"
+toml = "0.8"
 async-trait = "0.1.89"
 axum = { version = "0.8", features = ["default"] }
 base64 = "0.22"
