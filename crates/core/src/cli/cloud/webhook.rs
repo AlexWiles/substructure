@@ -132,9 +132,7 @@ async fn rotate(scope: AppScope) -> Result<()> {
     let (ctx, app) = Context::from_app(&scope).await?;
     let w: WorkerConfig = ctx
         .client
-        .post_empty(&format!(
-            "/api/v1/apps/{app}/worker/rotate-secret"
-        ))
+        .post_empty(&format!("/api/v1/apps/{app}/worker/rotate-secret"))
         .await?;
 
     if scope.globals.json {

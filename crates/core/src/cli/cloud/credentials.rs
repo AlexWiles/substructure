@@ -44,8 +44,9 @@ pub fn resolve_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
 
 pub fn load(path: &Path) -> Result<Credentials> {
     match fs::read_to_string(path) {
-        Ok(s) => toml::from_str::<Credentials>(&s)
-            .with_context(|| format!("parsing {}", path.display())),
+        Ok(s) => {
+            toml::from_str::<Credentials>(&s).with_context(|| format!("parsing {}", path.display()))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Credentials::default()),
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     }

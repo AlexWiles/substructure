@@ -173,10 +173,7 @@ async fn show(app_id: Option<String>, scope: AppScope) -> Result<()> {
         ..scope
     };
     let (ctx, app_id) = Context::from_app(&scope).await?;
-    let a: AppRecord = ctx
-        .client
-        .get(&format!("/api/v1/apps/{app_id}"))
-        .await?;
+    let a: AppRecord = ctx.client.get(&format!("/api/v1/apps/{app_id}")).await?;
 
     if scope.globals.json {
         return print::json(&a);

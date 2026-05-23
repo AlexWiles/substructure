@@ -1,6 +1,6 @@
 mod apps;
-pub mod credentials;
 mod context;
+pub mod credentials;
 mod http;
 mod init;
 mod keys;
