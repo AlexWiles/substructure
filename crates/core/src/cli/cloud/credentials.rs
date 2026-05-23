@@ -7,18 +7,32 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_API_URL: &str = "https://api.substructure.ai";
+pub const API_URL_ENV: &str = "SUBS_API_URL";
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct Config {
-    pub api_url: Option<String>,
+pub struct Credentials {
     pub token: Option<String>,
 }
 
+pub fn resolve_api_url(flag: Option<&str>) -> String {
+    if let Some(u) = flag {
+        return u.to_string();
+    }
+    if let Ok(u) = std::env::var(API_URL_ENV) {
+        if !u.is_empty() {
+            return u;
+        }
+    }
+    DEFAULT_API_URL.to_string()
+}
+
 pub fn default_path() -> Result<PathBuf> {
-    let base = dirs::config_dir()
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
         .context("could not determine config dir (HOME/XDG_CONFIG_HOME unset)")?;
-    Ok(base.join("subs").join("config.toml"))
+    Ok(base.join("subs").join("credentials.toml"))
 }
 
 pub fn resolve_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
@@ -28,23 +42,22 @@ pub fn resolve_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
-pub fn load(path: &Path) -> Result<Config> {
+pub fn load(path: &Path) -> Result<Credentials> {
     match fs::read_to_string(path) {
-        Ok(s) => {
-            toml::from_str::<Config>(&s).with_context(|| format!("parsing {}", path.display()))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+        Ok(s) => toml::from_str::<Credentials>(&s)
+            .with_context(|| format!("parsing {}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Credentials::default()),
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     }
 }
 
-pub fn save(path: &Path, config: &Config) -> Result<()> {
+pub fn save(path: &Path, creds: &Credentials) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
     }
 
-    let serialized = toml::to_string_pretty(config).context("serializing config")?;
+    let serialized = toml::to_string_pretty(creds).context("serializing credentials")?;
 
     let tmp = path.with_extension("toml.tmp");
     {
@@ -65,13 +78,7 @@ pub fn save(path: &Path, config: &Config) -> Result<()> {
     Ok(())
 }
 
-impl Config {
-    pub fn resolve_api_url(&self, flag: Option<&str>) -> String {
-        flag.map(str::to_string)
-            .or_else(|| self.api_url.clone())
-            .unwrap_or_else(|| DEFAULT_API_URL.to_string())
-    }
-
+impl Credentials {
     pub fn require_token(&self) -> Result<&str> {
         self.token
             .as_deref()
@@ -89,7 +96,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("subs-config-test-{nanos}"));
+        let dir = std::env::temp_dir().join(format!("subs-credentials-test-{nanos}"));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -97,53 +104,77 @@ mod tests {
     #[test]
     fn load_missing_returns_default() {
         let path = tmpdir().join("missing.toml");
-        let cfg = load(&path).unwrap();
-        assert!(cfg.token.is_none());
-        assert!(cfg.api_url.is_none());
+        let creds = load(&path).unwrap();
+        assert!(creds.token.is_none());
+    }
+
+    #[test]
+    fn load_ignores_unknown_fields() {
+        // Older credentials files carried an `api_url` key. After the move to
+        // env-var-only URL config, leftover keys must not break loading.
+        let dir = tmpdir();
+        let path = dir.join("credentials.toml");
+        fs::write(
+            &path,
+            "api_url = \"http://localhost:5173\"\ntoken = \"ba_secret\"\n",
+        )
+        .unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.token.as_deref(), Some("ba_secret"));
     }
 
     #[test]
     fn save_round_trip_with_0600_perms() {
         let dir = tmpdir();
-        let path = dir.join("config.toml");
-        let cfg = Config {
-            api_url: Some("https://api.example.com".into()),
+        let path = dir.join("credentials.toml");
+        let creds = Credentials {
             token: Some("ba_secret".into()),
         };
 
-        save(&path, &cfg).unwrap();
+        save(&path, &creds).unwrap();
 
         let mode = fs::metadata(&path).unwrap().mode() & 0o777;
         assert_eq!(mode, 0o600, "expected 0600, got {:o}", mode);
 
         let loaded = load(&path).unwrap();
-        assert_eq!(loaded.api_url.as_deref(), Some("https://api.example.com"));
         assert_eq!(loaded.token.as_deref(), Some("ba_secret"));
     }
 
     #[test]
     fn save_tightens_existing_loose_perms() {
         let dir = tmpdir();
-        let path = dir.join("config.toml");
+        let path = dir.join("credentials.toml");
         fs::write(&path, "").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
 
-        save(&path, &Config::default()).unwrap();
+        save(&path, &Credentials::default()).unwrap();
         let mode = fs::metadata(&path).unwrap().mode() & 0o777;
         assert_eq!(mode, 0o600);
     }
 
     #[test]
-    fn resolve_api_url_precedence_flag_over_config_over_default() {
-        let cfg = Config {
-            api_url: Some("https://configured.example".into()),
-            ..Default::default()
-        };
+    fn resolve_api_url_precedence_flag_over_env_over_default() {
+        // Snapshot + clear the env so this test is hermetic regardless of
+        // what the surrounding shell has set.
+        let prev = std::env::var(API_URL_ENV).ok();
+        std::env::remove_var(API_URL_ENV);
+
+        assert_eq!(resolve_api_url(None), DEFAULT_API_URL);
+
+        std::env::set_var(API_URL_ENV, "https://env.example");
+        assert_eq!(resolve_api_url(None), "https://env.example");
         assert_eq!(
-            cfg.resolve_api_url(Some("https://flag.example")),
+            resolve_api_url(Some("https://flag.example")),
             "https://flag.example"
         );
-        assert_eq!(cfg.resolve_api_url(None), "https://configured.example");
-        assert_eq!(Config::default().resolve_api_url(None), DEFAULT_API_URL);
+
+        // Empty env var falls through to default.
+        std::env::set_var(API_URL_ENV, "");
+        assert_eq!(resolve_api_url(None), DEFAULT_API_URL);
+
+        match prev {
+            Some(v) => std::env::set_var(API_URL_ENV, v),
+            None => std::env::remove_var(API_URL_ENV),
+        }
     }
 }

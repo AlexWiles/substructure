@@ -3,6 +3,7 @@ use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 
 use super::context::Context;
+use super::pickers;
 use super::print;
 use super::AppScope;
 
@@ -22,7 +23,7 @@ pub enum KeysCommand {
     },
     /// Revoke an API key (owner only).
     Revoke {
-        key_id: String,
+        key_id: Option<String>,
         #[command(flatten)]
         scope: AppScope,
     },
@@ -69,10 +70,10 @@ pub async fn run(command: KeysCommand) -> Result<()> {
 }
 
 async fn list(scope: AppScope) -> Result<()> {
-    let (ctx, org, app) = Context::from_app(&scope)?;
+    let (ctx, app) = Context::from_app(&scope).await?;
     let keys: Vec<ApiKeyRow> = ctx
         .client
-        .get(&format!("/api/v1/orgs/{org}/apps/{app}/api-keys"))
+        .get(&format!("/api/v1/apps/{app}/api-keys"))
         .await?;
 
     if scope.globals.json {
@@ -96,11 +97,11 @@ async fn list(scope: AppScope) -> Result<()> {
 }
 
 async fn create(label: String, scope: AppScope) -> Result<()> {
-    let (ctx, org, app) = Context::from_app(&scope)?;
+    let (ctx, app) = Context::from_app(&scope).await?;
     let res: CreateKeyResponse = ctx
         .client
         .post_json(
-            &format!("/api/v1/orgs/{org}/apps/{app}/api-keys"),
+            &format!("/api/v1/apps/{app}/api-keys"),
             &LabelPayload { label: &label },
         )
         .await?;
@@ -120,10 +121,19 @@ async fn create(label: String, scope: AppScope) -> Result<()> {
     Ok(())
 }
 
-async fn revoke(key_id: String, scope: AppScope) -> Result<()> {
-    let (ctx, org, app) = Context::from_app(&scope)?;
+async fn revoke(key_id: Option<String>, scope: AppScope) -> Result<()> {
+    let (ctx, app) = Context::from_app(&scope).await?;
+    let key_id = match key_id {
+        Some(id) => id,
+        None => {
+            if !pickers::interactive(&scope.globals) {
+                anyhow::bail!("missing <KEY_ID>");
+            }
+            pickers::pick_api_key(&ctx, &app).await?
+        }
+    };
     ctx.client
-        .delete_discard(&format!("/api/v1/orgs/{org}/apps/{app}/api-keys/{key_id}"))
+        .delete_discard(&format!("/api/v1/apps/{app}/api-keys/{key_id}"))
         .await?;
 
     if scope.globals.json {

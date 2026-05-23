@@ -51,7 +51,7 @@ struct Query<'a> {
 }
 
 pub async fn run(cmd: SessionsCommand) -> Result<()> {
-    let (ctx, org, app) = Context::from_app(&cmd.scope)?;
+    let (ctx, app) = Context::from_app(&cmd.scope).await?;
 
     let query = serde_urlencoded::to_string(&Query {
         limit: cmd.limit,
@@ -63,7 +63,7 @@ pub async fn run(cmd: SessionsCommand) -> Result<()> {
 
     let page: Page = ctx
         .client
-        .get(&format!("/api/v1/orgs/{org}/apps/{app}/sessions?{query}"))
+        .get(&format!("/api/v1/apps/{app}/sessions?{query}"))
         .await?;
 
     if cmd.scope.globals.json {

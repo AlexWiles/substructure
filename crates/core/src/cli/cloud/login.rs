@@ -7,7 +7,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use tokio::time::sleep;
 
-use super::config;
+use super::credentials;
 use super::http::CloudClient;
 
 const CLIENT_ID: &str = "subs-cli";
@@ -38,12 +38,12 @@ struct OauthError {
 
 pub async fn run(
     url_flag: Option<String>,
-    config_path: Option<PathBuf>,
+    credentials_path: Option<PathBuf>,
     no_browser: bool,
 ) -> Result<()> {
-    let path = config::resolve_path(config_path)?;
-    let mut cfg = config::load(&path)?;
-    let api_url = cfg.resolve_api_url(url_flag.as_deref());
+    let path = credentials::resolve_path(credentials_path)?;
+    let mut creds = credentials::load(&path)?;
+    let api_url = credentials::resolve_api_url(url_flag.as_deref());
 
     let client = CloudClient::new(&api_url, None);
 
@@ -144,11 +144,8 @@ pub async fn run(
         }
     };
 
-    cfg.token = Some(token);
-    if cfg.api_url.is_none() && url_flag.is_some() {
-        cfg.api_url = Some(api_url.clone());
-    }
-    config::save(&path, &cfg)?;
+    creds.token = Some(token);
+    credentials::save(&path, &creds)?;
 
     println!("Logged in. Token saved to {}", path.display());
     Ok(())

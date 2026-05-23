@@ -1,13 +1,14 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 
 use super::context::Context;
 use super::keys;
+use super::pickers;
 use super::print;
 use super::sessions;
 use super::webhook;
-use super::OrgScope;
+use super::{AppScope, OrgScope, GLOBAL_FLAGS_HELP};
 
 #[derive(Subcommand)]
 pub enum AppsCommand {
@@ -25,24 +26,25 @@ pub enum AppsCommand {
     },
     /// Show an app's details.
     Show {
-        app_id: String,
+        app_id: Option<String>,
         #[command(flatten)]
-        scope: OrgScope,
+        scope: AppScope,
     },
     /// Rename an app.
     Rename {
-        app_id: String,
-        new_name: String,
+        app_id: Option<String>,
+        new_name: Option<String>,
         #[command(flatten)]
-        scope: OrgScope,
+        scope: AppScope,
     },
     /// Delete an app (owner only).
     Delete {
-        app_id: String,
+        app_id: Option<String>,
         #[command(flatten)]
-        scope: OrgScope,
+        scope: AppScope,
     },
     /// Manage API keys for an app.
+    #[command(after_help = GLOBAL_FLAGS_HELP)]
     Keys {
         #[command(subcommand)]
         command: keys::KeysCommand,
@@ -53,6 +55,7 @@ pub enum AppsCommand {
         args: sessions::SessionsCommand,
     },
     /// Manage the webhook (worker) config for an app.
+    #[command(after_help = GLOBAL_FLAGS_HELP)]
     Webhook {
         #[command(subcommand)]
         command: webhook::WebhookCommand,
@@ -109,7 +112,7 @@ pub async fn run(command: AppsCommand) -> Result<()> {
 }
 
 async fn list(scope: OrgScope) -> Result<()> {
-    let (ctx, org) = Context::from_org(&scope)?;
+    let (ctx, org) = Context::from_org(&scope).await?;
     let apps: Vec<AppRecord> = ctx.client.get(&format!("/api/v1/orgs/{org}/apps")).await?;
 
     if scope.globals.json {
@@ -118,7 +121,7 @@ async fn list(scope: OrgScope) -> Result<()> {
 
     let pinned = ctx.project.as_ref().and_then(|p| p.app.as_deref());
     println!(
-        "  {:<36} {:<30} {:>10} {:>10}",
+        "  {:<36} {:<30} {:>10} {:>12}",
         "ID", "NAME", "SESSIONS", "BALANCE"
     );
     for a in &apps {
@@ -131,9 +134,9 @@ async fn list(scope: OrgScope) -> Result<()> {
             .session_count
             .map(|n| n.to_string())
             .unwrap_or_else(|| "-".into());
-        let balance = a.balance_usd.as_deref().unwrap_or("-");
+        let balance = print::fmt_usd(a.balance_usd.as_deref().unwrap_or("0"));
         println!(
-            "{marker} {:<36} {:<30} {:>10} {:>10}",
+            "{marker} {:<36} {:<30} {:>10} {:>12}",
             a.id, a.name, sessions, balance
         );
     }
@@ -141,7 +144,7 @@ async fn list(scope: OrgScope) -> Result<()> {
 }
 
 async fn create(name: String, scope: OrgScope) -> Result<()> {
-    let (ctx, org) = Context::from_org(&scope)?;
+    let (ctx, org) = Context::from_org(&scope).await?;
     let res: CreateAppResponse = ctx
         .client
         .post_json(
@@ -158,16 +161,21 @@ async fn create(name: String, scope: OrgScope) -> Result<()> {
     println!("  id:              {}", res.app.id);
     println!("  name:            {}", res.app.name);
     println!("  organization_id: {}", res.app.organization_id);
-    println!();
     println!("  signing_secret:  {}", res.signing_secret);
+    println!();
+    print::warn_zero_balance(&res.app.name, ctx.client.base_url(), &res.app.id);
     Ok(())
 }
 
-async fn show(app_id: String, scope: OrgScope) -> Result<()> {
-    let (ctx, org) = Context::from_org(&scope)?;
+async fn show(app_id: Option<String>, scope: AppScope) -> Result<()> {
+    let scope = AppScope {
+        app: app_id.or(scope.app.clone()),
+        ..scope
+    };
+    let (ctx, app_id) = Context::from_app(&scope).await?;
     let a: AppRecord = ctx
         .client
-        .get(&format!("/api/v1/orgs/{org}/apps/{app_id}"))
+        .get(&format!("/api/v1/apps/{app_id}"))
         .await?;
 
     if scope.globals.json {
@@ -180,21 +188,33 @@ async fn show(app_id: String, scope: OrgScope) -> Result<()> {
     if let Some(ca) = &a.created_at {
         println!("created_at:      {ca}");
     }
-    if let Some(b) = &a.balance_usd {
-        println!("balance_usd:     {b}");
-    }
+    let balance_raw = a.balance_usd.as_deref().unwrap_or("0");
+    println!("balance:         {}", print::fmt_usd(balance_raw));
     if let Some(s) = a.session_count {
         println!("session_count:   {s}");
     }
     Ok(())
 }
 
-async fn rename(app_id: String, new_name: String, scope: OrgScope) -> Result<()> {
-    let (ctx, org) = Context::from_org(&scope)?;
+async fn rename(app_id: Option<String>, new_name: Option<String>, scope: AppScope) -> Result<()> {
+    let scope = AppScope {
+        app: app_id.or(scope.app.clone()),
+        ..scope
+    };
+    let (ctx, app_id) = Context::from_app(&scope).await?;
+    let new_name = match new_name {
+        Some(n) => n,
+        None => {
+            if !pickers::interactive(&scope.globals) {
+                bail!("missing <NEW_NAME>");
+            }
+            pickers::prompt_text("New name")?
+        }
+    };
     let a: AppRecord = ctx
         .client
         .patch_json(
-            &format!("/api/v1/orgs/{org}/apps/{app_id}"),
+            &format!("/api/v1/apps/{app_id}"),
             &NamePayload { name: &new_name },
         )
         .await?;
@@ -207,10 +227,14 @@ async fn rename(app_id: String, new_name: String, scope: OrgScope) -> Result<()>
     Ok(())
 }
 
-async fn delete(app_id: String, scope: OrgScope) -> Result<()> {
-    let (ctx, org) = Context::from_org(&scope)?;
+async fn delete(app_id: Option<String>, scope: AppScope) -> Result<()> {
+    let scope = AppScope {
+        app: app_id.or(scope.app.clone()),
+        ..scope
+    };
+    let (ctx, app_id) = Context::from_app(&scope).await?;
     ctx.client
-        .delete_discard(&format!("/api/v1/orgs/{org}/apps/{app_id}"))
+        .delete_discard(&format!("/api/v1/apps/{app_id}"))
         .await?;
 
     if scope.globals.json {

@@ -75,10 +75,10 @@ fn print_config(w: &WorkerConfig) {
 }
 
 async fn show(scope: AppScope) -> Result<()> {
-    let (ctx, org, app) = Context::from_app(&scope)?;
+    let (ctx, app) = Context::from_app(&scope).await?;
     let w: WorkerConfig = ctx
         .client
-        .get(&format!("/api/v1/orgs/{org}/apps/{app}/worker"))
+        .get(&format!("/api/v1/apps/{app}/worker"))
         .await?;
 
     if scope.globals.json {
@@ -89,11 +89,11 @@ async fn show(scope: AppScope) -> Result<()> {
 }
 
 async fn set(endpoint: String, scope: AppScope) -> Result<()> {
-    let (ctx, org, app) = Context::from_app(&scope)?;
+    let (ctx, app) = Context::from_app(&scope).await?;
     let w: WorkerConfig = ctx
         .client
         .put_json(
-            &format!("/api/v1/orgs/{org}/apps/{app}/worker"),
+            &format!("/api/v1/apps/{app}/worker"),
             &UpsertBody {
                 endpoint_url: Some(&endpoint),
                 state: Some("enabled"),
@@ -109,11 +109,11 @@ async fn set(endpoint: String, scope: AppScope) -> Result<()> {
 }
 
 async fn disable(scope: AppScope) -> Result<()> {
-    let (ctx, org, app) = Context::from_app(&scope)?;
+    let (ctx, app) = Context::from_app(&scope).await?;
     let w: WorkerConfig = ctx
         .client
         .put_json(
-            &format!("/api/v1/orgs/{org}/apps/{app}/worker"),
+            &format!("/api/v1/apps/{app}/worker"),
             &UpsertBody {
                 endpoint_url: None,
                 state: Some("disabled"),
@@ -129,11 +129,11 @@ async fn disable(scope: AppScope) -> Result<()> {
 }
 
 async fn rotate(scope: AppScope) -> Result<()> {
-    let (ctx, org, app) = Context::from_app(&scope)?;
+    let (ctx, app) = Context::from_app(&scope).await?;
     let w: WorkerConfig = ctx
         .client
         .post_empty(&format!(
-            "/api/v1/orgs/{org}/apps/{app}/worker/rotate-secret"
+            "/api/v1/apps/{app}/worker/rotate-secret"
         ))
         .await?;
 

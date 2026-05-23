@@ -18,6 +18,7 @@ enum Command {
         command: LocalCommand,
     },
     /// Manage your hosted Substructure cloud account.
+    #[command(after_help = substructure_core::cli::cloud::GLOBAL_FLAGS_HELP)]
     Cloud {
         #[command(subcommand)]
         command: CloudCommand,

@@ -2,14 +2,13 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
-use super::config;
+use super::credentials;
 
 pub async fn run(_url_flag: Option<String>, credentials_path: Option<PathBuf>) -> Result<()> {
-    let path = config::resolve_path(credentials_path)?;
-    let mut cfg = config::load(&path)?;
-    cfg.token = None;
-    config::save(&path, &cfg)?;
+    let path = credentials::resolve_path(credentials_path)?;
+    let mut creds = credentials::load(&path)?;
+    creds.token = None;
+    credentials::save(&path, &creds)?;
     println!("Logged out. Token cleared from {}", path.display());
-    println!("Note: the server-side session remains valid until idle expiry.");
     Ok(())
 }
