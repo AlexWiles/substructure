@@ -38,10 +38,9 @@ pub fn is_zero_usd(raw: &str) -> bool {
     raw.trim().parse::<f64>().map(|n| n == 0.0).unwrap_or(false)
 }
 
-/// Build the web URL where an app's top-up flow lives, given the CLI's
-/// configured API URL. In prod we swap `api.` for `app.`; in dev (same-origin)
-/// we leave the host alone.
-pub fn topup_url(api_url: &str, app_id: &str) -> String {
+/// Web origin for the admin UI, given the CLI's configured API URL. In prod
+/// we swap `api.` for `app.`; in dev (same-origin) we leave the host alone.
+fn web_base(api_url: &str) -> String {
     let base = if let Some(rest) = api_url.strip_prefix("https://api.") {
         format!("https://app.{rest}")
     } else if let Some(rest) = api_url.strip_prefix("http://api.") {
@@ -49,16 +48,33 @@ pub fn topup_url(api_url: &str, app_id: &str) -> String {
     } else {
         api_url.to_string()
     };
-    format!("{}/apps/{app_id}/overview", base.trim_end_matches('/'))
+    base.trim_end_matches('/').to_string()
+}
+
+/// Admin landing page for an app.
+pub fn admin_url(api_url: &str, app_id: &str) -> String {
+    format!("{}/apps/{app_id}", web_base(api_url))
+}
+
+/// Top-up flow for an app.
+pub fn topup_url(api_url: &str, app_id: &str) -> String {
+    format!("{}/apps/{app_id}/overview", web_base(api_url))
 }
 
 /// Print the standard zero-balance warning line for an app. Goes to stderr
 /// so it doesn't pollute `--json` stdout.
 pub fn warn_zero_balance(app_name: &str, api_url: &str, app_id: &str) {
-    eprintln!(
+    use std::io::IsTerminal;
+    let line = format!(
         "⚠ {app_name} has zero balance. Top up: {}",
         topup_url(api_url, app_id)
     );
+    if std::io::stderr().is_terminal() {
+        // 33 = yellow, 0 = reset
+        eprintln!("\x1b[33m{line}\x1b[0m");
+    } else {
+        eprintln!("{line}");
+    }
 }
 
 #[cfg(test)]
@@ -88,21 +104,29 @@ mod tests {
     }
 
     #[test]
-    fn topup_url_swaps_api_subdomain() {
+    fn admin_url_swaps_api_subdomain() {
+        assert_eq!(
+            admin_url("https://api.substructure.ai", "abc"),
+            "https://app.substructure.ai/apps/abc"
+        );
+        assert_eq!(
+            admin_url("http://api.local.test", "abc"),
+            "http://app.local.test/apps/abc"
+        );
+        assert_eq!(
+            admin_url("http://localhost:5173", "abc"),
+            "http://localhost:5173/apps/abc"
+        );
+        assert_eq!(
+            admin_url("https://api.substructure.ai/", "abc"),
+            "https://app.substructure.ai/apps/abc"
+        );
+    }
+
+    #[test]
+    fn topup_url_points_at_overview() {
         assert_eq!(
             topup_url("https://api.substructure.ai", "abc"),
-            "https://app.substructure.ai/apps/abc/overview"
-        );
-        assert_eq!(
-            topup_url("http://api.local.test", "abc"),
-            "http://app.local.test/apps/abc/overview"
-        );
-        assert_eq!(
-            topup_url("http://localhost:5173", "abc"),
-            "http://localhost:5173/apps/abc/overview"
-        );
-        assert_eq!(
-            topup_url("https://api.substructure.ai/", "abc"),
             "https://app.substructure.ai/apps/abc/overview"
         );
     }

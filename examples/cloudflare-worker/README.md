@@ -15,9 +15,9 @@ Substructure backend).
    subs cloud login
    ```
 
-2. Initialize a config file in this directory.
+2. Link this directory to your org/app (writes `subs.toml`).
    ```sh
-   subs cloud init
+   subs cloud link
    ```
 
 3. Deploy the worker and copy its URL.

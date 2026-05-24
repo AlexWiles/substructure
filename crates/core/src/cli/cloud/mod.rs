@@ -2,10 +2,11 @@ mod apps;
 mod context;
 pub mod credentials;
 mod http;
-mod init;
 mod keys;
+mod link;
 mod login;
 mod logout;
+mod open;
 mod orgs;
 mod pickers;
 mod print;
@@ -118,9 +119,18 @@ pub enum CloudCommand {
         #[command(subcommand)]
         command: webhook::WebhookCommand,
     },
-    /// Write a `subs.toml` in the current directory pinning org (and app)
-    /// so commands run from this tree pick them up automatically.
-    Init(init::InitCommand),
+    /// Open an app's admin page in your browser.
+    Open {
+        app_id: Option<String>,
+        /// Print the URL instead of opening a browser.
+        #[arg(long)]
+        no_browser: bool,
+        #[command(flatten)]
+        scope: AppScope,
+    },
+    /// Link the current directory to an org (and app) by writing a
+    /// `subs.toml`, so commands run from this tree pick them up automatically.
+    Link(link::LinkCommand),
 }
 
 pub async fn run(command: CloudCommand) -> anyhow::Result<()> {
@@ -141,6 +151,11 @@ pub async fn run(command: CloudCommand) -> anyhow::Result<()> {
         CloudCommand::Keys { command } => keys::run(command).await,
         CloudCommand::Sessions { command } => sessions::run(command).await,
         CloudCommand::Webhook { command } => webhook::run(command).await,
-        CloudCommand::Init(cmd) => init::run(cmd).await,
+        CloudCommand::Open {
+            app_id,
+            no_browser,
+            scope,
+        } => open::run(app_id, no_browser, scope).await,
+        CloudCommand::Link(cmd) => link::run(cmd).await,
     }
 }

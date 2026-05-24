@@ -9,7 +9,7 @@ use super::project_config::{self, ProjectConfig, FILENAME};
 use super::{print, CloudGlobals};
 
 #[derive(Debug, clap::Args)]
-pub struct InitCommand {
+pub struct LinkCommand {
     /// Org id to pin. Skips the org picker.
     #[arg(long)]
     pub org: Option<String>,
@@ -24,7 +24,7 @@ pub struct InitCommand {
     pub globals: CloudGlobals,
 }
 
-pub async fn run(cmd: InitCommand) -> Result<()> {
+pub async fn run(cmd: LinkCommand) -> Result<()> {
     let cwd = env::current_dir().context("could not determine cwd")?;
     let target: PathBuf = cwd.join(FILENAME);
     if target.exists() && !cmd.force {
