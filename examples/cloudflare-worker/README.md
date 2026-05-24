@@ -10,64 +10,55 @@ Substructure backend).
 
 ## Deploy
 
-1. Deploy the worker and copy its URL.
-   ```sh
-   pnpm deploy
-   ```
-
-2. Log in to Substructure.
+1. Log in to Substructure.
    ```sh
    subs cloud login
    ```
 
-3. Find your org id.
+2. Initialize a config file in this directory.
    ```sh
-   subs cloud orgs list
+   subs cloud init
    ```
 
-4. Create an app. The printed `signing_secret` can be re-read later with
-   `subs cloud apps webhook show`, or rotated with `webhook rotate-secret`.
+3. Deploy the worker and copy its URL.
    ```sh
-   subs cloud apps create my-worker --org <ORG_ID>
+   wrangler deploy
    ```
 
-5. Pin this directory to the org + app so subsequent commands don't need
-   `--org` / `--app`.
+4. Point the app at the worker URL (this also enables delivery).
    ```sh
-   subs cloud init --org <ORG_ID> --app <APP_ID>
+   subs cloud webhook set https://<your-worker>.workers.dev
    ```
 
-6. Put the signing secret in the worker env.
+5. Pipe the signing secret into the worker env — the secret never
+   touches your terminal or shell history.
    ```sh
-   wrangler secret put SIGNING_SECRET
-   ```
-
-7. Point the app at the worker URL (this also enables delivery).
-   ```sh
-   subs cloud apps webhook set https://<your-worker>.workers.dev
+   subs cloud webhook secret | wrangler secret put SIGNING_SECRET
    ```
 
 ## Trigger a turn
 
-Mint an API key for the app:
+Mint an API key and pipe it straight into the client process:
 
 ```sh
-subs cloud apps keys create local-dev
+export SUBSTRUCTURE_API_KEY=$(subs cloud keys create local-dev)
+tsx client.ts
 ```
 
-`client.ts` submits a turn against the hosted backend:
-
-```sh
-export SUBSTRUCTURE_API_KEY=<api_key from previous step>
-pnpm client
-```
+`client.ts` submits a turn against the hosted backend using that key.
 
 ## Useful commands
 
 ```sh
-subs cloud apps webhook show          # current endpoint + signing secret + state
-subs cloud apps webhook rotate-secret # rotate the signing secret
-subs cloud apps webhook disable       # pause delivery (keeps URL)
-subs cloud apps sessions              # recent debug sessions
-subs cloud apps keys list             # active API keys
+subs cloud webhook show          # endpoint + state
+subs cloud webhook secret        # print signing secret to stdout
+subs cloud webhook rotate-secret # rotate and print new signing secret
+subs cloud webhook disable       # pause delivery (keeps URL)
+subs cloud sessions list         # recent sessions
+subs cloud keys list             # active API keys
 ```
+
+All secret-emitting commands (`keys create`, `webhook secret`,
+`webhook rotate-secret`) print the raw value to stdout and human
+messages to stderr, so they pipe cleanly into `wrangler secret put`,
+`op`, `doppler secrets set`, etc.

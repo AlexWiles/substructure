@@ -57,7 +57,9 @@ struct SessionRow {
     #[serde(default)]
     agent_id: Option<String>,
     #[serde(default)]
-    created_at: Option<String>,
+    first_event_at: Option<String>,
+    #[serde(default)]
+    last_event_at: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -98,14 +100,18 @@ async fn list(cmd: ListCommand) -> Result<()> {
         return print::json(&page);
     }
 
-    println!("{:<40} {:<30} {}", "SESSION_ID", "AGENT", "CREATED");
+    println!(
+        "{:<40} {:<30} {:<30} {}",
+        "SESSION_ID", "AGENT", "FIRST_EVENT", "LAST_EVENT"
+    );
     for s in &page.items {
         let sid = s.session_id.as_deref().or(s.id.as_deref()).unwrap_or("-");
         println!(
-            "{:<40} {:<30} {}",
+            "{:<40} {:<30} {:<30} {}",
             sid,
             s.agent_id.as_deref().unwrap_or("-"),
-            s.created_at.as_deref().unwrap_or("-"),
+            s.first_event_at.as_deref().unwrap_or("-"),
+            s.last_event_at.as_deref().unwrap_or("-"),
         );
     }
     if let Some(c) = page.next_cursor {
@@ -125,14 +131,15 @@ async fn events(cmd: EventsCommand) -> Result<()> {
         "/api/v1/apps/{app}/sessions/{session_id}/events/stream?sequence_after={}",
         cmd.from
     );
-    ctx.client.stream_sse(&path, |line| {
-        // SSE frames: each event is a series of lines, blank-line separated.
-        // Print as-is so users can pipe into jq / awk / less. Comments
-        // (lines starting with `:`) and keep-alives are suppressed.
-        if line.starts_with(':') {
-            return;
-        }
-        println!("{line}");
-    })
-    .await
+    ctx.client
+        .stream_sse(&path, |line| {
+            // SSE frames: each event is a series of lines, blank-line separated.
+            // Print as-is so users can pipe into jq / awk / less. Comments
+            // (lines starting with `:`) and keep-alives are suppressed.
+            if line.starts_with(':') {
+                return;
+            }
+            println!("{line}");
+        })
+        .await
 }

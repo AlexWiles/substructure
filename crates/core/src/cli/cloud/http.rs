@@ -1,4 +1,6 @@
-use anyhow::{bail, Context, Result};
+use std::error::Error as _;
+
+use anyhow::{anyhow, bail, Context, Result};
 use futures_util::StreamExt;
 use reqwest::{header, Method, Response, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
@@ -54,8 +56,37 @@ impl CloudClient {
         req
     }
 
+    async fn send(&self, req: reqwest::RequestBuilder) -> Result<Response> {
+        req.send().await.map_err(|e| self.transport_error(e))
+    }
+
+    // Turn reqwest's nested connect/TLS/timeout chain into one actionable
+    // line that names the URL the CLI is trying to reach. Status-code
+    // errors are handled separately in check_status.
+    fn transport_error(&self, e: reqwest::Error) -> anyhow::Error {
+        let kind = if e.is_timeout() {
+            "timed out reaching"
+        } else if e.is_connect() {
+            "could not connect to"
+        } else if e.is_request() {
+            "could not reach"
+        } else {
+            return anyhow::Error::new(e);
+        };
+        // The innermost source (e.g. "tls handshake eof", "dns error") is
+        // far more useful than the outer "error sending request for url …".
+        let mut deepest: Option<&dyn std::error::Error> = e.source();
+        while let Some(next) = deepest.and_then(|s| s.source()) {
+            deepest = Some(next);
+        }
+        let detail = deepest
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| e.to_string());
+        anyhow!("{kind} {}: {detail}", self.base_url)
+    }
+
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
-        let res = self.request(Method::GET, path).send().await?;
+        let res = self.send(self.request(Method::GET, path)).await?;
         decode(res).await
     }
 
@@ -64,7 +95,9 @@ impl CloudClient {
         path: &str,
         body: &B,
     ) -> Result<T> {
-        let res = self.request(Method::POST, path).json(body).send().await?;
+        let res = self
+            .send(self.request(Method::POST, path).json(body))
+            .await?;
         decode(res).await
     }
 
@@ -73,7 +106,9 @@ impl CloudClient {
         path: &str,
         body: &B,
     ) -> Result<T> {
-        let res = self.request(Method::PATCH, path).json(body).send().await?;
+        let res = self
+            .send(self.request(Method::PATCH, path).json(body))
+            .await?;
         decode(res).await
     }
 
@@ -82,21 +117,24 @@ impl CloudClient {
         path: &str,
         body: &B,
     ) -> Result<T> {
-        let res = self.request(Method::PUT, path).json(body).send().await?;
+        let res = self
+            .send(self.request(Method::PUT, path).json(body))
+            .await?;
         decode(res).await
     }
 
     pub async fn delete_discard(&self, path: &str) -> Result<()> {
-        let res = self.request(Method::DELETE, path).send().await?;
+        let res = self.send(self.request(Method::DELETE, path)).await?;
         check_status(res).await?;
         Ok(())
     }
 
     pub async fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let res = self
-            .request(Method::POST, path)
-            .header(header::CONTENT_LENGTH, "0")
-            .send()
+            .send(
+                self.request(Method::POST, path)
+                    .header(header::CONTENT_LENGTH, "0"),
+            )
             .await?;
         decode(res).await
     }
@@ -104,7 +142,7 @@ impl CloudClient {
     // Raw Response: OAuth device-flow polling treats 400 `authorization_pending` as "keep polling".
     // Better Auth's device endpoints require JSON (form-encoded yields UNSUPPORTED_MEDIA_TYPE).
     pub async fn post_json_raw<B: Serialize>(&self, path: &str, body: &B) -> Result<Response> {
-        Ok(self.request(Method::POST, path).json(body).send().await?)
+        self.send(self.request(Method::POST, path).json(body)).await
     }
 
     /// Open an SSE stream and invoke `on_line` for each non-empty line
@@ -115,9 +153,10 @@ impl CloudClient {
         F: FnMut(&str),
     {
         let res = self
-            .request(Method::GET, path)
-            .header(header::ACCEPT, "text/event-stream")
-            .send()
+            .send(
+                self.request(Method::GET, path)
+                    .header(header::ACCEPT, "text/event-stream"),
+            )
             .await?;
         let res = check_status(res).await?;
 

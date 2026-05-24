@@ -67,6 +67,8 @@ pub async fn run(command: WebhookCommand) -> Result<()> {
     }
 }
 
+// Human view deliberately omits signing_secret — use `webhook secret` to
+// fetch the value. Keeps `show` safe to run in agent/LLM contexts.
 fn print_config(w: &WorkerConfig) {
     println!(
         "endpoint_url:    {}",
@@ -76,9 +78,6 @@ fn print_config(w: &WorkerConfig) {
         "state:           {}",
         w.state.as_deref().unwrap_or("(unknown)")
     );
-    if let Some(s) = &w.signing_secret {
-        println!("signing_secret:  {s}");
-    }
 }
 
 async fn show(scope: AppScope) -> Result<()> {
