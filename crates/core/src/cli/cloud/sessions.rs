@@ -100,20 +100,26 @@ async fn list(cmd: ListCommand) -> Result<()> {
         return print::json(&page);
     }
 
-    println!(
-        "{:<40} {:<30} {:<30} {}",
-        "SESSION_ID", "AGENT", "FIRST_EVENT", "LAST_EVENT"
-    );
-    for s in &page.items {
-        let sid = s.session_id.as_deref().or(s.id.as_deref()).unwrap_or("-");
-        println!(
-            "{:<40} {:<30} {:<30} {}",
-            sid,
-            s.agent_id.as_deref().unwrap_or("-"),
-            s.first_event_at.as_deref().unwrap_or("-"),
-            s.last_event_at.as_deref().unwrap_or("-"),
-        );
-    }
+    let columns = [
+        print::Column::left("SESSION_ID"),
+        print::Column::left("AGENT"),
+        print::Column::left("FIRST_EVENT"),
+        print::Column::left("LAST_EVENT"),
+    ];
+    let rows: Vec<Vec<String>> = page
+        .items
+        .iter()
+        .map(|s| {
+            let sid = s.session_id.as_deref().or(s.id.as_deref()).unwrap_or("-");
+            vec![
+                sid.into(),
+                s.agent_id.clone().unwrap_or_else(|| "-".into()),
+                s.first_event_at.clone().unwrap_or_else(|| "-".into()),
+                s.last_event_at.clone().unwrap_or_else(|| "-".into()),
+            ]
+        })
+        .collect();
+    print::table(&columns, &rows);
     if let Some(c) = page.next_cursor {
         println!();
         println!("Next page: --cursor {c}");

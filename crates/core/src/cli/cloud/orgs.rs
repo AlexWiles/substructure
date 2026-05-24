@@ -38,14 +38,19 @@ async fn list(globals: CloudGlobals) -> Result<()> {
     }
 
     let pinned = ctx.project.as_ref().and_then(|p| p.org.as_deref());
-    println!("  {:<36} {:<30} {}", "ID", "NAME", "ROLE");
-    for o in &orgs {
-        let marker = if Some(o.id.as_str()) == pinned {
-            "*"
-        } else {
-            " "
-        };
-        println!("{marker} {:<36} {:<30} {}", o.id, o.name, o.role);
-    }
+    let columns = [
+        print::Column::left(""),
+        print::Column::left("ID"),
+        print::Column::left("NAME"),
+        print::Column::left("ROLE"),
+    ];
+    let rows: Vec<Vec<String>> = orgs
+        .iter()
+        .map(|o| {
+            let marker = if Some(o.id.as_str()) == pinned { "*" } else { "" };
+            vec![marker.into(), o.id.clone(), o.name.clone(), o.role.clone()]
+        })
+        .collect();
+    print::table(&columns, &rows);
     Ok(())
 }

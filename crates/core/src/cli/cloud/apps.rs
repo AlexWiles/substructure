@@ -97,26 +97,32 @@ async fn list(scope: OrgScope) -> Result<()> {
     }
 
     let pinned = ctx.project.as_ref().and_then(|p| p.app.as_deref());
-    println!(
-        "  {:<36} {:<30} {:>10} {:>12}",
-        "ID", "NAME", "SESSIONS", "BALANCE"
-    );
-    for a in &apps {
-        let marker = if pinned == Some(a.id.as_str()) {
-            "*"
-        } else {
-            " "
-        };
-        let sessions = a
-            .session_count
-            .map(|n| n.to_string())
-            .unwrap_or_else(|| "-".into());
-        let balance = print::fmt_usd(a.balance_usd.as_deref().unwrap_or("0"));
-        println!(
-            "{marker} {:<36} {:<30} {:>10} {:>12}",
-            a.id, a.name, sessions, balance
-        );
-    }
+    let columns = [
+        print::Column::left(""),
+        print::Column::left("ID"),
+        print::Column::left("NAME"),
+        print::Column::right("SESSIONS"),
+        print::Column::right("BALANCE"),
+    ];
+    let rows: Vec<Vec<String>> = apps
+        .iter()
+        .map(|a| {
+            let marker = if pinned == Some(a.id.as_str()) { "*" } else { "" };
+            let sessions = a
+                .session_count
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "-".into());
+            let balance = print::fmt_usd(a.balance_usd.as_deref().unwrap_or("0"));
+            vec![
+                marker.into(),
+                a.id.clone(),
+                a.name.clone(),
+                sessions,
+                balance,
+            ]
+        })
+        .collect();
+    print::table(&columns, &rows);
     Ok(())
 }
 

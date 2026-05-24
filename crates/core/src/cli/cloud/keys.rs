@@ -81,19 +81,24 @@ async fn list(scope: AppScope) -> Result<()> {
         return print::json(&keys);
     }
 
-    println!(
-        "{:<40} {:<30} {:<25} {}",
-        "KEY_ID", "LABEL", "CREATED", "LAST USED"
-    );
-    for k in &keys {
-        println!(
-            "{:<40} {:<30} {:<25} {}",
-            k.key_id,
-            k.label,
-            k.created_at.as_deref().unwrap_or("-"),
-            k.last_used_at.as_deref().unwrap_or("-"),
-        );
-    }
+    let columns = [
+        print::Column::left("KEY_ID"),
+        print::Column::left("LABEL"),
+        print::Column::left("CREATED"),
+        print::Column::left("LAST USED"),
+    ];
+    let rows: Vec<Vec<String>> = keys
+        .iter()
+        .map(|k| {
+            vec![
+                k.key_id.clone(),
+                k.label.clone(),
+                k.created_at.clone().unwrap_or_else(|| "-".into()),
+                k.last_used_at.clone().unwrap_or_else(|| "-".into()),
+            ]
+        })
+        .collect();
+    print::table(&columns, &rows);
     Ok(())
 }
 
