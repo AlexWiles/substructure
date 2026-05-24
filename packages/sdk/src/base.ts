@@ -1,4 +1,8 @@
+import { SDK_VERSION } from "./version.js";
+
 type ClientHeaders = Record<string, string>;
+
+const SDK_VERSION_HEADER = "X-Substructure-Sdk-Version";
 
 export interface BaseClientOptions {
     baseUrl: string;
@@ -27,6 +31,7 @@ export class BaseClient {
                 merged.set(k, v);
             }
         }
+        merged.set(SDK_VERSION_HEADER, SDK_VERSION);
         return merged;
     }
 

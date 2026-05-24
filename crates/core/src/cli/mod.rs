@@ -1,5 +1,7 @@
 pub mod auth;
+pub mod cloud;
 pub mod env;
+pub mod local;
 
 use crate::transport::push::PushAdapter;
 use crate::worker::push::PushRegistrationRecord;

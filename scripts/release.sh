@@ -35,6 +35,11 @@ if [ "$BRANCH" != "main" ]; then
   exit 1
 fi
 
+if ! cargo set-version --help >/dev/null 2>&1; then
+  echo "cargo set-version not found. Install with: cargo install cargo-edit" >&2
+  exit 1
+fi
+
 git fetch origin --tags
 
 CURRENT=$(node -p "require('./packages/cli/package.json').version")
@@ -73,6 +78,11 @@ for pkg in packages/sdk packages/cli packages/runtime; do
   npm --prefix "$pkg" version "$VERSION" --no-git-tag-version --allow-same-version >/dev/null
 done
 
+# Keep the Rust crate version in lockstep — `env!("CARGO_PKG_VERSION")`
+# bakes it into the CLI's User-Agent header. `cargo set-version` (from
+# cargo-edit) also refreshes Cargo.lock.
+cargo set-version --package substructure-core "$VERSION"
+
 # Keep optionalDependencies in cli + runtime aligned with the new version.
 node -e "
   const fs = require('fs');
@@ -87,7 +97,8 @@ node -e "
   }
 " "$VERSION"
 
-git add packages/sdk/package.json packages/cli/package.json packages/runtime/package.json
+git add packages/sdk/package.json packages/cli/package.json packages/runtime/package.json \
+  crates/core/Cargo.toml Cargo.lock
 git commit -m "release $TAG"
 git tag -a "$TAG" -m "$TAG"
 

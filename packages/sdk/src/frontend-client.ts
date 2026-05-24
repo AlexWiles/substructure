@@ -5,9 +5,11 @@ import { UserClient } from "./user-client";
 export type { SessionScope, TurnResult } from "./types";
 
 export interface FrontendClientOptions {
-    url: string;
     token: string;
+    url?: string;
 }
+
+const DEFAULT_URL = "https://api.substructure.ai";
 
 export interface StartTurnRequest {
     agentId: string;
@@ -25,7 +27,7 @@ export class FrontendClient {
 
     constructor(options: FrontendClientOptions) {
         this.user = new UserClient({
-            baseUrl: options.url,
+            baseUrl: options.url ?? DEFAULT_URL,
             headers: { Authorization: `Bearer ${options.token}` },
         });
     }

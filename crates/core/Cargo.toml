@@ -6,11 +6,15 @@ description = "Core runtime for Substructure"
 license-file = "LICENSE"
 
 [[bin]]
-name = "substructure"
+name = "subs"
 path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+dialoguer = "0.11"
+dirs = "5"
+serde_urlencoded = "0.7"
+toml = "0.8"
 async-trait = "0.1.89"
 axum = { version = "0.8", features = ["default"] }
 base64 = "0.22"
@@ -37,4 +41,5 @@ tower-http = { version = "0.6", features = ["trace", "cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["serde", "v7"] }
+webbrowser = "1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }

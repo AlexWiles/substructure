@@ -9,6 +9,7 @@
     "client": "tsx client.ts"
   },
   "dependencies": {
+    "@substructure.ai/cli": "workspace:*",
     "@substructure.ai/sdk": "workspace:*"
   },
   "devDependencies": {

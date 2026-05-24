@@ -5,9 +5,11 @@ import type { ClientPayload, Event, SessionScope, SubmitRequest, SubmitResponse,
 export type { SessionScope, TurnResult } from "./types";
 
 export interface BackendClientOptions {
-    url: string;
     apiKey: string;
+    url?: string;
 }
+
+const DEFAULT_URL = "https://api.substructure.ai";
 
 export interface IssueClientTokenRequest {
     identity: {
@@ -42,7 +44,7 @@ export class BackendClient {
 
     constructor(options: BackendClientOptions) {
         this.worker = new WorkerClient({
-            baseUrl: options.url,
+            baseUrl: options.url ?? DEFAULT_URL,
             headers: { Authorization: `Bearer ${options.apiKey}` },
         });
     }

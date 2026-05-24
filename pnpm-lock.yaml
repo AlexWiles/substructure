@@ -26,6 +26,9 @@ importers:
 
   examples/cloudflare-worker:
     dependencies:
+      '@substructure.ai/cli':
+        specifier: workspace:*
+        version: link:../../packages/cli
       '@substructure.ai/sdk':
         specifier: workspace:*
         version: link:../../packages/sdk

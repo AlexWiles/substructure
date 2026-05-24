@@ -10,26 +10,55 @@ Substructure backend).
 
 ## Deploy
 
-1. Deploy the cloudflare worker and copy its URL.
+1. Log in to Substructure.
    ```sh
-   pnpm deploy
+   subs cloud login
    ```
-2. In the substructure.ai dashboard, create an app.
-   Set the worker URL to the copied worker URL.
-   Copy the signing secret.
-3. Put the signing secret in the cloudflare worker env.
+
+2. Link this directory to your org/app (writes `subs.toml`).
+   ```sh
+   subs cloud link
    ```
-   wrangler secret put SIGNING_SECRET
+
+3. Deploy the worker and copy its URL.
+   ```sh
+   wrangler deploy
    ```
-3. Enable the worker in the substructure dashboard.
+
+4. Point the app at the worker URL (this also enables delivery).
+   ```sh
+   subs cloud webhook set https://<your-worker>.workers.dev
+   ```
+
+5. Pipe the signing secret into the worker env — the secret never
+   touches your terminal or shell history.
+   ```sh
+   subs cloud webhook secret | wrangler secret put SIGNING_SECRET
+   ```
 
 ## Trigger a turn
 
-Create an API key in the substructure dashboard.
-
-`client.ts` submits a turn against the hosted backend:
+Mint an API key and pipe it straight into the client process:
 
 ```sh
-export SUBSTRUCTURE_API_KEY=...
-pnpm client
+export SUBSTRUCTURE_API_KEY=$(subs cloud keys create local-dev)
+tsx client.ts
 ```
+
+`client.ts` submits a turn against the hosted backend using that key.
+
+## Useful commands
+
+```sh
+subs cloud webhook show          # endpoint + state
+subs cloud webhook secret        # print signing secret to stdout
+subs cloud webhook rotate-secret # rotate and print new signing secret
+subs cloud webhook disable       # pause delivery (keeps URL)
+subs cloud sessions list         # recent sessions
+subs cloud keys list             # active API keys
+```
+
+All secret-emitting commands (`keys create`, `webhook secret`,
+`webhook rotate-secret`) print the raw value to stdout and human
+messages to stderr, so they pipe cleanly into `wrangler secret put`,
+`op`, `doppler secrets set`, etc.
