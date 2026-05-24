@@ -2,8 +2,11 @@ use std::error::Error as _;
 
 use anyhow::{anyhow, bail, Context, Result};
 use futures_util::StreamExt;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{header, Method, Response, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
+
+use super::telemetry;
 
 #[derive(Debug)]
 pub struct CloudClient {
@@ -25,8 +28,24 @@ struct ErrorPayload {
 
 impl CloudClient {
     pub fn new(base_url: impl Into<String>, token: Option<String>) -> Self {
+        let user_agent = format!(
+            "subs/{} ({}; {})",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+        );
+        let mut default_headers = HeaderMap::new();
+        if let Some(t) = telemetry::get() {
+            if let Ok(v) = HeaderValue::from_str(&t.invocation_id) {
+                default_headers.insert(HeaderName::from_static("x-subs-invocation-id"), v);
+            }
+            if let Ok(v) = HeaderValue::from_str(t.command) {
+                default_headers.insert(HeaderName::from_static("x-subs-command"), v);
+            }
+        }
         let http = reqwest::Client::builder()
-            .user_agent(concat!("subs/", env!("CARGO_PKG_VERSION")))
+            .user_agent(user_agent)
+            .default_headers(default_headers)
             .build()
             .expect("reqwest client");
         Self {

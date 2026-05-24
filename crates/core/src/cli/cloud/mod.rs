@@ -12,6 +12,7 @@ mod pickers;
 mod print;
 mod project_config;
 mod sessions;
+mod telemetry;
 mod webhook;
 mod whoami;
 
@@ -134,6 +135,7 @@ pub enum CloudCommand {
 }
 
 pub async fn run(command: CloudCommand) -> anyhow::Result<()> {
+    telemetry::init(command_path(&command));
     match command {
         CloudCommand::Login {
             no_browser,
@@ -157,5 +159,44 @@ pub async fn run(command: CloudCommand) -> anyhow::Result<()> {
             scope,
         } => open::run(app_id, no_browser, scope).await,
         CloudCommand::Link(cmd) => link::run(cmd).await,
+    }
+}
+
+// Leaf command path for telemetry headers (e.g. "cloud webhook set").
+// Kept manually in sync with the enum rather than scraping argv so we never
+// leak secrets users pass on the command line.
+fn command_path(cmd: &CloudCommand) -> &'static str {
+    match cmd {
+        CloudCommand::Login { .. } => "cloud login",
+        CloudCommand::Logout { .. } => "cloud logout",
+        CloudCommand::Whoami { .. } => "cloud whoami",
+        CloudCommand::Open { .. } => "cloud open",
+        CloudCommand::Link(_) => "cloud link",
+        CloudCommand::Orgs { command } => match command {
+            orgs::OrgsCommand::List { .. } => "cloud orgs list",
+        },
+        CloudCommand::Apps { command } => match command {
+            apps::AppsCommand::List { .. } => "cloud apps list",
+            apps::AppsCommand::Create { .. } => "cloud apps create",
+            apps::AppsCommand::Show { .. } => "cloud apps show",
+            apps::AppsCommand::Rename { .. } => "cloud apps rename",
+            apps::AppsCommand::Delete { .. } => "cloud apps delete",
+        },
+        CloudCommand::Keys { command } => match command {
+            keys::KeysCommand::List { .. } => "cloud keys list",
+            keys::KeysCommand::Create { .. } => "cloud keys create",
+            keys::KeysCommand::Revoke { .. } => "cloud keys revoke",
+        },
+        CloudCommand::Sessions { command } => match command {
+            sessions::SessionsCommand::List(_) => "cloud sessions list",
+            sessions::SessionsCommand::Events(_) => "cloud sessions events",
+        },
+        CloudCommand::Webhook { command } => match command {
+            webhook::WebhookCommand::Show { .. } => "cloud webhook show",
+            webhook::WebhookCommand::Set { .. } => "cloud webhook set",
+            webhook::WebhookCommand::Disable { .. } => "cloud webhook disable",
+            webhook::WebhookCommand::Secret { .. } => "cloud webhook secret",
+            webhook::WebhookCommand::RotateSecret { .. } => "cloud webhook rotate-secret",
+        },
     }
 }
