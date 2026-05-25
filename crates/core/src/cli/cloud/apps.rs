@@ -107,7 +107,11 @@ async fn list(scope: OrgScope) -> Result<()> {
     let rows: Vec<Vec<String>> = apps
         .iter()
         .map(|a| {
-            let marker = if pinned == Some(a.id.as_str()) { "*" } else { "" };
+            let marker = if pinned == Some(a.id.as_str()) {
+                "*"
+            } else {
+                ""
+            };
             let sessions = a
                 .session_count
                 .map(|n| n.to_string())

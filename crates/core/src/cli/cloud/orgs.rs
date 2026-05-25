@@ -47,7 +47,11 @@ async fn list(globals: CloudGlobals) -> Result<()> {
     let rows: Vec<Vec<String>> = orgs
         .iter()
         .map(|o| {
-            let marker = if Some(o.id.as_str()) == pinned { "*" } else { "" };
+            let marker = if Some(o.id.as_str()) == pinned {
+                "*"
+            } else {
+                ""
+            };
             vec![marker.into(), o.id.clone(), o.name.clone(), o.role.clone()]
         })
         .collect();
