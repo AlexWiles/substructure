@@ -1,8 +1,20 @@
 import { WorkerClient } from "./worker-client";
+import { AdminClient } from "./admin-client";
+import type { ListSessionsParams, SessionDetail, SessionEventsParams, SessionListResponse } from "./admin-client";
 import { drainToTurnResult } from "./types";
 import type { ClientPayload, Event, SessionScope, SubmitRequest, SubmitResponse, TurnResult } from "./types";
+import type { RequestOptions } from "./base";
 
 export type { SessionScope, TurnResult } from "./types";
+export type {
+    AggregateSort,
+    AggregateSummary,
+    ListSessionsParams,
+    SessionDetail,
+    SessionEventsParams,
+    SessionListItem,
+    SessionListResponse,
+} from "./admin-client";
 
 export interface BackendClientOptions {
     apiKey: string;
@@ -41,12 +53,13 @@ export interface StreamOptions {
 
 export class BackendClient {
     private worker: WorkerClient;
+    private admin: AdminClient;
 
     constructor(options: BackendClientOptions) {
-        this.worker = new WorkerClient({
-            baseUrl: options.url ?? DEFAULT_URL,
-            headers: { Authorization: `Bearer ${options.apiKey}` },
-        });
+        const baseUrl = options.url ?? DEFAULT_URL;
+        const headers = { Authorization: `Bearer ${options.apiKey}` };
+        this.worker = new WorkerClient({ baseUrl, headers });
+        this.admin = new AdminClient({ baseUrl, headers });
     }
 
     async mintClientToken(request: IssueClientTokenRequest): Promise<IssueClientTokenResponse> {
@@ -88,5 +101,25 @@ export class BackendClient {
             throw new Error("turnResult requires scope.turnId");
         }
         return drainToTurnResult(this.stream(scope));
+    }
+
+    /** List sessions for the tenant scoped by this client's API key. */
+    listSessions(params?: ListSessionsParams): Promise<SessionListResponse> {
+        return this.admin.listSessions(params);
+    }
+
+    /** Fetch the current state snapshot for a session. */
+    getSession(sessionId: string): Promise<SessionDetail> {
+        return this.admin.getSession(sessionId);
+    }
+
+    /** Fetch historical events for a session. */
+    sessionEvents(sessionId: string, params?: SessionEventsParams): Promise<Event[]> {
+        return this.admin.getSessionEvents(sessionId, params);
+    }
+
+    /** Stream session events as they are appended (SSE). */
+    streamSessionEvents(sessionId: string, params?: SessionEventsParams, opts?: RequestOptions): AsyncGenerator<Event> {
+        return this.admin.streamSessionEvents(sessionId, params, opts);
     }
 }

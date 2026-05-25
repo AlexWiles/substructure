@@ -264,5 +264,4 @@ mod tests {
         assert_eq!(truncate("abcdef", 1), ".");
         assert_eq!(truncate("abcdef", 3), "...");
     }
-
 }

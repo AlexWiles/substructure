@@ -61,7 +61,7 @@ export interface SessionEventsParams {
 
 export class AdminClient extends BaseClient {
     async listSessions(params?: ListSessionsParams): Promise<SessionListResponse> {
-        return this.get("/admin/sessions", {
+        return this.get("/api/admin/sessions", {
             tenant_id: params?.tenant_id,
             top_level: params?.top_level?.toString(),
             sort: params?.sort,
@@ -71,11 +71,11 @@ export class AdminClient extends BaseClient {
     }
 
     async getSession(sessionId: Uuid): Promise<SessionDetail> {
-        return this.get(`/admin/sessions/${sessionId}`);
+        return this.get(`/api/admin/sessions/${sessionId}`);
     }
 
     async getSessionEvents(sessionId: Uuid, params?: SessionEventsParams): Promise<Event[]> {
-        return this.get(`/admin/sessions/${sessionId}/events`, {
+        return this.get(`/api/admin/sessions/${sessionId}/events`, {
             sequence_after: params?.sequence_after?.toString(),
             limit: params?.limit?.toString(),
         });
@@ -87,7 +87,7 @@ export class AdminClient extends BaseClient {
         opts?: RequestOptions,
     ): AsyncGenerator<Event> {
         yield* this.streamSSEGet<Event>(
-            `/admin/sessions/${sessionId}/events/stream`,
+            `/api/admin/sessions/${sessionId}/events/stream`,
             {
                 sequence_after: params?.sequence_after?.toString(),
                 limit: params?.limit?.toString(),

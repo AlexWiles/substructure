@@ -23,14 +23,14 @@ pub struct AdminHttpState {
 
 pub fn router(state: AdminHttpState) -> Router {
     Router::new()
-        .route("/admin/sessions", get(routes::list_sessions))
-        .route("/admin/sessions/{session_id}", get(routes::get_session))
+        .route("/api/admin/sessions", get(routes::list_sessions))
+        .route("/api/admin/sessions/{session_id}", get(routes::get_session))
         .route(
-            "/admin/sessions/{session_id}/events",
+            "/api/admin/sessions/{session_id}/events",
             get(routes::get_session_events),
         )
         .route(
-            "/admin/sessions/{session_id}/events/stream",
+            "/api/admin/sessions/{session_id}/events/stream",
             get(routes::stream_session_events),
         )
         .route_layer(middleware::from_fn_with_state(

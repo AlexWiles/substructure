@@ -39,12 +39,11 @@ impl AuthWiring {
             env.client_token_audience,
             env.client_token_hs256_secret,
         ));
-        let worker = bearer_resolver(&env.worker_api_key, "worker")?;
-        let admin = bearer_resolver(&env.admin_api_key, "admin")?;
+        let resolver = bearer_resolver(&env.substructure_api_key, "sdk")?;
         Ok(Self {
             client: issuer.clone(),
-            worker,
-            admin,
+            worker: resolver.clone(),
+            admin: resolver,
             issuer,
         })
     }
