@@ -13,8 +13,7 @@ pub struct AuthEnvVars {
     pub client_token_issuer: String,
     pub client_token_audience: String,
     pub client_token_hs256_secret: String,
-    pub worker_api_key: String,
-    pub admin_api_key: String,
+    pub substructure_api_key: String,
 }
 
 pub struct EnvVars {
@@ -39,10 +38,9 @@ impl EnvVars {
                 "HS256 secret used to sign client tokens",
             ),
             (
-                "WORKER_API_KEY",
-                "Bearer API key that workers present to the server",
+                "SUBSTRUCTURE_API_KEY",
+                "Bearer API key SDK clients present to reach worker and admin HTTP APIs",
             ),
-            ("ADMIN_API_KEY", "Bearer API key for the admin HTTP API"),
         ];
 
         let mut missing: Vec<(&'static str, &'static str)> = Vec::new();
@@ -90,8 +88,7 @@ impl EnvVars {
                 client_token_issuer: it.next().unwrap(),
                 client_token_audience: it.next().unwrap(),
                 client_token_hs256_secret: it.next().unwrap(),
-                worker_api_key: it.next().unwrap(),
-                admin_api_key: it.next().unwrap(),
+                substructure_api_key: it.next().unwrap(),
             })
         };
 
