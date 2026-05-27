@@ -26,7 +26,7 @@ npm i -g @substructure.ai/cli
 
 The SDK is available at:
 ```sh
-npm i -g @substructure.ai/sdk
+npm i @substructure.ai/sdk
 ```
 
 
@@ -77,9 +77,9 @@ export default {
 ```sh
 substructure cloud login
 substructure cloud link                                          # link this directory to an org & app
-substructure cloud webhook set https://your-worker.example.com   # tell the cloud where to call
+substructure cloud webhook set https://your-worker.example.com   # tell the substructure where to call
 
-# Copy the signing secret into your worker's env as SIGNING_SECRET:
+# Prints out the signing secret for the webhook. Copy into your worker's env as SIGNING_SECRET:
 substructure cloud webhook secret
 
 # Mint an API key for your client:
@@ -110,36 +110,9 @@ const { data } = await client.turnResult(scope);
 console.log(data);
 ```
 
-Prefer to run the server yourself? Swap the client URL for a local server started with `substructure local start`. Or skip the server entirely and run everything in-process with the embedded runtime:
+## Docs
 
-```typescript
-import Substructure from "@substructure.ai/sdk";
-
-const sub = new Substructure();
-const instance = await sub.embedded({ agents: [weatherAgent], db: "agent.db" });
-
-const stream = instance.submit({
-  agentId: "weather-agent",
-  payload: {
-    type: "message",
-    message: { role: "user", content: "What's the weather in SF?" },
-  },
-  identity: { tenant_id: "default", id: "user-1" },
-});
-
-for await (const event of stream) {
-  console.log(event.payload.type);
-}
-```
-
-## Features
-
-- **Durable execution** -- Every decision persisted to an event log. Survives crashes, restarts, and timeouts.
-- **Middleware composition** -- State, history, tools, LLM routing, sub-agents are all middleware. Add what you need, replace what you don't.
-- **Sub-agents** -- Agents can delegate to child agents. Failures isolate. Costs roll up.
-- **Cost and token tracking** -- Per-turn, per-session, per-sub-agent.
-- **Multi-tenant** -- Sessions scoped by tenant and user. JWT auth for browser clients.
-- **Portable** -- Workers are HTTP handlers. Deploy anywhere: Cloudflare Workers, Fly.io, bare metal, wherever.
+Full documentation in [`docs/`](./docs).
 
 ## Packages
 

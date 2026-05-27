@@ -79,5 +79,6 @@ export type {
     ToolResult,
     WorkerAction,
     WorkerDecisionRequestWire,
+    WorkerIdentity,
 } from "./types";
 export { contentText } from "./types";
