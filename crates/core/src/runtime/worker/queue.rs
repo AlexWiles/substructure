@@ -42,6 +42,16 @@ pub struct SubmitDecision {
     pub span: SpanContext,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct FailDecision {
+    pub session_id: String,
+    pub tenant_id: String,
+    pub decision_id: String,
+    pub error: String,
+    pub retryable: bool,
+    pub span: SpanContext,
+}
+
 #[async_trait]
 pub trait WorkerQueue: Send + Sync {
     async fn enqueue(&self, decision: WorkerDecisionRequest);
