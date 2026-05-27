@@ -24,7 +24,7 @@ use span::SpanContext;
 use sub_agent::{spawn_sub_agent_dispatch_processor, spawn_sub_agent_task_executor, SubAgentTask};
 use wake::{spawn_wake_dispatcher, spawn_wake_processor, WakeScheduleStore};
 use worker::spawn_worker_processor;
-use worker::{DequeueFilter, SubmitDecision, WorkerDecisionRequest, WorkerQueue};
+use worker::{DequeueFilter, FailDecision, SubmitDecision, WorkerDecisionRequest, WorkerQueue};
 
 pub mod aggregate;
 pub mod event_store;
@@ -254,6 +254,26 @@ impl Runtime {
                     decision_id: input.decision_id,
                     actions: input.actions,
                     state: input.state,
+                },
+                span: input.span,
+            },
+            &ConflictRetry::default(),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| RuntimeError(e.to_string()))
+    }
+
+    pub async fn fail_decision(&self, input: FailDecision) -> Result<(), RuntimeError> {
+        execute::<SessionState>(
+            &*self.store,
+            ExecuteInput {
+                aggregate_id: input.session_id.clone(),
+                tenant_id: input.tenant_id,
+                command: CommandPayload::FailWorkerDecision {
+                    decision_id: input.decision_id,
+                    error: input.error,
+                    retryable: input.retryable,
                 },
                 span: input.span,
             },

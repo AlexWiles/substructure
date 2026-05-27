@@ -102,6 +102,11 @@ pub enum CommandPayload {
         actions: Vec<WorkerAction>,
         state: Vec<u8>,
     },
+    FailWorkerDecision {
+        decision_id: String,
+        error: String,
+        retryable: bool,
+    },
     CancelSession,
     MarkDone {
         data: serde_json::Value,
@@ -755,6 +760,28 @@ impl SessionState {
                 }
 
                 Ok(events)
+            }
+
+            CommandPayload::FailWorkerDecision {
+                decision_id,
+                error,
+                retryable,
+            } => {
+                match self
+                    .worker_decisions
+                    .get(&decision_id)
+                    .map(|d| &d.tracking.status)
+                {
+                    Some(&EffectStatus::Pending) => {}
+                    _ => return Ok(vec![]),
+                }
+                Ok(vec![EventPayload::WorkerDecisionErrored(
+                    WorkerDecisionErrored {
+                        decision_id,
+                        error,
+                        retryable,
+                    },
+                )])
             }
 
             CommandPayload::CancelSession => Ok(vec![EventPayload::SessionCancelled]),
