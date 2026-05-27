@@ -25,6 +25,8 @@ export { HandlerBuilder } from "./worker";
 // ── Middleware ─────────────────────────────────────────────────────────────
 
 export type {
+    ActionDef,
+    ActionHandlerResult,
     LlmLoopSelection,
     Logger,
     LoggingOptions,
@@ -39,17 +41,21 @@ export type {
     ToolSelector,
 } from "./middleware";
 export {
+    action,
+    actions,
     DEFAULT_RETRY,
     jsonState,
     llmLoop,
     logging,
     messageHistory,
     middleware,
+    prependHistoryToLlmCalls,
     stateSlice,
     subAgents,
     systemMessage,
     tool,
     tools,
+    triggerToMessage,
 } from "./middleware";
 
 // ── Webhook ───────────────────────────────────────────────────────────────

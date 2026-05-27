@@ -1,0 +1,17 @@
+{
+  "name": "@substructure.ai/example-plan-mode",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc"
+  },
+  "dependencies": {
+    "@substructure.ai/runtime": "workspace:*",
+    "@substructure.ai/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.2",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3"
+  }
+}

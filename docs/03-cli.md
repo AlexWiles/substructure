@@ -194,6 +194,3 @@ These apply to any `substructure cloud ...` invocation:
 - `--json`: emit machine-readable JSON instead of formatted tables.
 - `--no-interaction` (`-n`): never prompt; fail if input would be required. Useful in scripts and CI.
 
-## Next steps
-
-- [SDK](./04-sdk.md): build the agent and worker the CLI is provisioning for.

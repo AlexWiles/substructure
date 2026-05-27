@@ -114,7 +114,7 @@ The built-in middleware:
 | `agent.messageHistoryCurrentTurn()` | Same, but scoped to a single turn. |
 | `agent.tools([...])` | Registers tools, dispatches tool calls from the LLM, and feeds results back. |
 | `agent.llmLoop({ request })` | Drives the core loop: on a user message or tool result, call the LLM; on an LLM response with no tool calls, finish the turn. |
-| `agent.subAgents({ agents })` | Lets the agent delegate to child agents as if they were tools. |
+| `agent.subAgents({ agents })` | Lets the agent delegate to child agents as if they were tools. See [Sub-agents](./05-sub-agents.md). |
 | `agent.logging()` | Logs each decision lifecycle to stdout. Handy in development. |
 
 The order matters. State middleware first, then context (system message, history), then tools, then `llmLoop` at the end to drive the loop.

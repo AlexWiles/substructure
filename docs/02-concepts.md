@@ -99,11 +99,5 @@ For browser clients, identity is baked into the short-lived token your backend m
 
 ## Sub-agents
 
-A **sub-agent** is an agent another agent can delegate to, as if calling a tool. The parent emits a `spawn.sub_agent` action; the engine creates a child session, runs it to completion, and returns the result to the parent. The parent agent's session keeps the parent's history; the child's session keeps the child's. This lets you compose agents with clean isolation: a planner agent that delegates to specialist agents, a router that hands off to different worker pools, and so on.
+A **sub-agent** is an agent another agent can delegate to, as if calling a tool. The parent emits a `spawn.sub_agent` action; the engine creates a child session, runs it to completion, and returns the result to the parent. The parent agent's session keeps the parent's history; the child's session keeps the child's. This lets you compose agents with clean isolation: a planner agent that delegates to specialist agents, a router that hands off to different worker pools, and so on. See the [Sub-agents](./05-sub-agents.md) page for the full walkthrough.
 
-## Where to next
-
-Now that the vocabulary is settled:
-
-- The [CLI](./03-cli.md) walkthrough provisions a cloud app, sets up the engine-to-worker webhook, and mints API keys for clients.
-- The [SDK](./04-sdk.md) walkthrough builds an agent (middleware, tools, sub-agents), wraps it in a worker, and drives turns from backend or browser clients.
