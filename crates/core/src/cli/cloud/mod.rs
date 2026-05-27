@@ -26,7 +26,7 @@ use clap::Subcommand;
 pub const GLOBAL_FLAGS_HELP: &str = "\
 Global Options:
       --url <URL>          Override the cloud API URL.
-  -c, --config <PATH>      Project-local subs.toml override.
+  -c, --config <PATH>      Project-local substructure.toml override.
       --credentials <PATH> User-level credentials file override.
       --json               Emit machine-readable JSON.
   -n, --no-interaction     Never prompt; fail if input is required.";
@@ -37,11 +37,11 @@ pub struct CloudGlobals {
     #[arg(long, global = true)]
     pub url: Option<String>,
     /// Project-local config file (default: walks up from cwd looking for
-    /// `subs.toml`). Pins which org/app commands target without flags.
+    /// `substructure.toml`). Pins which org/app commands target without flags.
     #[arg(short = 'c', long, global = true)]
     pub config: Option<PathBuf>,
     /// User-level credentials file holding the bearer token
-    /// (default: ~/.config/subs/credentials.toml).
+    /// (default: ~/.config/substructure/credentials.toml).
     #[arg(long, global = true)]
     pub credentials: Option<PathBuf>,
     /// Emit machine-readable JSON instead of the human-readable table/text.
@@ -130,7 +130,7 @@ pub enum CloudCommand {
         scope: AppScope,
     },
     /// Link the current directory to an org (and app) by writing a
-    /// `subs.toml`, so commands run from this tree pick them up automatically.
+    /// `substructure.toml`, so commands run from this tree pick them up automatically.
     Link(link::LinkCommand),
 }
 

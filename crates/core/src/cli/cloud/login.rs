@@ -103,7 +103,7 @@ pub async fn run(
 
     let token = loop {
         if started.elapsed() > total_window {
-            bail!("login expired before approval. Run `subs cloud login` to start over.");
+            bail!("login expired before approval. Run `substructure cloud login` to start over.");
         }
         sleep(interval).await;
 
@@ -134,7 +134,7 @@ pub async fn run(
                 continue;
             }
             "access_denied" => bail!("login denied by user"),
-            "expired_token" => bail!("login code expired. Run `subs cloud login` to start over."),
+            "expired_token" => bail!("login code expired. Run `substructure cloud login` to start over."),
             other => bail!(
                 "OAuth error `{other}`: {}",
                 err.error_description

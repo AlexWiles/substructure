@@ -221,7 +221,7 @@ async fn check_status(res: Response) -> Result<Response> {
         _ => format!("HTTP {}", status.as_u16()),
     };
     let suffix = match status {
-        StatusCode::UNAUTHORIZED => " Run `subs cloud login` to authenticate.",
+        StatusCode::UNAUTHORIZED => " Run `substructure cloud login` to authenticate.",
         StatusCode::FORBIDDEN => " Your account does not have access to this resource.",
         _ => "",
     };

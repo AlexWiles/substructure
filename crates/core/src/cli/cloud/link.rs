@@ -17,7 +17,7 @@ pub struct LinkCommand {
     /// pinning an app while still pinning an org.
     #[arg(long)]
     pub app: Option<String>,
-    /// Overwrite an existing subs.toml in the current directory.
+    /// Overwrite an existing substructure.toml in the current directory.
     #[arg(long)]
     pub force: bool,
     #[command(flatten)]

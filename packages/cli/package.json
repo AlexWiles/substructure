@@ -26,7 +26,7 @@
     "access": "public"
   },
   "bin": {
-    "subs": "./bin/subs.js"
+    "substructure": "./bin/substructure.js"
   },
   "main": "./src/index.js",
   "files": [
