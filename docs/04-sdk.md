@@ -89,6 +89,47 @@ const addTodo = agent.tool({
 
 The `state` you mutate inside `execute` is durably persisted by Substructure across turns.
 
+## Defining client actions
+
+Tools react to the LLM; actions react to the client. A **client action** is a named handler that fires when a client calls `startTurn({ payload: { type: "action", name, args } })`. Use them for anything that isn't a chat message: approvals, cancellations, replays, typed events from a UI.
+
+Define one with `agent.action`:
+
+```ts
+const approveCommand = agent.action({
+  name: "approve_command",
+  handler: (args: { approved: boolean; reason?: string }) => {
+    console.log("approval received:", args);
+  },
+});
+```
+
+Register them with `agent.actions(...)` in the chain:
+
+```ts
+const myAgent = agent({ id: "..." })
+  .use(agent.jsonState())
+  .use(agent.actions([approveCommand]))
+  .use(/* ... */);
+```
+
+A few notes:
+
+- `handler` receives `args` cast to the type you declare. There's no runtime validation; treat it like a typed `JSON.parse`.
+- Return `void` to let the chain continue, so `llmLoop` runs as it would for a normal trigger. Return a `WorkerAction[]` to short-circuit with exactly those actions.
+- Pass `state: someSlice` to get typed access to that slice inside the handler, same as `agent.tool`.
+
+Clients submit an action the same way they submit a message, just with a different payload shape:
+
+```ts
+await client.startTurn({
+  agentId: "...",
+  sessionId,
+  payload: { type: "action", name: "approve_command", args: { approved: true } },
+  identity: { id: "user-1" },
+});
+```
+
 ## Building an agent
 
 An agent is a chain of middleware. You start with `agent({ id })` and stack behavior with `.use(...)`:
@@ -113,6 +154,7 @@ The built-in middleware:
 | `agent.messageHistory()` | Tracks the full message history across turns and injects it into LLM calls. |
 | `agent.messageHistoryCurrentTurn()` | Same, but scoped to a single turn. |
 | `agent.tools([...])` | Registers tools, dispatches tool calls from the LLM, and feeds results back. |
+| `agent.actions([...])` | Dispatches `client.action` triggers to their handlers. See [Defining client actions](#defining-client-actions). |
 | `agent.llmLoop({ request })` | Drives the core loop: on a user message or tool result, call the LLM; on an LLM response with no tool calls, finish the turn. |
 | `agent.subAgents({ agents })` | Lets the agent delegate to child agents as if they were tools. See [Sub-agents](./05-sub-agents.md). |
 | `agent.logging()` | Logs each decision lifecycle to stdout. Handy in development. |
