@@ -157,57 +157,57 @@ impl EmbeddedRuntime {
                     };
 
                 match result {
-                    Ok(response_json) => match serde_json::from_str::<WorkerResponse>(
-                        &response_json,
-                    ) {
-                        Ok(submit) => {
-                            let submit_decision = SubmitDecision {
-                                session_id: decision.session_id,
-                                tenant_id: decision.tenant_id.clone(),
-                                decision_id: decision.decision_id.clone(),
-                                actions: submit.actions,
-                                state: submit
-                                    .state
-                                    .map(|s| {
-                                        base64::engine::general_purpose::STANDARD
-                                            .decode(s)
-                                            .unwrap_or_default()
-                                    })
-                                    .unwrap_or_default(),
-                                span: decision.span.child("js_worker"),
-                            };
+                    Ok(response_json) => {
+                        match serde_json::from_str::<WorkerResponse>(&response_json) {
+                            Ok(submit) => {
+                                let submit_decision = SubmitDecision {
+                                    session_id: decision.session_id,
+                                    tenant_id: decision.tenant_id.clone(),
+                                    decision_id: decision.decision_id.clone(),
+                                    actions: submit.actions,
+                                    state: submit
+                                        .state
+                                        .map(|s| {
+                                            base64::engine::general_purpose::STANDARD
+                                                .decode(s)
+                                                .unwrap_or_default()
+                                        })
+                                        .unwrap_or_default(),
+                                    span: decision.span.child("js_worker"),
+                                };
 
-                            if let Err(e) = runtime.submit_decision(submit_decision).await {
+                                if let Err(e) = runtime.submit_decision(submit_decision).await {
+                                    tracing::warn!(
+                                        decision_id = %decision.decision_id,
+                                        error = %e,
+                                        "failed to submit worker decision"
+                                    );
+                                }
+                            }
+                            Err(e) => {
                                 tracing::warn!(
                                     decision_id = %decision.decision_id,
                                     error = %e,
-                                    "failed to submit worker decision"
+                                    "failed to parse worker response"
                                 );
+                                let fail = FailDecision {
+                                    session_id: decision.session_id,
+                                    tenant_id: decision.tenant_id.clone(),
+                                    decision_id: decision.decision_id.clone(),
+                                    error: format!("failed to parse worker response: {e}"),
+                                    retryable: false,
+                                    span: decision.span.child("js_worker"),
+                                };
+                                if let Err(e) = runtime.fail_decision(fail).await {
+                                    tracing::warn!(
+                                        decision_id = %decision.decision_id,
+                                        error = %e,
+                                        "fail_decision failed"
+                                    );
+                                }
                             }
                         }
-                        Err(e) => {
-                            tracing::warn!(
-                                decision_id = %decision.decision_id,
-                                error = %e,
-                                "failed to parse worker response"
-                            );
-                            let fail = FailDecision {
-                                session_id: decision.session_id,
-                                tenant_id: decision.tenant_id.clone(),
-                                decision_id: decision.decision_id.clone(),
-                                error: format!("failed to parse worker response: {e}"),
-                                retryable: false,
-                                span: decision.span.child("js_worker"),
-                            };
-                            if let Err(e) = runtime.fail_decision(fail).await {
-                                tracing::warn!(
-                                    decision_id = %decision.decision_id,
-                                    error = %e,
-                                    "fail_decision failed"
-                                );
-                            }
-                        }
-                    },
+                    }
                     Err(e) => {
                         tracing::warn!(
                             decision_id = %decision.decision_id,
