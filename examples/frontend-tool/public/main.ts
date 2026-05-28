@@ -95,6 +95,24 @@ async function sendMessage(content: string) {
     input.disabled = true;
 
     let typing: HTMLDivElement | null = showTyping();
+    // In-progress assistant message, keyed by call_id. Deltas append text
+    // into a live DOM node; when llm.call.completed arrives we drop the
+    // partial in favor of the persisted message.new event so the rendered
+    // text matches what's stored server-side. Out-of-order deltas are
+    // buffered until the missing seq arrives.
+    type Partial = { node: HTMLDivElement; chunks: Map<number, string>; nextSeq: number };
+    const partials = new Map<string, Partial>();
+
+    const flush = (p: Partial) => {
+        let chunk = p.chunks.get(p.nextSeq);
+        while (chunk !== undefined) {
+            p.node.textContent = (p.node.textContent ?? "") + chunk;
+            p.chunks.delete(p.nextSeq);
+            p.nextSeq += 1;
+            chunk = p.chunks.get(p.nextSeq);
+        }
+        chatLog.scrollTop = chatLog.scrollHeight;
+    };
 
     try {
         const scope = await client.startTurn({
@@ -107,7 +125,28 @@ async function sendMessage(content: string) {
         for await (const event of client.stream(scope)) {
             const p = event.payload as any;
 
-            if (p.type === "tool.call.requested" && tools[p.name]) {
+            if (p.type === "llm.token.delta") {
+                let partial = partials.get(p.call_id);
+                if (!partial) {
+                    typing?.remove();
+                    typing = null;
+                    partial = { node: append("assistant", ""), chunks: new Map(), nextSeq: 0 };
+                    partials.set(p.call_id, partial);
+                }
+                if (typeof p.text === "string" && p.text.length > 0) {
+                    partial.chunks.set(p.seq, p.text);
+                    flush(partial);
+                }
+            } else if (p.type === "llm.call.completed") {
+                // The matching message.new with the canonical content arrives
+                // immediately after; drop the partial node so we don't
+                // double-render.
+                const partial = partials.get(p.call_id);
+                if (partial) {
+                    partial.node.remove();
+                    partials.delete(p.call_id);
+                }
+            } else if (p.type === "tool.call.requested" && tools[p.name]) {
                 const args = p.arguments ? JSON.parse(p.arguments) : {};
                 typing?.remove();
                 typing = null;

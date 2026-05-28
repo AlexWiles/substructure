@@ -3,11 +3,12 @@ use axum::http::StatusCode;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use futures_util::StreamExt;
+use futures_util::stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use crate::identity::ClientIdentity;
+use crate::llm::TokenDelta;
 use crate::session::command::SessionError;
 use crate::session::subscriptions::SessionSubscriptionSpec;
 use crate::transport::auth::AuthPrincipal;
@@ -171,6 +172,8 @@ pub async fn stream_session_events(
     Path(session_id): Path<String>,
     Query(params): Query<StreamSessionEventsParams>,
 ) -> Response {
+    let root_session_id = session_id.clone();
+    let scope_turn_id = params.turn_id.clone();
     let spec = match params.turn_id {
         Some(turn_id) => SessionSubscriptionSpec::Turn {
             root_session_id: session_id,
@@ -181,21 +184,80 @@ pub async fn stream_session_events(
         },
     };
 
-    let rx = state.runtime.stream(spec, params.sequence_after).await;
-    let stream = ReceiverStream::new(rx)
-        .take_until(state.shutdown.clone().cancelled_owned())
-        .map(|event| {
-            let event_type = event.payload_type().to_owned();
-            let data = serde_json::to_string(&event).unwrap_or_default();
-            Ok::<_, std::convert::Infallible>(
-                SseEvent::default()
-                    .id(event.sequence.to_string())
-                    .event(event_type)
-                    .data(data),
-            )
-        });
+    let mut event_rx = state.runtime.stream(spec, params.sequence_after).await;
+    let mut delta_rx = state.runtime.subscribe_token_deltas(&root_session_id).await;
+
+    // Fan in persisted events + transient deltas. The session subscription's
+    // sender drops when the scope completes (for Turn scope, on
+    // `turn.completed`); we mirror that here by terminating the merged
+    // stream as soon as the event side closes, so the SSE response ends
+    // and the client's for-await loop exits.
+    let (out_tx, out_rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
+    let shutdown = state.shutdown.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => return,
+                ev = event_rx.recv() => match ev {
+                    Some(event) => {
+                        let event_type = event.payload_type().to_owned();
+                        let data = serde_json::to_string(&event).unwrap_or_default();
+                        let sse = SseEvent::default()
+                            .id(event.sequence.to_string())
+                            .event(event_type)
+                            .data(data);
+                        if out_tx.send(sse).await.is_err() {
+                            return;
+                        }
+                    }
+                    None => return,
+                },
+                delta = delta_rx.recv() => match delta {
+                    Some(delta) => {
+                        if let Some(ref scope) = scope_turn_id {
+                            if delta.turn_id.as_deref() != Some(scope.as_str()) {
+                                continue;
+                            }
+                        }
+                        if out_tx.send(token_delta_to_sse(delta)).await.is_err() {
+                            return;
+                        }
+                    }
+                    None => continue,
+                },
+            }
+        }
+    });
+
+    let stream = ReceiverStream::new(out_rx).map(Ok::<_, std::convert::Infallible>);
 
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response()
+}
+
+/// Wrap a transient [`TokenDelta`] in an envelope mirroring the persisted
+/// `Event` shape so SSE consumers can branch on `payload.type` uniformly.
+/// `sequence` is omitted because transient deltas are not persisted.
+fn token_delta_to_sse(delta: TokenDelta) -> SseEvent {
+    let envelope = serde_json::json!({
+        "aggregate_type": "session",
+        "aggregate_id": delta.session_id,
+        "event_type": "llm.token.delta",
+        "occurred_at": chrono::Utc::now(),
+        "payload": {
+            "type": "llm.token.delta",
+            "call_id": delta.call_id,
+            "attempt": delta.attempt,
+            "seq": delta.seq,
+            "agent_id": delta.agent_id,
+            "turn_id": delta.turn_id,
+            "text": delta.text,
+            "finish_reason": delta.finish_reason,
+        },
+    });
+    SseEvent::default()
+        .event("llm.token.delta")
+        .data(envelope.to_string())
 }

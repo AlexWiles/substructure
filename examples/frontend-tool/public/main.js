@@ -336,7 +336,7 @@ var AdminClient = class extends BaseClient {
   }
 };
 
-// ../../packages/sdk/dist/chunk-KEMAK6WM.js
+// ../../packages/sdk/dist/chunk-5BTYOZ6C.js
 function toSubmitToolCallResultRequest(args) {
   if (args.result !== void 0) {
     return {
@@ -372,7 +372,7 @@ async function drainToTurnResult(stream) {
   };
 }
 
-// ../../packages/sdk/dist/chunk-NG2NGZ7P.js
+// ../../packages/sdk/dist/chunk-DMIUTP74.js
 var DEFAULT_URL = "https://api.substructure.ai";
 var BackendClient = class {
   worker;
@@ -440,7 +440,7 @@ var BackendClient = class {
   }
 };
 
-// ../../packages/sdk/dist/chunk-Z32OEXBA.js
+// ../../packages/sdk/dist/chunk-QX4IMKVI.js
 var UserClient = class extends BaseClient {
   async submitPayload(request) {
     return this.post("/api/client/sessions/submit", request);
@@ -448,6 +448,9 @@ var UserClient = class extends BaseClient {
   async submitToolCallResult(sessionId2, request) {
     return this.post(`/api/client/sessions/${sessionId2}/tool-call-results`, request);
   }
+  /** Stream the session's persisted events and live LLM token deltas. Both
+   *  arrive as `Event` envelopes; transient deltas have
+   *  `payload.type === "llm.token.delta"` and lack a `sequence`. */
   async *streamSessionEvents(sessionId2, params) {
     yield* this.streamSSEGet(`/api/client/sessions/${sessionId2}/events/stream`, {
       turn_id: params?.turn_id,
@@ -456,7 +459,7 @@ var UserClient = class extends BaseClient {
   }
 };
 
-// ../../packages/sdk/dist/chunk-IT37KX5V.js
+// ../../packages/sdk/dist/chunk-JIJERYHY.js
 var DEFAULT_URL2 = "https://api.substructure.ai";
 var FrontendClient = class {
   user;
@@ -1072,7 +1075,7 @@ function mergeTools(existing, added) {
   return Array.from(byName.values());
 }
 
-// ../../packages/sdk/dist/chunk-ZXYKB4HO.js
+// ../../packages/sdk/dist/chunk-JPTDPZIA.js
 function createAgentFactory() {
   const factory = (options) => {
     return new HandlerBuilder(options.id);
@@ -1266,6 +1269,17 @@ async function sendMessage(content) {
   sendBtn.disabled = true;
   input.disabled = true;
   let typing = showTyping();
+  const partials = /* @__PURE__ */ new Map();
+  const flush = (p) => {
+    let chunk = p.chunks.get(p.nextSeq);
+    while (chunk !== void 0) {
+      p.node.textContent = (p.node.textContent ?? "") + chunk;
+      p.chunks.delete(p.nextSeq);
+      p.nextSeq += 1;
+      chunk = p.chunks.get(p.nextSeq);
+    }
+    chatLog.scrollTop = chatLog.scrollHeight;
+  };
   try {
     const scope = await client.startTurn({
       agentId: "browser-assistant",
@@ -1275,7 +1289,25 @@ async function sendMessage(content) {
     sessionId = scope.sessionId;
     for await (const event of client.stream(scope)) {
       const p = event.payload;
-      if (p.type === "tool.call.requested" && tools2[p.name]) {
+      if (p.type === "llm.token.delta") {
+        let partial = partials.get(p.call_id);
+        if (!partial) {
+          typing?.remove();
+          typing = null;
+          partial = { node: append("assistant", ""), chunks: /* @__PURE__ */ new Map(), nextSeq: 0 };
+          partials.set(p.call_id, partial);
+        }
+        if (typeof p.text === "string" && p.text.length > 0) {
+          partial.chunks.set(p.seq, p.text);
+          flush(partial);
+        }
+      } else if (p.type === "llm.call.completed") {
+        const partial = partials.get(p.call_id);
+        if (partial) {
+          partial.node.remove();
+          partials.delete(p.call_id);
+        }
+      } else if (p.type === "tool.call.requested" && tools2[p.name]) {
         const args = p.arguments ? JSON.parse(p.arguments) : {};
         typing?.remove();
         typing = null;

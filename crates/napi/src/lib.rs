@@ -99,6 +99,8 @@ impl EmbeddedRuntime {
                 .unwrap_or_else(|| "https://openrouter.ai/api".to_string()),
             api_key: options.openrouter_api_key.unwrap_or_default(),
         }));
+        let token_delta_transport =
+            Arc::new(substructure_core::llm::InMemoryTokenDeltaTransport::new());
 
         // Enter the NAPI tokio runtime so background tasks spawned by start() work
         let rt = tokio::runtime::Handle::current();
@@ -112,6 +114,7 @@ impl EmbeddedRuntime {
                 session_index_store,
                 checkpoint_store,
                 wake_store,
+                token_delta_transport,
                 config,
             )
         });

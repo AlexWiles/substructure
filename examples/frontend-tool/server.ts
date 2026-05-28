@@ -61,7 +61,7 @@ const browserAgent = agent({ id: "browser-assistant" })
     )
     .use(agent.messageHistory())
     .use(agent.tools([getUserLocation, setTheme]))
-    .use(agent.llmLoop({ request: { model: "anthropic/claude-sonnet-4-6" } }));
+    .use(agent.llmLoop({ request: { model: "anthropic/claude-sonnet-4-6" }, stream: true }));
 
 const worker = sub.worker({ agents: [browserAgent] });
 const agentHandler = worker.fetchHandler({ signingSecret: process.env.SIGNING_SECRET });

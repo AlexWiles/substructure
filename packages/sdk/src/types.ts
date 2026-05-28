@@ -345,6 +345,24 @@ export interface LlmCallErrored {
     detail?: unknown;
 }
 
+/** Transient LLM token delta. Not persisted — clients that connect mid-call
+ *  will not see deltas already emitted for that call. The full assembled
+ *  content always arrives via the persisted `llm.call.completed` event,
+ *  which is followed by a `message.new` event with the canonical assistant
+ *  message. Use `(call_id, attempt)` to join back to the originating
+ *  `llm.call.requested` event; order chunks within a call by `seq`. */
+export interface LlmTokenDelta {
+    type: "llm.token.delta";
+    call_id: string;
+    attempt: number;
+    /** Monotonic per-call sequence (0-based). */
+    seq: number;
+    agent_id: string;
+    turn_id?: string;
+    text?: string;
+    finish_reason?: string;
+}
+
 export interface ToolCallRequested {
     type: "tool.call.requested";
     tool_call_id: string;
@@ -495,7 +513,9 @@ export interface DerivedState {
     turn_id?: string;
 }
 
-export interface Event {
+/** A persisted session event from the event store. Carries a monotonic
+ *  `sequence` usable with `sequence_after` for resume. */
+export interface PersistedEvent {
     id: Uuid;
     tenant_id: string;
     aggregate_type: string;
@@ -510,6 +530,21 @@ export interface Event {
     start_time: DateTime;
     end_time: DateTime;
 }
+
+/** A transient LLM token delta envelope. Same envelope shape as a persisted
+ *  event but slimmer — not persisted, no `sequence`, not replayed on
+ *  reconnect. */
+export interface TokenDeltaEvent {
+    aggregate_type: string;
+    aggregate_id: Uuid;
+    event_type: "llm.token.delta";
+    occurred_at: DateTime;
+    payload: LlmTokenDelta;
+}
+
+/** Discriminate on `payload.type`: `"llm.token.delta"` ⇒ `TokenDeltaEvent`,
+ *  anything else ⇒ `PersistedEvent`. */
+export type Event = PersistedEvent | TokenDeltaEvent;
 
 // ── Turns ───────────────────────────────────────────────────────────────────
 

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -9,12 +10,13 @@ use crate::runtime::event_store::EventStore;
 use crate::runtime::session::command::CommandPayload;
 use crate::runtime::session::state::SessionState;
 
-use super::{CallContext, ErrorCode, LlmProviderTrait, LlmTask};
+use super::{CallContext, ErrorCode, LlmProviderTrait, LlmTask, TokenDelta, TokenDeltaTransport};
 
 pub fn spawn_llm_task_executor(
     store: Arc<dyn EventStore>,
     provider: Arc<dyn LlmProviderTrait>,
     queue: Arc<dyn TaskQueue<LlmTask>>,
+    token_delta_transport: Arc<dyn TokenDeltaTransport>,
     worker_count: usize,
     cancel: CancellationToken,
 ) -> Vec<JoinHandle<()>> {
@@ -23,6 +25,7 @@ pub fn spawn_llm_task_executor(
     for _ in 0..worker_count {
         let store = store.clone();
         let provider = provider.clone();
+        let token_delta_transport = token_delta_transport.clone();
         let mut rx = queue.subscribe();
         let cancel = cancel.clone();
         handles.push(tokio::spawn(async move {
@@ -48,7 +51,16 @@ pub fn spawn_llm_task_executor(
                             identity: &task.identity,
                             ancestry: &task.ancestry,
                         };
-                        match client.call(&task.request, &ctx).await {
+                        let result = if task.stream {
+                            let (tx, rx) = mpsc::unbounded_channel();
+                            let pump = spawn_delta_pump(&task, token_delta_transport.clone(), rx);
+                            let result = client.call_streaming(&task.request, &ctx, tx).await;
+                            let _ = pump.await;
+                            result
+                        } else {
+                            client.call(&task.request, &ctx).await
+                        };
+                        match result {
                             Ok(response) => CommandPayload::CompleteLlmCall {
                                 call_id: task.call_id.clone(),
                                 attempt: task.attempt,
@@ -99,4 +111,43 @@ pub fn spawn_llm_task_executor(
         }));
     }
     handles
+}
+
+/// Drains `StreamDelta`s emitted by the provider and republishes them as
+/// `TokenDelta`s on the transport. Returns a JoinHandle the caller awaits
+/// after the streaming call completes so we don't drop in-flight deltas.
+fn spawn_delta_pump(
+    task: &LlmTask,
+    transport: Arc<dyn TokenDeltaTransport>,
+    mut rx: mpsc::UnboundedReceiver<super::StreamDelta>,
+) -> JoinHandle<()> {
+    let root_session_id = task
+        .ancestry
+        .last()
+        .cloned()
+        .unwrap_or_else(|| task.session_id.clone());
+    let session_id = task.session_id.clone();
+    let agent_id = task.agent_id.clone();
+    let turn_id = task.turn_id.clone();
+    let call_id = task.call_id.clone();
+    let attempt = task.attempt;
+    tokio::spawn(async move {
+        let mut seq: u32 = 0;
+        while let Some(delta) = rx.recv().await {
+            transport
+                .publish(TokenDelta {
+                    root_session_id: root_session_id.clone(),
+                    session_id: session_id.clone(),
+                    agent_id: agent_id.clone(),
+                    turn_id: turn_id.clone(),
+                    call_id: call_id.clone(),
+                    attempt,
+                    seq,
+                    text: delta.text,
+                    finish_reason: delta.finish_reason,
+                })
+                .await;
+            seq = seq.saturating_add(1);
+        }
+    })
 }

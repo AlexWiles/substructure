@@ -20,6 +20,9 @@ export class UserClient extends BaseClient {
         return this.post(`/api/client/sessions/${sessionId}/tool-call-results`, request);
     }
 
+    /** Stream the session's persisted events and live LLM token deltas. Both
+     *  arrive as `Event` envelopes; transient deltas have
+     *  `payload.type === "llm.token.delta"` and lack a `sequence`. */
     async *streamSessionEvents(sessionId: string, params?: StreamSessionEventsParams): AsyncGenerator<Event> {
         yield* this.streamSSEGet<Event>(`/api/client/sessions/${sessionId}/events/stream`, {
             turn_id: params?.turn_id,

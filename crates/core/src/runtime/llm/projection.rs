@@ -60,6 +60,7 @@ impl EventProcessor for LlmDispatchProjection {
             ProcessorError::Apply("missing agent_id in derived state".to_string())
         })?;
         let ancestry = derived.ancestry.clone();
+        let turn_id = derived.turn_id.clone();
 
         let shard_key = raw.aggregate_id.clone();
 
@@ -70,8 +71,10 @@ impl EventProcessor for LlmDispatchProjection {
             call_id: req.call_id.clone(),
             attempt: req.attempt,
             request: req.request.clone(),
+            stream: req.stream,
             identity,
             ancestry,
+            turn_id,
             span: event.span,
         };
 

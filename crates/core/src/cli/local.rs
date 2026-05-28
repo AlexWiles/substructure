@@ -103,6 +103,7 @@ async fn start_server(
         }
     };
 
+    let token_delta_transport = Arc::new(crate::llm::InMemoryTokenDeltaTransport::new());
     let rt = start(
         event_store.clone(),
         llm_provider,
@@ -112,6 +113,7 @@ async fn start_server(
         session_index_store,
         checkpoint_store,
         wake_store,
+        token_delta_transport,
         config,
     );
 
