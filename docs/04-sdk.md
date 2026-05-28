@@ -448,7 +448,7 @@ console.log(data);
 `startTurn` returns a `SessionScope` containing `sessionId` and `turnId`. From there you have two choices:
 
 - `await client.turnResult(scope)` waits for the turn to finish and returns `{ data, cost, tokenUsage }`.
-- `for await (const event of client.stream(scope))` streams individual events as they arrive: LLM responses, tool calls, sub-agent updates, and so on. Use `sequenceAfter` to resume from a known event.
+- `for await (const event of client.stream(scope))` streams individual events as they arrive: LLM responses, tool calls, sub-agent updates, and so on. Use `sequenceAfter` to resume from a known event. If the agent's `llmLoop` has `stream: true`, transient `llm.token.delta` events are interleaved for progressive rendering — they share the event envelope but lack `sequence` and are not replayed on reconnect.
 
 The client also exposes admin APIs: `listSessions`, `getSession`, and `sessionEvents` for tooling and dashboards.
 
@@ -516,11 +516,19 @@ const scope = await client.startTurn({
 });
 
 for await (const event of client.stream(scope)) {
-  if (event.payload.type === "message.new") {
+  if (event.payload.type === "llm.token.delta") {
+    // Live token chunk. Order chunks within a call by payload.seq and
+    // append to the in-progress assistant bubble. Drop the partial when
+    // the matching llm.call.completed arrives — the persisted message.new
+    // that follows carries the canonical content.
+    appendDelta(event.payload);
+  } else if (event.payload.type === "message.new") {
     appendToUi(event.payload);
   }
 }
 ```
+
+Token deltas only flow when the agent's `llmLoop` was configured with `stream: true`. They're transient: the engine does not persist them, and a client reconnecting mid-call will not see deltas already emitted — only the final `message.new` once the call completes.
 
 Note that the browser does not pass `identity`: it's already baked into the token. Mint a fresh token when the current one nears `expiresAt`, or on every page load if your TTL is short.
 
@@ -585,4 +593,4 @@ See [`examples/`](https://github.com/substructure-ai/substructure/tree/main/exam
 - `sub-agent` — a parent agent delegating to a child via `subAgents`.
 - `hybrid-state` — most state on the wire via `jsonState`, one slice swapped in and out of a database.
 - `deferred-tool` — async tool call: `execute` returns `ctx.defer()`, the result is posted later via `submitToolCallResult`.
-- `frontend-tool` — chat UI where tools run in the browser (geolocation, theme). The worker defers; the page executes locally and posts the result back via `submitToolCallResult` using the frontend client.
+- `frontend-tool` — chat UI where tools run in the browser (geolocation, theme). The worker defers; the page executes locally and posts the result back via `submitToolCallResult` using the frontend client. Also demonstrates `stream: true` on `llmLoop` — the assistant message renders token-by-token from `llm.token.delta` events.

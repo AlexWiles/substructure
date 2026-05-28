@@ -4,4 +4,5 @@ pub mod client_http;
 pub mod http_push;
 pub mod push;
 pub mod server;
+pub mod session_sse;
 pub mod worker_http;
