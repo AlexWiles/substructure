@@ -585,3 +585,4 @@ See [`examples/`](https://github.com/substructure-ai/substructure/tree/main/exam
 - `sub-agent` — a parent agent delegating to a child via `subAgents`.
 - `hybrid-state` — most state on the wire via `jsonState`, one slice swapped in and out of a database.
 - `deferred-tool` — async tool call: `execute` returns `ctx.defer()`, the result is posted later via `submitToolCallResult`.
+- `frontend-tool` — chat UI where tools run in the browser (geolocation, theme). The worker defers; the page executes locally and posts the result back via `submitToolCallResult` using the frontend client.

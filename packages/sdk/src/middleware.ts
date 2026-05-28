@@ -1,4 +1,13 @@
-import type { DecisionTrigger, LlmRequest, LlmTool, Message, RetryPolicy, ToolResult, WorkerAction } from "./types";
+import type {
+    DecisionTrigger,
+    LlmRequest,
+    LlmTool,
+    Message,
+    RetryPolicy,
+    ToolHandler,
+    ToolResult,
+    WorkerAction,
+} from "./types";
 import type { Handler, AgentRequest, AgentResponse, MiddlewareFn, Next, StateContributor } from "./worker";
 
 export const DEFAULT_RETRY: RetryPolicy = {
@@ -131,6 +140,11 @@ export interface ToolDef {
     execute: ToolFn;
     retry?: RetryPolicy;
     stateSlice?: StateSliceMw<any>;
+    /** Who completes this tool. Defaults to "worker". Set to "client" to
+     *  declare a browser/frontend tool: the worker's `execute` should
+     *  return `ctx.defer()`, and the result is submitted via
+     *  `submitToolCallResult` from a frontend client. */
+    handler?: ToolHandler;
 }
 
 /** Define a tool from plain data. */
@@ -143,6 +157,7 @@ export function tool<S extends object = never>(config: {
         ? (args: string, ctx: ToolExecutionContext) => unknown | Promise<unknown>
         : (args: string, state: S, ctx: ToolExecutionContext) => unknown | Promise<unknown>;
     retry?: RetryPolicy;
+    handler?: ToolHandler;
 }): ToolDef {
     return {
         name: config.name,
@@ -163,6 +178,7 @@ export function tool<S extends object = never>(config: {
         },
         retry: config.retry,
         stateSlice: config.state,
+        handler: config.handler,
     };
 }
 
@@ -558,7 +574,7 @@ export function tools<S>(
                             tool_call_id: tc.id,
                             name: tc.function.name,
                             arguments: tc.function.arguments,
-                            handler: "worker" as const,
+                            handler: def?.handler ?? ("worker" as const),
                             retry: def?.retry ?? DEFAULT_RETRY,
                         };
                     });

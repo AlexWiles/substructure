@@ -25,10 +25,20 @@ impl AuthWiring {
             "substructure-dev",
             &secret,
         ));
+        // Worker/admin endpoints check `principal.source == "api_key"` (and
+        // require a non-empty subject) for machine-only operations like
+        // `mint_client_token`. The dev resolver bypasses auth but still
+        // needs to present itself as a machine principal for those checks
+        // to pass. Client endpoints validate the JWT minted by `issuer` so
+        // the browser flow exercises the real token plumbing.
         Self {
-            client: Arc::new(NoopAuthResolver::new(DEFAULT_TENANT)),
-            worker: Arc::new(NoopAuthResolver::new(DEFAULT_TENANT)),
-            admin: Arc::new(NoopAuthResolver::new(DEFAULT_TENANT)),
+            client: issuer.clone(),
+            worker: Arc::new(
+                NoopAuthResolver::new(DEFAULT_TENANT).with_principal("api_key", "dev-worker"),
+            ),
+            admin: Arc::new(
+                NoopAuthResolver::new(DEFAULT_TENANT).with_principal("api_key", "dev-admin"),
+            ),
             issuer,
         }
     }
