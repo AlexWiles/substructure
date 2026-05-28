@@ -89,6 +89,68 @@ const addTodo = agent.tool({
 
 The `state` you mutate inside `execute` is durably persisted by Substructure across turns.
 
+### Deferred (async) tool calls
+
+By default, the value `execute` returns *is* the tool result: it ships back to the LLM as soon as the worker finishes the decision. That works when the answer is already in hand by the time `execute` returns (a database lookup, an HTTP call you `await`, a computation).
+
+It does not work for tools that hand work off to something the worker can't await — a webhook callback, a queued job, a human approval, an external system that pings you when ready. For those, `execute` calls `ctx.defer()`, kicks off the work, and the result arrives later via `submitToolCallResult`.
+
+```ts
+const wait = agent.tool({
+  name: "wait",
+  description: "Wait for the given number of seconds, then return.",
+  parameters: {
+    type: "object",
+    properties: { seconds: { type: "number" } },
+    required: ["seconds"],
+  },
+  execute: (args, ctx) => {
+    const { seconds } = JSON.parse(args);
+
+    setTimeout(() => {
+      client.submitToolCallResult({
+        sessionId: ctx.sessionId,
+        toolCallId: ctx.toolCallId,
+        attempt: ctx.attempt,
+        result: JSON.stringify({ waited_seconds: seconds }),
+      });
+    }, seconds * 1000);
+
+    return ctx.defer();
+  },
+});
+```
+
+`client` here is a backend client minted with your API key:
+
+```ts
+const client = sub.backend.client({
+  url: "https://api.substructure.ai",
+  apiKey: process.env.SUBSTRUCTURE_API_KEY!,
+});
+```
+
+The third argument to `execute` is a `ToolExecutionContext`:
+
+- `ctx.sessionId` — the session this call belongs to.
+- `ctx.toolCallId` — the LLM-assigned id you must pass back.
+- `ctx.attempt` — the current retry attempt; pass it back unchanged.
+- `ctx.defer()` — returns the sentinel value to `return`.
+
+Capture the ids *before* you return, since the worker decision ends as soon as `execute` returns.
+
+What happens on the wire:
+
+1. The LLM emits a tool call. The engine records it as pending and dispatches a `tool.execute` trigger to your worker.
+2. Your `execute` returns `ctx.defer()`. The `tools` middleware emits no `return.tool.result`, so the worker submits zero actions for that decision. The engine leaves the tool call pending.
+3. Later — minutes, hours, however long — the external work completes. You call `submitToolCallResult({ tool_call_id, result, attempt })`. The engine treats this exactly like a synchronous tool return: emits `tool.call.completed`, fires a `tool.result` trigger, the chain runs, and `llmLoop` issues the next `call.llm` once every pending tool result is in.
+
+`submitToolCallResult` is available on every flavor of client — `sub.backend.client(...)` on your servers, `sub.frontend.client(...)` in the browser, and `sub.embedded(...)` for in-process runs — so the call back can come from wherever finishes the work (a webhook handler, a queue worker, a UI button). To report a failure instead of a result, pass `error` (and optional `retryable`) in place of `result`.
+
+If you never call `submitToolCallResult`, the tool call stays pending forever — the agent will not resume. For tools where that's a real risk, set a `retry` policy on the tool (which carries a `timeout_secs`) so the engine eventually fails the call and lets the chain see a `tool.result` with `is_error: true`.
+
+Full runnable version: [`examples/deferred-tool`](https://github.com/substructureai/substructure/tree/main/examples/deferred-tool).
+
 ## Defining client actions
 
 Tools react to the LLM; actions react to the client. A **client action** is a named handler that fires when a client calls `startTurn({ payload: { type: "action", name, args } })`. Use them for anything that isn't a chat message: approvals, cancellations, replays, typed events from a UI.
@@ -522,3 +584,4 @@ See [`examples/`](https://github.com/substructure-ai/substructure/tree/main/exam
 - `vercel` — serverless worker on Vercel.
 - `sub-agent` — a parent agent delegating to a child via `subAgents`.
 - `hybrid-state` — most state on the wire via `jsonState`, one slice swapped in and out of a database.
+- `deferred-tool` — async tool call: `execute` returns `ctx.defer()`, the result is posted later via `submitToolCallResult`.

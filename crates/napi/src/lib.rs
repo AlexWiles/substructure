@@ -17,8 +17,12 @@ use substructure_core::providers::sqlite::{
 };
 use substructure_core::providers::worker_queue::InMemoryWorkerQueue;
 use substructure_core::session::decision::ClientPayload;
+use substructure_core::span::SpanContext as CoreSpanContext;
 use substructure_core::worker::{DequeueFilter, FailDecision, SubmitDecision};
-use substructure_core::{Caller, Runtime, RuntimeConfig, SubmitClientPayload};
+use substructure_core::{
+    Caller, Runtime, RuntimeConfig, SubmitClientPayload, SubmitToolCallResult,
+    SubmitToolCallResultInput,
+};
 
 /// Result returned by `submitPayload`.
 #[napi(object)]
@@ -286,6 +290,57 @@ impl EmbeddedRuntime {
             session_id: output.session_id,
             turn_id: output.turn_id,
         })
+    }
+
+    /// Complete (or fail) a tool call out-of-band. Mirrors the HTTP
+    /// `POST /api/machine/sessions/{id}/tool-call-results` endpoint and
+    /// is the embedded counterpart to `BackendClient.submitToolCallResult`.
+    #[napi(
+        js_name = "submitToolCallResult",
+        ts_args_type = "sessionId: string, tenantId: string, toolCallId: string, attempt: number, resultJson: string | undefined, errorMessage: string | undefined, retryable: boolean | undefined"
+    )]
+    pub async fn submit_tool_call_result(
+        &self,
+        session_id: String,
+        tenant_id: String,
+        tool_call_id: String,
+        attempt: u32,
+        result_json: Option<String>,
+        error_message: Option<String>,
+        retryable: Option<bool>,
+    ) -> Result<()> {
+        let result = match (result_json, error_message) {
+            (Some(result), None) => SubmitToolCallResult::Result { result },
+            (None, Some(error)) => SubmitToolCallResult::Error {
+                error,
+                retryable: retryable.unwrap_or(false),
+            },
+            (Some(_), Some(_)) => {
+                return Err(Error::from_reason(
+                    "submitToolCallResult: provide either resultJson or errorMessage, not both",
+                ));
+            }
+            (None, None) => {
+                return Err(Error::from_reason(
+                    "submitToolCallResult: provide resultJson or errorMessage",
+                ));
+            }
+        };
+
+        self.inner
+            .submit_tool_call_result(SubmitToolCallResultInput {
+                session_id,
+                tenant_id,
+                tool_call_id,
+                attempt,
+                result,
+                caller: Caller::System,
+                span: CoreSpanContext::root().child("napi_tool_call_result"),
+            })
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+
+        Ok(())
     }
 
     /// Stream events for a session. If `turnId` is provided, events are

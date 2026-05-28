@@ -16,7 +16,7 @@ import {
     tool,
     tools,
 } from "./middleware";
-import type { ClientIdentity, ClientPayload, Event, SessionScope, TurnResult } from "./types";
+import type { ClientIdentity, ClientPayload, Event, SessionScope, SubmitToolCallResultArgs, TurnResult } from "./types";
 import { drainToTurnResult } from "./types";
 import type { FetchHandlerOptions, Handler, NativeRuntime } from "./worker";
 import { HandlerBuilder, Worker } from "./worker";
@@ -110,10 +110,12 @@ export class EmbeddedInstance {
     private runtime: NativeRuntime;
     private worker: Worker;
     private registered: Promise<void>;
+    private tenantId: string;
 
     constructor(runtime: NativeRuntime, agents: Handler[], tenantId: string) {
         this.runtime = runtime;
         this.worker = new Worker(agents);
+        this.tenantId = tenantId;
         this.registered = this.worker.register(runtime, tenantId);
     }
 
@@ -148,6 +150,32 @@ export class EmbeddedInstance {
             throw new Error("turnResult requires scope.turnId");
         }
         return drainToTurnResult(this.stream(scope));
+    }
+
+    /** Complete (or fail) a tool call out-of-band. Use after a tool returns
+     *  `DEFERRED`. */
+    async submitToolCallResult(args: SubmitToolCallResultArgs): Promise<void> {
+        if (args.result !== undefined) {
+            await this.runtime.submitToolCallResult(
+                args.sessionId,
+                this.tenantId,
+                args.toolCallId,
+                args.attempt,
+                args.result,
+                undefined,
+                undefined,
+            );
+        } else {
+            await this.runtime.submitToolCallResult(
+                args.sessionId,
+                this.tenantId,
+                args.toolCallId,
+                args.attempt,
+                undefined,
+                args.error,
+                args.retryable,
+            );
+        }
     }
 
     fetchHandler(options?: FetchHandlerOptions): (req: Request) => Promise<Response> {

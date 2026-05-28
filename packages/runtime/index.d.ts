@@ -31,6 +31,16 @@ export class EmbeddedRuntime {
         turnId?: string,
     ): Promise<SubmitPayloadResult>;
 
+    submitToolCallResult(
+        sessionId: string,
+        tenantId: string,
+        toolCallId: string,
+        attempt: number,
+        resultJson: string | undefined,
+        errorMessage: string | undefined,
+        retryable: boolean | undefined,
+    ): Promise<void>;
+
     streamSession(sessionId: string, turnId?: string, sequenceAfter?: number): AsyncGenerator<string, void, unknown>;
 
     shutdown(): Promise<void>;

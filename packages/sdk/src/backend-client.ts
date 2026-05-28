@@ -1,14 +1,14 @@
 import { WorkerClient } from "./worker-client";
 import { AdminClient } from "./admin-client";
 import type { ListSessionsParams, SessionDetail, SessionEventsParams, SessionListResponse } from "./admin-client";
-import { drainToTurnResult } from "./types";
+import { drainToTurnResult, toSubmitToolCallResultRequest } from "./types";
 import type {
     ClientPayload,
     Event,
     SessionScope,
     SubmitRequest,
     SubmitResponse,
-    SubmitToolCallResultRequest,
+    SubmitToolCallResultArgs,
     SubmitToolCallResultResponse,
     TurnResult,
 } from "./types";
@@ -83,11 +83,8 @@ export class BackendClient {
         return this.worker.submit(request);
     }
 
-    async submitToolCallResult(
-        sessionId: string,
-        request: SubmitToolCallResultRequest,
-    ): Promise<SubmitToolCallResultResponse> {
-        return this.worker.submitToolCallResult(sessionId, request);
+    async submitToolCallResult(args: SubmitToolCallResultArgs): Promise<SubmitToolCallResultResponse> {
+        return this.worker.submitToolCallResult(args.sessionId, toSubmitToolCallResultRequest(args));
     }
 
     /** Fire-and-forget: enqueue a turn, return as soon as it's accepted. */

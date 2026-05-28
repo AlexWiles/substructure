@@ -98,7 +98,31 @@ export function jsonState(): MiddlewareFn<unknown> {
 
 // ── Tool ───────────────────────────────────────────────────────────────────
 
-export type ToolFn = (args: string, state?: unknown) => Promise<unknown>;
+/**
+ * Sentinel returned by `ctx.defer()` to tell the `tools` middleware to
+ * skip emitting `return.tool.result` / `return.tool.error` for this call.
+ * The worker submits zero actions for the `tool.execute` trigger and the
+ * engine leaves the tool call pending until `submitToolCallResult` is
+ * called with the eventual outcome.
+ *
+ * Tools should call `ctx.defer()` rather than importing this value.
+ */
+export const DEFERRED: unique symbol = Symbol.for("substructure.tool.deferred");
+export type Deferred = typeof DEFERRED;
+
+/** Per-call context passed to a tool's `execute`. Carries the
+ *  identifiers needed to complete the call out-of-band, plus the
+ *  `defer()` helper used to signal that completion will arrive later. */
+export interface ToolExecutionContext {
+    sessionId: string;
+    toolCallId: string;
+    attempt: number;
+    /** Signal that this tool will deliver its result later via
+     *  `submitToolCallResult`. Return the value: `return ctx.defer();`. */
+    defer: () => Deferred;
+}
+
+export type ToolFn = (args: string, state?: unknown, ctx?: ToolExecutionContext) => Promise<unknown>;
 
 export interface ToolDef {
     name: string;
@@ -116,15 +140,27 @@ export function tool<S extends object = never>(config: {
     parameters: unknown;
     state?: StateSliceMw<S>;
     execute: [S] extends [never]
-        ? (args: string) => unknown | Promise<unknown>
-        : (args: string, state: S) => unknown | Promise<unknown>;
+        ? (args: string, ctx: ToolExecutionContext) => unknown | Promise<unknown>
+        : (args: string, state: S, ctx: ToolExecutionContext) => unknown | Promise<unknown>;
     retry?: RetryPolicy;
 }): ToolDef {
     return {
         name: config.name,
         description: config.description,
         parameters: config.parameters,
-        execute: async (args: string, state?: unknown) => (config.execute as ToolFn)(args, state),
+        execute: async (args: string, state?: unknown, ctx?: ToolExecutionContext) => {
+            if (config.state) {
+                return (config.execute as (a: string, s: unknown, c: ToolExecutionContext) => unknown)(
+                    args,
+                    state,
+                    ctx as ToolExecutionContext,
+                );
+            }
+            return (config.execute as (a: string, c: ToolExecutionContext) => unknown)(
+                args,
+                ctx as ToolExecutionContext,
+            );
+        },
         retry: config.retry,
         stateSlice: config.state,
     };
@@ -468,7 +504,16 @@ export function tools<S>(
                     if (t.stateSlice) {
                         toolState = initSlice(req.state, t.stateSlice._init);
                     }
-                    const output = await t.execute(req.trigger.arguments, toolState);
+                    const ctx: ToolExecutionContext = {
+                        sessionId: req.wire.session_id,
+                        toolCallId: req.trigger.tool_call_id,
+                        attempt: req.trigger.attempt,
+                        defer: () => DEFERRED,
+                    };
+                    const output = await t.execute(req.trigger.arguments, toolState, ctx);
+                    if (output === DEFERRED) {
+                        return downstream;
+                    }
                     return {
                         ...downstream,
                         actions: [

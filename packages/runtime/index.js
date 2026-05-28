@@ -54,6 +54,12 @@ export class EmbeddedRuntime {
     return this._native.submitPayload(sessionId, agentId, payloadJson, identityJson, turnId);
   }
 
+  submitToolCallResult(sessionId, tenantId, toolCallId, attempt, resultJson, errorMessage, retryable) {
+    return this._native.submitToolCallResult(
+      sessionId, tenantId, toolCallId, attempt, resultJson, errorMessage, retryable,
+    );
+  }
+
   async *streamSession(sessionId, turnId, sequenceAfter) {
     let resolve;
     let done = false;

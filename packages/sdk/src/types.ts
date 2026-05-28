@@ -248,6 +248,56 @@ export interface SubmitToolCallResultResponse {
     error?: string;
 }
 
+/** Identifies a single deferred tool call. */
+export interface SubmitToolCallResultTarget {
+    sessionId: string;
+    toolCallId: string;
+    attempt: number;
+}
+
+/** Successful completion of a deferred tool call. */
+export interface SubmitToolCallSuccess {
+    result: string;
+    error?: never;
+    retryable?: never;
+}
+
+/** Failed completion of a deferred tool call. */
+export interface SubmitToolCallFailure {
+    error: string;
+    retryable?: boolean;
+    result?: never;
+}
+
+/**
+ * Outcome of a deferred tool call: either a successful result or a
+ * failure. The `never`-typed alternates make this a discriminated union,
+ * so passing both — or neither — is a compile error.
+ */
+export type SubmitToolCallResultOutcome = SubmitToolCallSuccess | SubmitToolCallFailure;
+
+/** Arguments for completing a deferred tool call. */
+export type SubmitToolCallResultArgs = SubmitToolCallResultTarget & SubmitToolCallResultOutcome;
+
+/** Translate the ergonomic args object into the wire shape. */
+export function toSubmitToolCallResultRequest(args: SubmitToolCallResultArgs): SubmitToolCallResultRequest {
+    if (args.result !== undefined) {
+        return {
+            type: "return.tool.result",
+            tool_call_id: args.toolCallId,
+            result: args.result,
+            attempt: args.attempt,
+        };
+    }
+    return {
+        type: "return.tool.error",
+        tool_call_id: args.toolCallId,
+        error: args.error,
+        retryable: args.retryable ?? false,
+        attempt: args.attempt,
+    };
+}
+
 // ── Event Payloads ──────────────────────────────────────────────────────────
 
 export interface SessionCreated {
