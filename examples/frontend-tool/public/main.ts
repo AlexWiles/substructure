@@ -95,11 +95,8 @@ async function sendMessage(content: string) {
     input.disabled = true;
 
     let typing: HTMLDivElement | null = showTyping();
-    // In-progress assistant message, keyed by call_id. Deltas append text
-    // into a live DOM node; when llm.call.completed arrives we drop the
-    // partial in favor of the persisted message.new event so the rendered
-    // text matches what's stored server-side. Out-of-order deltas are
-    // buffered until the missing seq arrives.
+    // Per-call partial bubble. Chunks may arrive out of order, so buffer
+    // by seq and flush contiguous prefix.
     type Partial = { node: HTMLDivElement; chunks: Map<number, string>; nextSeq: number };
     const partials = new Map<string, Partial>();
 
@@ -138,9 +135,7 @@ async function sendMessage(content: string) {
                     flush(partial);
                 }
             } else if (p.type === "llm.call.completed") {
-                // The matching message.new with the canonical content arrives
-                // immediately after; drop the partial node so we don't
-                // double-render.
+                // Drop the partial; the following message.new renders the canonical content.
                 const partial = partials.get(p.call_id);
                 if (partial) {
                     partial.node.remove();

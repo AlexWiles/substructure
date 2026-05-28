@@ -113,9 +113,6 @@ pub fn spawn_llm_task_executor(
     handles
 }
 
-/// Drains `StreamDelta`s emitted by the provider and republishes them as
-/// `TokenDelta`s on the transport. Returns a JoinHandle the caller awaits
-/// after the streaming call completes so we don't drop in-flight deltas.
 fn spawn_delta_pump(
     task: &LlmTask,
     transport: Arc<dyn TokenDeltaTransport>,

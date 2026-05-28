@@ -14,8 +14,7 @@ pub struct LlmTask {
     pub identity: ClientIdentity,
     /// Parent chain, root-last. Empty for top-level sessions.
     pub ancestry: Vec<String>,
-    /// Turn the call belongs to. Used to scope transient token deltas to
-    /// turn-scoped subscribers.
+    /// Tagged on emitted token deltas so Turn-scoped subscribers can filter.
     pub turn_id: Option<String>,
     pub span: SpanContext,
 }

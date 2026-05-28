@@ -236,11 +236,6 @@ impl Runtime {
             .await
     }
 
-    /// Subscribe to transient (non-persisted) LLM token deltas for a root
-    /// session. Used by the SSE route to forward live tokens to frontend
-    /// clients. Deltas missed before subscription will not be replayed —
-    /// the final assembled content arrives via the persisted
-    /// `LlmCallCompleted` event.
     pub async fn subscribe_token_deltas(
         &self,
         root_session_id: &str,

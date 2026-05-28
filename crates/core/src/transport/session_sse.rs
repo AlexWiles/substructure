@@ -1,8 +1,3 @@
-//! Shared SSE plumbing for session event streaming. Fans in persisted
-//! events from the event store with transient `llm.token.delta` events
-//! from the [`TokenDeltaTransport`], emitting them as SSE messages with
-//! a uniform Event-shaped envelope.
-
 use axum::response::sse::Event as SseEvent;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -10,16 +5,9 @@ use tokio_util::sync::CancellationToken;
 use crate::event_store::Event;
 use crate::llm::TokenDelta;
 
-/// Spawn a fan-in task that forwards persisted events and transient token
-/// deltas onto a single SSE channel. Terminates when the event side closes
-/// (mirrors the existing Turn-scoped completion semantics — on
-/// `turn.completed` the session subscription's sender drops, the merged
-/// stream ends, and the SSE response closes so client `for-await` loops
-/// can exit).
-///
-/// When `scope_turn_id` is `Some`, deltas whose `turn_id` doesn't match
-/// are filtered out so a Turn-scoped subscriber doesn't see deltas from
-/// other concurrent calls in the same root session.
+/// Terminates when `event_rx` closes (Turn scopes auto-close on
+/// `turn.completed`). Delta-side closure is ignored — the transport outlives
+/// any single turn.
 pub fn merge_session_stream(
     mut event_rx: mpsc::Receiver<Event>,
     mut delta_rx: mpsc::Receiver<TokenDelta>,
@@ -65,9 +53,7 @@ pub fn merge_session_stream(
     out_rx
 }
 
-/// Wrap a transient [`TokenDelta`] in an envelope mirroring the persisted
-/// `Event` shape so SSE consumers can branch on `payload.type` uniformly.
-/// `sequence` is omitted because transient deltas are not persisted.
+/// Mirrors the persisted `Event` JSON shape, minus `sequence`.
 fn token_delta_to_sse(delta: TokenDelta) -> SseEvent {
     let envelope = serde_json::json!({
         "aggregate_type": "session",
