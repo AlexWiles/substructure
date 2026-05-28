@@ -76,7 +76,9 @@ export default {
 
 ```sh
 substructure cloud login
+
 substructure cloud link                                          # link this directory to an org & app
+
 substructure cloud webhook set https://your-worker.example.com   # tell the substructure where to call
 
 # Prints out the signing secret for the webhook. Copy into your worker's env as SIGNING_SECRET:

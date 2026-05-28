@@ -4,17 +4,6 @@ title: Sub-agents
 
 A sub-agent is an agent another agent can delegate to as if calling a tool. The parent's LLM sees a "tool" with the sub-agent's name and a single `message: string` parameter. Calling it spawns a child session that runs to completion in its own loop and returns a single result.
 
-## When to reach for one
-
-A sub-agent is heavier than a regular tool: it's a whole session with its own state, message history, retries, and event log. Reach for one when you want:
-
-- **Isolation.** The child has its own message history and won't pollute the parent's context with low-level reasoning. The parent only sees the final result.
-- **Specialization.** The child can have its own system prompt, tools, and model. A planner on Sonnet can delegate to a fast Haiku agent for lookups.
-- **Composition.** Stack agents (parent, child, grandchild) so each layer stays small and testable.
-- **Reuse.** The same agent can be a top-level entry point for some clients and a sub-agent for others. No code changes.
-
-If you just need the LLM to think about a sub-problem in the same conversation, don't reach for a sub-agent. Use a tool or let it answer.
-
 ## Defining a sub-agent
 
 Sub-agents are ordinary agents. There's nothing special about how they're built:
