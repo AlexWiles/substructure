@@ -18,13 +18,6 @@ Components:
 
 ## Why substructure.ai
 
-Substructure is a durable execution runtime for AI agents. You write a stateless HTTP handler that takes a trigger and returns actions. The cloud handles everything else.
-What the cloud handles: durability (event log, retries, crash recovery, idempotency), multi-tenant session state, streaming to clients, and auth (short-lived JWTs for browsers, API keys for service-to-service).
-What stays in your code: the HTTP handler, the prompts, the control flow, and a few agent.use(...) middleware calls.
-Properties:
-- Robust by default. Crashes, retries, duplicate requests, partial tool failures, and reconnecting clients are absorbed by the event log and idempotent replay.
-- Scales without rearchitecting. The day-one agent keeps working as sessions, tool calls, and sub-agents grow.
-- Portable. Workers are plain HTTP; state is opaque bytes. The same agent runs self-hosted or embedded.
-
-Use Substructure when an app needs durable, observable, multi-tenant agent behavior and you'd rather call a hosted engine than operate workflow infrastructure — while keeping prompts and control flow in your own codebase.
+- Substructure handles the nasty stuff involved in building production ready agents that can integrate into larger software systems.
+- Portable. Workers are stateless functions. Runnable as stateless HTTP endpoints on the cloud/self-hosted, or embedded directly in-process.
 
