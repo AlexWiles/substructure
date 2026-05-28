@@ -16,21 +16,31 @@ pub struct SessionSubscriptions {
 #[derive(Debug, Clone)]
 pub enum SessionSubscriptionSpec {
     Turn {
+        tenant_id: String,
         root_session_id: String,
         turn_id: String,
     },
     All {
+        tenant_id: String,
         root_session_id: String,
     },
 }
 
 impl SessionSubscriptionSpec {
+    fn tenant_id(&self) -> &str {
+        match self {
+            Self::Turn { tenant_id, .. } | Self::All { tenant_id, .. } => tenant_id,
+        }
+    }
+
     fn root_session_id(&self) -> &str {
         match self {
             Self::Turn {
                 root_session_id, ..
             }
-            | Self::All { root_session_id } => root_session_id,
+            | Self::All {
+                root_session_id, ..
+            } => root_session_id,
         }
     }
 
@@ -48,6 +58,7 @@ impl SessionSubscriptionSpec {
             Self::Turn {
                 root_session_id,
                 turn_id,
+                ..
             } => {
                 event.aggregate_id == *root_session_id
                     && matches!(
@@ -74,6 +85,9 @@ impl SessionSubscriptions {
                 match rx.recv().await {
                     Ok(batch) => {
                         for raw in batch.iter() {
+                            if raw.tenant_id != spec.tenant_id() {
+                                continue;
+                            }
                             if let Some(event) = decode_session_event(raw) {
                                 let in_scope =
                                     belongs_to_root_session(raw, &event, spec.root_session_id());
@@ -153,6 +167,7 @@ impl SessionSubscriptions {
         let events = self
             .store
             .query_events(&EventFilter {
+                tenant_id: Some(spec.tenant_id().to_string()),
                 aggregate_id: Some(spec.root_session_id().to_string()),
                 sequence_after: Some(sequence_after),
                 ..Default::default()
@@ -171,6 +186,9 @@ fn filter_by_spec(events: Vec<Event>, spec: &SessionSubscriptionSpec) -> Vec<Eve
     events
         .into_iter()
         .filter(|e| {
+            if e.tenant_id != spec.tenant_id() {
+                return false;
+            }
             let Some(event) = decode_session_event(e) else {
                 return false;
             };

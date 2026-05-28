@@ -291,10 +291,12 @@ pub async fn stream_session_events(
     let scope_turn_id = params.turn_id.clone();
     let spec = match params.turn_id {
         Some(turn_id) => SessionSubscriptionSpec::Turn {
+            tenant_id: principal.tenant_id.clone(),
             root_session_id: session_id,
             turn_id,
         },
         None => SessionSubscriptionSpec::All {
+            tenant_id: principal.tenant_id.clone(),
             root_session_id: session_id,
         },
     };

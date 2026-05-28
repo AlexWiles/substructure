@@ -50,7 +50,7 @@ function timingSafeEqual(a, b) {
   return result === 0;
 }
 
-// ../../packages/sdk/dist/chunk-RGABIIPF.js
+// ../../packages/sdk/dist/chunk-UDPS742Q.js
 var DEFAULT_FALLBACK = (req) => ({ actions: [], state: req.state });
 var HandlerBuilder = class {
   agentId;
@@ -1075,7 +1075,7 @@ function mergeTools(existing, added) {
   return Array.from(byName.values());
 }
 
-// ../../packages/sdk/dist/chunk-R4ZJCTS6.js
+// ../../packages/sdk/dist/chunk-7LPEG4OC.js
 function createAgentFactory() {
   const factory = (options) => {
     return new HandlerBuilder(options.id);
@@ -1134,7 +1134,7 @@ var EmbeddedInstance = class {
   /** Stream events for a session. If `scope.turnId` is set, the stream is
    *  filtered to that turn and auto-closes on completion. */
   async *stream(scope, options) {
-    for await (const json of this.runtime.streamSession(scope.sessionId, scope.turnId, options?.sequenceAfter)) {
+    for await (const json of this.runtime.streamSession(this.tenantId, scope.sessionId, scope.turnId, options?.sequenceAfter)) {
       yield JSON.parse(json);
     }
   }

@@ -21,7 +21,12 @@ export interface NativeRuntime {
         errorMessage: string | undefined,
         retryable: boolean | undefined,
     ): Promise<void>;
-    streamSession(sessionId: string, turnId?: string, sequenceAfter?: number): AsyncGenerator<string, void, unknown>;
+    streamSession(
+        tenantId: string,
+        sessionId: string,
+        turnId?: string,
+        sequenceAfter?: number,
+    ): AsyncGenerator<string, void, unknown>;
     shutdown(): Promise<void>;
 }
 import { verifyWebhookSignature } from "./webhook";

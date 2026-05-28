@@ -118,32 +118,31 @@ fn spawn_delta_pump(
     transport: Arc<dyn TokenDeltaTransport>,
     mut rx: mpsc::UnboundedReceiver<super::StreamDelta>,
 ) -> JoinHandle<()> {
-    let root_session_id = task
-        .ancestry
-        .first()
-        .cloned()
-        .unwrap_or_else(|| task.session_id.clone());
-    let tenant_id = task.tenant_id.clone();
-    let session_id = task.session_id.clone();
-    let agent_id = task.agent_id.clone();
-    let turn_id = task.turn_id.clone();
-    let call_id = task.call_id.clone();
-    let attempt = task.attempt;
+    let template = TokenDelta {
+        tenant_id: task.tenant_id.clone(),
+        root_session_id: task
+            .ancestry
+            .first()
+            .cloned()
+            .unwrap_or_else(|| task.session_id.clone()),
+        session_id: task.session_id.clone(),
+        agent_id: task.agent_id.clone(),
+        turn_id: task.turn_id.clone(),
+        call_id: task.call_id.clone(),
+        attempt: task.attempt,
+        seq: 0,
+        text: None,
+        finish_reason: None,
+    };
     tokio::spawn(async move {
         let mut seq: u32 = 0;
         while let Some(delta) = rx.recv().await {
             transport
                 .publish(TokenDelta {
-                    tenant_id: tenant_id.clone(),
-                    root_session_id: root_session_id.clone(),
-                    session_id: session_id.clone(),
-                    agent_id: agent_id.clone(),
-                    turn_id: turn_id.clone(),
-                    call_id: call_id.clone(),
-                    attempt,
                     seq,
                     text: delta.text,
                     finish_reason: delta.finish_reason,
+                    ..template.clone()
                 })
                 .await;
             seq = seq.saturating_add(1);

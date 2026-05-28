@@ -352,10 +352,11 @@ impl EmbeddedRuntime {
     /// optionally replays historical events with `sequence > N` first.
     #[napi(
         js_name = "streamSession",
-        ts_args_type = "sessionId: string, turnId: string | undefined, sequenceAfter: number | undefined, onEvent: (event: string) => void"
+        ts_args_type = "tenantId: string, sessionId: string, turnId: string | undefined, sequenceAfter: number | undefined, onEvent: (event: string) => void"
     )]
     pub async fn stream_session(
         &self,
+        tenant_id: String,
         session_id: String,
         turn_id: Option<String>,
         sequence_after: Option<i64>,
@@ -365,10 +366,12 @@ impl EmbeddedRuntime {
 
         let spec = match turn_id {
             Some(tid) => SessionSubscriptionSpec::Turn {
+                tenant_id: tenant_id.clone(),
                 root_session_id: session_id,
                 turn_id: tid,
             },
             None => SessionSubscriptionSpec::All {
+                tenant_id: tenant_id.clone(),
                 root_session_id: session_id,
             },
         };
