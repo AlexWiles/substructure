@@ -7,6 +7,7 @@ use crate::runtime::event_store::{AppendInput, EventStore, StoreError};
 use crate::runtime::span::SpanContext;
 
 use super::aggregate::{Aggregate, CommitContext};
+use super::caller::Caller;
 use super::state::{AggregateState, DomainEvent};
 
 #[derive(Debug, thiserror::Error)]
@@ -27,6 +28,7 @@ pub struct ExecuteResult<R: AggregateState> {
 pub struct ExecuteInput<R: AggregateState> {
     pub aggregate_id: String,
     pub tenant_id: String,
+    pub caller: Caller,
     pub command: R::Command,
     pub span: SpanContext,
 }
@@ -96,7 +98,7 @@ pub async fn execute<R: AggregateState>(
 
         let events = aggregate
             .state
-            .handle_command(command)
+            .handle_command(command, &input.caller)
             .map_err(ExecuteError::Command)?;
 
         if events.is_empty() {

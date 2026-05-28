@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::providers::memory_queue::TaskQueue;
-use aggregate::{execute, ConflictRetry, ExecuteError, ExecuteInput};
+use aggregate::{execute, Caller, ConflictRetry, ExecuteError, ExecuteInput};
 use event_store::EventStore;
 use identity::ClientIdentity;
 use llm::{spawn_llm_dispatch_processor, spawn_llm_task_executor, LlmProviderTrait, LlmTask};
@@ -73,6 +73,7 @@ pub struct Runtime {
 pub struct SubmitClientPayload {
     pub session_id: String,
     pub tenant_id: String,
+    pub caller: Caller,
     pub identity: ClientIdentity,
     pub agent_id: String,
     pub payload: ClientPayload,
@@ -85,9 +86,37 @@ pub struct SubmitClientPayloadOutput {
     pub turn_id: String,
 }
 
+pub enum SubmitToolCallResult {
+    Result { result: String },
+    Error { error: String, retryable: bool },
+}
+
+pub struct SubmitToolCallResultInput {
+    pub session_id: String,
+    pub tenant_id: String,
+    pub tool_call_id: String,
+    pub attempt: u32,
+    pub result: SubmitToolCallResult,
+    pub caller: Caller,
+    pub span: SpanContext,
+}
+
 #[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct RuntimeError(String);
+pub enum RuntimeError {
+    #[error(transparent)]
+    Session(#[from] SessionError),
+    #[error("{0}")]
+    Internal(String),
+}
+
+impl From<ExecuteError<SessionError>> for RuntimeError {
+    fn from(e: ExecuteError<SessionError>) -> Self {
+        match e {
+            ExecuteError::Command(c) => RuntimeError::Session(c),
+            other => RuntimeError::Internal(other.to_string()),
+        }
+    }
+}
 
 impl Runtime {
     pub async fn shutdown(&self) {
@@ -141,9 +170,10 @@ impl Runtime {
             ExecuteInput {
                 aggregate_id: session_id.clone(),
                 tenant_id: input.tenant_id.clone(),
+                caller: input.caller.clone(),
                 command: CommandPayload::CreateSession {
                     agent_id: input.agent_id,
-                    identity: input.identity.clone(),
+                    identity: input.identity,
                     ancestry: vec![],
                     worker_retry,
                 },
@@ -156,7 +186,7 @@ impl Runtime {
         match create_result {
             Ok(_) => {}
             Err(ExecuteError::Command(SessionError::SessionAlreadyCreated)) => {}
-            Err(e) => return Err(RuntimeError(e.to_string())),
+            Err(e) => return Err(e.into()),
         }
 
         // Try to submit the payload (idempotency guard may reject)
@@ -165,9 +195,9 @@ impl Runtime {
             ExecuteInput {
                 aggregate_id: session_id.clone(),
                 tenant_id: input.tenant_id,
+                caller: input.caller,
                 command: CommandPayload::SubmitClientPayload {
                     payload: input.payload,
-                    identity: input.identity,
                     turn_id: Some(turn_id.clone()),
                 },
                 span: span.child("submit_client_payload"),
@@ -180,7 +210,7 @@ impl Runtime {
             Ok(_) => turn_id,
             Err(ExecuteError::Command(SessionError::TurnAlreadyActive { turn_id })) => turn_id,
             Err(ExecuteError::Command(SessionError::TurnAlreadyCompleted { turn_id })) => turn_id,
-            Err(e) => return Err(RuntimeError(e.to_string())),
+            Err(e) => return Err(e.into()),
         };
 
         Ok(SubmitClientPayloadOutput {
@@ -208,14 +238,14 @@ impl Runtime {
         self.session_index
             .list_sessions(filter)
             .await
-            .map_err(|e| RuntimeError(e.to_string()))
+            .map_err(|e| RuntimeError::Internal(e.to_string()))
     }
 
     pub async fn count_sessions(&self, filter: &SessionFilter) -> Result<u64, RuntimeError> {
         self.session_index
             .count_sessions(filter)
             .await
-            .map_err(|e| RuntimeError(e.to_string()))
+            .map_err(|e| RuntimeError::Internal(e.to_string()))
     }
 
     pub async fn get_session(
@@ -227,9 +257,9 @@ impl Runtime {
             .store
             .load(tenant_id, session_id)
             .await
-            .map_err(|e| RuntimeError(e.to_string()))?;
+            .map_err(|e| RuntimeError::Internal(e.to_string()))?;
         let agg: aggregate::Aggregate<SessionState> = serde_json::from_value(snapshot.data.clone())
-            .map_err(|e| RuntimeError(e.to_string()))?;
+            .map_err(|e| RuntimeError::Internal(e.to_string()))?;
         let state = agg.state;
         Ok((snapshot, state))
     }
@@ -241,7 +271,7 @@ impl Runtime {
         self.store
             .query_events(filter)
             .await
-            .map_err(|e| RuntimeError(e.to_string()))
+            .map_err(|e| RuntimeError::Internal(e.to_string()))
     }
 
     pub async fn submit_decision(&self, input: SubmitDecision) -> Result<(), RuntimeError> {
@@ -250,6 +280,7 @@ impl Runtime {
             ExecuteInput {
                 aggregate_id: input.session_id.clone(),
                 tenant_id: input.tenant_id,
+                caller: input.caller,
                 command: CommandPayload::SubmitWorkerDecision {
                     decision_id: input.decision_id,
                     actions: input.actions,
@@ -261,7 +292,43 @@ impl Runtime {
         )
         .await
         .map(|_| ())
-        .map_err(|e| RuntimeError(e.to_string()))
+        .map_err(RuntimeError::from)
+    }
+
+    pub async fn submit_tool_call_result(
+        &self,
+        input: SubmitToolCallResultInput,
+    ) -> Result<(), RuntimeError> {
+        let command = match input.result {
+            SubmitToolCallResult::Result { result } => CommandPayload::CompleteToolCall {
+                tool_call_id: input.tool_call_id,
+                attempt: input.attempt,
+                result,
+                worker_state: None,
+            },
+            SubmitToolCallResult::Error { error, retryable } => CommandPayload::FailToolCall {
+                tool_call_id: input.tool_call_id,
+                attempt: input.attempt,
+                error,
+                retryable,
+                worker_state: None,
+            },
+        };
+
+        execute::<SessionState>(
+            &*self.store,
+            ExecuteInput {
+                aggregate_id: input.session_id,
+                tenant_id: input.tenant_id,
+                caller: input.caller,
+                command,
+                span: input.span,
+            },
+            &ConflictRetry::default(),
+        )
+        .await
+        .map(|_| ())
+        .map_err(RuntimeError::from)
     }
 
     pub async fn fail_decision(&self, input: FailDecision) -> Result<(), RuntimeError> {
@@ -270,6 +337,7 @@ impl Runtime {
             ExecuteInput {
                 aggregate_id: input.session_id.clone(),
                 tenant_id: input.tenant_id,
+                caller: input.caller,
                 command: CommandPayload::FailWorkerDecision {
                     decision_id: input.decision_id,
                     error: input.error,
@@ -281,7 +349,7 @@ impl Runtime {
         )
         .await
         .map(|_| ())
-        .map_err(|e| RuntimeError(e.to_string()))
+        .map_err(RuntimeError::from)
     }
 }
 

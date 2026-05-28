@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::runtime::aggregate::Caller;
 use crate::runtime::identity::ClientIdentity;
 use crate::runtime::serde_helpers::base64_bytes;
 use crate::runtime::session::decision::DecisionTrigger;
@@ -32,20 +33,22 @@ pub struct DequeueFilter {
     pub tenant_id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct SubmitDecision {
     pub session_id: String,
     pub tenant_id: String,
+    pub caller: Caller,
     pub decision_id: String,
     pub actions: Vec<WorkerAction>,
     pub state: Vec<u8>,
     pub span: SpanContext,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct FailDecision {
     pub session_id: String,
     pub tenant_id: String,
+    pub caller: Caller,
     pub decision_id: String,
     pub error: String,
     pub retryable: bool,

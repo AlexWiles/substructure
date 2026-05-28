@@ -6,7 +6,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::runtime::aggregate::{
-    execute, AggregateState, ConflictRetry, DomainEvent, ExecuteInput,
+    execute, AggregateState, Caller, ConflictRetry, DomainEvent, ExecuteInput,
 };
 use crate::runtime::event_store::{Event, EventStore};
 use crate::runtime::processor::{
@@ -157,6 +157,7 @@ async fn fire_due(
             ExecuteInput {
                 aggregate_id: item.aggregate_id,
                 tenant_id: item.tenant_id,
+                caller: Caller::System,
                 command: CommandPayload::Wake { now },
                 span: SpanContext::root(),
             },

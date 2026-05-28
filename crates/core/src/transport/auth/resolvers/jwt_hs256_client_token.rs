@@ -122,6 +122,7 @@ impl AuthResolver for JwtHs256ClientTokenAuthResolver {
             tenant_id: decoded.claims.tenant_id,
             source: "client_token",
             subject: Some(decoded.claims.sub),
+            attrs: decoded.claims.attrs,
         })
     }
 }

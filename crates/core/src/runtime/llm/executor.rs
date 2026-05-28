@@ -4,7 +4,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::providers::memory_queue::TaskQueue;
-use crate::runtime::aggregate::{execute, ConflictRetry, ExecuteInput};
+use crate::runtime::aggregate::{execute, Caller, ConflictRetry, ExecuteInput};
 use crate::runtime::event_store::EventStore;
 use crate::runtime::session::command::CommandPayload;
 use crate::runtime::session::state::SessionState;
@@ -79,6 +79,7 @@ pub fn spawn_llm_task_executor(
                     ExecuteInput {
                         aggregate_id: task.session_id.clone(),
                         tenant_id: task.tenant_id.clone(),
+                        caller: Caller::System,
                         command,
                         span: task.span.child("llm_call"),
                     },

@@ -22,6 +22,7 @@ impl AuthResolver for NoopAuthResolver {
             tenant_id: self.tenant_id.clone(),
             source: "noop",
             subject: None,
+            attrs: std::collections::HashMap::new(),
         })
     }
 }

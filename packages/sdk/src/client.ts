@@ -81,6 +81,8 @@ export type {
     Role,
     SessionState,
     SessionStatus,
+    SubmitToolCallResultRequest,
+    SubmitToolCallResultResponse,
     ToolCall,
     ToolResult,
     WorkerAction,
