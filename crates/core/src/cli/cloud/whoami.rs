@@ -62,7 +62,7 @@ pub async fn run(globals: CloudGlobals) -> Result<()> {
         (Some(id), None) => println!("Pinned org: {id} (not in your memberships?)"),
         (None, _) => {
             println!("Pinned org: none");
-            println!("Run `subs cloud link` in your project to pin one.");
+            println!("Run `substructure cloud link` in your project to pin one.");
         }
     }
     if let Some(app_id) = pinned_app {

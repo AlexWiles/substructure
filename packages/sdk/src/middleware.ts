@@ -1,4 +1,4 @@
-import type { Message, LlmTool, LlmRequest, RetryPolicy, WorkerAction, ToolResult } from "./types";
+import type { DecisionTrigger, LlmRequest, LlmTool, Message, RetryPolicy, ToolResult, WorkerAction } from "./types";
 import type { Handler, AgentRequest, AgentResponse, MiddlewareFn, Next, StateContributor } from "./worker";
 
 export const DEFAULT_RETRY: RetryPolicy = {
@@ -130,6 +130,71 @@ export function tool<S extends object = never>(config: {
     };
 }
 
+// ── Client actions ─────────────────────────────────────────────────────────
+
+export type ActionHandlerResult = void | WorkerAction[];
+
+export interface ActionDef<Args = unknown, S = unknown> {
+    name: string;
+    /** Optional JSON schema for `args`. Currently documentation-only; no
+     *  runtime validation is performed. */
+    parameters?: unknown;
+    stateSlice?: StateSliceMw<any>;
+    handler: (args: Args, state: S) => ActionHandlerResult | Promise<ActionHandlerResult>;
+}
+
+/**
+ * Define a client.action handler with typed args.
+ *
+ * Pair with `actions()` to dispatch by `client.action.name`. The handler
+ * receives `args` cast to `Args` (no runtime validation) and the typed
+ * state slice if `state` was supplied. A `void` return lets the chain
+ * proceed (e.g. the LLM call fires on the trigger); returning a
+ * `WorkerAction[]` short-circuits with those actions.
+ */
+export function action<Args = unknown, S extends object = never>(config: {
+    name: string;
+    parameters?: unknown;
+    state?: StateSliceMw<S>;
+    handler: [S] extends [never]
+        ? (args: Args) => ActionHandlerResult | Promise<ActionHandlerResult>
+        : (args: Args, state: S) => ActionHandlerResult | Promise<ActionHandlerResult>;
+}): ActionDef<Args, S> {
+    return {
+        name: config.name,
+        parameters: config.parameters,
+        stateSlice: config.state,
+        handler: config.handler as ActionDef<Args, S>["handler"],
+    };
+}
+
+/**
+ * Dispatch `client.action` triggers to matching `ActionDef`s by name.
+ * Non-matching triggers and non-client-action triggers pass through.
+ */
+export function actions(defs: ActionDef<any, any>[]): MiddlewareFn<unknown> {
+    const byName: Record<string, ActionDef<any, any>> = {};
+    for (const def of defs) byName[def.name] = def;
+
+    return middleware({
+        handler: async (req, next) => {
+            const { trigger } = req;
+            if (trigger.type !== "client.action") return next(req);
+
+            const def = byName[trigger.name];
+            if (!def) return next(req);
+
+            const state = def.stateSlice ? initSlice(req.state, def.stateSlice._init) : req.state;
+            const result = await def.handler(trigger.args ?? {}, state);
+
+            if (Array.isArray(result)) {
+                return { state: req.state, actions: result };
+            }
+            return next(req);
+        },
+    });
+}
+
 // ── Logging ────────────────────────────────────────────────────────────────
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
@@ -210,48 +275,74 @@ export function logging(options?: string | LoggingOptions): MiddlewareFn<unknown
 export type MessageSelector<S> = (state: S, req: AgentRequest<S>) => Message[];
 
 /**
+ * Translate a decision trigger into the message (if any) that belongs in the
+ * conversation transcript. Returns `null` for triggers that don't correspond
+ * to a turn entry (`client.action`, `tool.execute`, `llm.error`, ...).
+ *
+ * Building block for custom history middleware. Pair with `withHistory`
+ * on the way out.
+ */
+export function triggerToMessage(trigger: DecisionTrigger): Message | null {
+    switch (trigger.type) {
+        case "user.message":
+        case "llm.response":
+            return trigger.message;
+        case "tool.result":
+            return {
+                role: "tool",
+                content: trigger.result.content,
+                tool_call_id: trigger.result.tool_call_id,
+                name: trigger.result.name,
+            };
+        default:
+            return null;
+    }
+}
+
+/**
+ * Prepend a transcript to every `call.llm` action's `messages`. Non-LLM
+ * actions pass through unchanged.
+ *
+ * Building block for custom history middleware: pair with `triggerToMessage`
+ * to record on the way in, then call this on the way out to attach the
+ * transcript to whatever LLM call the chain below produced.
+ */
+export function prependHistoryToLlmCalls(history: Message[], actions: WorkerAction[]): WorkerAction[] {
+    return actions.map((action) =>
+        action.type === "call.llm"
+            ? {
+                  ...action,
+                  request: {
+                      ...action.request,
+                      messages: [...history, ...action.request.messages],
+                  },
+              }
+            : action,
+    );
+}
+
+/**
  * Conversation history middleware. Contributes `{ messages: Message[] }` to state.
  * Records incoming messages and augments `call_llm` actions with the full history.
+ *
+ * Implementation is intentionally tiny: `triggerToMessage` +
+ * `prependHistoryToLlmCalls` composed against a state slice. For anything
+ * non-default (clear on a signal, cap at N, persist out-of-band) write
+ * your own middleware using the same helpers.
  */
 export function messageHistory(): StateContributor<{ messages: Message[] }> &
     MiddlewareFn<unknown, { messages: Message[] }> {
     return middleware({
         state: { messages: [] as Message[] },
         handler: async (req, next) => {
-            const history = req.state.messages;
-            const { trigger } = req;
-
-            switch (trigger.type) {
-                case "user.message":
-                case "llm.response":
-                    history.push(trigger.message);
-                    break;
-                case "client.action":
-                    break;
-                case "tool.result":
-                    history.push({
-                        role: "tool",
-                        content: trigger.result.content,
-                        tool_call_id: trigger.result.tool_call_id,
-                        name: trigger.result.name,
-                    });
-                    break;
-            }
+            const msg = triggerToMessage(req.trigger);
+            if (msg) req.state.messages.push(msg);
 
             const result = await next(req);
-
-            const actions = result.actions.map((action) => {
-                if (action.type !== "call.llm") return action;
-                return {
-                    ...action,
-                    request: {
-                        ...action.request,
-                        messages: [...history, ...action.request.messages],
-                    },
-                };
-            });
-
-            return { ...result, actions };
+            return {
+                ...result,
+                actions: prependHistoryToLlmCalls(req.state.messages, result.actions),
+            };
         },
     });
 }
@@ -271,46 +362,19 @@ export function messageHistoryCurrentTurn(): StateContributor<{
     return middleware({
         state: { messages: [] as Message[], lastTurnId: undefined as string | undefined },
         handler: async (req, next) => {
-            const turnId = req.wire.turn_id;
-            if (turnId !== req.state.lastTurnId) {
+            if (req.wire.turn_id !== req.state.lastTurnId) {
                 req.state.messages = [];
-                req.state.lastTurnId = turnId;
+                req.state.lastTurnId = req.wire.turn_id;
             }
 
-            const history = req.state.messages;
-            const { trigger } = req;
-
-            switch (trigger.type) {
-                case "user.message":
-                case "llm.response":
-                    history.push(trigger.message);
-                    break;
-                case "client.action":
-                    break;
-                case "tool.result":
-                    history.push({
-                        role: "tool",
-                        content: trigger.result.content,
-                        tool_call_id: trigger.result.tool_call_id,
-                        name: trigger.result.name,
-                    });
-                    break;
-            }
+            const msg = triggerToMessage(req.trigger);
+            if (msg) req.state.messages.push(msg);
 
             const result = await next(req);
-
-            const actions = result.actions.map((action) => {
-                if (action.type !== "call.llm") return action;
-                return {
-                    ...action,
-                    request: {
-                        ...action.request,
-                        messages: [...history, ...action.request.messages],
-                    },
-                };
-            });
-
-            return { ...result, actions };
+            return {
+                ...result,
+                actions: prependHistoryToLlmCalls(req.state.messages, result.actions),
+            };
         },
     });
 }

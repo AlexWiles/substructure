@@ -1,35 +1,42 @@
 # substructure.ai
 
-A durable runtime for AI agents. You own the agent logic and tool execution. Substructure handles state persistence, retries, cost tracking, sub-agent orchestration, and client connections.
+> **Alpha.** Substructure is under active development. APIs, CLI commands, and the wire protocol may change between releases.
 
-The runtime executes a decision loop: it sends your handler a trigger (user message, LLM response, tool result) and your handler returns actions (call an LLM, execute a tool, spawn a sub-agent, finish). Every decision and result is persisted. If something crashes, the runtime replays the event log and picks up where it left off.
+Substructure is an open-source engine for building durable, long-running AI agents using just an HTTP endpoint hosted on your infrastructure, in your code.
+
+Substructure drives the agentic loop, handling retries, sub-agent supervision, llm calls, real-time event streaming and more. Tool execution and agent decisions live in your codebase on your infrastructure.
 
 ## How it works
 
-Three components:
+- **Server:** The engine that drives the agent loop, written in Rust. It can be run locally on your machine, embedded in process, or as a cloud hosted version available at [https://app.substructure.ai](https://app.substructure.ai). The server drives the loop, handles durability, retries, llm calls, realtime streaming, subagent supervision and more.
+- **Workers:** Your agent logic. Receives a decision trigger, returns actions. Runs in your codebase with your dependencies. Can be an HTTP endpoint for use with the cloud/local server, or a callback passed to embedded substructure.
+- **Clients:**  Submit work and stream events back. We have support for both backend-to-backend as well as browser based clients.
+- **CLI:** Substructure comes with a CLI to help you provision, observe, and debug from the terminal. You can also start a local server.
+- **SDK:** We provide a TypeScript SDK for building agents and setting up your worker with a just a few lines of code. It also includes server-to-server and browser clients.
 
-- **Server** -- Orchestration layer written in Rust. Persists state, retries failures, tracks costs, manages sub-agents. Runs standalone or embeds in your process.
-- **Workers** -- Your agent logic as an HTTP handler. Receives a decision trigger, returns actions. Runs in your codebase with your dependencies.
-- **Clients** -- Submit work and stream events back. Works service-to-service from backends or real-time from browsers.
+## Why Substructure
+- **Write agent logic, not agent infrastructure.** The event log, retries, timeouts, streaming, etc. are Substructure's job.
+- **Add agents to the codebase you already have.** Workers are plain HTTP handlers. You can drop them into your app, deploy them to your infrastructure.
+- **Ship to serverless.** Stateless workers means they can be deployed to any serverless platform. There are no long running processes.
 
 ## Install
 
+The CLI is available at:
 ```sh
 npm i -g @substructure.ai/cli
 ```
 
-## Local Usage
-
-Start a server:
-
+The SDK is available at:
 ```sh
-export OPENROUTER_API_KEY=sk-or-...   # https://openrouter.ai/keys
-subs local start --dev --provider openrouter --port 9000 --worker-url http://localhost:4444
+npm i @substructure.ai/sdk
 ```
 
-For production startup, drop `--dev` and set `CLIENT_TOKEN_ISSUER`, `CLIENT_TOKEN_AUDIENCE`, `CLIENT_TOKEN_HS256_SECRET`, and `SUBSTRUCTURE_API_KEY`. See `subs local start --help`.
 
-Define an agent with the middleware DSL. Each `.use()` adds a capability -- state, message history, tools, LLM routing:
+## A Quick Example
+
+This walks through running an agent against [Substructure Cloud](https://app.substructure.ai). Three steps: define a worker, point the cloud at it, submit a turn.
+
+**1. Define an agent and serve it as a worker.** Workers are plain HTTP handlers; deploy this anywhere with a public URL (Cloudflare, Vercel, Fly, your own infra). See [`examples/`](./examples) for full deployments.
 
 ```typescript
 import Substructure from "@substructure.ai/sdk";
@@ -60,18 +67,41 @@ const weatherAgent = agent({ id: "weather-agent" })
     request: { model: "anthropic/claude-sonnet-4-5" },
   }));
 
-Bun.serve({ port: 4444, fetch: sub.worker({ agents: [weatherAgent] }).fetchHandler() });
+const worker = sub.worker({ agents: [weatherAgent] });
+
+export default {
+  fetch: worker.fetchHandler({ signingSecret: process.env.SIGNING_SECRET }),
+};
 ```
 
-Submit a message and stream events:
+**2. Provision Substructure Cloud and point it at your deployed worker.**
+
+```sh
+substructure cloud login
+
+substructure cloud link                                          # link this directory to an org & app
+
+substructure cloud webhook set https://your-worker.example.com   # tell the substructure where to call
+
+# Prints out the signing secret for the webhook. Copy into your worker's env as SIGNING_SECRET:
+substructure cloud webhook secret
+
+# Mint an API key for your client:
+export SUBSTRUCTURE_API_KEY=$(substructure cloud keys create demo)
+```
+
+**3. Submit a turn from your client.**
 
 ```typescript
 import Substructure from "@substructure.ai/sdk";
 
 const sub = new Substructure();
-const client = sub.backend.client({ url: "http://localhost:9000", apiKey: "your-api-key" });
+const client = sub.backend.client({
+  url: "https://api.substructure.ai",
+  apiKey: process.env.SUBSTRUCTURE_API_KEY!,
+});
 
-const stream = client.submit({
+const scope = await client.startTurn({
   agentId: "weather-agent",
   payload: {
     type: "message",
@@ -80,43 +110,13 @@ const stream = client.submit({
   identity: { id: "user-1" },
 });
 
-for await (const event of stream) {
-  console.log(event.payload.type);
-}
-
-const result = await stream.result;
+const { data } = await client.turnResult(scope);
+console.log(data);
 ```
 
-You can also skip the server and run everything in-process with the embedded runtime:
+## Docs
 
-```typescript
-import Substructure from "@substructure.ai/sdk";
-
-const sub = new Substructure();
-const instance = await sub.embedded({ agents: [weatherAgent], db: "agent.db" });
-
-const stream = instance.submit({
-  agentId: "weather-agent",
-  payload: {
-    type: "message",
-    message: { role: "user", content: "What's the weather in SF?" },
-  },
-  identity: { tenant_id: "default", id: "user-1" },
-});
-
-for await (const event of stream) {
-  console.log(event.payload.type);
-}
-```
-
-## Features
-
-- **Durable execution** -- Every decision persisted to an event log. Survives crashes, restarts, and timeouts.
-- **Middleware composition** -- State, history, tools, LLM routing, sub-agents are all middleware. Add what you need, replace what you don't.
-- **Sub-agents** -- Agents can delegate to child agents. Failures isolate. Costs roll up.
-- **Cost and token tracking** -- Per-turn, per-session, per-sub-agent.
-- **Multi-tenant** -- Sessions scoped by tenant and user. JWT auth for browser clients.
-- **Portable** -- Workers are HTTP handlers. Deploy anywhere: Cloudflare Workers, Fly.io, bare metal, wherever.
+Full documentation in [`docs/`](./docs).
 
 ## Packages
 

@@ -16,10 +16,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
 
 const TARGETS = {
-  "aarch64-apple-darwin":      { platform: "darwin-arm64", os: "darwin", cpu: "arm64", binName: "subs" },
-  "x86_64-apple-darwin":       { platform: "darwin-x64",   os: "darwin", cpu: "x64",   binName: "subs" },
-  "aarch64-unknown-linux-gnu": { platform: "linux-arm64",  os: "linux",  cpu: "arm64", binName: "subs", libc: "glibc" },
-  "x86_64-unknown-linux-gnu":  { platform: "linux-x64",    os: "linux",  cpu: "x64",   binName: "subs", libc: "glibc" },
+  "aarch64-apple-darwin":      { platform: "darwin-arm64", os: "darwin", cpu: "arm64", binName: "substructure" },
+  "x86_64-apple-darwin":       { platform: "darwin-x64",   os: "darwin", cpu: "x64",   binName: "substructure" },
+  "aarch64-unknown-linux-gnu": { platform: "linux-arm64",  os: "linux",  cpu: "arm64", binName: "substructure", libc: "glibc" },
+  "x86_64-unknown-linux-gnu":  { platform: "linux-x64",    os: "linux",  cpu: "x64",   binName: "substructure", libc: "glibc" },
 };
 
 function parseArgs(argv) {

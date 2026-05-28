@@ -3,6 +3,8 @@ import { BackendClient } from "./backend-client";
 import type { FrontendClientOptions } from "./frontend-client";
 import { FrontendClient } from "./frontend-client";
 import {
+    action,
+    actions,
     jsonState,
     llmLoop,
     logging,
@@ -30,6 +32,8 @@ export interface AgentFactory {
     jsonState: typeof jsonState;
     stateSlice: typeof stateSlice;
     tool: typeof tool;
+    action: typeof action;
+    actions: typeof actions;
     logging: typeof logging;
     messageHistory: typeof messageHistory;
     messageHistoryCurrentTurn: typeof messageHistoryCurrentTurn;
@@ -47,6 +51,8 @@ function createAgentFactory(): AgentFactory {
     factory.jsonState = jsonState;
     factory.stateSlice = stateSlice;
     factory.tool = tool;
+    factory.action = action;
+    factory.actions = actions;
     factory.logging = logging;
     factory.messageHistory = messageHistory;
     factory.messageHistoryCurrentTurn = messageHistoryCurrentTurn;

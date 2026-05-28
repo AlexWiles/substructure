@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-pub const FILENAME: &str = "subs.toml";
+pub const FILENAME: &str = "substructure.toml";
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -13,7 +13,7 @@ pub struct ProjectConfig {
     pub org: Option<String>,
     pub app: Option<String>,
     /// Override the cloud API URL for commands run from this tree. Written
-    /// when `subs cloud link --url <URL>` is used; respected by all later
+    /// when `substructure cloud link --url <URL>` is used; respected by all later
     /// commands unless a `--url` flag or `$SUBS_API_URL` overrides it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
@@ -48,7 +48,7 @@ pub fn find_from(start: &Path) -> Result<Option<Found>> {
 }
 
 pub fn find() -> Result<Option<Found>> {
-    let cwd = env::current_dir().context("could not determine cwd for subs.toml lookup")?;
+    let cwd = env::current_dir().context("could not determine cwd for substructure.toml lookup")?;
     find_from(&cwd)
 }
 
@@ -63,7 +63,7 @@ pub fn load_explicit(path: &Path) -> Result<Found> {
 }
 
 pub fn write(path: &Path, config: &ProjectConfig) -> Result<()> {
-    let serialized = toml::to_string_pretty(config).context("serializing subs.toml")?;
+    let serialized = toml::to_string_pretty(config).context("serializing substructure.toml")?;
     fs::write(path, serialized).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
@@ -87,7 +87,7 @@ mod tests {
         let root = tmpdir();
         let nested = root.join("a/b/c");
         fs::create_dir_all(&nested).unwrap();
-        let cfg_path = root.join("subs.toml");
+        let cfg_path = root.join("substructure.toml");
         fs::write(&cfg_path, "org = \"org-x\"\napp = \"app-y\"\n").unwrap();
 
         let found = find_from(&nested).unwrap().expect("should find ancestor");
@@ -109,9 +109,9 @@ mod tests {
         let root = tmpdir();
         let nested = root.join("inner");
         fs::create_dir_all(&nested).unwrap();
-        fs::write(root.join("subs.toml"), "org = \"outer\"\n").unwrap();
+        fs::write(root.join("substructure.toml"), "org = \"outer\"\n").unwrap();
         fs::write(
-            nested.join("subs.toml"),
+            nested.join("substructure.toml"),
             "org = \"inner\"\napp = \"app-i\"\n",
         )
         .unwrap();
@@ -124,7 +124,7 @@ mod tests {
     #[test]
     fn missing_fields_default_to_none() {
         let dir = tmpdir();
-        fs::write(dir.join("subs.toml"), "").unwrap();
+        fs::write(dir.join("substructure.toml"), "").unwrap();
         let found = find_from(&dir).unwrap().unwrap();
         assert!(found.config.org.is_none());
         assert!(found.config.app.is_none());

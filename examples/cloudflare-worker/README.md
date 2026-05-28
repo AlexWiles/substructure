@@ -12,12 +12,12 @@ Substructure backend).
 
 1. Log in to Substructure.
    ```sh
-   subs cloud login
+   substructure cloud login
    ```
 
-2. Link this directory to your org/app (writes `subs.toml`).
+2. Link this directory to your org/app (writes `substructure.toml`).
    ```sh
-   subs cloud link
+   substructure cloud link
    ```
 
 3. Deploy the worker and copy its URL.
@@ -27,13 +27,13 @@ Substructure backend).
 
 4. Point the app at the worker URL (this also enables delivery).
    ```sh
-   subs cloud webhook set https://<your-worker>.workers.dev
+   substructure cloud webhook set https://<your-worker>.workers.dev
    ```
 
 5. Pipe the signing secret into the worker env — the secret never
    touches your terminal or shell history.
    ```sh
-   subs cloud webhook secret | wrangler secret put SIGNING_SECRET
+   substructure cloud webhook secret | wrangler secret put SIGNING_SECRET
    ```
 
 ## Trigger a turn
@@ -41,7 +41,7 @@ Substructure backend).
 Mint an API key and pipe it straight into the client process:
 
 ```sh
-export SUBSTRUCTURE_API_KEY=$(subs cloud keys create local-dev)
+export SUBSTRUCTURE_API_KEY=$(substructure cloud keys create local-dev)
 tsx client.ts
 ```
 
@@ -50,12 +50,12 @@ tsx client.ts
 ## Useful commands
 
 ```sh
-subs cloud webhook show          # endpoint + state
-subs cloud webhook secret        # print signing secret to stdout
-subs cloud webhook rotate-secret # rotate and print new signing secret
-subs cloud webhook disable       # pause delivery (keeps URL)
-subs cloud sessions list         # recent sessions
-subs cloud keys list             # active API keys
+substructure cloud webhook show          # endpoint + state
+substructure cloud webhook secret        # print signing secret to stdout
+substructure cloud webhook rotate-secret # rotate and print new signing secret
+substructure cloud webhook disable       # pause delivery (keeps URL)
+substructure cloud sessions list         # recent sessions
+substructure cloud keys list             # active API keys
 ```
 
 All secret-emitting commands (`keys create`, `webhook secret`,

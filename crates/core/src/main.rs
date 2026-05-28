@@ -4,7 +4,7 @@ use substructure_core::cli::cloud::{self, CloudCommand};
 use substructure_core::cli::local::{self, LocalCommand};
 
 #[derive(Parser)]
-#[command(name = "subs", version)]
+#[command(name = "substructure", version)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

@@ -32,7 +32,7 @@ pub fn default_path() -> Result<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
         .context("could not determine config dir (HOME/XDG_CONFIG_HOME unset)")?;
-    Ok(base.join("subs").join("credentials.toml"))
+    Ok(base.join("substructure").join("credentials.toml"))
 }
 
 pub fn resolve_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
@@ -83,7 +83,7 @@ impl Credentials {
     pub fn require_token(&self) -> Result<&str> {
         self.token
             .as_deref()
-            .context("not logged in. Run `subs cloud login` to authenticate.")
+            .context("not logged in. Run `substructure cloud login` to authenticate.")
     }
 }
 

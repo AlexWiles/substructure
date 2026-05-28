@@ -68,6 +68,25 @@ importers:
         specifier: 5.9.3
         version: 5.9.3
 
+  examples/hybrid-state:
+    dependencies:
+      '@substructure.ai/runtime':
+        specifier: workspace:*
+        version: link:../../packages/runtime
+      '@substructure.ai/sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk
+    devDependencies:
+      '@types/node':
+        specifier: 24.12.2
+        version: 24.12.2
+      tsx:
+        specifier: 4.20.6
+        version: 4.20.6
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+
   examples/node-embedded:
     dependencies:
       '@substructure.ai/runtime':
@@ -87,7 +106,45 @@ importers:
         specifier: 5.9.3
         version: 5.9.3
 
+  examples/plan-mode:
+    dependencies:
+      '@substructure.ai/runtime':
+        specifier: workspace:*
+        version: link:../../packages/runtime
+      '@substructure.ai/sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk
+    devDependencies:
+      '@types/node':
+        specifier: 24.12.2
+        version: 24.12.2
+      tsx:
+        specifier: 4.20.6
+        version: 4.20.6
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+
   examples/sub-agent:
+    dependencies:
+      '@substructure.ai/runtime':
+        specifier: workspace:*
+        version: link:../../packages/runtime
+      '@substructure.ai/sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk
+    devDependencies:
+      '@types/node':
+        specifier: 24.12.2
+        version: 24.12.2
+      tsx:
+        specifier: 4.20.6
+        version: 4.20.6
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+
+  examples/tool-approval:
     dependencies:
       '@substructure.ai/runtime':
         specifier: workspace:*
@@ -128,32 +185,32 @@ importers:
   packages/cli:
     optionalDependencies:
       '@substructure.ai/cli-darwin-arm64':
-        specifier: 0.1.6
-        version: 0.1.6
+        specifier: 0.1.7
+        version: 0.1.7
       '@substructure.ai/cli-darwin-x64':
-        specifier: 0.1.6
-        version: 0.1.6
+        specifier: 0.1.7
+        version: 0.1.7
       '@substructure.ai/cli-linux-arm64':
-        specifier: 0.1.6
-        version: 0.1.6
+        specifier: 0.1.7
+        version: 0.1.7
       '@substructure.ai/cli-linux-x64':
-        specifier: 0.1.6
-        version: 0.1.6
+        specifier: 0.1.7
+        version: 0.1.7
 
   packages/runtime:
     optionalDependencies:
       '@substructure.ai/runtime-darwin-arm64':
-        specifier: 0.1.6
-        version: 0.1.6
+        specifier: 0.1.7
+        version: 0.1.7
       '@substructure.ai/runtime-darwin-x64':
-        specifier: 0.1.6
-        version: 0.1.6
+        specifier: 0.1.7
+        version: 0.1.7
       '@substructure.ai/runtime-linux-arm64-gnu':
-        specifier: 0.1.6
-        version: 0.1.6
+        specifier: 0.1.7
+        version: 0.1.7
       '@substructure.ai/runtime-linux-x64-gnu':
-        specifier: 0.1.6
-        version: 0.1.6
+        specifier: 0.1.7
+        version: 0.1.7
 
   packages/sdk:
     devDependencies:
@@ -2131,46 +2188,46 @@ packages:
   '@speed-highlight/core@1.2.15':
     resolution: {integrity: sha512-BMq1K3DsElxDWawkX6eLg9+CKJrTVGCBAWVuHXVUV2u0s2711qiChLSId6ikYPfxhdYocLNt3wWwSvDiTvFabw==}
 
-  '@substructure.ai/cli-darwin-arm64@0.1.6':
-    resolution: {integrity: sha512-VmMcPRx2HHzVdNRCbI+Pl01C+eKdHr44cKlWi7f17yw2kYMvJCjj0jnjO+653WGzzUPFnTbD/awrWJQXudqSmg==}
+  '@substructure.ai/cli-darwin-arm64@0.1.7':
+    resolution: {integrity: sha512-oZUcWdVWGvzoAF3F5hyEzquNR+tFX6zAKn1vaWhAHoEXDkkypzacOUMf1wr8wP1DqF3Rc1Vd7BypHsmnTpgRuw==}
     cpu: [arm64]
     os: [darwin]
 
-  '@substructure.ai/cli-darwin-x64@0.1.6':
-    resolution: {integrity: sha512-YgZmX67TtWpwED6hq/ug+TLf7v+SlDFEHIsslAO9gPdmqIzPJaNVIsXOCIZfbzZv9xwIj7f+Or50gWOAy39L0w==}
+  '@substructure.ai/cli-darwin-x64@0.1.7':
+    resolution: {integrity: sha512-vMZrnn2j7K48K8NkPSTlcznt4xKGkel8hYHOPyutIvG6KCrgDVWAIxH5ZKEI5LsmleqD5vZZc/iL4RYdydj6Gw==}
     cpu: [x64]
     os: [darwin]
 
-  '@substructure.ai/cli-linux-arm64@0.1.6':
-    resolution: {integrity: sha512-D+PGcBPkrldU6+E6ctJyTJwKWN0J+rJVxvnwNGN9MpuIotgd4X1CgyE8jBf8pyxXNmugTCRbB20mm4aJECfwgg==}
+  '@substructure.ai/cli-linux-arm64@0.1.7':
+    resolution: {integrity: sha512-t59b6u7GpD6YicOW7AoWcHVDaMeeTwvPsB8QJnJUuho5yAYgnCOfWptLw8EEgN1KpzT32J/OeQEaPDWpPDPVcg==}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
 
-  '@substructure.ai/cli-linux-x64@0.1.6':
-    resolution: {integrity: sha512-XHSampKrjTCIbs+ShuZjlt4w9CbtVWkrPzeg1gy9XJbGw7qjikcczsYgXMr+UAenClRewXG+nD3+xPXA6YHu9w==}
+  '@substructure.ai/cli-linux-x64@0.1.7':
+    resolution: {integrity: sha512-8TCTiK5DcDYwacR1hq1aYyV5x/RIjG3Km+Y80cV/MbwCYTrLHnJ+deidoKPnV08CYJ8VkyRloiCHOLvzJvvgWA==}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
 
-  '@substructure.ai/runtime-darwin-arm64@0.1.6':
-    resolution: {integrity: sha512-ExGLWF1pjDsg9KqDuSlsuX7yb9laCRxWmkGqC6UIAu3N1W6JAmJPMWR5gWYk+QY/NlYKwalZvVdeV9E0/pNyLg==}
+  '@substructure.ai/runtime-darwin-arm64@0.1.7':
+    resolution: {integrity: sha512-Zz3DJoLGp2NVUVRzxdDIdGAyjeRvi+f798TAuWg5Gn1YX25RxfWhKTW7xzo6Y2nNhD6+HDA/nz8Fen0AyBMr9A==}
     cpu: [arm64]
     os: [darwin]
 
-  '@substructure.ai/runtime-darwin-x64@0.1.6':
-    resolution: {integrity: sha512-4JH5B9HyWpKkF5uXCwPaHPAgciD86vU1az8LU1hGWMsGf3CkK7Qiy5X3ML/ABs4sQe+wRhyN7CfNUxNLK2b2uQ==}
+  '@substructure.ai/runtime-darwin-x64@0.1.7':
+    resolution: {integrity: sha512-ojpjTMh6pc4pVfmFRpytXuB9U5XSDUyJk3MvYoTpSGbpo8vy1orCN7FQV0xOK+nrPeNUcjpwsXeFUfert7d89A==}
     cpu: [x64]
     os: [darwin]
 
-  '@substructure.ai/runtime-linux-arm64-gnu@0.1.6':
-    resolution: {integrity: sha512-imROuWVxwIRZ9xfrb2vbhkzMx3ddCkUWckOjEIZEC4NKQ8yPggu+EpHHDmr598H7qUaWGMr+1IIlm1z/DYey+w==}
+  '@substructure.ai/runtime-linux-arm64-gnu@0.1.7':
+    resolution: {integrity: sha512-QvO0WV7i20JAzo+sHi8GhMt6yLtIn5Ajbrws5sZnt6ikjYQqtbk7Cr3gDa6J4DcuHsD2HFO0oyuaEukl/WRVLw==}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
 
-  '@substructure.ai/runtime-linux-x64-gnu@0.1.6':
-    resolution: {integrity: sha512-knDx/HIy67N/tHFtet4YYbrus4glpYjgXo/xOEXG29wZgRESQOXOiwv2f7btBomI9qaKh8DVYPuSN6MT2nVC+g==}
+  '@substructure.ai/runtime-linux-x64-gnu@0.1.7':
+    resolution: {integrity: sha512-qvey4dmzJt3f07o/WDrxGUdlex6s2cict2CpK6X6cQ8ooQsL/ILgq/zqou4FFYYuXgv77fDlv+JmFmCCKNiJqg==}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
@@ -5131,28 +5188,28 @@ snapshots:
 
   '@speed-highlight/core@1.2.15': {}
 
-  '@substructure.ai/cli-darwin-arm64@0.1.6':
+  '@substructure.ai/cli-darwin-arm64@0.1.7':
     optional: true
 
-  '@substructure.ai/cli-darwin-x64@0.1.6':
+  '@substructure.ai/cli-darwin-x64@0.1.7':
     optional: true
 
-  '@substructure.ai/cli-linux-arm64@0.1.6':
+  '@substructure.ai/cli-linux-arm64@0.1.7':
     optional: true
 
-  '@substructure.ai/cli-linux-x64@0.1.6':
+  '@substructure.ai/cli-linux-x64@0.1.7':
     optional: true
 
-  '@substructure.ai/runtime-darwin-arm64@0.1.6':
+  '@substructure.ai/runtime-darwin-arm64@0.1.7':
     optional: true
 
-  '@substructure.ai/runtime-darwin-x64@0.1.6':
+  '@substructure.ai/runtime-darwin-x64@0.1.7':
     optional: true
 
-  '@substructure.ai/runtime-linux-arm64-gnu@0.1.6':
+  '@substructure.ai/runtime-linux-arm64-gnu@0.1.7':
     optional: true
 
-  '@substructure.ai/runtime-linux-x64-gnu@0.1.6':
+  '@substructure.ai/runtime-linux-x64-gnu@0.1.7':
     optional: true
 
   '@tootallnate/once@2.0.0': {}

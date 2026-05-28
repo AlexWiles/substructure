@@ -17,9 +17,26 @@ export type SpanId = string;
 
 // ── Identity ────────────────────────────────────────────────────────────────
 
+/**
+ * The full identity shape as seen in the event log and admin views. `id` is
+ * optional because the underlying engine technically permits it. In practice
+ * every public entry point (HTTP, embedded) rejects a missing `id` before a
+ * session is created.
+ */
 export interface ClientIdentity {
     tenant_id: string;
     id?: string;
+    metadata?: Record<string, string>;
+}
+
+/**
+ * Narrowed identity for the worker-facing surface. `id` is required because
+ * any decision your worker receives came from a session created via an entry
+ * point that enforced a non-empty `id`.
+ */
+export interface WorkerIdentity {
+    tenant_id: string;
+    id: string;
     metadata?: Record<string, string>;
 }
 
@@ -594,9 +611,8 @@ export interface WorkerDecisionRequestWire {
     tenant_id: string;
     decision_id: string;
     agent_id: string;
-    identity: ClientIdentity;
+    identity: WorkerIdentity;
     trigger: DecisionTrigger;
-    /** Base64-encoded opaque worker state */
     worker_state: string;
     ancestry?: Uuid[];
     span: SpanContext;

@@ -29,7 +29,7 @@ impl Context {
             Some(p) => Some(project_config::load_explicit(p)?.config),
             None => project_config::find()?.map(|f| f.config),
         };
-        // Precedence: --url flag > project subs.toml url > $SUBS_API_URL > default.
+        // Precedence: --url flag > project substructure.toml url > $SUBS_API_URL > default.
         let url_override = globals
             .url
             .as_deref()
