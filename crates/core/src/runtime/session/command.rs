@@ -406,57 +406,57 @@ impl SessionState {
             } => {
                 Self::ensure_internal(caller)?;
                 match self.llm_calls.get(&call_id).map(|c| &c.tracking.status) {
-                Some(&EffectStatus::Pending) => {
-                    let truncated = response.finish_reason.as_deref() == Some("length");
-                    let usage = response.usage.clone();
-                    let cost = response.cost;
-                    let tool_calls = if response.tool_calls.is_empty() {
-                        None
-                    } else {
-                        Some(response.tool_calls.clone())
-                    };
-                    let content = if response.images.is_empty() {
-                        response.content.clone().map(Content::Text)
-                    } else {
-                        let mut parts: Vec<ContentPart> = Vec::new();
-                        if let Some(text) = &response.content {
-                            parts.push(ContentPart::Text { text: text.clone() });
-                        }
-                        for img in &response.images {
-                            parts.push(ContentPart::ImageUrl {
-                                image_url: ImageUrl {
-                                    url: img.url.clone(),
-                                },
-                            });
-                        }
-                        Some(Content::Parts(parts))
-                    };
-                    let message = Message {
-                        role: Role::Assistant,
-                        content,
-                        tool_calls,
-                        tool_call_id: None,
-                        name: None,
-                    };
-                    Ok(vec![
-                        EventPayload::LlmCallCompleted(LlmCallCompleted {
-                            call_id: call_id.clone(),
-                            attempt,
-                            response,
-                        }),
-                        EventPayload::NewMessage(NewMessage {
-                            message: message.clone(),
-                        }),
-                        self.emit_decision_request(DecisionTrigger::LlmResponse {
-                            call_id,
-                            message,
-                            truncated,
-                            usage,
-                            cost,
-                        }),
-                    ])
-                }
-                _ => Ok(vec![]),
+                    Some(&EffectStatus::Pending) => {
+                        let truncated = response.finish_reason.as_deref() == Some("length");
+                        let usage = response.usage.clone();
+                        let cost = response.cost;
+                        let tool_calls = if response.tool_calls.is_empty() {
+                            None
+                        } else {
+                            Some(response.tool_calls.clone())
+                        };
+                        let content = if response.images.is_empty() {
+                            response.content.clone().map(Content::Text)
+                        } else {
+                            let mut parts: Vec<ContentPart> = Vec::new();
+                            if let Some(text) = &response.content {
+                                parts.push(ContentPart::Text { text: text.clone() });
+                            }
+                            for img in &response.images {
+                                parts.push(ContentPart::ImageUrl {
+                                    image_url: ImageUrl {
+                                        url: img.url.clone(),
+                                    },
+                                });
+                            }
+                            Some(Content::Parts(parts))
+                        };
+                        let message = Message {
+                            role: Role::Assistant,
+                            content,
+                            tool_calls,
+                            tool_call_id: None,
+                            name: None,
+                        };
+                        Ok(vec![
+                            EventPayload::LlmCallCompleted(LlmCallCompleted {
+                                call_id: call_id.clone(),
+                                attempt,
+                                response,
+                            }),
+                            EventPayload::NewMessage(NewMessage {
+                                message: message.clone(),
+                            }),
+                            self.emit_decision_request(DecisionTrigger::LlmResponse {
+                                call_id,
+                                message,
+                                truncated,
+                                usage,
+                                cost,
+                            }),
+                        ])
+                    }
+                    _ => Ok(vec![]),
                 }
             }
 
@@ -507,27 +507,27 @@ impl SessionState {
             } => {
                 Self::ensure_internal(caller)?;
                 match self.tool_calls.get(&tool_call_id) {
-                Some(_) => Ok(vec![]),
-                None => {
-                    let mut events = vec![EventPayload::ToolCallRequested(ToolCallRequested {
-                        tool_call_id: tool_call_id.clone(),
-                        attempt: 0,
-                        name: name.clone(),
-                        arguments: arguments.clone(),
-                        handler: handler.clone(),
-                        retry: retry.clone(),
-                    })];
-                    if handler == ToolHandler::Worker {
-                        events.push(self.emit_decision_request(DecisionTrigger::ToolExecute {
-                            tool_call_id,
-                            name,
-                            arguments,
+                    Some(_) => Ok(vec![]),
+                    None => {
+                        let mut events = vec![EventPayload::ToolCallRequested(ToolCallRequested {
+                            tool_call_id: tool_call_id.clone(),
                             attempt: 0,
-                            deadline: retry.deadline(chrono::Utc::now()),
-                        }));
+                            name: name.clone(),
+                            arguments: arguments.clone(),
+                            handler: handler.clone(),
+                            retry: retry.clone(),
+                        })];
+                        if handler == ToolHandler::Worker {
+                            events.push(self.emit_decision_request(DecisionTrigger::ToolExecute {
+                                tool_call_id,
+                                name,
+                                arguments,
+                                attempt: 0,
+                                deadline: retry.deadline(chrono::Utc::now()),
+                            }));
+                        }
+                        Ok(events)
                     }
-                    Ok(events)
-                }
                 }
             }
 
@@ -742,14 +742,16 @@ impl SessionState {
             } => {
                 Self::ensure_machine_or_system(caller)?;
                 match self.active_interrupt() {
-                Some(id) if id == interrupt_id => Ok(vec![
-                    EventPayload::InterruptResumed(InterruptResumed {
-                        interrupt_id: interrupt_id.clone(),
-                        payload,
-                    }),
-                    self.emit_decision_request(DecisionTrigger::InterruptResumed { interrupt_id }),
-                ]),
-                _ => Ok(vec![]),
+                    Some(id) if id == interrupt_id => Ok(vec![
+                        EventPayload::InterruptResumed(InterruptResumed {
+                            interrupt_id: interrupt_id.clone(),
+                            payload,
+                        }),
+                        self.emit_decision_request(DecisionTrigger::InterruptResumed {
+                            interrupt_id,
+                        }),
+                    ]),
+                    _ => Ok(vec![]),
                 }
             }
 
@@ -1138,11 +1140,7 @@ mod tests {
     /// Build an empty `Aggregate<SessionState>` for the given session and
     /// run `CreateSession` against it. Returns the aggregate ready for
     /// further `dispatch(...)` calls.
-    fn create_session(
-        session_id: &str,
-        tenant_id: &str,
-        user_id: &str,
-    ) -> Aggregate<SessionState> {
+    fn create_session(session_id: &str, tenant_id: &str, user_id: &str) -> Aggregate<SessionState> {
         let mut agg = Aggregate::new(
             session_id.to_string(),
             tenant_id.to_string(),
@@ -1830,7 +1828,10 @@ mod tests {
             .handle(CommandPayload::Wake { now: Utc::now() }, &Caller::System)
             .expect("wake should succeed");
 
-        assert!(events.is_empty(), "wake on idle session should be a no-op; got {events:?}");
+        assert!(
+            events.is_empty(),
+            "wake on idle session should be a no-op; got {events:?}"
+        );
     }
 
     #[test]
