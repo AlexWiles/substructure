@@ -120,7 +120,7 @@ fn spawn_delta_pump(
 ) -> JoinHandle<()> {
     let root_session_id = task
         .ancestry
-        .last()
+        .first()
         .cloned()
         .unwrap_or_else(|| task.session_id.clone());
     let session_id = task.session_id.clone();

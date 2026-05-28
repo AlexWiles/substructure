@@ -12,7 +12,7 @@ pub struct LlmTask {
     pub request: LlmRequest,
     pub stream: bool,
     pub identity: ClientIdentity,
-    /// Parent chain, root-last. Empty for top-level sessions.
+    /// Parent chain, root-first. Empty for top-level sessions.
     pub ancestry: Vec<String>,
     /// Tagged on emitted token deltas so Turn-scoped subscribers can filter.
     pub turn_id: Option<String>,
