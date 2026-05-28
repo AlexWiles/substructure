@@ -1,4 +1,11 @@
-import type { ClientPayload, Event, SessionScope, TurnResult } from "./types";
+import type {
+    ClientPayload,
+    Event,
+    SessionScope,
+    SubmitToolCallResultRequest,
+    SubmitToolCallResultResponse,
+    TurnResult,
+} from "./types";
 import { drainToTurnResult } from "./types";
 import { UserClient } from "./user-client";
 
@@ -41,6 +48,13 @@ export class FrontendClient {
             turn_id: request.turnId,
         });
         return { sessionId: response.session_id, turnId: response.turn_id };
+    }
+
+    async submitToolCallResult(
+        sessionId: string,
+        request: SubmitToolCallResultRequest,
+    ): Promise<SubmitToolCallResultResponse> {
+        return this.user.submitToolCallResult(sessionId, request);
     }
 
     /** Stream events for a session. If `scope.turnId` is set, the stream is

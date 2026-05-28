@@ -18,7 +18,7 @@ use substructure_core::providers::sqlite::{
 use substructure_core::providers::worker_queue::InMemoryWorkerQueue;
 use substructure_core::session::decision::ClientPayload;
 use substructure_core::worker::{DequeueFilter, FailDecision, SubmitDecision};
-use substructure_core::{Runtime, RuntimeConfig, SubmitClientPayload};
+use substructure_core::{Caller, Runtime, RuntimeConfig, SubmitClientPayload};
 
 /// Result returned by `submitPayload`.
 #[napi(object)]
@@ -163,6 +163,7 @@ impl EmbeddedRuntime {
                                 let submit_decision = SubmitDecision {
                                     session_id: decision.session_id,
                                     tenant_id: decision.tenant_id.clone(),
+                                    caller: Caller::System,
                                     decision_id: decision.decision_id.clone(),
                                     actions: submit.actions,
                                     state: submit
@@ -193,6 +194,7 @@ impl EmbeddedRuntime {
                                 let fail = FailDecision {
                                     session_id: decision.session_id,
                                     tenant_id: decision.tenant_id.clone(),
+                                    caller: Caller::System,
                                     decision_id: decision.decision_id.clone(),
                                     error: format!("failed to parse worker response: {e}"),
                                     retryable: false,
@@ -217,6 +219,7 @@ impl EmbeddedRuntime {
                         let fail = FailDecision {
                             session_id: decision.session_id,
                             tenant_id: decision.tenant_id.clone(),
+                            caller: Caller::System,
                             decision_id: decision.decision_id.clone(),
                             error: format!("js worker callback failed: {e}"),
                             retryable: true,
@@ -270,6 +273,7 @@ impl EmbeddedRuntime {
             .submit_client_payload(SubmitClientPayload {
                 session_id,
                 tenant_id: identity.tenant_id.clone(),
+                caller: Caller::System,
                 identity,
                 agent_id,
                 payload,

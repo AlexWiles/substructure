@@ -62,6 +62,7 @@ impl BearerHashedApiKeyAuthResolver {
                     tenant_id: binding.tenant_id.clone(),
                     source: "api_key",
                     subject: Some(binding.key_id.clone()),
+                    attrs: std::collections::HashMap::new(),
                 });
             }
         }

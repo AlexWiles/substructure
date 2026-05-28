@@ -241,6 +241,13 @@ export type WorkerAction =
     | { type: "send.message"; session_id: Uuid; message: Message }
     | { type: "done"; data: unknown };
 
+export type SubmitToolCallResultRequest = Extract<WorkerAction, { type: "return.tool.result" | "return.tool.error" }>;
+
+export interface SubmitToolCallResultResponse {
+    ok: boolean;
+    error?: string;
+}
+
 // ── Event Payloads ──────────────────────────────────────────────────────────
 
 export interface SessionCreated {
@@ -291,6 +298,7 @@ export interface LlmCallErrored {
 export interface ToolCallRequested {
     type: "tool.call.requested";
     tool_call_id: string;
+    attempt: number;
     name: string;
     arguments: string;
     handler: ToolHandler;

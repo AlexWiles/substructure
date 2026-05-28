@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use axum::http::HeaderMap;
 
@@ -12,6 +14,9 @@ pub struct AuthPrincipal {
     pub tenant_id: String,
     pub source: &'static str,
     pub subject: Option<String>,
+    /// Additional claims surfaced by the resolver (e.g. JWT `attrs`).
+    /// Empty for credential types that don't carry extra data.
+    pub attrs: HashMap<String, String>,
 }
 
 #[derive(Debug, thiserror::Error)]

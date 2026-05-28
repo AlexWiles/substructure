@@ -2,7 +2,16 @@ import { WorkerClient } from "./worker-client";
 import { AdminClient } from "./admin-client";
 import type { ListSessionsParams, SessionDetail, SessionEventsParams, SessionListResponse } from "./admin-client";
 import { drainToTurnResult } from "./types";
-import type { ClientPayload, Event, SessionScope, SubmitRequest, SubmitResponse, TurnResult } from "./types";
+import type {
+    ClientPayload,
+    Event,
+    SessionScope,
+    SubmitRequest,
+    SubmitResponse,
+    SubmitToolCallResultRequest,
+    SubmitToolCallResultResponse,
+    TurnResult,
+} from "./types";
 import type { RequestOptions } from "./base";
 
 export type { SessionScope, TurnResult } from "./types";
@@ -72,6 +81,13 @@ export class BackendClient {
 
     async submitWorkerDecision(request: SubmitRequest): Promise<SubmitResponse> {
         return this.worker.submit(request);
+    }
+
+    async submitToolCallResult(
+        sessionId: string,
+        request: SubmitToolCallResultRequest,
+    ): Promise<SubmitToolCallResultResponse> {
+        return this.worker.submitToolCallResult(sessionId, request);
     }
 
     /** Fire-and-forget: enqueue a turn, return as soon as it's accepted. */

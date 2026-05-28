@@ -7,4 +7,4 @@ pre-commit:
 
     - name: cargo fmt
       glob: "*.rs"
-      run: cargo fmt
+      run: cargo fmt && git add {staged_files}

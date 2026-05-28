@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::providers::memory_queue::TaskQueue;
-use crate::runtime::aggregate::{execute, ConflictRetry, ExecuteError, ExecuteInput};
+use crate::runtime::aggregate::{execute, Caller, ConflictRetry, ExecuteError, ExecuteInput};
 use crate::runtime::event_store::EventStore;
 use crate::runtime::session::command::{CommandPayload, SessionError};
 use crate::runtime::session::state::SessionState;
@@ -58,6 +58,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
                 ExecuteInput {
                     aggregate_id: child_session_id.clone(),
                     tenant_id: tenant_id.clone(),
+                    caller: Caller::System,
                     command: CommandPayload::CreateSession {
                         agent_id,
                         identity,
@@ -91,6 +92,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
                 ExecuteInput {
                     aggregate_id: parent_session_id.clone(),
                     tenant_id: tenant_id.clone(),
+                    caller: Caller::System,
                     command: parent_command,
                     span: span.child("sub_agent_parent_update"),
                 },
@@ -119,6 +121,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
                 ExecuteInput {
                     aggregate_id: target_session_id.clone(),
                     tenant_id,
+                    caller: Caller::System,
                     command: CommandPayload::SendMessage {
                         message,
                         stream: false,
@@ -155,6 +158,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
                 ExecuteInput {
                     aggregate_id: parent_session_id.clone(),
                     tenant_id,
+                    caller: Caller::System,
                     command: CommandPayload::CompleteSubAgentTurn {
                         session_id: child_session_id,
                         agent_id,

@@ -6,7 +6,7 @@ use tokio::task::JoinHandle;
 
 use crate::worker::push::{PushRegistrationRecord, PushRegistry};
 use crate::worker::{DequeueFilter, SubmitDecision};
-use crate::Runtime;
+use crate::{Caller, Runtime};
 
 pub struct PushAdapter {
     pub runtime: Arc<Runtime>,
@@ -87,6 +87,7 @@ impl PushAdapter {
                             let submit = SubmitDecision {
                                 session_id: decision.session_id,
                                 tenant_id: decision.tenant_id.clone(),
+                                caller: Caller::System,
                                 decision_id: decision.decision_id.clone(),
                                 actions: resp.actions,
                                 state: resp.state,

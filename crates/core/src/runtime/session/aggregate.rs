@@ -1,4 +1,4 @@
-use crate::runtime::aggregate::{AggregateState, ApplyContext};
+use crate::runtime::aggregate::{AggregateState, ApplyContext, Caller};
 
 use super::command::{CommandPayload, SessionError};
 use super::events::EventPayload;
@@ -20,8 +20,12 @@ impl AggregateState for SessionState {
         SessionState::apply(self, event, ctx);
     }
 
-    fn handle_command(&self, cmd: CommandPayload) -> Result<Vec<EventPayload>, SessionError> {
-        self.handle(cmd)
+    fn handle_command(
+        &self,
+        cmd: CommandPayload,
+        caller: &Caller,
+    ) -> Result<Vec<EventPayload>, SessionError> {
+        self.handle(cmd, caller)
     }
 
     fn derived_state(&self) -> DerivedState {

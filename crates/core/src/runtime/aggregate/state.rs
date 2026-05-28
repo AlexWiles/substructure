@@ -100,7 +100,11 @@ pub trait AggregateState:
 
     fn apply(&mut self, event: &Self::Event, ctx: &ApplyContext);
 
-    fn handle_command(&self, cmd: Self::Command) -> Result<Vec<Self::Event>, Self::Error>;
+    fn handle_command(
+        &self,
+        cmd: Self::Command,
+        caller: &super::caller::Caller,
+    ) -> Result<Vec<Self::Event>, Self::Error>;
 
     fn derived_state(&self) -> Self::Derived;
 

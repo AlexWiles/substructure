@@ -24,6 +24,24 @@ pub struct SubmitResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+pub enum SubmitToolCallResultRequest {
+    #[serde(rename = "return.tool.result")]
+    Result {
+        tool_call_id: String,
+        result: String,
+        attempt: u32,
+    },
+    #[serde(rename = "return.tool.error")]
+    Error {
+        tool_call_id: String,
+        error: String,
+        retryable: bool,
+        attempt: u32,
+    },
+}
+
+#[derive(Debug, Deserialize)]
 pub struct MintClientTokenRequest {
     pub identity: MintClientTokenIdentity,
     #[serde(default)]

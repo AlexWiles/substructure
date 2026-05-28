@@ -353,6 +353,13 @@ The worker is stateless. Each request is one decision; the engine holds the dura
 
 ## Submitting turns from a client
 
+There are two clients for talking to a deployed worker, picked by where the code runs:
+
+- `sub.backend.client({ apiKey })` — for code that runs on **your servers**. Authenticates with a long-lived API key. Can act as any identity and exposes admin APIs (`listSessions`, `getSession`, `sessionEvents`).
+- `sub.frontend.client({ token })` — for code that runs in **the browser** (or any untrusted environment). Authenticates with a short-lived per-user token your backend mints. Scoped to a single identity; no admin APIs.
+
+The two have the same core surface (`startTurn`, `stream`, `turnResult`), so most agent code is identical regardless of which client drives it. Pick by trust boundary, not by feature.
+
 ### Backend client
 
 Use the backend client from any server. It authenticates with an API key minted via `substructure cloud keys create`.
@@ -383,11 +390,26 @@ console.log(data);
 
 The client also exposes admin APIs: `listSessions`, `getSession`, and `sessionEvents` for tooling and dashboards.
 
-### Browser client
+### Frontend client
 
-`sub.frontend.client({ token })` is the browser equivalent. The shape is identical (`startTurn`, `stream`, `turnResult`), but it authenticates with a short-lived user token instead of an API key. Never ship an API key to the browser.
+`sub.frontend.client({ token })` is the browser-side counterpart. The shape mirrors the backend client (`startTurn`, `stream`, `turnResult`, `submitToolCallResult`), but it authenticates with a short-lived user token instead of an API key, so it's safe to use in code shipped to a browser, a mobile app, or any other untrusted environment. **Never ship an API key to a client.**
 
-The flow is two steps: your backend mints a token for a specific user, the browser uses that token to drive the turn.
+Reach for the frontend client when:
+
+- You want a chat UI, dashboard, or other interface to talk to your agent directly from the browser without round-tripping each message through your backend.
+- You want to stream events (token-by-token responses, tool calls, sub-agent progress) straight to the UI over SSE without standing up your own proxy.
+- You're building a mobile or desktop client that has user-level auth but no shared secret with Substructure.
+
+Stay on the backend client when the caller is a trusted server, when you need admin APIs like `listSessions`, or when you want to act as multiple identities from one process (cron jobs, webhooks, batch jobs).
+
+Key differences from the backend client:
+
+- **Auth.** Authorized with a JWT minted by your backend via `client.mintClientToken({ identity, ttlSeconds })`. The token is bound to a single identity and expires.
+- **No `identity` field on `startTurn`.** The identity is already baked into the token; the browser can't impersonate other users even though it holds the token directly.
+- **No admin APIs.** `listSessions`, `getSession`, and `sessionEvents` are server-only.
+- **Endpoint surface.** The frontend client talks to `/api/client/*` routes that are scoped to the token's identity; the backend client talks to `/api/worker/*` and `/api/admin/*`.
+
+The typical flow is two steps: your backend mints a token for the signed-in user, the browser uses that token to drive the turn.
 
 **Backend: mint a token for the logged-in user.**
 
@@ -442,7 +464,7 @@ Note that the browser does not pass `identity`: it's already baked into the toke
 
 ## Embedded runtime
 
-For local development, testing, or single-machine deployments, you can run the Substructure engine in-process. No separate server, no cloud account, just a SQLite file.
+For scripts, tests, and local development, you can run the Substructure engine in-process.
 
 The engine itself is a native Rust binary, so it ships as a separate package. Install it alongside the SDK:
 
@@ -488,7 +510,7 @@ agent.llmLoop({
 });
 ```
 
-Substructure uses OpenRouter under the hood, so any OpenRouter model identifier works. When running embedded, pass `openrouterApiKey` to `sub.embedded(...)`. With cloud or local server, the provider credentials live on the server (set via `OPENROUTER_API_KEY` when you ran `substructure local start`, or configured for your org in the cloud dashboard).
+Models are identified by `provider/model` strings. When running embedded or locally, provider credentials are read from the environment; with cloud, they're configured for your org in the dashboard.
 
 ## Examples
 

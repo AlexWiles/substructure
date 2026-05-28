@@ -8,6 +8,8 @@ import type {
     SubmitClientPayloadResponse,
     SubmitRequest,
     SubmitResponse,
+    SubmitToolCallResultRequest,
+    SubmitToolCallResultResponse,
     WorkerAuthOptions,
 } from "./types";
 
@@ -25,6 +27,16 @@ export class WorkerClient extends BaseClient {
         auth?: WorkerAuthOptions,
     ): Promise<SubmitClientPayloadResponse> {
         return this.post("/api/machine/sessions/submit", request, {
+            headers: buildWorkerAuthHeaders(auth),
+        });
+    }
+
+    async submitToolCallResult(
+        sessionId: string,
+        request: SubmitToolCallResultRequest,
+        auth?: WorkerAuthOptions,
+    ): Promise<SubmitToolCallResultResponse> {
+        return this.post(`/api/machine/sessions/${sessionId}/tool-call-results`, request, {
             headers: buildWorkerAuthHeaders(auth),
         });
     }

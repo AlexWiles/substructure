@@ -147,6 +147,7 @@ pub struct SubAgentErrored {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallRequested {
     pub tool_call_id: String,
+    pub attempt: u32,
     pub name: String,
     pub arguments: String,
     #[serde(default)]

@@ -7,6 +7,7 @@ use super::decision::{ClientPayload, DecisionTrigger, ToolResult, WorkerAction};
 use super::events::*;
 use super::message::{Content, ContentPart, ImageUrl, Message, Role};
 use super::state::{new_call_id, EffectStatus, SessionState, SessionStatus};
+use crate::runtime::aggregate::Caller;
 use crate::runtime::identity::ClientIdentity;
 use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse};
 use crate::runtime::retry::RetryPolicy;
@@ -21,7 +22,6 @@ pub enum CommandPayload {
     },
     SubmitClientPayload {
         payload: ClientPayload,
-        identity: ClientIdentity,
         turn_id: Option<String>,
     },
     SendMessage {
@@ -58,11 +58,13 @@ pub enum CommandPayload {
     },
     CompleteToolCall {
         tool_call_id: String,
+        attempt: u32,
         result: String,
         worker_state: Option<Vec<u8>>,
     },
     FailToolCall {
         tool_call_id: String,
+        attempt: u32,
         error: String,
         retryable: bool,
         worker_state: Option<Vec<u8>>,
@@ -132,10 +134,94 @@ pub enum SessionError {
     MissingSubject,
     #[error("session access denied")]
     SessionAccessDenied,
+    #[error("tool call not found")]
+    ToolCallNotFound,
+    #[error("tool call is not pending")]
+    ToolCallNotPending,
+    #[error("tool call attempt mismatch")]
+    ToolCallAttemptMismatch,
+    #[error("client may only complete client-handled tool calls")]
+    ToolCallWrongHandler,
 }
 
 impl SessionState {
-    pub fn handle(&self, cmd: CommandPayload) -> Result<Vec<EventPayload>, SessionError> {
+    /// Reject anything but [`Caller::System`]. For commands only ever
+    /// dispatched by internal processors or recursive expansions.
+    fn ensure_internal(caller: &Caller) -> Result<(), SessionError> {
+        match caller {
+            Caller::System => Ok(()),
+            _ => Err(SessionError::SessionAccessDenied),
+        }
+    }
+
+    /// Allow [`Caller::Machine`] and [`Caller::System`] only. For
+    /// worker-flavored commands (worker decisions, admin actions) that
+    /// end users should never reach.
+    fn ensure_machine_or_system(caller: &Caller) -> Result<(), SessionError> {
+        match caller {
+            Caller::System | Caller::Machine { .. } => Ok(()),
+            Caller::Frontend { .. } => Err(SessionError::SessionAccessDenied),
+        }
+    }
+
+    /// Verify that the caller's tenant matches the given session-tenant.
+    /// Catches transport bugs where a route builds a [`Caller`] with a
+    /// different tenant than the one the session was created under.
+    fn ensure_tenant_matches(caller: &Caller, tenant_id: &str) -> Result<(), SessionError> {
+        match caller {
+            Caller::System => Ok(()),
+            Caller::Machine {
+                tenant_id: caller_tenant,
+                ..
+            }
+            | Caller::Frontend {
+                tenant_id: caller_tenant,
+                ..
+            } => {
+                if caller_tenant != tenant_id {
+                    return Err(SessionError::SessionAccessDenied);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Verify that the caller is allowed to act on this session.
+    /// `Frontend` callers must own the session (matching `user_id`).
+    /// `Machine` and `System` callers are unconstrained.
+    fn ensure_owns_session(&self, caller: &Caller) -> Result<(), SessionError> {
+        match caller {
+            Caller::System | Caller::Machine { .. } => Ok(()),
+            Caller::Frontend { user_id, .. } => {
+                let identity = self
+                    .identity
+                    .as_ref()
+                    .ok_or(SessionError::SessionAccessDenied)?;
+                if identity.id.as_deref() != Some(user_id.as_str()) {
+                    return Err(SessionError::SessionAccessDenied);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn check_tool_call_caller(
+        &self,
+        tc: &super::state::ToolCallState,
+        caller: &Caller,
+    ) -> Result<(), SessionError> {
+        self.ensure_owns_session(caller)?;
+        if matches!(caller, Caller::Frontend { .. }) && tc.handler != ToolHandler::Client {
+            return Err(SessionError::ToolCallWrongHandler);
+        }
+        Ok(())
+    }
+
+    pub fn handle(
+        &self,
+        cmd: CommandPayload,
+        caller: &Caller,
+    ) -> Result<Vec<EventPayload>, SessionError> {
         match (&self.agent_id, cmd) {
             (
                 None,
@@ -145,19 +231,27 @@ impl SessionState {
                     ancestry,
                     worker_retry,
                 },
-            ) => Ok(vec![EventPayload::SessionCreated(Box::new(
-                SessionCreated {
-                    agent_id,
-                    identity,
-                    ancestry,
-                    worker_retry,
-                },
-            ))]),
+            ) => {
+                Self::ensure_tenant_matches(caller, &identity.tenant_id)?;
+                if let Caller::Frontend { user_id, .. } = caller {
+                    if identity.id.as_deref() != Some(user_id.as_str()) {
+                        return Err(SessionError::SessionAccessDenied);
+                    }
+                }
+                Ok(vec![EventPayload::SessionCreated(Box::new(
+                    SessionCreated {
+                        agent_id,
+                        identity,
+                        ancestry,
+                        worker_retry,
+                    },
+                ))])
+            }
             (Some(_), CommandPayload::CreateSession { .. }) => {
                 Err(SessionError::SessionAlreadyCreated)
             }
             (None, _) => Err(SessionError::SessionNotCreated),
-            (Some(_), cmd) => self.handle_active(cmd),
+            (Some(_), cmd) => self.handle_active(cmd, caller),
         }
     }
 
@@ -176,26 +270,19 @@ impl SessionState {
         }
     }
 
-    fn handle_active(&self, cmd: CommandPayload) -> Result<Vec<EventPayload>, SessionError> {
+    fn handle_active(
+        &self,
+        cmd: CommandPayload,
+        caller: &Caller,
+    ) -> Result<Vec<EventPayload>, SessionError> {
+        if let Some(identity) = self.identity.as_ref() {
+            Self::ensure_tenant_matches(caller, &identity.tenant_id)?;
+        }
         match cmd {
             CommandPayload::CreateSession { .. } => Err(SessionError::SessionAlreadyCreated),
 
-            CommandPayload::SubmitClientPayload {
-                payload,
-                identity,
-                turn_id,
-            } => {
-                let Some(subject) = identity.id.as_deref() else {
-                    return Err(SessionError::MissingSubject);
-                };
-                let Some(existing) = self.identity.as_ref() else {
-                    return Err(SessionError::SessionAccessDenied);
-                };
-                if existing.tenant_id != identity.tenant_id
-                    || existing.id.as_deref() != Some(subject)
-                {
-                    return Err(SessionError::SessionAccessDenied);
-                }
+            CommandPayload::SubmitClientPayload { payload, turn_id } => {
+                self.ensure_owns_session(caller)?;
 
                 if let Some(ref tid) = turn_id {
                     if self.completed_turn_ids.contains(tid) {
@@ -248,6 +335,7 @@ impl SessionState {
                 stream,
                 turn_id,
             } => {
+                Self::ensure_internal(caller)?;
                 // Idempotency guard: reject if this turn_id was already seen
                 if let Some(ref tid) = turn_id {
                     if self.completed_turn_ids.contains(tid) {
@@ -290,6 +378,7 @@ impl SessionState {
                 stream,
                 retry,
             } => {
+                Self::ensure_internal(caller)?;
                 if self.has_pending_llm() {
                     return Ok(vec![]);
                 }
@@ -314,59 +403,62 @@ impl SessionState {
                 call_id,
                 attempt,
                 response,
-            } => match self.llm_calls.get(&call_id).map(|c| &c.tracking.status) {
-                Some(&EffectStatus::Pending) => {
-                    let truncated = response.finish_reason.as_deref() == Some("length");
-                    let usage = response.usage.clone();
-                    let cost = response.cost;
-                    let tool_calls = if response.tool_calls.is_empty() {
-                        None
-                    } else {
-                        Some(response.tool_calls.clone())
-                    };
-                    let content = if response.images.is_empty() {
-                        response.content.clone().map(Content::Text)
-                    } else {
-                        let mut parts: Vec<ContentPart> = Vec::new();
-                        if let Some(text) = &response.content {
-                            parts.push(ContentPart::Text { text: text.clone() });
-                        }
-                        for img in &response.images {
-                            parts.push(ContentPart::ImageUrl {
-                                image_url: ImageUrl {
-                                    url: img.url.clone(),
-                                },
-                            });
-                        }
-                        Some(Content::Parts(parts))
-                    };
-                    let message = Message {
-                        role: Role::Assistant,
-                        content,
-                        tool_calls,
-                        tool_call_id: None,
-                        name: None,
-                    };
-                    Ok(vec![
-                        EventPayload::LlmCallCompleted(LlmCallCompleted {
-                            call_id: call_id.clone(),
-                            attempt,
-                            response,
-                        }),
-                        EventPayload::NewMessage(NewMessage {
-                            message: message.clone(),
-                        }),
-                        self.emit_decision_request(DecisionTrigger::LlmResponse {
-                            call_id,
-                            message,
-                            truncated,
-                            usage,
-                            cost,
-                        }),
-                    ])
+            } => {
+                Self::ensure_internal(caller)?;
+                match self.llm_calls.get(&call_id).map(|c| &c.tracking.status) {
+                    Some(&EffectStatus::Pending) => {
+                        let truncated = response.finish_reason.as_deref() == Some("length");
+                        let usage = response.usage.clone();
+                        let cost = response.cost;
+                        let tool_calls = if response.tool_calls.is_empty() {
+                            None
+                        } else {
+                            Some(response.tool_calls.clone())
+                        };
+                        let content = if response.images.is_empty() {
+                            response.content.clone().map(Content::Text)
+                        } else {
+                            let mut parts: Vec<ContentPart> = Vec::new();
+                            if let Some(text) = &response.content {
+                                parts.push(ContentPart::Text { text: text.clone() });
+                            }
+                            for img in &response.images {
+                                parts.push(ContentPart::ImageUrl {
+                                    image_url: ImageUrl {
+                                        url: img.url.clone(),
+                                    },
+                                });
+                            }
+                            Some(Content::Parts(parts))
+                        };
+                        let message = Message {
+                            role: Role::Assistant,
+                            content,
+                            tool_calls,
+                            tool_call_id: None,
+                            name: None,
+                        };
+                        Ok(vec![
+                            EventPayload::LlmCallCompleted(LlmCallCompleted {
+                                call_id: call_id.clone(),
+                                attempt,
+                                response,
+                            }),
+                            EventPayload::NewMessage(NewMessage {
+                                message: message.clone(),
+                            }),
+                            self.emit_decision_request(DecisionTrigger::LlmResponse {
+                                call_id,
+                                message,
+                                truncated,
+                                usage,
+                                cost,
+                            }),
+                        ])
+                    }
+                    _ => Ok(vec![]),
                 }
-                _ => Ok(vec![]),
-            },
+            }
 
             CommandPayload::FailLlmCall {
                 call_id,
@@ -376,6 +468,7 @@ impl SessionState {
                 code,
                 detail,
             } => {
+                Self::ensure_internal(caller)?;
                 let Some(call) = self.llm_calls.get(&call_id) else {
                     return Ok(vec![]);
                 };
@@ -411,40 +504,50 @@ impl SessionState {
                 arguments,
                 handler,
                 retry,
-            } => match self.tool_calls.get(&tool_call_id) {
-                Some(_) => Ok(vec![]),
-                None => {
-                    let mut events = vec![EventPayload::ToolCallRequested(ToolCallRequested {
-                        tool_call_id: tool_call_id.clone(),
-                        name: name.clone(),
-                        arguments: arguments.clone(),
-                        handler: handler.clone(),
-                        retry: retry.clone(),
-                    })];
-                    if handler == ToolHandler::Worker {
-                        events.push(self.emit_decision_request(DecisionTrigger::ToolExecute {
-                            tool_call_id,
-                            name,
-                            arguments,
+            } => {
+                Self::ensure_internal(caller)?;
+                match self.tool_calls.get(&tool_call_id) {
+                    Some(_) => Ok(vec![]),
+                    None => {
+                        let mut events = vec![EventPayload::ToolCallRequested(ToolCallRequested {
+                            tool_call_id: tool_call_id.clone(),
                             attempt: 0,
-                            deadline: retry.deadline(chrono::Utc::now()),
-                        }));
+                            name: name.clone(),
+                            arguments: arguments.clone(),
+                            handler: handler.clone(),
+                            retry: retry.clone(),
+                        })];
+                        if handler == ToolHandler::Worker {
+                            events.push(self.emit_decision_request(DecisionTrigger::ToolExecute {
+                                tool_call_id,
+                                name,
+                                arguments,
+                                attempt: 0,
+                                deadline: retry.deadline(chrono::Utc::now()),
+                            }));
+                        }
+                        Ok(events)
                     }
-                    Ok(events)
                 }
-            },
+            }
 
             CommandPayload::CompleteToolCall {
                 tool_call_id,
+                attempt,
                 result,
                 worker_state,
             } => {
-                let Some(tc) = self.tool_calls.get(&tool_call_id) else {
-                    return Ok(vec![]);
-                };
+                let tc = self
+                    .tool_calls
+                    .get(&tool_call_id)
+                    .ok_or(SessionError::ToolCallNotFound)?;
                 if tc.tracking.status != EffectStatus::Pending {
-                    return Ok(vec![]);
+                    return Err(SessionError::ToolCallNotPending);
                 }
+                if tc.tracking.retry.attempts != attempt {
+                    return Err(SessionError::ToolCallAttemptMismatch);
+                }
+                self.check_tool_call_caller(tc, caller)?;
                 let name = tc.name.clone();
                 let mut events = vec![
                     EventPayload::ToolCallCompleted(ToolCallCompleted {
@@ -480,16 +583,22 @@ impl SessionState {
 
             CommandPayload::FailToolCall {
                 tool_call_id,
+                attempt,
                 error,
                 retryable,
                 worker_state,
             } => {
-                let Some(tc) = self.tool_calls.get(&tool_call_id) else {
-                    return Ok(vec![]);
-                };
+                let tc = self
+                    .tool_calls
+                    .get(&tool_call_id)
+                    .ok_or(SessionError::ToolCallNotFound)?;
                 if tc.tracking.status != EffectStatus::Pending {
-                    return Ok(vec![]);
+                    return Err(SessionError::ToolCallNotPending);
                 }
+                if tc.tracking.retry.attempts != attempt {
+                    return Err(SessionError::ToolCallAttemptMismatch);
+                }
+                self.check_tool_call_caller(tc, caller)?;
                 let name = tc.name.clone();
                 let mut events = vec![EventPayload::ToolCallErrored(ToolCallErrored {
                     tool_call_id: tool_call_id.clone(),
@@ -523,16 +632,20 @@ impl SessionState {
                 session_id,
                 agent_id,
                 retry,
-            } => match self.sub_agent_calls.get(&session_id) {
-                Some(_) => Ok(vec![]),
-                None => Ok(vec![EventPayload::SubAgentRequested(SubAgentRequested {
-                    session_id,
-                    agent_id,
-                    retry,
-                })]),
-            },
+            } => {
+                Self::ensure_internal(caller)?;
+                match self.sub_agent_calls.get(&session_id) {
+                    Some(_) => Ok(vec![]),
+                    None => Ok(vec![EventPayload::SubAgentRequested(SubAgentRequested {
+                        session_id,
+                        agent_id,
+                        retry,
+                    })]),
+                }
+            }
 
             CommandPayload::StartSubAgent { session_id } => {
+                Self::ensure_internal(caller)?;
                 match self
                     .sub_agent_calls
                     .get(&session_id)
@@ -552,6 +665,7 @@ impl SessionState {
                 error,
                 retryable,
             } => {
+                Self::ensure_internal(caller)?;
                 let Some(sa) = self.sub_agent_calls.get(&session_id) else {
                     return Ok(vec![]);
                 };
@@ -585,6 +699,7 @@ impl SessionState {
                 cost,
                 token_usage,
             } => {
+                Self::ensure_internal(caller)?;
                 // Only fire if we know about this sub-agent
                 if self.sub_agent_calls.contains_key(&session_id) {
                     Ok(vec![
@@ -609,34 +724,43 @@ impl SessionState {
                 interrupt_id,
                 reason,
                 payload,
-            } => match self.status {
-                SessionStatus::Interrupted { .. } => Ok(vec![]),
-                _ => Ok(vec![EventPayload::SessionInterrupted(SessionInterrupted {
-                    interrupt_id,
-                    reason,
-                    payload,
-                })]),
-            },
+            } => {
+                Self::ensure_machine_or_system(caller)?;
+                match self.status {
+                    SessionStatus::Interrupted { .. } => Ok(vec![]),
+                    _ => Ok(vec![EventPayload::SessionInterrupted(SessionInterrupted {
+                        interrupt_id,
+                        reason,
+                        payload,
+                    })]),
+                }
+            }
 
             CommandPayload::ResumeInterrupt {
                 interrupt_id,
                 payload,
-            } => match self.active_interrupt() {
-                Some(id) if id == interrupt_id => Ok(vec![
-                    EventPayload::InterruptResumed(InterruptResumed {
-                        interrupt_id: interrupt_id.clone(),
-                        payload,
-                    }),
-                    self.emit_decision_request(DecisionTrigger::InterruptResumed { interrupt_id }),
-                ]),
-                _ => Ok(vec![]),
-            },
+            } => {
+                Self::ensure_machine_or_system(caller)?;
+                match self.active_interrupt() {
+                    Some(id) if id == interrupt_id => Ok(vec![
+                        EventPayload::InterruptResumed(InterruptResumed {
+                            interrupt_id: interrupt_id.clone(),
+                            payload,
+                        }),
+                        self.emit_decision_request(DecisionTrigger::InterruptResumed {
+                            interrupt_id,
+                        }),
+                    ]),
+                    _ => Ok(vec![]),
+                }
+            }
 
             CommandPayload::SubmitWorkerDecision {
                 decision_id,
                 actions,
                 state,
             } => {
+                Self::ensure_machine_or_system(caller)?;
                 match self
                     .worker_decisions
                     .get(&decision_id)
@@ -654,34 +778,43 @@ impl SessionState {
                             request,
                             stream,
                             retry,
-                        } => self.handle(CommandPayload::RequestLlmCall {
-                            call_id: new_call_id(),
-                            request,
-                            stream,
-                            retry,
-                        }),
+                        } => self.handle(
+                            CommandPayload::RequestLlmCall {
+                                call_id: new_call_id(),
+                                request,
+                                stream,
+                                retry,
+                            },
+                            &Caller::System,
+                        ),
                         WorkerAction::CallTool {
                             tool_call_id,
                             name,
                             arguments,
                             handler,
                             retry,
-                        } => self.handle(CommandPayload::RequestToolCall {
-                            tool_call_id,
-                            name,
-                            arguments,
-                            handler,
-                            retry,
-                        }),
+                        } => self.handle(
+                            CommandPayload::RequestToolCall {
+                                tool_call_id,
+                                name,
+                                arguments,
+                                handler,
+                                retry,
+                            },
+                            &Caller::System,
+                        ),
                         WorkerAction::SpawnSubAgent {
                             session_id,
                             agent_id,
                             retry,
-                        } => self.handle(CommandPayload::RequestSubAgent {
-                            session_id,
-                            agent_id,
-                            retry,
-                        }),
+                        } => self.handle(
+                            CommandPayload::RequestSubAgent {
+                                session_id,
+                                agent_id,
+                                retry,
+                            },
+                            &Caller::System,
+                        ),
                         WorkerAction::SendMessage {
                             session_id,
                             message,
@@ -695,40 +828,32 @@ impl SessionState {
                             tool_call_id,
                             result,
                             attempt,
-                        } => match self.tool_calls.get(&tool_call_id) {
-                            Some(tc)
-                                if tc.tracking.status == EffectStatus::Pending
-                                    && tc.tracking.retry.attempts == attempt =>
-                            {
-                                self.handle(CommandPayload::CompleteToolCall {
-                                    tool_call_id,
-                                    result,
-                                    worker_state: None,
-                                })
-                            }
-                            _ => Ok(vec![]),
-                        },
+                        } => self.handle(
+                            CommandPayload::CompleteToolCall {
+                                tool_call_id,
+                                attempt,
+                                result,
+                                worker_state: None,
+                            },
+                            &Caller::System,
+                        ),
                         WorkerAction::ReturnToolError {
                             tool_call_id,
                             error,
                             retryable,
                             attempt,
-                        } => match self.tool_calls.get(&tool_call_id) {
-                            Some(tc)
-                                if tc.tracking.status == EffectStatus::Pending
-                                    && tc.tracking.retry.attempts == attempt =>
-                            {
-                                self.handle(CommandPayload::FailToolCall {
-                                    tool_call_id,
-                                    error,
-                                    retryable,
-                                    worker_state: None,
-                                })
-                            }
-                            _ => Ok(vec![]),
-                        },
+                        } => self.handle(
+                            CommandPayload::FailToolCall {
+                                tool_call_id,
+                                attempt,
+                                error,
+                                retryable,
+                                worker_state: None,
+                            },
+                            &Caller::System,
+                        ),
                         WorkerAction::Done { data } => {
-                            self.handle(CommandPayload::MarkDone { data })
+                            self.handle(CommandPayload::MarkDone { data }, &Caller::System)
                         }
                     };
                     if let Ok(sub) = sub_events {
@@ -767,6 +892,7 @@ impl SessionState {
                 error,
                 retryable,
             } => {
+                Self::ensure_machine_or_system(caller)?;
                 match self
                     .worker_decisions
                     .get(&decision_id)
@@ -784,9 +910,13 @@ impl SessionState {
                 )])
             }
 
-            CommandPayload::CancelSession => Ok(vec![EventPayload::SessionCancelled]),
+            CommandPayload::CancelSession => {
+                Self::ensure_machine_or_system(caller)?;
+                Ok(vec![EventPayload::SessionCancelled])
+            }
 
             CommandPayload::MarkDone { data } => {
+                Self::ensure_internal(caller)?;
                 let mut events = Vec::new();
                 if let Some(turn_id) = &self.turn_id {
                     events.push(EventPayload::TurnCompleted(TurnCompleted {
@@ -800,7 +930,10 @@ impl SessionState {
                 Ok(events)
             }
 
-            CommandPayload::Wake { now } => self.handle_wake(now),
+            CommandPayload::Wake { now } => {
+                Self::ensure_internal(caller)?;
+                self.handle_wake(now)
+            }
         }
     }
 
@@ -859,6 +992,7 @@ impl SessionState {
                     if next_at <= now {
                         let mut events = vec![EventPayload::ToolCallRequested(ToolCallRequested {
                             tool_call_id: tc.tool_call_id.clone(),
+                            attempt: tc.tracking.retry.attempts,
                             name: tc.name.clone(),
                             arguments: tc.arguments.clone(),
                             handler: tc.handler.clone(),
@@ -869,7 +1003,7 @@ impl SessionState {
                                 tool_call_id: tc.tool_call_id.clone(),
                                 name: tc.name.clone(),
                                 arguments: tc.arguments.clone(),
-                                attempt: tc.tracking.retry.attempts + 1,
+                                attempt: tc.tracking.retry.attempts,
                                 deadline: tc.tracking.retry_policy.deadline(now),
                             }));
                         }
@@ -962,5 +1096,1224 @@ impl SessionState {
         }
 
         Ok(vec![])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use chrono::Utc;
+
+    use super::*;
+    use crate::runtime::aggregate::{Aggregate, Caller, CommitContext};
+    use crate::runtime::identity::ClientIdentity;
+    use crate::runtime::llm::{LlmRequest, LlmResponse};
+    use crate::runtime::retry::RetryPolicy;
+    use crate::runtime::session::decision::{ClientPayload, WorkerAction};
+    use crate::runtime::session::events::{EventPayload, ToolHandler};
+    use crate::runtime::session::message::{Content, Message, Role};
+    use crate::runtime::session::state::{EffectStatus, SessionState, SessionStatus};
+    use crate::runtime::span::SpanContext;
+
+    /// Run a command through the handler and commit the resulting events.
+    /// Mirrors what `execute()` does in production (minus the store
+    /// round-trip), so test setup exercises the real command + commit
+    /// paths including stream version, sequence numbers, and derived
+    /// state tracking. Returns the emitted event payloads so tests can
+    /// pluck out generated ids (decision_id, etc.) without peeking into
+    /// state.
+    fn dispatch(
+        agg: &mut Aggregate<SessionState>,
+        cmd: CommandPayload,
+        caller: &Caller,
+    ) -> Vec<EventPayload> {
+        let events = agg.state.handle(cmd, caller).expect("setup command failed");
+        let ctx = CommitContext {
+            span: SpanContext::root(),
+            occurred_at: Utc::now(),
+        };
+        agg.commit(events.clone(), &ctx);
+        events
+    }
+
+    /// Build an empty `Aggregate<SessionState>` for the given session and
+    /// run `CreateSession` against it. Returns the aggregate ready for
+    /// further `dispatch(...)` calls.
+    fn create_session(session_id: &str, tenant_id: &str, user_id: &str) -> Aggregate<SessionState> {
+        let mut agg = Aggregate::new(
+            session_id.to_string(),
+            tenant_id.to_string(),
+            SessionState::new(session_id.to_string()),
+        );
+        dispatch(
+            &mut agg,
+            CommandPayload::CreateSession {
+                agent_id: "agent-1".to_string(),
+                identity: ClientIdentity {
+                    tenant_id: tenant_id.to_string(),
+                    id: Some(user_id.to_string()),
+                    metadata: HashMap::new(),
+                },
+                ancestry: vec![],
+                worker_retry: RetryPolicy::no_retry(),
+            },
+            &Caller::System,
+        );
+        agg
+    }
+
+    #[test]
+    fn frontend_can_complete_own_client_handled_tool_call() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        dispatch(
+            &mut agg,
+            CommandPayload::RequestToolCall {
+                tool_call_id: "tc-1".to_string(),
+                name: "my_tool".to_string(),
+                arguments: "{}".to_string(),
+                handler: ToolHandler::Client,
+                retry: RetryPolicy::no_retry(),
+            },
+            &Caller::System,
+        );
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::CompleteToolCall {
+                tool_call_id: "tc-1".to_string(),
+                attempt: 0,
+                result: "ok".to_string(),
+                worker_state: None,
+            },
+            &Caller::Frontend {
+                tenant_id: "tenant-a".to_string(),
+                user_id: "user-1".to_string(),
+                attrs: HashMap::new(),
+            },
+        );
+
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    EventPayload::ToolCallCompleted(_),
+                    EventPayload::NewMessage(_),
+                    EventPayload::WorkerDecisionRequested(_),
+                ]
+            ),
+            "expected [ToolCallCompleted, NewMessage, WorkerDecisionRequested]; got {events:?}"
+        );
+
+        let tc = agg.state.tool_calls.get("tc-1").expect("tool call present");
+        assert_eq!(tc.tracking.status, EffectStatus::Completed);
+        assert_eq!(tc.result.as_deref(), Some("ok"));
+        assert!(!tc.is_error);
+    }
+
+    #[test]
+    fn frontend_with_mismatched_user_id_is_denied() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        dispatch(
+            &mut agg,
+            CommandPayload::RequestToolCall {
+                tool_call_id: "tc-1".to_string(),
+                name: "my_tool".to_string(),
+                arguments: "{}".to_string(),
+                handler: ToolHandler::Client,
+                retry: RetryPolicy::no_retry(),
+            },
+            &Caller::System,
+        );
+
+        let caller = Caller::Frontend {
+            tenant_id: "tenant-a".to_string(),
+            user_id: "other-user".to_string(),
+            attrs: HashMap::new(),
+        };
+
+        let err = agg
+            .state
+            .handle(
+                CommandPayload::CompleteToolCall {
+                    tool_call_id: "tc-1".to_string(),
+                    attempt: 0,
+                    result: "ok".to_string(),
+                    worker_state: None,
+                },
+                &caller,
+            )
+            .expect_err("mismatched user_id should be rejected");
+
+        assert!(
+            matches!(err, SessionError::SessionAccessDenied),
+            "expected SessionAccessDenied; got {err:?}"
+        );
+    }
+
+    #[test]
+    fn frontend_cannot_complete_worker_handled_tool_call() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        dispatch(
+            &mut agg,
+            CommandPayload::RequestToolCall {
+                tool_call_id: "tc-1".to_string(),
+                name: "my_tool".to_string(),
+                arguments: "{}".to_string(),
+                handler: ToolHandler::Worker,
+                retry: RetryPolicy::no_retry(),
+            },
+            &Caller::System,
+        );
+
+        let caller = Caller::Frontend {
+            tenant_id: "tenant-a".to_string(),
+            user_id: "user-1".to_string(),
+            attrs: HashMap::new(),
+        };
+
+        let err = agg
+            .state
+            .handle(
+                CommandPayload::CompleteToolCall {
+                    tool_call_id: "tc-1".to_string(),
+                    attempt: 0,
+                    result: "ok".to_string(),
+                    worker_state: None,
+                },
+                &caller,
+            )
+            .expect_err("frontend should not complete worker-handled tool calls");
+
+        assert!(
+            matches!(err, SessionError::ToolCallWrongHandler),
+            "expected ToolCallWrongHandler; got {err:?}"
+        );
+    }
+
+    #[test]
+    fn request_tool_call_with_client_handler_does_not_queue_worker_decision() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::RequestToolCall {
+                tool_call_id: "tc-1".to_string(),
+                name: "my_tool".to_string(),
+                arguments: "{}".to_string(),
+                handler: ToolHandler::Client,
+                retry: RetryPolicy::no_retry(),
+            },
+            &Caller::System,
+        );
+
+        assert!(
+            matches!(events.as_slice(), [EventPayload::ToolCallRequested(_)]),
+            "client-handled tool call should emit ToolCallRequested only; got {events:?}"
+        );
+
+        let tc = agg.state.tool_calls.get("tc-1").expect("tool call present");
+        assert_eq!(tc.tracking.status, EffectStatus::Pending);
+        assert_eq!(tc.handler, ToolHandler::Client);
+        assert_eq!(agg.state.status, SessionStatus::Idle);
+    }
+
+    #[test]
+    fn request_tool_call_with_worker_handler_emits_decision_to_execute() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::RequestToolCall {
+                tool_call_id: "tc-1".to_string(),
+                name: "my_tool".to_string(),
+                arguments: "{}".to_string(),
+                handler: ToolHandler::Worker,
+                retry: RetryPolicy::no_retry(),
+            },
+            &Caller::System,
+        );
+
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    EventPayload::ToolCallRequested(_),
+                    EventPayload::WorkerDecisionRequested(_),
+                ]
+            ),
+            "worker-handled tool call should also queue a worker decision; got {events:?}"
+        );
+
+        let tc = agg.state.tool_calls.get("tc-1").expect("tool call present");
+        assert_eq!(tc.handler, ToolHandler::Worker);
+    }
+
+    #[test]
+    fn machine_completes_worker_handled_tool_call_after_worker_releases_decision() {
+        // Realistic async-tool flow: worker sees the ToolExecute decision,
+        // acknowledges it with no actions ("I've handed off"), then the
+        // machine that's actually running the work completes the tool
+        // call out-of-band. Result emerges cleanly with a fresh follow-up
+        // worker decision.
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let request_events = dispatch(
+            &mut agg,
+            CommandPayload::RequestToolCall {
+                tool_call_id: "tc-1".to_string(),
+                name: "my_tool".to_string(),
+                arguments: "{}".to_string(),
+                handler: ToolHandler::Worker,
+                retry: RetryPolicy::no_retry(),
+            },
+            &Caller::System,
+        );
+        let d1 = request_events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(p) => Some(p.decision_id.clone()),
+                _ => None,
+            })
+            .expect("worker-handled tool call emits a ToolExecute decision");
+
+        let machine = Caller::Machine {
+            tenant_id: "tenant-a".to_string(),
+            key_id: "prod-key-1".to_string(),
+        };
+
+        // Worker releases its decision with no actions.
+        dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: d1,
+                actions: vec![],
+                state: vec![],
+            },
+            &machine,
+        );
+
+        // Now the machine completes the tool call directly.
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::CompleteToolCall {
+                tool_call_id: "tc-1".to_string(),
+                attempt: 0,
+                result: "ok".to_string(),
+                worker_state: None,
+            },
+            &machine,
+        );
+
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    EventPayload::ToolCallCompleted(_),
+                    EventPayload::NewMessage(_),
+                    EventPayload::WorkerDecisionRequested(_),
+                ]
+            ),
+            "expected [ToolCallCompleted, NewMessage, WorkerDecisionRequested]; got {events:?}"
+        );
+
+        let tc = agg.state.tool_calls.get("tc-1").expect("tool call present");
+        assert_eq!(tc.tracking.status, EffectStatus::Completed);
+    }
+
+    #[test]
+    fn machine_completes_worker_handled_tool_call_before_worker_releases_decision() {
+        // Race case: tool result arrives before the worker has acknowledged
+        // its ToolExecute decision. The pending decision is still in flight,
+        // so the follow-up ToolResult decision is queued behind it. It will
+        // be promoted later — either by the worker's eventual response or
+        // by the wake cycle timing out the original decision.
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        dispatch(
+            &mut agg,
+            CommandPayload::RequestToolCall {
+                tool_call_id: "tc-1".to_string(),
+                name: "my_tool".to_string(),
+                arguments: "{}".to_string(),
+                handler: ToolHandler::Worker,
+                retry: RetryPolicy::no_retry(),
+            },
+            &Caller::System,
+        );
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::CompleteToolCall {
+                tool_call_id: "tc-1".to_string(),
+                attempt: 0,
+                result: "ok".to_string(),
+                worker_state: None,
+            },
+            &Caller::Machine {
+                tenant_id: "tenant-a".to_string(),
+                key_id: "prod-key-1".to_string(),
+            },
+        );
+
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    EventPayload::ToolCallCompleted(_),
+                    EventPayload::NewMessage(_),
+                    EventPayload::DecisionRequestQueued(_),
+                ]
+            ),
+            "expected [ToolCallCompleted, NewMessage, DecisionRequestQueued]; got {events:?}"
+        );
+
+        let tc = agg.state.tool_calls.get("tc-1").expect("tool call present");
+        assert_eq!(tc.tracking.status, EffectStatus::Completed);
+    }
+
+    #[test]
+    fn complete_tool_call_with_wrong_attempt_fails() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        dispatch(
+            &mut agg,
+            CommandPayload::RequestToolCall {
+                tool_call_id: "tc-1".to_string(),
+                name: "my_tool".to_string(),
+                arguments: "{}".to_string(),
+                handler: ToolHandler::Worker,
+                retry: RetryPolicy::no_retry(),
+            },
+            &Caller::System,
+        );
+
+        let caller = Caller::Machine {
+            tenant_id: "tenant-a".to_string(),
+            key_id: "prod-key-1".to_string(),
+        };
+
+        let err = agg
+            .state
+            .handle(
+                CommandPayload::CompleteToolCall {
+                    tool_call_id: "tc-1".to_string(),
+                    attempt: 7,
+                    result: "ok".to_string(),
+                    worker_state: None,
+                },
+                &caller,
+            )
+            .expect_err("wrong attempt should be rejected");
+
+        assert!(
+            matches!(err, SessionError::ToolCallAttemptMismatch),
+            "expected ToolCallAttemptMismatch; got {err:?}"
+        );
+    }
+
+    #[test]
+    fn submit_client_payload_with_active_turn_id_is_rejected() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let payload = ClientPayload::Message {
+            message: Message {
+                role: Role::User,
+                content: Some(Content::Text("hello".to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            stream: false,
+        };
+
+        dispatch(
+            &mut agg,
+            CommandPayload::SubmitClientPayload {
+                payload: payload.clone(),
+                turn_id: Some("turn-1".to_string()),
+            },
+            &Caller::System,
+        );
+
+        let err = agg
+            .state
+            .handle(
+                CommandPayload::SubmitClientPayload {
+                    payload,
+                    turn_id: Some("turn-1".to_string()),
+                },
+                &Caller::System,
+            )
+            .expect_err("re-submitting an active turn_id should be rejected");
+
+        match err {
+            SessionError::TurnAlreadyActive { turn_id } => assert_eq!(turn_id, "turn-1"),
+            other => panic!("expected TurnAlreadyActive; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn submit_worker_decision_dispatches_action_and_completes_decision() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let setup_events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Message {
+                    message: Message {
+                        role: Role::User,
+                        content: Some(Content::Text("hi".to_string())),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                    },
+                    stream: false,
+                },
+                turn_id: Some("turn-1".to_string()),
+            },
+            &Caller::System,
+        );
+        let decision_id = setup_events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(p) => Some(p.decision_id.clone()),
+                _ => None,
+            })
+            .expect("user message should request a worker decision");
+
+        let machine = Caller::Machine {
+            tenant_id: "tenant-a".to_string(),
+            key_id: "prod-key-1".to_string(),
+        };
+
+        let events = agg
+            .state
+            .handle(
+                CommandPayload::SubmitWorkerDecision {
+                    decision_id,
+                    actions: vec![WorkerAction::CallTool {
+                        tool_call_id: "tc-1".to_string(),
+                        name: "my_tool".to_string(),
+                        arguments: "{}".to_string(),
+                        handler: ToolHandler::Worker,
+                        retry: RetryPolicy::no_retry(),
+                    }],
+                    state: vec![],
+                },
+                &machine,
+            )
+            .expect("submit worker decision should succeed");
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::WorkerDecisionCompleted(_))),
+            "expected WorkerDecisionCompleted; got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::ToolCallRequested(_))),
+            "CallTool action should expand into a ToolCallRequested event; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_submit_worker_decision_is_no_op() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let setup_events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Message {
+                    message: Message {
+                        role: Role::User,
+                        content: Some(Content::Text("hi".to_string())),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                    },
+                    stream: false,
+                },
+                turn_id: Some("turn-1".to_string()),
+            },
+            &Caller::System,
+        );
+        let decision_id = setup_events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(p) => Some(p.decision_id.clone()),
+                _ => None,
+            })
+            .expect("user message should request a worker decision");
+
+        let machine = Caller::Machine {
+            tenant_id: "tenant-a".to_string(),
+            key_id: "prod-key-1".to_string(),
+        };
+
+        // First submission completes the decision.
+        dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: decision_id.clone(),
+                actions: vec![],
+                state: vec![],
+            },
+            &machine,
+        );
+
+        // Second submission with the same decision_id should be a no-op.
+        let events = agg
+            .state
+            .handle(
+                CommandPayload::SubmitWorkerDecision {
+                    decision_id,
+                    actions: vec![WorkerAction::CallTool {
+                        tool_call_id: "tc-1".to_string(),
+                        name: "my_tool".to_string(),
+                        arguments: "{}".to_string(),
+                        handler: ToolHandler::Worker,
+                        retry: RetryPolicy::no_retry(),
+                    }],
+                    state: vec![],
+                },
+                &machine,
+            )
+            .expect("duplicate submission should not error");
+
+        assert!(
+            events.is_empty(),
+            "duplicate worker decision submission should emit no events; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn user_message_rejected_while_session_interrupted() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        dispatch(
+            &mut agg,
+            CommandPayload::Interrupt {
+                interrupt_id: "int-1".to_string(),
+                reason: "paused".to_string(),
+                payload: serde_json::Value::Null,
+            },
+            &Caller::System,
+        );
+
+        let user_message = ClientPayload::Message {
+            message: Message {
+                role: Role::User,
+                content: Some(Content::Text("hello".to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            stream: false,
+        };
+
+        let err = agg
+            .state
+            .handle(
+                CommandPayload::SubmitClientPayload {
+                    payload: user_message,
+                    turn_id: Some("turn-1".to_string()),
+                },
+                &Caller::System,
+            )
+            .expect_err("user messages should be rejected while interrupted");
+
+        assert!(
+            matches!(err, SessionError::SessionInterrupted),
+            "expected SessionInterrupted; got {err:?}"
+        );
+    }
+
+    #[test]
+    fn complete_unknown_tool_call_fails() {
+        let agg = create_session("sess-1", "tenant-a", "user-1");
+
+        let caller = Caller::Machine {
+            tenant_id: "tenant-a".to_string(),
+            key_id: "prod-key-1".to_string(),
+        };
+
+        let err = agg
+            .state
+            .handle(
+                CommandPayload::CompleteToolCall {
+                    tool_call_id: "tc-unknown".to_string(),
+                    attempt: 0,
+                    result: "ok".to_string(),
+                    worker_state: None,
+                },
+                &caller,
+            )
+            .expect_err("unknown tool call should be rejected");
+
+        assert!(
+            matches!(err, SessionError::ToolCallNotFound),
+            "expected ToolCallNotFound; got {err:?}"
+        );
+    }
+
+    #[test]
+    fn send_message_emits_new_message() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::SendMessage {
+                message: Message {
+                    role: Role::User,
+                    content: Some(Content::Text("hi".to_string())),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    name: None,
+                },
+                stream: false,
+                turn_id: None,
+            },
+            &Caller::System,
+        );
+
+        // A user message wakes a worker decision so the LLM can respond.
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    EventPayload::NewMessage(_),
+                    EventPayload::WorkerDecisionRequested(_),
+                ]
+            ),
+            "expected [NewMessage, WorkerDecisionRequested]; got {events:?}"
+        );
+        assert_eq!(agg.state.status, SessionStatus::Idle);
+    }
+
+    #[test]
+    fn cancel_session_emits_cancelled() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+
+        let events = dispatch(&mut agg, CommandPayload::CancelSession, &Caller::System);
+
+        assert!(
+            matches!(events.as_slice(), [EventPayload::SessionCancelled]),
+            "expected [SessionCancelled]; got {events:?}"
+        );
+        assert_eq!(agg.state.status, SessionStatus::Done);
+    }
+
+    #[test]
+    fn mark_done_emits_session_done() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::MarkDone {
+                data: serde_json::Value::Null,
+            },
+            &Caller::System,
+        );
+
+        // No active turn, no ancestry → just SessionDone, status returns to Idle.
+        assert!(
+            matches!(events.as_slice(), [EventPayload::SessionDone(_)]),
+            "expected [SessionDone]; got {events:?}"
+        );
+        assert_eq!(agg.state.status, SessionStatus::Idle);
+    }
+
+    #[test]
+    fn wake_with_no_pending_effects_is_noop() {
+        let agg = create_session("sess-1", "tenant-a", "user-1");
+
+        let events = agg
+            .state
+            .handle(CommandPayload::Wake { now: Utc::now() }, &Caller::System)
+            .expect("wake should succeed");
+
+        assert!(
+            events.is_empty(),
+            "wake on idle session should be a no-op; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn request_llm_call_emits_requested() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::RequestLlmCall {
+                call_id: "llm-1".to_string(),
+                request: LlmRequest {
+                    model: "test-model".to_string(),
+                    messages: vec![],
+                    tools: None,
+                    temperature: None,
+                    max_completion_tokens: None,
+                },
+                stream: false,
+                retry: RetryPolicy::no_retry(),
+            },
+            &Caller::System,
+        );
+
+        assert!(
+            matches!(events.as_slice(), [EventPayload::LlmCallRequested(_)]),
+            "expected [LlmCallRequested]; got {events:?}"
+        );
+        let call = agg.state.llm_calls.get("llm-1").expect("llm call present");
+        assert_eq!(call.tracking.status, EffectStatus::Pending);
+    }
+
+    #[test]
+    fn complete_llm_call_emits_completed() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        dispatch(
+            &mut agg,
+            CommandPayload::RequestLlmCall {
+                call_id: "llm-1".to_string(),
+                request: LlmRequest {
+                    model: "test-model".to_string(),
+                    messages: vec![],
+                    tools: None,
+                    temperature: None,
+                    max_completion_tokens: None,
+                },
+                stream: false,
+                retry: RetryPolicy::no_retry(),
+            },
+            &Caller::System,
+        );
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::CompleteLlmCall {
+                call_id: "llm-1".to_string(),
+                attempt: 0,
+                response: LlmResponse {
+                    model: "test-model".to_string(),
+                    content: Some("hello".to_string()),
+                    tool_calls: vec![],
+                    finish_reason: Some("stop".to_string()),
+                    usage: None,
+                    cost: None,
+                    images: vec![],
+                },
+            },
+            &Caller::System,
+        );
+
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    EventPayload::LlmCallCompleted(_),
+                    EventPayload::NewMessage(_),
+                    EventPayload::WorkerDecisionRequested(_),
+                ]
+            ),
+            "expected [LlmCallCompleted, NewMessage, WorkerDecisionRequested]; got {events:?}"
+        );
+        let call = agg.state.llm_calls.get("llm-1").expect("llm call present");
+        assert_eq!(call.tracking.status, EffectStatus::Completed);
+    }
+
+    #[test]
+    fn fail_llm_call_emits_errored() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        dispatch(
+            &mut agg,
+            CommandPayload::RequestLlmCall {
+                call_id: "llm-1".to_string(),
+                request: LlmRequest {
+                    model: "test-model".to_string(),
+                    messages: vec![],
+                    tools: None,
+                    temperature: None,
+                    max_completion_tokens: None,
+                },
+                stream: false,
+                retry: RetryPolicy::no_retry(),
+            },
+            &Caller::System,
+        );
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::FailLlmCall {
+                call_id: "llm-1".to_string(),
+                attempt: 0,
+                error: "provider down".to_string(),
+                retryable: false,
+                code: None,
+                detail: None,
+            },
+            &Caller::System,
+        );
+
+        // Retry policy exhausted (no_retry + retryable=false) so the handler
+        // fires a follow-up worker decision with the error.
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    EventPayload::LlmCallErrored(_),
+                    EventPayload::WorkerDecisionRequested(_),
+                ]
+            ),
+            "expected [LlmCallErrored, WorkerDecisionRequested]; got {events:?}"
+        );
+        let call = agg.state.llm_calls.get("llm-1").expect("llm call present");
+        assert_eq!(call.tracking.status, EffectStatus::Failed);
+    }
+
+    #[test]
+    fn fail_tool_call_emits_errored() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let request_events = dispatch(
+            &mut agg,
+            CommandPayload::RequestToolCall {
+                tool_call_id: "tc-1".to_string(),
+                name: "my_tool".to_string(),
+                arguments: "{}".to_string(),
+                handler: ToolHandler::Worker,
+                retry: RetryPolicy::no_retry(),
+            },
+            &Caller::System,
+        );
+        let d1 = request_events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(p) => Some(p.decision_id.clone()),
+                _ => None,
+            })
+            .expect("worker-handled tool call emits a ToolExecute decision");
+
+        let machine = Caller::Machine {
+            tenant_id: "tenant-a".to_string(),
+            key_id: "prod-key-1".to_string(),
+        };
+
+        // Worker releases its decision so the failure cleanly emits a fresh
+        // follow-up rather than queueing behind a phantom pending decision.
+        dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: d1,
+                actions: vec![],
+                state: vec![],
+            },
+            &machine,
+        );
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::FailToolCall {
+                tool_call_id: "tc-1".to_string(),
+                attempt: 0,
+                error: "boom".to_string(),
+                retryable: false,
+                worker_state: None,
+            },
+            &machine,
+        );
+
+        // Retry exhausted (no_retry + retryable=false) so the failure
+        // surfaces a follow-up worker decision with is_error=true.
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    EventPayload::ToolCallErrored(_),
+                    EventPayload::WorkerDecisionRequested(_),
+                ]
+            ),
+            "expected [ToolCallErrored, WorkerDecisionRequested]; got {events:?}"
+        );
+        let tc = agg.state.tool_calls.get("tc-1").expect("tool call present");
+        assert_eq!(tc.tracking.status, EffectStatus::Failed);
+        assert!(tc.is_error);
+    }
+
+    #[test]
+    fn request_sub_agent_emits_requested() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::RequestSubAgent {
+                session_id: "child-1".to_string(),
+                agent_id: "agent-2".to_string(),
+                retry: RetryPolicy::no_retry(),
+            },
+            &Caller::System,
+        );
+
+        assert!(
+            matches!(events.as_slice(), [EventPayload::SubAgentRequested(_)]),
+            "expected [SubAgentRequested]; got {events:?}"
+        );
+        let sa = agg
+            .state
+            .sub_agent_calls
+            .get("child-1")
+            .expect("sub-agent recorded");
+        assert_eq!(sa.tracking.status, EffectStatus::Pending);
+    }
+
+    #[test]
+    fn start_sub_agent_emits_started() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        dispatch(
+            &mut agg,
+            CommandPayload::RequestSubAgent {
+                session_id: "child-1".to_string(),
+                agent_id: "agent-2".to_string(),
+                retry: RetryPolicy::no_retry(),
+            },
+            &Caller::System,
+        );
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::StartSubAgent {
+                session_id: "child-1".to_string(),
+            },
+            &Caller::System,
+        );
+
+        assert!(
+            matches!(events.as_slice(), [EventPayload::SubAgentStarted(_)]),
+            "expected [SubAgentStarted]; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn fail_sub_agent_emits_errored() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        dispatch(
+            &mut agg,
+            CommandPayload::RequestSubAgent {
+                session_id: "child-1".to_string(),
+                agent_id: "agent-2".to_string(),
+                retry: RetryPolicy::no_retry(),
+            },
+            &Caller::System,
+        );
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::FailSubAgent {
+                session_id: "child-1".to_string(),
+                error: "child crashed".to_string(),
+                retryable: false,
+            },
+            &Caller::System,
+        );
+
+        // Retry exhausted → follow-up worker decision with the error.
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    EventPayload::SubAgentErrored(_),
+                    EventPayload::WorkerDecisionRequested(_),
+                ]
+            ),
+            "expected [SubAgentErrored, WorkerDecisionRequested]; got {events:?}"
+        );
+        let sa = agg
+            .state
+            .sub_agent_calls
+            .get("child-1")
+            .expect("sub-agent present");
+        assert_eq!(sa.tracking.status, EffectStatus::Failed);
+    }
+
+    #[test]
+    fn complete_sub_agent_turn_emits_completed() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        dispatch(
+            &mut agg,
+            CommandPayload::RequestSubAgent {
+                session_id: "child-1".to_string(),
+                agent_id: "agent-2".to_string(),
+                retry: RetryPolicy::no_retry(),
+            },
+            &Caller::System,
+        );
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::CompleteSubAgentTurn {
+                session_id: "child-1".to_string(),
+                agent_id: "agent-2".to_string(),
+                turn_id: "turn-x".to_string(),
+                data: serde_json::Value::Null,
+                cost: rust_decimal::Decimal::ZERO,
+                token_usage: std::collections::BTreeMap::new(),
+            },
+            &Caller::System,
+        );
+
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    EventPayload::SubAgentTurnCompleted(_),
+                    EventPayload::WorkerDecisionRequested(_),
+                ]
+            ),
+            "expected [SubAgentTurnCompleted, WorkerDecisionRequested]; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn resume_interrupt_emits_resumed() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        dispatch(
+            &mut agg,
+            CommandPayload::Interrupt {
+                interrupt_id: "int-1".to_string(),
+                reason: "paused".to_string(),
+                payload: serde_json::Value::Null,
+            },
+            &Caller::System,
+        );
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::ResumeInterrupt {
+                interrupt_id: "int-1".to_string(),
+                payload: serde_json::Value::Null,
+            },
+            &Caller::System,
+        );
+
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    EventPayload::InterruptResumed(_),
+                    EventPayload::WorkerDecisionRequested(_),
+                ]
+            ),
+            "expected [InterruptResumed, WorkerDecisionRequested]; got {events:?}"
+        );
+        assert_eq!(agg.state.status, SessionStatus::Idle);
+    }
+
+    #[test]
+    fn fail_worker_decision_emits_errored() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let setup_events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Message {
+                    message: Message {
+                        role: Role::User,
+                        content: Some(Content::Text("hi".to_string())),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                    },
+                    stream: false,
+                },
+                turn_id: Some("turn-1".to_string()),
+            },
+            &Caller::System,
+        );
+        let decision_id = setup_events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(p) => Some(p.decision_id.clone()),
+                _ => None,
+            })
+            .expect("user message should request a worker decision");
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::FailWorkerDecision {
+                decision_id: decision_id.clone(),
+                error: "worker offline".to_string(),
+                retryable: false,
+            },
+            &Caller::System,
+        );
+
+        assert!(
+            matches!(events.as_slice(), [EventPayload::WorkerDecisionErrored(_)]),
+            "expected [WorkerDecisionErrored]; got {events:?}"
+        );
+        let wd = agg
+            .state
+            .worker_decisions
+            .get(&decision_id)
+            .expect("decision present");
+        assert_eq!(wd.tracking.status, EffectStatus::Failed);
+    }
+
+    #[test]
+    fn machine_caller_from_wrong_tenant_is_denied() {
+        let agg = create_session("sess-1", "tenant-a", "user-1");
+
+        let cross_tenant_machine = Caller::Machine {
+            tenant_id: "tenant-b".to_string(),
+            key_id: "key-from-tenant-b".to_string(),
+        };
+
+        let err = agg
+            .state
+            .handle(
+                CommandPayload::CompleteToolCall {
+                    tool_call_id: "tc-1".to_string(),
+                    attempt: 0,
+                    result: "ok".to_string(),
+                    worker_state: None,
+                },
+                &cross_tenant_machine,
+            )
+            .expect_err("machine from a different tenant should be rejected");
+
+        assert!(
+            matches!(err, SessionError::SessionAccessDenied),
+            "expected SessionAccessDenied; got {err:?}"
+        );
+    }
+
+    #[test]
+    fn frontend_caller_with_mismatched_tenant_on_create_session_is_denied() {
+        let session_id = "sess-1".to_string();
+        let agg = Aggregate::new(
+            session_id.clone(),
+            "tenant-a".to_string(),
+            SessionState::new(session_id),
+        );
+
+        let caller = Caller::Frontend {
+            tenant_id: "tenant-a".to_string(),
+            user_id: "user-1".to_string(),
+            attrs: HashMap::new(),
+        };
+
+        let err = agg
+            .state
+            .handle(
+                CommandPayload::CreateSession {
+                    agent_id: "agent-1".to_string(),
+                    identity: ClientIdentity {
+                        tenant_id: "tenant-b".to_string(),
+                        id: Some("user-1".to_string()),
+                        metadata: HashMap::new(),
+                    },
+                    ancestry: vec![],
+                    worker_retry: RetryPolicy::no_retry(),
+                },
+                &caller,
+            )
+            .expect_err("creating a session in a different tenant should be rejected");
+
+        assert!(
+            matches!(err, SessionError::SessionAccessDenied),
+            "expected SessionAccessDenied; got {err:?}"
+        );
     }
 }
