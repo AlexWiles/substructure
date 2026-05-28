@@ -168,7 +168,7 @@ fn runtime_error_response(err: RuntimeError) -> Response {
 
 pub async fn stream_session_events(
     State(state): State<ClientHttpState>,
-    Extension(_principal): Extension<AuthPrincipal>,
+    Extension(principal): Extension<AuthPrincipal>,
     Path(session_id): Path<String>,
     Query(params): Query<StreamSessionEventsParams>,
 ) -> Response {
@@ -185,7 +185,10 @@ pub async fn stream_session_events(
     };
 
     let event_rx = state.runtime.stream(spec, params.sequence_after).await;
-    let delta_rx = state.runtime.subscribe_token_deltas(&root_session_id).await;
+    let delta_rx = state
+        .runtime
+        .subscribe_token_deltas(&principal.tenant_id, &root_session_id)
+        .await;
     let out_rx = merge_session_stream(event_rx, delta_rx, scope_turn_id, state.shutdown.clone());
     let stream = ReceiverStream::new(out_rx).map(Ok::<_, std::convert::Infallible>);
 

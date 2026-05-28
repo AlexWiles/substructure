@@ -123,6 +123,7 @@ fn spawn_delta_pump(
         .first()
         .cloned()
         .unwrap_or_else(|| task.session_id.clone());
+    let tenant_id = task.tenant_id.clone();
     let session_id = task.session_id.clone();
     let agent_id = task.agent_id.clone();
     let turn_id = task.turn_id.clone();
@@ -133,6 +134,7 @@ fn spawn_delta_pump(
         while let Some(delta) = rx.recv().await {
             transport
                 .publish(TokenDelta {
+                    tenant_id: tenant_id.clone(),
                     root_session_id: root_session_id.clone(),
                     session_id: session_id.clone(),
                     agent_id: agent_id.clone(),

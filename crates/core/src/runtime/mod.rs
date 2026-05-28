@@ -238,9 +238,12 @@ impl Runtime {
 
     pub async fn subscribe_token_deltas(
         &self,
+        tenant_id: &str,
         root_session_id: &str,
     ) -> mpsc::Receiver<TokenDelta> {
-        self.token_delta_transport.subscribe(root_session_id).await
+        self.token_delta_transport
+            .subscribe(tenant_id, root_session_id)
+            .await
     }
 
     // ---- Admin / inspection methods ----

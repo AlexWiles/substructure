@@ -4,6 +4,8 @@ use tokio::sync::{broadcast, mpsc};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenDelta {
+    /// Tenant isolation key — subscribers must match.
+    pub tenant_id: String,
     /// Transport routing key.
     pub root_session_id: String,
     /// May be a sub-agent of root.
@@ -24,7 +26,8 @@ pub struct TokenDelta {
 #[async_trait]
 pub trait TokenDeltaTransport: Send + Sync + 'static {
     async fn publish(&self, delta: TokenDelta);
-    async fn subscribe(&self, root_session_id: &str) -> mpsc::Receiver<TokenDelta>;
+    async fn subscribe(&self, tenant_id: &str, root_session_id: &str)
+        -> mpsc::Receiver<TokenDelta>;
 }
 
 const IN_MEMORY_BROADCAST_CAPACITY: usize = 1024;
@@ -53,15 +56,20 @@ impl TokenDeltaTransport for InMemoryTokenDeltaTransport {
         let _ = self.tx.send(delta);
     }
 
-    async fn subscribe(&self, root_session_id: &str) -> mpsc::Receiver<TokenDelta> {
+    async fn subscribe(
+        &self,
+        tenant_id: &str,
+        root_session_id: &str,
+    ) -> mpsc::Receiver<TokenDelta> {
         let mut rx = self.tx.subscribe();
         let (out_tx, out_rx) = mpsc::channel(PER_SUBSCRIBER_CAPACITY);
+        let tenant = tenant_id.to_owned();
         let target = root_session_id.to_owned();
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
                     Ok(delta) => {
-                        if delta.root_session_id != target {
+                        if delta.tenant_id != tenant || delta.root_session_id != target {
                             continue;
                         }
                         if out_tx.send(delta).await.is_err() {
