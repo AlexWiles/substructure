@@ -448,7 +448,7 @@ console.log(data);
 `startTurn` returns a `SessionScope` containing `sessionId` and `turnId`. From there you have two choices:
 
 - `await client.turnResult(scope)` waits for the turn to finish and returns `{ data, cost, tokenUsage }`.
-- `for await (const event of client.stream(scope))` streams individual events as they arrive: LLM responses, tool calls, sub-agent updates, and so on. Use `sequenceAfter` to resume from a known event. If the agent's `llmLoop` has `stream: true`, transient `llm.token.delta` events are interleaved for progressive rendering — they share the event envelope but lack `sequence` and are not replayed on reconnect.
+- `for await (const event of client.stream(scope))` streams individual events as they arrive: LLM responses, tool calls, sub-agent updates, and so on. Use `sequenceAfter` to resume from a known event. If the agent's `llmLoop` has `stream: true`, transient `llm.token.delta` items are interleaved for progressive rendering — they arrive as bare payloads (no envelope, no `sequence`) and are not replayed on reconnect. Discriminate with the exported `isTokenDelta(event)` guard.
 
 The client also exposes admin APIs: `listSessions`, `getSession`, and `sessionEvents` for tooling and dashboards.
 
@@ -516,12 +516,12 @@ const scope = await client.startTurn({
 });
 
 for await (const event of client.stream(scope)) {
-  if (event.payload.type === "llm.token.delta") {
-    // Live token chunk. Order chunks within a call by payload.seq and
-    // append to the in-progress assistant bubble. Drop the partial when
-    // the matching llm.call.completed arrives — the persisted message.new
-    // that follows carries the canonical content.
-    appendDelta(event.payload);
+  if (isTokenDelta(event)) {
+    // Transient live chunk. Order within a call by `seq` and append to the
+    // in-progress assistant bubble. Drop the partial when the matching
+    // llm.call.completed arrives — the persisted message.new that follows
+    // carries the canonical content.
+    appendDelta(event);
   } else if (event.payload.type === "message.new") {
     appendToUi(event.payload);
   }

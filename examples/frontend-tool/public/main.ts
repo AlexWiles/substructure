@@ -14,7 +14,7 @@
 // ctx.defer() so no result action is emitted server-side and the engine
 // waits for the browser to deliver one.
 
-import Substructure from "@substructure.ai/sdk";
+import Substructure, { isTokenDelta } from "@substructure.ai/sdk";
 
 const chatLog = document.getElementById("chat") as HTMLDivElement;
 const form = document.getElementById("form") as HTMLFormElement;
@@ -120,39 +120,40 @@ async function sendMessage(content: string) {
         sessionId = scope.sessionId;
 
         for await (const event of client.stream(scope)) {
-            const p = event.payload as any;
-
-            if (p.type === "llm.token.delta") {
-                let partial = partials.get(p.call_id);
+            if (isTokenDelta(event)) {
+                let partial = partials.get(event.call_id);
                 if (!partial) {
                     typing?.remove();
                     typing = null;
                     partial = { node: append("assistant", ""), chunks: new Map(), nextSeq: 0 };
-                    partials.set(p.call_id, partial);
+                    partials.set(event.call_id, partial);
                 }
-                if (typeof p.text === "string" && p.text.length > 0) {
-                    partial.chunks.set(p.seq, p.text);
+                if (typeof event.text === "string" && event.text.length > 0) {
+                    partial.chunks.set(event.seq, event.text);
                     flush(partial);
                 }
-            } else if (p.type === "llm.call.completed") {
-                // Drop the partial; the following message.new renders the canonical content.
-                const partial = partials.get(p.call_id);
+                continue;
+            }
+
+            if (event.payload.type === "llm.call.completed") {
+                const partial = partials.get(event.payload.call_id);
                 if (partial) {
                     partial.node.remove();
-                    partials.delete(p.call_id);
+                    partials.delete(event.payload.call_id);
                 }
-            } else if (p.type === "tool.call.requested" && tools[p.name]) {
-                const args = p.arguments ? JSON.parse(p.arguments) : {};
+            } else if (event.payload.type === "tool.call.requested" && tools[event.payload.name]) {
+                const { tool_call_id, name, arguments: argsJson, attempt } = event.payload;
+                const args = argsJson ? JSON.parse(argsJson) : {};
                 typing?.remove();
                 typing = null;
-                append("tool", `→ ${p.name}(${p.arguments || ""})`);
+                append("tool", `→ ${name}(${argsJson || ""})`);
                 try {
-                    const result = await tools[p.name](args);
+                    const result = await tools[name](args);
                     append("tool", `← ${JSON.stringify(result)}`);
                     await client.submitToolCallResult({
                         sessionId: scope.sessionId,
-                        toolCallId: p.tool_call_id,
-                        attempt: p.attempt,
+                        toolCallId: tool_call_id,
+                        attempt,
                         result: JSON.stringify(result),
                     });
                 } catch (err: any) {
@@ -160,15 +161,15 @@ async function sendMessage(content: string) {
                     append("tool", `✗ ${message}`);
                     await client.submitToolCallResult({
                         sessionId: scope.sessionId,
-                        toolCallId: p.tool_call_id,
-                        attempt: p.attempt,
+                        toolCallId: tool_call_id,
+                        attempt,
                         error: message,
                         retryable: false,
                     });
                 }
                 typing = showTyping();
-            } else if (p.type === "message.new" && p.message.role === "assistant") {
-                const text = typeof p.message.content === "string" ? p.message.content : "";
+            } else if (event.payload.type === "message.new" && event.payload.message.role === "assistant") {
+                const text = typeof event.payload.message.content === "string" ? event.payload.message.content : "";
                 if (text.trim()) {
                     typing?.remove();
                     typing = null;

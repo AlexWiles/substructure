@@ -350,12 +350,13 @@ export interface LlmCallErrored {
  *  Join to `llm.call.requested` via `(call_id, attempt)`; order chunks by `seq`. */
 export interface LlmTokenDelta {
     type: "llm.token.delta";
+    session_id: Uuid;
+    agent_id: string;
+    turn_id?: string;
     call_id: string;
     attempt: number;
     /** Monotonic per-call sequence (0-based). */
     seq: number;
-    agent_id: string;
-    turn_id?: string;
     text?: string;
     finish_reason?: string;
 }
@@ -527,19 +528,13 @@ export interface PersistedEvent {
     end_time: DateTime;
 }
 
-/** A transient delta envelope. Same shape as `PersistedEvent` but with no
- *  `sequence` — not persisted, not replayed on reconnect. */
-export interface TokenDeltaEvent {
-    aggregate_type: string;
-    aggregate_id: Uuid;
-    event_type: "llm.token.delta";
-    occurred_at: DateTime;
-    payload: LlmTokenDelta;
-}
+/** SSE stream item. Persisted events arrive wrapped in `PersistedEvent`;
+ *  transient token deltas arrive bare. Discriminate with `isTokenDelta`. */
+export type Event = PersistedEvent | LlmTokenDelta;
 
-/** Discriminate on `payload.type`: `"llm.token.delta"` ⇒ `TokenDeltaEvent`,
- *  anything else ⇒ `PersistedEvent`. */
-export type Event = PersistedEvent | TokenDeltaEvent;
+export function isTokenDelta(event: Event): event is LlmTokenDelta {
+    return (event as LlmTokenDelta).type === "llm.token.delta";
+}
 
 // ── Turns ───────────────────────────────────────────────────────────────────
 
@@ -563,7 +558,7 @@ export interface TurnResult {
 export async function drainToTurnResult(stream: AsyncIterable<Event>): Promise<TurnResult> {
     let completed: TurnCompleted | undefined;
     for await (const event of stream) {
-        if (event.payload.type === "turn.completed") {
+        if (!isTokenDelta(event) && event.payload.type === "turn.completed") {
             completed = event.payload;
         }
     }

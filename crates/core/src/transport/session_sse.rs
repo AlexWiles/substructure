@@ -53,25 +53,19 @@ pub fn merge_session_stream(
     out_rx
 }
 
-/// Mirrors the persisted `Event` JSON shape, minus `sequence`.
 fn token_delta_to_sse(delta: TokenDelta) -> SseEvent {
-    let envelope = serde_json::json!({
-        "aggregate_type": "session",
-        "aggregate_id": delta.session_id,
-        "event_type": "llm.token.delta",
-        "occurred_at": chrono::Utc::now(),
-        "payload": {
-            "type": "llm.token.delta",
-            "call_id": delta.call_id,
-            "attempt": delta.attempt,
-            "seq": delta.seq,
-            "agent_id": delta.agent_id,
-            "turn_id": delta.turn_id,
-            "text": delta.text,
-            "finish_reason": delta.finish_reason,
-        },
+    let payload = serde_json::json!({
+        "type": "llm.token.delta",
+        "session_id": delta.session_id,
+        "agent_id": delta.agent_id,
+        "turn_id": delta.turn_id,
+        "call_id": delta.call_id,
+        "attempt": delta.attempt,
+        "seq": delta.seq,
+        "text": delta.text,
+        "finish_reason": delta.finish_reason,
     });
     SseEvent::default()
         .event("llm.token.delta")
-        .data(envelope.to_string())
+        .data(payload.to_string())
 }
