@@ -1,6 +1,9 @@
 # substructure.ai
 
-> **Alpha.** Substructure is under active development. APIs, CLI commands, and the wire protocol may change between releases.
+[![sdk](https://img.shields.io/npm/v/@substructure.ai/sdk?label=sdk)](https://www.npmjs.com/package/@substructure.ai/sdk)
+[![cli](https://img.shields.io/npm/v/@substructure.ai/cli?label=cli)](https://www.npmjs.com/package/@substructure.ai/cli)
+
+> Substructure is under active development. APIs, CLI commands, and the wire protocol may change between releases for versions 0.1.x
 
 Substructure is an open-source engine for building durable, long-running AI agents using just an HTTP endpoint hosted on your infrastructure, in your code.
 
