@@ -148,7 +148,9 @@ pub(crate) fn runtime_error_status(err: &RuntimeError) -> (StatusCode, String) {
             | SessionError::SessionAccessDenied
             | SessionError::ToolCallWrongHandler,
         ) => StatusCode::FORBIDDEN,
-        RuntimeError::Session(SessionError::ToolCallNotFound) => StatusCode::NOT_FOUND,
+        RuntimeError::Session(SessionError::ToolCallNotFound | SessionError::SessionNotCreated) => {
+            StatusCode::NOT_FOUND
+        }
         RuntimeError::Session(
             SessionError::ToolCallNotPending
             | SessionError::ToolCallAttemptMismatch

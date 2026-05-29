@@ -218,7 +218,9 @@ pub(crate) fn runtime_error_status(err: &RuntimeError) -> (StatusCode, String) {
             | SessionError::SessionAccessDenied
             | SessionError::ToolCallWrongHandler,
         ) => StatusCode::FORBIDDEN,
-        RuntimeError::Session(SessionError::ToolCallNotFound) => StatusCode::NOT_FOUND,
+        RuntimeError::Session(SessionError::ToolCallNotFound | SessionError::SessionNotCreated) => {
+            StatusCode::NOT_FOUND
+        }
         RuntimeError::Session(
             SessionError::ToolCallNotPending
             | SessionError::ToolCallAttemptMismatch
@@ -312,4 +314,32 @@ pub async fn stream_session_events(
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status_of(err: SessionError) -> StatusCode {
+        runtime_error_status(&RuntimeError::Session(err)).0
+    }
+
+    #[test]
+    fn missing_session_is_not_found_not_server_error() {
+        // A worker only ever holds a decision a session emitted, so a
+        // submission against a never-created session is a stale/garbage
+        // reference (client error), never a server fault.
+        assert_eq!(
+            status_of(SessionError::SessionNotCreated),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn access_denied_is_forbidden() {
+        assert_eq!(
+            status_of(SessionError::SessionAccessDenied),
+            StatusCode::FORBIDDEN
+        );
+    }
 }
