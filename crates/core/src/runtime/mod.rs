@@ -10,7 +10,10 @@ use crate::providers::memory_queue::TaskQueue;
 use aggregate::{execute, Caller, ConflictRetry, ExecuteError, ExecuteInput};
 use event_store::EventStore;
 use identity::ClientIdentity;
-use llm::{spawn_llm_dispatch_processor, spawn_llm_task_executor, LlmProviderTrait, LlmTask};
+use llm::{
+    spawn_llm_dispatch_processor, spawn_llm_task_executor, LlmProviderTrait, LlmTask, TokenDelta,
+    TokenDeltaTransport,
+};
 use processor::ProcessorCheckpointStore;
 use retry::{NoRetryResolver, WorkerRetryResolver};
 use session::command::{CommandPayload, SessionError};
@@ -64,6 +67,7 @@ pub struct Runtime {
     queue: Arc<dyn WorkerQueue>,
     session_index: Arc<dyn SessionIndexStore>,
     session_subscriptions: session::subscriptions::SessionSubscriptions,
+    token_delta_transport: Arc<dyn TokenDeltaTransport>,
     cancel: CancellationToken,
     handles: tokio::sync::Mutex<Vec<JoinHandle<()>>>,
     shutdown_timeout: Duration,
@@ -232,6 +236,16 @@ impl Runtime {
             .await
     }
 
+    pub async fn subscribe_token_deltas(
+        &self,
+        tenant_id: &str,
+        root_session_id: &str,
+    ) -> mpsc::Receiver<TokenDelta> {
+        self.token_delta_transport
+            .subscribe(tenant_id, root_session_id)
+            .await
+    }
+
     // ---- Admin / inspection methods ----
 
     pub async fn list_sessions(&self, filter: &SessionFilter) -> Result<SessionPage, RuntimeError> {
@@ -362,6 +376,7 @@ pub fn start(
     session_index_store: Arc<dyn SessionIndexStore>,
     checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
     wake_store: Arc<dyn WakeScheduleStore>,
+    token_delta_transport: Arc<dyn TokenDeltaTransport>,
     config: RuntimeConfig,
 ) -> Arc<Runtime> {
     let cancel = CancellationToken::new();
@@ -376,6 +391,7 @@ pub fn start(
         store.clone(),
         llm_provider,
         llm_task_queue,
+        token_delta_transport.clone(),
         config.llm_executor_workers,
         cancel.clone(),
     );
@@ -437,6 +453,7 @@ pub fn start(
         queue: worker_queue,
         session_index: session_index_store,
         session_subscriptions,
+        token_delta_transport,
         cancel,
         handles: tokio::sync::Mutex::new(handles),
         shutdown_timeout: config.shutdown_timeout,

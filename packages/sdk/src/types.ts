@@ -345,6 +345,22 @@ export interface LlmCallErrored {
     detail?: unknown;
 }
 
+/** Transient LLM token delta. Not persisted — reconnecting mid-call skips
+ *  ahead to `llm.call.completed` / `message.new` for the canonical content.
+ *  Join to `llm.call.requested` via `(call_id, attempt)`; order chunks by `seq`. */
+export interface LlmTokenDelta {
+    type: "llm.token.delta";
+    session_id: Uuid;
+    agent_id: string;
+    turn_id?: string;
+    call_id: string;
+    attempt: number;
+    /** Monotonic per-call sequence (0-based). */
+    seq: number;
+    text?: string;
+    finish_reason?: string;
+}
+
 export interface ToolCallRequested {
     type: "tool.call.requested";
     tool_call_id: string;
@@ -495,7 +511,8 @@ export interface DerivedState {
     turn_id?: string;
 }
 
-export interface Event {
+/** A persisted event. `sequence` is monotonic and resumable via `sequence_after`. */
+export interface PersistedEvent {
     id: Uuid;
     tenant_id: string;
     aggregate_type: string;
@@ -509,6 +526,14 @@ export interface Event {
     metadata?: Record<string, string>;
     start_time: DateTime;
     end_time: DateTime;
+}
+
+/** SSE stream item. Persisted events arrive wrapped in `PersistedEvent`;
+ *  transient token deltas arrive bare. Discriminate with `isTokenDelta`. */
+export type Event = PersistedEvent | LlmTokenDelta;
+
+export function isTokenDelta(event: Event): event is LlmTokenDelta {
+    return (event as LlmTokenDelta).type === "llm.token.delta";
 }
 
 // ── Turns ───────────────────────────────────────────────────────────────────
@@ -533,7 +558,7 @@ export interface TurnResult {
 export async function drainToTurnResult(stream: AsyncIterable<Event>): Promise<TurnResult> {
     let completed: TurnCompleted | undefined;
     for await (const event of stream) {
-        if (event.payload.type === "turn.completed") {
+        if (!isTokenDelta(event) && event.payload.type === "turn.completed") {
             completed = event.payload;
         }
     }

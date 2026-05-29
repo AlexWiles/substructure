@@ -147,10 +147,12 @@ pub async fn get_session_events(
 
 pub async fn stream_session_events(
     State(state): State<AdminHttpState>,
+    Extension(principal): Extension<AuthPrincipal>,
     Path(session_id): Path<String>,
     Query(params): Query<SessionEventsParams>,
 ) -> Response {
     let spec = SessionSubscriptionSpec::All {
+        tenant_id: principal.tenant_id,
         root_session_id: session_id,
     };
     // Admin endpoint defaults to full-history replay (sequence_after defaults to 0).

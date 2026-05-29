@@ -78,8 +78,10 @@ export type {
     EventPayload,
     LlmRequest,
     LlmResponse,
+    LlmTokenDelta,
     LlmTool,
     Message,
+    PersistedEvent,
     RetryPolicy,
     Role,
     SessionState,
@@ -97,4 +99,4 @@ export type {
     WorkerDecisionRequestWire,
     WorkerIdentity,
 } from "./types";
-export { contentText } from "./types";
+export { contentText, isTokenDelta } from "./types";

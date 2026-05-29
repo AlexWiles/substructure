@@ -1,6 +1,6 @@
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
-use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
+use axum::response::sse::{KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use futures_util::StreamExt;
@@ -13,6 +13,7 @@ use crate::session::command::SessionError;
 use crate::session::subscriptions::SessionSubscriptionSpec;
 use crate::span::SpanContext;
 use crate::transport::auth::AuthPrincipal;
+use crate::transport::session_sse::merge_session_stream;
 use crate::worker::SubmitDecision;
 use crate::{
     Caller, RuntimeError, SubmitClientPayload, SubmitToolCallResult, SubmitToolCallResultInput,
@@ -282,33 +283,31 @@ pub async fn submit_client_payload(
 
 pub async fn stream_session_events(
     State(state): State<WorkerHttpState>,
-    Extension(_principal): Extension<AuthPrincipal>,
+    Extension(principal): Extension<AuthPrincipal>,
     Path(session_id): Path<String>,
     Query(params): Query<StreamSessionEventsParams>,
 ) -> Response {
+    let root_session_id = session_id.clone();
+    let scope_turn_id = params.turn_id.clone();
     let spec = match params.turn_id {
         Some(turn_id) => SessionSubscriptionSpec::Turn {
+            tenant_id: principal.tenant_id.clone(),
             root_session_id: session_id,
             turn_id,
         },
         None => SessionSubscriptionSpec::All {
+            tenant_id: principal.tenant_id.clone(),
             root_session_id: session_id,
         },
     };
 
-    let rx = state.runtime.stream(spec, params.sequence_after).await;
-    let stream = ReceiverStream::new(rx)
-        .take_until(state.shutdown.clone().cancelled_owned())
-        .map(|event| {
-            let event_type = event.payload_type().to_owned();
-            let data = serde_json::to_string(&event).unwrap_or_default();
-            Ok::<_, std::convert::Infallible>(
-                SseEvent::default()
-                    .id(event.sequence.to_string())
-                    .event(event_type)
-                    .data(data),
-            )
-        });
+    let event_rx = state.runtime.stream(spec, params.sequence_after).await;
+    let delta_rx = state
+        .runtime
+        .subscribe_token_deltas(&principal.tenant_id, &root_session_id)
+        .await;
+    let out_rx = merge_session_stream(event_rx, delta_rx, scope_turn_id, state.shutdown.clone());
+    let stream = ReceiverStream::new(out_rx).map(Ok::<_, std::convert::Infallible>);
 
     Sse::new(stream)
         .keep_alive(KeepAlive::default())

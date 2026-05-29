@@ -91,6 +91,8 @@ Every interesting thing that happens during a session is recorded as an **event*
 
 You can think of a session as the event log plus the derived state from replaying it.
 
+`client.stream(scope)` also interleaves transient `llm.token.delta` events when streaming is enabled on the agent's `llmLoop`. Deltas are *not* persisted — they're a live side channel for progressive UI rendering. The canonical assistant text always arrives via the persisted `llm.call.completed` and `message.new` events that follow.
+
 ## Identity
 
 Every turn is submitted on behalf of an **identity**, an object with an `id` (your user id) and optional `metadata`. Identity is how the engine knows who a session belongs to. It flows through to your worker (`req.wire.identity.id`) so middleware and tools can scope behavior per user without trusting client-supplied data.

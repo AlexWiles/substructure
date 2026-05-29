@@ -50,7 +50,7 @@ function timingSafeEqual(a, b) {
   return result === 0;
 }
 
-// ../../packages/sdk/dist/chunk-RGABIIPF.js
+// ../../packages/sdk/dist/chunk-UDPS742Q.js
 var DEFAULT_FALLBACK = (req) => ({ actions: [], state: req.state });
 var HandlerBuilder = class {
   agentId;
@@ -336,7 +336,7 @@ var AdminClient = class extends BaseClient {
   }
 };
 
-// ../../packages/sdk/dist/chunk-KEMAK6WM.js
+// ../../packages/sdk/dist/chunk-TIROG2YO.js
 function toSubmitToolCallResultRequest(args) {
   if (args.result !== void 0) {
     return {
@@ -354,10 +354,13 @@ function toSubmitToolCallResultRequest(args) {
     attempt: args.attempt
   };
 }
+function isTokenDelta(event) {
+  return event.type === "llm.token.delta";
+}
 async function drainToTurnResult(stream) {
   let completed;
   for await (const event of stream) {
-    if (event.payload.type === "turn.completed") {
+    if (!isTokenDelta(event) && event.payload.type === "turn.completed") {
       completed = event.payload;
     }
   }
@@ -372,7 +375,7 @@ async function drainToTurnResult(stream) {
   };
 }
 
-// ../../packages/sdk/dist/chunk-NG2NGZ7P.js
+// ../../packages/sdk/dist/chunk-BP54AKEE.js
 var DEFAULT_URL = "https://api.substructure.ai";
 var BackendClient = class {
   worker;
@@ -456,7 +459,7 @@ var UserClient = class extends BaseClient {
   }
 };
 
-// ../../packages/sdk/dist/chunk-IT37KX5V.js
+// ../../packages/sdk/dist/chunk-K3GB3YJF.js
 var DEFAULT_URL2 = "https://api.substructure.ai";
 var FrontendClient = class {
   user;
@@ -1072,7 +1075,7 @@ function mergeTools(existing, added) {
   return Array.from(byName.values());
 }
 
-// ../../packages/sdk/dist/chunk-ZXYKB4HO.js
+// ../../packages/sdk/dist/chunk-7LPEG4OC.js
 function createAgentFactory() {
   const factory = (options) => {
     return new HandlerBuilder(options.id);
@@ -1131,7 +1134,7 @@ var EmbeddedInstance = class {
   /** Stream events for a session. If `scope.turnId` is set, the stream is
    *  filtered to that turn and auto-closes on completion. */
   async *stream(scope, options) {
-    for await (const json of this.runtime.streamSession(scope.sessionId, scope.turnId, options?.sequenceAfter)) {
+    for await (const json of this.runtime.streamSession(this.tenantId, scope.sessionId, scope.turnId, options?.sequenceAfter)) {
       yield JSON.parse(json);
     }
   }
@@ -1266,6 +1269,17 @@ async function sendMessage(content) {
   sendBtn.disabled = true;
   input.disabled = true;
   let typing = showTyping();
+  const partials = /* @__PURE__ */ new Map();
+  const flush = (p) => {
+    let chunk = p.chunks.get(p.nextSeq);
+    while (chunk !== void 0) {
+      p.node.textContent = (p.node.textContent ?? "") + chunk;
+      p.chunks.delete(p.nextSeq);
+      p.nextSeq += 1;
+      chunk = p.chunks.get(p.nextSeq);
+    }
+    chatLog.scrollTop = chatLog.scrollHeight;
+  };
   try {
     const scope = await client.startTurn({
       agentId: "browser-assistant",
@@ -1274,19 +1288,39 @@ async function sendMessage(content) {
     });
     sessionId = scope.sessionId;
     for await (const event of client.stream(scope)) {
-      const p = event.payload;
-      if (p.type === "tool.call.requested" && tools2[p.name]) {
-        const args = p.arguments ? JSON.parse(p.arguments) : {};
+      if (isTokenDelta(event)) {
+        let partial = partials.get(event.call_id);
+        if (!partial) {
+          typing?.remove();
+          typing = null;
+          partial = { node: append("assistant", ""), chunks: /* @__PURE__ */ new Map(), nextSeq: 0 };
+          partials.set(event.call_id, partial);
+        }
+        if (typeof event.text === "string" && event.text.length > 0) {
+          partial.chunks.set(event.seq, event.text);
+          flush(partial);
+        }
+        continue;
+      }
+      if (event.payload.type === "llm.call.completed") {
+        const partial = partials.get(event.payload.call_id);
+        if (partial) {
+          partial.node.remove();
+          partials.delete(event.payload.call_id);
+        }
+      } else if (event.payload.type === "tool.call.requested" && tools2[event.payload.name]) {
+        const { tool_call_id, name, arguments: argsJson, attempt } = event.payload;
+        const args = argsJson ? JSON.parse(argsJson) : {};
         typing?.remove();
         typing = null;
-        append("tool", `\u2192 ${p.name}(${p.arguments || ""})`);
+        append("tool", `\u2192 ${name}(${argsJson || ""})`);
         try {
-          const result = await tools2[p.name](args);
+          const result = await tools2[name](args);
           append("tool", `\u2190 ${JSON.stringify(result)}`);
           await client.submitToolCallResult({
             sessionId: scope.sessionId,
-            toolCallId: p.tool_call_id,
-            attempt: p.attempt,
+            toolCallId: tool_call_id,
+            attempt,
             result: JSON.stringify(result)
           });
         } catch (err) {
@@ -1294,15 +1328,15 @@ async function sendMessage(content) {
           append("tool", `\u2717 ${message}`);
           await client.submitToolCallResult({
             sessionId: scope.sessionId,
-            toolCallId: p.tool_call_id,
-            attempt: p.attempt,
+            toolCallId: tool_call_id,
+            attempt,
             error: message,
             retryable: false
           });
         }
         typing = showTyping();
-      } else if (p.type === "message.new" && p.message.role === "assistant") {
-        const text = typeof p.message.content === "string" ? p.message.content : "";
+      } else if (event.payload.type === "message.new" && event.payload.message.role === "assistant") {
+        const text = typeof event.payload.message.content === "string" ? event.payload.message.content : "";
         if (text.trim()) {
           typing?.remove();
           typing = null;

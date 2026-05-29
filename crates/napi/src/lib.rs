@@ -99,6 +99,8 @@ impl EmbeddedRuntime {
                 .unwrap_or_else(|| "https://openrouter.ai/api".to_string()),
             api_key: options.openrouter_api_key.unwrap_or_default(),
         }));
+        let token_delta_transport =
+            Arc::new(substructure_core::llm::InMemoryTokenDeltaTransport::new());
 
         // Enter the NAPI tokio runtime so background tasks spawned by start() work
         let rt = tokio::runtime::Handle::current();
@@ -112,6 +114,7 @@ impl EmbeddedRuntime {
                 session_index_store,
                 checkpoint_store,
                 wake_store,
+                token_delta_transport,
                 config,
             )
         });
@@ -349,10 +352,11 @@ impl EmbeddedRuntime {
     /// optionally replays historical events with `sequence > N` first.
     #[napi(
         js_name = "streamSession",
-        ts_args_type = "sessionId: string, turnId: string | undefined, sequenceAfter: number | undefined, onEvent: (event: string) => void"
+        ts_args_type = "tenantId: string, sessionId: string, turnId: string | undefined, sequenceAfter: number | undefined, onEvent: (event: string) => void"
     )]
     pub async fn stream_session(
         &self,
+        tenant_id: String,
         session_id: String,
         turn_id: Option<String>,
         sequence_after: Option<i64>,
@@ -362,10 +366,12 @@ impl EmbeddedRuntime {
 
         let spec = match turn_id {
             Some(tid) => SessionSubscriptionSpec::Turn {
+                tenant_id: tenant_id.clone(),
                 root_session_id: session_id,
                 turn_id: tid,
             },
             None => SessionSubscriptionSpec::All {
+                tenant_id: tenant_id.clone(),
                 root_session_id: session_id,
             },
         };

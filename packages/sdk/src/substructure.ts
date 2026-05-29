@@ -139,7 +139,12 @@ export class EmbeddedInstance {
     /** Stream events for a session. If `scope.turnId` is set, the stream is
      *  filtered to that turn and auto-closes on completion. */
     async *stream(scope: SessionScope, options?: StreamOptions): AsyncGenerator<Event> {
-        for await (const json of this.runtime.streamSession(scope.sessionId, scope.turnId, options?.sequenceAfter)) {
+        for await (const json of this.runtime.streamSession(
+            this.tenantId,
+            scope.sessionId,
+            scope.turnId,
+            options?.sequenceAfter,
+        )) {
             yield JSON.parse(json) as Event;
         }
     }
