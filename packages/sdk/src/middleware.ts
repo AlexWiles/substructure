@@ -329,7 +329,7 @@ export function logging(options?: string | LoggingOptions): MiddlewareFn<unknown
 
 // ── Message history ────────────────────────────────────────────────────────
 
-export type MessageSelector<S> = (state: S, ctx: AgentContext<S>) => Message[];
+export type MessageSelector<S> = (state: S, ctx: AgentContext<S>) => Message[] | Promise<Message[]>;
 
 /**
  * Translate a decision trigger into the message (if any) that belongs in the
@@ -438,7 +438,7 @@ export function messageHistoryCurrentTurn(): StateContributor<{
 
 // ── System message ─────────────────────────────────────────────────────────
 
-export type SystemMessageSelector<S> = (state: S, ctx: AgentContext<S>) => string;
+export type SystemMessageSelector<S> = (state: S, ctx: AgentContext<S>) => string | Promise<string>;
 
 export function systemMessage<S>(selectorOrValue: SystemMessageSelector<S> | string): MiddlewareFn<S> {
     const selector: SystemMessageSelector<S> =
@@ -446,7 +446,7 @@ export function systemMessage<S>(selectorOrValue: SystemMessageSelector<S> | str
 
     return middleware({
         handler: async (ctx: AgentContext<S>, next: Next<S>) => {
-            const sysMsg: Message = { role: "system", content: selector(ctx.state, ctx) };
+            const sysMsg: Message = { role: "system", content: await selector(ctx.state, ctx) };
 
             const result = await next(ctx);
             const actions = result.actions.map((action) => {
@@ -468,7 +468,7 @@ export function systemMessage<S>(selectorOrValue: SystemMessageSelector<S> | str
 // ── Tools ──────────────────────────────────────────────────────────────────
 
 export type ToolInput = Record<string, ToolDef> | ToolDef[];
-export type ToolSelector<S> = (state: S, ctx: AgentContext<S>) => ToolInput;
+export type ToolSelector<S> = (state: S, ctx: AgentContext<S>) => ToolInput | Promise<ToolInput>;
 
 function resolveTools(input: ToolInput): Record<string, ToolDef> {
     if (Array.isArray(input)) {
@@ -497,7 +497,7 @@ export function tools<S>(
     return middleware({
         state: { pendingToolCalls: [] as string[] },
         handler: async (ctx, next) => {
-            const toolMap = resolveTools(selector(ctx.state as S, ctx as unknown as AgentContext<S>));
+            const toolMap = resolveTools(await selector(ctx.state as S, ctx as unknown as AgentContext<S>));
 
             const downstream = await next(ctx);
 
@@ -644,14 +644,16 @@ export interface LlmLoopSelection {
 }
 
 export function llmLoop<S>(
-    selectorOrValue: ((state: S, ctx: AgentContext<S>) => LlmLoopSelection) | LlmLoopSelection,
+    selectorOrValue:
+        | ((state: S, ctx: AgentContext<S>) => LlmLoopSelection | Promise<LlmLoopSelection>)
+        | LlmLoopSelection,
 ): MiddlewareFn<S> {
-    const selector: (state: S, ctx: AgentContext<S>) => LlmLoopSelection =
+    const selector: (state: S, ctx: AgentContext<S>) => LlmLoopSelection | Promise<LlmLoopSelection> =
         typeof selectorOrValue === "function" ? selectorOrValue : () => selectorOrValue;
 
     return middleware({
         handler: async (ctx: AgentContext<S>, next: Next<S>) => {
-            const selection = selector(ctx.state, ctx);
+            const selection = await selector(ctx.state, ctx);
             const downstream = await next(ctx);
 
             const { trigger } = ctx.request;
