@@ -48,14 +48,14 @@ async function saveTodos(userId: string, data: TodoData): Promise<void> {
 
 const todoSlice = middleware<{ todos: TodoData }>({
     state: { todos: { items: [] } },
-    handler: async (req, next) => {
-        const userId = req.wire.identity.id;
-        req.state.todos = (await loadTodos(userId)) ?? { items: [] };
+    handler: async (ctx, next) => {
+        const userId = ctx.request.identity.id;
+        ctx.state.todos = (await loadTodos(userId)) ?? { items: [] };
 
-        const res = await next(req);
+        const res = await next(ctx);
 
-        await saveTodos(userId, req.state.todos);
-        req.state.todos = { items: [] }; // DB has the items; don't ship them again
+        await saveTodos(userId, ctx.state.todos);
+        ctx.state.todos = { items: [] }; // DB has the items; don't ship them again
         return res;
     },
 });
@@ -90,7 +90,7 @@ const listTodos = agent.tool({
 // ── Agent ───────────────────────────────────────────────────────────────────
 
 const todoAgent = agent({ id: "todo" })
-    .use(agent.jsonState()) // wire <-> req.state (everything below)
+    .use(agent.jsonState()) // request.worker_state <-> ctx.state (everything below)
     .use(todoSlice) // contributes + hydrates `todos`
     .use(agent.systemMessage("Concise todo assistant. Use tools to manage the list."))
     .use(agent.messageHistory()) // wire-backed (rides along in jsonState)

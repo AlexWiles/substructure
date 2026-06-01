@@ -40,8 +40,13 @@
     "build": "tsup",
     "prepublishOnly": "pnpm build"
   },
-  "optionalDependencies": {
+  "peerDependencies": {
     "@substructure.ai/runtime": "workspace:*"
+  },
+  "peerDependenciesMeta": {
+    "@substructure.ai/runtime": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "22.19.15",

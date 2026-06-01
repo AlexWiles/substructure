@@ -39,14 +39,14 @@ const initialState: ApprovalState = {
 
 const approvalGate = middleware<ApprovalState>({
     state: initialState,
-    handler: async (req, next) => {
-        const result = await next(req);
+    handler: async (ctx, next) => {
+        const result = await next(ctx);
 
         let intercepted = false;
         const kept = result.actions.filter((action) => {
             if (action.type === "call.tool" && action.name === "run_command") {
                 const a = JSON.parse(action.arguments) as { cmd: string };
-                req.state.pendingCommand = { toolCallId: action.tool_call_id, cmd: a.cmd };
+                ctx.state.pendingCommand = { toolCallId: action.tool_call_id, cmd: a.cmd };
                 intercepted = true;
                 return false;
             }
@@ -60,7 +60,7 @@ const approvalGate = middleware<ApprovalState>({
         const finalActions = kept.filter((a) => a.type !== "call.llm");
         finalActions.push({
             type: "done",
-            data: { pendingCommand: req.state.pendingCommand },
+            data: { pendingCommand: ctx.state.pendingCommand },
         });
         return { ...result, actions: finalActions };
     },

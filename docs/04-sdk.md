@@ -212,7 +212,7 @@ The built-in middleware:
 | Middleware | What it does |
 | --- | --- |
 | `agent.jsonState()` | Decodes incoming worker state and encodes the result. Almost always the first middleware. |
-| `agent.systemMessage(str \| fn)` | Prepends a system message to every LLM call. Pass a function `(state, req) => string` to compute it dynamically. |
+| `agent.systemMessage(str \| fn)` | Prepends a system message to every LLM call. Pass a function `(state, ctx) => string` to compute it dynamically. |
 | `agent.messageHistory()` | Tracks the full message history across turns and injects it into LLM calls. |
 | `agent.messageHistoryCurrentTurn()` | Same, but scoped to a single turn. |
 | `agent.tools([...])` | Registers tools, dispatches tool calls from the LLM, and feeds results back. |
@@ -230,9 +230,9 @@ If the built-ins don't cover what you need, write your own. A middleware is just
 ```ts
 import type { MiddlewareFn } from "@substructure.ai/sdk";
 
-const timing: MiddlewareFn = async (req, next) => {
+const timing: MiddlewareFn = async (ctx, next) => {
   const start = Date.now();
-  const res = await next(req);
+  const res = await next(ctx);
   console.log(`decision took ${Date.now() - start}ms`);
   return res;
 };
@@ -244,10 +244,10 @@ const myAgent = agent({ id: "..." })
 
 The middleware receives:
 
-- `req` — the incoming decision request. The interesting fields are `req.state` (the agent state so far) and `req.wire` (the raw envelope, including `wire.session_id`, `wire.turn_id`, and the decision trigger).
-- `next(req)` — runs the rest of the chain. Returns a response containing `actions` (what the engine will do next), `state` (the new state to persist), and optionally `workerState` (the raw, serialized form Substructure sends back next time).
+- `ctx` — the decision context. The interesting fields are `ctx.state` (the agent state so far) and `ctx.request` (the raw decision envelope, including `request.session_id`, `request.turn_id`, `request.identity`, and `request.trigger`).
+- `next(ctx)` — runs the rest of the chain. Returns a response containing `actions` (what the engine will do next), `state` (the new state to persist), and optionally `workerState` (the raw, serialized form Substructure sends back next time).
 
-You can mutate `req` before calling `next`, inspect or rewrite `res.actions` after, or short-circuit entirely.
+You can mutate `ctx` before calling `next`, inspect or rewrite `res.actions` after, or short-circuit entirely.
 
 ### Example: keep conversation state in your own database
 
@@ -267,14 +267,14 @@ type SupportState = {
 const dbState = (db: MyDatabase) =>
   middleware<SupportState>({
     state: { messages: [], ticketId: null },
-    handler: async (req, next) => {
-      const userId = req.wire.identity.id;
-      const sessionId = req.wire.session_id;
+    handler: async (ctx, next) => {
+      const userId = ctx.request.identity.id;
+      const sessionId = ctx.request.session_id;
 
       const loaded = await db.loadAgentState(userId, sessionId);
-      if (loaded) req.state = loaded;
+      if (loaded) ctx.state = loaded;
 
-      const res = await next(req);
+      const res = await next(ctx);
 
       await db.saveAgentState(userId, sessionId, res.state);
 
@@ -290,9 +290,9 @@ const myAgent = agent({ id: "support" })
   .use(agent.llmLoop({ request: { model: "anthropic/claude-sonnet-4-5" } }));
 ```
 
-The `state` field on `middleware` does two things: it gives you the initial value used on the first turn, and it locks in the type so `req.state` is typed inside `handler` and any tool that takes `state: this slice` gets the same type. Downstream middleware like `messageHistory` will populate `req.state.messages` for you; `ticketId` is a slot you can read and write from your own tools.
+The `state` field on `middleware` does two things: it gives you the initial value used on the first turn, and it locks in the type so `ctx.state` is typed inside `handler` and any tool that takes `state: this slice` gets the same type. Downstream middleware like `messageHistory` will populate `ctx.state.messages` for you; `ticketId` is a slot you can read and write from your own tools.
 
-`req.wire.identity.id` is the user id the client passed when calling `startTurn`, and `req.wire.session_id` is the conversation. Keying on both means a single user can have multiple parallel conversations and you can scope, list, or delete state per user without ever touching Substructure.
+`ctx.request.identity.id` is the user id the client passed when calling `startTurn`, and `ctx.request.session_id` is the conversation. Keying on both means a single user can have multiple parallel conversations and you can scope, list, or delete state per user without ever touching Substructure.
 
 Because this middleware loads and saves state directly to your database, you don't need `agent.jsonState()` in the chain at all: there's no `workerState` to round-trip. Substructure will pass an empty wire state on the next turn and your middleware will load the real state from the DB.
 
@@ -310,14 +310,14 @@ type TodoData = { items: Todo[] };
 
 const todoSlice = middleware<{ todos: TodoData }>({
   state: { todos: { items: [] } },
-  handler: async (req, next) => {
-    const userId = req.wire.identity.id;
-    req.state.todos = (await db.loadTodos(userId)) ?? { items: [] };
+  handler: async (ctx, next) => {
+    const userId = ctx.request.identity.id;
+    ctx.state.todos = (await db.loadTodos(userId)) ?? { items: [] };
 
-    const res = await next(req);
+    const res = await next(ctx);
 
-    await db.saveTodos(userId, req.state.todos);
-    req.state.todos = { items: [] };   // DB has the items; don't ship them again
+    await db.saveTodos(userId, ctx.state.todos);
+    ctx.state.todos = { items: [] };   // DB has the items; don't ship them again
     return res;
   },
 });
@@ -350,7 +350,7 @@ And the chain stays small: one middleware covers both the slice and the persiste
 
 ```ts
 const todoAgent = agent({ id: "todo" })
-  .use(agent.jsonState())          // wire <-> req.state
+  .use(agent.jsonState())          // wire <-> ctx.state
   .use(todoSlice)                  // contributes + hydrates `todos`
   .use(agent.messageHistory())     // wire-backed via jsonState
   .use(agent.tools([addTodo]))
@@ -377,12 +377,12 @@ type RateState = { callsThisTurn: number };
 
 const rateLimit = middleware<RateState>({
   state: { callsThisTurn: 0 } as RateState,
-  handler: async (req, next) => {
-    req.state.callsThisTurn += 1;
-    if (req.state.callsThisTurn > 10) {
-      return { actions: [{ type: "done", data: "rate limit exceeded" }], state: req.state };
+  handler: async (ctx, next) => {
+    ctx.state.callsThisTurn += 1;
+    if (ctx.state.callsThisTurn > 10) {
+      return { actions: [{ type: "done", data: "rate limit exceeded" }], state: ctx.state };
     }
-    return next(req);
+    return next(ctx);
   },
 });
 ```
@@ -448,7 +448,7 @@ console.log(data);
 `startTurn` returns a `SessionScope` containing `sessionId` and `turnId`. From there you have two choices:
 
 - `await client.turnResult(scope)` waits for the turn to finish and returns `{ data, cost, tokenUsage }`.
-- `for await (const event of client.stream(scope))` streams individual events as they arrive: LLM responses, tool calls, sub-agent updates, and so on. Use `sequenceAfter` to resume from a known event. If the agent's `llmLoop` has `stream: true`, transient `llm.token.delta` items are interleaved for progressive rendering — they arrive as bare payloads (no envelope, no `sequence`) and are not replayed on reconnect. Discriminate with the exported `isTokenDelta(event)` guard.
+- `for await (const event of client.stream(scope))` streams individual events as they arrive: LLM responses, tool calls, sub-agent updates, and so on. Use `sequenceAfter` to resume from a known event. By default the stream yields only persisted events, so you can `switch` on `event.payload.type` directly. Pass `{ tokens: true }` to also receive transient `llm.token.delta` items for progressive rendering (only emitted when the agent's `llmLoop` has `stream: true`) — they arrive as bare payloads (no envelope, no `sequence`), are not replayed on reconnect, and are discriminated with the exported `isTokenDelta(event)` guard.
 
 The client also exposes admin APIs: `listSessions`, `getSession`, and `sessionEvents` for tooling and dashboards.
 
@@ -515,7 +515,7 @@ const scope = await client.startTurn({
   },
 });
 
-for await (const event of client.stream(scope)) {
+for await (const event of client.stream(scope, { tokens: true })) {
   if (isTokenDelta(event)) {
     // Transient live chunk. Order within a call by `seq` and append to the
     // in-progress assistant bubble. Drop the partial when the matching

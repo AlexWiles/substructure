@@ -3,7 +3,7 @@
 // at this Worker's URL.
 
 import Substructure from "@substructure.ai/sdk";
-import type { AgentRequest, MiddlewareFn, Next } from "@substructure.ai/sdk";
+import type { AgentContext, MiddlewareFn, Next } from "@substructure.ai/sdk";
 import { DurableObject } from "cloudflare:workers";
 
 type Todo = { id: string; title: string; done: boolean };
@@ -37,12 +37,12 @@ export class AgentState extends DurableObject {
 }
 
 function durableObjectState(namespace: DurableObjectNamespace<AgentState>): MiddlewareFn<unknown, State> {
-    return async (req: AgentRequest<unknown>, next: Next<State>) => {
-        const sessionId = req.wire.session_id;
+    return async (ctx: AgentContext<unknown>, next: Next<State>) => {
+        const sessionId = ctx.request.session_id;
         const stub = namespace.getByName(sessionId);
         const state = await stub.getState();
 
-        const result = await next({ ...req, state });
+        const result = await next({ ...ctx, state });
 
         await stub.setState(result.state as State);
 

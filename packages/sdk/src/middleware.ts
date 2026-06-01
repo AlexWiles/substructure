@@ -7,8 +7,9 @@ import type {
     ToolHandler,
     ToolResult,
     WorkerAction,
+    WorkerDecisionRequestWire,
 } from "./types";
-import type { Handler, AgentRequest, AgentResponse, MiddlewareFn, Next, StateContributor } from "./worker";
+import type { Handler, AgentContext, AgentResponse, MiddlewareFn, Next, StateContributor } from "./worker";
 
 export const DEFAULT_RETRY: RetryPolicy = {
     timeout_secs: 120,
@@ -45,26 +46,26 @@ function initSlice<A extends object>(rawState: unknown, init: A): A {
  */
 export function middleware<A extends object>(config: {
     state: A;
-    handler?: (ctx: AgentRequest<A>, next: Next<A>) => Promise<AgentResponse> | AgentResponse;
+    handler?: (ctx: AgentContext<A>, next: Next<A>) => Promise<AgentResponse> | AgentResponse;
 }): StateContributor<A> & MiddlewareFn<unknown, A> & { _init: A };
 export function middleware<S = unknown>(config: {
-    handler: (ctx: AgentRequest<S>, next: Next<S>) => Promise<AgentResponse> | AgentResponse;
+    handler: (ctx: AgentContext<S>, next: Next<S>) => Promise<AgentResponse> | AgentResponse;
 }): MiddlewareFn<S>;
 export function middleware<A extends object>(config: {
     state?: A;
-    handler?: (ctx: AgentRequest<A>, next: Next<A>) => Promise<AgentResponse> | AgentResponse;
+    handler?: (ctx: AgentContext<A>, next: Next<A>) => Promise<AgentResponse> | AgentResponse;
 }): MiddlewareFn<unknown> {
-    const handler = config.handler ?? ((req: AgentRequest<A>, next: Next<A>) => next(req));
+    const handler = config.handler ?? ((ctx: AgentContext<A>, next: Next<A>) => next(ctx));
 
     if (!config.state) {
         return handler as MiddlewareFn<unknown>;
     }
 
     const init = config.state;
-    const mw = (req: AgentRequest<unknown>, next: Next<A>) => {
-        const state = initSlice(req.state, init);
-        const typedReq: AgentRequest<A> = { ...req, state: state as A };
-        return handler(typedReq, next);
+    const mw = (ctx: AgentContext<unknown>, next: Next<A>) => {
+        const state = initSlice(ctx.state, init);
+        const typedCtx: AgentContext<A> = { ...ctx, state: state as A };
+        return handler(typedCtx, next);
     };
 
     return Object.assign(mw, { _contributes: init, _init: init }) as StateContributor<A> &
@@ -86,15 +87,15 @@ export function stateSlice<A extends object>(init: A): StateSliceMw<A> {
 
 /**
  * Base64 JSON state serialization middleware.
- * Decodes `wire.worker_state` into `req.state` (falling back to `{}`),
+ * Decodes `request.worker_state` into `ctx.state` (falling back to `{}`),
  * runs the chain, then encodes `res.state` back into `workerState`.
  */
 export function jsonState(): MiddlewareFn<unknown> {
     return middleware({
-        handler: async (req: AgentRequest<unknown>, next: Next<unknown>) => {
-            const enriched: AgentRequest<unknown> = {
-                ...req,
-                state: decodeWorkerState(req.wire.worker_state),
+        handler: async (ctx: AgentContext<unknown>, next: Next<unknown>) => {
+            const enriched: AgentContext<unknown> = {
+                ...ctx,
+                state: decodeWorkerState(ctx.request.worker_state),
             };
             const res = await next(enriched);
             return {
@@ -126,6 +127,10 @@ export interface ToolExecutionContext {
     sessionId: string;
     toolCallId: string;
     attempt: number;
+    /** The full worker decision request that triggered this tool call,
+     *  including the client `identity` that created the session, the
+     *  tenant, agent, span, and trigger details. */
+    request: WorkerDecisionRequestWire;
     /** Signal that this tool will deliver its result later via
      *  `submitToolCallResult`. Return the value: `return ctx.defer();`. */
     defer: () => Deferred;
@@ -229,20 +234,20 @@ export function actions(defs: ActionDef<any, any>[]): MiddlewareFn<unknown> {
     for (const def of defs) byName[def.name] = def;
 
     return middleware({
-        handler: async (req, next) => {
-            const { trigger } = req;
-            if (trigger.type !== "client.action") return next(req);
+        handler: async (ctx, next) => {
+            const { trigger } = ctx.request;
+            if (trigger.type !== "client.action") return next(ctx);
 
             const def = byName[trigger.name];
-            if (!def) return next(req);
+            if (!def) return next(ctx);
 
-            const state = def.stateSlice ? initSlice(req.state, def.stateSlice._init) : req.state;
+            const state = def.stateSlice ? initSlice(ctx.state, def.stateSlice._init) : ctx.state;
             const result = await def.handler(trigger.args ?? {}, state);
 
             if (Array.isArray(result)) {
-                return { state: req.state, actions: result };
+                return { state: ctx.state, actions: result };
             }
-            return next(req);
+            return next(ctx);
         },
     });
 }
@@ -285,34 +290,34 @@ export function logging(options?: string | LoggingOptions): MiddlewareFn<unknown
     const label = opts.label;
 
     return middleware({
-        handler: async (req, next) => {
-            const t = req.trigger;
+        handler: async (ctx, next) => {
+            const t = ctx.request.trigger;
             const tag = t.type === "tool.execute" ? `${t.type}:${t.name}` : t.type;
-            const ctx: Record<string, unknown> = {
-                agent: req.agentId,
-                session: req.wire.session_id,
-                decision: req.wire.decision_id,
+            const fields: Record<string, unknown> = {
+                agent: ctx.request.agent_id,
+                session: ctx.request.session_id,
+                decision: ctx.request.decision_id,
                 trigger: tag,
             };
-            if (label) ctx.label = label;
+            if (label) fields.label = label;
 
-            log.info("decision.start", ctx);
-            log.debug("decision.trigger", { ...ctx, payload: t });
+            log.info("decision.start", fields);
+            log.debug("decision.trigger", { ...fields, payload: t });
 
             const start = performance.now();
             try {
-                const result = await next(req);
+                const result = await next(ctx);
                 const durationMs = Number((performance.now() - start).toFixed(1));
                 const actionTypes = result.actions.map((a) => a.type);
 
-                log.info("decision.end", { ...ctx, actions: actionTypes, durationMs });
-                log.debug("decision.actions", { ...ctx, actions: result.actions, durationMs });
+                log.info("decision.end", { ...fields, actions: actionTypes, durationMs });
+                log.debug("decision.actions", { ...fields, actions: result.actions, durationMs });
 
                 return result;
             } catch (err) {
                 const durationMs = Number((performance.now() - start).toFixed(1));
                 log.error("decision.error", {
-                    ...ctx,
+                    ...fields,
                     error: err instanceof Error ? err.message : String(err),
                     durationMs,
                 });
@@ -324,7 +329,7 @@ export function logging(options?: string | LoggingOptions): MiddlewareFn<unknown
 
 // ── Message history ────────────────────────────────────────────────────────
 
-export type MessageSelector<S> = (state: S, req: AgentRequest<S>) => Message[];
+export type MessageSelector<S> = (state: S, ctx: AgentContext<S>) => Message[];
 
 /**
  * Translate a decision trigger into the message (if any) that belongs in the
@@ -386,14 +391,14 @@ export function messageHistory(): StateContributor<{ messages: Message[] }> &
     MiddlewareFn<unknown, { messages: Message[] }> {
     return middleware({
         state: { messages: [] as Message[] },
-        handler: async (req, next) => {
-            const msg = triggerToMessage(req.trigger);
-            if (msg) req.state.messages.push(msg);
+        handler: async (ctx, next) => {
+            const msg = triggerToMessage(ctx.request.trigger);
+            if (msg) ctx.state.messages.push(msg);
 
-            const result = await next(req);
+            const result = await next(ctx);
             return {
                 ...result,
-                actions: prependHistoryToLlmCalls(req.state.messages, result.actions),
+                actions: prependHistoryToLlmCalls(ctx.state.messages, result.actions),
             };
         },
     });
@@ -401,7 +406,7 @@ export function messageHistory(): StateContributor<{ messages: Message[] }> &
 
 /**
  * Like `messageHistory`, but only retains messages from the current turn.
- * Resets the buffer whenever `req.wire.turn_id` changes.
+ * Resets the buffer whenever `ctx.request.turn_id` changes.
  *
  * Requires callers to supply a distinct `turn_id` per submit. If `turn_id` is
  * omitted by the caller, this degrades to the same behavior as `messageHistory`.
@@ -413,19 +418,19 @@ export function messageHistoryCurrentTurn(): StateContributor<{
     MiddlewareFn<unknown, { messages: Message[]; lastTurnId?: string }> {
     return middleware({
         state: { messages: [] as Message[], lastTurnId: undefined as string | undefined },
-        handler: async (req, next) => {
-            if (req.wire.turn_id !== req.state.lastTurnId) {
-                req.state.messages = [];
-                req.state.lastTurnId = req.wire.turn_id;
+        handler: async (ctx, next) => {
+            if (ctx.request.turn_id !== ctx.state.lastTurnId) {
+                ctx.state.messages = [];
+                ctx.state.lastTurnId = ctx.request.turn_id;
             }
 
-            const msg = triggerToMessage(req.trigger);
-            if (msg) req.state.messages.push(msg);
+            const msg = triggerToMessage(ctx.request.trigger);
+            if (msg) ctx.state.messages.push(msg);
 
-            const result = await next(req);
+            const result = await next(ctx);
             return {
                 ...result,
-                actions: prependHistoryToLlmCalls(req.state.messages, result.actions),
+                actions: prependHistoryToLlmCalls(ctx.state.messages, result.actions),
             };
         },
     });
@@ -433,17 +438,17 @@ export function messageHistoryCurrentTurn(): StateContributor<{
 
 // ── System message ─────────────────────────────────────────────────────────
 
-export type SystemMessageSelector<S> = (state: S, req: AgentRequest<S>) => string;
+export type SystemMessageSelector<S> = (state: S, ctx: AgentContext<S>) => string;
 
 export function systemMessage<S>(selectorOrValue: SystemMessageSelector<S> | string): MiddlewareFn<S> {
     const selector: SystemMessageSelector<S> =
         typeof selectorOrValue === "function" ? selectorOrValue : () => selectorOrValue;
 
     return middleware({
-        handler: async (req: AgentRequest<S>, next: Next<S>) => {
-            const sysMsg: Message = { role: "system", content: selector(req.state, req) };
+        handler: async (ctx: AgentContext<S>, next: Next<S>) => {
+            const sysMsg: Message = { role: "system", content: selector(ctx.state, ctx) };
 
-            const result = await next(req);
+            const result = await next(ctx);
             const actions = result.actions.map((action) => {
                 if (action.type !== "call.llm") return action;
                 return {
@@ -463,7 +468,7 @@ export function systemMessage<S>(selectorOrValue: SystemMessageSelector<S> | str
 // ── Tools ──────────────────────────────────────────────────────────────────
 
 export type ToolInput = Record<string, ToolDef> | ToolDef[];
-export type ToolSelector<S> = (state: S, req: AgentRequest<S>) => ToolInput;
+export type ToolSelector<S> = (state: S, ctx: AgentContext<S>) => ToolInput;
 
 function resolveTools(input: ToolInput): Record<string, ToolDef> {
     if (Array.isArray(input)) {
@@ -491,24 +496,24 @@ export function tools<S>(
 
     return middleware({
         state: { pendingToolCalls: [] as string[] },
-        handler: async (req, next) => {
-            const toolMap = resolveTools(selector(req.state as S, req as unknown as AgentRequest<S>));
+        handler: async (ctx, next) => {
+            const toolMap = resolveTools(selector(ctx.state as S, ctx as unknown as AgentContext<S>));
 
-            const downstream = await next(req);
+            const downstream = await next(ctx);
 
             // Handle tool execution
-            if (req.trigger.type === "tool.execute") {
-                const t = toolMap[req.trigger.name];
+            if (ctx.request.trigger.type === "tool.execute") {
+                const t = toolMap[ctx.request.trigger.name];
                 if (!t) {
                     return {
                         ...downstream,
                         actions: [
                             {
                                 type: "return.tool.error" as const,
-                                tool_call_id: req.trigger.tool_call_id,
-                                error: `Unknown tool: ${req.trigger.name}`,
+                                tool_call_id: ctx.request.trigger.tool_call_id,
+                                error: `Unknown tool: ${ctx.request.trigger.name}`,
                                 retryable: false,
-                                attempt: req.trigger.attempt,
+                                attempt: ctx.request.trigger.attempt,
                             },
                             ...downstream.actions,
                         ],
@@ -518,15 +523,16 @@ export function tools<S>(
                 try {
                     let toolState: unknown;
                     if (t.stateSlice) {
-                        toolState = initSlice(req.state, t.stateSlice._init);
+                        toolState = initSlice(ctx.state, t.stateSlice._init);
                     }
-                    const ctx: ToolExecutionContext = {
-                        sessionId: req.wire.session_id,
-                        toolCallId: req.trigger.tool_call_id,
-                        attempt: req.trigger.attempt,
+                    const toolCtx: ToolExecutionContext = {
+                        sessionId: ctx.request.session_id,
+                        toolCallId: ctx.request.trigger.tool_call_id,
+                        attempt: ctx.request.trigger.attempt,
+                        request: ctx.request,
                         defer: () => DEFERRED,
                     };
-                    const output = await t.execute(req.trigger.arguments, toolState, ctx);
+                    const output = await t.execute(ctx.request.trigger.arguments, toolState, toolCtx);
                     if (output === DEFERRED) {
                         return downstream;
                     }
@@ -535,9 +541,9 @@ export function tools<S>(
                         actions: [
                             {
                                 type: "return.tool.result" as const,
-                                tool_call_id: req.trigger.tool_call_id,
+                                tool_call_id: ctx.request.trigger.tool_call_id,
                                 result: typeof output === "string" ? output : JSON.stringify(output),
-                                attempt: req.trigger.attempt,
+                                attempt: ctx.request.trigger.attempt,
                             },
                             ...downstream.actions,
                         ],
@@ -548,10 +554,10 @@ export function tools<S>(
                         actions: [
                             {
                                 type: "return.tool.error" as const,
-                                tool_call_id: req.trigger.tool_call_id,
+                                tool_call_id: ctx.request.trigger.tool_call_id,
                                 error: error instanceof Error ? error.message : String(error),
                                 retryable: false,
-                                attempt: req.trigger.attempt,
+                                attempt: ctx.request.trigger.attempt,
                             },
                             ...downstream.actions,
                         ],
@@ -561,11 +567,11 @@ export function tools<S>(
 
             // Track pending tool calls from LLM response and emit call_tool actions
             // Only emit call.tool for tools this middleware knows about.
-            if (req.trigger.type === "llm.response") {
-                const toolCalls = req.trigger.message.tool_calls;
+            if (ctx.request.trigger.type === "llm.response") {
+                const toolCalls = ctx.request.trigger.message.tool_calls;
                 if (toolCalls && toolCalls.length > 0) {
                     const known = toolCalls.filter((tc) => tc.function.name in toolMap);
-                    req.state.pendingToolCalls = known.map((tc) => tc.id);
+                    ctx.state.pendingToolCalls = known.map((tc) => tc.id);
 
                     const callToolActions: WorkerAction[] = known.map((tc) => {
                         const def = toolMap[tc.function.name];
@@ -612,10 +618,10 @@ export function tools<S>(
             });
 
             // Suppress call_llm until all tool results are in
-            if (req.trigger.type === "tool.result") {
-                const resultId = req.trigger.result.tool_call_id;
-                req.state.pendingToolCalls = req.state.pendingToolCalls.filter((id) => id !== resultId);
-                if (req.state.pendingToolCalls.length > 0) {
+            if (ctx.request.trigger.type === "tool.result") {
+                const resultId = ctx.request.trigger.result.tool_call_id;
+                ctx.state.pendingToolCalls = ctx.state.pendingToolCalls.filter((id) => id !== resultId);
+                if (ctx.state.pendingToolCalls.length > 0) {
                     return {
                         ...downstream,
                         actions: actions.filter((a) => a.type !== "call.llm"),
@@ -638,17 +644,17 @@ export interface LlmLoopSelection {
 }
 
 export function llmLoop<S>(
-    selectorOrValue: ((state: S, req: AgentRequest<S>) => LlmLoopSelection) | LlmLoopSelection,
+    selectorOrValue: ((state: S, ctx: AgentContext<S>) => LlmLoopSelection) | LlmLoopSelection,
 ): MiddlewareFn<S> {
-    const selector: (state: S, req: AgentRequest<S>) => LlmLoopSelection =
+    const selector: (state: S, ctx: AgentContext<S>) => LlmLoopSelection =
         typeof selectorOrValue === "function" ? selectorOrValue : () => selectorOrValue;
 
     return middleware({
-        handler: async (req: AgentRequest<S>, next: Next<S>) => {
-            const selection = selector(req.state, req);
-            const downstream = await next(req);
+        handler: async (ctx: AgentContext<S>, next: Next<S>) => {
+            const selection = selector(ctx.state, ctx);
+            const downstream = await next(ctx);
 
-            const { trigger } = req;
+            const { trigger } = ctx.request;
             switch (trigger.type) {
                 case "user.message":
                 case "client.action":
@@ -708,16 +714,16 @@ export function subAgents<S>(config: {
 
     return middleware({
         state: { subAgentTracker: {} as Record<string, SubAgentTrack> },
-        handler: async (req, next) => {
-            const tracker = req.state.subAgentTracker;
+        handler: async (ctx, next) => {
+            const tracker = ctx.state.subAgentTracker;
 
-            switch (req.trigger.type) {
+            switch (ctx.request.trigger.type) {
                 case "llm.response": {
                     // Intercept tool calls destined for sub-agents directly from
                     // the trigger, so this middleware works with or without
                     // agent.tools() in the chain.
                     const spawnActions: WorkerAction[] = [];
-                    const toolCalls = req.trigger.message.tool_calls ?? [];
+                    const toolCalls = ctx.request.trigger.message.tool_calls ?? [];
                     for (const tc of toolCalls) {
                         const sub = subAgentMap[tc.function.name];
                         if (!sub) continue;
@@ -754,7 +760,7 @@ export function subAgents<S>(config: {
                         );
                     }
 
-                    const downstream = await next(req);
+                    const downstream = await next(ctx);
 
                     // Merge sub-agent tool defs into any call.llm actions, and
                     // filter out call.tool actions that we already spawned above.
@@ -780,14 +786,16 @@ export function subAgents<S>(config: {
                 }
 
                 case "sub_agent.turn.complete": {
-                    const tracked = tracker[req.trigger.session_id];
+                    const tracked = tracker[ctx.request.trigger.session_id];
                     if (!tracked) {
-                        return next(req);
+                        return next(ctx);
                     }
-                    delete tracker[req.trigger.session_id];
+                    delete tracker[ctx.request.trigger.session_id];
 
                     const content =
-                        typeof req.trigger.data === "string" ? req.trigger.data : JSON.stringify(req.trigger.data);
+                        typeof ctx.request.trigger.data === "string"
+                            ? ctx.request.trigger.data
+                            : JSON.stringify(ctx.request.trigger.data);
                     const result: ToolResult = {
                         tool_call_id: tracked.toolCallId,
                         name: tracked.name,
@@ -796,33 +804,33 @@ export function subAgents<S>(config: {
                     };
 
                     return appendToolResultToLlmCalls(
-                        await next({ ...req, trigger: { type: "tool.result", result } }),
+                        await next({ ...ctx, request: { ...ctx.request, trigger: { type: "tool.result", result } } }),
                         result,
                     );
                 }
 
                 case "sub_agent.error": {
-                    const tracked = tracker[req.trigger.session_id];
+                    const tracked = tracker[ctx.request.trigger.session_id];
                     if (!tracked) {
-                        return next(req);
+                        return next(ctx);
                     }
-                    delete tracker[req.trigger.session_id];
+                    delete tracker[ctx.request.trigger.session_id];
 
                     const result: ToolResult = {
                         tool_call_id: tracked.toolCallId,
                         name: tracked.name,
-                        content: `Sub-agent ${req.trigger.agent_id} failed: ${req.trigger.error}`,
+                        content: `Sub-agent ${ctx.request.trigger.agent_id} failed: ${ctx.request.trigger.error}`,
                         is_error: true,
                     };
 
                     return appendToolResultToLlmCalls(
-                        await next({ ...req, trigger: { type: "tool.result", result } }),
+                        await next({ ...ctx, request: { ...ctx.request, trigger: { type: "tool.result", result } } }),
                         result,
                     );
                 }
 
                 default: {
-                    const downstream = await next(req);
+                    const downstream = await next(ctx);
                     const actions = downstream.actions.map((action) => {
                         if (action.type !== "call.llm") return action;
                         return {

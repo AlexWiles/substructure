@@ -1,10 +1,11 @@
 import { WorkerClient } from "./worker-client";
 import { AdminClient } from "./admin-client";
 import type { ListSessionsParams, SessionDetail, SessionEventsParams, SessionListResponse } from "./admin-client";
-import { drainToTurnResult, toSubmitToolCallResultRequest } from "./types";
+import { drainToTurnResult, persistedOnly, toSubmitToolCallResultRequest } from "./types";
 import type {
     ClientPayload,
     Event,
+    PersistedEvent,
     SessionScope,
     SubmitRequest,
     SubmitResponse,
@@ -58,6 +59,12 @@ export interface StartTurnRequest {
 
 export interface StreamOptions {
     sequenceAfter?: number;
+    /** Include transient `llm.token.delta` events. Off by default, so
+     *  `stream()` yields only persisted events and you can `switch` on
+     *  `event.payload.type` without a guard. Opt in for live token
+     *  rendering; deltas only arrive when streaming is enabled on the
+     *  agent's `llmLoop`. */
+    tokens?: boolean;
 }
 
 export class BackendClient {
@@ -100,12 +107,17 @@ export class BackendClient {
     }
 
     /** Stream events for a session. If `scope.turnId` is set, the stream is
-     *  filtered to that turn and auto-closes on completion. */
+     *  filtered to that turn and auto-closes on completion. Yields only
+     *  persisted events unless `{ tokens: true }` is passed. */
+    stream(scope: SessionScope, options?: StreamOptions & { tokens?: false }): AsyncGenerator<PersistedEvent>;
+    stream(scope: SessionScope, options: StreamOptions & { tokens: true }): AsyncGenerator<Event>;
+    stream(scope: SessionScope, options: StreamOptions): AsyncGenerator<Event>;
     stream(scope: SessionScope, options?: StreamOptions): AsyncGenerator<Event> {
-        return this.worker.streamSessionEvents(scope.sessionId, {
+        const raw = this.worker.streamSessionEvents(scope.sessionId, {
             turn_id: scope.turnId,
             sequence_after: options?.sequenceAfter,
         });
+        return options?.tokens ? raw : persistedOnly(raw);
     }
 
     /** Stream a turn to completion and return its result. Requires `scope.turnId`. */

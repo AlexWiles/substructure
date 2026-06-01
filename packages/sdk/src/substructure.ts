@@ -16,8 +16,16 @@ import {
     tool,
     tools,
 } from "./middleware";
-import type { ClientIdentity, ClientPayload, Event, SessionScope, SubmitToolCallResultArgs, TurnResult } from "./types";
-import { drainToTurnResult } from "./types";
+import type {
+    ClientIdentity,
+    ClientPayload,
+    Event,
+    PersistedEvent,
+    SessionScope,
+    SubmitToolCallResultArgs,
+    TurnResult,
+} from "./types";
+import { drainToTurnResult, isTokenDelta } from "./types";
 import type { FetchHandlerOptions, Handler, NativeRuntime } from "./worker";
 import { HandlerBuilder, Worker } from "./worker";
 
@@ -104,6 +112,12 @@ export interface StartTurnRequest {
 
 export interface StreamOptions {
     sequenceAfter?: number;
+    /** Include transient `llm.token.delta` events. Off by default, so
+     *  `stream()` yields only persisted events and you can `switch` on
+     *  `event.payload.type` without a guard. Opt in for live token
+     *  rendering; deltas only arrive when streaming is enabled on the
+     *  agent's `llmLoop`. */
+    tokens?: boolean;
 }
 
 export class EmbeddedInstance {
@@ -137,7 +151,11 @@ export class EmbeddedInstance {
     }
 
     /** Stream events for a session. If `scope.turnId` is set, the stream is
-     *  filtered to that turn and auto-closes on completion. */
+     *  filtered to that turn and auto-closes on completion. Yields only
+     *  persisted events unless `{ tokens: true }` is passed. */
+    stream(scope: SessionScope, options?: StreamOptions & { tokens?: false }): AsyncGenerator<PersistedEvent>;
+    stream(scope: SessionScope, options: StreamOptions & { tokens: true }): AsyncGenerator<Event>;
+    stream(scope: SessionScope, options: StreamOptions): AsyncGenerator<Event>;
     async *stream(scope: SessionScope, options?: StreamOptions): AsyncGenerator<Event> {
         for await (const json of this.runtime.streamSession(
             this.tenantId,
@@ -145,7 +163,9 @@ export class EmbeddedInstance {
             scope.turnId,
             options?.sequenceAfter,
         )) {
-            yield JSON.parse(json) as Event;
+            const event = JSON.parse(json) as Event;
+            if (!options?.tokens && isTokenDelta(event)) continue;
+            yield event;
         }
     }
 

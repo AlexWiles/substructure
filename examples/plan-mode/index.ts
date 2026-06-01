@@ -62,15 +62,15 @@ const initialState: PlanState = {
 
 const planMode = middleware<PlanState>({
     state: initialState,
-    handler: async (req, next) => {
-        const { trigger } = req;
+    handler: async (ctx, next) => {
+        const { trigger } = ctx.request;
         if (trigger.type === "client.action" && trigger.name === "set_mode") {
             const args = (trigger.args ?? {}) as { mode?: Mode };
             if (args.mode === "planning" || args.mode === "executing") {
-                req.state.mode = args.mode;
+                ctx.state.mode = args.mode;
             }
         }
-        return next(req);
+        return next(ctx);
     },
 });
 
@@ -78,19 +78,19 @@ const planMode = middleware<PlanState>({
 
 const modeAwareHistory = middleware<PlanState>({
     state: initialState,
-    handler: async (req, next) => {
-        if (req.state.mode !== req.state.lastMode) {
-            req.state.messages = [];
-            req.state.lastMode = req.state.mode;
+    handler: async (ctx, next) => {
+        if (ctx.state.mode !== ctx.state.lastMode) {
+            ctx.state.messages = [];
+            ctx.state.lastMode = ctx.state.mode;
         }
 
-        const msg = triggerToMessage(req.trigger);
-        if (msg) req.state.messages.push(msg);
+        const msg = triggerToMessage(ctx.request.trigger);
+        if (msg) ctx.state.messages.push(msg);
 
-        const result = await next(req);
+        const result = await next(ctx);
         return {
             ...result,
-            actions: prependHistoryToLlmCalls(req.state.messages, result.actions),
+            actions: prependHistoryToLlmCalls(ctx.state.messages, result.actions),
         };
     },
 });

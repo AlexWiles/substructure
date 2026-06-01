@@ -10,7 +10,7 @@ export type { SessionScope, TurnResult } from "./types";
 // ── Worker & Agent ────────────────────────────────────────────────────────
 
 export type {
-    AgentRequest,
+    AgentContext,
     AgentResponse,
     DecisionHandler,
     DecisionResult,
@@ -99,4 +99,4 @@ export type {
     WorkerDecisionRequestWire,
     WorkerIdentity,
 } from "./types";
-export { contentText, isTokenDelta } from "./types";
+export { contentText, isTokenDelta, persistedOnly } from "./types";

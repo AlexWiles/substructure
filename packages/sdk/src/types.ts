@@ -536,6 +536,15 @@ export function isTokenDelta(event: Event): event is LlmTokenDelta {
     return (event as LlmTokenDelta).type === "llm.token.delta";
 }
 
+/** Project a raw event stream down to persisted events, dropping transient
+ *  token deltas. This is what `stream()` applies unless you pass
+ *  `{ tokens: true }`. Exposed for callers wiring streams together by hand. */
+export async function* persistedOnly(stream: AsyncIterable<Event>): AsyncGenerator<PersistedEvent> {
+    for await (const event of stream) {
+        if (!isTokenDelta(event)) yield event;
+    }
+}
+
 // ── Turns ───────────────────────────────────────────────────────────────────
 
 /** Scope of events to observe within a session. With `turnId` omitted, the

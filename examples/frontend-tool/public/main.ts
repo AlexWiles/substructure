@@ -119,7 +119,7 @@ async function sendMessage(content: string) {
         });
         sessionId = scope.sessionId;
 
-        for await (const event of client.stream(scope)) {
+        for await (const event of client.stream(scope, { tokens: true })) {
             if (isTokenDelta(event)) {
                 let partial = partials.get(event.call_id);
                 if (!partial) {

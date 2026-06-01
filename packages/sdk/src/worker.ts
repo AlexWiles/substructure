@@ -40,11 +40,13 @@ export interface DecisionResult {
 
 export type DecisionHandler = (request: WorkerDecisionRequestWire) => Promise<DecisionResult>;
 
-export interface AgentRequest<S = unknown> {
-    agentId: string;
-    trigger: WorkerDecisionRequestWire["trigger"];
+export interface AgentContext<S = unknown> {
+    /** Mutable agent state, built up across middleware layers. */
     state: S;
-    wire: WorkerDecisionRequestWire;
+    /** The raw decision envelope off the wire (snake_case, mirrors the
+     *  engine's `WorkerDecisionRequest`): identity, trigger, session_id,
+     *  agent_id, turn_id, span, etc. */
+    request: WorkerDecisionRequestWire;
 }
 
 export interface AgentResponse {
@@ -54,7 +56,7 @@ export interface AgentResponse {
 }
 
 /** Terminal handler: receives context with state S, returns actions. */
-export type Next<S = unknown> = (req: AgentRequest<S>) => Promise<AgentResponse> | AgentResponse;
+export type Next<S = unknown> = (ctx: AgentContext<S>) => Promise<AgentResponse> | AgentResponse;
 
 /**
  * Middleware function. Receives the current context and a `next` callback.
@@ -63,7 +65,7 @@ export type Next<S = unknown> = (req: AgentRequest<S>) => Promise<AgentResponse>
  * Most middleware is passthrough (In=Out). State providers transform the type.
  */
 export interface MiddlewareFn<In = unknown, Out = In> {
-    (req: AgentRequest<In>, next: Next<Out>): Promise<AgentResponse> | AgentResponse;
+    (ctx: AgentContext<In>, next: Next<Out>): Promise<AgentResponse> | AgentResponse;
     /** Type brand carrying the output state type — never set at runtime. */
     readonly _out?: Out;
 }
@@ -88,7 +90,7 @@ export type StateContributor<A> = MiddlewareFn<any, any> & { readonly _contribut
 type UnknownMiddleware = MiddlewareFn<unknown, unknown>;
 type UnknownNext = Next<unknown>;
 
-const DEFAULT_FALLBACK: UnknownNext = (req) => ({ actions: [], state: req.state });
+const DEFAULT_FALLBACK: UnknownNext = (ctx) => ({ actions: [], state: ctx.state });
 
 export class HandlerBuilder<S> implements Handler {
     readonly agentId: string;
@@ -112,13 +114,11 @@ export class HandlerBuilder<S> implements Handler {
         const chain = composeChain(middlewares, DEFAULT_FALLBACK);
 
         return async (request: WorkerDecisionRequestWire) => {
-            const req: AgentRequest<unknown> = {
-                agentId: request.agent_id,
-                trigger: request.trigger,
+            const ctx: AgentContext<unknown> = {
                 state: undefined,
-                wire: request,
+                request,
             };
-            const result = await chain(req);
+            const result = await chain(ctx);
             return {
                 actions: result.actions,
                 state: result.workerState ?? request.worker_state,
