@@ -561,7 +561,7 @@ impl SessionState {
                             content: Some(Content::Text(result.clone())),
                             tool_calls: None,
                             tool_call_id: Some(tool_call_id.clone()),
-                            name: None,
+                            name: Some(name.clone()),
                         },
                     }),
                 ];

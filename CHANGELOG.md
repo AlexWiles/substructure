@@ -14,6 +14,13 @@ same version.
 
 - Changelog with automated release notes.
 
+### Fixed
+
+- Tool-result messages (`message.new` with `role: "tool"`) now carry the tool
+  `name` instead of `null`, so consumers reading only the message stream (e.g.
+  reconstructing a transcript from session events) no longer have to correlate
+  `tool_call_id` back to the originating tool call to recover the name.
+
 ## [0.1.14] - 2026-06-02
 
 ### Changed
