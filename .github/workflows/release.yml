@@ -131,7 +131,7 @@ jobs:
     runs-on: ubuntu-24.04
     environment: Publish
     permissions:
-      contents: read
+      contents: write
       id-token: write
     steps:
       - uses: actions/checkout@v6
@@ -219,3 +219,19 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: pnpm publish --access public --no-git-checks
+
+      # ── GitHub Release ───────────────────────────────────────────────────
+      # Notes come straight from the CHANGELOG section for this version. If the
+      # tag has no changelog entry, fall back to GitHub's auto-generated notes.
+      - name: Create GitHub Release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          if NOTES=$(node scripts/changelog-section.mjs "$VERSION"); then
+            gh release create "v$VERSION" --title "v$VERSION" --verify-tag --notes "$NOTES"
+          else
+            echo "No CHANGELOG section for $VERSION; using auto-generated notes."
+            gh release create "v$VERSION" --title "v$VERSION" --verify-tag --generate-notes
+          fi

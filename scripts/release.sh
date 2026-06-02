@@ -83,6 +83,10 @@ done
 # cargo-edit) also refreshes Cargo.lock.
 cargo set-version --package substructure-core "$VERSION"
 
+# Promote the CHANGELOG's [Unreleased] section into a dated release section.
+# Fails (and aborts the release) if there are no unreleased entries.
+node scripts/promote-changelog.mjs "$VERSION" "$(date +%F)" "$CURRENT"
+
 # Keep optionalDependencies in cli + runtime aligned with the new version.
 node -e "
   const fs = require('fs');
@@ -98,7 +102,7 @@ node -e "
 " "$VERSION"
 
 git add packages/sdk/package.json packages/cli/package.json packages/runtime/package.json \
-  crates/core/Cargo.toml Cargo.lock
+  crates/core/Cargo.toml Cargo.lock CHANGELOG.md
 git commit -m "release $TAG"
 git tag -a "$TAG" -m "$TAG"
 

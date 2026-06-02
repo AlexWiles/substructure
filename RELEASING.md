@@ -7,6 +7,18 @@ All three npm packages (`@substructure.ai/sdk`, `@substructure.ai/runtime`, `@su
 1. Create an automation-scoped npm access token under the `substructure.ai` org and add it as the `NPM_TOKEN` repository secret in GitHub (Settings → Secrets and variables → Actions).
 2. Make sure each platform sub-package name is reserved by publishing the first version through CI, not by hand. npm requires the org to own them before optionalDependencies will resolve.
 
+## Changelog
+
+Notes live in `CHANGELOG.md` ([Keep a Changelog](https://keepachangelog.com)
+format). As you merge changes, add bullets under the `## [Unreleased]` heading
+(grouped under `### Added` / `### Changed` / `### Fixed` / etc.).
+
+At release time `scripts/release.sh` promotes `[Unreleased]` into a dated
+`[<version>]` section and updates the compare links — so the release aborts if
+`[Unreleased]` is empty. The release workflow then publishes those same notes as
+the GitHub Release body (falling back to auto-generated notes if a tag has no
+changelog section).
+
 ## Cutting a release
 
 All packages release together at the same version.
