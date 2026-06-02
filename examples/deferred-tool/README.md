@@ -10,7 +10,7 @@ When `execute` returns `ctx.defer()`, the `tools` middleware emits no
 that `tool.execute` trigger, and the engine leaves the tool call pending
 until the result lands.
 
-This example runs the runtime in-process (`sub.embedded`), so a single
+This example runs the runtime in-process (`SubstructureEmbedded.create`), so a single
 file drives the whole demo.
 
 ## Run

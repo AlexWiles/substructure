@@ -14,7 +14,7 @@ Components:
 - **CLI** `@substructure.ai/cli`. Provisions projects, observes live sessions, and debugs runs against the cloud from the terminal. Built to pair with coding agents.
 - **SDK** First-party TypeScript SDK with a middleware DSL for state, message history, tools, sub-agents, and the LLM loop. Workers in other languages can implement the wire protocol directly.
 - **Local** Self-hosted Substructure server (Rust, SQLite). Escape hatch for development and air-gapped deploys; start with `substructure start`.
-- **Embedded** The same server in-process via NAPI (`sub.embedded({...})`). Useful for tests and single-binary deploys.
+- **Embedded** The same server in-process via NAPI (`SubstructureEmbedded.create({...})` from `@substructure.ai/sdk/embedded`). Useful for tests and single-binary deploys.
 
 ## Why substructure.ai
 

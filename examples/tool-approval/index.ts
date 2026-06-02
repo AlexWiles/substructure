@@ -15,6 +15,7 @@
 
 import { spawnSync } from "node:child_process";
 import Substructure, { DEFAULT_RETRY, middleware } from "@substructure.ai/sdk";
+import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
 
 const sub = new Substructure();
 const { agent } = sub;
@@ -175,7 +176,7 @@ const payload =
             }
           : { type: "message" as const, message: { role: "user" as const, content: input } };
 
-const embedded = await sub.embedded({
+const embedded = await SubstructureEmbedded.create({
     agents: [assistant],
     db: "agent.db",
     openrouterApiKey: process.env.OPENROUTER_API_KEY,

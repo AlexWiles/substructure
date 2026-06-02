@@ -8,11 +8,12 @@
 // long jobs, human approvals) where the result arrives out-of-band.
 
 import Substructure from "@substructure.ai/sdk";
+import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
 
 const sub = new Substructure();
 const { agent } = sub;
 
-let embedded: Awaited<ReturnType<typeof sub.embedded>>;
+let embedded: SubstructureEmbedded;
 
 const wait = agent.tool({
     name: "wait",
@@ -48,7 +49,7 @@ const waitAgent = agent({ id: "waiter" })
     .use(agent.tools([wait]))
     .use(agent.llmLoop({ request: { model: "anthropic/claude-sonnet-4-6" } }));
 
-embedded = await sub.embedded({
+embedded = await SubstructureEmbedded.create({
     agents: [waitAgent],
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
 });

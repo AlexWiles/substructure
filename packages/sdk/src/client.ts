@@ -1,6 +1,6 @@
 // ── Default export ────────────────────────────────────────────────────────
 
-export type { AgentFactory, AgentOptions, EmbeddedOptions } from "./substructure";
+export type { AgentFactory, AgentOptions } from "./substructure";
 export { Substructure as default, Substructure } from "./substructure";
 
 // ── Turns ────────────────────────────────────────────────────────────────

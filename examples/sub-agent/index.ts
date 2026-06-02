@@ -4,6 +4,7 @@
 // child; token + cost usage rolls up to the parent.
 
 import Substructure from "@substructure.ai/sdk";
+import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
 
 const sub = new Substructure();
 const { agent } = sub;
@@ -36,7 +37,7 @@ const assistant = agent({ id: "assistant" })
     .use(agent.subAgents({ agents: [weatherAgent] }))
     .use(agent.llmLoop({ request: { model: "anthropic/claude-sonnet-4-6" } }));
 
-const embedded = await sub.embedded({
+const embedded = await SubstructureEmbedded.create({
     agents: [assistant, weatherAgent],
     db: "agent.db",
     openrouterApiKey: process.env.OPENROUTER_API_KEY,

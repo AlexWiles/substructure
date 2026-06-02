@@ -2,6 +2,7 @@
 // State and event log persist to a local SQLite file (`agent.db`).
 
 import Substructure from "@substructure.ai/sdk";
+import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
 import { randomUUID } from "node:crypto";
 
 const sub = new Substructure();
@@ -42,7 +43,7 @@ const todoAgent = agent({ id: "todo" })
     .use(agent.tools([addTodo, listTodos]))
     .use(agent.llmLoop({ request: { model: "anthropic/claude-sonnet-4-6" } }));
 
-const embedded = await sub.embedded({
+const embedded = await SubstructureEmbedded.create({
     agents: [todoAgent],
     db: "agent.db",
     openrouterApiKey: process.env.OPENROUTER_API_KEY,

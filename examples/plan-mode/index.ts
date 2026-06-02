@@ -28,6 +28,7 @@ import Substructure, {
     triggerToMessage,
     type Message,
 } from "@substructure.ai/sdk";
+import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
 
 const sub = new Substructure();
 const { agent } = sub;
@@ -265,7 +266,7 @@ const payload = input.startsWith("/mode ")
     ? { type: "action" as const, name: "set_mode", args: { mode: input.slice(6).trim() as Mode } }
     : { type: "message" as const, message: { role: "user" as const, content: input } };
 
-const embedded = await sub.embedded({
+const embedded = await SubstructureEmbedded.create({
     agents: [planner],
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
 });

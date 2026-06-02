@@ -11,6 +11,7 @@
 // middleware or the tools.
 
 import Substructure, { middleware } from "@substructure.ai/sdk";
+import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -99,7 +100,7 @@ const todoAgent = agent({ id: "todo" })
 
 // ── Run ─────────────────────────────────────────────────────────────────────
 
-const embedded = await sub.embedded({
+const embedded = await SubstructureEmbedded.create({
     agents: [todoAgent],
     db: "agent.db",
     openrouterApiKey: process.env.OPENROUTER_API_KEY,

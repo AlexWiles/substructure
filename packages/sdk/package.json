@@ -26,6 +26,7 @@
   },
   "files": [
     "dist",
+    "src",
     "LICENSE",
     "README.md"
   ],
@@ -34,10 +35,15 @@
       "@source": "./src/client.ts",
       "types": "./dist/client.d.ts",
       "import": "./dist/client.js"
+    },
+    "./embedded": {
+      "@source": "./src/embedded.ts",
+      "types": "./dist/embedded.d.ts",
+      "import": "./dist/embedded.js"
     }
   },
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && tsc --emitDeclarationOnly",
     "prepublishOnly": "pnpm build"
   },
   "peerDependencies": {

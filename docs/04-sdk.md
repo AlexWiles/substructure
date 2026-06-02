@@ -30,7 +30,7 @@ From `sub` you get:
 - `sub.worker(...)` — wrap agents into an HTTP handler.
 - `sub.backend.client(...)` — server-to-server client (uses an API key).
 - `sub.frontend.client(...)` — browser client (uses a short-lived token).
-- `sub.embedded(...)` — run the engine in-process with a SQLite event log.
+- `SubstructureEmbedded.create(...)` (from `@substructure.ai/sdk/embedded`) — run the engine in-process with a SQLite event log.
 
 ## Defining tools
 
@@ -145,7 +145,7 @@ What happens on the wire:
 2. Your `execute` returns `ctx.defer()`. The `tools` middleware emits no `return.tool.result`, so the worker submits zero actions for that decision. The engine leaves the tool call pending.
 3. Later — minutes, hours, however long — the external work completes. You call `submitToolCallResult({ tool_call_id, result, attempt })`. The engine treats this exactly like a synchronous tool return: emits `tool.call.completed`, fires a `tool.result` trigger, the chain runs, and `llmLoop` issues the next `call.llm` once every pending tool result is in.
 
-`submitToolCallResult` is available on every flavor of client — `sub.backend.client(...)` on your servers, `sub.frontend.client(...)` in the browser, and `sub.embedded(...)` for in-process runs — so the call back can come from wherever finishes the work (a webhook handler, a queue worker, a UI button). To report a failure instead of a result, pass `error` (and optional `retryable`) in place of `result`.
+`submitToolCallResult` is available on every flavor of client — `sub.backend.client(...)` on your servers, `sub.frontend.client(...)` in the browser, and `SubstructureEmbedded.create(...)` for in-process runs — so the call back can come from wherever finishes the work (a webhook handler, a queue worker, a UI button). To report a failure instead of a result, pass `error` (and optional `retryable`) in place of `result`.
 
 If you never call `submitToolCallResult`, the tool call stays pending forever — the agent will not resume. For tools where that's a real risk, set a `retry` policy on the tool (which carries a `timeout_secs`) so the engine eventually fails the call and lets the chain see a `tool.result` with `is_error: true`.
 
@@ -542,12 +542,14 @@ The engine itself is a native Rust binary, so it ships as a separate package. In
 npm i @substructure.ai/runtime
 ```
 
-It's listed as an optional peer of `@substructure.ai/sdk`, so the main SDK install doesn't pull it down by default. `sub.embedded(...)` will throw at call time if it can't find the runtime package.
+It's listed as an optional peer of `@substructure.ai/sdk`, so the main SDK install doesn't pull it down by default. The embedded entry lives at its own subpath, `@substructure.ai/sdk/embedded`, so the main `@substructure.ai/sdk` entry stays free of the native dependency and bundles cleanly for workers/edge. `SubstructureEmbedded.create(...)` will throw at call time if it can't find the runtime package.
 
 Then use it like this:
 
 ```ts
-const embedded = await sub.embedded({
+import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
+
+const embedded = await SubstructureEmbedded.create({
   agents: [todoAgent],
   db: "agent.db",
   openrouterApiKey: process.env.OPENROUTER_API_KEY,
