@@ -7,10 +7,11 @@
   },
   "packageManager": "pnpm@11.0.9",
   "scripts": {
-    "build": "nx run-many -t build",
-    "dev": "nx run-many -t dev",
-    "lint": "nx run-many -t lint",
-    "test": "nx run-many -t test",
+    "build": "pnpm -r build && cargo build --release -p substructure-core",
+    "dev": "pnpm -r --parallel dev",
+    "dev:server": "cargo run -p substructure-core -- start",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test",
     "format": "biome format --write .",
     "format:check": "biome format .",
     "release": "scripts/release.sh"
@@ -22,7 +23,6 @@
     "@biomejs/biome": "2.4.10",
     "@napi-rs/cli": "3.5.1",
     "lefthook": "2.1.5",
-    "nx": "22.7.1",
     "typescript": "5.9.3"
   }
 }

@@ -9,6 +9,7 @@ use super::project_config::{self, ProjectConfig};
 use super::{AppScope, CloudGlobals, OrgScope};
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct AppBalance {
     name: String,
     #[serde(default)]
