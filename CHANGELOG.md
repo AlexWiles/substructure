@@ -10,6 +10,8 @@ same version.
 
 ## [Unreleased]
 
+## [0.1.15] - 2026-06-02
+
 ### Added
 
 - Changelog with automated release notes.
@@ -33,5 +35,6 @@ same version.
 
 - SDK typing and developer-experience improvements.
 
-[Unreleased]: https://github.com/substructureai/substructure/compare/v0.1.14...HEAD
+[Unreleased]: https://github.com/substructureai/substructure/compare/v0.1.15...HEAD
+[0.1.15]: https://github.com/substructureai/substructure/compare/v0.1.14...v0.1.15
 [0.1.14]: https://github.com/substructureai/substructure/releases/tag/v0.1.14
