@@ -170,7 +170,6 @@ Register them with `agent.actions(...)` in the chain:
 
 ```ts
 const myAgent = agent({ id: "..." })
-  .use(agent.jsonState())
   .use(agent.actions([approveCommand]))
   .use(/* ... */);
 ```
@@ -198,7 +197,6 @@ An agent is a chain of middleware. You start with `agent({ id })` and stack beha
 
 ```ts
 const weatherAgent = agent({ id: "weather-agent" })
-  .use(agent.jsonState())
   .use(agent.messageHistory("You are a helpful weather assistant."))
   .use(agent.tools([getWeather]))
   .use(agent.llmLoop({
@@ -206,12 +204,13 @@ const weatherAgent = agent({ id: "weather-agent" })
   }));
 ```
 
+Agent state is serialized as JSON and carried across turns for you. To keep large or sensitive state off the wire, see [Keep conversation state in your own database](#example-keep-conversation-state-in-your-own-database).
+
 The built-in middleware:
 
 | Middleware | What it does |
 | --- | --- |
-| `agent.jsonState()` | Decodes incoming worker state and encodes the result. Almost always the first middleware. |
-| `agent.messageHistory(system?, opts?)` | Tracks the full message history across turns and injects it into LLM calls. Pass `system` — a string or a `(state, ctx) => string` selector — to also prepend a system message. Pass `{ stateKey }` as a second arg to change where the transcript lives (default `"messages"`). |
+| `agent.messageHistory(system?, opts?)` | Tracks the full message history across turns and injects it into LLM calls. Pass `system`, a string or a `(state, ctx) => string` selector, to also prepend a system message. Pass `{ stateKey }` as a second arg to change where the transcript lives (default `"messages"`). |
 | `agent.messageHistoryCurrentTurn(system?, opts?)` | Same arguments, but scoped to a single turn. |
 | `agent.tools([...])` | Registers tools, dispatches tool calls from the LLM, and feeds results back. |
 | `agent.actions([...])` | Dispatches `client.action` triggers to their handlers. See [Defining client actions](#defining-client-actions). |
@@ -249,7 +248,7 @@ You can mutate `ctx` before calling `next`, inspect or rewrite `res.actions` aft
 
 ### Example: keep conversation state in your own database
 
-The default `agent.jsonState()` round-trips the agent's state through Substructure as a base64-encoded blob on every request. That's fine for small state, but for large message histories or sensitive data you may want state to live entirely in your own database. Write a middleware that loads state on the way in and saves it on the way out, then return a tiny reference instead of the blob:
+By default your agent's state is serialized as JSON and round-tripped through Substructure on every request. That's fine for small state, but for large message histories or sensitive data you may want state to live entirely in your own database. Write a middleware that loads state on the way in, saves it on the way out, and returns an empty placeholder so nothing heavy rides the wire:
 
 Declare the shape of the state your middleware loads and the rest of the chain (and your tools) will see it as that type:
 
@@ -274,9 +273,12 @@ const dbState = (db: MyDatabase) =>
 
       const res = await next(ctx);
 
+      // The DB is the source of truth. Persist the full state, then hand the
+      // wire back an empty placeholder so the (possibly large) state never
+      // rides along. Next turn this middleware reloads it from the DB.
       await db.saveAgentState(userId, sessionId, res.state);
 
-      return res;
+      return { ...res, state: { messages: [], ticketId: null } satisfies SupportState };
     },
   });
 
@@ -291,13 +293,13 @@ The `state` field on `middleware` does two things: it gives you the initial valu
 
 `ctx.request.identity.id` is the user id the client passed when calling `startTurn`, and `ctx.request.session_id` is the conversation. Keying on both means a single user can have multiple parallel conversations and you can scope, list, or delete state per user without ever touching Substructure.
 
-Because this middleware loads and saves state directly to your database, you don't need `agent.jsonState()` in the chain at all: there's no `workerState` to round-trip. Substructure will pass an empty wire state on the next turn and your middleware will load the real state from the DB.
+Because the state you return is what gets serialized onto the wire, the way-out half hands back an empty placeholder rather than the loaded data. Substructure ships that tiny blob, passes it back as the wire state on the next turn, and your middleware loads the real state from the DB, so the heavy or sensitive data never leaves your infrastructure.
 
 The same pattern works for anything that needs to bridge the agent to your infrastructure: pulling user profile data into state, writing audit logs alongside the response, gating tool calls by feature flag, or short-circuiting a turn when a per-user quota is exceeded.
 
 ### Example: hybrid wire and database state
 
-Sometimes you want most state on the wire (cheap, no infrastructure) and just one slice in your database (because it's large, sensitive, or you want to share it across sessions). The pattern is to keep `agent.jsonState()` and add a middleware that contributes a typed slice but loads and saves it from the database, keyed by something stable like the user id:
+Sometimes you want most state on the wire (cheap, no infrastructure) and just one slice in your database (because it's large, sensitive, or you want to share it across sessions). Since state rides the wire by default, you just add a middleware that contributes a typed slice but loads and saves it from the database, keyed by something stable like the user id, and empties the field on the way out so only that one slice stays off the wire:
 
 ```ts
 import { middleware } from "@substructure.ai/sdk";
@@ -347,9 +349,8 @@ And the chain stays small: one middleware covers both the slice and the persiste
 
 ```ts
 const todoAgent = agent({ id: "todo" })
-  .use(agent.jsonState())          // wire <-> ctx.state
   .use(todoSlice)                  // contributes + hydrates `todos`
-  .use(agent.messageHistory())     // wire-backed via jsonState
+  .use(agent.messageHistory())     // rides the wire by default
   .use(agent.tools([addTodo]))
   .use(agent.llmLoop({ request: { model: "anthropic/claude-sonnet-4-5" } }));
 ```
@@ -590,6 +591,6 @@ See [`examples/`](https://github.com/substructure-ai/substructure/tree/main/exam
 - `hono` — `fetchHandler` mounted on a Hono route in Node.
 - `vercel` — serverless worker on Vercel.
 - `sub-agent` — a parent agent delegating to a child via `subAgents`.
-- `hybrid-state` — most state on the wire via `jsonState`, one slice swapped in and out of a database.
+- `hybrid-state` — most state on the wire as JSON, one slice swapped in and out of a database.
 - `deferred-tool` — async tool call: `execute` returns `ctx.defer()`, the result is posted later via `submitToolCallResult`.
 - `frontend-tool` — chat UI where tools run in the browser (geolocation, theme). The worker defers; the page executes locally and posts the result back via `submitToolCallResult` using the frontend client. Also demonstrates `stream: true` on `llmLoop` — the assistant message renders token-by-token from `llm.token.delta` events.

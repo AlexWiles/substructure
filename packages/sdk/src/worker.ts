@@ -1,4 +1,5 @@
 import type { WorkerDecisionRequestWire, WorkerAction, SubmitRequest, SpanContext } from "./types";
+import { jsonState } from "./middleware";
 export interface NativeRuntime {
     registerWorker(
         tenantId: string,
@@ -110,7 +111,11 @@ export class HandlerBuilder<S> implements Handler {
     }
 
     toDecisionHandler(): DecisionHandler {
-        const middlewares = this.middlewares;
+        // `jsonState` is applied by default as the outermost middleware: it
+        // decodes `worker_state` into `ctx.state` on the way in and re-encodes
+        // it on the way out. Applying it again explicitly is idempotent, so
+        // chains that still `.use(agent.jsonState())` keep working.
+        const middlewares = [jsonState() as UnknownMiddleware, ...this.middlewares];
         const chain = composeChain(middlewares, DEFAULT_FALLBACK);
 
         return async (request: WorkerDecisionRequestWire) => {

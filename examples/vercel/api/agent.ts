@@ -26,7 +26,6 @@ const getWeather = agent.tool({
 });
 
 const weatherAgent = agent({ id: "weather" })
-    .use(agent.jsonState())
     .use(agent.messageHistory("Weather assistant. Be concise."))
     .use(agent.tools([getWeather]))
     .use(agent.llmLoop({ request: { model: "anthropic/claude-sonnet-4-6" } }));

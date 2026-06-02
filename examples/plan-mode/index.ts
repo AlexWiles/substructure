@@ -235,7 +235,6 @@ const executingPrompt = (plan: Plan) =>
 // ── Agent ───────────────────────────────────────────────────────────────────
 
 const planner = agent({ id: "planner" })
-    .use(agent.jsonState())
     .use(planMode)
     .use(modeAwareHistory)
     .use(agent.tools<PlanState>((state) => (state.mode === "planning" ? planningTools : executingTools)))

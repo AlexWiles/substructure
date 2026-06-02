@@ -13,8 +13,8 @@
 //   - Middleware that changes the state TYPE, not just adds keys.
 //   - Compact wire state (two ids) backed by a database; the heavy data
 //     (messages, todos) lives in the DB and is rehydrated each turn.
-//   - The mandatory dehydrate step: jsonState encodes whatever state comes
-//     back, so we persist the data and hand the wire back only the ids.
+//   - The mandatory dehydrate step: whatever state we return is serialized
+//     onto the wire, so we persist the data and hand back only the ids.
 
 import Substructure, { type AgentContext, type Message, type MiddlewareFn, type Next } from "@substructure.ai/sdk";
 import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
@@ -54,10 +54,10 @@ async function save<T>(ns: string, id: string, data: T): Promise<void> {
 }
 
 // ── Hydration middleware: Refs -> Hydrated ───────────────────────────────────
-// A plain `MiddlewareFn<In, Out>`. `In` is what upstream (jsonState + the Refs
-// slice) provides; passing a different `Out` to `next` swaps the state type for
-// everything downstream. `dehydrate` on the way out is mandatory — without it,
-// jsonState would serialize the hydrated objects onto the wire.
+// A plain `MiddlewareFn<In, Out>`. `In` is what the upstream Refs slice
+// provides; passing a different `Out` to `next` swaps the state type for
+// everything downstream. `dehydrate` on the way out is mandatory: without it,
+// the hydrated objects would be serialized onto the wire.
 
 const hydrate: MiddlewareFn<Refs, Hydrated> = async (ctx: AgentContext<Refs>, next: Next<Hydrated>) => {
     // First turn the refs are empty — mint stable ids: todos per user (persist
@@ -115,11 +115,10 @@ const listTodos = agent.tool({
 });
 
 // ── Agent ────────────────────────────────────────────────────────────────────
-// jsonState (wire <-> ctx.state) -> Refs slice (establishes the id shape) ->
-// hydrate (Refs -> Hydrated) -> everything below sees Hydrated.
+// Refs slice (establishes the id shape) -> hydrate (Refs -> Hydrated) ->
+// everything below sees Hydrated.
 
 const todoAgent = agent({ id: "todo" })
-    .use(agent.jsonState())
     .use(agent.stateSlice<Refs>({ historyId: "", todosId: "" }))
     .use(hydrate)
     .use(agent.messageHistory("Concise todo assistant. Use the tools to manage the list."))

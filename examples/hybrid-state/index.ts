@@ -1,5 +1,5 @@
-// Hybrid state: most state rides the wire as base64 JSON (via jsonState),
-// but the todo list lives in its own database, keyed by user id. The
+// Hybrid state: most state rides the wire as JSON, but the todo list lives
+// in its own database, keyed by user id. The
 // todoSlice middleware loads `todos` from the DB on the way in and saves
 // on the way out, then empties the field so it doesn't ride the wire.
 // Tools that opt into the slice see `state.todos` as if it were ordinary
@@ -91,7 +91,6 @@ const listTodos = agent.tool({
 // ── Agent ───────────────────────────────────────────────────────────────────
 
 const todoAgent = agent({ id: "todo" })
-    .use(agent.jsonState())
     .use(todoSlice)
     .use(agent.messageHistory("Concise todo assistant. Use tools to manage the list."))
     .use(agent.tools([addTodo, listTodos]))

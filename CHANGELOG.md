@@ -14,6 +14,12 @@ same version.
 
 - Changelog with automated release notes.
 
+### Changed
+
+- Agent state is serialized as JSON automatically; chains no longer need an
+  explicit `.use(agent.jsonState())`. Existing chains that still include it
+  keep working, and the wire format is unchanged.
+
 ### Fixed
 
 - Tool-result messages (`message.new` with `role: "tool"`) now carry the tool

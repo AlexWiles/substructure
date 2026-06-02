@@ -79,7 +79,7 @@ Each agent has a **state** object that persists across decisions within a sessio
 
 You have three ways to hold state:
 
-- **Wire state.** The SDK's `agent.jsonState()` middleware encodes state as a base64 JSON blob and ships it back and forth on every decision. Simple, no infrastructure required.
+- **Wire state.** By default the SDK serializes state as JSON and ships it back and forth on every decision. Simple, no infrastructure required.
 - **Your own database.** A custom middleware that loads state from your DB on the way in and saves it on the way out. Better for large state, sensitive data, or anything you want to query directly. See [Keep conversation state in your own database](./04-sdk.md#example-keep-conversation-state-in-your-own-database) in the SDK docs.
 - **Hybrid.** Keep most state on the wire and pull individual slices out to your database. Useful when, for example, conversation history is small enough to ride along but a tool's working set is large. See [Hybrid wire and database state](./04-sdk.md#example-hybrid-wire-and-database-state).
 

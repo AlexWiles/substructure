@@ -137,7 +137,6 @@ const runCommand = agent.tool({
 // ── Agent ───────────────────────────────────────────────────────────────────
 
 const assistant = agent({ id: "assistant" })
-    .use(agent.jsonState())
     .use(
         agent.messageHistory(
             "You are a shell assistant. Use `run_command` to run real shell commands on the user's machine. Every command requires explicit user approval before it runs and may be denied with a reason. If a command is denied, adapt rather than retrying the same command.",

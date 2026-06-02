@@ -24,13 +24,11 @@ const getWeather = agent.tool({
 });
 
 const weatherAgent = agent({ id: "weather" })
-    .use(agent.jsonState())
     .use(agent.messageHistory("Weather assistant. Look up the weather. Be concise."))
     .use(agent.tools([getWeather]))
     .use(agent.llmLoop({ request: { model: "anthropic/claude-sonnet-4-6" } }));
 
 const assistant = agent({ id: "assistant" })
-    .use(agent.jsonState())
     .use(agent.messageHistory("Helpful assistant. Delegate weather questions to the weather agent."))
     .use(agent.subAgents({ agents: [weatherAgent] }))
     .use(agent.llmLoop({ request: { model: "anthropic/claude-sonnet-4-6" } }));

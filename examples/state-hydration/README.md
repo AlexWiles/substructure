@@ -35,9 +35,9 @@ fully-typed `Hydrated` shape — `state.messages: Message[]`, `state.todos: Todo
 
 ## Two things the types won't enforce
 
-- **`dehydrate` is mandatory.** `jsonState` encodes whatever state comes back. If
-  you don't restore the references, the hydrated objects get serialized onto the
-  wire and balloon every turn. Here the way-out half saves to the DB and returns
+- **`dehydrate` is mandatory.** Whatever state you return is serialized onto the
+  wire. If you don't restore the references, the hydrated objects get serialized
+  and balloon every turn. Here the way-out half saves to the DB and returns
   just `{ historyId, todosId }`.
 - **Ordering matters.** `hydrate` must sit after the slice that establishes
   `Refs` and before anything meant to see `Hydrated`.

@@ -50,7 +50,6 @@ const setTheme = agent.tool({
 });
 
 const browserAgent = agent({ id: "browser-assistant" })
-    .use(agent.jsonState())
     .use(
         agent.messageHistory(
             "You are a friendly assistant embedded in a web page. Two tools run in the user's browser: " +

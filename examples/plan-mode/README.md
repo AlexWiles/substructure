@@ -48,7 +48,7 @@ Two middlewares:
 Chain order:
 
 ```
-jsonState → planMode → modeAwareHistory → tools → llmLoop
+planMode → modeAwareHistory → tools → llmLoop
 ```
 
 `modeAwareHistory` puts its system prompt ahead of the transcript so it
