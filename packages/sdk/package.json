@@ -1,6 +1,6 @@
 {
   "name": "@substructure.ai/sdk",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "TypeScript SDK for Substructure",
   "license": "MIT",
   "type": "module",
