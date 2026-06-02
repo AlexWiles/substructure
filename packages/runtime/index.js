@@ -60,13 +60,13 @@ export class EmbeddedRuntime {
     );
   }
 
-  async *streamSession(sessionId, turnId, sequenceAfter) {
+  async *streamSession(tenantId, sessionId, turnId, sequenceAfter) {
     let resolve;
     let done = false;
     const buffer = [];
 
     const finished = this._native.streamSession(
-      sessionId, turnId, sequenceAfter,
+      tenantId, sessionId, turnId, sequenceAfter,
       (json) => {
         buffer.push(json);
         resolve?.();

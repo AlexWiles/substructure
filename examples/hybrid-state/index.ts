@@ -56,7 +56,7 @@ const todoSlice = middleware<{ todos: TodoData }>({
         const res = await next(ctx);
 
         await saveTodos(userId, ctx.state.todos);
-        ctx.state.todos = { items: [] }; // DB has the items; don't ship them again
+        ctx.state.todos = { items: [] };
         return res;
     },
 });
@@ -72,11 +72,11 @@ const addTodo = agent.tool({
         required: ["title"],
     },
     state: todoSlice,
-    execute: (args, state) => {
+    execute: (args, state, ctx) => {
         const { title } = JSON.parse(args);
         const item: Todo = { id: randomUUID().slice(0, 8), title, done: false };
         state.todos.items.push(item);
-        return item;
+        return JSON.stringify(item);
     },
 });
 
@@ -85,16 +85,15 @@ const listTodos = agent.tool({
     description: "List all todos",
     parameters: { type: "object", properties: {} },
     state: todoSlice,
-    execute: (_args, state) => state.todos.items,
+    execute: (_args, state) => JSON.stringify(state.todos.items),
 });
 
 // ── Agent ───────────────────────────────────────────────────────────────────
 
 const todoAgent = agent({ id: "todo" })
-    .use(agent.jsonState()) // request.worker_state <-> ctx.state (everything below)
-    .use(todoSlice) // contributes + hydrates `todos`
-    .use(agent.systemMessage("Concise todo assistant. Use tools to manage the list."))
-    .use(agent.messageHistory()) // wire-backed (rides along in jsonState)
+    .use(agent.jsonState())
+    .use(todoSlice)
+    .use(agent.messageHistory("Concise todo assistant. Use tools to manage the list."))
     .use(agent.tools([addTodo, listTodos]))
     .use(agent.llmLoop({ request: { model: "anthropic/claude-sonnet-4-6" } }));
 

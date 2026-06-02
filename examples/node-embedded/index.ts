@@ -24,7 +24,7 @@ const addTodo = agent.tool({
         const { title } = JSON.parse(args);
         const item: Todo = { id: randomUUID().slice(0, 8), title, done: false };
         state.items.push(item);
-        return item;
+        return JSON.stringify(item);
     },
 });
 
@@ -33,13 +33,12 @@ const listTodos = agent.tool({
     description: "List all todos",
     parameters: { type: "object", properties: {} },
     state: todos,
-    execute: (_args, state) => state.items,
+    execute: (_args, state) => JSON.stringify(state.items),
 });
 
 const todoAgent = agent({ id: "todo" })
     .use(agent.jsonState())
-    .use(agent.systemMessage("You are a concise todo assistant. Use tools to manage the list."))
-    .use(agent.messageHistory())
+    .use(agent.messageHistory("You are a concise todo assistant. Use tools to manage the list."))
     .use(agent.tools([addTodo, listTodos]))
     .use(agent.llmLoop({ request: { model: "anthropic/claude-sonnet-4-6" } }));
 

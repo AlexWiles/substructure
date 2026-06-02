@@ -49,7 +49,7 @@ const getWeather = agent.tool({
   },
   execute: (args: string) => {
     const { city } = JSON.parse(args);
-    return { city, temp_f: 62, condition: "sunny" };
+    return JSON.stringify({ city, temp_f: 62, condition: "sunny" });
   },
 });
 ```
@@ -58,7 +58,7 @@ A few notes:
 
 - `parameters` is a plain JSON Schema object. The LLM uses it to format calls.
 - `execute` receives the raw stringified JSON args. Parse it yourself.
-- Return any JSON-serializable value. It's stringified and fed back to the LLM as the tool result.
+- Return a string — the tool result fed back to the LLM. For structured data, `JSON.stringify` it yourself. (Or return `ctx.defer()` to complete the call out-of-band.)
 - Tools can be async. Substructure will wait for the promise.
 
 ### Typed state per tool
@@ -82,7 +82,7 @@ const addTodo = agent.tool({
     const { title } = JSON.parse(args);
     const item = { id: crypto.randomUUID(), title, done: false };
     state.items.push(item);
-    return item;
+    return JSON.stringify(item);
   },
 });
 ```
@@ -199,8 +199,7 @@ An agent is a chain of middleware. You start with `agent({ id })` and stack beha
 ```ts
 const weatherAgent = agent({ id: "weather-agent" })
   .use(agent.jsonState())
-  .use(agent.systemMessage("You are a helpful weather assistant."))
-  .use(agent.messageHistory())
+  .use(agent.messageHistory("You are a helpful weather assistant."))
   .use(agent.tools([getWeather]))
   .use(agent.llmLoop({
     request: { model: "anthropic/claude-sonnet-4-5" },
@@ -212,16 +211,15 @@ The built-in middleware:
 | Middleware | What it does |
 | --- | --- |
 | `agent.jsonState()` | Decodes incoming worker state and encodes the result. Almost always the first middleware. |
-| `agent.systemMessage(str \| fn)` | Prepends a system message to every LLM call. Pass a function `(state, ctx) => string` to compute it dynamically. |
-| `agent.messageHistory()` | Tracks the full message history across turns and injects it into LLM calls. |
-| `agent.messageHistoryCurrentTurn()` | Same, but scoped to a single turn. |
+| `agent.messageHistory(system?, opts?)` | Tracks the full message history across turns and injects it into LLM calls. Pass `system` — a string or a `(state, ctx) => string` selector — to also prepend a system message. Pass `{ stateKey }` as a second arg to change where the transcript lives (default `"messages"`). |
+| `agent.messageHistoryCurrentTurn(system?, opts?)` | Same arguments, but scoped to a single turn. |
 | `agent.tools([...])` | Registers tools, dispatches tool calls from the LLM, and feeds results back. |
 | `agent.actions([...])` | Dispatches `client.action` triggers to their handlers. See [Defining client actions](#defining-client-actions). |
 | `agent.llmLoop({ request })` | Drives the core loop: on a user message or tool result, call the LLM; on an LLM response with no tool calls, finish the turn. |
 | `agent.subAgents({ agents })` | Lets the agent delegate to child agents as if they were tools. See [Sub-agents](./05-sub-agents.md). |
 | `agent.logging()` | Logs each decision lifecycle to stdout. Handy in development. |
 
-The order matters. State middleware first, then context (system message, history), then tools, then `llmLoop` at the end to drive the loop.
+The order matters. State middleware first, then context (history, which also carries the system message), then tools, then `llmLoop` at the end to drive the loop.
 
 ### Writing your own middleware
 
@@ -284,8 +282,7 @@ const dbState = (db: MyDatabase) =>
 
 const myAgent = agent({ id: "support" })
   .use(dbState(db))
-  .use(agent.systemMessage("You are a support agent."))
-  .use(agent.messageHistory())
+  .use(agent.messageHistory("You are a support agent."))
   .use(agent.tools([/* ... */]))
   .use(agent.llmLoop({ request: { model: "anthropic/claude-sonnet-4-5" } }));
 ```
@@ -341,7 +338,7 @@ const addTodo = agent.tool({
     const { title } = JSON.parse(args);
     const item = { id: crypto.randomUUID(), title, done: false };
     state.todos.items.push(item);
-    return item;
+    return JSON.stringify(item);
   },
 });
 ```

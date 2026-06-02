@@ -12,7 +12,6 @@ import {
     messageHistoryCurrentTurn,
     stateSlice,
     subAgents,
-    systemMessage,
     tool,
     tools,
 } from "./middleware";
@@ -35,7 +34,6 @@ export interface AgentFactory {
     logging: typeof logging;
     messageHistory: typeof messageHistory;
     messageHistoryCurrentTurn: typeof messageHistoryCurrentTurn;
-    systemMessage: typeof systemMessage;
     tools: typeof tools;
     llmLoop: typeof llmLoop;
     subAgents: typeof subAgents;
@@ -54,7 +52,6 @@ function createAgentFactory(): AgentFactory {
     factory.logging = logging;
     factory.messageHistory = messageHistory;
     factory.messageHistoryCurrentTurn = messageHistoryCurrentTurn;
-    factory.systemMessage = systemMessage;
     factory.tools = tools;
     factory.llmLoop = llmLoop;
     factory.subAgents = subAgents;

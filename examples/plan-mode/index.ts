@@ -10,13 +10,13 @@
 // What this shows:
 //   - `client.action` as a non-message way for the client to drive
 //     state changes that the chain reacts to.
-//   - Selector-based middleware (`tools`, `systemMessage`, `llmLoop`)
-//     swapping output based on a state slice. Mode-dependent tool
-//     gating means the agent literally cannot call execution tools
-//     while planning, and a smaller model handles planning while a
-//     bigger one handles execution.
+//   - Selector-based middleware (`tools`, `llmLoop`) swapping output
+//     based on a state slice. Mode-dependent tool gating means the
+//     agent literally cannot call execution tools while planning, and
+//     a smaller model handles planning while a bigger one handles
+//     execution.
 //   - A custom history middleware that reads a foreign slice (`mode`)
-//     to know when to reset itself.
+//     to know when to reset itself and to swap its own system prompt.
 //
 // Domain is intentionally generic: a TODO list. Planning mode edits
 // the steps; executing mode walks them one by one with a single
@@ -88,10 +88,16 @@ const modeAwareHistory = middleware<PlanState>({
         const msg = triggerToMessage(ctx.request.trigger);
         if (msg) ctx.state.messages.push(msg);
 
+        // System prompt swaps with the mode and rides ahead of the transcript.
+        const sysMsg: Message = {
+            role: "system",
+            content: ctx.state.mode === "executing" ? executingPrompt(ctx.state.plan) : planningPrompt(ctx.state.plan),
+        };
+
         const result = await next(ctx);
         return {
             ...result,
-            actions: prependHistoryToLlmCalls(ctx.state.messages, result.actions),
+            actions: prependHistoryToLlmCalls([sysMsg, ...ctx.state.messages], result.actions),
         };
     },
 });
@@ -110,7 +116,7 @@ const setGoal = agent.tool({
     execute: (args, state) => {
         const { goal } = JSON.parse(args) as { goal: string };
         state.plan.goal = goal;
-        return state.plan;
+        return JSON.stringify(state.plan);
     },
 });
 
@@ -127,7 +133,7 @@ const addStep = agent.tool({
         const { text } = JSON.parse(args) as { text: string };
         const step: Step = { id: `s${state.plan.nextId++}`, text, done: false };
         state.plan.steps.push(step);
-        return step;
+        return JSON.stringify(step);
     },
 });
 
@@ -145,7 +151,7 @@ const updateStep = agent.tool({
         const step = state.plan.steps.find((s: Step) => s.id === id);
         if (!step) throw new Error(`unknown step: ${id}`);
         step.text = text;
-        return step;
+        return JSON.stringify(step);
     },
 });
 
@@ -163,7 +169,7 @@ const removeStep = agent.tool({
         const idx = state.plan.steps.findIndex((s: Step) => s.id === id);
         if (idx === -1) throw new Error(`unknown step: ${id}`);
         const [removed] = state.plan.steps.splice(idx, 1);
-        return removed;
+        return JSON.stringify(removed);
     },
 });
 
@@ -189,7 +195,7 @@ const completeStep = agent.tool({
         const step = state.plan.steps.find((s: Step) => s.id === id);
         if (!step) throw new Error(`unknown step: ${id}`);
         step.done = true;
-        return { id, text: step.text, note };
+        return JSON.stringify({ id, text: step.text, note });
     },
 });
 
@@ -231,11 +237,6 @@ const executingPrompt = (plan: Plan) =>
 const planner = agent({ id: "planner" })
     .use(agent.jsonState())
     .use(planMode)
-    .use(
-        agent.systemMessage<PlanState>((state) =>
-            state.mode === "executing" ? executingPrompt(state.plan) : planningPrompt(state.plan),
-        ),
-    )
     .use(modeAwareHistory)
     .use(agent.tools<PlanState>((state) => (state.mode === "planning" ? planningTools : executingTools)))
     .use(

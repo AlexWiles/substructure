@@ -152,15 +152,33 @@ export interface ToolDef {
     handler?: ToolHandler;
 }
 
+/**
+ * Recover a slice's contributed state shape from the slice value itself.
+ *
+ * We infer the whole `StateSliceMw` type as one blob and read its `_init`
+ * field, rather than inferring the slice's `S` directly: `StateContributor`
+ * is branded `MiddlewareFn<any, any>`, so inferring `S` structurally picks up
+ * that `any` (via `_out` / the call signature) and collapses `state` to `any`.
+ * `_init` is the one field the `any` never reaches.
+ */
+type SliceState<Slice> = Slice extends { _init: infer A } ? A : never;
+
 /** Define a tool from plain data. */
-export function tool<S extends object = never>(config: {
+export function tool<Slice extends StateSliceMw<object> = never>(config: {
     name: string;
     description: string;
     parameters: unknown;
-    state?: StateSliceMw<S>;
-    execute: [S] extends [never]
-        ? (args: string, ctx: ToolExecutionContext) => unknown | Promise<unknown>
-        : (args: string, state: S, ctx: ToolExecutionContext) => unknown | Promise<unknown>;
+    state?: Slice;
+    // Tools return the result string directly (no implicit serialization — call
+    // `JSON.stringify` yourself for structured data), or `ctx.defer()` to
+    // complete the call out-of-band.
+    execute: [Slice] extends [never]
+        ? (args: string, ctx: ToolExecutionContext) => string | Deferred | Promise<string | Deferred>
+        : (
+              args: string,
+              state: SliceState<Slice>,
+              ctx: ToolExecutionContext,
+          ) => string | Deferred | Promise<string | Deferred>;
     retry?: RetryPolicy;
     handler?: ToolHandler;
 }): ToolDef {
@@ -331,6 +349,19 @@ export function logging(options?: string | LoggingOptions): MiddlewareFn<unknown
 
 export type MessageSelector<S> = (state: S, ctx: AgentContext<S>) => Message[] | Promise<Message[]>;
 
+export type SystemMessageSelector<S> = (state: S, ctx: AgentContext<S>) => string | Promise<string>;
+
+export interface MessageHistoryOptions<K extends string = "messages"> {
+    /** State key the transcript array lives at. Defaults to `"messages"`. */
+    stateKey?: K;
+}
+
+/** Normalize the `system` option into a selector (or null when absent). */
+function toSystemSelector<S>(system: SystemMessageSelector<S> | string | undefined): SystemMessageSelector<S> | null {
+    if (system === undefined) return null;
+    return typeof system === "function" ? system : () => system;
+}
+
 /**
  * Translate a decision trigger into the message (if any) that belongs in the
  * conversation transcript. Returns `null` for triggers that don't correspond
@@ -379,26 +410,45 @@ export function prependHistoryToLlmCalls(history: Message[], actions: WorkerActi
 }
 
 /**
- * Conversation history middleware. Contributes `{ messages: Message[] }` to state.
- * Records incoming messages and augments `call_llm` actions with the full history.
+ * Conversation history middleware. Contributes `{ [stateKey]: Message[] }` to
+ * state (default key `messages`). Records incoming messages and augments
+ * `call_llm` actions with the full history.
+ *
+ * Pass `system` — a string or a `(state, ctx) => string` selector — to also
+ * prepend a system message to every LLM call; it lands ahead of the transcript.
+ * Use the second argument to move the transcript to a different state key.
  *
  * Implementation is intentionally tiny: `triggerToMessage` +
  * `prependHistoryToLlmCalls` composed against a state slice. For anything
  * non-default (clear on a signal, cap at N, persist out-of-band) write
  * your own middleware using the same helpers.
  */
-export function messageHistory(): StateContributor<{ messages: Message[] }> &
-    MiddlewareFn<unknown, { messages: Message[] }> {
+export function messageHistory<S, K extends string = "messages">(
+    system?: SystemMessageSelector<S> | string,
+    options?: MessageHistoryOptions<K>,
+): StateContributor<Record<K, Message[]>> & MiddlewareFn<unknown, Record<K, Message[]>> {
+    const key = (options?.stateKey ?? "messages") as K;
+    const select = toSystemSelector(system);
+
     return middleware({
-        state: { messages: [] as Message[] },
+        state: { [key]: [] as Message[] } as Record<K, Message[]>,
         handler: async (ctx, next) => {
+            const history = ctx.state[key];
             const msg = triggerToMessage(ctx.request.trigger);
-            if (msg) ctx.state.messages.push(msg);
+            if (msg) history.push(msg);
+
+            const sysMsg = select
+                ? {
+                      role: "system",
+                      content: await select(ctx.state as unknown as S, ctx as unknown as AgentContext<S>),
+                  }
+                : null;
 
             const result = await next(ctx);
+            const prefix = sysMsg ? [sysMsg as Message, ...history] : history;
             return {
                 ...result,
-                actions: prependHistoryToLlmCalls(ctx.state.messages, result.actions),
+                actions: prependHistoryToLlmCalls(prefix, result.actions),
             };
         },
     });
@@ -408,59 +458,46 @@ export function messageHistory(): StateContributor<{ messages: Message[] }> &
  * Like `messageHistory`, but only retains messages from the current turn.
  * Resets the buffer whenever `ctx.request.turn_id` changes.
  *
+ * Accepts the same `system` / `stateKey` arguments as `messageHistory`.
+ *
  * Requires callers to supply a distinct `turn_id` per submit. If `turn_id` is
  * omitted by the caller, this degrades to the same behavior as `messageHistory`.
  */
-export function messageHistoryCurrentTurn(): StateContributor<{
-    messages: Message[];
-    lastTurnId?: string;
-}> &
-    MiddlewareFn<unknown, { messages: Message[]; lastTurnId?: string }> {
+export function messageHistoryCurrentTurn<S, K extends string = "messages">(
+    system?: SystemMessageSelector<S> | string,
+    options?: MessageHistoryOptions<K>,
+): StateContributor<Record<K, Message[]> & { lastTurnId?: string }> &
+    MiddlewareFn<unknown, Record<K, Message[]> & { lastTurnId?: string }> {
+    const key = (options?.stateKey ?? "messages") as K;
+    const select = toSystemSelector(system);
+
     return middleware({
-        state: { messages: [] as Message[], lastTurnId: undefined as string | undefined },
+        state: { [key]: [] as Message[], lastTurnId: undefined as string | undefined } as Record<K, Message[]> & {
+            lastTurnId?: string;
+        },
         handler: async (ctx, next) => {
+            const history = ctx.state[key];
             if (ctx.request.turn_id !== ctx.state.lastTurnId) {
-                ctx.state.messages = [];
+                history.length = 0;
                 ctx.state.lastTurnId = ctx.request.turn_id;
             }
 
             const msg = triggerToMessage(ctx.request.trigger);
-            if (msg) ctx.state.messages.push(msg);
+            if (msg) history.push(msg);
+
+            const sysMsg = select
+                ? {
+                      role: "system",
+                      content: await select(ctx.state as unknown as S, ctx as unknown as AgentContext<S>),
+                  }
+                : null;
 
             const result = await next(ctx);
+            const prefix = sysMsg ? [sysMsg as Message, ...history] : history;
             return {
                 ...result,
-                actions: prependHistoryToLlmCalls(ctx.state.messages, result.actions),
+                actions: prependHistoryToLlmCalls(prefix, result.actions),
             };
-        },
-    });
-}
-
-// ── System message ─────────────────────────────────────────────────────────
-
-export type SystemMessageSelector<S> = (state: S, ctx: AgentContext<S>) => string | Promise<string>;
-
-export function systemMessage<S>(selectorOrValue: SystemMessageSelector<S> | string): MiddlewareFn<S> {
-    const selector: SystemMessageSelector<S> =
-        typeof selectorOrValue === "function" ? selectorOrValue : () => selectorOrValue;
-
-    return middleware({
-        handler: async (ctx: AgentContext<S>, next: Next<S>) => {
-            const sysMsg: Message = { role: "system", content: await selector(ctx.state, ctx) };
-
-            const result = await next(ctx);
-            const actions = result.actions.map((action) => {
-                if (action.type !== "call.llm") return action;
-                return {
-                    ...action,
-                    request: {
-                        ...action.request,
-                        messages: [sysMsg, ...action.request.messages],
-                    },
-                };
-            });
-
-            return { ...result, actions };
         },
     });
 }
@@ -542,7 +579,10 @@ export function tools<S>(
                             {
                                 type: "return.tool.result" as const,
                                 tool_call_id: ctx.request.trigger.tool_call_id,
-                                result: typeof output === "string" ? output : JSON.stringify(output),
+                                // Tools are typed to return a string; guard at runtime so an
+                                // untyped caller can't drop the field and make the engine reject
+                                // the action ("missing field `result`").
+                                result: typeof output === "string" ? output : "",
                                 attempt: ctx.request.trigger.attempt,
                             },
                             ...downstream.actions,
@@ -797,7 +837,7 @@ export function subAgents<S>(config: {
                     const content =
                         typeof ctx.request.trigger.data === "string"
                             ? ctx.request.trigger.data
-                            : JSON.stringify(ctx.request.trigger.data);
+                            : (JSON.stringify(ctx.request.trigger.data) ?? "");
                     const result: ToolResult = {
                         tool_call_id: tracked.toolCallId,
                         name: tracked.name,

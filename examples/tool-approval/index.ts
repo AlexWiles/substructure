@@ -112,12 +112,12 @@ const runCommand = agent.tool({
         state.approvalDecision = null;
         if (decision && !decision.approved) {
             const reason = decision.reason ? ` Reason: ${decision.reason}` : "";
-            return {
+            return JSON.stringify({
                 cmd,
                 exit_code: 1,
                 stdout: "",
                 stderr: `User denied this command.${reason}`,
-            };
+            });
         }
         const result = spawnSync(cmd, {
             shell: true,
@@ -125,12 +125,12 @@ const runCommand = agent.tool({
             timeout: 30_000,
             maxBuffer: 1_000_000,
         });
-        return {
+        return JSON.stringify({
             cmd,
             exit_code: result.status ?? -1,
             stdout: result.stdout ?? "",
             stderr: result.stderr ?? result.error?.message ?? "",
-        };
+        });
     },
 });
 
@@ -139,11 +139,10 @@ const runCommand = agent.tool({
 const assistant = agent({ id: "assistant" })
     .use(agent.jsonState())
     .use(
-        agent.systemMessage(
+        agent.messageHistory(
             "You are a shell assistant. Use `run_command` to run real shell commands on the user's machine. Every command requires explicit user approval before it runs and may be denied with a reason. If a command is denied, adapt rather than retrying the same command.",
         ),
     )
-    .use(agent.messageHistory())
     .use(agent.actions([approveCommand]))
     .use(approvalGate)
     .use(agent.tools([runCommand]))

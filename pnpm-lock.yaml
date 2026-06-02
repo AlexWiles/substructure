@@ -166,6 +166,25 @@ importers:
         specifier: 5.9.3
         version: 5.9.3
 
+  examples/state-hydration:
+    dependencies:
+      '@substructure.ai/runtime':
+        specifier: workspace:*
+        version: link:../../packages/runtime
+      '@substructure.ai/sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk
+    devDependencies:
+      '@types/node':
+        specifier: 24.12.2
+        version: 24.12.2
+      tsx:
+        specifier: 4.20.6
+        version: 4.20.6
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+
   examples/sub-agent:
     dependencies:
       '@substructure.ai/runtime':
@@ -223,35 +242,9 @@ importers:
         specifier: 54.0.0
         version: 54.0.0(rollup@4.59.0)
 
-  packages/cli:
-    optionalDependencies:
-      '@substructure.ai/cli-darwin-arm64':
-        specifier: 0.1.12
-        version: 0.1.12
-      '@substructure.ai/cli-darwin-x64':
-        specifier: 0.1.12
-        version: 0.1.12
-      '@substructure.ai/cli-linux-arm64':
-        specifier: 0.1.12
-        version: 0.1.12
-      '@substructure.ai/cli-linux-x64':
-        specifier: 0.1.12
-        version: 0.1.12
+  packages/cli: {}
 
-  packages/runtime:
-    optionalDependencies:
-      '@substructure.ai/runtime-darwin-arm64':
-        specifier: 0.1.12
-        version: 0.1.12
-      '@substructure.ai/runtime-darwin-x64':
-        specifier: 0.1.12
-        version: 0.1.12
-      '@substructure.ai/runtime-linux-arm64-gnu':
-        specifier: 0.1.12
-        version: 0.1.12
-      '@substructure.ai/runtime-linux-x64-gnu':
-        specifier: 0.1.12
-        version: 0.1.12
+  packages/runtime: {}
 
   packages/sdk:
     dependencies:
@@ -2314,50 +2307,6 @@ packages:
 
   '@speed-highlight/core@1.2.15':
     resolution: {integrity: sha512-BMq1K3DsElxDWawkX6eLg9+CKJrTVGCBAWVuHXVUV2u0s2711qiChLSId6ikYPfxhdYocLNt3wWwSvDiTvFabw==}
-
-  '@substructure.ai/cli-darwin-arm64@0.1.12':
-    resolution: {integrity: sha512-tiByJA/8inqwcCFPBmHgvi9/EDJx2uBZb1oldTPuczW+EepeA9uPKs0JFf1ipMB58xakC6jwT3VLLqW+WMsQHg==}
-    cpu: [arm64]
-    os: [darwin]
-
-  '@substructure.ai/cli-darwin-x64@0.1.12':
-    resolution: {integrity: sha512-Uxmngdxf6xCmULSzau1sMOqngxdyF4nZVLQzCbEdDyYG6h4r1Q2/WcwV41KCo3UzMb5TTxNsX6VTiMl+w2B0CA==}
-    cpu: [x64]
-    os: [darwin]
-
-  '@substructure.ai/cli-linux-arm64@0.1.12':
-    resolution: {integrity: sha512-Uc54urgG5wZJj13yuptnZRdJVyAWDTKzJBE7nA2Jw+pTuEEneBEB627hZJTotgIsy42wiNEjuZNnVMiZHCh5Tw==}
-    cpu: [arm64]
-    os: [linux]
-    libc: [glibc]
-
-  '@substructure.ai/cli-linux-x64@0.1.12':
-    resolution: {integrity: sha512-3bQJ7BIMWikx4yBWvoFes3CdEuzjtBvmyJZ2rvWlDLWermolvIDHBolFsUBpQzcVKdAtdtwYKKkXN94ELSNF2A==}
-    cpu: [x64]
-    os: [linux]
-    libc: [glibc]
-
-  '@substructure.ai/runtime-darwin-arm64@0.1.12':
-    resolution: {integrity: sha512-8XyDtCEX0IKUpAFjHBxxtBzWlF4+zyJl/Kzq2GSx5ZEBP19rAM554PajHi/S7/5fbwYAHoHbfko7Kxf4gLfTqA==}
-    cpu: [arm64]
-    os: [darwin]
-
-  '@substructure.ai/runtime-darwin-x64@0.1.12':
-    resolution: {integrity: sha512-EWbceEmWuDDXVXPeyek455ukKsKQs2oppYwqnlsF5wmrsbb4nAbGg0BS0iLlocyUn+unusxi4Aj8h9pT+4RzRg==}
-    cpu: [x64]
-    os: [darwin]
-
-  '@substructure.ai/runtime-linux-arm64-gnu@0.1.12':
-    resolution: {integrity: sha512-PkUdkbED2KChc2czcla6mJzAi6mD7Uwv20XAoqcGU97Q5yk5j//5D9wF44AvaPanqiIGLLQbJq+4ZmpGFK25DA==}
-    cpu: [arm64]
-    os: [linux]
-    libc: [glibc]
-
-  '@substructure.ai/runtime-linux-x64-gnu@0.1.12':
-    resolution: {integrity: sha512-MF6/NatdWW2ITP6ug1WLXr8DF3P7TP/yUa9z4XjW+7gUox1iEMQj5suw0G/AzEKXbNCzAUiibOt9Rww/4fT/8w==}
-    cpu: [x64]
-    os: [linux]
-    libc: [glibc]
 
   '@tootallnate/once@2.0.0':
     resolution: {integrity: sha512-XCuKFP5PS55gnMVu3dty8KPatLqUoy/ZYzDzAGCQ8JNFCkLXzmI7vNHCR+XpbZaMWQK/vQubr7PkYq8g470J/A==}
@@ -5070,30 +5019,6 @@ snapshots:
   '@sindresorhus/is@7.2.0': {}
 
   '@speed-highlight/core@1.2.15': {}
-
-  '@substructure.ai/cli-darwin-arm64@0.1.12':
-    optional: true
-
-  '@substructure.ai/cli-darwin-x64@0.1.12':
-    optional: true
-
-  '@substructure.ai/cli-linux-arm64@0.1.12':
-    optional: true
-
-  '@substructure.ai/cli-linux-x64@0.1.12':
-    optional: true
-
-  '@substructure.ai/runtime-darwin-arm64@0.1.12':
-    optional: true
-
-  '@substructure.ai/runtime-darwin-x64@0.1.12':
-    optional: true
-
-  '@substructure.ai/runtime-linux-arm64-gnu@0.1.12':
-    optional: true
-
-  '@substructure.ai/runtime-linux-x64-gnu@0.1.12':
-    optional: true
 
   '@tootallnate/once@2.0.0': {}
 

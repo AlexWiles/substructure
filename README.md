@@ -57,14 +57,13 @@ const getWeather = agent.tool({
   },
   execute: (args: string) => {
     const { city } = JSON.parse(args);
-    return { city, temp_f: 62, condition: "sunny" };
+    return JSON.stringify({ city, temp_f: 62, condition: "sunny" });
   },
 });
 
 const weatherAgent = agent({ id: "weather-agent" })
   .use(agent.jsonState())
-  .use(agent.systemMessage("You are a helpful weather assistant."))
-  .use(agent.messageHistory())
+  .use(agent.messageHistory("You are a helpful weather assistant."))
   .use(agent.tools([getWeather]))
   .use(agent.llmLoop({
     request: { model: "anthropic/claude-sonnet-4-5" },

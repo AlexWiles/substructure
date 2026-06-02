@@ -52,14 +52,13 @@ const setTheme = agent.tool({
 const browserAgent = agent({ id: "browser-assistant" })
     .use(agent.jsonState())
     .use(
-        agent.systemMessage(
+        agent.messageHistory(
             "You are a friendly assistant embedded in a web page. Two tools run in the user's browser: " +
                 "`get_user_location` reads the device's GPS (the user is prompted to allow it), and `set_theme` " +
                 "repaints the page. Use them when the user asks about where they are or how the page looks. " +
                 "Keep replies short and conversational.",
         ),
     )
-    .use(agent.messageHistory())
     .use(agent.tools([getUserLocation, setTheme]))
     .use(agent.llmLoop({ request: { model: "anthropic/claude-sonnet-4-6" }, stream: true }));
 

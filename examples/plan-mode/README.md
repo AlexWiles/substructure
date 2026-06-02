@@ -11,13 +11,14 @@ interaction in coding agents like Claude Code.
   drive state changes. Sending `{ type: "action", name: "set_mode", ... }`
   flips state inside the worker without producing a user message in
   the transcript.
-- **Selector-form middleware** (`agent.tools`, `agent.systemMessage`,
-  `agent.llmLoop`) reading the same state slice (`mode`) so the toolset,
-  system prompt, and model all swap together when the mode changes.
+- **Selector-form middleware** (`agent.tools`, `agent.llmLoop`) reading
+  the same state slice (`mode`) so the toolset and model swap together
+  when the mode changes.
 - **A custom history middleware** built from the `triggerToMessage` and
   `prependHistoryToLlmCalls` SDK helpers. This one resets the
-  transcript whenever it observes a mode transition, so the executor
-  starts cold with only the rendered plan in its system prompt.
+  transcript whenever it observes a mode transition and computes its
+  own mode-dependent system prompt, so the executor starts cold with
+  only the rendered plan in its system prompt.
 - **Embedded runtime** with session persistence: subsequent CLI
   invocations resume the same conversation by passing the session id.
 
@@ -39,17 +40,18 @@ Two middlewares:
 - **`planMode`** — on a `set_mode` client action, writes the new mode
   to state and lets the chain proceed normally. The action itself
   becomes the trigger that kicks off execution.
-- **`modeAwareHistory`** — records triggers to `state.messages` and
-  prepends the transcript to outgoing `call.llm` actions. If
+- **`modeAwareHistory`** — records triggers to `state.messages`, computes
+  a mode-dependent system prompt, and prepends both (system message
+  first, then the transcript) to outgoing `call.llm` actions. If
   `state.mode !== state.lastMode`, wipes `messages` first.
 
 Chain order:
 
 ```
-jsonState → planMode → systemMessage → modeAwareHistory → tools → llmLoop
+jsonState → planMode → modeAwareHistory → tools → llmLoop
 ```
 
-`systemMessage` sits outside `modeAwareHistory` so the system message
+`modeAwareHistory` puts its system prompt ahead of the transcript so it
 ends up first in the LLM request. Tool gating and model selection use
 the selector forms — planning runs on Opus 4.7 (harder reasoning),
 executing runs on Sonnet 4.6 (mechanical step-by-step work).
