@@ -1,8 +1,7 @@
 packages:
-  - packages/*
+  - '*'
 allowBuilds:
-  core-js-pure: true
+  '@scarf/scarf': false
   esbuild: true
-  lefthook: true
   sharp: true
   workerd: true

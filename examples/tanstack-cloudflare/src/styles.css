@@ -1,0 +1,269 @@
+html,
+body {
+    margin: 0;
+    height: 100%;
+    font-family: system-ui, -apple-system, sans-serif;
+}
+
+#app,
+.shell {
+    height: 100dvh;
+}
+
+.shell {
+    display: flex;
+}
+
+.sidebar {
+    width: 260px;
+    flex-shrink: 0;
+    box-sizing: border-box;
+    border-right: 1px solid #eee;
+    padding: 20px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.sidebar .brand {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.sidebar .brand span {
+    color: #888;
+    font-size: 13px;
+}
+
+.nav {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.navlink {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 10px 12px;
+    border: 1px solid #e3e3e3;
+    border-radius: 10px;
+    text-decoration: none;
+    color: inherit;
+}
+
+.navlink span {
+    color: #888;
+    font-size: 12px;
+}
+
+.navlink:hover {
+    border-color: #bbb;
+}
+
+.navlink.active {
+    border-color: #111;
+    background: #fafafa;
+}
+
+.sidebar .hint {
+    margin-top: auto;
+    color: #777;
+    font-size: 13px;
+    line-height: 1.45;
+}
+
+.pagebody {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+}
+
+.chatpane {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    position: relative;
+}
+
+.colorpanel {
+    width: 300px;
+    flex-shrink: 0;
+    box-sizing: border-box;
+    border-left: 1px solid #eee;
+    background: #fafafa;
+    padding: 20px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.colorpanel-title {
+    font-weight: 600;
+    font-size: 14px;
+}
+
+.swatch {
+    height: 120px;
+    border-radius: 14px;
+    display: flex;
+    align-items: flex-end;
+    padding: 10px;
+    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.06);
+    /* The agent-driven change tweens frame-by-frame in the store (color-store.ts),
+       so no CSS transition on background here — it would only add trailing lag. */
+}
+
+.swatchhex {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    color: #fff;
+    background: rgba(0, 0, 0, 0.4);
+    padding: 3px 8px;
+    border-radius: 999px;
+}
+
+.sliders {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.slider {
+    display: grid;
+    grid-template-columns: 44px 1fr 30px;
+    align-items: center;
+    gap: 10px;
+}
+
+.sliderlabel {
+    font-size: 13px;
+    color: #555;
+}
+
+.sliderval {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    color: #888;
+    text-align: right;
+}
+
+.slider input[type="range"] {
+    width: 100%;
+}
+
+.slider[data-ch="r"] input {
+    accent-color: #e5484d;
+}
+
+.slider[data-ch="g"] input {
+    accent-color: #30a46c;
+}
+
+.slider[data-ch="b"] input {
+    accent-color: #3b82f6;
+}
+
+.panelhint {
+    margin-top: auto;
+    color: #888;
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.panelhint code,
+.hint code {
+    background: #ececec;
+    padding: 1px 5px;
+    border-radius: 5px;
+    font-size: 11px;
+}
+
+/* Inline color chip next to a rendered tool call (TanStack's custom renderer). */
+.swatchchip {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+    vertical-align: middle;
+    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.15);
+}
+
+.chat {
+    max-width: 720px;
+    margin: 0 auto;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    padding: 16px;
+    box-sizing: border-box;
+}
+
+.messages {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 8px 0;
+}
+
+.msg {
+    padding: 10px 14px;
+    border-radius: 14px;
+    max-width: 80%;
+    white-space: pre-wrap;
+    line-height: 1.4;
+}
+
+.msg.user {
+    align-self: flex-end;
+    background: #f0f0f0;
+}
+
+.msg.assistant {
+    align-self: flex-start;
+    background: #fff;
+}
+
+.msg.pending {
+    color: #999;
+}
+
+.tool {
+    display: inline-block;
+    color: #6b6b6b;
+    font-size: 0.85em;
+}
+
+.composer {
+    display: flex;
+    gap: 8px;
+    padding-top: 8px;
+    border-top: 1px solid #eee;
+}
+
+.composer input {
+    flex: 1;
+    padding: 10px 14px;
+    border: 1px solid #ddd;
+    border-radius: 999px;
+    font-size: 15px;
+    outline: none;
+}
+
+.composer button {
+    padding: 10px 18px;
+    border: none;
+    border-radius: 999px;
+    background: #111;
+    color: #fff;
+    font-size: 15px;
+    cursor: pointer;
+}
+
+.composer button:disabled {
+    opacity: 0.4;
+    cursor: default;
+}

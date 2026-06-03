@@ -1,3 +1,4 @@
+mod ag_ui;
 mod routes;
 mod types;
 
@@ -35,6 +36,10 @@ pub fn router(state: ClientHttpState) -> Router {
         .route(
             "/api/client/sessions/{session_id}/events/stream",
             get(routes::stream_session_events),
+        )
+        .route(
+            "/api/client/ag-ui/agents/{agent_id}/run",
+            post(ag_ui::ag_ui_run),
         )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),

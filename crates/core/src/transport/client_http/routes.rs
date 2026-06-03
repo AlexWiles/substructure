@@ -163,7 +163,7 @@ pub(crate) fn runtime_error_status(err: &RuntimeError) -> (StatusCode, String) {
     (status, err.to_string())
 }
 
-fn runtime_error_response(err: RuntimeError) -> Response {
+pub(crate) fn runtime_error_response(err: RuntimeError) -> Response {
     let (status, message) = runtime_error_status(&err);
     (status, Json(serde_json::json!({"error": message}))).into_response()
 }

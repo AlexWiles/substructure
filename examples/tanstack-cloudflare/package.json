@@ -1,0 +1,41 @@
+{
+  "name": "@substructure.ai/example-tanstack-cloudflare",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "build:cf": "DEPLOY_TARGET=cloudflare vite build",
+    "deploy": "pnpm build:cf && wrangler deploy",
+    "cf:dev": "pnpm build:cf && wrangler dev"
+  },
+  "dependencies": {
+    "@ag-ui/client": "0.0.54",
+    "@assistant-ui/react": "0.14.13",
+    "@assistant-ui/react-ag-ui": "0.0.34",
+    "@assistant-ui/react-markdown": "0.14.1",
+    "@assistant-ui/react-ui": "0.2.1",
+    "@copilotkit/react-core": "1.59.2",
+    "@copilotkit/react-ui": "1.59.2",
+    "@substructure.ai/sdk": "^0.1.15",
+    "@tanstack/ai": "0.26.1",
+    "@tanstack/ai-client": "0.16.1",
+    "@tanstack/ai-react": "0.15.1",
+    "@tanstack/react-router": "1.168.10",
+    "@tanstack/react-start": "1.167.16",
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "1.33.2",
+    "@tanstack/router-plugin": "1.167.12",
+    "@types/node": "24.12.2",
+    "@types/react": "19.2.16",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "5.2.0",
+    "typescript": "5.9.3",
+    "vite": "7.3.1",
+    "vite-tsconfig-paths": "5.1.4",
+    "wrangler": "4.85.0"
+  }
+}
