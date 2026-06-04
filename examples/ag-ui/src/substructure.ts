@@ -87,7 +87,7 @@ export const substructureHandler = worker.fetchHandler({ signingSecret: process.
 /** Handle a decision webhook from the engine. Reads SIGNING_SECRET per call so
  *  Workers secrets are resolved at request time. */
 export function handleAgentRequest(request: Request): Promise<Response> {
-    return handler(request);
+    return substructureHandler(request);
 }
 
 /** Mint a short-lived, identity-locked client token for the browser. In a real
