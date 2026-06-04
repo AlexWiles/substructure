@@ -420,11 +420,6 @@ fn tool_result(tool_call_id: String, content: String) -> AgUiEvent {
     }
 }
 
-fn to_sse(event: &AgUiEvent) -> SseEvent {
-    let data = serde_json::to_string(event).unwrap_or_default();
-    SseEvent::default().event(event.type_name()).data(data)
-}
-
 /// Spawn the translation task and return the SSE receiver. The task ends on the
 /// first terminal event, when the event channel closes, or on shutdown.
 pub fn run_ag_ui_translation(
@@ -438,7 +433,7 @@ pub fn run_ag_ui_translation(
     tokio::spawn(async move {
         let mut t = AgUiTranslator::new(thread_id, run_id);
         for v in t.start() {
-            if out_tx.send(to_sse(&v)).await.is_err() {
+            if out_tx.send(v.to_sse()).await.is_err() {
                 return;
             }
         }
@@ -446,7 +441,7 @@ pub fn run_ag_ui_translation(
             tokio::select! {
                 _ = shutdown.cancelled() => {
                     for v in t.finalize_error("server shutting down".to_string()) {
-                        let _ = out_tx.send(to_sse(&v)).await;
+                        let _ = out_tx.send(v.to_sse()).await;
                     }
                     return;
                 }
@@ -462,14 +457,14 @@ pub fn run_ag_ui_translation(
                         if matches!(payload, EventPayload::LlmCallCompleted(_)) {
                             while let Ok(d) = delta_rx.try_recv() {
                                 for v in t.on_delta(d) {
-                                    if out_tx.send(to_sse(&v)).await.is_err() {
+                                    if out_tx.send(v.to_sse()).await.is_err() {
                                         return;
                                     }
                                 }
                             }
                         }
                         for v in t.on_event(payload) {
-                            if out_tx.send(to_sse(&v)).await.is_err() {
+                            if out_tx.send(v.to_sse()).await.is_err() {
                                 return;
                             }
                         }
@@ -481,7 +476,7 @@ pub fn run_ag_ui_translation(
                         if !t.terminated {
                             let msg = "run stream closed before completion".to_string();
                             for v in t.finalize_error(msg) {
-                                let _ = out_tx.send(to_sse(&v)).await;
+                                let _ = out_tx.send(v.to_sse()).await;
                             }
                         }
                         return;
@@ -490,7 +485,7 @@ pub fn run_ag_ui_translation(
                 delta = delta_rx.recv() => match delta {
                     Some(d) => {
                         for v in t.on_delta(d) {
-                            if out_tx.send(to_sse(&v)).await.is_err() {
+                            if out_tx.send(v.to_sse()).await.is_err() {
                                 return;
                             }
                         }

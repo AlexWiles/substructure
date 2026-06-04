@@ -8,9 +8,12 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use tokio_stream::wrappers::ReceiverStream;
 
+use uuid::Uuid;
+
 use crate::event_store::{AggregateSort, EventFilter};
 use crate::session::index::{SessionCursor, SessionFilter};
 use crate::session::subscriptions::SessionSubscriptionSpec;
+use crate::transport::ag_ui::snapshot::{message_history, snapshot_events};
 use crate::transport::auth::AuthPrincipal;
 
 use super::AdminHttpState;
@@ -175,4 +178,62 @@ pub async fn stream_session_events(
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response()
+}
+
+/// `GET /api/admin/sessions/{session_id}/ag-ui/messages` — the session's history
+/// as an AG-UI message list, for hydrating an admin console (e.g. as `HttpAgent`'s
+/// `initialMessages`). Tenant-scoped to any session in the tenant. Read-only.
+pub async fn session_ag_ui_messages(
+    State(state): State<AdminHttpState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(session_id): Path<String>,
+) -> Response {
+    let events = match load_session_events(&state, &principal, session_id).await {
+        Ok(events) => events,
+        Err(response) => return response,
+    };
+    Json(message_history(&events)).into_response()
+}
+
+/// `GET /api/admin/sessions/{session_id}/ag-ui/snapshot` — the same history as an
+/// SSE `RUN_STARTED → MESSAGES_SNAPSHOT → RUN_FINISHED` sequence, for replaying a
+/// session into a stock AG-UI client. Read-only.
+pub async fn stream_session_ag_ui(
+    State(state): State<AdminHttpState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(session_id): Path<String>,
+) -> Response {
+    let events = match load_session_events(&state, &principal, session_id.clone()).await {
+        Ok(events) => events,
+        Err(response) => return response,
+    };
+    let run_id = Uuid::now_v7().to_string();
+    let frames = snapshot_events(session_id, run_id, &events)
+        .into_iter()
+        .map(|e| Ok::<_, std::convert::Infallible>(e.to_sse()));
+    Sse::new(futures_util::stream::iter(frames)).into_response()
+}
+
+/// Load a session's events, tenant-scoped. On error, returns the response to send.
+async fn load_session_events(
+    state: &AdminHttpState,
+    principal: &AuthPrincipal,
+    session_id: String,
+) -> Result<Vec<crate::event_store::Event>, Response> {
+    let filter = EventFilter {
+        aggregate_id: Some(session_id),
+        tenant_id: Some(principal.tenant_id.clone()),
+        ..Default::default()
+    };
+    state
+        .runtime
+        .get_session_events(&filter)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response()
+        })
 }

@@ -13,6 +13,10 @@ export default defineConfig({
     // the browser would hit whatever else owns the port (and 404). 3030 is
     // chosen to dodge the common 3000/3001 dev collisions.
     server: { port: 3030, strictPort: true },
+    // CopilotKit's compiled JS does `import "./index.css"`. When externalized for
+    // SSR, Node tries to load that .css and throws "Unknown file extension". Let
+    // Vite bundle it instead, so the CSS import runs through Vite's pipeline.
+    ssr: { noExternal: ["@copilotkit/react-core"] },
     plugins: [
         ...(isCloudflareBuild ? [cloudflare({ viteEnvironment: { name: "ssr" } })] : []),
         tsconfigPaths(),

@@ -67,6 +67,77 @@ body {
     background: #fafafa;
 }
 
+.sessions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 0;
+}
+
+.sessions-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #999;
+}
+
+.newchat {
+    border: 1px solid #e3e3e3;
+    border-radius: 7px;
+    background: #fff;
+    padding: 3px 8px;
+    font-size: 12px;
+    cursor: pointer;
+    color: #333;
+}
+
+.newchat:hover {
+    border-color: #bbb;
+}
+
+.session-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    overflow-y: auto;
+}
+
+.session-item {
+    text-align: left;
+    padding: 8px 10px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: none;
+    cursor: pointer;
+    font-size: 13px;
+    color: #444;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.session-item:hover {
+    background: #f4f4f4;
+}
+
+.session-item.active {
+    border-color: #111;
+    background: #fafafa;
+    color: #111;
+}
+
+.chat-loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: #999;
+    font-size: 14px;
+}
+
 .sidebar .hint {
     margin-top: auto;
     color: #777;

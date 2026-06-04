@@ -2,12 +2,18 @@ import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 
 import { ColorPanel } from "./color-panel";
+import { SessionList } from "./session-list";
 
 // The client examples, one per route, linked from the sidebar.
 const CLIENTS = [
     { to: "/assistant-ui", name: "assistant-ui", note: "useAgUiRuntime" },
     { to: "/copilotkit", name: "CopilotKit", note: "v2 self-managed" },
 ] as const;
+
+// Shown while a session's history is being fetched on open/switch.
+export function ChatLoading() {
+    return <div className="chat-loading">Loading conversation…</div>;
+}
 
 export function PageShell({ children }: { children: ReactNode }) {
     return (
@@ -30,6 +36,7 @@ export function PageShell({ children }: { children: ReactNode }) {
                         </Link>
                     ))}
                 </nav>
+                <SessionList />
                 <p className="hint">
                     Each client calls the same frontend <code>set_color</code> tool — watch the
                     agent drive the mixer on the right.

@@ -1,5 +1,8 @@
+use axum::response::sse::Event as SseEvent;
 use serde::Serialize;
 use serde_json::Value;
+
+use crate::session::message::ToolCall;
 
 /// A single AG-UI output event. Serializes to the wire shape: a
 /// SCREAMING_SNAKE_CASE `type` discriminator plus camelCase fields, with absent
@@ -21,6 +24,11 @@ pub enum AgUiEvent {
 
     #[serde(rename = "RUN_ERROR")]
     RunError { message: String },
+
+    /// Full conversation history, applied wholesale to the client's message list
+    /// — used to hydrate a thread on (re)connect.
+    #[serde(rename = "MESSAGES_SNAPSHOT", rename_all = "camelCase")]
+    MessagesSnapshot { messages: Vec<SnapshotMessage> },
 
     #[serde(rename = "TEXT_MESSAGE_START", rename_all = "camelCase")]
     TextMessageStart {
@@ -81,6 +89,36 @@ pub enum AgUiEvent {
     ReasoningEnd { message_id: String },
 }
 
+/// One message in a [`AgUiEvent::MessagesSnapshot`], matching AG-UI's role-tagged
+/// message union. Reconstructed from the session's persisted `message.new` events.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "role", rename_all = "lowercase")]
+pub enum SnapshotMessage {
+    System {
+        id: String,
+        content: String,
+    },
+    User {
+        id: String,
+        content: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Assistant {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        content: Option<String>,
+        /// Serializes as `[{ id, type: "function", function: { name, arguments } }]`.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        tool_calls: Vec<ToolCall>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Tool {
+        id: String,
+        tool_call_id: String,
+        content: String,
+    },
+}
+
 impl AgUiEvent {
     /// The wire `type` discriminator, reused as the SSE `event:` name. Kept in
     /// sync with the serde `rename` on each variant.
@@ -89,6 +127,7 @@ impl AgUiEvent {
             AgUiEvent::RunStarted { .. } => "RUN_STARTED",
             AgUiEvent::RunFinished { .. } => "RUN_FINISHED",
             AgUiEvent::RunError { .. } => "RUN_ERROR",
+            AgUiEvent::MessagesSnapshot { .. } => "MESSAGES_SNAPSHOT",
             AgUiEvent::TextMessageStart { .. } => "TEXT_MESSAGE_START",
             AgUiEvent::TextMessageContent { .. } => "TEXT_MESSAGE_CONTENT",
             AgUiEvent::TextMessageEnd { .. } => "TEXT_MESSAGE_END",
@@ -102,5 +141,12 @@ impl AgUiEvent {
             AgUiEvent::ReasoningMessageEnd { .. } => "REASONING_MESSAGE_END",
             AgUiEvent::ReasoningEnd { .. } => "REASONING_END",
         }
+    }
+
+    /// Serialize to an SSE frame: the JSON body as `data:`, the type name as the
+    /// (debug-friendly) `event:` name.
+    pub fn to_sse(&self) -> SseEvent {
+        let data = serde_json::to_string(self).unwrap_or_default();
+        SseEvent::default().event(self.type_name()).data(data)
     }
 }

@@ -1,0 +1,122 @@
+// assistant-ui hydrates a thread from a history adapter, NOT from the agent's
+// `initialMessages` (its runtime keeps its own message list). So we fetch the
+// session's AG-UI messages, shape them as ThreadMessageLike, and hand them to
+// ExportedMessageRepository.fromBranchableArray (which does the ThreadMessage
+// conversion). `load()` runs once when the runtime mounts for a thread.
+
+import { ExportedMessageRepository, type ThreadHistoryAdapter, type ThreadMessageLike } from "@assistant-ui/react";
+
+import type { AgUiMessage } from "./history";
+import { setSessionTitle } from "./sessions";
+import type { BrowserSession } from "./token";
+
+type ToolCallPart = {
+    type: "tool-call";
+    toolCallId: string;
+    toolName: string;
+    argsText: string;
+    args?: Record<string, unknown>;
+    result?: unknown;
+};
+type Part = ToolCallPart | { type: "text"; text: string };
+type Draft =
+    | { id: string; role: "user" | "system"; content: string }
+    | { id: string; role: "assistant"; content: string | Part[] };
+
+function parse(text: string | undefined): unknown {
+    if (text == null) return text;
+    try {
+        return JSON.parse(text);
+    } catch {
+        return text;
+    }
+}
+
+function toToolCallPart(
+    tc: { id?: string; function?: { name?: string; arguments?: string } },
+    fallbackId: string,
+): ToolCallPart {
+    const fn = tc.function ?? {};
+    const argsText = fn.arguments ?? "{}";
+    const parsed = parse(argsText);
+    const args =
+        parsed && typeof parsed === "object" && !Array.isArray(parsed)
+            ? (parsed as Record<string, unknown>)
+            : undefined;
+    return {
+        type: "tool-call",
+        toolCallId: tc.id ?? fallbackId,
+        toolName: fn.name ?? "tool",
+        argsText,
+        ...(args ? { args } : {}),
+    };
+}
+
+// Fold AG-UI messages into ThreadMessageLike. Tool results merge into their
+// assistant tool-call part — assistant-ui has no standalone tool messages.
+function toThreadMessages(messages: AgUiMessage[]): Draft[] {
+    const out: Draft[] = [];
+    for (const m of messages) {
+        if (m.role === "tool") {
+            for (let i = out.length - 1; i >= 0; i--) {
+                const prev = out[i];
+                if (prev.role !== "assistant" || !Array.isArray(prev.content)) continue;
+                const part = prev.content.find(
+                    (p): p is ToolCallPart => p.type === "tool-call" && p.toolCallId === m.toolCallId,
+                );
+                if (part) {
+                    part.result = parse(m.content);
+                    break;
+                }
+            }
+            continue;
+        }
+        if (m.role === "assistant") {
+            const parts: Part[] = [];
+            if (m.content) parts.push({ type: "text", text: m.content });
+            const calls = (m.toolCalls ?? []) as { id?: string; function?: { name?: string; arguments?: string } }[];
+            calls.forEach((tc, i) => parts.push(toToolCallPart(tc, `${m.id}-tool-${i}`)));
+            out.push({ id: m.id, role: "assistant", content: parts.length ? parts : "" });
+            continue;
+        }
+        out.push({ id: m.id, role: m.role, content: m.content ?? "" });
+    }
+    return out;
+}
+
+async function fetchMessages(session: BrowserSession, sessionId: string): Promise<AgUiMessage[]> {
+    if (!sessionId) return [];
+    try {
+        const res = await fetch(`${session.substructureUrl}/api/client/ag-ui/sessions/${sessionId}/messages`, {
+            headers: { Authorization: `Bearer ${session.token}` },
+        });
+        if (!res.ok) return [];
+        const data: { messages?: AgUiMessage[] } = await res.json();
+        return data.messages ?? [];
+    } catch {
+        return [];
+    }
+}
+
+export function makeAssistantUiHistory(session: BrowserSession, sessionId: string): ThreadHistoryAdapter {
+    return {
+        async load() {
+            const raw = await fetchMessages(session, sessionId);
+            const firstUser = raw.find((m) => m.role === "user");
+            if (firstUser?.content) setSessionTitle(sessionId, firstUser.content);
+            const drafts = toThreadMessages(raw);
+            // Linear thread: each message's parent is the one before it.
+            // fromBranchableArray converts each ThreadMessageLike and picks the head.
+            return ExportedMessageRepository.fromBranchableArray(
+                drafts.map((message, i) => ({
+                    // Our tool-call args are parsed JSON; cast to the lib's ThreadMessageLike.
+                    message: message as ThreadMessageLike & { id: string },
+                    parentId: i === 0 ? null : drafts[i - 1].id,
+                })),
+            );
+        },
+        async append() {
+            // The engine persists the conversation; nothing to store client-side.
+        },
+    };
+}

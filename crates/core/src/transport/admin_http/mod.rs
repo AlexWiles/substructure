@@ -33,6 +33,14 @@ pub fn router(state: AdminHttpState) -> Router {
             "/api/admin/sessions/{session_id}/events/stream",
             get(routes::stream_session_events),
         )
+        .route(
+            "/api/admin/sessions/{session_id}/ag-ui/messages",
+            get(routes::session_ag_ui_messages),
+        )
+        .route(
+            "/api/admin/sessions/{session_id}/ag-ui/snapshot",
+            get(routes::stream_session_ag_ui),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             admin_auth_middleware,

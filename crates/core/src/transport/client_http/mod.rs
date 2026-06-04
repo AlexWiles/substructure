@@ -1,4 +1,3 @@
-mod ag_ui;
 mod routes;
 mod types;
 
@@ -39,7 +38,15 @@ pub fn router(state: ClientHttpState) -> Router {
         )
         .route(
             "/api/client/ag-ui/agents/{agent_id}/run",
-            post(ag_ui::ag_ui_run),
+            post(routes::ag_ui_run),
+        )
+        .route(
+            "/api/client/ag-ui/agents/{agent_id}/connect",
+            post(routes::ag_ui_connect),
+        )
+        .route(
+            "/api/client/ag-ui/sessions/{session_id}/messages",
+            get(routes::ag_ui_session_messages),
         )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),

@@ -10,8 +10,12 @@ import { Thread } from "@assistant-ui/react-ui";
 import "@assistant-ui/react-ui/styles/index.css";
 import { useMemo } from "react";
 
+import { makeAssistantUiHistory } from "../lib/assistant-ui-history";
 import { getColor, setColor, toHex } from "../lib/color-store";
+import { useSessions } from "../lib/sessions";
 import type { BrowserSession } from "../lib/token";
+import { MarkdownText } from "./markdown-text";
+import { ChatLoading } from "./page-shell";
 
 type ColorArgs = { red?: number; green?: number; blue?: number };
 type ColorResult = { red: number; green: number; blue: number; hex: string };
@@ -42,6 +46,32 @@ const SetColorToolUI = makeAssistantToolUI<ColorArgs, ColorResult>({
 const GetColorToolUI = makeAssistantToolUI<ColorArgs, ColorResult>({
     toolName: "get_color",
     render: colorCard,
+});
+
+type WeatherArgs = { city?: string };
+type WeatherResult = { city: string; temp_f: number; condition: string };
+
+// Card for the server-side get_weather tool. Without a registered UI a restored
+// tool call falls back to assistant-ui's generic JSON card, so we give it one
+// that matches the color swatches — same look live and rehydrated from history.
+const WeatherToolUI = makeAssistantToolUI<WeatherArgs, WeatherResult>({
+    toolName: "get_weather",
+    render: ({ args, result, status }) => {
+        const city = result?.city ?? args?.city;
+        return (
+            <div className="toolcard">
+                <span className="toolcard-name">get_weather</span>
+                {city ? <code className="toolcard-hex">{city}</code> : null}
+                {result ? (
+                    <span className="toolcard-status">
+                        {result.temp_f}°F, {result.condition}
+                    </span>
+                ) : status.type !== "complete" ? (
+                    <span className="toolcard-status">…</span>
+                ) : null}
+            </div>
+        );
+    },
 });
 
 // Frontend tool driving the shared color mixer. The execute() delay works
@@ -83,7 +113,16 @@ const GetColor = makeAssistantTool({
     },
 });
 
+// Mount the thread keyed on the active session so switching gives a fresh
+// runtime. History is loaded by assistant-ui's history adapter (it ignores the
+// agent's initialMessages); the agent's threadId targets the same session.
 export function AssistantUiChat({ session }: { session: BrowserSession }) {
+    const { activeId } = useSessions();
+    if (!activeId) return <ChatLoading />;
+    return <AssistantUiThread key={activeId} session={session} sessionId={activeId} />;
+}
+
+function AssistantUiThread({ session, sessionId }: { session: BrowserSession; sessionId: string }) {
     const { token, substructureUrl, agentId } = session;
 
     const agent = useMemo(
@@ -91,21 +130,25 @@ export function AssistantUiChat({ session }: { session: BrowserSession }) {
             new HttpAgent({
                 url: `${substructureUrl}/api/client/ag-ui/agents/${agentId}/run`,
                 headers: { Authorization: `Bearer ${token}` },
+                threadId: sessionId,
                 // Bound fetch — HttpAgent calls `this.fetch(...)`, which throws
                 // "Illegal invocation" in Firefox with an unbound reference.
                 fetch: (url, init) => fetch(url, init),
             }),
-        [token, substructureUrl, agentId],
+        [token, substructureUrl, agentId, sessionId],
     );
 
-    const runtime = useAgUiRuntime({ agent });
+    const adapters = useMemo(() => ({ history: makeAssistantUiHistory(session, sessionId) }), [session, sessionId]);
+
+    const runtime = useAgUiRuntime({ agent, adapters });
     return (
         <AssistantRuntimeProvider runtime={runtime}>
             <SetColor />
             <GetColor />
             <SetColorToolUI />
             <GetColorToolUI />
-            <Thread />
+            <WeatherToolUI />
+            <Thread assistantMessage={{ components: { Text: MarkdownText } }} />
         </AssistantRuntimeProvider>
     );
 }
