@@ -2,11 +2,9 @@ use serde::Deserialize;
 
 use crate::session::message::{Content, Message, Role};
 
-/// AG-UI [`RunAgentInput`](https://docs.ag-ui.com). The client posts the full
-/// conversation; fields beyond `threadId`/`runId`/`messages` are accepted for
-/// protocol compatibility but unused here (`state`, `tools`, `context`, and
-/// `forwardedProps` back deferred shared-state and dynamic frontend-tool work —
-/// the basic frontend-tool flow declares the tool on the worker instead).
+/// AG-UI [`RunAgentInput`](https://docs.ag-ui.com). Fields beyond
+/// `threadId`/`runId`/`messages` are accepted for protocol compatibility but not
+/// read here.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunAgentInput {
@@ -14,7 +12,6 @@ pub struct RunAgentInput {
     pub run_id: String,
     #[serde(default)]
     pub messages: Vec<AgUiMessage>,
-    // Accepted for protocol compatibility; not yet read.
     #[serde(default)]
     #[allow(dead_code)]
     pub state: Option<serde_json::Value>,
@@ -24,8 +21,6 @@ pub struct RunAgentInput {
     #[serde(default)]
     #[allow(dead_code)]
     pub context: Vec<serde_json::Value>,
-    /// Arbitrary client→server passthrough. Accepted for protocol
-    /// compatibility; not read.
     #[serde(default)]
     #[allow(dead_code)]
     pub forwarded_props: Option<serde_json::Value>,
@@ -40,52 +35,43 @@ pub struct AgUiMessage {
     #[serde(default)]
     #[allow(dead_code)]
     pub id: Option<String>,
-    /// Set on `role: "tool"` messages — correlates a frontend tool result back
-    /// to the suspended tool call.
+    /// On `role: "tool"` messages, the call this result completes.
     #[serde(default)]
     pub tool_call_id: Option<String>,
 }
 
-/// What a `RunAgentInput` asks the engine to do, derived from the trailing
-/// messages. A new `user` turn starts a turn; trailing `tool` messages are
-/// frontend tool results that resume the turn suspended on those calls.
+/// What a `RunAgentInput` asks the engine to do, derived from its trailing
+/// messages.
 pub enum AgUiInput {
     /// Start a new turn from this user message.
     UserTurn(Message),
-    /// Resume the suspended turn by completing these client tool calls. A turn
-    /// that issued several parallel client tools is blocked until *all* of them
-    /// return, so every trailing result must be submitted — not just the last.
+    /// Resume the suspended turn by completing these client tool calls. All
+    /// parallel results must be submitted, not just the last.
     ToolResults(Vec<ToolResultItem>),
 }
 
-/// One frontend tool result from a resuming `RunAgentInput`.
 pub struct ToolResultItem {
     pub tool_call_id: String,
     pub content: String,
 }
 
 impl RunAgentInput {
-    /// Classify the run: trailing frontend tool results take precedence over a
-    /// new user turn. The worker owns history server-side, so we never replay
-    /// the whole `messages` array — only the trailing action.
+    /// Classify the run from its trailing messages: a contiguous block of
+    /// trailing `tool` messages is a resume (every parallel result included);
+    /// otherwise it's a new turn from the last user message. The worker owns
+    /// history, so we never replay the whole `messages` array.
     ///
-    /// Clients batch parallel frontend-tool results as a contiguous run of
-    /// `tool` messages at the end of `messages` (one per call, in call order),
-    /// so collect the whole trailing block: the suspended turn needs every
-    /// result before it can resume.
-    ///
-    /// `reasoning` messages are skipped: clients (e.g. CopilotKit) keep the
-    /// transient reasoning message in their history and echo it back *after* the
-    /// tool result, which would otherwise mask the trailing tool block and make
-    /// a resume look like a fresh user turn.
+    /// Trailing `reasoning` messages are skipped — CopilotKit echoes the
+    /// transient reasoning back after the tool result, which would otherwise
+    /// mask the tool block and look like a fresh user turn.
     pub fn classify(&self) -> Option<AgUiInput> {
         let mut results: Vec<ToolResultItem> = Vec::new();
         for m in self.messages.iter().rev() {
             if m.role.eq_ignore_ascii_case("reasoning") {
-                continue; // transient; not part of the tool round-trip
+                continue;
             }
             if !m.role.eq_ignore_ascii_case("tool") {
-                break; // first real (user/assistant) message ends the block
+                break;
             }
             if let Some(tool_call_id) = m.tool_call_id.clone() {
                 results.push(ToolResultItem {
@@ -95,7 +81,7 @@ impl RunAgentInput {
             }
         }
         if !results.is_empty() {
-            results.reverse(); // back to source (call) order
+            results.reverse(); // back to call order
             return Some(AgUiInput::ToolResults(results));
         }
         self.last_user_message().map(AgUiInput::UserTurn)
@@ -177,9 +163,7 @@ mod tests {
 
     #[test]
     fn classify_tool_result_with_trailing_reasoning() {
-        // CopilotKit echoes the transient reasoning message back in its history,
-        // AFTER the tool result. The trailing reasoning must not mask the tool
-        // result and make this look like a fresh user turn.
+        // A trailing reasoning message must not mask the tool result.
         let input: RunAgentInput = serde_json::from_value(json!({
             "threadId": "t1", "runId": "r2",
             "messages": [
@@ -204,10 +188,7 @@ mod tests {
 
     #[test]
     fn classify_mixed_parallel_batch_collects_all_trailing_results() {
-        // One assistant message with a worker tool (get_weather) AND a client
-        // tool (get_color). On resume the client echoes BOTH tool results (plus
-        // reasoning). classify collects both in call order; the route tolerates
-        // the already-completed worker result and applies the client one.
+        // A worker + client tool batch: classify collects both in call order.
         let input: RunAgentInput = serde_json::from_value(json!({
             "threadId": "t1", "runId": "r2",
             "messages": [
@@ -234,7 +215,6 @@ mod tests {
 
     #[test]
     fn classify_tool_result_takes_precedence() {
-        // A continuation run: full history ending in a frontend tool result.
         let input: RunAgentInput = serde_json::from_value(json!({
             "threadId": "t1", "runId": "r2",
             "messages": [
@@ -256,10 +236,7 @@ mod tests {
 
     #[test]
     fn classify_collects_all_trailing_tool_results() {
-        // Parallel frontend tools: the client appends one `tool` message per
-        // call. Every result must be submitted — the suspended turn is blocked
-        // until all of them return — so classify returns the whole trailing run
-        // in call order, not just the last.
+        // Parallel frontend tools: the whole trailing block is returned, in call order.
         let input: RunAgentInput = serde_json::from_value(json!({
             "threadId": "t1", "runId": "r2",
             "messages": [
@@ -281,8 +258,7 @@ mod tests {
 
     #[test]
     fn classify_user_turn_when_trailing_message_not_tool() {
-        // Earlier (resolved) tool results in history must not be mistaken for a
-        // resume: only a *trailing* block of tool messages counts.
+        // Only a trailing block of tool messages counts as a resume.
         let input: RunAgentInput = serde_json::from_value(json!({
             "threadId": "t1", "runId": "r3",
             "messages": [

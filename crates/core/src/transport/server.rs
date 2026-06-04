@@ -20,12 +20,9 @@ impl SubstructureServer {
         listener: TcpListener,
         shutdown: CancellationToken,
     ) -> anyhow::Result<()> {
-        // Like `CorsLayer::permissive()`, but `allow_headers` mirrors the
-        // request instead of sending `*`. Per the Fetch spec, a `*` in
-        // `Access-Control-Allow-Headers` does NOT cover `Authorization`, so
-        // browsers strip the bearer token on cross-origin requests (and the
-        // streamed response read fails mid-flight). Mirroring lists the
-        // requested headers explicitly, including `Authorization`.
+        // `allow_headers` mirrors the request rather than sending `*`: per the
+        // Fetch spec, `*` does not cover `Authorization`, so browsers would strip
+        // the bearer token on cross-origin requests.
         use tower_http::cors::{AllowHeaders, Any, CorsLayer};
         let cors = CorsLayer::new()
             .allow_origin(Any)

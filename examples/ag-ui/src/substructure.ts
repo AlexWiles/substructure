@@ -1,6 +1,4 @@
-// Shared substructure setup. Imported only by server routes (never the
-// client bundle). Runs fine on the Cloudflare Workers runtime — the worker is
-// a plain Web fetch handler, and the backend client is just HTTP.
+// Shared substructure setup. Server-only (never the client bundle).
 
 import Substructure from "@substructure.ai/sdk";
 
@@ -23,11 +21,8 @@ const getWeather = agent.tool({
     },
 });
 
-// A frontend (client-handled) tool. The worker only DECLARES it. `handler:
-// "client"` + `ctx.defer()` means the engine suspends the turn and waits for the
-// browser to execute it and submit the result. The matching executor lives in
-// each React chat client (src/components/*-chat.tsx) and updates the on-screen
-// color mixer; the engine never runs it.
+// A frontend (client-handled) tool: `handler: "client"` + `ctx.defer()` suspends
+// the turn so the browser executes it. The executor lives in each chat client.
 const setColor = agent.tool({
     name: "set_color",
     description:
@@ -46,8 +41,7 @@ const setColor = agent.tool({
     execute: (_args: string, ctx) => ctx.defer(),
 });
 
-// The read counterpart to set_color: returns whatever the user currently has in
-// their on-screen mixer (which they can drag themselves). Also browser-run.
+// The read counterpart to set_color, also browser-run.
 const getColor = agent.tool({
     name: "get_color",
     description:
@@ -70,9 +64,6 @@ const weatherAgent = agent({ id: AGENT_ID })
         ),
     )
     .use(agent.tools([getWeather, setColor, getColor]))
-    // `reasoning` turns on the model's thinking; it streams to the clients as
-    // REASONING_* events. Use `max_tokens` for Anthropic/Gemini/Qwen, or
-    // `{ effort: "medium" }` for OpenAI/Grok (the two are mutually exclusive).
     .use(
         agent.llmLoop({
             request: { model: "minimax/minimax-m3" },
@@ -84,14 +75,13 @@ const worker = sub.worker({ agents: [weatherAgent] });
 
 export const substructureHandler = worker.fetchHandler({ signingSecret: process.env.SIGNING_SECRET });
 
-/** Handle a decision webhook from the engine. Reads SIGNING_SECRET per call so
- *  Workers secrets are resolved at request time. */
+/** Handle a decision webhook from the engine. */
 export function handleAgentRequest(request: Request): Promise<Response> {
     return substructureHandler(request);
 }
 
 /** Mint a short-lived, identity-locked client token for the browser. In a real
- *  app, authenticate the request first and bind identity.id to that user. */
+ *  app, authenticate first and bind identity.id to that user. */
 export async function mintBrowserToken(): Promise<{ token: string; substructureUrl: string; agentId: string }> {
     const backend = sub.backend.client({
         url: process.env.SUBSTRUCTURE_URL ?? "http://localhost:9000",
@@ -101,8 +91,7 @@ export async function mintBrowserToken(): Promise<{ token: string; substructureU
         identity: { id: "demo-user" },
         ttlSeconds: 60 * 15,
     });
-    // The browser talks to the engine directly, so it needs the engine's
-    // public URL (CORS-open). Falls back to the server-side URL for local dev.
+    // The browser talks to the engine directly, so it needs the public URL.
     const substructureUrl =
         process.env.SUBSTRUCTURE_PUBLIC_URL ?? process.env.SUBSTRUCTURE_URL ?? "http://localhost:9000";
     return { token, substructureUrl, agentId: AGENT_ID };

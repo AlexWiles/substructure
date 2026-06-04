@@ -5,9 +5,8 @@ import { useMemo } from "react";
 import { getColor, setColor, toHex } from "../lib/color-store";
 import type { BrowserSession } from "../lib/token";
 
-// Frontend tools. CopilotKit executes them after RUN_FINISHED off the standard
-// TOOL_CALL_* events (no dialect hint needed). The schema is declared on the
-// worker, so the handlers just read/write the shared color mixer.
+// Frontend tools. The schema is declared on the worker; these handlers just
+// read/write the shared color mixer.
 const setColorTool = {
     name: "set_color",
     description: "Set the color in the on-screen color mixer (red/green/blue, 0–255).",
@@ -27,9 +26,8 @@ const getColorTool = {
     },
 };
 
-// CopilotKit v2 connects straight to an AG-UI endpoint via a self-managed
-// HttpAgent — no CopilotRuntime broker. HttpAgent is re-exported from
-// @copilotkit/react-core/v2 (its own @ag-ui/client version).
+// CopilotKit v2 connects straight to the AG-UI endpoint via a self-managed
+// HttpAgent (re-exported from @copilotkit/react-core/v2) — no CopilotRuntime broker.
 export function CopilotKitChat({ session }: { session: BrowserSession }) {
     const { token, substructureUrl, agentId } = session;
 

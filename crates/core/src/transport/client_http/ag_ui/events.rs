@@ -1,14 +1,9 @@
 use serde::Serialize;
 use serde_json::Value;
 
-/// A single AG-UI protocol output event.
-///
-/// Serializes to the AG-UI wire shape — an object with a SCREAMING_SNAKE_CASE
-/// `type` discriminator and camelCase fields — so the variant set *is* the
-/// protocol surface this endpoint emits. Optional fields are omitted when
-/// absent. The driver loop turns each value into one SSE frame via
-/// [`AgUiEvent::type_name`] (the `event:` name) plus the serialized JSON (the
-/// `data:` payload).
+/// A single AG-UI output event. Serializes to the wire shape: a
+/// SCREAMING_SNAKE_CASE `type` discriminator plus camelCase fields, with absent
+/// optionals omitted.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum AgUiEvent {
@@ -43,9 +38,8 @@ pub enum AgUiEvent {
     ToolCallStart {
         tool_call_id: String,
         tool_call_name: String,
-        /// The assistant message this tool call belongs to (the producing llm
-        /// call). Gives the client a stable server message id from the moment
-        /// the call appears; omitted when unknown.
+        /// The producing llm call, giving the client a stable assistant message
+        /// id; omitted when unknown.
         #[serde(skip_serializing_if = "Option::is_none")]
         parent_message_id: Option<String>,
     },
@@ -64,18 +58,16 @@ pub enum AgUiEvent {
         role: &'static str,
     },
 
-    // Reasoning / thinking. Transient: streamed live for reasoning models, never
-    // persisted, so it does not replay. A block nests as REASONING_START →
-    // REASONING_MESSAGE_START → REASONING_MESSAGE_CONTENT* → REASONING_MESSAGE_END
-    // → REASONING_END, mirroring the THINKING_* family.
+    // Reasoning blocks nest as REASONING_START → REASONING_MESSAGE_START →
+    // REASONING_MESSAGE_CONTENT* → REASONING_MESSAGE_END → REASONING_END.
     #[serde(rename = "REASONING_START", rename_all = "camelCase")]
     ReasoningStart { message_id: String },
 
     #[serde(rename = "REASONING_MESSAGE_START", rename_all = "camelCase")]
     ReasoningMessageStart {
         message_id: String,
-        /// AG-UI requires this literal on the reasoning message — the client's
-        /// Zod schema rejects the event without `role: "reasoning"`.
+        /// Must be the literal `"reasoning"` — the client's Zod schema rejects
+        /// the event otherwise.
         role: &'static str,
     },
 

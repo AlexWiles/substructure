@@ -3,8 +3,7 @@ import type { ReactNode } from "react";
 
 import { ColorPanel } from "./color-panel";
 
-// The client examples, one per route. The sidebar links between them; each is
-// its own route, so switching mounts a fresh chat with its own token.
+// The client examples, one per route, linked from the sidebar.
 const CLIENTS = [
     { to: "/assistant-ui", name: "assistant-ui", note: "useAgUiRuntime" },
     { to: "/copilotkit", name: "CopilotKit", note: "v2 self-managed" },

@@ -8,9 +8,8 @@ const CHANNELS: { key: keyof Rgb; label: string }[] = [
     { key: "b", label: "Blue" },
 ];
 
-// The thing the agent drives. Its sliders + swatch are bound to the shared
-// color store, so the frontend `set_color` tool (in any client) moves them — and
-// you can drag them yourself too.
+// Sliders + swatch bound to the shared color store: the agent's `set_color`
+// tool moves them, and you can drag them yourself.
 export function ColorPanel() {
     const color = useSyncExternalStore(subscribeColor, getColor, getColor);
     const hex = toHex(color);

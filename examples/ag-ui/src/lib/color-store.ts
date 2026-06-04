@@ -1,16 +1,13 @@
-// A tiny framework-agnostic store for the demo's color mixer. The frontend
-// `set_color` tool — defined in each chat client — writes to it; the ColorPanel
-// reads it via useSyncExternalStore. It's a module-global singleton, which is
-// all a single-user demo needs and lets the (module-scope) tool executors reach
-// the same state the panel renders.
+// A tiny framework-agnostic store for the demo's color mixer: a module-global
+// singleton the frontend tools write to and ColorPanel reads via
+// useSyncExternalStore.
 
 export type Rgb = { r: number; g: number; b: number };
 
 let state: Rgb = { r: 99, g: 102, b: 241 }; // indigo, to start
 const listeners = new Set<() => void>();
 
-// Animation bookkeeping. A monotonically-bumped token cancels any in-flight
-// tween the moment a newer setColor() arrives (or a drag snaps the value).
+// A bumped token cancels any in-flight tween when a newer setColor() arrives.
 let rafId = 0;
 let animToken = 0;
 const TWEEN_MS = 550;
@@ -19,13 +16,8 @@ export function getColor(): Rgb {
     return state;
 }
 
-/**
- * Apply a (partial) color and notify subscribers; returns the clamped target.
- *
- * With `{ animate: true }` (used by the agent's tool) it tweens from the current
- * color to the target over a few hundred ms, so the sliders glide and the swatch
- * morphs. Manual slider drags omit it and snap instantly.
- */
+/** Apply a (partial) color and notify subscribers; returns the clamped target.
+ *  `{ animate: true }` tweens to it; manual drags omit it and snap instantly. */
 export function setColor(next: Partial<Rgb>, opts: { animate?: boolean } = {}): Rgb {
     const target: Rgb = {
         r: clamp(next.r ?? state.r),
@@ -60,7 +52,7 @@ export function setColor(next: Partial<Rgb>, opts: { animate?: boolean } = {}): 
     };
     rafId = requestAnimationFrame(step);
 
-    // The tool result should carry the final color, not a mid-tween frame.
+    // Return the final color, not a mid-tween frame.
     return target;
 }
 

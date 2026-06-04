@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use axum::body::Bytes;
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::{KeepAlive, Sse};
@@ -33,17 +33,17 @@ pub async fn ag_ui_run(
     State(state): State<ClientHttpState>,
     Extension(principal): Extension<AuthPrincipal>,
     Path(agent_id): Path<String>,
-    body: Bytes,
+    payload: Result<Json<RunAgentInput>, JsonRejection>,
 ) -> Response {
     let Some(user_id) = principal.subject.clone() else {
         let body = serde_json::json!({"error": "client subject is required"});
         return (StatusCode::FORBIDDEN, Json(body)).into_response();
     };
 
-    let input: RunAgentInput = match serde_json::from_slice(&body) {
-        Ok(input) => input,
-        Err(e) => {
-            let body = serde_json::json!({"error": format!("invalid RunAgentInput: {e}")});
+    let input = match payload {
+        Ok(Json(input)) => input,
+        Err(rejection) => {
+            let body = serde_json::json!({"error": format!("invalid RunAgentInput: {rejection}")});
             return (StatusCode::BAD_REQUEST, Json(body)).into_response();
         }
     };
@@ -54,24 +54,13 @@ pub async fn ag_ui_run(
         let body = serde_json::json!({"error": "no user message or tool result in RunAgentInput"});
         return (StatusCode::BAD_REQUEST, Json(body)).into_response();
     };
-    // TEMP DIAGNOSTIC: confirm resume classification. Remove once verified.
-    tracing::info!(
-        target: "ag_ui_resume_debug",
-        decision = match &action {
-            AgUiInput::UserTurn(_) => "UserTurn".to_string(),
-            AgUiInput::ToolResults(r) => format!("ToolResults({})", r.len()),
-        },
-        "ag_ui_run: classified action"
-    );
 
-    // AG-UI threadId maps onto the session id. (The runId need not equal the
-    // engine turn id: a resumed turn keeps the turn it suspended on.)
+    // threadId maps onto the session id; runId need not equal the engine turn id.
     let session_id = input.thread_id.clone();
     let tenant_id = principal.tenant_id.clone();
 
-    // Subscribe live to the whole session FIRST (live-only), THEN act — so the
-    // reducer sees every event the submit/resume produces. It follows the
-    // stream and closes the run on `turn.completed` or a client-tool yield.
+    // Subscribe live to the whole session BEFORE acting, so the translator sees
+    // every event the submit/resume produces.
     let spec = SessionSubscriptionSpec::All {
         tenant_id: tenant_id.clone(),
         root_session_id: session_id.clone(),
@@ -107,21 +96,16 @@ pub async fn ag_ui_run(
                         message,
                         stream: true,
                     },
-                    // Bind the new turn to the AG-UI runId.
                     turn_id: Some(input.run_id.clone()),
                 })
                 .await
                 .map(|_| ())
         }
         AgUiInput::ToolResults(results) => {
-            // Submit every result the client sent back. A client echoes its WHOLE
-            // result history on resume — which includes results for tool calls
-            // that are no longer pending: server (worker) tools that already
-            // completed (e.g. in a mixed parallel batch), or results it already
-            // submitted. Those come back as `ToolCallNotPending`/`NotFound`/
-            // `AttemptMismatch` — benign here, so skip them and keep going.
-            // Aborting on the first would strand the genuinely-pending client
-            // tool result and hang the turn forever.
+            // A client echoes its whole result history on resume, including
+            // already-resolved worker tools and prior submissions. Submit every
+            // result; tolerate the benign "not pending" errors those produce
+            // (skipping them keeps the genuinely-pending client result moving).
             let mut outcome: Result<(), RuntimeError> = Ok(());
             for item in results {
                 let tool_call_id = item.tool_call_id.clone();
@@ -142,9 +126,6 @@ pub async fn ag_ui_run(
                 match r {
                     Ok(()) => {}
                     Err(RuntimeError::Session(
-                        // Already completed, unknown, stale attempt, or a server
-                        // (worker) tool the frontend can't complete — all expected
-                        // when a client echoes its full result history.
                         SessionError::ToolCallNotPending
                         | SessionError::ToolCallNotFound
                         | SessionError::ToolCallAttemptMismatch
