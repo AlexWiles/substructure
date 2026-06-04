@@ -2,18 +2,27 @@ import { CopilotChat, CopilotKitProvider, HttpAgent } from "@copilotkit/react-co
 import "@copilotkit/react-core/v2/styles.css";
 import { useMemo } from "react";
 
-import { setColor, toHex } from "../lib/color-store";
+import { getColor, setColor, toHex } from "../lib/color-store";
 import type { BrowserSession } from "../lib/token";
 
-// Frontend tool. CopilotKit executes it after RUN_FINISHED off the standard
+// Frontend tools. CopilotKit executes them after RUN_FINISHED off the standard
 // TOOL_CALL_* events (no dialect hint needed). The schema is declared on the
-// worker, so the handler just reads the args and drives the shared color mixer.
+// worker, so the handlers just read/write the shared color mixer.
 const setColorTool = {
     name: "set_color",
     description: "Set the color in the on-screen color mixer (red/green/blue, 0–255).",
     handler: async (args: Record<string, unknown>) => {
         const { red, green, blue } = args as { red: number; green: number; blue: number };
         const c = setColor({ r: red, g: green, b: blue }, { animate: true });
+        return { red: c.r, green: c.g, blue: c.b, hex: toHex(c) };
+    },
+};
+
+const getColorTool = {
+    name: "get_color",
+    description: "Read the color currently shown in the on-screen color mixer.",
+    handler: async () => {
+        const c = getColor();
         return { red: c.r, green: c.g, blue: c.b, hex: toHex(c) };
     },
 };
@@ -35,7 +44,7 @@ export function CopilotKitChat({ session }: { session: BrowserSession }) {
         <CopilotKitProvider
             headers={{ Authorization: `Bearer ${token}` }}
             selfManagedAgents={{ [agentId]: agent }}
-            frontendTools={[setColorTool]}
+            frontendTools={[setColorTool, getColorTool]}
         >
             <CopilotChat agentId={agentId} />
         </CopilotKitProvider>

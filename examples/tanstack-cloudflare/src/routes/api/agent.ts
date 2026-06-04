@@ -3,7 +3,7 @@
 // it: `substructure start --worker-url https://<app>/api/agent`.
 import { createFileRoute } from "@tanstack/react-router";
 
-import { handleAgentRequest } from "../../../substructure";
+import { handleAgentRequest } from "../../substructure";
 
 export const Route = createFileRoute("/api/agent")({
     server: {

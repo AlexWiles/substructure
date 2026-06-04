@@ -1,12 +1,51 @@
 import { HttpAgent } from "@ag-ui/client";
-import { AssistantRuntimeProvider, makeAssistantTool } from "@assistant-ui/react";
+import {
+    AssistantRuntimeProvider,
+    makeAssistantTool,
+    makeAssistantToolUI,
+    type ToolCallMessagePartProps,
+} from "@assistant-ui/react";
 import { useAgUiRuntime } from "@assistant-ui/react-ag-ui";
 import { Thread } from "@assistant-ui/react-ui";
 import "@assistant-ui/react-ui/styles/index.css";
 import { useMemo } from "react";
 
-import { setColor, toHex } from "../lib/color-store";
+import { getColor, setColor, toHex } from "../lib/color-store";
 import type { BrowserSession } from "../lib/token";
+
+type ColorArgs = { red?: number; green?: number; blue?: number };
+type ColorResult = { red: number; green: number; blue: number; hex: string };
+
+// Render a color tool call inside the thread as a swatch card. assistant-ui shows
+// tool calls via a renderer registered with makeAssistantToolUI (matched by
+// toolName); mounting the returned component registers it. Without one, <Thread />
+// falls back to a generic tool box. The same card serves set_color and get_color
+// — it reads the resolved color from `result` (or the streaming `args`).
+function colorCard({ toolName, args, result, status }: ToolCallMessagePartProps<ColorArgs, ColorResult>) {
+    const r = result?.red ?? args?.red;
+    const g = result?.green ?? args?.green;
+    const b = result?.blue ?? args?.blue;
+    const known = [r, g, b].every((n) => typeof n === "number");
+    const hex = result?.hex ?? (known ? toHex({ r: r!, g: g!, b: b! }) : undefined);
+    return (
+        <div className="toolcard">
+            <span className="toolcard-swatch" style={{ background: hex ?? "#ddd" }} />
+            <span className="toolcard-name">{toolName}</span>
+            {hex ? <code className="toolcard-hex">{hex.toUpperCase()}</code> : null}
+            {status.type !== "complete" ? <span className="toolcard-status">…</span> : null}
+        </div>
+    );
+}
+
+const SetColorToolUI = makeAssistantToolUI<ColorArgs, ColorResult>({
+    toolName: "set_color",
+    render: colorCard,
+});
+
+const GetColorToolUI = makeAssistantToolUI<ColorArgs, ColorResult>({
+    toolName: "get_color",
+    render: colorCard,
+});
 
 // NOTE: assistant-ui resumes a frontend tool only when no run is in flight
 // (`addToolResult` → `if (!isRunningFlag) startRun`). A fast client tool can
@@ -41,6 +80,20 @@ const SetColor = makeAssistantTool({
     },
 });
 
+// The read counterpart: returns whatever the user currently has in the mixer.
+const GetColor = makeAssistantTool({
+    toolName: "get_color",
+    type: "frontend",
+    description: "Read the color currently shown in the on-screen color mixer.",
+    parameters: { type: "object", properties: {} },
+    execute: async () => {
+        // See the note above re the upstream resume race.
+        await new Promise((r) => setTimeout(r, 400));
+        const c = getColor();
+        return { red: c.r, green: c.g, blue: c.b, hex: toHex(c) };
+    },
+});
+
 export function AssistantUiChat({ session }: { session: BrowserSession }) {
     const { token, substructureUrl, agentId } = session;
 
@@ -60,6 +113,9 @@ export function AssistantUiChat({ session }: { session: BrowserSession }) {
     return (
         <AssistantRuntimeProvider runtime={runtime}>
             <SetColor />
+            <GetColor />
+            <SetColorToolUI />
+            <GetColorToolUI />
             <Thread />
         </AssistantRuntimeProvider>
     );

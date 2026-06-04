@@ -46,17 +46,39 @@ const setColor = agent.tool({
     execute: (_args: string, ctx) => ctx.defer(),
 });
 
+// The read counterpart to set_color: returns whatever the user currently has in
+// their on-screen mixer (which they can drag themselves). Also browser-run.
+const getColor = agent.tool({
+    name: "get_color",
+    description:
+        "Read the color the user currently has set in their on-screen color mixer. " +
+        "Returns red, green, and blue (0–255) plus the hex. Runs in the user's browser.",
+    parameters: { type: "object", properties: {} },
+    handler: "client",
+    execute: (_args: string, ctx) => ctx.defer(),
+});
+
 const weatherAgent = agent({ id: AGENT_ID })
     .use(
         agent.messageHistory(
             "You are a concise, friendly assistant. Use get_weather for weather. " +
                 "When the user asks to set, change, or mix a color — e.g. “make it sunset " +
                 "orange”, “a calming teal”, “warmer”, “darker” — call set_color with " +
-                "red/green/blue (0–255) to update their on-screen color mixer.",
+                "red/green/blue (0–255) to update their on-screen color mixer. When they " +
+                "ask what color is showing (e.g. “what color is this?”, “what's the hex?”), " +
+                "call get_color to read it.",
         ),
     )
-    .use(agent.tools([getWeather, setColor]))
-    .use(agent.llmLoop({ request: { model: "anthropic/claude-sonnet-4-6" }, stream: true }));
+    .use(agent.tools([getWeather, setColor, getColor]))
+    // `reasoning` turns on the model's thinking; it streams to the clients as
+    // REASONING_* events. Use `max_tokens` for Anthropic/Gemini/Qwen, or
+    // `{ effort: "medium" }` for OpenAI/Grok (the two are mutually exclusive).
+    .use(
+        agent.llmLoop({
+            request: { model: "minimax/minimax-m3" },
+            stream: true,
+        }),
+    );
 
 const worker = sub.worker({ agents: [weatherAgent] });
 

@@ -2,6 +2,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 
+use super::types::ToolCallChunk;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenDelta {
     /// Tenant isolation key — subscribers must match.
@@ -19,6 +21,12 @@ pub struct TokenDelta {
     pub seq: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// Reasoning/thinking text fragment (transient; never persisted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    /// Incremental tool-call fragments for this delta (see [`ToolCallChunk`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCallChunk>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
 }

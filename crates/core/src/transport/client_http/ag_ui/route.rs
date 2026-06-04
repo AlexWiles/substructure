@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use axum::body::Bytes;
 use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::{KeepAlive, Sse};
@@ -9,14 +10,17 @@ use futures_util::stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::identity::ClientIdentity;
+use crate::session::command::SessionError;
 use crate::session::decision::ClientPayload;
 use crate::session::subscriptions::SessionSubscriptionSpec;
 use crate::transport::auth::AuthPrincipal;
-use crate::{Caller, SubmitClientPayload, SubmitToolCallResult, SubmitToolCallResultInput};
+use crate::{
+    Caller, RuntimeError, SubmitClientPayload, SubmitToolCallResult, SubmitToolCallResultInput,
+};
 
 use super::super::routes::runtime_error_response;
 use super::super::ClientHttpState;
-use super::translator::{client_tool_signal_for, run_ag_ui_translation};
+use super::translator::run_ag_ui_translation;
 use super::types::{AgUiInput, RunAgentInput};
 
 /// `POST /api/client/ag-ui/agents/{agent_id}/run` — native AG-UI endpoint.
@@ -29,18 +33,36 @@ pub async fn ag_ui_run(
     State(state): State<ClientHttpState>,
     Extension(principal): Extension<AuthPrincipal>,
     Path(agent_id): Path<String>,
-    Json(input): Json<RunAgentInput>,
+    body: Bytes,
 ) -> Response {
     let Some(user_id) = principal.subject.clone() else {
         let body = serde_json::json!({"error": "client subject is required"});
         return (StatusCode::FORBIDDEN, Json(body)).into_response();
     };
+
+    let input: RunAgentInput = match serde_json::from_slice(&body) {
+        Ok(input) => input,
+        Err(e) => {
+            let body = serde_json::json!({"error": format!("invalid RunAgentInput: {e}")});
+            return (StatusCode::BAD_REQUEST, Json(body)).into_response();
+        }
+    };
+
     // The trailing message decides the action: a new user turn, or a frontend
     // tool result resuming the turn suspended on that call.
     let Some(action) = input.classify() else {
         let body = serde_json::json!({"error": "no user message or tool result in RunAgentInput"});
         return (StatusCode::BAD_REQUEST, Json(body)).into_response();
     };
+    // TEMP DIAGNOSTIC: confirm resume classification. Remove once verified.
+    tracing::info!(
+        target: "ag_ui_resume_debug",
+        decision = match &action {
+            AgUiInput::UserTurn(_) => "UserTurn".to_string(),
+            AgUiInput::ToolResults(r) => format!("ToolResults({})", r.len()),
+        },
+        "ag_ui_run: classified action"
+    );
 
     // AG-UI threadId maps onto the session id. (The runId need not equal the
     // engine turn id: a resumed turn keeps the turn it suspended on.)
@@ -91,22 +113,55 @@ pub async fn ag_ui_run(
                 .await
                 .map(|_| ())
         }
-        AgUiInput::ToolResult {
-            tool_call_id,
-            content,
-        } => {
-            state
-                .runtime
-                .submit_tool_call_result(SubmitToolCallResultInput {
-                    session_id: session_id.clone(),
-                    tenant_id: tenant_id.clone(),
-                    tool_call_id,
-                    attempt: 0,
-                    result: SubmitToolCallResult::Result { result: content },
-                    caller,
-                    span: crate::span::SpanContext::root().child("ag_ui_tool_result"),
-                })
-                .await
+        AgUiInput::ToolResults(results) => {
+            // Submit every result the client sent back. A client echoes its WHOLE
+            // result history on resume — which includes results for tool calls
+            // that are no longer pending: server (worker) tools that already
+            // completed (e.g. in a mixed parallel batch), or results it already
+            // submitted. Those come back as `ToolCallNotPending`/`NotFound`/
+            // `AttemptMismatch` — benign here, so skip them and keep going.
+            // Aborting on the first would strand the genuinely-pending client
+            // tool result and hang the turn forever.
+            let mut outcome: Result<(), RuntimeError> = Ok(());
+            for item in results {
+                let tool_call_id = item.tool_call_id.clone();
+                let r = state
+                    .runtime
+                    .submit_tool_call_result(SubmitToolCallResultInput {
+                        session_id: session_id.clone(),
+                        tenant_id: tenant_id.clone(),
+                        tool_call_id: item.tool_call_id,
+                        attempt: 0,
+                        result: SubmitToolCallResult::Result {
+                            result: item.content,
+                        },
+                        caller: caller.clone(),
+                        span: crate::span::SpanContext::root().child("ag_ui_tool_result"),
+                    })
+                    .await;
+                match r {
+                    Ok(()) => {}
+                    Err(RuntimeError::Session(
+                        // Already completed, unknown, stale attempt, or a server
+                        // (worker) tool the frontend can't complete — all expected
+                        // when a client echoes its full result history.
+                        SessionError::ToolCallNotPending
+                        | SessionError::ToolCallNotFound
+                        | SessionError::ToolCallAttemptMismatch
+                        | SessionError::ToolCallWrongHandler,
+                    )) => {
+                        tracing::debug!(
+                            %tool_call_id,
+                            "ag_ui_run: skipping non-pending tool result on resume"
+                        );
+                    }
+                    Err(e) => {
+                        outcome = Err(e);
+                        break;
+                    }
+                }
+            }
+            outcome
         }
     };
     if let Err(e) = submit {
@@ -114,21 +169,11 @@ pub async fn ag_ui_run(
         return runtime_error_response(e);
     }
 
-    // Pick the client dialect from the client's hint (spec-pure by default).
-    let client_tool_signal = client_tool_signal_for(
-        input
-            .forwarded_props
-            .as_ref()
-            .and_then(|p| p.get("aguiClient"))
-            .and_then(|v| v.as_str()),
-    );
-
     let out_rx = run_ag_ui_translation(
         event_rx,
         delta_rx,
         input.thread_id,
         input.run_id,
-        client_tool_signal,
         state.shutdown.clone(),
     );
     let stream = ReceiverStream::new(out_rx).map(Ok::<_, std::convert::Infallible>);

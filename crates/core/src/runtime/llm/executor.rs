@@ -132,6 +132,8 @@ fn spawn_delta_pump(
         attempt: task.attempt,
         seq: 0,
         text: None,
+        reasoning: None,
+        tool_calls: Vec::new(),
         finish_reason: None,
     };
     tokio::spawn(async move {
@@ -141,6 +143,8 @@ fn spawn_delta_pump(
                 .publish(TokenDelta {
                     seq,
                     text: delta.text,
+                    reasoning: delta.reasoning,
+                    tool_calls: delta.tool_calls,
                     finish_reason: delta.finish_reason,
                     ..template.clone()
                 })

@@ -3,12 +3,11 @@ import type { ReactNode } from "react";
 
 import { ColorPanel } from "./color-panel";
 
-// The three client examples, one per route. The sidebar links between them;
-// each is its own route, so switching mounts a fresh chat with its own token.
+// The client examples, one per route. The sidebar links between them; each is
+// its own route, so switching mounts a fresh chat with its own token.
 const CLIENTS = [
-    { to: "/tanstack", name: "TanStack AI", note: "useChat · dialect: tanstack" },
-    { to: "/assistant-ui", name: "assistant-ui", note: "useAgUiRuntime · dialect: spec" },
-    { to: "/copilotkit", name: "CopilotKit", note: "v2 self-managed · dialect: spec" },
+    { to: "/assistant-ui", name: "assistant-ui", note: "useAgUiRuntime" },
+    { to: "/copilotkit", name: "CopilotKit", note: "v2 self-managed" },
 ] as const;
 
 export function PageShell({ children }: { children: ReactNode }) {
@@ -17,7 +16,7 @@ export function PageShell({ children }: { children: ReactNode }) {
             <aside className="sidebar">
                 <div className="brand">
                     <b>Substructure × AG-UI</b>
-                    <span>One endpoint, three clients</span>
+                    <span>One endpoint, multiple clients</span>
                 </div>
                 <nav className="nav">
                     {CLIENTS.map((c) => (

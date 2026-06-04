@@ -37,8 +37,8 @@ export function ColorPanel() {
                 ))}
             </div>
             <p className="panelhint">
-                The assistant's <code>set_color</code> tool moves these — try “make it a
-                calming teal” or “warmer.”
+                The agent's <code>set_color</code> moves these (“make it a calming teal”);
+                drag them yourself and ask “what color is this?” to see <code>get_color</code>.
             </p>
         </aside>
     );

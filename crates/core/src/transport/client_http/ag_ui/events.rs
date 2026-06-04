@@ -64,12 +64,29 @@ pub enum AgUiEvent {
         role: &'static str,
     },
 
-    /// A spec-legal AG-UI passthrough event. Used by client dialects to carry a
-    /// trigger a particular runtime needs (e.g. TanStack's
-    /// `tool-input-available`); ignored by clients that don't use it. The
-    /// `value` is dialect-defined, so it stays an opaque [`Value`].
-    #[serde(rename = "CUSTOM")]
-    Custom { name: String, value: Value },
+    // Reasoning / thinking. Transient: streamed live for reasoning models, never
+    // persisted, so it does not replay. A block nests as REASONING_START →
+    // REASONING_MESSAGE_START → REASONING_MESSAGE_CONTENT* → REASONING_MESSAGE_END
+    // → REASONING_END, mirroring the THINKING_* family.
+    #[serde(rename = "REASONING_START", rename_all = "camelCase")]
+    ReasoningStart { message_id: String },
+
+    #[serde(rename = "REASONING_MESSAGE_START", rename_all = "camelCase")]
+    ReasoningMessageStart {
+        message_id: String,
+        /// AG-UI requires this literal on the reasoning message — the client's
+        /// Zod schema rejects the event without `role: "reasoning"`.
+        role: &'static str,
+    },
+
+    #[serde(rename = "REASONING_MESSAGE_CONTENT", rename_all = "camelCase")]
+    ReasoningMessageContent { message_id: String, delta: String },
+
+    #[serde(rename = "REASONING_MESSAGE_END", rename_all = "camelCase")]
+    ReasoningMessageEnd { message_id: String },
+
+    #[serde(rename = "REASONING_END", rename_all = "camelCase")]
+    ReasoningEnd { message_id: String },
 }
 
 impl AgUiEvent {
@@ -87,7 +104,11 @@ impl AgUiEvent {
             AgUiEvent::ToolCallArgs { .. } => "TOOL_CALL_ARGS",
             AgUiEvent::ToolCallEnd { .. } => "TOOL_CALL_END",
             AgUiEvent::ToolCallResult { .. } => "TOOL_CALL_RESULT",
-            AgUiEvent::Custom { .. } => "CUSTOM",
+            AgUiEvent::ReasoningStart { .. } => "REASONING_START",
+            AgUiEvent::ReasoningMessageStart { .. } => "REASONING_MESSAGE_START",
+            AgUiEvent::ReasoningMessageContent { .. } => "REASONING_MESSAGE_CONTENT",
+            AgUiEvent::ReasoningMessageEnd { .. } => "REASONING_MESSAGE_END",
+            AgUiEvent::ReasoningEnd { .. } => "REASONING_END",
         }
     }
 }

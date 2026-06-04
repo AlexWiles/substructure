@@ -11,7 +11,7 @@ use rust_decimal::Decimal;
 use crate::identity::ClientIdentity;
 use crate::llm::{
     CallContext, ErrorCode, LlmCallError, LlmCallable, LlmProviderTrait, LlmRequest, LlmResponse,
-    LlmTool, ResponseImage, StreamDelta,
+    LlmTool, ReasoningConfig, ResponseImage, StreamDelta, ToolCallChunk,
 };
 use crate::session::message::{ToolCall, ToolCallFunction};
 
@@ -55,6 +55,10 @@ struct WireBody<'a> {
     temperature: Option<f64>,
     #[serde(rename = "max_tokens", skip_serializing_if = "Option::is_none")]
     max_completion_tokens: Option<u64>,
+    /// OpenRouter's unified reasoning control, passed straight through — its
+    /// shape already matches the API ({ effort | max_tokens, exclude, enabled }).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<&'a ReasoningConfig>,
     stream: bool,
 }
 
@@ -195,6 +199,10 @@ struct StreamChunkChoice {
 struct StreamChunkDelta {
     #[serde(default)]
     content: Option<String>,
+    /// Reasoning/thinking text (reasoning models). Transient — streamed but not
+    /// part of the assembled response.
+    #[serde(default)]
+    reasoning: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<ToolCallDelta>>,
 }
@@ -266,6 +274,7 @@ impl OpenRouterClient {
                 .map(|ts| ts.iter().map(WireTool::from).collect()),
             temperature: request.temperature,
             max_completion_tokens: request.max_completion_tokens,
+            reasoning: request.reasoning.as_ref(),
             stream,
         };
 
@@ -409,8 +418,19 @@ impl LlmCallable for OpenRouterClient {
                         content.push_str(text);
                         let _ = chunk_tx.send(StreamDelta {
                             text: Some(text.clone()),
-                            finish_reason: None,
+                            ..Default::default()
                         });
+                    }
+
+                    if let Some(ref reasoning) = choice.delta.reasoning {
+                        if !reasoning.is_empty() {
+                            // Transient only — accumulate nothing; it never enters
+                            // the assembled response.
+                            let _ = chunk_tx.send(StreamDelta {
+                                reasoning: Some(reasoning.clone()),
+                                ..Default::default()
+                            });
+                        }
                     }
 
                     if let Some(tc_deltas) = choice.delta.tool_calls {
@@ -422,13 +442,29 @@ impl LlmCallable for OpenRouterClient {
                             if let Some(id) = tc_delta.id {
                                 accum.id = id;
                             }
+                            let mut args_fragment = None;
                             if let Some(f) = tc_delta.function {
                                 if let Some(name) = f.name {
                                     accum.name = name;
                                 }
                                 if let Some(args) = f.arguments {
                                     accum.arguments.push_str(&args);
+                                    args_fragment = Some(args);
                                 }
+                            }
+                            // Forward a live fragment once the call's id is known
+                            // (it arrives in the first chunk). The resolved id and
+                            // name ride every fragment so downstream needs no
+                            // index→id bookkeeping; arguments stream as they come.
+                            if !accum.id.is_empty() {
+                                let _ = chunk_tx.send(StreamDelta {
+                                    tool_calls: vec![ToolCallChunk {
+                                        id: accum.id.clone(),
+                                        name: (!accum.name.is_empty()).then(|| accum.name.clone()),
+                                        arguments: args_fragment,
+                                    }],
+                                    ..Default::default()
+                                });
                             }
                         }
                     }
@@ -436,8 +472,8 @@ impl LlmCallable for OpenRouterClient {
                     if let Some(reason) = choice.finish_reason {
                         finish_reason = Some(reason.clone());
                         let _ = chunk_tx.send(StreamDelta {
-                            text: None,
                             finish_reason: Some(reason),
+                            ..Default::default()
                         });
                     }
                 }

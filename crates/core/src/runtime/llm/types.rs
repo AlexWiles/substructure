@@ -35,6 +35,41 @@ pub struct LlmRequest {
     pub temperature: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_completion_tokens: Option<u64>,
+    /// Reasoning / thinking controls, passed through to providers that support
+    /// it (see [`ReasoningConfig`]). Omitted entirely when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ReasoningConfig>,
+}
+
+/// Controls model reasoning ("thinking") on providers that support it. Mirrors
+/// OpenRouter's unified `reasoning` parameter. `effort` and `max_tokens` are
+/// mutually exclusive; all fields are optional.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReasoningConfig {
+    /// Reasoning effort. OpenAI / Grok style. Mutually exclusive with `max_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReasoningEffort>,
+    /// Token budget for reasoning. Anthropic / Gemini / Qwen style. Mutually
+    /// exclusive with `effort`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    /// Reason internally but omit the reasoning from the response (default false).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude: Option<bool>,
+    /// Shorthand to enable reasoning at the provider's default (medium) effort.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    Xhigh,
+    High,
+    Medium,
+    Low,
+    Minimal,
+    None,
 }
 
 /// Normalized LLM response. Provider adapters convert their raw responses
@@ -116,8 +151,31 @@ pub struct LlmCallError {
     pub detail: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone)]
+/// A transient streaming delta from a provider's in-progress call. Each field
+/// is independent — a chunk may carry assistant text, reasoning (thinking)
+/// text, incremental tool-call arguments, a finish reason, or any combination.
+#[derive(Debug, Clone, Default)]
 pub struct StreamDelta {
+    /// Assistant message text fragment.
     pub text: Option<String>,
+    /// Reasoning/thinking text fragment (transient; not persisted).
+    pub reasoning: Option<String>,
+    /// Tool-call fragments. The provider resolves each call's id (and name)
+    /// from the first fragment, so every chunk here carries a stable id.
+    pub tool_calls: Vec<ToolCallChunk>,
     pub finish_reason: Option<String>,
+}
+
+/// One tool call's incremental contribution within a [`StreamDelta`]. The first
+/// chunk for a call carries `id` + `name` (and possibly an initial `arguments`
+/// fragment); later chunks carry the same `id` and further `arguments` fragments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallChunk {
+    pub id: String,
+    /// The function name, once the provider has seen it (first chunk).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// An arguments fragment to append, if this chunk carried one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
 }

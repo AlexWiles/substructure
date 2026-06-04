@@ -1,6 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 
-import { mintBrowserToken } from "../../substructure";
+import { mintBrowserToken } from "../substructure";
 
 // Server function: mints the short-lived, identity-locked client token on the
 // server (the API key never reaches the browser). Each page's route loader

@@ -4,6 +4,6 @@ import { createFileRoute, redirect } from "@tanstack/react-router";
 // client rather than a separate landing page.
 export const Route = createFileRoute("/")({
     beforeLoad: () => {
-        throw redirect({ to: "/tanstack" });
+        throw redirect({ to: "/assistant-ui" });
     },
 });
