@@ -23,7 +23,7 @@ const getWeather = agent.tool({
     },
 });
 
-// A frontend (client-handled) tool. The worker only DECLARES it — `handler:
+// A frontend (client-handled) tool. The worker only DECLARES it. `handler:
 // "client"` + `ctx.defer()` means the engine suspends the turn and waits for the
 // browser to execute it and submit the result. The matching executor lives in
 // each React chat client (src/components/*-chat.tsx) and updates the on-screen
@@ -82,10 +82,11 @@ const weatherAgent = agent({ id: AGENT_ID })
 
 const worker = sub.worker({ agents: [weatherAgent] });
 
+export const substructureHandler = worker.fetchHandler({ signingSecret: process.env.SIGNING_SECRET });
+
 /** Handle a decision webhook from the engine. Reads SIGNING_SECRET per call so
  *  Workers secrets are resolved at request time. */
 export function handleAgentRequest(request: Request): Promise<Response> {
-    const handler = worker.fetchHandler({ signingSecret: process.env.SIGNING_SECRET });
     return handler(request);
 }
 

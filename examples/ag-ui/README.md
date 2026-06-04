@@ -1,4 +1,4 @@
-# tanstack-cloudflare
+# ag-ui
 
 A [TanStack Start](https://tanstack.com/start) app deployed to **Cloudflare
 Workers**, with a [TanStack AI](https://tanstack.com/ai) chat that talks to
