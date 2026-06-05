@@ -203,6 +203,8 @@ struct StreamChunkDelta {
     reasoning: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<ToolCallDelta>>,
+    #[serde(default)]
+    images: Option<Vec<WireResponseImage>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -364,6 +366,7 @@ impl LlmCallable for OpenRouterClient {
 
         let mut content = String::new();
         let mut tool_calls: Vec<ToolCallAccum> = Vec::new();
+        let mut images: Vec<ResponseImage> = Vec::new();
         let mut finish_reason: Option<String> = None;
         let mut model = request.model.clone();
         let mut usage: Option<serde_json::Value> = None;
@@ -465,6 +468,12 @@ impl LlmCallable for OpenRouterClient {
                         }
                     }
 
+                    if let Some(imgs) = choice.delta.images {
+                        images.extend(imgs.into_iter().map(|img| ResponseImage {
+                            url: img.image_url.url,
+                        }));
+                    }
+
                     if let Some(reason) = choice.finish_reason {
                         finish_reason = Some(reason.clone());
                         let _ = chunk_tx.send(StreamDelta {
@@ -500,7 +509,7 @@ impl LlmCallable for OpenRouterClient {
             finish_reason,
             usage,
             cost,
-            images: Vec::new(),
+            images,
         })
     }
 }
