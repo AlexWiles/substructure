@@ -8,15 +8,15 @@ use super::events::*;
 use super::message::{Content, ContentPart, ImageUrl, Message, Role};
 use super::state::{new_call_id, EffectStatus, SessionState, SessionStatus};
 use crate::runtime::aggregate::Caller;
-use crate::runtime::identity::ClientIdentity;
 use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse};
+use crate::runtime::owner::SessionOwner;
 use crate::runtime::retry::RetryPolicy;
 
 #[derive(Debug, Clone)]
 pub enum CommandPayload {
     CreateSession {
         agent_id: String,
-        identity: ClientIdentity,
+        owner: SessionOwner,
         ancestry: Vec<String>,
         worker_retry: RetryPolicy,
     },
@@ -193,11 +193,11 @@ impl SessionState {
         match caller {
             Caller::System | Caller::Machine { .. } => Ok(()),
             Caller::Frontend { user_id, .. } => {
-                let identity = self
-                    .identity
+                let owner = self
+                    .owner
                     .as_ref()
                     .ok_or(SessionError::SessionAccessDenied)?;
-                if identity.id.as_deref() != Some(user_id.as_str()) {
+                if owner.id.as_deref() != Some(user_id.as_str()) {
                     return Err(SessionError::SessionAccessDenied);
                 }
                 Ok(())
@@ -227,21 +227,21 @@ impl SessionState {
                 None,
                 CommandPayload::CreateSession {
                     agent_id,
-                    identity,
+                    owner,
                     ancestry,
                     worker_retry,
                 },
             ) => {
-                Self::ensure_tenant_matches(caller, &identity.tenant_id)?;
+                Self::ensure_tenant_matches(caller, &owner.tenant_id)?;
                 if let Caller::Frontend { user_id, .. } = caller {
-                    if identity.id.as_deref() != Some(user_id.as_str()) {
+                    if owner.id.as_deref() != Some(user_id.as_str()) {
                         return Err(SessionError::SessionAccessDenied);
                     }
                 }
                 Ok(vec![EventPayload::SessionCreated(Box::new(
                     SessionCreated {
                         agent_id,
-                        identity,
+                        owner,
                         ancestry,
                         worker_retry,
                     },
@@ -275,8 +275,8 @@ impl SessionState {
         cmd: CommandPayload,
         caller: &Caller,
     ) -> Result<Vec<EventPayload>, SessionError> {
-        if let Some(identity) = self.identity.as_ref() {
-            Self::ensure_tenant_matches(caller, &identity.tenant_id)?;
+        if let Some(owner) = self.owner.as_ref() {
+            Self::ensure_tenant_matches(caller, &owner.tenant_id)?;
         }
         match cmd {
             CommandPayload::CreateSession { .. } => Err(SessionError::SessionAlreadyCreated),
@@ -1107,8 +1107,8 @@ mod tests {
 
     use super::*;
     use crate::runtime::aggregate::{Aggregate, Caller, CommitContext};
-    use crate::runtime::identity::ClientIdentity;
     use crate::runtime::llm::{LlmRequest, LlmResponse};
+    use crate::runtime::owner::SessionOwner;
     use crate::runtime::retry::RetryPolicy;
     use crate::runtime::session::decision::{ClientPayload, WorkerAction};
     use crate::runtime::session::events::{EventPayload, ToolHandler};
@@ -1150,7 +1150,7 @@ mod tests {
             &mut agg,
             CommandPayload::CreateSession {
                 agent_id: "agent-1".to_string(),
-                identity: ClientIdentity {
+                owner: SessionOwner {
                     tenant_id: tenant_id.to_string(),
                     id: Some(user_id.to_string()),
                     metadata: HashMap::new(),
@@ -2302,7 +2302,7 @@ mod tests {
             .handle(
                 CommandPayload::CreateSession {
                     agent_id: "agent-1".to_string(),
-                    identity: ClientIdentity {
+                    owner: SessionOwner {
                         tenant_id: "tenant-b".to_string(),
                         id: Some("user-1".to_string()),
                         metadata: HashMap::new(),

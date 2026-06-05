@@ -9,11 +9,11 @@ use uuid::Uuid;
 use crate::providers::memory_queue::TaskQueue;
 use aggregate::{execute, Caller, ConflictRetry, ExecuteError, ExecuteInput};
 use event_store::{EventStore, StoreError};
-use identity::ClientIdentity;
 use llm::{
     spawn_llm_dispatch_processor, spawn_llm_task_executor, LlmProviderTrait, LlmTask, TokenDelta,
     TokenDeltaTransport,
 };
+use owner::SessionOwner;
 use processor::ProcessorCheckpointStore;
 use retry::{NoRetryResolver, WorkerRetryResolver};
 use session::command::{CommandPayload, SessionError};
@@ -22,7 +22,7 @@ use session::index::{
     spawn_session_index_processor, SessionFilter, SessionIndexStore, SessionPage,
 };
 use session::state::SessionState;
-use session::subscriptions::{SessionRequester, SessionSubscriptionSpec};
+use session::subscriptions::SessionSubscriptionSpec;
 use span::SpanContext;
 use sub_agent::{spawn_sub_agent_dispatch_processor, spawn_sub_agent_task_executor, SubAgentTask};
 use wake::{spawn_wake_dispatcher, spawn_wake_processor, WakeScheduleStore};
@@ -31,8 +31,8 @@ use worker::{DequeueFilter, FailDecision, SubmitDecision, WorkerDecisionRequest,
 
 pub mod aggregate;
 pub mod event_store;
-pub mod identity;
 pub mod llm;
+pub mod owner;
 pub mod processor;
 pub mod retry;
 pub mod serde_helpers;
@@ -78,7 +78,7 @@ pub struct SubmitClientPayload {
     pub session_id: String,
     pub tenant_id: String,
     pub caller: Caller,
-    pub identity: ClientIdentity,
+    pub owner: SessionOwner,
     pub agent_id: String,
     pub payload: ClientPayload,
     /// Caller-provided turn ID for idempotency. Auto-generated if None.
@@ -177,7 +177,7 @@ impl Runtime {
                 caller: input.caller.clone(),
                 command: CommandPayload::CreateSession {
                     agent_id: input.agent_id,
-                    identity: input.identity,
+                    owner: input.owner,
                     ancestry: vec![],
                     worker_retry,
                 },
@@ -231,7 +231,7 @@ impl Runtime {
         spec: SessionSubscriptionSpec,
         sequence_after: Option<u64>,
     ) -> Result<mpsc::Receiver<event_store::Event>, RuntimeError> {
-        self.authorize_session_read(spec.tenant_id(), spec.root_session_id(), spec.requester())
+        self.authorize_session_read(spec.tenant_id(), spec.root_session_id(), spec.caller())
             .await?;
         Ok(self
             .session_subscriptions
@@ -241,17 +241,17 @@ impl Runtime {
 
     /// Authorize a read of a session's events — the shared business-logic
     /// ownership check for every read path (live streams and history snapshots).
-    /// An end-user identity may only read a session they own (its creating
-    /// `identity.id` matches); privileged callers are unrestricted within the
+    /// An end-user owner may only read a session they own (its creating
+    /// `owner.id` matches); privileged callers are unrestricted within the
     /// tenant. An uncreated session has no owner yet, so the read is allowed (it
     /// is simply empty, and the first turn binds the session to its caller).
     pub async fn authorize_session_read(
         &self,
         tenant_id: &str,
         session_id: &str,
-        requester: &SessionRequester,
+        caller: &Caller,
     ) -> Result<(), RuntimeError> {
-        let SessionRequester::Identity { id } = requester else {
+        let Some(id) = caller.owner_scope() else {
             return Ok(());
         };
 
@@ -260,9 +260,9 @@ impl Runtime {
                 let agg: aggregate::Aggregate<SessionState> = serde_json::from_value(snapshot.data)
                     .map_err(|e| RuntimeError::Internal(e.to_string()))?;
 
-                let owner = agg.state.identity.as_ref().and_then(|i| i.id.as_deref());
+                let owner = agg.state.owner.as_ref().and_then(|i| i.id.as_deref());
 
-                if owner == Some(id.as_str()) {
+                if owner == Some(id) {
                     Ok(())
                 } else {
                     Err(RuntimeError::Session(SessionError::SessionAccessDenied))
@@ -338,9 +338,9 @@ impl Runtime {
         &self,
         tenant_id: &str,
         session_id: &str,
-        requester: &SessionRequester,
+        caller: &Caller,
     ) -> Result<Vec<event_store::Event>, RuntimeError> {
-        self.authorize_session_read(tenant_id, session_id, requester)
+        self.authorize_session_read(tenant_id, session_id, caller)
             .await?;
         let filter = event_store::EventFilter {
             aggregate_id: Some(session_id.to_string()),

@@ -8,16 +8,14 @@ use std::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-use crate::identity::ClientIdentity;
+use crate::owner::SessionOwner;
 use crate::session::command::SessionError;
-use crate::session::subscriptions::{SessionRequester, SessionSubscriptionSpec};
+use crate::session::subscriptions::SessionSubscriptionSpec;
 use crate::span::SpanContext;
 use crate::transport::auth::AuthPrincipal;
 use crate::transport::session_sse::merge_session_stream;
 use crate::worker::SubmitDecision;
-use crate::{
-    Caller, RuntimeError, SubmitClientPayload, SubmitToolCallResult, SubmitToolCallResultInput,
-};
+use crate::{RuntimeError, SubmitClientPayload, SubmitToolCallResult, SubmitToolCallResultInput};
 
 use super::types::{
     MintClientTokenRequest, MintClientTokenResponse, StreamSessionEventsParams,
@@ -36,7 +34,7 @@ pub async fn submit(
         .unwrap_or_else(SpanContext::root)
         .child("worker_submit");
 
-    let Some(caller) = machine_caller(&principal) else {
+    let Some(caller) = principal.machine_caller() else {
         return machine_subject_required();
     };
 
@@ -132,7 +130,7 @@ pub async fn submit_tool_call_result(
     Path(session_id): Path<String>,
     Json(req): Json<SubmitToolCallResultRequest>,
 ) -> Response {
-    let Some(caller) = machine_caller(&principal) else {
+    let Some(caller) = principal.machine_caller() else {
         return machine_subject_required();
     };
 
@@ -191,17 +189,6 @@ pub async fn submit_tool_call_result(
     }
 }
 
-fn machine_caller(principal: &AuthPrincipal) -> Option<Caller> {
-    principal
-        .subject
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .map(|s| Caller::Machine {
-            tenant_id: principal.tenant_id.clone(),
-            key_id: s.to_string(),
-        })
-}
-
 fn machine_subject_required() -> Response {
     (
         StatusCode::FORBIDDEN,
@@ -243,12 +230,12 @@ pub async fn submit_client_payload(
         return (StatusCode::BAD_REQUEST, Json(body)).into_response();
     }
 
-    let Some(caller) = machine_caller(&principal) else {
+    let Some(caller) = principal.machine_caller() else {
         return machine_subject_required();
     };
 
     let session_id = req.session_id.unwrap_or_else(|| Uuid::now_v7().to_string());
-    let identity = ClientIdentity {
+    let owner = SessionOwner {
         tenant_id: principal.tenant_id.clone(),
         id: Some(req.identity.id),
         metadata: req.identity.metadata,
@@ -260,7 +247,7 @@ pub async fn submit_client_payload(
             session_id,
             tenant_id: principal.tenant_id,
             caller,
-            identity,
+            owner,
             agent_id: req.agent_id,
             payload: req.payload,
             turn_id: req.turn_id,
@@ -292,17 +279,20 @@ pub async fn stream_session_events(
     let root_session_id = session_id.clone();
     let scope_turn_id = params.turn_id.clone();
     // The worker transport is a privileged machine caller: unrestricted.
+    let Some(caller) = principal.machine_caller() else {
+        return machine_subject_required();
+    };
     let spec = match params.turn_id {
         Some(turn_id) => SessionSubscriptionSpec::Turn {
             tenant_id: principal.tenant_id.clone(),
             root_session_id: session_id,
             turn_id,
-            requester: SessionRequester::Privileged,
+            caller,
         },
         None => SessionSubscriptionSpec::All {
             tenant_id: principal.tenant_id.clone(),
             root_session_id: session_id,
-            requester: SessionRequester::Privileged,
+            caller,
         },
     };
 

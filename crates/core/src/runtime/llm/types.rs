@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::runtime::identity::ClientIdentity;
+use crate::runtime::owner::SessionOwner;
 use crate::runtime::session::message::{Message, ToolCall};
 
 /// An image returned by the model in the response.
@@ -91,7 +91,7 @@ pub struct LlmResponse {
 /// Trait for LLM client providers (resolved by the runtime).
 #[async_trait]
 pub trait LlmProviderTrait: Send + Sync {
-    async fn resolve(&self, identity: &ClientIdentity) -> Result<Arc<dyn LlmCallable>, String>;
+    async fn resolve(&self, owner: &SessionOwner) -> Result<Arc<dyn LlmCallable>, String>;
 }
 
 #[derive(Debug, Clone)]
@@ -101,7 +101,7 @@ pub struct CallContext<'a> {
     pub agent_id: &'a str,
     pub call_id: &'a str,
     pub attempt: u32,
-    pub identity: &'a ClientIdentity,
+    pub owner: &'a SessionOwner,
     /// Parent chain, root-last. Empty for top-level sessions.
     pub ancestry: &'a [String],
 }

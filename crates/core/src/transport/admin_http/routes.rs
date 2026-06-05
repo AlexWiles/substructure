@@ -10,7 +10,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::event_store::{AggregateSort, EventFilter};
 use crate::session::index::{SessionCursor, SessionFilter};
-use crate::session::subscriptions::{SessionRequester, SessionSubscriptionSpec};
+use crate::session::subscriptions::SessionSubscriptionSpec;
 use crate::transport::ag_ui::snapshot::snapshot_events;
 use crate::transport::ag_ui::types::RunAgentInput;
 use crate::transport::auth::AuthPrincipal;
@@ -155,11 +155,19 @@ pub async fn stream_session_events(
     Path(session_id): Path<String>,
     Query(params): Query<SessionEventsParams>,
 ) -> Response {
-    // Admin is a privileged operator role: unrestricted within its tenant.
+    // Admin authenticates as a machine (api_key) principal — a privileged
+    // caller, unrestricted within its tenant.
+    let Some(caller) = principal.machine_caller() else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "machine subject is required"})),
+        )
+            .into_response();
+    };
     let spec = SessionSubscriptionSpec::All {
         tenant_id: principal.tenant_id,
         root_session_id: session_id,
-        requester: SessionRequester::Privileged,
+        caller,
     };
     // Admin endpoint defaults to full-history replay (sequence_after defaults to 0).
     let sequence_after = Some(params.sequence_after.unwrap_or(0));
@@ -207,13 +215,16 @@ pub async fn connect_session_ag_ui(
 ) -> Response {
     // Admin is privileged within its tenant: no ownership gate, but the read is
     // still tenant-scoped — the runtime owns both decisions.
+    let Some(caller) = principal.machine_caller() else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "machine subject is required"})),
+        )
+            .into_response();
+    };
     let events = match state
         .runtime
-        .read_session_events(
-            &principal.tenant_id,
-            &session_id,
-            &SessionRequester::Privileged,
-        )
+        .read_session_events(&principal.tenant_id, &session_id, &caller)
         .await
     {
         Ok(events) => events,

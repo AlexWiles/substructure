@@ -26,3 +26,18 @@ pub enum Caller {
         attrs: HashMap<String, String>,
     },
 }
+
+impl Caller {
+    /// The session-owner this caller is restricted to when reading sessions, or
+    /// `None` if the caller is privileged (unrestricted within its tenant).
+    ///
+    /// A frontend user may only read sessions they own (their `user_id`);
+    /// system and machine callers are unrestricted. Read paths use this to scope
+    /// a [`SessionSubscriptionSpec`](crate::session::subscriptions::SessionSubscriptionSpec).
+    pub fn owner_scope(&self) -> Option<&str> {
+        match self {
+            Caller::Frontend { user_id, .. } => Some(user_id),
+            Caller::System | Caller::Machine { .. } => None,
+        }
+    }
+}

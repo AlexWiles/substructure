@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
@@ -10,18 +8,15 @@ use futures_util::stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-use crate::identity::ClientIdentity;
 use crate::session::command::SessionError;
 use crate::session::decision::ClientPayload;
-use crate::session::subscriptions::{SessionRequester, SessionSubscriptionSpec};
+use crate::session::subscriptions::SessionSubscriptionSpec;
 use crate::transport::ag_ui::snapshot::snapshot_events;
 use crate::transport::ag_ui::translator::run_ag_ui_translation;
 use crate::transport::ag_ui::types::{AgUiInput, RunAgentInput};
 use crate::transport::auth::AuthPrincipal;
 use crate::transport::session_sse::merge_session_stream;
-use crate::{
-    Caller, RuntimeError, SubmitClientPayload, SubmitToolCallResult, SubmitToolCallResultInput,
-};
+use crate::{RuntimeError, SubmitClientPayload, SubmitToolCallResult, SubmitToolCallResultInput};
 
 use super::types::{
     StreamSessionEventsParams, SubmitClientPayloadRequest, SubmitClientPayloadResponse,
@@ -34,21 +29,12 @@ pub async fn submit_client_payload(
     Extension(principal): Extension<AuthPrincipal>,
     Json(req): Json<SubmitClientPayloadRequest>,
 ) -> Response {
-    let Some(subject) = principal.subject.clone() else {
+    let (Some(caller), Some(owner)) = (principal.frontend_caller(), principal.session_owner())
+    else {
         let body = serde_json::json!({"error": "client subject is required"});
         return (StatusCode::FORBIDDEN, Json(body)).into_response();
     };
     let session_id = req.session_id.unwrap_or_else(|| Uuid::now_v7().to_string());
-    let identity = ClientIdentity {
-        tenant_id: principal.tenant_id.clone(),
-        id: Some(subject.clone()),
-        metadata: std::collections::HashMap::new(),
-    };
-    let caller = Caller::Frontend {
-        tenant_id: principal.tenant_id.clone(),
-        user_id: subject,
-        attrs: principal.attrs.clone(),
-    };
 
     let result = state
         .runtime
@@ -56,7 +42,7 @@ pub async fn submit_client_payload(
             session_id,
             tenant_id: principal.tenant_id,
             caller,
-            identity,
+            owner,
             agent_id: req.agent_id,
             payload: req.payload,
             turn_id: req.turn_id,
@@ -82,14 +68,9 @@ pub async fn submit_tool_call_result(
     Path(session_id): Path<String>,
     Json(req): Json<SubmitToolCallResultRequest>,
 ) -> Response {
-    let Some(subject) = principal.subject.clone() else {
+    let Some(caller) = principal.frontend_caller() else {
         let body = serde_json::json!({"error": "client subject is required"});
         return (StatusCode::FORBIDDEN, Json(body)).into_response();
-    };
-    let caller = Caller::Frontend {
-        tenant_id: principal.tenant_id.clone(),
-        user_id: subject,
-        attrs: principal.attrs.clone(),
     };
 
     let (tool_call_id, attempt, result) = match req {
@@ -181,26 +162,25 @@ pub async fn stream_session_events(
     Path(session_id): Path<String>,
     Query(params): Query<StreamSessionEventsParams>,
 ) -> Response {
-    let Some(subject) = principal.subject.clone() else {
+    let Some(caller) = principal.frontend_caller() else {
         let body = serde_json::json!({"error": "client subject is required"});
         return (StatusCode::FORBIDDEN, Json(body)).into_response();
     };
     let root_session_id = session_id.clone();
     let scope_turn_id = params.turn_id.clone();
-    // The caller may only stream a session they own — enforced by the runtime
-    // from the spec's requester.
-    let requester = SessionRequester::Identity { id: subject };
+    // The caller may only stream a session they own — the runtime enforces the
+    // ownership gate from the spec's caller.
     let spec = match params.turn_id {
         Some(turn_id) => SessionSubscriptionSpec::Turn {
             tenant_id: principal.tenant_id.clone(),
             root_session_id: session_id,
             turn_id,
-            requester,
+            caller,
         },
         None => SessionSubscriptionSpec::All {
             tenant_id: principal.tenant_id.clone(),
             root_session_id: session_id,
-            requester,
+            caller,
         },
     };
 
@@ -231,7 +211,7 @@ pub async fn ag_ui_run(
     Path(agent_id): Path<String>,
     payload: Result<Json<RunAgentInput>, JsonRejection>,
 ) -> Response {
-    let Some(subject) = principal.subject.clone() else {
+    let Some(caller) = principal.frontend_caller() else {
         let body = serde_json::json!({"error": "client subject is required"});
         return (StatusCode::FORBIDDEN, Json(body)).into_response();
     };
@@ -261,9 +241,7 @@ pub async fn ag_ui_run(
     let spec = SessionSubscriptionSpec::All {
         tenant_id: tenant_id.clone(),
         root_session_id: session_id.clone(),
-        requester: SessionRequester::Identity {
-            id: subject.clone(),
-        },
+        caller: caller.clone(),
     };
     let event_rx = match state.runtime.stream(spec, None).await {
         Ok(rx) => rx,
@@ -274,26 +252,20 @@ pub async fn ag_ui_run(
         .subscribe_token_deltas(&tenant_id, &session_id)
         .await;
 
-    let caller = Caller::Frontend {
-        tenant_id: tenant_id.clone(),
-        user_id: subject.clone(),
-        attrs: principal.attrs.clone(),
-    };
-
     let submit = match action {
         AgUiInput::UserTurn(message) => {
-            let identity = ClientIdentity {
-                tenant_id: tenant_id.clone(),
-                id: Some(subject),
-                metadata: HashMap::new(),
-            };
+            // A frontend caller's subject is the user themselves; present here
+            // because `frontend_caller()` succeeded above.
+            let owner = principal
+                .session_owner()
+                .expect("frontend caller implies a client subject");
             state
                 .runtime
                 .submit_client_payload(SubmitClientPayload {
                     session_id: session_id.clone(),
                     tenant_id: tenant_id.clone(),
                     caller,
-                    identity,
+                    owner,
                     agent_id,
                     payload: ClientPayload::Message {
                         message,
@@ -377,7 +349,7 @@ pub async fn ag_ui_run(
 /// `threadId` selects the session, `runId` labels the synthetic snapshot run.
 ///
 /// Scoped to the authenticated client's own sessions: the caller must own the
-/// thread (its creating `identity.id` must match `principal.subject`), so one
+/// thread (its creating `owner.id` must match `principal.subject`), so one
 /// user can't hydrate another's thread by guessing its id — mirroring the
 /// write-path `ensure_owns_session`. Read-only (no turn is submitted).
 pub async fn ag_ui_connect(
@@ -386,7 +358,7 @@ pub async fn ag_ui_connect(
     Path(_agent_id): Path<String>,
     Json(input): Json<RunAgentInput>,
 ) -> Response {
-    let Some(subject) = principal.subject.clone() else {
+    let Some(caller) = principal.frontend_caller() else {
         let body = serde_json::json!({"error": "client subject is required"});
         return (StatusCode::FORBIDDEN, Json(body)).into_response();
     };
@@ -395,11 +367,7 @@ pub async fn ag_ui_connect(
     // allowed (nothing to leak) and hydrates to an empty snapshot.
     let events = match state
         .runtime
-        .read_session_events(
-            &principal.tenant_id,
-            &input.thread_id,
-            &SessionRequester::Identity { id: subject },
-        )
+        .read_session_events(&principal.tenant_id, &input.thread_id, &caller)
         .await
     {
         Ok(events) => events,

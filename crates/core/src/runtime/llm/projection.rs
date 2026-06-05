@@ -53,9 +53,10 @@ impl EventProcessor for LlmDispatchProjection {
         let derived = event.derived.as_ref().ok_or_else(|| {
             ProcessorError::Apply("missing derived state on llm event".to_string())
         })?;
-        let identity = derived.identity.clone().ok_or_else(|| {
-            ProcessorError::Apply("missing identity in derived state".to_string())
-        })?;
+        let owner = derived
+            .owner
+            .clone()
+            .ok_or_else(|| ProcessorError::Apply("missing owner in derived state".to_string()))?;
         let agent_id = derived.agent_id.clone().ok_or_else(|| {
             ProcessorError::Apply("missing agent_id in derived state".to_string())
         })?;
@@ -72,7 +73,7 @@ impl EventProcessor for LlmDispatchProjection {
             attempt: req.attempt,
             request: req.request.clone(),
             stream: req.stream,
-            identity,
+            owner,
             ancestry,
             turn_id,
             span: event.span,

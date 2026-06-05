@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tokio::sync::{broadcast, mpsc};
 
-use crate::runtime::aggregate::{AggregateState, DomainEvent};
+use crate::runtime::aggregate::{AggregateState, Caller, DomainEvent};
 use crate::runtime::event_store::{Event, EventFilter, EventStore};
 use crate::runtime::session::events::EventPayload;
 use crate::runtime::session::state::SessionState;
@@ -13,30 +13,18 @@ pub struct SessionSubscriptions {
     store: Arc<dyn EventStore>,
 }
 
-/// Who is observing a session — carried on the spec so the ownership check
-/// travels with the subscription request and the runtime can enforce it before
-/// any events are yielded.
-#[derive(Debug, Clone)]
-pub enum SessionRequester {
-    /// A specific end-user identity. May only observe sessions whose creating
-    /// identity matches `id` — so one identity can't read another's session.
-    Identity { id: String },
-    /// Machine, system, or admin caller. Unrestricted within the tenant.
-    Privileged,
-}
-
 #[derive(Debug, Clone)]
 pub enum SessionSubscriptionSpec {
     Turn {
         tenant_id: String,
         root_session_id: String,
         turn_id: String,
-        requester: SessionRequester,
+        caller: Caller,
     },
     All {
         tenant_id: String,
         root_session_id: String,
-        requester: SessionRequester,
+        caller: Caller,
     },
 }
 
@@ -58,9 +46,12 @@ impl SessionSubscriptionSpec {
         }
     }
 
-    pub(crate) fn requester(&self) -> &SessionRequester {
+    /// The caller observing the session — the runtime enforces the ownership
+    /// gate from this (a frontend caller is scoped to sessions it owns; system
+    /// and machine callers are unrestricted within the tenant).
+    pub(crate) fn caller(&self) -> &Caller {
         match self {
-            Self::Turn { requester, .. } | Self::All { requester, .. } => requester,
+            Self::Turn { caller, .. } | Self::All { caller, .. } => caller,
         }
     }
 

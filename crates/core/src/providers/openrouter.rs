@@ -8,11 +8,11 @@ use tokio_stream::StreamExt;
 
 use rust_decimal::Decimal;
 
-use crate::identity::ClientIdentity;
 use crate::llm::{
     CallContext, ErrorCode, LlmCallError, LlmCallable, LlmProviderTrait, LlmRequest, LlmResponse,
     LlmTool, ReasoningConfig, ResponseImage, StreamDelta, ToolCallChunk,
 };
+use crate::owner::SessionOwner;
 use crate::session::message::{ToolCall, ToolCallFunction};
 
 /// Wraps our normalized `LlmTool` with the `"type": "function"` field
@@ -528,7 +528,7 @@ impl OpenRouterProvider {
 
 #[async_trait]
 impl LlmProviderTrait for OpenRouterProvider {
-    async fn resolve(&self, _identity: &ClientIdentity) -> Result<Arc<dyn LlmCallable>, String> {
+    async fn resolve(&self, _owner: &SessionOwner) -> Result<Arc<dyn LlmCallable>, String> {
         Ok(self.client.clone())
     }
 }

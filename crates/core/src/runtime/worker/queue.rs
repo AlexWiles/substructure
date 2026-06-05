@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::runtime::aggregate::Caller;
-use crate::runtime::identity::ClientIdentity;
+use crate::runtime::owner::SessionOwner;
 use crate::runtime::serde_helpers::base64_bytes;
 use crate::runtime::session::decision::DecisionTrigger;
 use crate::runtime::session::decision::WorkerAction;
@@ -16,7 +16,7 @@ pub struct WorkerDecisionRequest {
     pub tenant_id: String,
     pub decision_id: String,
     pub agent_id: String,
-    pub identity: ClientIdentity,
+    pub owner: SessionOwner,
     pub trigger: DecisionTrigger,
     #[serde(with = "base64_bytes")]
     pub worker_state: Vec<u8>,

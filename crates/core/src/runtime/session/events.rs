@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use super::decision::DecisionTrigger;
 use super::message::Message;
-use crate::runtime::identity::ClientIdentity;
 use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse};
+use crate::runtime::owner::SessionOwner;
 use crate::runtime::retry::RetryPolicy;
 use crate::runtime::serde_helpers::base64_bytes;
 
@@ -66,7 +66,7 @@ pub enum EventPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionCreated {
     pub agent_id: String,
-    pub identity: ClientIdentity,
+    pub owner: SessionOwner,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ancestry: Vec<String>,
     pub worker_retry: RetryPolicy,

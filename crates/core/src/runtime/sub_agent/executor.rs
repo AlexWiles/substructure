@@ -47,7 +47,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
             tenant_id,
             child_session_id,
             agent_id,
-            identity,
+            owner,
             ancestry,
             retry,
             span,
@@ -61,7 +61,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
                     caller: Caller::System,
                     command: CommandPayload::CreateSession {
                         agent_id,
-                        identity,
+                        owner,
                         ancestry,
                         worker_retry: retry,
                     },
