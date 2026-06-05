@@ -23,6 +23,19 @@ pub struct ClientHttpState {
 }
 
 pub fn router(state: ClientHttpState) -> Router {
+    // CORS applies only to this browser-facing client API; the worker and admin
+    // surfaces are server-to-server (api-key), where CORS is irrelevant.
+    // `allow_headers` mirrors the request rather than sending `*`: per the Fetch
+    // spec, `*` does not cover `Authorization`, so browsers would strip the bearer
+    // token on cross-origin requests.
+    let cors = {
+        use tower_http::cors::{AllowHeaders, Any, CorsLayer};
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(AllowHeaders::mirror_request())
+            .expose_headers(Any)
+    };
     Router::new()
         .route(
             "/api/client/sessions/submit",
@@ -48,6 +61,8 @@ pub fn router(state: ClientHttpState) -> Router {
             state.clone(),
             client_auth_middleware,
         ))
+        // Outermost so CORS preflight (OPTIONS) is answered before auth runs.
+        .layer(cors)
         .with_state(state)
 }
 

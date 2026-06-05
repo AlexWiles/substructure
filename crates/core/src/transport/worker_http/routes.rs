@@ -12,10 +12,11 @@ use crate::owner::SessionOwner;
 use crate::session::command::SessionError;
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use crate::span::SpanContext;
-use crate::transport::auth::AuthPrincipal;
 use crate::transport::session_sse::merge_session_stream;
 use crate::worker::SubmitDecision;
-use crate::{RuntimeError, SubmitClientPayload, SubmitToolCallResult, SubmitToolCallResultInput};
+use crate::{
+    Caller, RuntimeError, SubmitClientPayload, SubmitToolCallResult, SubmitToolCallResultInput,
+};
 
 use super::types::{
     MintClientTokenRequest, MintClientTokenResponse, StreamSessionEventsParams,
@@ -26,17 +27,13 @@ use super::WorkerHttpState;
 
 pub async fn submit(
     State(state): State<WorkerHttpState>,
-    Extension(principal): Extension<AuthPrincipal>,
+    Extension(caller): Extension<Caller>,
     Json(req): Json<SubmitRequest>,
 ) -> Response {
     let span = req
         .span
         .unwrap_or_else(SpanContext::root)
         .child("worker_submit");
-
-    let Some(caller) = principal.machine_caller() else {
-        return machine_subject_required();
-    };
 
     let result = state
         .runtime
@@ -72,27 +69,13 @@ pub async fn submit(
 
 pub async fn mint_client_token(
     State(state): State<WorkerHttpState>,
-    Extension(principal): Extension<AuthPrincipal>,
+    Extension(caller): Extension<Caller>,
     Json(req): Json<MintClientTokenRequest>,
 ) -> impl IntoResponse {
-    if principal.source != "api_key" {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "machine auth required"})),
-        )
-            .into_response();
-    }
     if req.identity.id.trim().is_empty() {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "identity.id is required"})),
-        )
-            .into_response();
-    }
-    if principal.subject.as_deref().is_none_or(str::is_empty) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "machine subject is required"})),
         )
             .into_response();
     }
@@ -107,7 +90,7 @@ pub async fn mint_client_token(
     }
 
     match state.client_token_issuer.issue_token(
-        principal.tenant_id,
+        caller.tenant_id().to_string(),
         req.identity.id,
         req.identity.metadata,
         Duration::from_secs(ttl_secs),
@@ -125,14 +108,10 @@ pub async fn mint_client_token(
 
 pub async fn submit_tool_call_result(
     State(state): State<WorkerHttpState>,
-    Extension(principal): Extension<AuthPrincipal>,
+    Extension(caller): Extension<Caller>,
     Path(session_id): Path<String>,
     Json(req): Json<SubmitToolCallResultRequest>,
 ) -> Response {
-    let Some(caller) = principal.machine_caller() else {
-        return machine_subject_required();
-    };
-
     let (tool_call_id, attempt, result) = match req {
         SubmitToolCallResultRequest::Result {
             tool_call_id,
@@ -187,14 +166,6 @@ pub async fn submit_tool_call_result(
     }
 }
 
-fn machine_subject_required() -> Response {
-    (
-        StatusCode::FORBIDDEN,
-        Json(serde_json::json!({"error": "machine subject is required"})),
-    )
-        .into_response()
-}
-
 /// Map RuntimeError variants to HTTP status codes for the worker API.
 pub(crate) fn runtime_error_status(err: &RuntimeError) -> (StatusCode, String) {
     let status = match err {
@@ -220,7 +191,7 @@ pub(crate) fn runtime_error_status(err: &RuntimeError) -> (StatusCode, String) {
 
 pub async fn submit_client_payload(
     State(state): State<WorkerHttpState>,
-    Extension(principal): Extension<AuthPrincipal>,
+    Extension(caller): Extension<Caller>,
     Json(req): Json<SubmitClientPayloadRequest>,
 ) -> Response {
     if req.identity.id.trim().is_empty() {
@@ -228,13 +199,9 @@ pub async fn submit_client_payload(
         return (StatusCode::BAD_REQUEST, Json(body)).into_response();
     }
 
-    let Some(caller) = principal.machine_caller() else {
-        return machine_subject_required();
-    };
-
     let session_id = req.session_id.unwrap_or_else(|| Uuid::now_v7().to_string());
     let owner = SessionOwner {
-        tenant_id: principal.tenant_id.clone(),
+        tenant_id: caller.tenant_id().to_string(),
         id: Some(req.identity.id),
         metadata: req.identity.metadata,
     };
@@ -269,16 +236,12 @@ pub async fn submit_client_payload(
 
 pub async fn stream_session_events(
     State(state): State<WorkerHttpState>,
-    Extension(principal): Extension<AuthPrincipal>,
+    Extension(caller): Extension<Caller>,
     Path(session_id): Path<String>,
     Query(params): Query<StreamSessionEventsParams>,
 ) -> Response {
     let root_session_id = session_id.clone();
     let scope_turn_id = params.turn_id.clone();
-    // The worker transport is a privileged machine caller: unrestricted.
-    let Some(caller) = principal.machine_caller() else {
-        return machine_subject_required();
-    };
     // Subscribe before the caller is moved into the spec.
     let delta_rx = state
         .runtime

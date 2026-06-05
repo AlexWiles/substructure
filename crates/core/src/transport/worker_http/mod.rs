@@ -56,7 +56,16 @@ async fn worker_auth_middleware(
 ) -> Response {
     match state.auth.resolve(request.headers()).await {
         Ok(principal) => {
-            request.extensions_mut().insert(principal);
+            // The worker transport authenticates machines (api-key). Resolve the
+            // caller once here so handlers receive a ready `Caller`.
+            let Some(caller) = principal.machine_caller() else {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({"error": "machine subject is required"})),
+                )
+                    .into_response();
+            };
+            request.extensions_mut().insert(caller);
             next.run(request).await
         }
         Err(AuthError::MissingCredentials | AuthError::InvalidCredentials) => (

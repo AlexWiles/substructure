@@ -1,9 +1,4 @@
 //! Reconstructs a session's conversation as an AG-UI `MESSAGES_SNAPSHOT`.
-//!
-//! Every message — user, assistant (with tool calls), and tool result — is
-//! persisted as a `message.new` event, so folding those events alone rebuilds
-//! the whole conversation. The snapshot hydrates a client thread on (re)connect;
-//! it carries no streaming deltas.
 
 use crate::event_store::Event;
 use crate::session::events::EventPayload;
@@ -11,9 +6,6 @@ use crate::session::message::{Content, ContentPart, Role};
 
 use super::events::{AgUiEvent, SnapshotMessage};
 
-/// Fold a session's persisted events into its AG-UI message list, in order. Each
-/// message's id is the id of the `message.new` event that recorded it — stable
-/// across re-fetches.
 pub fn session_messages(events: &[Event]) -> Vec<SnapshotMessage> {
     let mut out = Vec::new();
     for event in events {
@@ -49,8 +41,6 @@ pub fn session_messages(events: &[Event]) -> Vec<SnapshotMessage> {
     out
 }
 
-/// The hydration event sequence for a session: `RUN_STARTED` → `MESSAGES_SNAPSHOT`
-/// → `RUN_FINISHED`. The `run_id` is synthetic — a snapshot is not a real turn.
 pub fn snapshot_events(thread_id: String, run_id: String, events: &[Event]) -> Vec<AgUiEvent> {
     vec![
         AgUiEvent::RunStarted {
@@ -68,7 +58,6 @@ pub fn snapshot_events(thread_id: String, run_id: String, events: &[Event]) -> V
     ]
 }
 
-/// Flatten message content to plain text; multimodal parts keep only their text.
 fn content_text(content: Option<Content>) -> Option<String> {
     match content {
         Some(Content::Text(t)) => Some(t),

@@ -51,9 +51,6 @@ async fn admin_auth_middleware(
 ) -> Response {
     match state.auth.resolve(request.headers()).await {
         Ok(principal) => {
-            // Admin authenticates as a machine (api_key) principal — a privileged
-            // caller, unrestricted within its tenant. Resolve it once here so the
-            // handlers receive a ready `Caller`.
             let Some(caller) = principal.machine_caller() else {
                 return (
                     StatusCode::FORBIDDEN,
