@@ -4,9 +4,6 @@ use serde_json::Value;
 
 use crate::session::message::ToolCall;
 
-/// A single AG-UI output event. Serializes to the wire shape: a
-/// SCREAMING_SNAKE_CASE `type` discriminator plus camelCase fields, with absent
-/// optionals omitted.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum AgUiEvent {
@@ -17,7 +14,6 @@ pub enum AgUiEvent {
     RunFinished {
         thread_id: String,
         run_id: String,
-        /// The turn result, when the engine produced one.
         #[serde(skip_serializing_if = "Option::is_none")]
         result: Option<Value>,
     },
@@ -25,8 +21,6 @@ pub enum AgUiEvent {
     #[serde(rename = "RUN_ERROR")]
     RunError { message: String },
 
-    /// Full conversation history, applied wholesale to the client's message list
-    /// — used to hydrate a thread on (re)connect.
     #[serde(rename = "MESSAGES_SNAPSHOT", rename_all = "camelCase")]
     MessagesSnapshot { messages: Vec<SnapshotMessage> },
 
@@ -46,8 +40,6 @@ pub enum AgUiEvent {
     ToolCallStart {
         tool_call_id: String,
         tool_call_name: String,
-        /// The producing llm call, giving the client a stable assistant message
-        /// id; omitted when unknown.
         #[serde(skip_serializing_if = "Option::is_none")]
         parent_message_id: Option<String>,
     },
@@ -66,8 +58,6 @@ pub enum AgUiEvent {
         role: &'static str,
     },
 
-    // Reasoning blocks nest as REASONING_START → REASONING_MESSAGE_START →
-    // REASONING_MESSAGE_CONTENT* → REASONING_MESSAGE_END → REASONING_END.
     #[serde(rename = "REASONING_START", rename_all = "camelCase")]
     ReasoningStart { message_id: String },
 
@@ -89,8 +79,6 @@ pub enum AgUiEvent {
     ReasoningEnd { message_id: String },
 }
 
-/// One message in a [`AgUiEvent::MessagesSnapshot`], matching AG-UI's role-tagged
-/// message union. Reconstructed from the session's persisted `message.new` events.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "role", rename_all = "lowercase")]
 pub enum SnapshotMessage {
@@ -107,7 +95,6 @@ pub enum SnapshotMessage {
         id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         content: Option<String>,
-        /// Serializes as `[{ id, type: "function", function: { name, arguments } }]`.
         #[serde(skip_serializing_if = "Vec::is_empty")]
         tool_calls: Vec<ToolCall>,
     },
@@ -120,8 +107,6 @@ pub enum SnapshotMessage {
 }
 
 impl AgUiEvent {
-    /// The wire `type` discriminator, reused as the SSE `event:` name. Kept in
-    /// sync with the serde `rename` on each variant.
     pub fn type_name(&self) -> &'static str {
         match self {
             AgUiEvent::RunStarted { .. } => "RUN_STARTED",
@@ -143,8 +128,6 @@ impl AgUiEvent {
         }
     }
 
-    /// Serialize to an SSE frame: the JSON body as `data:`, the type name as the
-    /// (debug-friendly) `event:` name.
     pub fn to_sse(&self) -> SseEvent {
         let data = serde_json::to_string(self).unwrap_or_default();
         SseEvent::default().event(self.type_name()).data(data)

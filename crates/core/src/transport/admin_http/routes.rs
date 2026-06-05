@@ -188,7 +188,6 @@ pub async fn stream_session_events(
         .into_response()
 }
 
-/// Replays a session's history as an AG-UI `RUN_STARTED → MESSAGES_SNAPSHOT → RUN_FINISHED` stream,
 pub async fn connect_session_ag_ui(
     State(state): State<AdminHttpState>,
     Extension(caller): Extension<Caller>,

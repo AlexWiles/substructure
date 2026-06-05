@@ -243,8 +243,6 @@ impl Runtime {
         session_id: &str,
         caller: &Caller,
     ) -> Result<(), RuntimeError> {
-        // System and machine callers are unrestricted within their tenant; only
-        // a frontend user is gated, and only to the sessions it owns.
         let Caller::Frontend {
             tenant_id, user_id, ..
         } = caller

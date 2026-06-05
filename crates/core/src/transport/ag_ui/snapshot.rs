@@ -1,5 +1,3 @@
-//! Reconstructs a session's conversation as an AG-UI `MESSAGES_SNAPSHOT`.
-
 use crate::event_store::Event;
 use crate::session::events::EventPayload;
 use crate::session::message::{Content, ContentPart, Role};
@@ -154,7 +152,6 @@ mod tests {
         }
     }
 
-    /// Serialize messages to their AG-UI wire JSON for field-name assertions.
     fn wire(messages: Vec<SnapshotMessage>) -> Vec<Value> {
         messages
             .iter()
@@ -181,7 +178,6 @@ mod tests {
         assert_eq!(w[0]["content"], "weather in SF?");
         assert_eq!(w[0]["id"], Uuid::from_u128(1).to_string());
 
-        // Assistant tool-call message: no content key, toolCalls in AG-UI shape.
         assert_eq!(w[1]["role"], "assistant");
         assert!(w[1].get("content").is_none());
         assert_eq!(w[1]["toolCalls"][0]["id"], "call-1");
@@ -192,7 +188,6 @@ mod tests {
             r#"{"city":"SF"}"#
         );
 
-        // Tool result references the assistant's tool call by toolCallId.
         assert_eq!(w[2]["role"], "tool");
         assert_eq!(w[2]["toolCallId"], "call-1");
         assert_eq!(w[2]["content"], r#"{"temp":62}"#);

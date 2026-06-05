@@ -242,7 +242,6 @@ pub async fn stream_session_events(
 ) -> Response {
     let root_session_id = session_id.clone();
     let scope_turn_id = params.turn_id.clone();
-    // Subscribe before the caller is moved into the spec.
     let delta_rx = state
         .runtime
         .subscribe_token_deltas(&caller, &root_session_id)

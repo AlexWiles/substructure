@@ -39,19 +39,14 @@ pub struct LlmRequest {
     pub reasoning: Option<ReasoningConfig>,
 }
 
-/// Reasoning ("thinking") controls, mirroring OpenRouter's `reasoning` param.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReasoningConfig {
-    /// OpenAI / Grok style. Mutually exclusive with `max_tokens`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<ReasoningEffort>,
-    /// Anthropic / Gemini / Qwen style token budget. Mutually exclusive with `effort`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
-    /// Reason internally but omit the reasoning from the response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclude: Option<bool>,
-    /// Enable reasoning at the provider's default (medium) effort.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
 }
@@ -146,20 +141,14 @@ pub struct LlmCallError {
     pub detail: Option<serde_json::Value>,
 }
 
-/// A transient streaming delta from a provider's in-progress call. Each field is
-/// independent; a chunk may carry any combination.
 #[derive(Debug, Clone, Default)]
 pub struct StreamDelta {
     pub text: Option<String>,
-    /// Reasoning/thinking text (transient; not persisted).
     pub reasoning: Option<String>,
-    /// Tool-call fragments; every chunk carries the call's stable id.
     pub tool_calls: Vec<ToolCallChunk>,
     pub finish_reason: Option<String>,
 }
 
-/// One tool call's incremental contribution within a [`StreamDelta`]. The first
-/// chunk carries `id` + `name`; later chunks carry the same `id` and more `arguments`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallChunk {
     pub id: String,

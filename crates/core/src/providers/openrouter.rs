@@ -55,7 +55,6 @@ struct WireBody<'a> {
     temperature: Option<f64>,
     #[serde(rename = "max_tokens", skip_serializing_if = "Option::is_none")]
     max_completion_tokens: Option<u64>,
-    /// Passed straight through; its shape already matches OpenRouter's API.
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<&'a ReasoningConfig>,
     stream: bool,
@@ -198,7 +197,6 @@ struct StreamChunkChoice {
 struct StreamChunkDelta {
     #[serde(default)]
     content: Option<String>,
-    /// Reasoning text; streamed but not part of the assembled response.
     #[serde(default)]
     reasoning: Option<String>,
     #[serde(default)]
@@ -425,7 +423,6 @@ impl LlmCallable for OpenRouterClient {
 
                     if let Some(ref reasoning) = choice.delta.reasoning {
                         if !reasoning.is_empty() {
-                            // Transient: streamed, never accumulated.
                             let _ = chunk_tx.send(StreamDelta {
                                 reasoning: Some(reasoning.clone()),
                                 ..Default::default()
@@ -452,9 +449,6 @@ impl LlmCallable for OpenRouterClient {
                                     args_fragment = Some(args);
                                 }
                             }
-                            // Forward fragments once the id is known (first chunk),
-                            // with the resolved id+name on each so downstream needs
-                            // no index→id bookkeeping.
                             if !accum.id.is_empty() {
                                 let _ = chunk_tx.send(StreamDelta {
                                     tool_calls: vec![ToolCallChunk {

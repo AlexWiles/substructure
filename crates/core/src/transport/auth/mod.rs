@@ -23,9 +23,6 @@ pub struct AuthPrincipal {
 }
 
 impl AuthPrincipal {
-    /// Project this principal into a machine [`Caller`] — an API-key credential
-    /// trusted to act within its tenant, identified by `subject` (the key id).
-    /// `None` when no non-empty subject identifies the credential.
     pub fn machine_caller(&self) -> Option<Caller> {
         self.subject
             .as_deref()
@@ -36,9 +33,6 @@ impl AuthPrincipal {
             })
     }
 
-    /// Project this principal into a frontend [`Caller`] — an end user
-    /// authenticated via a client token, carrying its claims as `attrs`. `None`
-    /// when the token carries no subject.
     pub fn frontend_caller(&self) -> Option<Caller> {
         self.subject.clone().map(|user_id| Caller::Frontend {
             tenant_id: self.tenant_id.clone(),
@@ -47,9 +41,6 @@ impl AuthPrincipal {
         })
     }
 
-    /// Project this principal into the [`SessionOwner`] subject it represents —
-    /// the end user the work is done on behalf of. For a frontend request the
-    /// subject *is* the authenticated user. `None` when no subject is present.
     pub fn session_owner(&self) -> Option<SessionOwner> {
         self.subject.clone().map(|id| SessionOwner {
             tenant_id: self.tenant_id.clone(),

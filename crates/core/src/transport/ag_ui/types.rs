@@ -2,9 +2,6 @@ use serde::Deserialize;
 
 use crate::session::message::{Content, Message, Role};
 
-/// AG-UI [`RunAgentInput`](https://docs.ag-ui.com). Fields beyond
-/// `threadId`/`runId`/`messages` are accepted for protocol compatibility but not
-/// read here.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunAgentInput {
@@ -39,13 +36,8 @@ pub struct AgUiMessage {
     pub tool_call_id: Option<String>,
 }
 
-/// What a `RunAgentInput` asks the engine to do, derived from its trailing
-/// messages.
 pub enum AgUiInput {
-    /// Start a new turn from this user message.
     UserTurn(Message),
-    /// Resume the suspended turn by completing these client tool calls. All
-    /// parallel results must be submitted, not just the last.
     ToolResults(Vec<ToolResultItem>),
 }
 
@@ -55,11 +47,6 @@ pub struct ToolResultItem {
 }
 
 impl RunAgentInput {
-    /// Classify the run from its trailing messages: a contiguous block of
-    /// trailing `tool` messages is a resume (every parallel result included);
-    /// otherwise it's a new turn from the last user message. The worker owns
-    /// history, so we never replay the whole `messages` array.
-    ///
     /// Trailing `reasoning` messages are skipped — CopilotKit echoes the
     /// transient reasoning back after the tool result, which would otherwise
     /// mask the tool block and look like a fresh user turn.
@@ -80,13 +67,12 @@ impl RunAgentInput {
             }
         }
         if !results.is_empty() {
-            results.reverse(); // back to call order
+            results.reverse();
             return Some(AgUiInput::ToolResults(results));
         }
         self.last_user_message().map(AgUiInput::UserTurn)
     }
 
-    /// The last user-authored message, mapped to an engine [`Message`].
     pub fn last_user_message(&self) -> Option<Message> {
         self.messages
             .iter()
@@ -162,7 +148,6 @@ mod tests {
 
     #[test]
     fn classify_tool_result_with_trailing_reasoning() {
-        // A trailing reasoning message must not mask the tool result.
         let input: RunAgentInput = serde_json::from_value(json!({
             "threadId": "t1", "runId": "r2",
             "messages": [
@@ -187,7 +172,6 @@ mod tests {
 
     #[test]
     fn classify_mixed_parallel_batch_collects_all_trailing_results() {
-        // A worker + client tool batch: classify collects both in call order.
         let input: RunAgentInput = serde_json::from_value(json!({
             "threadId": "t1", "runId": "r2",
             "messages": [
@@ -235,7 +219,6 @@ mod tests {
 
     #[test]
     fn classify_collects_all_trailing_tool_results() {
-        // Parallel frontend tools: the whole trailing block is returned, in call order.
         let input: RunAgentInput = serde_json::from_value(json!({
             "threadId": "t1", "runId": "r2",
             "messages": [
@@ -257,7 +240,6 @@ mod tests {
 
     #[test]
     fn classify_user_turn_when_trailing_message_not_tool() {
-        // Only a trailing block of tool messages counts as a resume.
         let input: RunAgentInput = serde_json::from_value(json!({
             "threadId": "t1", "runId": "r3",
             "messages": [

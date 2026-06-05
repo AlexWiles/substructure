@@ -56,8 +56,6 @@ async fn worker_auth_middleware(
 ) -> Response {
     match state.auth.resolve(request.headers()).await {
         Ok(principal) => {
-            // The worker transport authenticates machines (api-key). Resolve the
-            // caller once here so handlers receive a ready `Caller`.
             let Some(caller) = principal.machine_caller() else {
                 return (
                     StatusCode::FORBIDDEN,

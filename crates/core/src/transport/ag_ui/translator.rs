@@ -10,11 +10,8 @@ use crate::llm::TokenDelta;
 use crate::session::events::{EventPayload, ToolHandler};
 
 struct ToolBatch {
-    /// Client tool calls not yet seen as `ToolCallRequested`.
     pending_client_tool_calls: HashSet<String>,
-    /// Worker tool calls awaiting their result.
     pending_worker_tool_calls: HashSet<String>,
-    /// Whether the batch has a client tool (so the turn yields to the browser).
     has_client: bool,
 }
 
@@ -26,40 +23,18 @@ impl ToolBatch {
     }
 }
 
-/// Translates substructure session events + token deltas into the AG-UI event
-/// sequence. Stateful: tracks open `TEXT_MESSAGE` / `TOOL_CALL` / `REASONING`
-/// brackets so every `*_START` is matched by a `*_END` before any terminal
-/// event — AG-UI clients are strict state machines.
 pub struct AgUiTranslator {
     thread_id: String,
     run_id: String,
-    /// The engine turn this run follows. Learned from `turn.started`, or adopted
-    /// from the first token delta on a resumed turn (which emits no
-    /// `turn.started`). The engine turn id need not equal the client `runId`.
     turn_id: Option<String>,
-    /// call_ids with an open `TEXT_MESSAGE`.
     open_text: HashSet<String>,
-    /// call_ids that produced a text delta, so the final `llm.call.completed`
-    /// content is not also synthesized into a message.
     streamed_calls: HashSet<String>,
-    /// call_ids with an open reasoning block.
     open_reasoning: HashSet<String>,
-    /// tool_call_ids whose START/ARGS already streamed from deltas, so the later
-    /// `tool.call.requested` only closes the bracket.
     streamed_tool_calls: HashSet<String>,
-    /// Streamed tool_call_ids that emitted a non-empty ARGS fragment. If none
-    /// streamed (e.g. a no-arg tool), the close step emits the args once.
     streamed_tool_call_args: HashSet<String>,
-    /// tool_call_ids already finalized by `tool.call.requested`; late delta
-    /// fragments for them are dropped (re-opening would reset the client's args).
     closed_tool_calls: HashSet<String>,
-    /// The current llm `call_id`, used as a tool call's `parentMessageId` so the
-    /// client binds it to a stable assistant message from the moment it appears.
     current_call_id: Option<String>,
-    /// tool_call_ids mid-bracket, for the close-all finalizer.
     open_tools: HashSet<String>,
-    /// Tool calls of the current assistant message; the run yields to the browser
-    /// only once the whole batch is on the wire (see [`ToolBatch`]).
     batch: Option<ToolBatch>,
     pub terminated: bool,
 }
@@ -83,7 +58,6 @@ impl AgUiTranslator {
         }
     }
 
-    /// The opening `RUN_STARTED`. Call once before the event loop.
     pub fn start(&self) -> Vec<AgUiEvent> {
         vec![AgUiEvent::RunStarted {
             thread_id: self.thread_id.clone(),
@@ -95,8 +69,6 @@ impl AgUiTranslator {
         if self.terminated {
             return vec![];
         }
-        // Scope the session-wide delta transport to this run's turn; adopt the
-        // turn id from the first delta on a resumed turn.
         match (&self.turn_id, &delta.turn_id) {
             (Some(known), Some(d)) if known != d => return vec![],
             (None, Some(d)) => self.turn_id = Some(d.clone()),
@@ -104,8 +76,6 @@ impl AgUiTranslator {
         }
         let mut out = Vec::new();
 
-        // Reasoning gets its own message id (distinct from the answer's call_id)
-        // so clients render it as a separate message.
         if let Some(reasoning) = delta.reasoning {
             if !reasoning.is_empty() {
                 let rid = reasoning_id(&delta.call_id);
@@ -149,8 +119,6 @@ impl AgUiTranslator {
             });
         }
 
-        // Tool-call args stream too: first fragment carries id (+ name) and opens
-        // the bracket; the matching `tool.call.requested` closes it (see `on_event`).
         for tc in delta.tool_calls {
             if self.closed_tool_calls.contains(&tc.id) {
                 continue;
@@ -191,8 +159,6 @@ impl AgUiTranslator {
                 vec![]
             }
             EventPayload::LlmCallCompleted(c) => {
-                // Record the response's tool calls so a client-tool yield waits
-                // for the whole batch (see `ToolBatch`).
                 let ids: HashSet<String> = c
                     .response
                     .tool_calls
@@ -207,13 +173,9 @@ impl AgUiTranslator {
                 self.on_llm_completed(c.call_id, c.response.content)
             }
             EventPayload::ToolCallRequested(t) => {
-                // If args already streamed, just close the bracket; otherwise
-                // emit the whole call now.
                 let mut out = if self.streamed_tool_calls.remove(&t.tool_call_id) {
                     self.open_tools.remove(&t.tool_call_id);
                     let mut closed = Vec::new();
-                    // Nothing streamed for the args (e.g. a no-arg tool) → emit
-                    // the complete args once so the client ends with valid JSON.
                     if !self.streamed_tool_call_args.remove(&t.tool_call_id)
                         && !t.arguments.is_empty()
                     {
@@ -244,9 +206,6 @@ impl AgUiTranslator {
                 };
                 self.closed_tool_calls.insert(t.tool_call_id.clone());
                 let is_client = t.handler == ToolHandler::Client;
-                // Yield only once the whole batch is on the wire (every client
-                // tool announced, every worker tool resolved). With no batch
-                // context (a resumed stream), a lone client call yields at once.
                 let yield_now = if let Some(batch) = self.batch.as_mut() {
                     if batch.pending_client_tool_calls.remove(&t.tool_call_id) {
                         if is_client {
@@ -270,7 +229,6 @@ impl AgUiTranslator {
             }
             EventPayload::ToolCallCompleted(t) => {
                 let mut out = vec![tool_result(t.tool_call_id.clone(), t.result)];
-                // A worker result may be the last thing the batch waits on.
                 let yield_now = if let Some(batch) = self.batch.as_mut() {
                     batch.pending_worker_tool_calls.remove(&t.tool_call_id);
                     batch.is_yield_point()
@@ -312,7 +270,6 @@ impl AgUiTranslator {
     }
 
     fn on_llm_completed(&mut self, call_id: String, content: Option<String>) -> Vec<AgUiEvent> {
-        // A reasoning-only response leaves the block open — close it now.
         let mut out = self.close_reasoning(&call_id);
         if self.open_text.remove(&call_id) {
             out.push(AgUiEvent::TextMessageEnd {
@@ -323,7 +280,6 @@ impl AgUiTranslator {
         if self.streamed_calls.contains(&call_id) {
             return out;
         }
-        // Non-streaming: synthesize the whole message from the final content.
         if let Some(text) = content {
             if !text.is_empty() {
                 out.push(AgUiEvent::TextMessageStart {
@@ -356,8 +312,6 @@ impl AgUiTranslator {
         }
     }
 
-    /// Close open brackets and emit `RUN_FINISHED` for a turn that yielded to the
-    /// browser on a client tool. The result re-enters on the resumed run.
     fn finish_client_yield(&mut self) -> Vec<AgUiEvent> {
         let mut out = self.close_all_open();
         out.push(AgUiEvent::RunFinished {
@@ -370,7 +324,6 @@ impl AgUiTranslator {
         out
     }
 
-    /// Close every open bracket in a deterministic order.
     fn close_all_open(&mut self) -> Vec<AgUiEvent> {
         let mut out = Vec::new();
         let mut reasoning: Vec<String> = self.open_reasoning.drain().collect();
@@ -395,7 +348,6 @@ impl AgUiTranslator {
         out
     }
 
-    /// Close open brackets and emit a terminal `RUN_ERROR`.
     pub fn finalize_error(&mut self, message: String) -> Vec<AgUiEvent> {
         if self.terminated {
             return vec![];
@@ -420,8 +372,6 @@ fn tool_result(tool_call_id: String, content: String) -> AgUiEvent {
     }
 }
 
-/// Spawn the translation task and return the SSE receiver. The task ends on the
-/// first terminal event, when the event channel closes, or on shutdown.
 pub fn run_ag_ui_translation(
     mut event_rx: mpsc::Receiver<Event>,
     mut delta_rx: mpsc::Receiver<TokenDelta>,
@@ -490,7 +440,6 @@ pub fn run_ag_ui_translation(
                             }
                         }
                     }
-                    // The delta transport outlives any single turn.
                     None => continue,
                 },
             }
@@ -625,9 +574,7 @@ mod tests {
                 "REASONING_MESSAGE_CONTENT"
             ]
         );
-        // Reasoning carries its own message id, distinct from the answer's call id.
         assert_eq!(a[0]["messageId"], "c1-reasoning");
-        // AG-UI's client Zod schema requires this literal.
         assert_eq!(a[1]["role"], "reasoning");
         assert_eq!(a[2]["delta"], "Let me think");
 
@@ -655,8 +602,6 @@ mod tests {
 
     #[test]
     fn leading_empty_text_does_not_preempt_reasoning() {
-        // The provider's empty priming chunk must not open the text message ahead
-        // of reasoning, which would render the thinking below the answer.
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
 
         let prime = vals(t.on_delta(delta("c1", "r1", "")));
@@ -751,8 +696,6 @@ mod tests {
 
     #[test]
     fn streamed_tool_with_no_args_emits_complete_on_close() {
-        // A no-arg tool that streamed only id+name: the close emits the complete
-        // args once so the client gets valid JSON, not an empty argsText.
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
         let a = vals(t.on_delta(tool_args_delta(
             "c1",
@@ -770,8 +713,6 @@ mod tests {
 
     #[test]
     fn late_tool_fragment_after_requested_is_ignored() {
-        // A fragment after the call was finalized must be dropped — re-opening it
-        // would reset the client's accumulated args.
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
         let _ = t.on_delta(tool_args_delta("c1", "r1", "call-1", Some("f"), Some("{}")));
         let _ = t.on_event(llm_completed_with_tools("c1", &["call-1"]));
@@ -814,8 +755,6 @@ mod tests {
 
     #[test]
     fn resumed_turn_adopts_turn_id_from_first_delta() {
-        // A continuation run (runId r2) resuming turn r1 has no turn.started, so
-        // the first delta's turn id is adopted, then other turns are rejected.
         let mut t = AgUiTranslator::new("t1".into(), "r2".into());
         let a = vals(t.on_delta(delta("c3", "r1", "ok")));
         assert_eq!(kinds(&a), ["TEXT_MESSAGE_START", "TEXT_MESSAGE_CONTENT"]);
@@ -866,8 +805,6 @@ mod tests {
 
     #[test]
     fn tool_call_carries_parent_message_id_from_llm_call() {
-        // The tool call's `parentMessageId` must be the producing llm call_id so
-        // the client binds it to a stable assistant message (no phantom branch).
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
         t.on_event(ev(json!({
             "type": "llm.call.requested", "call_id": "c9", "attempt": 0,
@@ -882,7 +819,6 @@ mod tests {
 
     #[test]
     fn tool_call_without_llm_call_omits_parent_message_id() {
-        // With no llm.call.requested seen, omit the field rather than emit a bogus parent.
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
         let s = vals(t.on_event(tool_requested("x", "f", "{}", "worker")));
         assert!(s[0].get("parentMessageId").is_none());
@@ -939,8 +875,6 @@ mod tests {
 
     #[test]
     fn parallel_client_tools_yield_once_after_whole_batch() {
-        // Both client tools must be announced before the run yields, or the
-        // browser never sees the second and the turn deadlocks.
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
         let _ = t.on_event(llm_completed_with_tools("c1", &["a", "b"]));
 
@@ -968,8 +902,6 @@ mod tests {
 
     #[test]
     fn mixed_batch_waits_for_worker_result_before_yielding() {
-        // The worker tool's RESULT must be delivered before the run yields on the
-        // client tool.
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
         let _ = t.on_event(llm_completed_with_tools("c1", &["w", "c"]));
 
@@ -995,7 +927,6 @@ mod tests {
 
     #[test]
     fn pure_worker_batch_does_not_yield() {
-        // No client tool → the run ends only at turn.completed.
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
         let _ = t.on_event(llm_completed_with_tools("c1", &["w1", "w2"]));
         let _ = t.on_event(tool_requested("w1", "f", "{}", "worker"));

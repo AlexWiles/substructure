@@ -22,9 +22,7 @@ pub struct SessionSubscriptionSpec {
 
 #[derive(Debug, Clone)]
 pub enum SubscriptionScope {
-    /// Observe a single turn; the stream auto-closes when it completes.
     Turn { turn_id: String },
-    /// Observe every event in the session.
     All,
 }
 

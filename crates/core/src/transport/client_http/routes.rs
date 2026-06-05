@@ -155,7 +155,6 @@ pub async fn stream_session_events(
     let root_session_id = session_id.clone();
     let scope_turn_id = params.turn_id.clone();
 
-    // Subscribe before the caller is moved into the spec.
     let delta_rx = state
         .runtime
         .subscribe_token_deltas(&caller, &root_session_id)
@@ -183,11 +182,6 @@ pub async fn stream_session_events(
         .into_response()
 }
 
-/// `POST /api/client/ag-ui/agents/{agent_id}/run` — native AG-UI endpoint.
-///
-/// Accepts a [`RunAgentInput`], starts (or resumes) a turn for the path-selected
-/// agent, and streams the turn's events back as the AG-UI SSE sequence. Identity
-/// is stamped from the authenticated principal, never from the request body.
 pub async fn ag_ui_run(
     State(state): State<ClientHttpState>,
     Extension(caller): Extension<Caller>,
@@ -200,12 +194,8 @@ pub async fn ag_ui_run(
         return (StatusCode::BAD_REQUEST, Json(body)).into_response();
     };
 
-    // threadId maps onto the session id; runId need not equal the engine turn id.
     let session_id = input.thread_id.clone();
 
-    // Subscribe live to the whole session BEFORE acting, so the translator sees
-    // every event the submit/resume produces. The runtime pre-authorizes from the
-    // spec's requester: a non-owner is rejected here, before any turn is submitted.
     let spec = SessionSubscriptionSpec {
         scope: SubscriptionScope::All,
         caller: caller.clone(),
@@ -280,7 +270,6 @@ pub async fn ag_ui_run(
         }
     };
     if let Err(e) = submit {
-        // The SSE body has not been opened yet, so a plain HTTP error is fine.
         return runtime_error_response(e);
     }
 
@@ -297,9 +286,6 @@ pub async fn ag_ui_run(
         .into_response()
 }
 
-/// `POST /api/client/ag-ui/agents/{agent_id}/connect` — replays a thread's history
-/// as an AG-UI event stream (`RUN_STARTED` → `MESSAGES_SNAPSHOT` → `RUN_FINISHED`),
-/// the standard "load thread" response a client expects on (re)connect.
 pub async fn ag_ui_connect(
     State(state): State<ClientHttpState>,
     Extension(caller): Extension<Caller>,

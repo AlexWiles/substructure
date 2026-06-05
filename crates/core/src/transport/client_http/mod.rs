@@ -23,8 +23,6 @@ pub struct ClientHttpState {
 }
 
 pub fn router(state: ClientHttpState) -> Router {
-    // CORS applies only to this browser-facing client API; the worker and admin
-    // surfaces are server-to-server (api-key), where CORS is irrelevant.
     // `allow_headers` mirrors the request rather than sending `*`: per the Fetch
     // spec, `*` does not cover `Authorization`, so browsers would strip the bearer
     // token on cross-origin requests.
@@ -73,9 +71,6 @@ async fn client_auth_middleware(
 ) -> Response {
     match state.auth.resolve(request.headers()).await {
         Ok(principal) => {
-            // Every client route acts as the authenticated end user, so resolve the
-            // frontend caller (and the session owner it maps to) once here. Handlers
-            // receive a ready `Caller`/`SessionOwner` and never re-check the subject.
             let (Some(caller), Some(owner)) =
                 (principal.frontend_caller(), principal.session_owner())
             else {

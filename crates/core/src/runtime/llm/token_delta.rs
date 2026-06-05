@@ -21,10 +21,8 @@ pub struct TokenDelta {
     pub seq: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
-    /// Reasoning/thinking text fragment (transient; never persisted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
-    /// Incremental tool-call fragments for this delta (see [`ToolCallChunk`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallChunk>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
