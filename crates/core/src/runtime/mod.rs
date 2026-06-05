@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::providers::memory_queue::TaskQueue;
 use aggregate::{execute, Caller, ConflictRetry, ExecuteError, ExecuteInput};
-use event_store::EventStore;
+use event_store::{EventStore, StoreError};
 use identity::ClientIdentity;
 use llm::{
     spawn_llm_dispatch_processor, spawn_llm_task_executor, LlmProviderTrait, LlmTask, TokenDelta,
@@ -22,7 +22,7 @@ use session::index::{
     spawn_session_index_processor, SessionFilter, SessionIndexStore, SessionPage,
 };
 use session::state::SessionState;
-use session::subscriptions::SessionSubscriptionSpec;
+use session::subscriptions::{SessionRequester, SessionSubscriptionSpec};
 use span::SpanContext;
 use sub_agent::{spawn_sub_agent_dispatch_processor, spawn_sub_agent_task_executor, SubAgentTask};
 use wake::{spawn_wake_dispatcher, spawn_wake_processor, WakeScheduleStore};
@@ -230,10 +230,48 @@ impl Runtime {
         &self,
         spec: SessionSubscriptionSpec,
         sequence_after: Option<u64>,
-    ) -> mpsc::Receiver<event_store::Event> {
-        self.session_subscriptions
+    ) -> Result<mpsc::Receiver<event_store::Event>, RuntimeError> {
+        self.authorize_session_read(spec.tenant_id(), spec.root_session_id(), spec.requester())
+            .await?;
+        Ok(self
+            .session_subscriptions
             .stream(spec, sequence_after)
-            .await
+            .await)
+    }
+
+    /// Authorize a read of a session's events — the shared business-logic
+    /// ownership check for every read path (live streams and history snapshots).
+    /// An end-user identity may only read a session they own (its creating
+    /// `identity.id` matches); privileged callers are unrestricted within the
+    /// tenant. An uncreated session has no owner yet, so the read is allowed (it
+    /// is simply empty, and the first turn binds the session to its caller).
+    pub async fn authorize_session_read(
+        &self,
+        tenant_id: &str,
+        session_id: &str,
+        requester: &SessionRequester,
+    ) -> Result<(), RuntimeError> {
+        let SessionRequester::Identity { id } = requester else {
+            return Ok(());
+        };
+
+        match self.store.load(tenant_id, session_id).await {
+            Ok(snapshot) => {
+                let agg: aggregate::Aggregate<SessionState> = serde_json::from_value(snapshot.data)
+                    .map_err(|e| RuntimeError::Internal(e.to_string()))?;
+
+                let owner = agg.state.identity.as_ref().and_then(|i| i.id.as_deref());
+
+                if owner == Some(id.as_str()) {
+                    Ok(())
+                } else {
+                    Err(RuntimeError::Session(SessionError::SessionAccessDenied))
+                }
+            }
+            // An uncreated session has no owner yet — nothing to leak.
+            Err(StoreError::StreamNotFound) => Ok(()),
+            Err(e) => Err(RuntimeError::Internal(e.to_string())),
+        }
     }
 
     pub async fn subscribe_token_deltas(
@@ -286,6 +324,30 @@ impl Runtime {
             .query_events(filter)
             .await
             .map_err(|e| RuntimeError::Internal(e.to_string()))
+    }
+
+    /// Authorized read of a session's full event history, tenant-scoped.
+    ///
+    /// The snapshot twin of [`Runtime::stream`]: it runs the same
+    /// `requester`-driven ownership gate before reading, so the authorization and
+    /// the tenant scoping each live in exactly one place and there is no un-gated
+    /// path to a session's history. Transport hands in `(tenant, session,
+    /// requester)` and gets back authorized events to project; it never assembles
+    /// an `EventFilter` or pairs a separate authorize call by hand.
+    pub async fn read_session_events(
+        &self,
+        tenant_id: &str,
+        session_id: &str,
+        requester: &SessionRequester,
+    ) -> Result<Vec<event_store::Event>, RuntimeError> {
+        self.authorize_session_read(tenant_id, session_id, requester)
+            .await?;
+        let filter = event_store::EventFilter {
+            aggregate_id: Some(session_id.to_string()),
+            tenant_id: Some(tenant_id.to_string()),
+            ..Default::default()
+        };
+        self.get_session_events(&filter).await
     }
 
     pub async fn submit_decision(&self, input: SubmitDecision) -> Result<(), RuntimeError> {

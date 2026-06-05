@@ -1,12 +1,15 @@
 // assistant-ui hydrates a thread from a history adapter, NOT from the agent's
-// `initialMessages` (its runtime keeps its own message list). So we fetch the
-// session's AG-UI messages, shape them as ThreadMessageLike, and hand them to
+// `initialMessages` (its runtime keeps its own message list). Its AG-UI runtime
+// also only folds AG-UI messages for the live MESSAGES_SNAPSHOT *event* — that
+// fold isn't exported for the adapter path — so we fetch the session's snapshot
+// (the shared /connect endpoint) and do the Camp A→B fold ourselves: shape the
+// messages as ThreadMessageLike and hand them to
 // ExportedMessageRepository.fromBranchableArray (which does the ThreadMessage
 // conversion). `load()` runs once when the runtime mounts for a thread.
 
 import { ExportedMessageRepository, type ThreadHistoryAdapter, type ThreadMessageLike } from "@assistant-ui/react";
 
-import type { AgUiMessage } from "./history";
+import { fetchSessionSnapshot, type AgUiMessage } from "./history";
 import { setSessionTitle } from "./sessions";
 import type { BrowserSession } from "./token";
 
@@ -84,24 +87,10 @@ function toThreadMessages(messages: AgUiMessage[]): Draft[] {
     return out;
 }
 
-async function fetchMessages(session: BrowserSession, sessionId: string): Promise<AgUiMessage[]> {
-    if (!sessionId) return [];
-    try {
-        const res = await fetch(`${session.substructureUrl}/api/client/ag-ui/sessions/${sessionId}/messages`, {
-            headers: { Authorization: `Bearer ${session.token}` },
-        });
-        if (!res.ok) return [];
-        const data: { messages?: AgUiMessage[] } = await res.json();
-        return data.messages ?? [];
-    } catch {
-        return [];
-    }
-}
-
 export function makeAssistantUiHistory(session: BrowserSession, sessionId: string): ThreadHistoryAdapter {
     return {
         async load() {
-            const raw = await fetchMessages(session, sessionId);
+            const raw = await fetchSessionSnapshot(session, sessionId);
             const firstUser = raw.find((m) => m.role === "user");
             if (firstUser?.content) setSessionTitle(sessionId, firstUser.content);
             const drafts = toThreadMessages(raw);

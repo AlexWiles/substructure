@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::identity::ClientIdentity;
 use crate::session::command::SessionError;
-use crate::session::subscriptions::SessionSubscriptionSpec;
+use crate::session::subscriptions::{SessionRequester, SessionSubscriptionSpec};
 use crate::span::SpanContext;
 use crate::transport::auth::AuthPrincipal;
 use crate::transport::session_sse::merge_session_stream;
@@ -291,19 +291,31 @@ pub async fn stream_session_events(
 ) -> Response {
     let root_session_id = session_id.clone();
     let scope_turn_id = params.turn_id.clone();
+    // The worker transport is a privileged machine caller: unrestricted.
     let spec = match params.turn_id {
         Some(turn_id) => SessionSubscriptionSpec::Turn {
             tenant_id: principal.tenant_id.clone(),
             root_session_id: session_id,
             turn_id,
+            requester: SessionRequester::Privileged,
         },
         None => SessionSubscriptionSpec::All {
             tenant_id: principal.tenant_id.clone(),
             root_session_id: session_id,
+            requester: SessionRequester::Privileged,
         },
     };
 
-    let event_rx = state.runtime.stream(spec, params.sequence_after).await;
+    let event_rx = match state.runtime.stream(spec, params.sequence_after).await {
+        Ok(rx) => rx,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
     let delta_rx = state
         .runtime
         .subscribe_token_deltas(&principal.tenant_id, &root_session_id)

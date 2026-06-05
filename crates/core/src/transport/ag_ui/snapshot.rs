@@ -5,28 +5,11 @@
 //! the whole conversation. The snapshot hydrates a client thread on (re)connect;
 //! it carries no streaming deltas.
 
-use serde::Serialize;
-
 use crate::event_store::Event;
 use crate::session::events::EventPayload;
 use crate::session::message::{Content, ContentPart, Role};
 
 use super::events::{AgUiEvent, SnapshotMessage};
-
-/// JSON body of the history (hydration) endpoints: `{ "messages": [...] }`.
-/// Drops straight into an AG-UI `HttpAgent`'s `initialMessages`.
-#[derive(Debug, Clone, Serialize)]
-pub struct MessageHistory {
-    pub messages: Vec<SnapshotMessage>,
-}
-
-/// The hydration body for a session — its `message.new` events folded into the
-/// AG-UI message list.
-pub fn message_history(events: &[Event]) -> MessageHistory {
-    MessageHistory {
-        messages: session_messages(events),
-    }
-}
 
 /// Fold a session's persisted events into its AG-UI message list, in order. Each
 /// message's id is the id of the `message.new` event that recorded it — stable
@@ -270,13 +253,5 @@ mod tests {
     #[test]
     fn empty_session_yields_empty_message_list() {
         assert!(session_messages(&[]).is_empty());
-    }
-
-    #[test]
-    fn message_history_serializes_to_messages_object() {
-        let events = vec![message_event(1, user("hi"))];
-        let body = serde_json::to_value(message_history(&events)).unwrap();
-        assert_eq!(body["messages"][0]["role"], "user");
-        assert_eq!(body["messages"][0]["content"], "hi");
     }
 }

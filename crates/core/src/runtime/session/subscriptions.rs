@@ -13,27 +13,41 @@ pub struct SessionSubscriptions {
     store: Arc<dyn EventStore>,
 }
 
+/// Who is observing a session — carried on the spec so the ownership check
+/// travels with the subscription request and the runtime can enforce it before
+/// any events are yielded.
+#[derive(Debug, Clone)]
+pub enum SessionRequester {
+    /// A specific end-user identity. May only observe sessions whose creating
+    /// identity matches `id` — so one identity can't read another's session.
+    Identity { id: String },
+    /// Machine, system, or admin caller. Unrestricted within the tenant.
+    Privileged,
+}
+
 #[derive(Debug, Clone)]
 pub enum SessionSubscriptionSpec {
     Turn {
         tenant_id: String,
         root_session_id: String,
         turn_id: String,
+        requester: SessionRequester,
     },
     All {
         tenant_id: String,
         root_session_id: String,
+        requester: SessionRequester,
     },
 }
 
 impl SessionSubscriptionSpec {
-    fn tenant_id(&self) -> &str {
+    pub(crate) fn tenant_id(&self) -> &str {
         match self {
             Self::Turn { tenant_id, .. } | Self::All { tenant_id, .. } => tenant_id,
         }
     }
 
-    fn root_session_id(&self) -> &str {
+    pub(crate) fn root_session_id(&self) -> &str {
         match self {
             Self::Turn {
                 root_session_id, ..
@@ -41,6 +55,12 @@ impl SessionSubscriptionSpec {
             | Self::All {
                 root_session_id, ..
             } => root_session_id,
+        }
+    }
+
+    pub(crate) fn requester(&self) -> &SessionRequester {
+        match self {
+            Self::Turn { requester, .. } | Self::All { requester, .. } => requester,
         }
     }
 

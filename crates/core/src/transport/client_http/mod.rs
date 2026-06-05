@@ -44,10 +44,6 @@ pub fn router(state: ClientHttpState) -> Router {
             "/api/client/ag-ui/agents/{agent_id}/connect",
             post(routes::ag_ui_connect),
         )
-        .route(
-            "/api/client/ag-ui/sessions/{session_id}/messages",
-            get(routes::ag_ui_session_messages),
-        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             client_auth_middleware,

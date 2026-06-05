@@ -8,12 +8,11 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use tokio_stream::wrappers::ReceiverStream;
 
-use uuid::Uuid;
-
 use crate::event_store::{AggregateSort, EventFilter};
 use crate::session::index::{SessionCursor, SessionFilter};
-use crate::session::subscriptions::SessionSubscriptionSpec;
-use crate::transport::ag_ui::snapshot::{message_history, snapshot_events};
+use crate::session::subscriptions::{SessionRequester, SessionSubscriptionSpec};
+use crate::transport::ag_ui::snapshot::snapshot_events;
+use crate::transport::ag_ui::types::RunAgentInput;
 use crate::transport::auth::AuthPrincipal;
 
 use super::AdminHttpState;
@@ -129,11 +128,13 @@ pub struct SessionEventsParams {
 
 pub async fn get_session_events(
     State(state): State<AdminHttpState>,
+    Extension(principal): Extension<AuthPrincipal>,
     Path(session_id): Path<String>,
     Query(params): Query<SessionEventsParams>,
 ) -> impl IntoResponse {
     let filter = EventFilter {
         aggregate_id: Some(session_id.clone()),
+        tenant_id: Some(principal.tenant_id.clone()),
         sequence_after: params.sequence_after,
         limit: params.limit,
         ..Default::default()
@@ -154,13 +155,24 @@ pub async fn stream_session_events(
     Path(session_id): Path<String>,
     Query(params): Query<SessionEventsParams>,
 ) -> Response {
+    // Admin is a privileged operator role: unrestricted within its tenant.
     let spec = SessionSubscriptionSpec::All {
         tenant_id: principal.tenant_id,
         root_session_id: session_id,
+        requester: SessionRequester::Privileged,
     };
     // Admin endpoint defaults to full-history replay (sequence_after defaults to 0).
     let sequence_after = Some(params.sequence_after.unwrap_or(0));
-    let rx = state.runtime.stream(spec, sequence_after).await;
+    let rx = match state.runtime.stream(spec, sequence_after).await {
+        Ok(rx) => rx,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
 
     let stream = ReceiverStream::new(rx)
         .take_until(state.shutdown.clone().cancelled_owned())
@@ -180,60 +192,43 @@ pub async fn stream_session_events(
         .into_response()
 }
 
-/// `GET /api/admin/sessions/{session_id}/ag-ui/messages` — the session's history
-/// as an AG-UI message list, for hydrating an admin console (e.g. as `HttpAgent`'s
-/// `initialMessages`). Tenant-scoped to any session in the tenant. Read-only.
-pub async fn session_ag_ui_messages(
+/// `POST /api/admin/sessions/{session_id}/ag-ui/connect` — replays a session's
+/// history as an AG-UI `RUN_STARTED → MESSAGES_SNAPSHOT → RUN_FINISHED` stream,
+/// the admin twin of the client `connect` endpoint. A Chat UI hydrates an admin
+/// view of a session through this exactly as a client hydrates its own thread:
+/// assistant-ui folds the snapshot, CopilotKit's `connectAgent` POSTs here. Admin
+/// browses by session, so the id is in the path; the posted `RunAgentInput`'s
+/// `runId` just labels the synthetic snapshot run. Tenant-scoped. Read-only.
+pub async fn connect_session_ag_ui(
     State(state): State<AdminHttpState>,
     Extension(principal): Extension<AuthPrincipal>,
     Path(session_id): Path<String>,
+    Json(input): Json<RunAgentInput>,
 ) -> Response {
-    let events = match load_session_events(&state, &principal, session_id).await {
-        Ok(events) => events,
-        Err(response) => return response,
-    };
-    Json(message_history(&events)).into_response()
-}
-
-/// `GET /api/admin/sessions/{session_id}/ag-ui/snapshot` — the same history as an
-/// SSE `RUN_STARTED → MESSAGES_SNAPSHOT → RUN_FINISHED` sequence, for replaying a
-/// session into a stock AG-UI client. Read-only.
-pub async fn stream_session_ag_ui(
-    State(state): State<AdminHttpState>,
-    Extension(principal): Extension<AuthPrincipal>,
-    Path(session_id): Path<String>,
-) -> Response {
-    let events = match load_session_events(&state, &principal, session_id.clone()).await {
-        Ok(events) => events,
-        Err(response) => return response,
-    };
-    let run_id = Uuid::now_v7().to_string();
-    let frames = snapshot_events(session_id, run_id, &events)
-        .into_iter()
-        .map(|e| Ok::<_, std::convert::Infallible>(e.to_sse()));
-    Sse::new(futures_util::stream::iter(frames)).into_response()
-}
-
-/// Load a session's events, tenant-scoped. On error, returns the response to send.
-async fn load_session_events(
-    state: &AdminHttpState,
-    principal: &AuthPrincipal,
-    session_id: String,
-) -> Result<Vec<crate::event_store::Event>, Response> {
-    let filter = EventFilter {
-        aggregate_id: Some(session_id),
-        tenant_id: Some(principal.tenant_id.clone()),
-        ..Default::default()
-    };
-    state
+    // Admin is privileged within its tenant: no ownership gate, but the read is
+    // still tenant-scoped — the runtime owns both decisions.
+    let events = match state
         .runtime
-        .get_session_events(&filter)
+        .read_session_events(
+            &principal.tenant_id,
+            &session_id,
+            &SessionRequester::Privileged,
+        )
         .await
-        .map_err(|e| {
-            (
+    {
+        Ok(events) => events,
+        Err(e) => {
+            return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": e.to_string()})),
             )
                 .into_response()
-        })
+        }
+    };
+    let frames = snapshot_events(session_id, input.run_id, &events)
+        .into_iter()
+        .map(|e| Ok::<_, std::convert::Infallible>(e.to_sse()));
+    Sse::new(futures_util::stream::iter(frames))
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }

@@ -1,6 +1,7 @@
-// Loads a session's history from the engine's AG-UI hydration endpoint so a
-// thread can be (re)opened with its past messages. The shape returned matches
-// AG-UI's message union, so it drops straight into HttpAgent's `initialMessages`.
+// Loads a session's history from the engine's AG-UI connect endpoint, the single
+// hydration path shared by both chat clients. `/connect` streams
+// RUN_STARTED → MESSAGES_SNAPSHOT → RUN_FINISHED; we read the snapshot's message
+// list out of that (small, finite) SSE response.
 
 import { useEffect, useState } from "react";
 
@@ -15,6 +16,39 @@ export type AgUiMessage = {
     toolCallId?: string;
 };
 
+/** Fetch a session's history as the AG-UI message list the engine persists. */
+export async function fetchSessionSnapshot(session: BrowserSession, sessionId: string): Promise<AgUiMessage[]> {
+    if (!sessionId) return [];
+    try {
+        const res = await fetch(`${session.substructureUrl}/api/client/ag-ui/agents/${session.agentId}/connect`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${session.token}`, "Content-Type": "application/json" },
+            // /connect reads only threadId; runId just labels the synthetic snapshot run.
+            body: JSON.stringify({ threadId: sessionId, runId: "snapshot", messages: [] }),
+        });
+        if (!res.ok) return [];
+        return snapshotMessages(await res.text());
+    } catch {
+        return [];
+    }
+}
+
+// Pull the MESSAGES_SNAPSHOT payload out of the connect SSE. Each frame is a
+// `data: {json}` line; we want the one whose type is MESSAGES_SNAPSHOT (and skip
+// the `event:`/keep-alive lines around it).
+function snapshotMessages(sse: string): AgUiMessage[] {
+    for (const line of sse.split("\n")) {
+        if (!line.startsWith("data:")) continue;
+        try {
+            const ev = JSON.parse(line.slice(5).trim());
+            if (ev?.type === "MESSAGES_SNAPSHOT") return ev.messages ?? [];
+        } catch {
+            // non-JSON / partial line — skip
+        }
+    }
+    return [];
+}
+
 type History = { loading: boolean; messages: AgUiMessage[] };
 
 export function useSessionHistory(session: BrowserSession, sessionId: string): History {
@@ -28,25 +62,18 @@ export function useSessionHistory(session: BrowserSession, sessionId: string): H
         let cancelled = false;
         setHistory({ loading: true, messages: [] });
 
-        const url = `${session.substructureUrl}/api/client/ag-ui/sessions/${sessionId}/messages`;
-        fetch(url, { headers: { Authorization: `Bearer ${session.token}` } })
-            .then((r) => (r.ok ? r.json() : { messages: [] }))
-            .then((data: { messages?: AgUiMessage[] }) => {
-                if (cancelled) return;
-                const messages = data.messages ?? [];
-                setHistory({ loading: false, messages });
-                // Label the session by its opening question, once.
-                const firstUser = messages.find((m) => m.role === "user");
-                if (firstUser?.content) setSessionTitle(sessionId, firstUser.content);
-            })
-            .catch(() => {
-                if (!cancelled) setHistory({ loading: false, messages: [] });
-            });
+        fetchSessionSnapshot(session, sessionId).then((messages) => {
+            if (cancelled) return;
+            setHistory({ loading: false, messages });
+            // Label the session by its opening question, once.
+            const firstUser = messages.find((m) => m.role === "user");
+            if (firstUser?.content) setSessionTitle(sessionId, firstUser.content);
+        });
 
         return () => {
             cancelled = true;
         };
-    }, [session.substructureUrl, session.token, sessionId]);
+    }, [session.substructureUrl, session.token, session.agentId, sessionId]);
 
     return history;
 }

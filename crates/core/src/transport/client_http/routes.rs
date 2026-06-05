@@ -10,12 +10,11 @@ use futures_util::stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-use crate::event_store::EventFilter;
 use crate::identity::ClientIdentity;
 use crate::session::command::SessionError;
 use crate::session::decision::ClientPayload;
-use crate::session::subscriptions::SessionSubscriptionSpec;
-use crate::transport::ag_ui::snapshot::{message_history, snapshot_events};
+use crate::session::subscriptions::{SessionRequester, SessionSubscriptionSpec};
+use crate::transport::ag_ui::snapshot::snapshot_events;
 use crate::transport::ag_ui::translator::run_ag_ui_translation;
 use crate::transport::ag_ui::types::{AgUiInput, RunAgentInput};
 use crate::transport::auth::AuthPrincipal;
@@ -35,19 +34,19 @@ pub async fn submit_client_payload(
     Extension(principal): Extension<AuthPrincipal>,
     Json(req): Json<SubmitClientPayloadRequest>,
 ) -> Response {
-    let Some(user_id) = principal.subject.clone() else {
+    let Some(subject) = principal.subject.clone() else {
         let body = serde_json::json!({"error": "client subject is required"});
         return (StatusCode::FORBIDDEN, Json(body)).into_response();
     };
     let session_id = req.session_id.unwrap_or_else(|| Uuid::now_v7().to_string());
     let identity = ClientIdentity {
         tenant_id: principal.tenant_id.clone(),
-        id: Some(user_id.clone()),
+        id: Some(subject.clone()),
         metadata: std::collections::HashMap::new(),
     };
     let caller = Caller::Frontend {
         tenant_id: principal.tenant_id.clone(),
-        user_id,
+        user_id: subject,
         attrs: principal.attrs.clone(),
     };
 
@@ -83,13 +82,13 @@ pub async fn submit_tool_call_result(
     Path(session_id): Path<String>,
     Json(req): Json<SubmitToolCallResultRequest>,
 ) -> Response {
-    let Some(user_id) = principal.subject.clone() else {
+    let Some(subject) = principal.subject.clone() else {
         let body = serde_json::json!({"error": "client subject is required"});
         return (StatusCode::FORBIDDEN, Json(body)).into_response();
     };
     let caller = Caller::Frontend {
         tenant_id: principal.tenant_id.clone(),
-        user_id,
+        user_id: subject,
         attrs: principal.attrs.clone(),
     };
 
@@ -182,21 +181,33 @@ pub async fn stream_session_events(
     Path(session_id): Path<String>,
     Query(params): Query<StreamSessionEventsParams>,
 ) -> Response {
+    let Some(subject) = principal.subject.clone() else {
+        let body = serde_json::json!({"error": "client subject is required"});
+        return (StatusCode::FORBIDDEN, Json(body)).into_response();
+    };
     let root_session_id = session_id.clone();
     let scope_turn_id = params.turn_id.clone();
+    // The caller may only stream a session they own — enforced by the runtime
+    // from the spec's requester.
+    let requester = SessionRequester::Identity { id: subject };
     let spec = match params.turn_id {
         Some(turn_id) => SessionSubscriptionSpec::Turn {
             tenant_id: principal.tenant_id.clone(),
             root_session_id: session_id,
             turn_id,
+            requester,
         },
         None => SessionSubscriptionSpec::All {
             tenant_id: principal.tenant_id.clone(),
             root_session_id: session_id,
+            requester,
         },
     };
 
-    let event_rx = state.runtime.stream(spec, params.sequence_after).await;
+    let event_rx = match state.runtime.stream(spec, params.sequence_after).await {
+        Ok(rx) => rx,
+        Err(e) => return runtime_error_response(e),
+    };
     let delta_rx = state
         .runtime
         .subscribe_token_deltas(&principal.tenant_id, &root_session_id)
@@ -220,7 +231,7 @@ pub async fn ag_ui_run(
     Path(agent_id): Path<String>,
     payload: Result<Json<RunAgentInput>, JsonRejection>,
 ) -> Response {
-    let Some(user_id) = principal.subject.clone() else {
+    let Some(subject) = principal.subject.clone() else {
         let body = serde_json::json!({"error": "client subject is required"});
         return (StatusCode::FORBIDDEN, Json(body)).into_response();
     };
@@ -245,12 +256,19 @@ pub async fn ag_ui_run(
     let tenant_id = principal.tenant_id.clone();
 
     // Subscribe live to the whole session BEFORE acting, so the translator sees
-    // every event the submit/resume produces.
+    // every event the submit/resume produces. The runtime pre-authorizes from the
+    // spec's requester: a non-owner is rejected here, before any turn is submitted.
     let spec = SessionSubscriptionSpec::All {
         tenant_id: tenant_id.clone(),
         root_session_id: session_id.clone(),
+        requester: SessionRequester::Identity {
+            id: subject.clone(),
+        },
     };
-    let event_rx = state.runtime.stream(spec, None).await;
+    let event_rx = match state.runtime.stream(spec, None).await {
+        Ok(rx) => rx,
+        Err(e) => return runtime_error_response(e),
+    };
     let delta_rx = state
         .runtime
         .subscribe_token_deltas(&tenant_id, &session_id)
@@ -258,7 +276,7 @@ pub async fn ag_ui_run(
 
     let caller = Caller::Frontend {
         tenant_id: tenant_id.clone(),
-        user_id: user_id.clone(),
+        user_id: subject.clone(),
         attrs: principal.attrs.clone(),
     };
 
@@ -266,7 +284,7 @@ pub async fn ag_ui_run(
         AgUiInput::UserTurn(message) => {
             let identity = ClientIdentity {
                 tenant_id: tenant_id.clone(),
-                id: Some(user_id),
+                id: Some(subject),
                 metadata: HashMap::new(),
             };
             state
@@ -348,26 +366,6 @@ pub async fn ag_ui_run(
         .into_response()
 }
 
-/// `GET /api/client/ag-ui/sessions/{session_id}/messages` — the session's history
-/// as an AG-UI message list, for hydrating a thread (e.g. as `HttpAgent`'s
-/// `initialMessages`). Tenant-scoped to the authenticated client. Read-only.
-pub async fn ag_ui_session_messages(
-    State(state): State<ClientHttpState>,
-    Extension(principal): Extension<AuthPrincipal>,
-    Path(session_id): Path<String>,
-) -> Response {
-    let filter = EventFilter {
-        aggregate_id: Some(session_id),
-        tenant_id: Some(principal.tenant_id.clone()),
-        ..Default::default()
-    };
-    let events = match state.runtime.get_session_events(&filter).await {
-        Ok(events) => events,
-        Err(e) => return runtime_error_response(e),
-    };
-    Json(message_history(&events)).into_response()
-}
-
 /// `POST /api/client/ag-ui/agents/{agent_id}/connect` — replays a thread's history
 /// as an AG-UI event stream (`RUN_STARTED` → `MESSAGES_SNAPSHOT` → `RUN_FINISHED`),
 /// the standard "load thread" response a client expects on (re)connect.
@@ -377,19 +375,33 @@ pub async fn ag_ui_session_messages(
 /// `connect()`, which `POST`s a `RunAgentInput` here and applies the snapshot to
 /// its message list. The body's `threadId`/`runId` are the only fields read —
 /// `threadId` selects the session, `runId` labels the synthetic snapshot run.
-/// Tenant-scoped to the authenticated client. Read-only (no turn is submitted).
+///
+/// Scoped to the authenticated client's own sessions: the caller must own the
+/// thread (its creating `identity.id` must match `principal.subject`), so one
+/// user can't hydrate another's thread by guessing its id — mirroring the
+/// write-path `ensure_owns_session`. Read-only (no turn is submitted).
 pub async fn ag_ui_connect(
     State(state): State<ClientHttpState>,
     Extension(principal): Extension<AuthPrincipal>,
     Path(_agent_id): Path<String>,
     Json(input): Json<RunAgentInput>,
 ) -> Response {
-    let filter = EventFilter {
-        aggregate_id: Some(input.thread_id.clone()),
-        tenant_id: Some(principal.tenant_id.clone()),
-        ..Default::default()
+    let Some(subject) = principal.subject.clone() else {
+        let body = serde_json::json!({"error": "client subject is required"});
+        return (StatusCode::FORBIDDEN, Json(body)).into_response();
     };
-    let events = match state.runtime.get_session_events(&filter).await {
+    // Authorized, tenant-scoped read. The runtime runs the same ownership gate as
+    // the live-stream path: a non-owner is denied; an uncreated/empty thread is
+    // allowed (nothing to leak) and hydrates to an empty snapshot.
+    let events = match state
+        .runtime
+        .read_session_events(
+            &principal.tenant_id,
+            &input.thread_id,
+            &SessionRequester::Identity { id: subject },
+        )
+        .await
+    {
         Ok(events) => events,
         Err(e) => return runtime_error_response(e),
     };

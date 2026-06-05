@@ -362,21 +362,30 @@ impl EmbeddedRuntime {
         sequence_after: Option<i64>,
         on_event: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
     ) -> Result<()> {
-        use substructure_core::session::subscriptions::SessionSubscriptionSpec;
+        use substructure_core::session::subscriptions::{
+            SessionRequester, SessionSubscriptionSpec,
+        };
 
+        // The native binding is a privileged machine caller.
         let spec = match turn_id {
             Some(tid) => SessionSubscriptionSpec::Turn {
                 tenant_id: tenant_id.clone(),
                 root_session_id: session_id,
                 turn_id: tid,
+                requester: SessionRequester::Privileged,
             },
             None => SessionSubscriptionSpec::All {
                 tenant_id: tenant_id.clone(),
                 root_session_id: session_id,
+                requester: SessionRequester::Privileged,
             },
         };
         let cursor = sequence_after.map(|n| n.max(0) as u64);
-        let mut rx = self.inner.stream(spec, cursor).await;
+        let mut rx = self
+            .inner
+            .stream(spec, cursor)
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))?;
 
         while let Some(event) = rx.recv().await {
             let json =

@@ -6,7 +6,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 
 use tokio_util::sync::CancellationToken;
@@ -34,12 +34,8 @@ pub fn router(state: AdminHttpState) -> Router {
             get(routes::stream_session_events),
         )
         .route(
-            "/api/admin/sessions/{session_id}/ag-ui/messages",
-            get(routes::session_ag_ui_messages),
-        )
-        .route(
-            "/api/admin/sessions/{session_id}/ag-ui/snapshot",
-            get(routes::stream_session_ag_ui),
+            "/api/admin/sessions/{session_id}/ag-ui/connect",
+            post(routes::connect_session_ag_ui),
         )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
