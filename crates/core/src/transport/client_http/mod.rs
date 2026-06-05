@@ -58,7 +58,20 @@ async fn client_auth_middleware(
 ) -> Response {
     match state.auth.resolve(request.headers()).await {
         Ok(principal) => {
-            request.extensions_mut().insert(principal);
+            // Every client route acts as the authenticated end user, so resolve the
+            // frontend caller (and the session owner it maps to) once here. Handlers
+            // receive a ready `Caller`/`SessionOwner` and never re-check the subject.
+            let (Some(caller), Some(owner)) =
+                (principal.frontend_caller(), principal.session_owner())
+            else {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({"error": "client subject is required"})),
+                )
+                    .into_response();
+            };
+            request.extensions_mut().insert(caller);
+            request.extensions_mut().insert(owner);
             next.run(request).await
         }
         Err(AuthError::MissingCredentials | AuthError::InvalidCredentials) => (

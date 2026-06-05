@@ -1,4 +1,3 @@
-use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{KeepAlive, Sse};
@@ -8,15 +7,17 @@ use futures_util::stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
+use crate::owner::SessionOwner;
 use crate::session::command::SessionError;
 use crate::session::decision::ClientPayload;
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use crate::transport::ag_ui::snapshot::snapshot_events;
 use crate::transport::ag_ui::translator::run_ag_ui_translation;
 use crate::transport::ag_ui::types::{AgUiInput, RunAgentInput};
-use crate::transport::auth::AuthPrincipal;
 use crate::transport::session_sse::merge_session_stream;
-use crate::{RuntimeError, SubmitClientPayload, SubmitToolCallResult, SubmitToolCallResultInput};
+use crate::{
+    Caller, RuntimeError, SubmitClientPayload, SubmitToolCallResult, SubmitToolCallResultInput,
+};
 
 use super::types::{
     StreamSessionEventsParams, SubmitClientPayloadRequest, SubmitClientPayloadResponse,
@@ -26,14 +27,10 @@ use super::ClientHttpState;
 
 pub async fn submit_client_payload(
     State(state): State<ClientHttpState>,
-    Extension(principal): Extension<AuthPrincipal>,
+    Extension(caller): Extension<Caller>,
+    Extension(owner): Extension<SessionOwner>,
     Json(req): Json<SubmitClientPayloadRequest>,
 ) -> Response {
-    let (Some(caller), Some(owner)) = (principal.frontend_caller(), principal.session_owner())
-    else {
-        let body = serde_json::json!({"error": "client subject is required"});
-        return (StatusCode::FORBIDDEN, Json(body)).into_response();
-    };
     let session_id = req.session_id.unwrap_or_else(|| Uuid::now_v7().to_string());
 
     let result = state
@@ -63,15 +60,10 @@ pub async fn submit_client_payload(
 
 pub async fn submit_tool_call_result(
     State(state): State<ClientHttpState>,
-    Extension(principal): Extension<AuthPrincipal>,
+    Extension(caller): Extension<Caller>,
     Path(session_id): Path<String>,
     Json(req): Json<SubmitToolCallResultRequest>,
 ) -> Response {
-    let Some(caller) = principal.frontend_caller() else {
-        let body = serde_json::json!({"error": "client subject is required"});
-        return (StatusCode::FORBIDDEN, Json(body)).into_response();
-    };
-
     let (tool_call_id, attempt, result) = match req {
         SubmitToolCallResultRequest::Result {
             tool_call_id,
@@ -156,18 +148,19 @@ pub(crate) fn runtime_error_response(err: RuntimeError) -> Response {
 
 pub async fn stream_session_events(
     State(state): State<ClientHttpState>,
-    Extension(principal): Extension<AuthPrincipal>,
+    Extension(caller): Extension<Caller>,
     Path(session_id): Path<String>,
     Query(params): Query<StreamSessionEventsParams>,
 ) -> Response {
-    let Some(caller) = principal.frontend_caller() else {
-        let body = serde_json::json!({"error": "client subject is required"});
-        return (StatusCode::FORBIDDEN, Json(body)).into_response();
-    };
     let root_session_id = session_id.clone();
     let scope_turn_id = params.turn_id.clone();
-    // The caller may only stream a session they own — the runtime enforces the
-    // ownership gate from the spec's caller.
+
+    // Subscribe before the caller is moved into the spec.
+    let delta_rx = state
+        .runtime
+        .subscribe_token_deltas(&caller, &root_session_id)
+        .await;
+
     let spec = SessionSubscriptionSpec {
         root_session_id: session_id,
         caller,
@@ -181,10 +174,7 @@ pub async fn stream_session_events(
         Ok(rx) => rx,
         Err(e) => return runtime_error_response(e),
     };
-    let delta_rx = state
-        .runtime
-        .subscribe_token_deltas(&principal.tenant_id, &root_session_id)
-        .await;
+
     let out_rx = merge_session_stream(event_rx, delta_rx, scope_turn_id, state.shutdown.clone());
     let stream = ReceiverStream::new(out_rx).map(Ok::<_, std::convert::Infallible>);
 
@@ -200,25 +190,11 @@ pub async fn stream_session_events(
 /// is stamped from the authenticated principal, never from the request body.
 pub async fn ag_ui_run(
     State(state): State<ClientHttpState>,
-    Extension(principal): Extension<AuthPrincipal>,
+    Extension(caller): Extension<Caller>,
+    Extension(owner): Extension<SessionOwner>,
     Path(agent_id): Path<String>,
-    payload: Result<Json<RunAgentInput>, JsonRejection>,
+    Json(input): Json<RunAgentInput>,
 ) -> Response {
-    let Some(caller) = principal.frontend_caller() else {
-        let body = serde_json::json!({"error": "client subject is required"});
-        return (StatusCode::FORBIDDEN, Json(body)).into_response();
-    };
-
-    let input = match payload {
-        Ok(Json(input)) => input,
-        Err(rejection) => {
-            let body = serde_json::json!({"error": format!("invalid RunAgentInput: {rejection}")});
-            return (StatusCode::BAD_REQUEST, Json(body)).into_response();
-        }
-    };
-
-    // The trailing message decides the action: a new user turn, or a frontend
-    // tool result resuming the turn suspended on that call.
     let Some(action) = input.classify() else {
         let body = serde_json::json!({"error": "no user message or tool result in RunAgentInput"});
         return (StatusCode::BAD_REQUEST, Json(body)).into_response();
@@ -226,15 +202,14 @@ pub async fn ag_ui_run(
 
     // threadId maps onto the session id; runId need not equal the engine turn id.
     let session_id = input.thread_id.clone();
-    let tenant_id = principal.tenant_id.clone();
 
     // Subscribe live to the whole session BEFORE acting, so the translator sees
     // every event the submit/resume produces. The runtime pre-authorizes from the
     // spec's requester: a non-owner is rejected here, before any turn is submitted.
     let spec = SessionSubscriptionSpec {
-        root_session_id: session_id.clone(),
-        caller: caller.clone(),
         scope: SubscriptionScope::All,
+        caller: caller.clone(),
+        root_session_id: session_id.clone(),
     };
     let event_rx = match state.runtime.stream(spec, None).await {
         Ok(rx) => rx,
@@ -242,32 +217,25 @@ pub async fn ag_ui_run(
     };
     let delta_rx = state
         .runtime
-        .subscribe_token_deltas(&tenant_id, &session_id)
+        .subscribe_token_deltas(&caller, &session_id)
         .await;
 
     let submit = match action {
-        AgUiInput::UserTurn(message) => {
-            // A frontend caller's subject is the user themselves; present here
-            // because `frontend_caller()` succeeded above.
-            let owner = principal
-                .session_owner()
-                .expect("frontend caller implies a client subject");
-            state
-                .runtime
-                .submit_client_payload(SubmitClientPayload {
-                    session_id: session_id.clone(),
-                    caller,
-                    owner,
-                    agent_id,
-                    payload: ClientPayload::Message {
-                        message,
-                        stream: true,
-                    },
-                    turn_id: Some(input.run_id.clone()),
-                })
-                .await
-                .map(|_| ())
-        }
+        AgUiInput::UserTurn(message) => state
+            .runtime
+            .submit_client_payload(SubmitClientPayload {
+                session_id: session_id.clone(),
+                caller,
+                owner,
+                agent_id,
+                payload: ClientPayload::Message {
+                    message,
+                    stream: true,
+                },
+                turn_id: Some(input.run_id.clone()),
+            })
+            .await
+            .map(|_| ()),
         AgUiInput::ToolResults(results) => {
             // A client echoes its whole result history on resume, including
             // already-resolved worker tools and prior submissions. Submit every
@@ -332,44 +300,26 @@ pub async fn ag_ui_run(
 /// `POST /api/client/ag-ui/agents/{agent_id}/connect` — replays a thread's history
 /// as an AG-UI event stream (`RUN_STARTED` → `MESSAGES_SNAPSHOT` → `RUN_FINISHED`),
 /// the standard "load thread" response a client expects on (re)connect.
-///
-/// AG-UI clients restore history by `connect`-ing to a thread, not by seeding
-/// `initialMessages`: CopilotKit's `<CopilotChat threadId>` calls the agent's
-/// `connect()`, which `POST`s a `RunAgentInput` here and applies the snapshot to
-/// its message list. The body's `threadId`/`runId` are the only fields read —
-/// `threadId` selects the session, `runId` labels the synthetic snapshot run.
-///
-/// Scoped to the authenticated client's own sessions: the caller must own the
-/// thread (its creating `owner.id` must match `principal.subject`), so one
-/// user can't hydrate another's thread by guessing its id — mirroring the
-/// write-path `ensure_owns_session`. Read-only (no turn is submitted).
 pub async fn ag_ui_connect(
     State(state): State<ClientHttpState>,
-    Extension(principal): Extension<AuthPrincipal>,
+    Extension(caller): Extension<Caller>,
     Path(_agent_id): Path<String>,
     Json(input): Json<RunAgentInput>,
 ) -> Response {
-    let Some(caller) = principal.frontend_caller() else {
-        let body = serde_json::json!({"error": "client subject is required"});
-        return (StatusCode::FORBIDDEN, Json(body)).into_response();
-    };
-    // Authorized, tenant-scoped read. The runtime runs the same ownership gate as
-    // the live-stream path: a non-owner is denied; an uncreated/empty thread is
-    // allowed (nothing to leak) and hydrates to an empty snapshot.
     let events = match state
         .runtime
-        .read_session_events(&principal.tenant_id, &input.thread_id, &caller)
+        .read_session_events(&caller, &input.thread_id, None, None)
         .await
     {
         Ok(events) => events,
         Err(e) => return runtime_error_response(e),
     };
-    // A finite, ready-made stream — the snapshot is computed up front, not driven
-    // by a live turn, so there is no channel/translator to run.
+
     let frames = snapshot_events(input.thread_id, input.run_id, &events)
         .into_iter()
         .map(|ev| Ok::<_, std::convert::Infallible>(ev.to_sse()))
         .collect::<Vec<_>>();
+
     Sse::new(futures_util::stream::iter(frames))
         .keep_alive(KeepAlive::default())
         .into_response()

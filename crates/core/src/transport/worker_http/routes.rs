@@ -279,6 +279,11 @@ pub async fn stream_session_events(
     let Some(caller) = principal.machine_caller() else {
         return machine_subject_required();
     };
+    // Subscribe before the caller is moved into the spec.
+    let delta_rx = state
+        .runtime
+        .subscribe_token_deltas(&caller, &root_session_id)
+        .await;
     let spec = SessionSubscriptionSpec {
         root_session_id: session_id,
         caller,
@@ -298,10 +303,6 @@ pub async fn stream_session_events(
                 .into_response()
         }
     };
-    let delta_rx = state
-        .runtime
-        .subscribe_token_deltas(&principal.tenant_id, &root_session_id)
-        .await;
     let out_rx = merge_session_stream(event_rx, delta_rx, scope_turn_id, state.shutdown.clone());
     let stream = ReceiverStream::new(out_rx).map(Ok::<_, std::convert::Infallible>);
 

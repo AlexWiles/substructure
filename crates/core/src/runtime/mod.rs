@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::providers::memory_queue::TaskQueue;
 use aggregate::{execute, Caller, ConflictRetry, ExecuteError, ExecuteInput};
-use event_store::{EventStore, StoreError};
+use event_store::{Event, EventFilter, EventStore, Snapshot, StoreError};
 use llm::{
     spawn_llm_dispatch_processor, spawn_llm_task_executor, LlmProviderTrait, LlmTask, TokenDelta,
     TokenDeltaTransport,
@@ -229,7 +229,7 @@ impl Runtime {
         &self,
         spec: SessionSubscriptionSpec,
         sequence_after: Option<u64>,
-    ) -> Result<mpsc::Receiver<event_store::Event>, RuntimeError> {
+    ) -> Result<mpsc::Receiver<Event>, RuntimeError> {
         self.authorize_session_read(&spec.root_session_id, &spec.caller)
             .await?;
         Ok(self
@@ -279,11 +279,11 @@ impl Runtime {
 
     pub async fn subscribe_token_deltas(
         &self,
-        tenant_id: &str,
+        caller: &Caller,
         root_session_id: &str,
     ) -> mpsc::Receiver<TokenDelta> {
         self.token_delta_transport
-            .subscribe(tenant_id, root_session_id)
+            .subscribe(caller.tenant_id(), root_session_id)
             .await
     }
 
@@ -307,7 +307,7 @@ impl Runtime {
         &self,
         tenant_id: &str,
         session_id: &str,
-    ) -> Result<(event_store::Snapshot, SessionState), RuntimeError> {
+    ) -> Result<(Snapshot, SessionState), RuntimeError> {
         let snapshot = self
             .store
             .load(tenant_id, session_id)
@@ -319,37 +319,31 @@ impl Runtime {
         Ok((snapshot, state))
     }
 
-    pub async fn get_session_events(
-        &self,
-        filter: &event_store::EventFilter,
-    ) -> Result<Vec<event_store::Event>, RuntimeError> {
-        self.store
-            .query_events(filter)
-            .await
-            .map_err(|e| RuntimeError::Internal(e.to_string()))
-    }
-
-    /// Authorized read of a session's full event history, tenant-scoped.
-    ///
-    /// The snapshot twin of [`Runtime::stream`]: it runs the same
-    /// `caller`-driven ownership gate before reading, so the authorization and
-    /// the tenant scoping each live in exactly one place and there is no un-gated
-    /// path to a session's history. Transport hands in `(tenant, session, caller)`
-    /// and gets back authorized events to project; it never assembles an
-    /// `EventFilter` or pairs a separate authorize call by hand.
+    /// Authorized, tenant-scoped read of a session's events. The ownership gate
+    /// is enforced from `caller` (a frontend may only read sessions it owns;
+    /// system/machine callers are unrestricted within the tenant). `sequence_after`
+    /// and `limit` paginate; pass `None` for the full history. This is the only
+    /// session-read path — system components that need cross-tenant scans use the
+    /// event store directly.
     pub async fn read_session_events(
         &self,
-        tenant_id: &str,
-        session_id: &str,
         caller: &Caller,
-    ) -> Result<Vec<event_store::Event>, RuntimeError> {
+        session_id: &str,
+        sequence_after: Option<u64>,
+        limit: Option<usize>,
+    ) -> Result<Vec<Event>, RuntimeError> {
         self.authorize_session_read(session_id, caller).await?;
-        let filter = event_store::EventFilter {
+        let filter = EventFilter {
             aggregate_id: Some(session_id.to_string()),
-            tenant_id: Some(tenant_id.to_string()),
+            tenant_id: Some(caller.tenant_id().to_string()),
+            sequence_after,
+            limit,
             ..Default::default()
         };
-        self.get_session_events(&filter).await
+        self.store
+            .query_events(&filter)
+            .await
+            .map_err(|e| RuntimeError::Internal(e.to_string()))
     }
 
     pub async fn submit_decision(&self, input: SubmitDecision) -> Result<(), RuntimeError> {

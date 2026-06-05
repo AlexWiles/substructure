@@ -8,7 +8,7 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::event_store::{AggregateSort, EventFilter};
+use crate::event_store::AggregateSort;
 use crate::session::index::{SessionCursor, SessionFilter};
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use crate::transport::ag_ui::snapshot::snapshot_events;
@@ -131,15 +131,21 @@ pub async fn get_session_events(
     Extension(principal): Extension<AuthPrincipal>,
     Path(session_id): Path<String>,
     Query(params): Query<SessionEventsParams>,
-) -> impl IntoResponse {
-    let filter = EventFilter {
-        aggregate_id: Some(session_id.clone()),
-        tenant_id: Some(principal.tenant_id.clone()),
-        sequence_after: params.sequence_after,
-        limit: params.limit,
-        ..Default::default()
+) -> Response {
+    // Admin authenticates as a machine (api_key) principal — privileged within
+    // its tenant. The read is authorized and tenant-scoped from the caller.
+    let Some(caller) = principal.machine_caller() else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "machine subject is required"})),
+        )
+            .into_response();
     };
-    match state.runtime.get_session_events(&filter).await {
+    match state
+        .runtime
+        .read_session_events(&caller, &session_id, params.sequence_after, params.limit)
+        .await
+    {
         Ok(events) => Json(events).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -224,7 +230,7 @@ pub async fn connect_session_ag_ui(
     };
     let events = match state
         .runtime
-        .read_session_events(&principal.tenant_id, &session_id, &caller)
+        .read_session_events(&caller, &session_id, None, None)
         .await
     {
         Ok(events) => events,

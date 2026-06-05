@@ -35,7 +35,6 @@ pub struct AgUiMessage {
     #[serde(default)]
     #[allow(dead_code)]
     pub id: Option<String>,
-    /// On `role: "tool"` messages, the call this result completes.
     #[serde(default)]
     pub tool_call_id: Option<String>,
 }

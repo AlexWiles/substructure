@@ -16,9 +16,6 @@ pub struct SessionSubscriptions {
 #[derive(Debug, Clone)]
 pub struct SessionSubscriptionSpec {
     pub root_session_id: String,
-    /// The caller observing the session — the runtime enforces the ownership
-    /// gate from this (a frontend caller is scoped to sessions it owns; system
-    /// and machine callers are unrestricted within the tenant).
     pub caller: Caller,
     pub scope: SubscriptionScope,
 }
@@ -120,6 +117,7 @@ impl SessionSubscriptions {
         let max_seq = historical.last().map(|e| e.sequence).unwrap_or(0);
 
         let (tx, rx) = mpsc::channel(64);
+
         tokio::spawn(async move {
             for event in historical {
                 let terminal = is_turn_completed_for(&event, &spec);
