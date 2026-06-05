@@ -369,7 +369,6 @@ impl EmbeddedRuntime {
             SessionSubscriptionSpec, SubscriptionScope,
         };
 
-        // The native binding is an in-process, fully trusted caller.
         let spec = SessionSubscriptionSpec {
             root_session_id: session_id,
             caller: Caller::System { tenant_id },
