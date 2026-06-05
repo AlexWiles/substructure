@@ -14,70 +14,43 @@ pub struct SessionSubscriptions {
 }
 
 #[derive(Debug, Clone)]
-pub enum SessionSubscriptionSpec {
-    Turn {
-        tenant_id: String,
-        root_session_id: String,
-        turn_id: String,
-        caller: Caller,
-    },
-    All {
-        tenant_id: String,
-        root_session_id: String,
-        caller: Caller,
-    },
-}
-
-impl SessionSubscriptionSpec {
-    pub(crate) fn tenant_id(&self) -> &str {
-        match self {
-            Self::Turn { tenant_id, .. } | Self::All { tenant_id, .. } => tenant_id,
-        }
-    }
-
-    pub(crate) fn root_session_id(&self) -> &str {
-        match self {
-            Self::Turn {
-                root_session_id, ..
-            }
-            | Self::All {
-                root_session_id, ..
-            } => root_session_id,
-        }
-    }
-
+pub struct SessionSubscriptionSpec {
+    pub root_session_id: String,
     /// The caller observing the session — the runtime enforces the ownership
     /// gate from this (a frontend caller is scoped to sessions it owns; system
     /// and machine callers are unrestricted within the tenant).
-    pub(crate) fn caller(&self) -> &Caller {
-        match self {
-            Self::Turn { caller, .. } | Self::All { caller, .. } => caller,
-        }
-    }
+    pub caller: Caller,
+    pub scope: SubscriptionScope,
+}
 
+#[derive(Debug, Clone)]
+pub enum SubscriptionScope {
+    /// Observe a single turn; the stream auto-closes when it completes.
+    Turn { turn_id: String },
+    /// Observe every event in the session.
+    All,
+}
+
+impl SessionSubscriptionSpec {
     fn include(&self, event: &DomainEvent<SessionState>) -> bool {
-        match self {
-            Self::Turn { turn_id, .. } => {
+        match &self.scope {
+            SubscriptionScope::Turn { turn_id } => {
                 event.derived.as_ref().and_then(|d| d.turn_id.as_deref()) == Some(turn_id.as_str())
             }
-            Self::All { .. } => true,
+            SubscriptionScope::All => true,
         }
     }
 
     fn is_terminal(&self, event: &DomainEvent<SessionState>) -> bool {
-        match self {
-            Self::Turn {
-                root_session_id,
-                turn_id,
-                ..
-            } => {
-                event.aggregate_id == *root_session_id
+        match &self.scope {
+            SubscriptionScope::Turn { turn_id } => {
+                event.aggregate_id == self.root_session_id
                     && matches!(
                         &event.payload,
                         EventPayload::TurnCompleted(tc) if tc.turn_id == *turn_id
                     )
             }
-            Self::All { .. } => false,
+            SubscriptionScope::All => false,
         }
     }
 }
@@ -96,12 +69,12 @@ impl SessionSubscriptions {
                 match rx.recv().await {
                     Ok(batch) => {
                         for raw in batch.iter() {
-                            if raw.tenant_id != spec.tenant_id() {
+                            if raw.tenant_id != spec.caller.tenant_id() {
                                 continue;
                             }
                             if let Some(event) = decode_session_event(raw) {
                                 let in_scope =
-                                    belongs_to_root_session(raw, &event, spec.root_session_id());
+                                    belongs_to_root_session(raw, &event, &spec.root_session_id);
                                 if in_scope && spec.include(&event) {
                                     if tx.send(raw.clone()).await.is_err() {
                                         return;
@@ -178,8 +151,8 @@ impl SessionSubscriptions {
         let events = self
             .store
             .query_events(&EventFilter {
-                tenant_id: Some(spec.tenant_id().to_string()),
-                aggregate_id: Some(spec.root_session_id().to_string()),
+                tenant_id: Some(spec.caller.tenant_id().to_string()),
+                aggregate_id: Some(spec.root_session_id.clone()),
                 sequence_after: Some(sequence_after),
                 ..Default::default()
             })
@@ -197,13 +170,13 @@ fn filter_by_spec(events: Vec<Event>, spec: &SessionSubscriptionSpec) -> Vec<Eve
     events
         .into_iter()
         .filter(|e| {
-            if e.tenant_id != spec.tenant_id() {
+            if e.tenant_id != spec.caller.tenant_id() {
                 return false;
             }
             let Some(event) = decode_session_event(e) else {
                 return false;
             };
-            if !belongs_to_root_session(e, &event, spec.root_session_id()) {
+            if !belongs_to_root_session(e, &event, &spec.root_session_id) {
                 return false;
             }
             spec.include(&event)

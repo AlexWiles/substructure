@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::owner::SessionOwner;
 use crate::session::command::SessionError;
-use crate::session::subscriptions::SessionSubscriptionSpec;
+use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use crate::span::SpanContext;
 use crate::transport::auth::AuthPrincipal;
 use crate::transport::session_sse::merge_session_stream;
@@ -42,7 +42,6 @@ pub async fn submit(
         .runtime
         .submit_decision(SubmitDecision {
             session_id: req.session_id,
-            tenant_id: principal.tenant_id,
             caller,
             decision_id: req.decision_id,
             actions: req.actions,
@@ -160,7 +159,6 @@ pub async fn submit_tool_call_result(
         .runtime
         .submit_tool_call_result(SubmitToolCallResultInput {
             session_id,
-            tenant_id: principal.tenant_id,
             tool_call_id,
             attempt,
             result,
@@ -245,7 +243,6 @@ pub async fn submit_client_payload(
         .runtime
         .submit_client_payload(SubmitClientPayload {
             session_id,
-            tenant_id: principal.tenant_id,
             caller,
             owner,
             agent_id: req.agent_id,
@@ -282,17 +279,12 @@ pub async fn stream_session_events(
     let Some(caller) = principal.machine_caller() else {
         return machine_subject_required();
     };
-    let spec = match params.turn_id {
-        Some(turn_id) => SessionSubscriptionSpec::Turn {
-            tenant_id: principal.tenant_id.clone(),
-            root_session_id: session_id,
-            turn_id,
-            caller,
-        },
-        None => SessionSubscriptionSpec::All {
-            tenant_id: principal.tenant_id.clone(),
-            root_session_id: session_id,
-            caller,
+    let spec = SessionSubscriptionSpec {
+        root_session_id: session_id,
+        caller,
+        scope: match params.turn_id {
+            Some(turn_id) => SubscriptionScope::Turn { turn_id },
+            None => SubscriptionScope::All,
         },
     };
 

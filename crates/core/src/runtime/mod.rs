@@ -76,7 +76,6 @@ pub struct Runtime {
 
 pub struct SubmitClientPayload {
     pub session_id: String,
-    pub tenant_id: String,
     pub caller: Caller,
     pub owner: SessionOwner,
     pub agent_id: String,
@@ -97,7 +96,6 @@ pub enum SubmitToolCallResult {
 
 pub struct SubmitToolCallResultInput {
     pub session_id: String,
-    pub tenant_id: String,
     pub tool_call_id: String,
     pub attempt: u32,
     pub result: SubmitToolCallResult,
@@ -166,14 +164,16 @@ impl Runtime {
 
         let span = SpanContext::root();
 
-        let worker_retry = self.worker_retry_resolver.resolve(&input.tenant_id).await;
+        let worker_retry = self
+            .worker_retry_resolver
+            .resolve(input.caller.tenant_id())
+            .await;
 
         // Create session (ignore if already exists)
         let create_result = execute::<SessionState>(
             &*self.store,
             ExecuteInput {
                 aggregate_id: session_id.clone(),
-                tenant_id: input.tenant_id.clone(),
                 caller: input.caller.clone(),
                 command: CommandPayload::CreateSession {
                     agent_id: input.agent_id,
@@ -198,7 +198,6 @@ impl Runtime {
             &*self.store,
             ExecuteInput {
                 aggregate_id: session_id.clone(),
-                tenant_id: input.tenant_id,
                 caller: input.caller,
                 command: CommandPayload::SubmitClientPayload {
                     payload: input.payload,
@@ -231,7 +230,7 @@ impl Runtime {
         spec: SessionSubscriptionSpec,
         sequence_after: Option<u64>,
     ) -> Result<mpsc::Receiver<event_store::Event>, RuntimeError> {
-        self.authorize_session_read(spec.tenant_id(), spec.root_session_id(), spec.caller())
+        self.authorize_session_read(&spec.root_session_id, &spec.caller)
             .await?;
         Ok(self
             .session_subscriptions
@@ -247,11 +246,15 @@ impl Runtime {
     /// is simply empty, and the first turn binds the session to its caller).
     pub async fn authorize_session_read(
         &self,
-        tenant_id: &str,
         session_id: &str,
         caller: &Caller,
     ) -> Result<(), RuntimeError> {
-        let Some(id) = caller.owner_scope() else {
+        // Only a frontend caller is restricted — to sessions it owns, within its
+        // own tenant. System and machine callers are unrestricted.
+        let Caller::Frontend {
+            tenant_id, user_id, ..
+        } = caller
+        else {
             return Ok(());
         };
 
@@ -262,7 +265,7 @@ impl Runtime {
 
                 let owner = agg.state.owner.as_ref().and_then(|i| i.id.as_deref());
 
-                if owner == Some(id) {
+                if owner == Some(user_id) {
                     Ok(())
                 } else {
                     Err(RuntimeError::Session(SessionError::SessionAccessDenied))
@@ -329,19 +332,18 @@ impl Runtime {
     /// Authorized read of a session's full event history, tenant-scoped.
     ///
     /// The snapshot twin of [`Runtime::stream`]: it runs the same
-    /// `requester`-driven ownership gate before reading, so the authorization and
+    /// `caller`-driven ownership gate before reading, so the authorization and
     /// the tenant scoping each live in exactly one place and there is no un-gated
-    /// path to a session's history. Transport hands in `(tenant, session,
-    /// requester)` and gets back authorized events to project; it never assembles
-    /// an `EventFilter` or pairs a separate authorize call by hand.
+    /// path to a session's history. Transport hands in `(tenant, session, caller)`
+    /// and gets back authorized events to project; it never assembles an
+    /// `EventFilter` or pairs a separate authorize call by hand.
     pub async fn read_session_events(
         &self,
         tenant_id: &str,
         session_id: &str,
         caller: &Caller,
     ) -> Result<Vec<event_store::Event>, RuntimeError> {
-        self.authorize_session_read(tenant_id, session_id, caller)
-            .await?;
+        self.authorize_session_read(session_id, caller).await?;
         let filter = event_store::EventFilter {
             aggregate_id: Some(session_id.to_string()),
             tenant_id: Some(tenant_id.to_string()),
@@ -355,7 +357,6 @@ impl Runtime {
             &*self.store,
             ExecuteInput {
                 aggregate_id: input.session_id.clone(),
-                tenant_id: input.tenant_id,
                 caller: input.caller,
                 command: CommandPayload::SubmitWorkerDecision {
                     decision_id: input.decision_id,
@@ -395,7 +396,6 @@ impl Runtime {
             &*self.store,
             ExecuteInput {
                 aggregate_id: input.session_id,
-                tenant_id: input.tenant_id,
                 caller: input.caller,
                 command,
                 span: input.span,
@@ -412,7 +412,6 @@ impl Runtime {
             &*self.store,
             ExecuteInput {
                 aggregate_id: input.session_id.clone(),
-                tenant_id: input.tenant_id,
                 caller: input.caller,
                 command: CommandPayload::FailWorkerDecision {
                     decision_id: input.decision_id,

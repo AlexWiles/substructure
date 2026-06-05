@@ -27,7 +27,6 @@ pub struct ExecuteResult<R: AggregateState> {
 
 pub struct ExecuteInput<R: AggregateState> {
     pub aggregate_id: String,
-    pub tenant_id: String,
     pub caller: Caller,
     pub command: R::Command,
     pub span: SpanContext,
@@ -92,7 +91,7 @@ pub async fn execute<R: AggregateState>(
         let (mut aggregate, expected_version) = Aggregate::<R>::load_or_create(
             store,
             input.aggregate_id.clone(),
-            input.tenant_id.clone(),
+            input.caller.tenant_id().to_string(),
         )
         .await?;
 

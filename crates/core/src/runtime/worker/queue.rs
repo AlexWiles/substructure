@@ -36,7 +36,6 @@ pub struct DequeueFilter {
 #[derive(Debug)]
 pub struct SubmitDecision {
     pub session_id: String,
-    pub tenant_id: String,
     pub caller: Caller,
     pub decision_id: String,
     pub actions: Vec<WorkerAction>,
@@ -47,7 +46,6 @@ pub struct SubmitDecision {
 #[derive(Debug)]
 pub struct FailDecision {
     pub session_id: String,
-    pub tenant_id: String,
     pub caller: Caller,
     pub decision_id: String,
     pub error: String,

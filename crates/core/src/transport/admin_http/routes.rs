@@ -10,7 +10,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::event_store::{AggregateSort, EventFilter};
 use crate::session::index::{SessionCursor, SessionFilter};
-use crate::session::subscriptions::SessionSubscriptionSpec;
+use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use crate::transport::ag_ui::snapshot::snapshot_events;
 use crate::transport::ag_ui::types::RunAgentInput;
 use crate::transport::auth::AuthPrincipal;
@@ -164,10 +164,10 @@ pub async fn stream_session_events(
         )
             .into_response();
     };
-    let spec = SessionSubscriptionSpec::All {
-        tenant_id: principal.tenant_id,
+    let spec = SessionSubscriptionSpec {
         root_session_id: session_id,
         caller,
+        scope: SubscriptionScope::All,
     };
     // Admin endpoint defaults to full-history replay (sequence_after defaults to 0).
     let sequence_after = Some(params.sequence_after.unwrap_or(0));

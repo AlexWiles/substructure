@@ -169,8 +169,9 @@ impl EmbeddedRuntime {
                             Ok(submit) => {
                                 let submit_decision = SubmitDecision {
                                     session_id: decision.session_id,
-                                    tenant_id: decision.tenant_id.clone(),
-                                    caller: Caller::System,
+                                    caller: Caller::System {
+                                        tenant_id: decision.tenant_id.clone(),
+                                    },
                                     decision_id: decision.decision_id.clone(),
                                     actions: submit.actions,
                                     state: submit
@@ -200,8 +201,9 @@ impl EmbeddedRuntime {
                                 );
                                 let fail = FailDecision {
                                     session_id: decision.session_id,
-                                    tenant_id: decision.tenant_id.clone(),
-                                    caller: Caller::System,
+                                    caller: Caller::System {
+                                        tenant_id: decision.tenant_id.clone(),
+                                    },
                                     decision_id: decision.decision_id.clone(),
                                     error: format!("failed to parse worker response: {e}"),
                                     retryable: false,
@@ -225,8 +227,9 @@ impl EmbeddedRuntime {
                         );
                         let fail = FailDecision {
                             session_id: decision.session_id,
-                            tenant_id: decision.tenant_id.clone(),
-                            caller: Caller::System,
+                            caller: Caller::System {
+                                tenant_id: decision.tenant_id.clone(),
+                            },
                             decision_id: decision.decision_id.clone(),
                             error: format!("js worker callback failed: {e}"),
                             retryable: true,
@@ -279,8 +282,9 @@ impl EmbeddedRuntime {
             .inner
             .submit_client_payload(SubmitClientPayload {
                 session_id,
-                tenant_id: owner.tenant_id.clone(),
-                caller: Caller::System,
+                caller: Caller::System {
+                    tenant_id: owner.tenant_id.clone(),
+                },
                 owner,
                 agent_id,
                 payload,
@@ -333,11 +337,10 @@ impl EmbeddedRuntime {
         self.inner
             .submit_tool_call_result(SubmitToolCallResultInput {
                 session_id,
-                tenant_id,
                 tool_call_id,
                 attempt,
                 result,
-                caller: Caller::System,
+                caller: Caller::System { tenant_id },
                 span: CoreSpanContext::root().child("napi_tool_call_result"),
             })
             .await
@@ -362,20 +365,17 @@ impl EmbeddedRuntime {
         sequence_after: Option<i64>,
         on_event: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
     ) -> Result<()> {
-        use substructure_core::session::subscriptions::SessionSubscriptionSpec;
+        use substructure_core::session::subscriptions::{
+            SessionSubscriptionSpec, SubscriptionScope,
+        };
 
         // The native binding is an in-process, fully trusted caller.
-        let spec = match turn_id {
-            Some(tid) => SessionSubscriptionSpec::Turn {
-                tenant_id: tenant_id.clone(),
-                root_session_id: session_id,
-                turn_id: tid,
-                caller: Caller::System,
-            },
-            None => SessionSubscriptionSpec::All {
-                tenant_id: tenant_id.clone(),
-                root_session_id: session_id,
-                caller: Caller::System,
+        let spec = SessionSubscriptionSpec {
+            root_session_id: session_id,
+            caller: Caller::System { tenant_id },
+            scope: match turn_id {
+                Some(tid) => SubscriptionScope::Turn { turn_id: tid },
+                None => SubscriptionScope::All,
             },
         };
         let cursor = sequence_after.map(|n| n.max(0) as u64);

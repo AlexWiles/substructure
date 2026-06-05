@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::session::command::SessionError;
 use crate::session::decision::ClientPayload;
-use crate::session::subscriptions::SessionSubscriptionSpec;
+use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use crate::transport::ag_ui::snapshot::snapshot_events;
 use crate::transport::ag_ui::translator::run_ag_ui_translation;
 use crate::transport::ag_ui::types::{AgUiInput, RunAgentInput};
@@ -40,7 +40,6 @@ pub async fn submit_client_payload(
         .runtime
         .submit_client_payload(SubmitClientPayload {
             session_id,
-            tenant_id: principal.tenant_id,
             caller,
             owner,
             agent_id: req.agent_id,
@@ -99,7 +98,6 @@ pub async fn submit_tool_call_result(
         .runtime
         .submit_tool_call_result(SubmitToolCallResultInput {
             session_id,
-            tenant_id: principal.tenant_id,
             tool_call_id,
             attempt,
             result,
@@ -170,17 +168,12 @@ pub async fn stream_session_events(
     let scope_turn_id = params.turn_id.clone();
     // The caller may only stream a session they own — the runtime enforces the
     // ownership gate from the spec's caller.
-    let spec = match params.turn_id {
-        Some(turn_id) => SessionSubscriptionSpec::Turn {
-            tenant_id: principal.tenant_id.clone(),
-            root_session_id: session_id,
-            turn_id,
-            caller,
-        },
-        None => SessionSubscriptionSpec::All {
-            tenant_id: principal.tenant_id.clone(),
-            root_session_id: session_id,
-            caller,
+    let spec = SessionSubscriptionSpec {
+        root_session_id: session_id,
+        caller,
+        scope: match params.turn_id {
+            Some(turn_id) => SubscriptionScope::Turn { turn_id },
+            None => SubscriptionScope::All,
         },
     };
 
@@ -238,10 +231,10 @@ pub async fn ag_ui_run(
     // Subscribe live to the whole session BEFORE acting, so the translator sees
     // every event the submit/resume produces. The runtime pre-authorizes from the
     // spec's requester: a non-owner is rejected here, before any turn is submitted.
-    let spec = SessionSubscriptionSpec::All {
-        tenant_id: tenant_id.clone(),
+    let spec = SessionSubscriptionSpec {
         root_session_id: session_id.clone(),
         caller: caller.clone(),
+        scope: SubscriptionScope::All,
     };
     let event_rx = match state.runtime.stream(spec, None).await {
         Ok(rx) => rx,
@@ -263,7 +256,6 @@ pub async fn ag_ui_run(
                 .runtime
                 .submit_client_payload(SubmitClientPayload {
                     session_id: session_id.clone(),
-                    tenant_id: tenant_id.clone(),
                     caller,
                     owner,
                     agent_id,
@@ -288,7 +280,6 @@ pub async fn ag_ui_run(
                     .runtime
                     .submit_tool_call_result(SubmitToolCallResultInput {
                         session_id: session_id.clone(),
-                        tenant_id: tenant_id.clone(),
                         tool_call_id: item.tool_call_id,
                         attempt: 0,
                         result: SubmitToolCallResult::Result {
