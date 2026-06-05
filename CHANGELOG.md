@@ -10,6 +10,17 @@ same version.
 
 ## [Unreleased]
 
+### Added
+
+- Native AG-UI protocol support: endpoints that stream an agent turn as AG-UI SSE
+  events, with live token and reasoning streaming.
+
+### Changed
+
+- **Breaking:** session events identify a session's end user as `owner` (was
+  `identity`); consumers reading raw events should read `owner`. No alias for the
+  old key.
+
 ## [0.1.15] - 2026-06-02
 
 ### Added
