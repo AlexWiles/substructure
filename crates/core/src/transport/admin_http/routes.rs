@@ -13,7 +13,7 @@ use crate::session::index::{SessionCursor, SessionFilter};
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use crate::transport::ag_ui::snapshot::snapshot_events;
 use crate::transport::ag_ui::types::RunAgentInput;
-use crate::transport::auth::AuthPrincipal;
+use crate::Caller;
 
 use super::AdminHttpState;
 
@@ -35,10 +35,10 @@ fn default_true() -> bool {
 
 pub async fn list_sessions(
     State(state): State<AdminHttpState>,
-    Extension(principal): Extension<AuthPrincipal>,
+    Extension(caller): Extension<Caller>,
     Query(params): Query<ListSessionsParams>,
 ) -> impl IntoResponse {
-    let tenant_id = principal.tenant_id;
+    let tenant_id = caller.tenant_id().to_string();
     let cursor = match params.cursor {
         Some(ref encoded) => match decode_cursor(encoded) {
             Ok(c) => Some(c),
@@ -97,12 +97,12 @@ fn decode_cursor(encoded: &str) -> Result<SessionCursor, String> {
 
 pub async fn get_session(
     State(state): State<AdminHttpState>,
-    Extension(principal): Extension<AuthPrincipal>,
+    Extension(caller): Extension<Caller>,
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
     match state
         .runtime
-        .get_session(&principal.tenant_id, &session_id)
+        .get_session(caller.tenant_id(), &session_id)
         .await
     {
         Ok((snapshot, state)) => Json(serde_json::json!({
@@ -128,19 +128,10 @@ pub struct SessionEventsParams {
 
 pub async fn get_session_events(
     State(state): State<AdminHttpState>,
-    Extension(principal): Extension<AuthPrincipal>,
+    Extension(caller): Extension<Caller>,
     Path(session_id): Path<String>,
     Query(params): Query<SessionEventsParams>,
 ) -> Response {
-    // Admin authenticates as a machine (api_key) principal — privileged within
-    // its tenant. The read is authorized and tenant-scoped from the caller.
-    let Some(caller) = principal.machine_caller() else {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "machine subject is required"})),
-        )
-            .into_response();
-    };
     match state
         .runtime
         .read_session_events(&caller, &session_id, params.sequence_after, params.limit)
@@ -157,19 +148,10 @@ pub async fn get_session_events(
 
 pub async fn stream_session_events(
     State(state): State<AdminHttpState>,
-    Extension(principal): Extension<AuthPrincipal>,
+    Extension(caller): Extension<Caller>,
     Path(session_id): Path<String>,
     Query(params): Query<SessionEventsParams>,
 ) -> Response {
-    // Admin authenticates as a machine (api_key) principal — a privileged
-    // caller, unrestricted within its tenant.
-    let Some(caller) = principal.machine_caller() else {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "machine subject is required"})),
-        )
-            .into_response();
-    };
     let spec = SessionSubscriptionSpec {
         root_session_id: session_id,
         caller,
@@ -206,28 +188,13 @@ pub async fn stream_session_events(
         .into_response()
 }
 
-/// `POST /api/admin/sessions/{session_id}/ag-ui/connect` — replays a session's
-/// history as an AG-UI `RUN_STARTED → MESSAGES_SNAPSHOT → RUN_FINISHED` stream,
-/// the admin twin of the client `connect` endpoint. A Chat UI hydrates an admin
-/// view of a session through this exactly as a client hydrates its own thread:
-/// assistant-ui folds the snapshot, CopilotKit's `connectAgent` POSTs here. Admin
-/// browses by session, so the id is in the path; the posted `RunAgentInput`'s
-/// `runId` just labels the synthetic snapshot run. Tenant-scoped. Read-only.
+/// Replays a session's history as an AG-UI `RUN_STARTED → MESSAGES_SNAPSHOT → RUN_FINISHED` stream,
 pub async fn connect_session_ag_ui(
     State(state): State<AdminHttpState>,
-    Extension(principal): Extension<AuthPrincipal>,
+    Extension(caller): Extension<Caller>,
     Path(session_id): Path<String>,
     Json(input): Json<RunAgentInput>,
 ) -> Response {
-    // Admin is privileged within its tenant: no ownership gate, but the read is
-    // still tenant-scoped — the runtime owns both decisions.
-    let Some(caller) = principal.machine_caller() else {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "machine subject is required"})),
-        )
-            .into_response();
-    };
     let events = match state
         .runtime
         .read_session_events(&caller, &session_id, None, None)

@@ -238,19 +238,13 @@ impl Runtime {
             .await)
     }
 
-    /// Authorize a read of a session's events — the shared business-logic
-    /// ownership check for every read path (live streams and history snapshots).
-    /// An end-user owner may only read a session they own (its creating
-    /// `owner.id` matches); privileged callers are unrestricted within the
-    /// tenant. An uncreated session has no owner yet, so the read is allowed (it
-    /// is simply empty, and the first turn binds the session to its caller).
     pub async fn authorize_session_read(
         &self,
         session_id: &str,
         caller: &Caller,
     ) -> Result<(), RuntimeError> {
-        // Only a frontend caller is restricted — to sessions it owns, within its
-        // own tenant. System and machine callers are unrestricted.
+        // System and machine callers are unrestricted within their tenant; only
+        // a frontend user is gated, and only to the sessions it owns.
         let Caller::Frontend {
             tenant_id, user_id, ..
         } = caller
@@ -258,22 +252,22 @@ impl Runtime {
             return Ok(());
         };
 
-        match self.store.load(tenant_id, session_id).await {
-            Ok(snapshot) => {
-                let agg: aggregate::Aggregate<SessionState> = serde_json::from_value(snapshot.data)
-                    .map_err(|e| RuntimeError::Internal(e.to_string()))?;
+        let snapshot = match self.store.load(tenant_id, session_id).await {
+            Ok(snapshot) => snapshot,
+            // An uncreated session has no owner yet — nothing to leak; the read
+            // is simply empty, and the first turn binds the session to its owner.
+            Err(StoreError::StreamNotFound) => return Ok(()),
+            Err(e) => return Err(RuntimeError::Internal(e.to_string())),
+        };
 
-                let owner = agg.state.owner.as_ref().and_then(|i| i.id.as_deref());
+        let agg: aggregate::Aggregate<SessionState> = serde_json::from_value(snapshot.data)
+            .map_err(|e| RuntimeError::Internal(e.to_string()))?;
+        let owner_id = agg.state.owner.as_ref().and_then(|o| o.id.as_deref());
 
-                if owner == Some(user_id) {
-                    Ok(())
-                } else {
-                    Err(RuntimeError::Session(SessionError::SessionAccessDenied))
-                }
-            }
-            // An uncreated session has no owner yet — nothing to leak.
-            Err(StoreError::StreamNotFound) => Ok(()),
-            Err(e) => Err(RuntimeError::Internal(e.to_string())),
+        if owner_id == Some(user_id.as_str()) {
+            Ok(())
+        } else {
+            Err(RuntimeError::Session(SessionError::SessionAccessDenied))
         }
     }
 
@@ -319,12 +313,6 @@ impl Runtime {
         Ok((snapshot, state))
     }
 
-    /// Authorized, tenant-scoped read of a session's events. The ownership gate
-    /// is enforced from `caller` (a frontend may only read sessions it owns;
-    /// system/machine callers are unrestricted within the tenant). `sequence_after`
-    /// and `limit` paginate; pass `None` for the full history. This is the only
-    /// session-read path — system components that need cross-tenant scans use the
-    /// event store directly.
     pub async fn read_session_events(
         &self,
         caller: &Caller,
