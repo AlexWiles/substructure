@@ -40,9 +40,6 @@ impl ReaderConfig {
 }
 
 /// A shared SQLite connection pair (writer + reader config).
-///
-/// Clone is cheap — both fields are behind Arc / small data.
-/// Each store struct holds one of these.
 #[derive(Clone)]
 pub struct SqliteDb {
     pub writer: Arc<Mutex<Connection>>,

@@ -64,7 +64,7 @@ impl JwtHs256ClientTokenAuthResolver {
 
     pub fn issue_token(
         &self,
-        tenant_id: String,
+        tenant_id: &str,
         subject: String,
         attrs: HashMap<String, String>,
         ttl: Duration,
@@ -87,7 +87,7 @@ impl JwtHs256ClientTokenAuthResolver {
             exp,
             iat: now,
             jti: Uuid::now_v7().to_string(),
-            tenant_id,
+            tenant_id: tenant_id.to_string(),
             sub: subject,
             attrs,
         };

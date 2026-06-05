@@ -90,7 +90,7 @@ pub async fn mint_client_token(
     }
 
     match state.client_token_issuer.issue_token(
-        caller.tenant_id().to_string(),
+        caller.tenant_id(),
         req.identity.id,
         req.identity.metadata,
         Duration::from_secs(ttl_secs),
