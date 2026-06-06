@@ -2,68 +2,85 @@
 
 import Substructure from "@substructure.ai/sdk";
 
-export const AGENT_ID = "weather-agent";
+export const AGENT_ID = "todo-agent";
 
 const sub = new Substructure();
 const { agent } = sub;
 
-const getWeather = agent.tool({
-    name: "get_weather",
-    description: "Get the current weather for a city.",
+// Every tool here is a frontend (client-handled) tool: `handler: "client"` +
+// `ctx.defer()` suspends the turn so the browser executes it against the shared
+// to-do store. The matching executors live in each chat client.
+const addTodo = agent.tool({
+    name: "add_todo",
+    description: "Add a task to the user's on-screen to-do list. Runs in the user's browser.",
     parameters: {
         type: "object",
-        properties: { city: { type: "string" } },
-        required: ["city"],
-    },
-    execute: (args: string) => {
-        const { city } = JSON.parse(args);
-        return JSON.stringify({ city, temp_f: 62, condition: "sunny" });
-    },
-});
-
-// A frontend (client-handled) tool: `handler: "client"` + `ctx.defer()` suspends
-// the turn so the browser executes it. The executor lives in each chat client.
-const setColor = agent.tool({
-    name: "set_color",
-    description:
-        "Set the color shown in the user's on-screen color mixer. Give red, green, and " +
-        "blue as integers from 0 to 255. Runs in the user's browser.",
-    parameters: {
-        type: "object",
-        properties: {
-            red: { type: "integer", minimum: 0, maximum: 255 },
-            green: { type: "integer", minimum: 0, maximum: 255 },
-            blue: { type: "integer", minimum: 0, maximum: 255 },
-        },
-        required: ["red", "green", "blue"],
+        properties: { title: { type: "string", description: "The task text." } },
+        required: ["title"],
     },
     handler: "client",
     execute: (_args: string, ctx) => ctx.defer(),
 });
 
-// The read counterpart to set_color, also browser-run.
-const getColor = agent.tool({
-    name: "get_color",
+const toggleTodo = agent.tool({
+    name: "toggle_todo",
     description:
-        "Read the color the user currently has set in their on-screen color mixer. " +
-        "Returns red, green, and blue (0–255) plus the hex. Runs in the user's browser.",
+        "Check off or reopen a task by id. Pass `done` to set it explicitly, or omit it to flip. " +
+        "Use list_todos first to get ids. Runs in the user's browser.",
+    parameters: {
+        type: "object",
+        properties: {
+            id: { type: "string" },
+            done: { type: "boolean" },
+        },
+        required: ["id"],
+    },
+    handler: "client",
+    execute: (_args: string, ctx) => ctx.defer(),
+});
+
+const removeTodo = agent.tool({
+    name: "remove_todo",
+    description: "Delete a task by id. Use list_todos first to get ids. Runs in the user's browser.",
+    parameters: {
+        type: "object",
+        properties: { id: { type: "string" } },
+        required: ["id"],
+    },
+    handler: "client",
+    execute: (_args: string, ctx) => ctx.defer(),
+});
+
+const clearCompleted = agent.tool({
+    name: "clear_completed",
+    description: "Remove every completed task from the list. Runs in the user's browser.",
     parameters: { type: "object", properties: {} },
     handler: "client",
     execute: (_args: string, ctx) => ctx.defer(),
 });
 
-const weatherAgent = agent({ id: AGENT_ID })
+const listTodos = agent.tool({
+    name: "list_todos",
+    description:
+        "Read the user's current to-do list. Returns each task's id, title, and done flag. " +
+        "Runs in the user's browser.",
+    parameters: { type: "object", properties: {} },
+    handler: "client",
+    execute: (_args: string, ctx) => ctx.defer(),
+});
+
+const todoAgent = agent({ id: AGENT_ID })
     .use(
         agent.messageHistory(
-            "You are a concise, friendly assistant. Use get_weather for weather. " +
-                "When the user asks to set, change, or mix a color — e.g. “make it sunset " +
-                "orange”, “a calming teal”, “warmer”, “darker” — call set_color with " +
-                "red/green/blue (0–255) to update their on-screen color mixer. When they " +
-                "ask what color is showing (e.g. “what color is this?”, “what's the hex?”), " +
-                "call get_color to read it.",
+            "You are a concise, friendly to-do list assistant. The user has an on-screen to-do " +
+                "list you drive with tools. Use add_todo to add a task (call it once per item when " +
+                "adding several). Call list_todos to see the current tasks and their ids before you " +
+                "toggle or remove anything — toggle_todo and remove_todo take an id. Use toggle_todo " +
+                "to check off or reopen a task, and clear_completed to drop all finished tasks. When " +
+                "the user asks what's on their list, call list_todos and summarize it.",
         ),
     )
-    .use(agent.tools([getWeather, setColor, getColor]))
+    .use(agent.tools([addTodo, toggleTodo, removeTodo, clearCompleted, listTodos]))
     .use(
         agent.llmLoop({
             request: { model: "minimax/minimax-m3" },
@@ -71,7 +88,7 @@ const weatherAgent = agent({ id: AGENT_ID })
         }),
     );
 
-const worker = sub.worker({ agents: [weatherAgent] });
+const worker = sub.worker({ agents: [todoAgent] });
 
 export const substructureHandler = worker.fetchHandler({ signingSecret: process.env.SIGNING_SECRET });
 

@@ -1,8 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 
-import { ColorPanel } from "./color-panel";
-import { SessionList } from "./session-list";
+import { TodoPanel } from "./todo-panel";
 
 // The client examples, one per route, linked from the sidebar.
 const CLIENTS = [
@@ -20,8 +19,7 @@ export function PageShell({ children }: { children: ReactNode }) {
         <div className="shell">
             <aside className="sidebar">
                 <div className="brand">
-                    <b>Substructure × AG-UI</b>
-                    <span>One endpoint, multiple clients</span>
+                    <b>substructure.ai × AG-UI</b>
                 </div>
                 <nav className="nav">
                     {CLIENTS.map((c) => (
@@ -36,15 +34,14 @@ export function PageShell({ children }: { children: ReactNode }) {
                         </Link>
                     ))}
                 </nav>
-                <SessionList />
                 <p className="hint">
-                    Each client calls the same frontend <code>set_color</code> tool — watch the
-                    agent drive the mixer on the right.
+                    Each client calls the same frontend to-do tools — watch the agent drive the
+                    list on the right.
                 </p>
             </aside>
             <main className="pagebody">
                 <div className="chatpane">{children}</div>
-                <ColorPanel />
+                <TodoPanel />
             </main>
         </div>
     );

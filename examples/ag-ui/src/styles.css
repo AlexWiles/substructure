@@ -67,68 +67,6 @@ body {
     background: #fafafa;
 }
 
-.sessions {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    min-height: 0;
-}
-
-.sessions-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    font-size: 12px;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: #999;
-}
-
-.newchat {
-    border: 1px solid #e3e3e3;
-    border-radius: 7px;
-    background: #fff;
-    padding: 3px 8px;
-    font-size: 12px;
-    cursor: pointer;
-    color: #333;
-}
-
-.newchat:hover {
-    border-color: #bbb;
-}
-
-.session-list {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    overflow-y: auto;
-}
-
-.session-item {
-    text-align: left;
-    padding: 8px 10px;
-    border: 1px solid transparent;
-    border-radius: 8px;
-    background: none;
-    cursor: pointer;
-    font-size: 13px;
-    color: #444;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.session-item:hover {
-    background: #f4f4f4;
-}
-
-.session-item.active {
-    border-color: #111;
-    background: #fafafa;
-    color: #111;
-}
-
 .chat-loading {
     display: flex;
     align-items: center;
@@ -158,8 +96,15 @@ body {
     position: relative;
 }
 
-.colorpanel {
-    width: 300px;
+/* CopilotKit's chat fills its container edge-to-edge; give it horizontal breathing room. */
+.copilot-pane {
+    height: 100%;
+    box-sizing: border-box;
+    padding: 0 16px;
+}
+
+.todopanel {
+    width: 420px;
     flex-shrink: 0;
     box-sizing: border-box;
     border-left: 1px solid #eee;
@@ -167,73 +112,133 @@ body {
     padding: 20px 18px;
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: 14px;
+    min-height: 0;
 }
 
-.colorpanel-title {
+.todopanel-title {
     font-weight: 600;
     font-size: 14px;
 }
 
-.swatch {
-    height: 120px;
-    border-radius: 14px;
+.todoadd {
     display: flex;
-    align-items: flex-end;
-    padding: 10px;
-    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.06);
-    /* The agent-driven change tweens frame-by-frame in the store (color-store.ts),
-       so no CSS transition on background here — it would only add trailing lag. */
+    gap: 8px;
 }
 
-.swatchhex {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 12px;
+.todoinput {
+    flex: 1;
+    min-width: 0;
+    box-sizing: border-box;
+    padding: 8px 10px;
+    border: 1px solid #e3e3e3;
+    border-radius: 9px;
+    font-size: 13px;
+    background: #fff;
+}
+
+.todoinput:focus {
+    outline: none;
+    border-color: #111;
+}
+
+.todoaddbtn {
+    border: 1px solid #111;
+    background: #111;
     color: #fff;
-    background: rgba(0, 0, 0, 0.4);
-    padding: 3px 8px;
-    border-radius: 999px;
+    border-radius: 9px;
+    padding: 0 14px;
+    font-size: 13px;
+    cursor: pointer;
 }
 
-.sliders {
+.todoaddbtn:hover {
+    background: #000;
+}
+
+.todolist {
+    list-style: none;
+    margin: 0;
+    padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 6px;
+    overflow-y: auto;
+    flex: 1;
+    min-height: 0;
 }
 
-.slider {
-    display: grid;
-    grid-template-columns: 44px 1fr 30px;
-    align-items: center;
-    gap: 10px;
-}
-
-.sliderlabel {
+.todoempty {
+    color: #aaa;
     font-size: 13px;
-    color: #555;
+    padding: 8px 2px;
 }
 
-.sliderval {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+.todoitem {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border: 1px solid #ececec;
+    border-radius: 10px;
+    background: #fff;
+}
+
+.todocheck {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    flex: 1;
+    min-width: 0;
+    cursor: pointer;
+    font-size: 13px;
+}
+
+.todotitle {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.todoitem[data-done="true"] .todotitle {
+    color: #aaa;
+    text-decoration: line-through;
+}
+
+.tododel {
+    border: none;
+    background: none;
+    color: #bbb;
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 2px;
+}
+
+.tododel:hover {
+    color: #e5484d;
+}
+
+.todofoot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     font-size: 12px;
     color: #888;
-    text-align: right;
 }
 
-.slider input[type="range"] {
-    width: 100%;
+.todoclear {
+    border: 1px solid #e3e3e3;
+    background: #fff;
+    border-radius: 7px;
+    padding: 3px 8px;
+    font-size: 12px;
+    cursor: pointer;
+    color: #333;
 }
 
-.slider[data-ch="r"] input {
-    accent-color: #e5484d;
-}
-
-.slider[data-ch="g"] input {
-    accent-color: #30a46c;
-}
-
-.slider[data-ch="b"] input {
-    accent-color: #3b82f6;
+.todoclear:hover {
+    border-color: #bbb;
 }
 
 .panelhint {
@@ -251,12 +256,11 @@ body {
     font-size: 11px;
 }
 
-/* assistant-ui tool-call card (makeAssistantToolUI renderer for set_color). */
+/* assistant-ui tool-call card (makeAssistantToolUI renderer for the to-do tools). */
 .toolcard {
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    margin: 4px 0;
     padding: 6px 10px;
     border: 1px solid #e3e3e3;
     border-radius: 10px;
@@ -264,21 +268,10 @@ body {
     font-size: 13px;
 }
 
-.toolcard-swatch {
-    width: 18px;
-    height: 18px;
-    border-radius: 5px;
-    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.15);
-}
-
 .toolcard-name {
     font-weight: 600;
-}
-
-.toolcard-hex {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 12px;
-    color: #555;
 }
 
 .toolcard-status {

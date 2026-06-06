@@ -11,105 +11,122 @@ import "@assistant-ui/react-ui/styles/index.css";
 import { useMemo } from "react";
 
 import { makeAssistantUiHistory } from "../lib/assistant-ui-history";
-import { getColor, setColor, toHex } from "../lib/color-store";
 import { useSessions } from "../lib/sessions";
+import { addTodo, clearCompleted, getTodos, removeTodo, type Todo, toggleTodo } from "../lib/todo-store";
 import type { BrowserSession } from "../lib/token";
 import { MarkdownText } from "./markdown-text";
 import { ChatLoading } from "./page-shell";
 
-type ColorArgs = { red?: number; green?: number; blue?: number };
-type ColorResult = { red: number; green: number; blue: number; hex: string };
+type TodoArgs = { title?: string; id?: string; done?: boolean };
+type TodoResult = Record<string, unknown>;
 
-// Swatch card for a color tool call, shared by set_color and get_color. Reads
-// the resolved color from `result`, falling back to the streaming `args`.
-function colorCard({ toolName, args, result, status }: ToolCallMessagePartProps<ColorArgs, ColorResult>) {
-    const r = result?.red ?? args?.red;
-    const g = result?.green ?? args?.green;
-    const b = result?.blue ?? args?.blue;
-    const known = [r, g, b].every((n) => typeof n === "number");
-    const hex = result?.hex ?? (known ? toHex({ r: r!, g: g!, b: b! }) : undefined);
+// One-line summary of a to-do tool call for its inline card, derived from the
+// result (or the streaming args before the result lands).
+function summarize(toolName: string, args: TodoArgs, result?: TodoResult): string | undefined {
+    switch (toolName) {
+        case "add_todo":
+            return (result as Todo | undefined)?.title ?? args.title;
+        case "toggle_todo": {
+            const r = result as Todo | undefined;
+            return r ? `${r.done ? "✓" : "○"} ${r.title}` : args.id;
+        }
+        case "remove_todo":
+            return args.id ? `removed ${args.id}` : "removed";
+        case "clear_completed": {
+            const n = (result as { removed?: number } | undefined)?.removed;
+            return typeof n === "number" ? `${n} cleared` : undefined;
+        }
+        case "list_todos": {
+            const n = (result as { todos?: Todo[] } | undefined)?.todos?.length;
+            return typeof n === "number" ? `${n} ${n === 1 ? "task" : "tasks"}` : undefined;
+        }
+        default:
+            return undefined;
+    }
+}
+
+// Shared inline card for every to-do tool call — same look live and rehydrated
+// from history. Without a registered UI a restored call falls back to
+// assistant-ui's generic JSON card.
+function todoCard({ toolName, args, result, status }: ToolCallMessagePartProps<TodoArgs, TodoResult>) {
+    const label = summarize(toolName, args ?? {}, result);
     return (
         <div className="toolcard">
-            <span className="toolcard-swatch" style={{ background: hex ?? "#ddd" }} />
             <span className="toolcard-name">{toolName}</span>
-            {hex ? <code className="toolcard-hex">{hex.toUpperCase()}</code> : null}
+            {label ? <span className="toolcard-status">{label}</span> : null}
             {status.type !== "complete" ? <span className="toolcard-status">…</span> : null}
         </div>
     );
 }
 
-const SetColorToolUI = makeAssistantToolUI<ColorArgs, ColorResult>({
-    toolName: "set_color",
-    render: colorCard,
-});
+const TODO_TOOL_NAMES = ["add_todo", "toggle_todo", "remove_todo", "clear_completed", "list_todos"] as const;
+const TodoToolUIs = TODO_TOOL_NAMES.map((toolName) => makeAssistantToolUI<TodoArgs, TodoResult>({ toolName, render: todoCard }));
 
-const GetColorToolUI = makeAssistantToolUI<ColorArgs, ColorResult>({
-    toolName: "get_color",
-    render: colorCard,
-});
+// The execute() delay works around an upstream race: assistant-ui resumes a
+// frontend tool only when no run is in flight, but a fast tool can resolve
+// before the originating run's SSE stream closes, dropping the resume and
+// hanging the chat. The delay lets the run close first. Tracked upstream in
+// @assistant-ui/react-ag-ui.
+const settle = () => new Promise((r) => setTimeout(r, 400));
 
-type WeatherArgs = { city?: string };
-type WeatherResult = { city: string; temp_f: number; condition: string };
-
-// Card for the server-side get_weather tool. Without a registered UI a restored
-// tool call falls back to assistant-ui's generic JSON card, so we give it one
-// that matches the color swatches — same look live and rehydrated from history.
-const WeatherToolUI = makeAssistantToolUI<WeatherArgs, WeatherResult>({
-    toolName: "get_weather",
-    render: ({ args, result, status }) => {
-        const city = result?.city ?? args?.city;
-        return (
-            <div className="toolcard">
-                <span className="toolcard-name">get_weather</span>
-                {city ? <code className="toolcard-hex">{city}</code> : null}
-                {result ? (
-                    <span className="toolcard-status">
-                        {result.temp_f}°F, {result.condition}
-                    </span>
-                ) : status.type !== "complete" ? (
-                    <span className="toolcard-status">…</span>
-                ) : null}
-            </div>
-        );
+const AddTodo = makeAssistantTool({
+    toolName: "add_todo",
+    type: "frontend",
+    description: "Add a task to the on-screen to-do list.",
+    parameters: { type: "object", properties: { title: { type: "string" } }, required: ["title"] },
+    execute: async (args) => {
+        await settle();
+        return addTodo(String((args as TodoArgs).title ?? ""));
     },
 });
 
-// Frontend tool driving the shared color mixer. The execute() delay works
-// around an upstream race: assistant-ui resumes a frontend tool only when no run
-// is in flight, but a fast tool can resolve before the originating run's SSE
-// stream closes, dropping the resume and hanging the chat. The delay lets the
-// run close first. Tracked upstream in @assistant-ui/react-ag-ui.
-const SetColor = makeAssistantTool({
-    toolName: "set_color",
+const ToggleTodo = makeAssistantTool({
+    toolName: "toggle_todo",
     type: "frontend",
-    description: "Set the color in the on-screen color mixer (red/green/blue, 0–255).",
+    description: "Check off or reopen a task by id (omit `done` to flip).",
     parameters: {
         type: "object",
-        properties: {
-            red: { type: "number" },
-            green: { type: "number" },
-            blue: { type: "number" },
-        },
-        required: ["red", "green", "blue"],
+        properties: { id: { type: "string" }, done: { type: "boolean" } },
+        required: ["id"],
     },
     execute: async (args) => {
-        const { red, green, blue } = args as { red: number; green: number; blue: number };
-        await new Promise((r) => setTimeout(r, 400)); // see SetColor note re resume race
-
-        const c = setColor({ r: red, g: green, b: blue }, { animate: true });
-        return { red: c.r, green: c.g, blue: c.b, hex: toHex(c) };
+        await settle();
+        const { id, done } = args as TodoArgs;
+        return toggleTodo(String(id), done) ?? { error: `No task with id ${String(id)}` };
     },
 });
 
-const GetColor = makeAssistantTool({
-    toolName: "get_color",
+const RemoveTodo = makeAssistantTool({
+    toolName: "remove_todo",
     type: "frontend",
-    description: "Read the color currently shown in the on-screen color mixer.",
+    description: "Delete a task by id.",
+    parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+    execute: async (args) => {
+        await settle();
+        const { id } = args as TodoArgs;
+        return { id: String(id), removed: removeTodo(String(id)) };
+    },
+});
+
+const ClearCompleted = makeAssistantTool({
+    toolName: "clear_completed",
+    type: "frontend",
+    description: "Remove every completed task.",
     parameters: { type: "object", properties: {} },
     execute: async () => {
-        await new Promise((r) => setTimeout(r, 400)); // see SetColor note re resume race
-        const c = getColor();
-        return { red: c.r, green: c.g, blue: c.b, hex: toHex(c) };
+        await settle();
+        return { removed: clearCompleted() };
+    },
+});
+
+const ListTodos = makeAssistantTool({
+    toolName: "list_todos",
+    type: "frontend",
+    description: "Read the current to-do list.",
+    parameters: { type: "object", properties: {} },
+    execute: async () => {
+        await settle();
+        return { todos: getTodos() };
     },
 });
 
@@ -143,11 +160,14 @@ function AssistantUiThread({ session, sessionId }: { session: BrowserSession; se
     const runtime = useAgUiRuntime({ agent, adapters });
     return (
         <AssistantRuntimeProvider runtime={runtime}>
-            <SetColor />
-            <GetColor />
-            <SetColorToolUI />
-            <GetColorToolUI />
-            <WeatherToolUI />
+            <AddTodo />
+            <ToggleTodo />
+            <RemoveTodo />
+            <ClearCompleted />
+            <ListTodos />
+            {TodoToolUIs.map((ToolUI, i) => (
+                <ToolUI key={TODO_TOOL_NAMES[i]} />
+            ))}
             <Thread assistantMessage={{ components: { Text: MarkdownText } }} />
         </AssistantRuntimeProvider>
     );

@@ -10,7 +10,6 @@
 import { ExportedMessageRepository, type ThreadHistoryAdapter, type ThreadMessageLike } from "@assistant-ui/react";
 
 import { fetchSessionSnapshot, type AgUiMessage } from "./history";
-import { setSessionTitle } from "./sessions";
 import type { BrowserSession } from "./token";
 
 type ToolCallPart = {
@@ -91,8 +90,6 @@ export function makeAssistantUiHistory(session: BrowserSession, sessionId: strin
     return {
         async load() {
             const raw = await fetchSessionSnapshot(session, sessionId);
-            const firstUser = raw.find((m) => m.role === "user");
-            if (firstUser?.content) setSessionTitle(sessionId, firstUser.content);
             const drafts = toThreadMessages(raw);
             // Linear thread: each message's parent is the one before it.
             // fromBranchableArray converts each ThreadMessageLike and picks the head.

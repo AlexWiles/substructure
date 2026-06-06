@@ -2,33 +2,48 @@ import { CopilotChat, CopilotKitProvider } from "@copilotkit/react-core/v2";
 import "@copilotkit/react-core/v2/styles.css";
 import { useMemo } from "react";
 
-import { getColor, setColor, toHex } from "../lib/color-store";
 import { useSessionHistory } from "../lib/history";
 import { HistoryHttpAgent } from "../lib/history-http-agent";
 import { useSessions } from "../lib/sessions";
+import { addTodo, clearCompleted, getTodos, removeTodo, toggleTodo } from "../lib/todo-store";
 import type { BrowserSession } from "../lib/token";
 import { ChatLoading } from "./page-shell";
 
 // Frontend tools. The schema is declared on the worker; these handlers just
-// read/write the shared color mixer.
-const setColorTool = {
-    name: "set_color",
-    description: "Set the color in the on-screen color mixer (red/green/blue, 0–255).",
-    handler: async (args: Record<string, unknown>) => {
-        const { red, green, blue } = args as { red: number; green: number; blue: number };
-        const c = setColor({ r: red, g: green, b: blue }, { animate: true });
-        return { red: c.r, green: c.g, blue: c.b, hex: toHex(c) };
+// read/write the shared to-do store.
+const frontendTools = [
+    {
+        name: "add_todo",
+        description: "Add a task to the on-screen to-do list.",
+        handler: async (args: Record<string, unknown>) => addTodo(String(args.title ?? "")),
     },
-};
-
-const getColorTool = {
-    name: "get_color",
-    description: "Read the color currently shown in the on-screen color mixer.",
-    handler: async () => {
-        const c = getColor();
-        return { red: c.r, green: c.g, blue: c.b, hex: toHex(c) };
+    {
+        name: "toggle_todo",
+        description: "Check off or reopen a task by id (omit `done` to flip).",
+        handler: async (args: Record<string, unknown>) => {
+            const t = toggleTodo(String(args.id), args.done as boolean | undefined);
+            return t ?? { error: `No task with id ${String(args.id)}` };
+        },
     },
-};
+    {
+        name: "remove_todo",
+        description: "Delete a task by id.",
+        handler: async (args: Record<string, unknown>) => ({
+            id: String(args.id),
+            removed: removeTodo(String(args.id)),
+        }),
+    },
+    {
+        name: "clear_completed",
+        description: "Remove every completed task.",
+        handler: async () => ({ removed: clearCompleted() }),
+    },
+    {
+        name: "list_todos",
+        description: "Read the current to-do list.",
+        handler: async () => ({ todos: getTodos() }),
+    },
+];
 
 // Mount the chat keyed on the active session so switching gives a fresh provider.
 // History is restored by the agent's connect() (see HistoryHttpAgent), not seeded
@@ -70,9 +85,11 @@ function CopilotKitThread({ session, sessionId }: { session: BrowserSession; ses
         <CopilotKitProvider
             headers={{ Authorization: `Bearer ${token}` }}
             selfManagedAgents={{ [agentId]: agent }}
-            frontendTools={[setColorTool, getColorTool]}
+            frontendTools={frontendTools}
         >
-            <CopilotChat agentId={agentId} threadId={sessionId} />
+            <div className="copilot-pane">
+                <CopilotChat agentId={agentId} threadId={sessionId} />
+            </div>
         </CopilotKitProvider>
     );
 }

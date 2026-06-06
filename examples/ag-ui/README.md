@@ -17,7 +17,7 @@ browser <TanStack AI useChat + fetchServerSentEvents>
    │  1. route loader → server fn mints a short-lived token (server-side)
    │  2. AG-UI run, streamed   (cross-origin, DIRECT to the engine)
    ▼
-<engine>/api/client/ag-ui/agents/weather-agent/run
+<engine>/api/client/ag-ui/agents/todo-agent/run
    │  drives the agent loop
    ▼
 POST /api/agent   (the substructure worker — also this Worker)
@@ -52,25 +52,34 @@ pnpm install
 pnpm dev          # http://localhost:3030
 ```
 
-Open <http://localhost:3030> and ask *“What's the weather in SF and Tokyo?”* —
-the reply streams in and the `get_weather` tool calls render inline.
+Open <http://localhost:3030>. On the right is a **to-do list**; on the left, a
+chat. Ask *“add milk, eggs, and bread”* and watch the agent fill the list, then
+*“check off the first one”* or *“what's on my list?”* — the tool calls render
+inline and the panel updates live. You can also edit the list by hand; the agent
+reads your edits back with `list_todos`.
 
 ## Frontend (client-handled) tools
 
-Ask *“What timezone am I in?”* to exercise a **frontend tool**. `get_user_timezone`
-runs in the **browser**, not on the server:
+Every tool here is a **frontend tool**: it runs in the **browser**, against a
+shared store the panel renders, not on the server. The set is `add_todo`,
+`toggle_todo`, `remove_todo`, `clear_completed`, and `list_todos` — the AI drives
+the list and reads it back, and you drive the same store from the UI.
 
-- The worker only *declares* it — `handler: "client"` + `ctx.defer()`
-  (`substructure.ts`). The engine suspends the turn and waits.
-- The matching executor is a TanStack AI client tool
-  (`toolDefinition(...).client(execute)` in `src/components/tools.ts`, passed to
-  `useChat({ tools })`). TanStack AI runs it and continues the run with the result.
+- The worker only *declares* each tool — `handler: "client"` + `ctx.defer()`
+  (`substructure.ts` and `routes/api/agent.ts`). The engine suspends the turn and
+  waits for the browser.
+- The matching executors live in each chat client and mutate the shared store
+  (`src/lib/todo-store.ts`): assistant-ui registers them with `makeAssistantTool`
+  (`assistant-ui-chat.tsx`); CopilotKit passes `frontendTools` to its provider
+  (`copilotkit-chat.tsx`). `TodoPanel` reads the store via `useSyncExternalStore`.
 - The AG-UI endpoint streams the call as `TOOL_CALL_START/ARGS/END` → `RUN_FINISHED`,
   then on the continuation run maps the tool-result message to
   `submit_tool_call_result`, resuming the turn → `TOOL_CALL_RESULT` → reply.
 
-The tool **name** must match on both sides (`get_user_timezone`). The browser
-never sees the substructure API key; only the short-lived client token.
+The tool **name** must match on both sides (e.g. `add_todo`). The browser never
+sees the substructure API key; only the short-lived client token. Mutations
+through the agent and through the panel both flow through the one store, so the
+UI stays in sync whichever drives it.
 
 ## Deploy to Cloudflare Workers
 

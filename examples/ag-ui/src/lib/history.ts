@@ -5,7 +5,6 @@
 
 import { useEffect, useState } from "react";
 
-import { setSessionTitle } from "./sessions";
 import type { BrowserSession } from "./token";
 
 export type AgUiMessage = {
@@ -65,9 +64,6 @@ export function useSessionHistory(session: BrowserSession, sessionId: string): H
         fetchSessionSnapshot(session, sessionId).then((messages) => {
             if (cancelled) return;
             setHistory({ loading: false, messages });
-            // Label the session by its opening question, once.
-            const firstUser = messages.find((m) => m.role === "user");
-            if (firstUser?.content) setSessionTitle(sessionId, firstUser.content);
         });
 
         return () => {
