@@ -6,7 +6,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 
 use tokio_util::sync::CancellationToken;
@@ -33,6 +33,10 @@ pub fn router(state: AdminHttpState) -> Router {
             "/api/admin/sessions/{session_id}/events/stream",
             get(routes::stream_session_events),
         )
+        .route(
+            "/api/admin/sessions/{session_id}/ag-ui/connect",
+            post(routes::connect_session_ag_ui),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             admin_auth_middleware,
@@ -47,7 +51,14 @@ async fn admin_auth_middleware(
 ) -> Response {
     match state.auth.resolve(request.headers()).await {
         Ok(principal) => {
-            request.extensions_mut().insert(principal);
+            let Some(caller) = principal.machine_caller() else {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({"error": "machine subject is required"})),
+                )
+                    .into_response();
+            };
+            request.extensions_mut().insert(caller);
             next.run(request).await
         }
         Err(AuthError::MissingCredentials | AuthError::InvalidCredentials) => (

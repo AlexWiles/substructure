@@ -8,11 +8,11 @@ use tokio_stream::StreamExt;
 
 use rust_decimal::Decimal;
 
-use crate::identity::ClientIdentity;
 use crate::llm::{
     CallContext, ErrorCode, LlmCallError, LlmCallable, LlmProviderTrait, LlmRequest, LlmResponse,
-    LlmTool, ResponseImage, StreamDelta,
+    LlmTool, ReasoningConfig, ResponseImage, StreamDelta, ToolCallChunk,
 };
+use crate::owner::SessionOwner;
 use crate::session::message::{ToolCall, ToolCallFunction};
 
 /// Wraps our normalized `LlmTool` with the `"type": "function"` field
@@ -55,6 +55,8 @@ struct WireBody<'a> {
     temperature: Option<f64>,
     #[serde(rename = "max_tokens", skip_serializing_if = "Option::is_none")]
     max_completion_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<&'a ReasoningConfig>,
     stream: bool,
 }
 
@@ -196,7 +198,11 @@ struct StreamChunkDelta {
     #[serde(default)]
     content: Option<String>,
     #[serde(default)]
+    reasoning: Option<String>,
+    #[serde(default)]
     tool_calls: Option<Vec<ToolCallDelta>>,
+    #[serde(default)]
+    images: Option<Vec<WireResponseImage>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -266,6 +272,7 @@ impl OpenRouterClient {
                 .map(|ts| ts.iter().map(WireTool::from).collect()),
             temperature: request.temperature,
             max_completion_tokens: request.max_completion_tokens,
+            reasoning: request.reasoning.as_ref(),
             stream,
         };
 
@@ -357,6 +364,7 @@ impl LlmCallable for OpenRouterClient {
 
         let mut content = String::new();
         let mut tool_calls: Vec<ToolCallAccum> = Vec::new();
+        let mut images: Vec<ResponseImage> = Vec::new();
         let mut finish_reason: Option<String> = None;
         let mut model = request.model.clone();
         let mut usage: Option<serde_json::Value> = None;
@@ -409,8 +417,17 @@ impl LlmCallable for OpenRouterClient {
                         content.push_str(text);
                         let _ = chunk_tx.send(StreamDelta {
                             text: Some(text.clone()),
-                            finish_reason: None,
+                            ..Default::default()
                         });
+                    }
+
+                    if let Some(ref reasoning) = choice.delta.reasoning {
+                        if !reasoning.is_empty() {
+                            let _ = chunk_tx.send(StreamDelta {
+                                reasoning: Some(reasoning.clone()),
+                                ..Default::default()
+                            });
+                        }
                     }
 
                     if let Some(tc_deltas) = choice.delta.tool_calls {
@@ -422,22 +439,40 @@ impl LlmCallable for OpenRouterClient {
                             if let Some(id) = tc_delta.id {
                                 accum.id = id;
                             }
+                            let mut args_fragment = None;
                             if let Some(f) = tc_delta.function {
                                 if let Some(name) = f.name {
                                     accum.name = name;
                                 }
                                 if let Some(args) = f.arguments {
                                     accum.arguments.push_str(&args);
+                                    args_fragment = Some(args);
                                 }
                             }
+                            if !accum.id.is_empty() {
+                                let _ = chunk_tx.send(StreamDelta {
+                                    tool_calls: vec![ToolCallChunk {
+                                        id: accum.id.clone(),
+                                        name: (!accum.name.is_empty()).then(|| accum.name.clone()),
+                                        arguments: args_fragment,
+                                    }],
+                                    ..Default::default()
+                                });
+                            }
                         }
+                    }
+
+                    if let Some(imgs) = choice.delta.images {
+                        images.extend(imgs.into_iter().map(|img| ResponseImage {
+                            url: img.image_url.url,
+                        }));
                     }
 
                     if let Some(reason) = choice.finish_reason {
                         finish_reason = Some(reason.clone());
                         let _ = chunk_tx.send(StreamDelta {
-                            text: None,
                             finish_reason: Some(reason),
+                            ..Default::default()
                         });
                     }
                 }
@@ -468,7 +503,7 @@ impl LlmCallable for OpenRouterClient {
             finish_reason,
             usage,
             cost,
-            images: Vec::new(),
+            images,
         })
     }
 }
@@ -487,7 +522,7 @@ impl OpenRouterProvider {
 
 #[async_trait]
 impl LlmProviderTrait for OpenRouterProvider {
-    async fn resolve(&self, _identity: &ClientIdentity) -> Result<Arc<dyn LlmCallable>, String> {
+    async fn resolve(&self, _owner: &SessionOwner) -> Result<Arc<dyn LlmCallable>, String> {
         Ok(self.client.clone())
     }
 }

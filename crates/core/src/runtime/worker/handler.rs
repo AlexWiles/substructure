@@ -79,7 +79,7 @@ fn try_extract(raw: &Event) -> Option<WorkerDecisionRequest> {
     };
     let derived = event.derived.as_ref()?;
     let agent_id = derived.agent_id.as_ref()?;
-    let identity = derived.identity.as_ref()?;
+    let owner = derived.owner.as_ref()?;
     let wd = derived.worker_decisions.get(&req.decision_id)?;
 
     Some(WorkerDecisionRequest {
@@ -87,7 +87,7 @@ fn try_extract(raw: &Event) -> Option<WorkerDecisionRequest> {
         tenant_id: event.tenant_id.clone(),
         decision_id: req.decision_id.clone(),
         agent_id: agent_id.clone(),
-        identity: identity.clone(),
+        owner: owner.clone(),
         trigger: req.trigger.clone(),
         worker_state: derived.worker_state.clone(),
         ancestry: derived.ancestry.clone(),

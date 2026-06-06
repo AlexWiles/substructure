@@ -8,15 +8,15 @@ use super::events::*;
 use super::message::{Content, ContentPart, ImageUrl, Message, Role};
 use super::state::{new_call_id, EffectStatus, SessionState, SessionStatus};
 use crate::runtime::aggregate::Caller;
-use crate::runtime::identity::ClientIdentity;
 use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse};
+use crate::runtime::owner::SessionOwner;
 use crate::runtime::retry::RetryPolicy;
 
 #[derive(Debug, Clone)]
 pub enum CommandPayload {
     CreateSession {
         agent_id: String,
-        identity: ClientIdentity,
+        owner: SessionOwner,
         ancestry: Vec<String>,
         worker_retry: RetryPolicy,
     },
@@ -149,7 +149,7 @@ impl SessionState {
     /// dispatched by internal processors or recursive expansions.
     fn ensure_internal(caller: &Caller) -> Result<(), SessionError> {
         match caller {
-            Caller::System => Ok(()),
+            Caller::System { .. } => Ok(()),
             _ => Err(SessionError::SessionAccessDenied),
         }
     }
@@ -159,7 +159,7 @@ impl SessionState {
     /// end users should never reach.
     fn ensure_machine_or_system(caller: &Caller) -> Result<(), SessionError> {
         match caller {
-            Caller::System | Caller::Machine { .. } => Ok(()),
+            Caller::System { .. } | Caller::Machine { .. } => Ok(()),
             Caller::Frontend { .. } => Err(SessionError::SessionAccessDenied),
         }
     }
@@ -169,7 +169,7 @@ impl SessionState {
     /// different tenant than the one the session was created under.
     fn ensure_tenant_matches(caller: &Caller, tenant_id: &str) -> Result<(), SessionError> {
         match caller {
-            Caller::System => Ok(()),
+            Caller::System { .. } => Ok(()),
             Caller::Machine {
                 tenant_id: caller_tenant,
                 ..
@@ -191,13 +191,13 @@ impl SessionState {
     /// `Machine` and `System` callers are unconstrained.
     fn ensure_owns_session(&self, caller: &Caller) -> Result<(), SessionError> {
         match caller {
-            Caller::System | Caller::Machine { .. } => Ok(()),
+            Caller::System { .. } | Caller::Machine { .. } => Ok(()),
             Caller::Frontend { user_id, .. } => {
-                let identity = self
-                    .identity
+                let owner = self
+                    .owner
                     .as_ref()
                     .ok_or(SessionError::SessionAccessDenied)?;
-                if identity.id.as_deref() != Some(user_id.as_str()) {
+                if owner.id.as_deref() != Some(user_id.as_str()) {
                     return Err(SessionError::SessionAccessDenied);
                 }
                 Ok(())
@@ -227,21 +227,21 @@ impl SessionState {
                 None,
                 CommandPayload::CreateSession {
                     agent_id,
-                    identity,
+                    owner,
                     ancestry,
                     worker_retry,
                 },
             ) => {
-                Self::ensure_tenant_matches(caller, &identity.tenant_id)?;
+                Self::ensure_tenant_matches(caller, &owner.tenant_id)?;
                 if let Caller::Frontend { user_id, .. } = caller {
-                    if identity.id.as_deref() != Some(user_id.as_str()) {
+                    if owner.id.as_deref() != Some(user_id.as_str()) {
                         return Err(SessionError::SessionAccessDenied);
                     }
                 }
                 Ok(vec![EventPayload::SessionCreated(Box::new(
                     SessionCreated {
                         agent_id,
-                        identity,
+                        owner,
                         ancestry,
                         worker_retry,
                     },
@@ -275,8 +275,8 @@ impl SessionState {
         cmd: CommandPayload,
         caller: &Caller,
     ) -> Result<Vec<EventPayload>, SessionError> {
-        if let Some(identity) = self.identity.as_ref() {
-            Self::ensure_tenant_matches(caller, &identity.tenant_id)?;
+        if let Some(owner) = self.owner.as_ref() {
+            Self::ensure_tenant_matches(caller, &owner.tenant_id)?;
         }
         match cmd {
             CommandPayload::CreateSession { .. } => Err(SessionError::SessionAlreadyCreated),
@@ -785,7 +785,9 @@ impl SessionState {
                                 stream,
                                 retry,
                             },
-                            &Caller::System,
+                            &Caller::System {
+                                tenant_id: "tenant-a".to_string(),
+                            },
                         ),
                         WorkerAction::CallTool {
                             tool_call_id,
@@ -801,7 +803,9 @@ impl SessionState {
                                 handler,
                                 retry,
                             },
-                            &Caller::System,
+                            &Caller::System {
+                                tenant_id: "tenant-a".to_string(),
+                            },
                         ),
                         WorkerAction::SpawnSubAgent {
                             session_id,
@@ -813,7 +817,9 @@ impl SessionState {
                                 agent_id,
                                 retry,
                             },
-                            &Caller::System,
+                            &Caller::System {
+                                tenant_id: "tenant-a".to_string(),
+                            },
                         ),
                         WorkerAction::SendMessage {
                             session_id,
@@ -835,7 +841,9 @@ impl SessionState {
                                 result,
                                 worker_state: None,
                             },
-                            &Caller::System,
+                            &Caller::System {
+                                tenant_id: "tenant-a".to_string(),
+                            },
                         ),
                         WorkerAction::ReturnToolError {
                             tool_call_id,
@@ -850,11 +858,16 @@ impl SessionState {
                                 retryable,
                                 worker_state: None,
                             },
-                            &Caller::System,
+                            &Caller::System {
+                                tenant_id: "tenant-a".to_string(),
+                            },
                         ),
-                        WorkerAction::Done { data } => {
-                            self.handle(CommandPayload::MarkDone { data }, &Caller::System)
-                        }
+                        WorkerAction::Done { data } => self.handle(
+                            CommandPayload::MarkDone { data },
+                            &Caller::System {
+                                tenant_id: "tenant-a".to_string(),
+                            },
+                        ),
                     };
                     if let Ok(sub) = sub_events {
                         events.extend(sub);
@@ -1107,8 +1120,8 @@ mod tests {
 
     use super::*;
     use crate::runtime::aggregate::{Aggregate, Caller, CommitContext};
-    use crate::runtime::identity::ClientIdentity;
     use crate::runtime::llm::{LlmRequest, LlmResponse};
+    use crate::runtime::owner::SessionOwner;
     use crate::runtime::retry::RetryPolicy;
     use crate::runtime::session::decision::{ClientPayload, WorkerAction};
     use crate::runtime::session::events::{EventPayload, ToolHandler};
@@ -1150,7 +1163,7 @@ mod tests {
             &mut agg,
             CommandPayload::CreateSession {
                 agent_id: "agent-1".to_string(),
-                identity: ClientIdentity {
+                owner: SessionOwner {
                     tenant_id: tenant_id.to_string(),
                     id: Some(user_id.to_string()),
                     metadata: HashMap::new(),
@@ -1158,7 +1171,9 @@ mod tests {
                 ancestry: vec![],
                 worker_retry: RetryPolicy::no_retry(),
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
         agg
     }
@@ -1175,7 +1190,9 @@ mod tests {
                 handler: ToolHandler::Client,
                 retry: RetryPolicy::no_retry(),
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
 
         let events = dispatch(
@@ -1223,7 +1240,9 @@ mod tests {
                 handler: ToolHandler::Client,
                 retry: RetryPolicy::no_retry(),
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
 
         let caller = Caller::Frontend {
@@ -1263,7 +1282,9 @@ mod tests {
                 handler: ToolHandler::Worker,
                 retry: RetryPolicy::no_retry(),
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
 
         let caller = Caller::Frontend {
@@ -1304,7 +1325,9 @@ mod tests {
                 handler: ToolHandler::Client,
                 retry: RetryPolicy::no_retry(),
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
 
         assert!(
@@ -1331,7 +1354,9 @@ mod tests {
                 handler: ToolHandler::Worker,
                 retry: RetryPolicy::no_retry(),
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
 
         assert!(
@@ -1366,7 +1391,9 @@ mod tests {
                 handler: ToolHandler::Worker,
                 retry: RetryPolicy::no_retry(),
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
         let d1 = request_events
             .iter()
@@ -1437,7 +1464,9 @@ mod tests {
                 handler: ToolHandler::Worker,
                 retry: RetryPolicy::no_retry(),
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
 
         let events = dispatch(
@@ -1482,7 +1511,9 @@ mod tests {
                 handler: ToolHandler::Worker,
                 retry: RetryPolicy::no_retry(),
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
 
         let caller = Caller::Machine {
@@ -1529,7 +1560,9 @@ mod tests {
                 payload: payload.clone(),
                 turn_id: Some("turn-1".to_string()),
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
 
         let err = agg
@@ -1539,7 +1572,9 @@ mod tests {
                     payload,
                     turn_id: Some("turn-1".to_string()),
                 },
-                &Caller::System,
+                &Caller::System {
+                    tenant_id: "tenant-a".to_string(),
+                },
             )
             .expect_err("re-submitting an active turn_id should be rejected");
 
@@ -1567,7 +1602,9 @@ mod tests {
                 },
                 turn_id: Some("turn-1".to_string()),
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
         let decision_id = setup_events
             .iter()
@@ -1632,7 +1669,9 @@ mod tests {
                 },
                 turn_id: Some("turn-1".to_string()),
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
         let decision_id = setup_events
             .iter()
@@ -1693,7 +1732,9 @@ mod tests {
                 reason: "paused".to_string(),
                 payload: serde_json::Value::Null,
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
 
         let user_message = ClientPayload::Message {
@@ -1714,7 +1755,9 @@ mod tests {
                     payload: user_message,
                     turn_id: Some("turn-1".to_string()),
                 },
-                &Caller::System,
+                &Caller::System {
+                    tenant_id: "tenant-a".to_string(),
+                },
             )
             .expect_err("user messages should be rejected while interrupted");
 
@@ -1769,7 +1812,9 @@ mod tests {
                 stream: false,
                 turn_id: None,
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
 
         // A user message wakes a worker decision so the LLM can respond.
@@ -1790,7 +1835,13 @@ mod tests {
     fn cancel_session_emits_cancelled() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
 
-        let events = dispatch(&mut agg, CommandPayload::CancelSession, &Caller::System);
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::CancelSession,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
+        );
 
         assert!(
             matches!(events.as_slice(), [EventPayload::SessionCancelled]),
@@ -1808,7 +1859,9 @@ mod tests {
             CommandPayload::MarkDone {
                 data: serde_json::Value::Null,
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
 
         // No active turn, no ancestry → just SessionDone, status returns to Idle.
@@ -1825,7 +1878,12 @@ mod tests {
 
         let events = agg
             .state
-            .handle(CommandPayload::Wake { now: Utc::now() }, &Caller::System)
+            .handle(
+                CommandPayload::Wake { now: Utc::now() },
+                &Caller::System {
+                    tenant_id: "tenant-a".to_string(),
+                },
+            )
             .expect("wake should succeed");
 
         assert!(
@@ -1848,11 +1906,14 @@ mod tests {
                     tools: None,
                     temperature: None,
                     max_completion_tokens: None,
+                    reasoning: None,
                 },
                 stream: false,
                 retry: RetryPolicy::no_retry(),
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
 
         assert!(
@@ -1876,11 +1937,14 @@ mod tests {
                     tools: None,
                     temperature: None,
                     max_completion_tokens: None,
+                    reasoning: None,
                 },
                 stream: false,
                 retry: RetryPolicy::no_retry(),
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
 
         let events = dispatch(
@@ -1898,7 +1962,9 @@ mod tests {
                     images: vec![],
                 },
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
 
         assert!(
@@ -1929,11 +1995,14 @@ mod tests {
                     tools: None,
                     temperature: None,
                     max_completion_tokens: None,
+                    reasoning: None,
                 },
                 stream: false,
                 retry: RetryPolicy::no_retry(),
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
 
         let events = dispatch(
@@ -1946,7 +2015,9 @@ mod tests {
                 code: None,
                 detail: None,
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
 
         // Retry policy exhausted (no_retry + retryable=false) so the handler
@@ -1977,7 +2048,9 @@ mod tests {
                 handler: ToolHandler::Worker,
                 retry: RetryPolicy::no_retry(),
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
         let d1 = request_events
             .iter()
@@ -2044,7 +2117,9 @@ mod tests {
                 agent_id: "agent-2".to_string(),
                 retry: RetryPolicy::no_retry(),
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
 
         assert!(
@@ -2069,7 +2144,9 @@ mod tests {
                 agent_id: "agent-2".to_string(),
                 retry: RetryPolicy::no_retry(),
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
 
         let events = dispatch(
@@ -2077,7 +2154,9 @@ mod tests {
             CommandPayload::StartSubAgent {
                 session_id: "child-1".to_string(),
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
 
         assert!(
@@ -2096,7 +2175,9 @@ mod tests {
                 agent_id: "agent-2".to_string(),
                 retry: RetryPolicy::no_retry(),
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
 
         let events = dispatch(
@@ -2106,7 +2187,9 @@ mod tests {
                 error: "child crashed".to_string(),
                 retryable: false,
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
 
         // Retry exhausted → follow-up worker decision with the error.
@@ -2138,7 +2221,9 @@ mod tests {
                 agent_id: "agent-2".to_string(),
                 retry: RetryPolicy::no_retry(),
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
 
         let events = dispatch(
@@ -2151,7 +2236,9 @@ mod tests {
                 cost: rust_decimal::Decimal::ZERO,
                 token_usage: std::collections::BTreeMap::new(),
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
 
         assert!(
@@ -2176,7 +2263,9 @@ mod tests {
                 reason: "paused".to_string(),
                 payload: serde_json::Value::Null,
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
 
         let events = dispatch(
@@ -2185,7 +2274,9 @@ mod tests {
                 interrupt_id: "int-1".to_string(),
                 payload: serde_json::Value::Null,
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
 
         assert!(
@@ -2219,7 +2310,9 @@ mod tests {
                 },
                 turn_id: Some("turn-1".to_string()),
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
         let decision_id = setup_events
             .iter()
@@ -2236,7 +2329,9 @@ mod tests {
                 error: "worker offline".to_string(),
                 retryable: false,
             },
-            &Caller::System,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
         );
 
         assert!(
@@ -2299,7 +2394,7 @@ mod tests {
             .handle(
                 CommandPayload::CreateSession {
                     agent_id: "agent-1".to_string(),
-                    identity: ClientIdentity {
+                    owner: SessionOwner {
                         tenant_id: "tenant-b".to_string(),
                         id: Some("user-1".to_string()),
                         metadata: HashMap::new(),

@@ -156,8 +156,9 @@ async fn fire_due(
             store.as_ref(),
             ExecuteInput {
                 aggregate_id: item.aggregate_id,
-                tenant_id: item.tenant_id,
-                caller: Caller::System,
+                caller: Caller::System {
+                    tenant_id: item.tenant_id,
+                },
                 command: CommandPayload::Wake { now },
                 span: SpanContext::root(),
             },

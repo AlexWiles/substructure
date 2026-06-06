@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::runtime::identity::ClientIdentity;
+use crate::runtime::owner::SessionOwner;
 use crate::runtime::session::message::{Message, ToolCall};
 
 /// An image returned by the model in the response.
@@ -35,6 +35,31 @@ pub struct LlmRequest {
     pub temperature: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_completion_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ReasoningConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReasoningConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReasoningEffort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    Xhigh,
+    High,
+    Medium,
+    Low,
+    Minimal,
+    None,
 }
 
 /// Normalized LLM response. Provider adapters convert their raw responses
@@ -61,7 +86,7 @@ pub struct LlmResponse {
 /// Trait for LLM client providers (resolved by the runtime).
 #[async_trait]
 pub trait LlmProviderTrait: Send + Sync {
-    async fn resolve(&self, identity: &ClientIdentity) -> Result<Arc<dyn LlmCallable>, String>;
+    async fn resolve(&self, owner: &SessionOwner) -> Result<Arc<dyn LlmCallable>, String>;
 }
 
 #[derive(Debug, Clone)]
@@ -71,7 +96,7 @@ pub struct CallContext<'a> {
     pub agent_id: &'a str,
     pub call_id: &'a str,
     pub attempt: u32,
-    pub identity: &'a ClientIdentity,
+    pub owner: &'a SessionOwner,
     /// Parent chain, root-last. Empty for top-level sessions.
     pub ancestry: &'a [String],
 }
@@ -116,8 +141,19 @@ pub struct LlmCallError {
     pub detail: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct StreamDelta {
     pub text: Option<String>,
+    pub reasoning: Option<String>,
+    pub tool_calls: Vec<ToolCallChunk>,
     pub finish_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallChunk {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
 }

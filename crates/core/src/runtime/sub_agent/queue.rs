@@ -1,7 +1,7 @@
 use rust_decimal::Decimal;
 use uuid::Uuid;
 
-use crate::runtime::identity::ClientIdentity;
+use crate::runtime::owner::SessionOwner;
 use crate::runtime::retry::RetryPolicy;
 use crate::runtime::session::message::Message;
 use crate::runtime::span::SpanContext;
@@ -14,7 +14,7 @@ pub enum SubAgentTask {
         tenant_id: String,
         child_session_id: String,
         agent_id: String,
-        identity: ClientIdentity,
+        owner: SessionOwner,
         ancestry: Vec<String>,
         retry: RetryPolicy,
         span: SpanContext,

@@ -148,6 +148,21 @@ export interface LlmRequest {
     tools?: LlmTool[];
     temperature?: number;
     max_completion_tokens?: number;
+    /** Reasoning / thinking controls, passed through to providers that support
+     *  it. `effort` and `max_tokens` are mutually exclusive. */
+    reasoning?: ReasoningConfig;
+}
+
+/** Mirrors OpenRouter's unified `reasoning` parameter. */
+export interface ReasoningConfig {
+    /** OpenAI / Grok style. Mutually exclusive with `max_tokens`. */
+    effort?: "xhigh" | "high" | "medium" | "low" | "minimal" | "none";
+    /** Anthropic / Gemini / Qwen style token budget. Mutually exclusive with `effort`. */
+    max_tokens?: number;
+    /** Reason internally but omit reasoning from the response (default false). */
+    exclude?: boolean;
+    /** Shorthand to enable reasoning at the provider's default (medium) effort. */
+    enabled?: boolean;
 }
 
 export interface ResponseImage {

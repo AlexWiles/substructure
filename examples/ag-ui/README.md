@@ -1,0 +1,105 @@
+# ag-ui
+
+A [TanStack Start](https://tanstack.com/start) app deployed to **Cloudflare
+Workers**, with a [TanStack AI](https://tanstack.com/ai) chat that talks to
+substructure's **native AG-UI endpoint** directly — no runtime broker, no
+translation layer.
+
+TanStack AI's client speaks AG-UI natively: `fetchServerSentEvents` POSTs a
+`RunAgentInput` straight to the engine's `/api/client/ag-ui/agents/{agentId}/run`
+and parses the AG-UI SSE stream. The only thing the edge app does is host the
+worker and mint a token, so the Worker stays tiny.
+
+## Architecture
+
+```
+browser <TanStack AI useChat + fetchServerSentEvents>
+   │  1. route loader → server fn mints a short-lived token (server-side)
+   │  2. AG-UI run, streamed   (cross-origin, DIRECT to the engine)
+   ▼
+<engine>/api/client/ag-ui/agents/todo-agent/run
+   │  drives the agent loop
+   ▼
+POST /api/agent   (the substructure worker — also this Worker)
+```
+
+- **`routes/api/agent.ts`** — the substructure worker. The engine calls it
+  server-to-server.
+- **`routes/index.tsx`** — a `createServerFn` mints the short-lived,
+  identity-locked client token in the route **loader** (the API key stays on the
+  server) and passes it to the chat.
+- **`components/chat.tsx`** — `useChat({ connection: fetchServerSentEvents(...) })`
+  pointed at the engine endpoint with the token as a Bearer header.
+
+Because the browser streams from the engine **directly**, the engine must be
+reachable from the browser with permissive CORS (the local/dev server already
+is). Set `SUBSTRUCTURE_PUBLIC_URL` to the browser-facing engine URL when it
+differs from the server-side one.
+
+## Run locally
+
+In one terminal, a local engine pointed at this app's worker route:
+
+```sh
+export OPENROUTER_API_KEY=sk-or-...
+substructure start --dev --port 9000 --worker-url http://localhost:3030/api/agent
+```
+
+In another, the TanStack Start app (Node dev server):
+
+```sh
+pnpm install
+pnpm dev          # http://localhost:3030
+```
+
+Open <http://localhost:3030>. On the right is a **to-do list**; on the left, a
+chat. Ask *“add milk, eggs, and bread”* and watch the agent fill the list, then
+*“check off the first one”* or *“what's on my list?”* — the tool calls render
+inline and the panel updates live. You can also edit the list by hand; the agent
+reads your edits back with `list_todos`.
+
+## Frontend (client-handled) tools
+
+Every tool here is a **frontend tool**: it runs in the **browser**, against a
+shared store the panel renders, not on the server. The set is `add_todo`,
+`toggle_todo`, `remove_todo`, `clear_completed`, and `list_todos` — the AI drives
+the list and reads it back, and you drive the same store from the UI.
+
+- The worker only *declares* each tool — `handler: "client"` + `ctx.defer()`
+  (`substructure.ts` and `routes/api/agent.ts`). The engine suspends the turn and
+  waits for the browser.
+- The matching executors live in each chat client and mutate the shared store
+  (`src/lib/todo-store.ts`): assistant-ui registers them with `makeAssistantTool`
+  (`assistant-ui-chat.tsx`); CopilotKit passes `frontendTools` to its provider
+  (`copilotkit-chat.tsx`). `TodoPanel` reads the store via `useSyncExternalStore`.
+- The AG-UI endpoint streams the call as `TOOL_CALL_START/ARGS/END` → `RUN_FINISHED`,
+  then on the continuation run maps the tool-result message to
+  `submit_tool_call_result`, resuming the turn → `TOOL_CALL_RESULT` → reply.
+
+The tool **name** must match on both sides (e.g. `add_todo`). The browser never
+sees the substructure API key; only the short-lived client token. Mutations
+through the agent and through the panel both flow through the one store, so the
+UI stays in sync whichever drives it.
+
+## Deploy to Cloudflare Workers
+
+```sh
+# set the engine URLs in wrangler.jsonc `vars`, then the secrets:
+wrangler secret put SUBSTRUCTURE_API_KEY
+wrangler secret put SIGNING_SECRET        # only if the engine signs webhooks
+
+pnpm deploy                                # build:cf + wrangler deploy
+```
+
+Point your engine's webhook at `https://<your-worker>/api/agent`. The build
+uses `@cloudflare/vite-plugin`; `nodejs_compat` is enabled and also populates
+`process.env` from the vars/secrets above.
+
+## Why this shape
+
+[TanStack AI](https://tanstack.com/ai) is a type-safe, provider-agnostic SDK
+that's [fully AG-UI compliant](https://tanstack.com/blog/ag-ui-compliance) — its
+client can hit any AG-UI server, so it speaks straight to substructure's endpoint
+with nothing in between. It's headless (you render `messages[].parts` yourself),
+client tools are first-class (`.client(execute)`, plus `needsApproval` for HITL),
+and it lives in the same TanStack ecosystem as the rest of the app.

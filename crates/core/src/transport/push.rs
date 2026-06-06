@@ -86,8 +86,9 @@ impl PushAdapter {
                         Ok(resp) => {
                             let submit = SubmitDecision {
                                 session_id: decision.session_id,
-                                tenant_id: decision.tenant_id.clone(),
-                                caller: Caller::System,
+                                caller: Caller::System {
+                                    tenant_id: decision.tenant_id.clone(),
+                                },
                                 decision_id: decision.decision_id.clone(),
                                 actions: resp.actions,
                                 state: resp.state,

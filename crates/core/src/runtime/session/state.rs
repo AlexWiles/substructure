@@ -10,8 +10,8 @@ use super::message::Role;
 use rust_decimal::Decimal;
 
 use crate::runtime::aggregate::ApplyContext;
-use crate::runtime::identity::ClientIdentity;
 use crate::runtime::llm::LlmRequest;
+use crate::runtime::owner::SessionOwner;
 use crate::runtime::retry::{RetryPolicy, RetryState};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -138,7 +138,7 @@ pub struct WorkerDecisionState {
 pub struct DerivedState {
     pub status: SessionStatus,
     pub wake_at: Option<DateTime<Utc>>,
-    pub identity: Option<ClientIdentity>,
+    pub owner: Option<SessionOwner>,
     pub agent_id: Option<String>,
     #[serde(default)]
     pub worker_state: Vec<u8>,
@@ -172,7 +172,7 @@ pub struct SessionState {
     pub session_id: String,
     pub status: SessionStatus,
     pub agent_id: Option<String>,
-    pub identity: Option<ClientIdentity>,
+    pub owner: Option<SessionOwner>,
     pub token_usage: BTreeMap<String, u64>,
 
     /// Accumulated cost across all LLM calls in this session.
@@ -226,7 +226,7 @@ impl SessionState {
             session_id,
             status: SessionStatus::Done,
             agent_id: None,
-            identity: None,
+            owner: None,
             token_usage: BTreeMap::new(),
             cost: Decimal::ZERO,
             sub_agent_cost: Decimal::ZERO,
@@ -252,7 +252,7 @@ impl SessionState {
             EventPayload::SessionCreated(payload) => {
                 self.status = SessionStatus::Idle;
                 self.agent_id = Some(payload.agent_id.clone());
-                self.identity = Some(payload.identity.clone());
+                self.owner = Some(payload.owner.clone());
                 self.ancestry = payload.ancestry.clone();
                 self.worker_retry = Some(payload.worker_retry.clone());
             }
@@ -523,7 +523,7 @@ impl SessionState {
         DerivedState {
             status: self.status.clone(),
             wake_at: self.wake_at(),
-            identity: self.identity.clone(),
+            owner: self.owner.clone(),
             agent_id: self.agent_id.clone(),
             worker_state: self.worker_state.clone(),
             ancestry: self.ancestry.clone(),

@@ -8,10 +8,12 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::event_store::{AggregateSort, EventFilter};
+use crate::event_store::AggregateSort;
 use crate::session::index::{SessionCursor, SessionFilter};
-use crate::session::subscriptions::SessionSubscriptionSpec;
-use crate::transport::auth::AuthPrincipal;
+use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
+use crate::transport::ag_ui::snapshot::snapshot_events;
+use crate::transport::ag_ui::types::RunAgentInput;
+use crate::Caller;
 
 use super::AdminHttpState;
 
@@ -33,10 +35,10 @@ fn default_true() -> bool {
 
 pub async fn list_sessions(
     State(state): State<AdminHttpState>,
-    Extension(principal): Extension<AuthPrincipal>,
+    Extension(caller): Extension<Caller>,
     Query(params): Query<ListSessionsParams>,
 ) -> impl IntoResponse {
-    let tenant_id = principal.tenant_id;
+    let tenant_id = caller.tenant_id().to_string();
     let cursor = match params.cursor {
         Some(ref encoded) => match decode_cursor(encoded) {
             Ok(c) => Some(c),
@@ -95,12 +97,12 @@ fn decode_cursor(encoded: &str) -> Result<SessionCursor, String> {
 
 pub async fn get_session(
     State(state): State<AdminHttpState>,
-    Extension(principal): Extension<AuthPrincipal>,
+    Extension(caller): Extension<Caller>,
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
     match state
         .runtime
-        .get_session(&principal.tenant_id, &session_id)
+        .get_session(caller.tenant_id(), &session_id)
         .await
     {
         Ok((snapshot, state)) => Json(serde_json::json!({
@@ -126,16 +128,15 @@ pub struct SessionEventsParams {
 
 pub async fn get_session_events(
     State(state): State<AdminHttpState>,
+    Extension(caller): Extension<Caller>,
     Path(session_id): Path<String>,
     Query(params): Query<SessionEventsParams>,
-) -> impl IntoResponse {
-    let filter = EventFilter {
-        aggregate_id: Some(session_id.clone()),
-        sequence_after: params.sequence_after,
-        limit: params.limit,
-        ..Default::default()
-    };
-    match state.runtime.get_session_events(&filter).await {
+) -> Response {
+    match state
+        .runtime
+        .read_session_events(&caller, &session_id, params.sequence_after, params.limit)
+        .await
+    {
         Ok(events) => Json(events).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -147,17 +148,27 @@ pub async fn get_session_events(
 
 pub async fn stream_session_events(
     State(state): State<AdminHttpState>,
-    Extension(principal): Extension<AuthPrincipal>,
+    Extension(caller): Extension<Caller>,
     Path(session_id): Path<String>,
     Query(params): Query<SessionEventsParams>,
 ) -> Response {
-    let spec = SessionSubscriptionSpec::All {
-        tenant_id: principal.tenant_id,
+    let spec = SessionSubscriptionSpec {
         root_session_id: session_id,
+        caller,
+        scope: SubscriptionScope::All,
     };
     // Admin endpoint defaults to full-history replay (sequence_after defaults to 0).
     let sequence_after = Some(params.sequence_after.unwrap_or(0));
-    let rx = state.runtime.stream(spec, sequence_after).await;
+    let rx = match state.runtime.stream(spec, sequence_after).await {
+        Ok(rx) => rx,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
 
     let stream = ReceiverStream::new(rx)
         .take_until(state.shutdown.clone().cancelled_owned())
@@ -173,6 +184,34 @@ pub async fn stream_session_events(
         });
 
     Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+pub async fn connect_session_ag_ui(
+    State(state): State<AdminHttpState>,
+    Extension(caller): Extension<Caller>,
+    Path(session_id): Path<String>,
+    Json(input): Json<RunAgentInput>,
+) -> Response {
+    let events = match state
+        .runtime
+        .read_session_events(&caller, &session_id, None, None)
+        .await
+    {
+        Ok(events) => events,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    let frames = snapshot_events(session_id, input.run_id, &events)
+        .into_iter()
+        .map(|e| Ok::<_, std::convert::Infallible>(e.to_sse()));
+    Sse::new(futures_util::stream::iter(frames))
         .keep_alive(KeepAlive::default())
         .into_response()
 }

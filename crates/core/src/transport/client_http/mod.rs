@@ -23,6 +23,17 @@ pub struct ClientHttpState {
 }
 
 pub fn router(state: ClientHttpState) -> Router {
+    // `allow_headers` mirrors the request rather than sending `*`: per the Fetch
+    // spec, `*` does not cover `Authorization`, so browsers would strip the bearer
+    // token on cross-origin requests.
+    let cors = {
+        use tower_http::cors::{AllowHeaders, Any, CorsLayer};
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(AllowHeaders::mirror_request())
+            .expose_headers(Any)
+    };
     Router::new()
         .route(
             "/api/client/sessions/submit",
@@ -36,10 +47,20 @@ pub fn router(state: ClientHttpState) -> Router {
             "/api/client/sessions/{session_id}/events/stream",
             get(routes::stream_session_events),
         )
+        .route(
+            "/api/client/ag-ui/agents/{agent_id}/run",
+            post(routes::ag_ui_run),
+        )
+        .route(
+            "/api/client/ag-ui/agents/{agent_id}/connect",
+            post(routes::ag_ui_connect),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             client_auth_middleware,
         ))
+        // Outermost so CORS preflight (OPTIONS) is answered before auth runs.
+        .layer(cors)
         .with_state(state)
 }
 
@@ -50,7 +71,17 @@ async fn client_auth_middleware(
 ) -> Response {
     match state.auth.resolve(request.headers()).await {
         Ok(principal) => {
-            request.extensions_mut().insert(principal);
+            let (Some(caller), Some(owner)) =
+                (principal.frontend_caller(), principal.session_owner())
+            else {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({"error": "client subject is required"})),
+                )
+                    .into_response();
+            };
+            request.extensions_mut().insert(caller);
+            request.extensions_mut().insert(owner);
             next.run(request).await
         }
         Err(AuthError::MissingCredentials | AuthError::InvalidCredentials) => (

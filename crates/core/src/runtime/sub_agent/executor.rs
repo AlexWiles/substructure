@@ -47,7 +47,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
             tenant_id,
             child_session_id,
             agent_id,
-            identity,
+            owner,
             ancestry,
             retry,
             span,
@@ -57,11 +57,12 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
                 store,
                 ExecuteInput {
                     aggregate_id: child_session_id.clone(),
-                    tenant_id: tenant_id.clone(),
-                    caller: Caller::System,
+                    caller: Caller::System {
+                        tenant_id: tenant_id.clone(),
+                    },
                     command: CommandPayload::CreateSession {
                         agent_id,
-                        identity,
+                        owner,
                         ancestry,
                         worker_retry: retry,
                     },
@@ -91,8 +92,9 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
                 store,
                 ExecuteInput {
                     aggregate_id: parent_session_id.clone(),
-                    tenant_id: tenant_id.clone(),
-                    caller: Caller::System,
+                    caller: Caller::System {
+                        tenant_id: tenant_id.clone(),
+                    },
                     command: parent_command,
                     span: span.child("sub_agent_parent_update"),
                 },
@@ -120,8 +122,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
                 store,
                 ExecuteInput {
                     aggregate_id: target_session_id.clone(),
-                    tenant_id,
-                    caller: Caller::System,
+                    caller: Caller::System { tenant_id },
                     command: CommandPayload::SendMessage {
                         message,
                         stream: false,
@@ -157,8 +158,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
                 store,
                 ExecuteInput {
                     aggregate_id: parent_session_id.clone(),
-                    tenant_id,
-                    caller: Caller::System,
+                    caller: Caller::System { tenant_id },
                     command: CommandPayload::CompleteSubAgentTurn {
                         session_id: child_session_id,
                         agent_id,

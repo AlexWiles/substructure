@@ -1,0 +1,282 @@
+html,
+body {
+    margin: 0;
+    height: 100%;
+    font-family: system-ui, -apple-system, sans-serif;
+}
+
+#app,
+.shell {
+    height: 100dvh;
+}
+
+.shell {
+    display: flex;
+}
+
+.sidebar {
+    width: 260px;
+    flex-shrink: 0;
+    box-sizing: border-box;
+    border-right: 1px solid #eee;
+    padding: 20px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.sidebar .brand {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.sidebar .brand span {
+    color: #888;
+    font-size: 13px;
+}
+
+.nav {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.navlink {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 10px 12px;
+    border: 1px solid #e3e3e3;
+    border-radius: 10px;
+    text-decoration: none;
+    color: inherit;
+}
+
+.navlink span {
+    color: #888;
+    font-size: 12px;
+}
+
+.navlink:hover {
+    border-color: #bbb;
+}
+
+.navlink.active {
+    border-color: #111;
+    background: #fafafa;
+}
+
+.chat-loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: #999;
+    font-size: 14px;
+}
+
+.sidebar .hint {
+    margin-top: auto;
+    color: #777;
+    font-size: 13px;
+    line-height: 1.45;
+}
+
+.pagebody {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+}
+
+.chatpane {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    position: relative;
+}
+
+/* CopilotKit's chat fills its container edge-to-edge; give it horizontal breathing room. */
+.copilot-pane {
+    height: 100%;
+    box-sizing: border-box;
+    padding: 0 16px;
+}
+
+.todopanel {
+    width: 420px;
+    flex-shrink: 0;
+    box-sizing: border-box;
+    border-left: 1px solid #eee;
+    background: #fafafa;
+    padding: 20px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    min-height: 0;
+}
+
+.todopanel-title {
+    font-weight: 600;
+    font-size: 14px;
+}
+
+.todoadd {
+    display: flex;
+    gap: 8px;
+}
+
+.todoinput {
+    flex: 1;
+    min-width: 0;
+    box-sizing: border-box;
+    padding: 8px 10px;
+    border: 1px solid #e3e3e3;
+    border-radius: 9px;
+    font-size: 13px;
+    background: #fff;
+}
+
+.todoinput:focus {
+    outline: none;
+    border-color: #111;
+}
+
+.todoaddbtn {
+    border: 1px solid #111;
+    background: #111;
+    color: #fff;
+    border-radius: 9px;
+    padding: 0 14px;
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.todoaddbtn:hover {
+    background: #000;
+}
+
+.todolist {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    overflow-y: auto;
+    flex: 1;
+    min-height: 0;
+}
+
+.todoempty {
+    color: #aaa;
+    font-size: 13px;
+    padding: 8px 2px;
+}
+
+.todoitem {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border: 1px solid #ececec;
+    border-radius: 10px;
+    background: #fff;
+}
+
+.todocheck {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    flex: 1;
+    min-width: 0;
+    cursor: pointer;
+    font-size: 13px;
+}
+
+.todotitle {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.todoitem[data-done="true"] .todotitle {
+    color: #aaa;
+    text-decoration: line-through;
+}
+
+.tododel {
+    border: none;
+    background: none;
+    color: #bbb;
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 2px;
+}
+
+.tododel:hover {
+    color: #e5484d;
+}
+
+.todofoot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    color: #888;
+}
+
+.todoclear {
+    border: 1px solid #e3e3e3;
+    background: #fff;
+    border-radius: 7px;
+    padding: 3px 8px;
+    font-size: 12px;
+    cursor: pointer;
+    color: #333;
+}
+
+.todoclear:hover {
+    border-color: #bbb;
+}
+
+.panelhint {
+    margin-top: auto;
+    color: #888;
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.panelhint code,
+.hint code {
+    background: #ececec;
+    padding: 1px 5px;
+    border-radius: 5px;
+    font-size: 11px;
+}
+
+/* assistant-ui tool-call card (makeAssistantToolUI renderer for the to-do tools). */
+.toolcard {
+    display: inline-flex;
+    align-items: center;
+    /* assistant-ui aligns adjacent text on its baseline; baseline sits below the
+       line's middle (where the avatar centers), so center on the middle instead. */
+    vertical-align: middle;
+    gap: 8px;
+    padding: 6px 10px;
+    border: 1px solid #e3e3e3;
+    border-radius: 10px;
+    background: #fff;
+    font-size: 13px;
+}
+
+.toolcard-name {
+    font-weight: 600;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+}
+
+.toolcard-status {
+    color: #999;
+}

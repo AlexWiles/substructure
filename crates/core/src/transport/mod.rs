@@ -1,4 +1,5 @@
 pub mod admin_http;
+pub mod ag_ui;
 pub mod auth;
 pub mod client_http;
 pub mod http_push;

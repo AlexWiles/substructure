@@ -9,7 +9,7 @@ use tokio::task::JoinHandle;
 use tracing_subscriber::EnvFilter;
 
 use base64::Engine;
-use substructure_core::identity::ClientIdentity;
+use substructure_core::owner::SessionOwner;
 use substructure_core::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use substructure_core::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
 use substructure_core::providers::sqlite::{
@@ -169,8 +169,9 @@ impl EmbeddedRuntime {
                             Ok(submit) => {
                                 let submit_decision = SubmitDecision {
                                     session_id: decision.session_id,
-                                    tenant_id: decision.tenant_id.clone(),
-                                    caller: Caller::System,
+                                    caller: Caller::System {
+                                        tenant_id: decision.tenant_id.clone(),
+                                    },
                                     decision_id: decision.decision_id.clone(),
                                     actions: submit.actions,
                                     state: submit
@@ -200,8 +201,9 @@ impl EmbeddedRuntime {
                                 );
                                 let fail = FailDecision {
                                     session_id: decision.session_id,
-                                    tenant_id: decision.tenant_id.clone(),
-                                    caller: Caller::System,
+                                    caller: Caller::System {
+                                        tenant_id: decision.tenant_id.clone(),
+                                    },
                                     decision_id: decision.decision_id.clone(),
                                     error: format!("failed to parse worker response: {e}"),
                                     retryable: false,
@@ -225,8 +227,9 @@ impl EmbeddedRuntime {
                         );
                         let fail = FailDecision {
                             session_id: decision.session_id,
-                            tenant_id: decision.tenant_id.clone(),
-                            caller: Caller::System,
+                            caller: Caller::System {
+                                tenant_id: decision.tenant_id.clone(),
+                            },
                             decision_id: decision.decision_id.clone(),
                             error: format!("js worker callback failed: {e}"),
                             retryable: true,
@@ -269,19 +272,20 @@ impl EmbeddedRuntime {
     ) -> Result<SubmitPayloadResult> {
         let payload: ClientPayload = serde_json::from_str(&payload_json)
             .map_err(|e| Error::from_reason(format!("invalid payloadJson: {e}")))?;
-        let identity: ClientIdentity = serde_json::from_str(&identity_json)
+        let owner: SessionOwner = serde_json::from_str(&identity_json)
             .map_err(|e| Error::from_reason(format!("invalid identityJson: {e}")))?;
-        if identity.id.as_deref().is_none_or(str::is_empty) {
-            return Err(Error::from_reason("identity.id is required"));
+        if owner.id.as_deref().is_none_or(str::is_empty) {
+            return Err(Error::from_reason("owner.id is required"));
         }
 
         let output = self
             .inner
             .submit_client_payload(SubmitClientPayload {
                 session_id,
-                tenant_id: identity.tenant_id.clone(),
-                caller: Caller::System,
-                identity,
+                caller: Caller::System {
+                    tenant_id: owner.tenant_id.clone(),
+                },
+                owner,
                 agent_id,
                 payload,
                 turn_id,
@@ -333,11 +337,10 @@ impl EmbeddedRuntime {
         self.inner
             .submit_tool_call_result(SubmitToolCallResultInput {
                 session_id,
-                tenant_id,
                 tool_call_id,
                 attempt,
                 result,
-                caller: Caller::System,
+                caller: Caller::System { tenant_id },
                 span: CoreSpanContext::root().child("napi_tool_call_result"),
             })
             .await
@@ -362,21 +365,24 @@ impl EmbeddedRuntime {
         sequence_after: Option<i64>,
         on_event: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
     ) -> Result<()> {
-        use substructure_core::session::subscriptions::SessionSubscriptionSpec;
+        use substructure_core::session::subscriptions::{
+            SessionSubscriptionSpec, SubscriptionScope,
+        };
 
-        let spec = match turn_id {
-            Some(tid) => SessionSubscriptionSpec::Turn {
-                tenant_id: tenant_id.clone(),
-                root_session_id: session_id,
-                turn_id: tid,
-            },
-            None => SessionSubscriptionSpec::All {
-                tenant_id: tenant_id.clone(),
-                root_session_id: session_id,
+        let spec = SessionSubscriptionSpec {
+            root_session_id: session_id,
+            caller: Caller::System { tenant_id },
+            scope: match turn_id {
+                Some(tid) => SubscriptionScope::Turn { turn_id: tid },
+                None => SubscriptionScope::All,
             },
         };
         let cursor = sequence_after.map(|n| n.max(0) as u64);
-        let mut rx = self.inner.stream(spec, cursor).await;
+        let mut rx = self
+            .inner
+            .stream(spec, cursor)
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))?;
 
         while let Some(event) = rx.recv().await {
             let json =

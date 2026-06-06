@@ -10,6 +10,25 @@ same version.
 
 ## [Unreleased]
 
+### Added
+
+- Native AG-UI protocol support: endpoints that stream an agent turn as AG-UI SSE
+  events, with live token and reasoning streaming.
+- Reasoning controls on `LlmRequest` (`reasoning`: `effort` or `max_tokens`,
+  plus `exclude` and `enabled`), passed through to providers that support them.
+
+### Changed
+
+- **Breaking:** session events identify a session's end user as `owner` (was
+  `identity`); consumers reading raw events should read `owner`. No alias for the
+  old key.
+- **Breaking:** `Caller::System` is now `System { tenant_id }` (was a unit
+  variant); crate consumers constructing or matching it must supply a tenant.
+
+### Fixed
+
+- OpenRouter responses no longer drop image outputs from the stream.
+
 ## [0.1.15] - 2026-06-02
 
 ### Added

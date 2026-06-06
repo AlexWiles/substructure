@@ -38,7 +38,7 @@ pub fn spawn_llm_task_executor(
                     _ = cancel.cancelled() => break,
                 };
 
-                let resolved = provider.resolve(&task.identity).await;
+                let resolved = provider.resolve(&task.owner).await;
 
                 let command = match resolved {
                     Ok(client) => {
@@ -48,7 +48,7 @@ pub fn spawn_llm_task_executor(
                             agent_id: &task.agent_id,
                             call_id: &task.call_id,
                             attempt: task.attempt,
-                            identity: &task.identity,
+                            owner: &task.owner,
                             ancestry: &task.ancestry,
                         };
                         let result = if task.stream {
@@ -90,8 +90,9 @@ pub fn spawn_llm_task_executor(
                     store.as_ref(),
                     ExecuteInput {
                         aggregate_id: task.session_id.clone(),
-                        tenant_id: task.tenant_id.clone(),
-                        caller: Caller::System,
+                        caller: Caller::System {
+                            tenant_id: task.tenant_id.clone(),
+                        },
                         command,
                         span: task.span.child("llm_call"),
                     },
@@ -119,19 +120,21 @@ fn spawn_delta_pump(
     mut rx: mpsc::UnboundedReceiver<super::StreamDelta>,
 ) -> JoinHandle<()> {
     let template = TokenDelta {
-        tenant_id: task.tenant_id.clone(),
         root_session_id: task
             .ancestry
             .first()
             .cloned()
             .unwrap_or_else(|| task.session_id.clone()),
         session_id: task.session_id.clone(),
+        tenant_id: task.tenant_id.clone(),
         agent_id: task.agent_id.clone(),
         turn_id: task.turn_id.clone(),
         call_id: task.call_id.clone(),
         attempt: task.attempt,
         seq: 0,
         text: None,
+        reasoning: None,
+        tool_calls: Vec::new(),
         finish_reason: None,
     };
     tokio::spawn(async move {
@@ -141,6 +144,8 @@ fn spawn_delta_pump(
                 .publish(TokenDelta {
                     seq,
                     text: delta.text,
+                    reasoning: delta.reasoning,
+                    tool_calls: delta.tool_calls,
                     finish_reason: delta.finish_reason,
                     ..template.clone()
                 })

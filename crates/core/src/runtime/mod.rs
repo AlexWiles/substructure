@@ -8,12 +8,12 @@ use uuid::Uuid;
 
 use crate::providers::memory_queue::TaskQueue;
 use aggregate::{execute, Caller, ConflictRetry, ExecuteError, ExecuteInput};
-use event_store::EventStore;
-use identity::ClientIdentity;
+use event_store::{Event, EventFilter, EventStore, Snapshot, StoreError};
 use llm::{
     spawn_llm_dispatch_processor, spawn_llm_task_executor, LlmProviderTrait, LlmTask, TokenDelta,
     TokenDeltaTransport,
 };
+use owner::SessionOwner;
 use processor::ProcessorCheckpointStore;
 use retry::{NoRetryResolver, WorkerRetryResolver};
 use session::command::{CommandPayload, SessionError};
@@ -31,8 +31,8 @@ use worker::{DequeueFilter, FailDecision, SubmitDecision, WorkerDecisionRequest,
 
 pub mod aggregate;
 pub mod event_store;
-pub mod identity;
 pub mod llm;
+pub mod owner;
 pub mod processor;
 pub mod retry;
 pub mod serde_helpers;
@@ -76,9 +76,8 @@ pub struct Runtime {
 
 pub struct SubmitClientPayload {
     pub session_id: String,
-    pub tenant_id: String,
     pub caller: Caller,
-    pub identity: ClientIdentity,
+    pub owner: SessionOwner,
     pub agent_id: String,
     pub payload: ClientPayload,
     /// Caller-provided turn ID for idempotency. Auto-generated if None.
@@ -97,7 +96,6 @@ pub enum SubmitToolCallResult {
 
 pub struct SubmitToolCallResultInput {
     pub session_id: String,
-    pub tenant_id: String,
     pub tool_call_id: String,
     pub attempt: u32,
     pub result: SubmitToolCallResult,
@@ -166,18 +164,20 @@ impl Runtime {
 
         let span = SpanContext::root();
 
-        let worker_retry = self.worker_retry_resolver.resolve(&input.tenant_id).await;
+        let worker_retry = self
+            .worker_retry_resolver
+            .resolve(input.caller.tenant_id())
+            .await;
 
         // Create session (ignore if already exists)
         let create_result = execute::<SessionState>(
             &*self.store,
             ExecuteInput {
                 aggregate_id: session_id.clone(),
-                tenant_id: input.tenant_id.clone(),
                 caller: input.caller.clone(),
                 command: CommandPayload::CreateSession {
                     agent_id: input.agent_id,
-                    identity: input.identity,
+                    owner: input.owner,
                     ancestry: vec![],
                     worker_retry,
                 },
@@ -198,7 +198,6 @@ impl Runtime {
             &*self.store,
             ExecuteInput {
                 aggregate_id: session_id.clone(),
-                tenant_id: input.tenant_id,
                 caller: input.caller,
                 command: CommandPayload::SubmitClientPayload {
                     payload: input.payload,
@@ -230,19 +229,53 @@ impl Runtime {
         &self,
         spec: SessionSubscriptionSpec,
         sequence_after: Option<u64>,
-    ) -> mpsc::Receiver<event_store::Event> {
-        self.session_subscriptions
+    ) -> Result<mpsc::Receiver<Event>, RuntimeError> {
+        self.authorize_session_read(&spec.root_session_id, &spec.caller)
+            .await?;
+        Ok(self
+            .session_subscriptions
             .stream(spec, sequence_after)
-            .await
+            .await)
+    }
+
+    pub async fn authorize_session_read(
+        &self,
+        session_id: &str,
+        caller: &Caller,
+    ) -> Result<(), RuntimeError> {
+        let Caller::Frontend {
+            tenant_id, user_id, ..
+        } = caller
+        else {
+            return Ok(());
+        };
+
+        let snapshot = match self.store.load(tenant_id, session_id).await {
+            Ok(snapshot) => snapshot,
+            // An uncreated session has no owner yet — nothing to leak; the read
+            // is simply empty, and the first turn binds the session to its owner.
+            Err(StoreError::StreamNotFound) => return Ok(()),
+            Err(e) => return Err(RuntimeError::Internal(e.to_string())),
+        };
+
+        let agg: aggregate::Aggregate<SessionState> = serde_json::from_value(snapshot.data)
+            .map_err(|e| RuntimeError::Internal(e.to_string()))?;
+        let owner_id = agg.state.owner.as_ref().and_then(|o| o.id.as_deref());
+
+        if owner_id == Some(user_id.as_str()) {
+            Ok(())
+        } else {
+            Err(RuntimeError::Session(SessionError::SessionAccessDenied))
+        }
     }
 
     pub async fn subscribe_token_deltas(
         &self,
-        tenant_id: &str,
+        caller: &Caller,
         root_session_id: &str,
     ) -> mpsc::Receiver<TokenDelta> {
         self.token_delta_transport
-            .subscribe(tenant_id, root_session_id)
+            .subscribe(caller.tenant_id(), root_session_id)
             .await
     }
 
@@ -266,7 +299,7 @@ impl Runtime {
         &self,
         tenant_id: &str,
         session_id: &str,
-    ) -> Result<(event_store::Snapshot, SessionState), RuntimeError> {
+    ) -> Result<(Snapshot, SessionState), RuntimeError> {
         let snapshot = self
             .store
             .load(tenant_id, session_id)
@@ -278,12 +311,23 @@ impl Runtime {
         Ok((snapshot, state))
     }
 
-    pub async fn get_session_events(
+    pub async fn read_session_events(
         &self,
-        filter: &event_store::EventFilter,
-    ) -> Result<Vec<event_store::Event>, RuntimeError> {
+        caller: &Caller,
+        session_id: &str,
+        sequence_after: Option<u64>,
+        limit: Option<usize>,
+    ) -> Result<Vec<Event>, RuntimeError> {
+        self.authorize_session_read(session_id, caller).await?;
+        let filter = EventFilter {
+            aggregate_id: Some(session_id.to_string()),
+            tenant_id: Some(caller.tenant_id().to_string()),
+            sequence_after,
+            limit,
+            ..Default::default()
+        };
         self.store
-            .query_events(filter)
+            .query_events(&filter)
             .await
             .map_err(|e| RuntimeError::Internal(e.to_string()))
     }
@@ -293,7 +337,6 @@ impl Runtime {
             &*self.store,
             ExecuteInput {
                 aggregate_id: input.session_id.clone(),
-                tenant_id: input.tenant_id,
                 caller: input.caller,
                 command: CommandPayload::SubmitWorkerDecision {
                     decision_id: input.decision_id,
@@ -333,7 +376,6 @@ impl Runtime {
             &*self.store,
             ExecuteInput {
                 aggregate_id: input.session_id,
-                tenant_id: input.tenant_id,
                 caller: input.caller,
                 command,
                 span: input.span,
@@ -350,7 +392,6 @@ impl Runtime {
             &*self.store,
             ExecuteInput {
                 aggregate_id: input.session_id.clone(),
-                tenant_id: input.tenant_id,
                 caller: input.caller,
                 command: CommandPayload::FailWorkerDecision {
                     decision_id: input.decision_id,

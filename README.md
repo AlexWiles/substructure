@@ -195,7 +195,6 @@ const getWeather = agent.tool({
 });
 
 const weatherAgent = agent({ id: "weather-agent" })
-  .use(agent.jsonState())
   .use(agent.messageHistory("You are a helpful weather assistant."))
   .use(agent.tools([getWeather]))
   .use(agent.llmLoop({

@@ -1,5 +1,5 @@
-use crate::runtime::identity::ClientIdentity;
 use crate::runtime::llm::LlmRequest;
+use crate::runtime::owner::SessionOwner;
 use crate::runtime::span::SpanContext;
 
 #[derive(Debug, Clone)]
@@ -11,7 +11,7 @@ pub struct LlmTask {
     pub attempt: u32,
     pub request: LlmRequest,
     pub stream: bool,
-    pub identity: ClientIdentity,
+    pub owner: SessionOwner,
     /// Parent chain, root-first. Empty for top-level sessions.
     pub ancestry: Vec<String>,
     /// Tagged on emitted token deltas so Turn-scoped subscribers can filter.
