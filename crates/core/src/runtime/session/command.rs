@@ -381,13 +381,16 @@ impl SessionState {
                 handler,
             } => {
                 Self::ensure_internal(caller)?;
+
                 if self.has_pending_llm() {
                     return Ok(vec![]);
                 }
+
                 let issue = matches!(
                     self.llm_calls.get(&call_id).map(|c| &c.tracking.status),
                     None | Some(&EffectStatus::Failed) | Some(&EffectStatus::RetryScheduled)
                 );
+
                 if issue {
                     let mut events = vec![EventPayload::LlmCallRequested(LlmCallRequested {
                         call_id: call_id.clone(),
@@ -397,6 +400,7 @@ impl SessionState {
                         retry,
                         handler: handler.clone(),
                     })];
+
                     if handler == LlmHandler::Worker {
                         events.push(self.emit_decision_request(DecisionTrigger::LlmRequest {
                             call_id,
@@ -405,6 +409,7 @@ impl SessionState {
                             attempt: 0,
                         }));
                     }
+
                     Ok(events)
                 } else {
                     Ok(vec![])
@@ -417,6 +422,7 @@ impl SessionState {
                 response,
             } => {
                 Self::ensure_internal(caller)?;
+
                 match self.llm_calls.get(&call_id).map(|c| &c.tracking.status) {
                     Some(&EffectStatus::Pending) => {
                         let truncated = response.finish_reason.as_deref() == Some("length");
