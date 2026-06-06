@@ -1,6 +1,8 @@
 import type {
     DecisionTrigger,
+    LlmHandler,
     LlmRequest,
+    LlmResponse,
     LlmTool,
     Message,
     RetryPolicy,
@@ -681,6 +683,45 @@ export interface LlmLoopSelection {
     retry?: RetryPolicy;
     stream?: boolean;
     toolRetries?: Record<string, RetryPolicy>;
+    /** Defaults to "server". */
+    handler?: LlmHandler;
+    /**
+     * Performs the call when `handler` is "worker" (required in that case).
+     * The request arrives with full message history already prepended.
+     */
+    caller?: (request: LlmRequest) => Promise<LlmResponse>;
+}
+
+async function runWorkerLlmCall(
+    trigger: Extract<DecisionTrigger, { type: "llm.request" }>,
+    caller?: (request: LlmRequest) => Promise<LlmResponse>,
+): Promise<WorkerAction> {
+    if (!caller) {
+        return {
+            type: "return.llm.error",
+            call_id: trigger.call_id,
+            error: 'llmLoop received an "llm.request" trigger but no `caller` was configured for worker-handled LLM calls',
+            retryable: false,
+            attempt: trigger.attempt,
+        };
+    }
+    try {
+        const response = await caller(trigger.request);
+        return {
+            type: "return.llm.result",
+            call_id: trigger.call_id,
+            response,
+            attempt: trigger.attempt,
+        };
+    } catch (error) {
+        return {
+            type: "return.llm.error",
+            call_id: trigger.call_id,
+            error: error instanceof Error ? error.message : String(error),
+            retryable: false,
+            attempt: trigger.attempt,
+        };
+    }
 }
 
 export function llmLoop<S>(
@@ -712,10 +753,15 @@ export function llmLoop<S>(
                                 },
                                 retry: selection.retry ?? DEFAULT_RETRY,
                                 stream: selection.stream ?? false,
+                                handler: selection.handler ?? "server",
                             },
                             ...downstream.actions,
                         ],
                     };
+                }
+                case "llm.request": {
+                    const action = await runWorkerLlmCall(trigger, selection.caller);
+                    return { ...downstream, actions: [action, ...downstream.actions] };
                 }
                 case "llm.response": {
                     if (!trigger.message.tool_calls || trigger.message.tool_calls.length === 0) {

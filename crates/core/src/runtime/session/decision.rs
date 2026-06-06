@@ -2,9 +2,9 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use super::events::ToolHandler;
+use super::events::{LlmHandler, ToolHandler};
 use super::message::Message;
-use crate::runtime::llm::{ErrorCode, LlmRequest};
+use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse};
 use crate::runtime::retry::RetryPolicy;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +67,13 @@ pub enum DecisionTrigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<serde_json::Value>,
     },
+    #[serde(rename = "llm.request")]
+    LlmRequest {
+        call_id: String,
+        request: LlmRequest,
+        stream: bool,
+        attempt: u32,
+    },
     #[serde(rename = "tool.execute")]
     ToolExecute {
         tool_call_id: String,
@@ -111,6 +118,8 @@ pub enum WorkerAction {
         request: LlmRequest,
         stream: bool,
         retry: RetryPolicy,
+        #[serde(default)]
+        handler: LlmHandler,
     },
     #[serde(rename = "call.tool")]
     CallTool {
@@ -131,6 +140,23 @@ pub enum WorkerAction {
         tool_call_id: String,
         error: String,
         retryable: bool,
+        attempt: u32,
+    },
+    #[serde(rename = "return.llm.result")]
+    ReturnLlmResult {
+        call_id: String,
+        response: LlmResponse,
+        attempt: u32,
+    },
+    #[serde(rename = "return.llm.error")]
+    ReturnLlmError {
+        call_id: String,
+        error: String,
+        retryable: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<ErrorCode>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<serde_json::Value>,
         attempt: u32,
     },
     #[serde(rename = "spawn.sub_agent")]

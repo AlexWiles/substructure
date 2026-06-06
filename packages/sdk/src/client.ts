@@ -76,6 +76,7 @@ export type {
     DecisionTrigger,
     Event,
     EventPayload,
+    LlmHandler,
     LlmRequest,
     LlmResponse,
     LlmTokenDelta,

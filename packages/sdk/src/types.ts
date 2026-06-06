@@ -183,6 +183,10 @@ export interface LlmResponse {
 
 export type ToolHandler = "worker" | "client";
 
+// ── LLM Handler ─────────────────────────────────────────────────────────────
+
+export type LlmHandler = "server" | "worker";
+
 // ── Decision Triggers ───────────────────────────────────────────────────────
 
 export interface ToolResult {
@@ -213,6 +217,7 @@ export type DecisionTrigger =
           cost?: Decimal;
       }
     | { type: "llm.error"; call_id: string; error: string; code?: string; detail?: unknown }
+    | { type: "llm.request"; call_id: string; request: LlmRequest; stream: boolean; attempt: number }
     | {
           type: "tool.execute";
           tool_call_id: string;
@@ -235,6 +240,7 @@ export type WorkerAction =
           request: LlmRequest;
           stream: boolean;
           retry: RetryPolicy;
+          handler: LlmHandler;
       }
     | {
           type: "call.tool";
@@ -250,6 +256,16 @@ export type WorkerAction =
           tool_call_id: string;
           error: string;
           retryable: boolean;
+          attempt: number;
+      }
+    | { type: "return.llm.result"; call_id: string; response: LlmResponse; attempt: number }
+    | {
+          type: "return.llm.error";
+          call_id: string;
+          error: string;
+          retryable: boolean;
+          code?: string;
+          detail?: unknown;
           attempt: number;
       }
     | { type: "spawn.sub_agent"; session_id: Uuid; agent_id: string; retry: RetryPolicy }

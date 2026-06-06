@@ -35,6 +35,7 @@ pub enum CommandPayload {
         request: LlmRequest,
         stream: bool,
         retry: RetryPolicy,
+        handler: LlmHandler,
     },
     CompleteLlmCall {
         call_id: String,
@@ -377,6 +378,7 @@ impl SessionState {
                 request,
                 stream,
                 retry,
+                handler,
             } => {
                 Self::ensure_internal(caller)?;
                 if self.has_pending_llm() {
@@ -387,13 +389,23 @@ impl SessionState {
                     None | Some(&EffectStatus::Failed) | Some(&EffectStatus::RetryScheduled)
                 );
                 if issue {
-                    Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {
-                        call_id,
+                    let mut events = vec![EventPayload::LlmCallRequested(LlmCallRequested {
+                        call_id: call_id.clone(),
                         attempt: 0,
-                        request,
+                        request: request.clone(),
                         stream,
                         retry,
-                    })])
+                        handler: handler.clone(),
+                    })];
+                    if handler == LlmHandler::Worker {
+                        events.push(self.emit_decision_request(DecisionTrigger::LlmRequest {
+                            call_id,
+                            request,
+                            stream,
+                            attempt: 0,
+                        }));
+                    }
+                    Ok(events)
                 } else {
                     Ok(vec![])
                 }
@@ -778,12 +790,14 @@ impl SessionState {
                             request,
                             stream,
                             retry,
+                            handler,
                         } => self.handle(
                             CommandPayload::RequestLlmCall {
                                 call_id: new_call_id(),
                                 request,
                                 stream,
                                 retry,
+                                handler,
                             },
                             &Caller::System {
                                 tenant_id: "tenant-a".to_string(),
@@ -857,6 +871,40 @@ impl SessionState {
                                 error,
                                 retryable,
                                 worker_state: None,
+                            },
+                            &Caller::System {
+                                tenant_id: "tenant-a".to_string(),
+                            },
+                        ),
+                        WorkerAction::ReturnLlmResult {
+                            call_id,
+                            response,
+                            attempt,
+                        } => self.handle(
+                            CommandPayload::CompleteLlmCall {
+                                call_id,
+                                attempt,
+                                response,
+                            },
+                            &Caller::System {
+                                tenant_id: "tenant-a".to_string(),
+                            },
+                        ),
+                        WorkerAction::ReturnLlmError {
+                            call_id,
+                            error,
+                            retryable,
+                            code,
+                            detail,
+                            attempt,
+                        } => self.handle(
+                            CommandPayload::FailLlmCall {
+                                call_id,
+                                attempt,
+                                error,
+                                retryable,
+                                code,
+                                detail,
                             },
                             &Caller::System {
                                 tenant_id: "tenant-a".to_string(),
@@ -986,13 +1034,23 @@ impl SessionState {
             if call.tracking.status == EffectStatus::RetryScheduled {
                 if let Some(next_at) = call.tracking.retry.next_at {
                     if next_at <= now {
-                        return Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {
+                        let mut events = vec![EventPayload::LlmCallRequested(LlmCallRequested {
                             call_id: call.call_id.clone(),
                             attempt: call.tracking.retry.attempts,
                             request: call.request.clone(),
                             stream: call.stream,
                             retry: call.tracking.retry_policy.clone(),
-                        })]);
+                            handler: call.handler.clone(),
+                        })];
+                        if call.handler == LlmHandler::Worker {
+                            events.push(self.emit_decision_request(DecisionTrigger::LlmRequest {
+                                call_id: call.call_id.clone(),
+                                request: call.request.clone(),
+                                stream: call.stream,
+                                attempt: call.tracking.retry.attempts,
+                            }));
+                        }
+                        return Ok(events);
                     }
                 }
             }
@@ -1123,8 +1181,8 @@ mod tests {
     use crate::runtime::llm::{LlmRequest, LlmResponse};
     use crate::runtime::owner::SessionOwner;
     use crate::runtime::retry::RetryPolicy;
-    use crate::runtime::session::decision::{ClientPayload, WorkerAction};
-    use crate::runtime::session::events::{EventPayload, ToolHandler};
+    use crate::runtime::session::decision::{ClientPayload, DecisionTrigger, WorkerAction};
+    use crate::runtime::session::events::{EventPayload, LlmHandler, ToolHandler};
     use crate::runtime::session::message::{Content, Message, Role};
     use crate::runtime::session::state::{EffectStatus, SessionState, SessionStatus};
     use crate::runtime::span::SpanContext;
@@ -1910,6 +1968,7 @@ mod tests {
                 },
                 stream: false,
                 retry: RetryPolicy::no_retry(),
+                handler: LlmHandler::Server,
             },
             &Caller::System {
                 tenant_id: "tenant-a".to_string(),
@@ -1941,6 +2000,7 @@ mod tests {
                 },
                 stream: false,
                 retry: RetryPolicy::no_retry(),
+                handler: LlmHandler::Server,
             },
             &Caller::System {
                 tenant_id: "tenant-a".to_string(),
@@ -1999,6 +2059,7 @@ mod tests {
                 },
                 stream: false,
                 retry: RetryPolicy::no_retry(),
+                handler: LlmHandler::Server,
             },
             &Caller::System {
                 tenant_id: "tenant-a".to_string(),
@@ -2034,6 +2095,152 @@ mod tests {
         );
         let call = agg.state.llm_calls.get("llm-1").expect("llm call present");
         assert_eq!(call.tracking.status, EffectStatus::Failed);
+    }
+
+    fn test_llm_request() -> LlmRequest {
+        LlmRequest {
+            model: "test-model".to_string(),
+            messages: vec![],
+            tools: None,
+            temperature: None,
+            max_completion_tokens: None,
+            reasoning: None,
+        }
+    }
+
+    #[test]
+    fn worker_handled_llm_call_emits_request_trigger() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::RequestLlmCall {
+                call_id: "llm-1".to_string(),
+                request: test_llm_request(),
+                stream: false,
+                retry: RetryPolicy::no_retry(),
+                handler: LlmHandler::Worker,
+            },
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
+        );
+
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    EventPayload::LlmCallRequested(_),
+                    EventPayload::WorkerDecisionRequested(_),
+                ]
+            ),
+            "expected [LlmCallRequested, WorkerDecisionRequested]; got {events:?}"
+        );
+        let trigger = events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(p) => Some(&p.trigger),
+                _ => None,
+            })
+            .expect("worker decision present");
+        assert!(
+            matches!(trigger, DecisionTrigger::LlmRequest { call_id, .. } if call_id == "llm-1"),
+            "expected an llm.request trigger; got {trigger:?}"
+        );
+        let call = agg.state.llm_calls.get("llm-1").expect("llm call present");
+        assert_eq!(call.handler, LlmHandler::Worker);
+        assert_eq!(call.tracking.status, EffectStatus::Pending);
+    }
+
+    #[test]
+    fn server_handled_llm_call_does_not_emit_request_trigger() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::RequestLlmCall {
+                call_id: "llm-1".to_string(),
+                request: test_llm_request(),
+                stream: false,
+                retry: RetryPolicy::no_retry(),
+                handler: LlmHandler::Server,
+            },
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
+        );
+
+        assert!(
+            matches!(events.as_slice(), [EventPayload::LlmCallRequested(_)]),
+            "expected just [LlmCallRequested]; got {events:?}"
+        );
+        let call = agg.state.llm_calls.get("llm-1").expect("llm call present");
+        assert_eq!(call.handler, LlmHandler::Server);
+    }
+
+    #[test]
+    fn return_llm_result_completes_worker_handled_call() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let request_events = dispatch(
+            &mut agg,
+            CommandPayload::RequestLlmCall {
+                call_id: "llm-1".to_string(),
+                request: test_llm_request(),
+                stream: false,
+                retry: RetryPolicy::no_retry(),
+                handler: LlmHandler::Worker,
+            },
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
+        );
+        let decision_id = request_events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(p) => Some(p.decision_id.clone()),
+                _ => None,
+            })
+            .expect("worker-handled llm call emits an llm.request decision");
+
+        let machine = Caller::Machine {
+            tenant_id: "tenant-a".to_string(),
+            key_id: "prod-key-1".to_string(),
+        };
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id,
+                actions: vec![WorkerAction::ReturnLlmResult {
+                    call_id: "llm-1".to_string(),
+                    response: LlmResponse {
+                        model: "test-model".to_string(),
+                        content: Some("hello from the worker".to_string()),
+                        tool_calls: vec![],
+                        finish_reason: Some("stop".to_string()),
+                        usage: None,
+                        cost: None,
+                        images: vec![],
+                    },
+                    attempt: 0,
+                }],
+                state: vec![],
+            },
+            &machine,
+        );
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::LlmCallCompleted(_))),
+            "expected an LlmCallCompleted event; got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::NewMessage(_))),
+            "expected a NewMessage event; got {events:?}"
+        );
+        let call = agg.state.llm_calls.get("llm-1").expect("llm call present");
+        assert_eq!(call.tracking.status, EffectStatus::Completed);
     }
 
     #[test]

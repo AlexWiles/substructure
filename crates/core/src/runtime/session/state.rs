@@ -99,6 +99,8 @@ pub struct LlmCallState {
     /// Original request, stored for retries and crash recovery.
     pub request: LlmRequest,
     pub stream: bool,
+    #[serde(default)]
+    pub handler: LlmHandler,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -267,6 +269,7 @@ impl SessionState {
                     existing.tracking.reset_pending(now);
                     existing.request = payload.request.clone();
                     existing.stream = payload.stream;
+                    existing.handler = payload.handler.clone();
                 } else {
                     self.llm_calls.insert(
                         payload.call_id.clone(),
@@ -275,6 +278,7 @@ impl SessionState {
                             tracking: EffectTracking::new(payload.retry.clone(), now),
                             request: payload.request.clone(),
                             stream: payload.stream,
+                            handler: payload.handler.clone(),
                         },
                     );
                 }

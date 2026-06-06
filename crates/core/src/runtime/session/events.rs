@@ -88,6 +88,8 @@ pub struct LlmCallRequested {
     pub request: LlmRequest,
     pub stream: bool,
     pub retry: RetryPolicy,
+    #[serde(default)]
+    pub handler: LlmHandler,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +124,17 @@ pub enum ToolHandler {
     Worker,
     /// Executed by the client. Session goes Idle while waiting.
     Client,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmHandler {
+    /// Server-side executor resolves the provider and makes the call.
+    #[default]
+    Server,
+    /// Dispatched to the worker via an `llm.request` decision trigger; the
+    /// worker performs the call and replies with `return.llm.result`/`error`.
+    Worker,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
