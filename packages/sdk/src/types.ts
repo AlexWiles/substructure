@@ -80,6 +80,12 @@ export interface ToolCall {
     function: ToolCallFunction;
 }
 
+export interface ToolCallChunk {
+    id: string;
+    name?: string;
+    arguments?: string;
+}
+
 // ── Multimodal content parts (OpenAI/OpenRouter wire format) ──────────
 
 export interface ImageUrlPart {
@@ -389,8 +395,29 @@ export interface LlmTokenDelta {
     /** Monotonic per-call sequence (0-based). */
     seq: number;
     text?: string;
+    reasoning?: string;
+    tool_calls?: ToolCallChunk[];
     finish_reason?: string;
 }
+
+export interface LlmTokenDeltaInput {
+    text?: string;
+    reasoning?: string;
+    tool_calls?: ToolCallChunk[];
+    finish_reason?: string;
+}
+
+export type StreamPart =
+    | { type: "text-start"; id?: string }
+    | { type: "text-delta"; id?: string; delta: string }
+    | { type: "text-end"; id?: string }
+    | { type: "reasoning-start"; id?: string }
+    | { type: "reasoning-delta"; id?: string; delta: string }
+    | { type: "reasoning-end"; id?: string }
+    | { type: "tool-input-start"; toolCallId: string; toolName: string }
+    | { type: "tool-input-delta"; toolCallId: string; inputTextDelta: string }
+    | { type: "tool-input-available"; toolCallId: string; toolName: string; input: unknown }
+    | { type: "finish"; finishReason?: string };
 
 export interface ToolCallRequested {
     type: "tool.call.requested";

@@ -87,6 +87,7 @@ export type {
     Role,
     SessionState,
     SessionStatus,
+    StreamPart,
     SubmitToolCallFailure,
     SubmitToolCallResultArgs,
     SubmitToolCallResultOutcome,

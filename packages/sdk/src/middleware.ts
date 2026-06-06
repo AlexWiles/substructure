@@ -3,9 +3,11 @@ import type {
     LlmHandler,
     LlmRequest,
     LlmResponse,
+    LlmTokenDeltaInput,
     LlmTool,
     Message,
     RetryPolicy,
+    StreamPart,
     ToolHandler,
     ToolResult,
     WorkerAction,
@@ -683,18 +685,31 @@ export interface LlmLoopSelection {
     retry?: RetryPolicy;
     stream?: boolean;
     toolRetries?: Record<string, RetryPolicy>;
-    /** Defaults to "server". */
     handler?: LlmHandler;
-    /**
-     * Performs the call when `handler` is "worker" (required in that case).
-     * The request arrives with full message history already prepended.
-     */
-    caller?: (request: LlmRequest) => Promise<LlmResponse>;
+    caller?: (request: LlmRequest, ctx: { emitDelta?: (part: StreamPart) => Promise<void> }) => Promise<LlmResponse>;
+}
+
+function flattenStreamPart(part: StreamPart): LlmTokenDeltaInput | null {
+    switch (part.type) {
+        case "text-delta":
+            return { text: part.delta };
+        case "reasoning-delta":
+            return { reasoning: part.delta };
+        case "tool-input-start":
+            return { tool_calls: [{ id: part.toolCallId, name: part.toolName }] };
+        case "tool-input-delta":
+            return { tool_calls: [{ id: part.toolCallId, arguments: part.inputTextDelta }] };
+        case "finish":
+            return part.finishReason ? { finish_reason: part.finishReason } : null;
+        default:
+            return null;
+    }
 }
 
 async function runWorkerLlmCall(
     trigger: Extract<DecisionTrigger, { type: "llm.request" }>,
-    caller?: (request: LlmRequest) => Promise<LlmResponse>,
+    caller?: (request: LlmRequest, ctx: { emitDelta?: (part: StreamPart) => Promise<void> }) => Promise<LlmResponse>,
+    emitDelta?: (delta: LlmTokenDeltaInput) => Promise<void>,
 ): Promise<WorkerAction> {
     if (!caller) {
         return {
@@ -705,8 +720,14 @@ async function runWorkerLlmCall(
             attempt: trigger.attempt,
         };
     }
+    const emitPart = emitDelta
+        ? async (part: StreamPart) => {
+              const flat = flattenStreamPart(part);
+              if (flat) await emitDelta(flat);
+          }
+        : undefined;
     try {
-        const response = await caller(trigger.request);
+        const response = await caller(trigger.request, { emitDelta: emitPart });
         return {
             type: "return.llm.result",
             call_id: trigger.call_id,
@@ -760,7 +781,7 @@ export function llmLoop<S>(
                     };
                 }
                 case "llm.request": {
-                    const action = await runWorkerLlmCall(trigger, selection.caller);
+                    const action = await runWorkerLlmCall(trigger, selection.caller, ctx.emitDelta);
                     return { ...downstream, actions: [action, ...downstream.actions] };
                 }
                 case "llm.response": {

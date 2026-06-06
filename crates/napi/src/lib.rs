@@ -396,6 +396,14 @@ impl EmbeddedRuntime {
         Ok(())
     }
 
+    #[napi(js_name = "emitTokenDelta", ts_args_type = "deltaJson: string")]
+    pub async fn emit_token_delta(&self, delta_json: String) -> Result<()> {
+        let delta: substructure_core::runtime::llm::TokenDelta = serde_json::from_str(&delta_json)
+            .map_err(|e| Error::from_reason(format!("invalid deltaJson: {e}")))?;
+        self.inner.token_delta_transport().publish(delta).await;
+        Ok(())
+    }
+
     /// Shut down the runtime and all worker loops.
     #[napi]
     pub async fn shutdown(&self) -> Result<()> {

@@ -279,6 +279,10 @@ impl Runtime {
             .await
     }
 
+    pub fn token_delta_transport(&self) -> Arc<dyn TokenDeltaTransport> {
+        self.token_delta_transport.clone()
+    }
+
     // ---- Admin / inspection methods ----
 
     pub async fn list_sessions(&self, filter: &SessionFilter) -> Result<SessionPage, RuntimeError> {
