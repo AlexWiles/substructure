@@ -260,6 +260,9 @@ body {
 .toolcard {
     display: inline-flex;
     align-items: center;
+    /* assistant-ui aligns adjacent text on its baseline; baseline sits below the
+       line's middle (where the avatar centers), so center on the middle instead. */
+    vertical-align: middle;
     gap: 8px;
     padding: 6px 10px;
     border: 1px solid #e3e3e3;
