@@ -1,4 +1,4 @@
-// ── AI SDK adapter (`@substructure.ai/sdk/ai`) ───────────────────────────────
+// ── AI SDK adapter (`@substructure.ai/sdk/adapters/ai`) ───────────────────────────────
 //
 // Lets a Vercel AI SDK user run their existing agent on Substructure by
 // swapping `new ToolLoopAgent(settings)` for `new SubstructureAgent(settings)`.
@@ -15,11 +15,11 @@
 import { asSchema, streamText } from "ai";
 import type { LanguageModel, ModelMessage, TextStreamPart, Tool, ToolChoice, ToolSet } from "ai";
 
-import { llmLoop, messageHistory, tools } from "./middleware";
-import type { LlmLoopSelection, ToolDef, ToolExecutionContext } from "./middleware";
-import { contentText } from "./types";
-import type { Message, StreamPart, ToolCall } from "./types";
-import type { MiddlewareFn, MiddlewareSource, Next } from "./worker";
+import { llmLoop, messageHistory, tools } from "../middleware";
+import type { LlmLoopSelection, ToolDef, ToolExecutionContext } from "../middleware";
+import { contentText } from "../types";
+import type { Message, StreamPart, ToolCall } from "../types";
+import type { MiddlewareFn, MiddlewareSource, Next } from "../worker";
 
 type StreamTextOptions = Parameters<typeof streamText>[0];
 type ProviderOptions = NonNullable<StreamTextOptions["providerOptions"]>;
@@ -101,6 +101,10 @@ export function aiSdkTools(toolset: ToolSet, experimentalContext?: unknown): Too
         const parameters = asSchema(t.inputSchema).jsonSchema;
         const execute = t.execute;
 
+        // A tool without `execute` is one the AI SDK doesn't run server-side; it
+        // maps to a Substructure client tool, completed by the frontend via
+        // `submitToolCallResult`. The worker is never asked to execute it, so
+        // `execute` only exists to satisfy the type — fail loud if it ever runs.
         if (!execute) {
             return [
                 {
@@ -108,8 +112,11 @@ export function aiSdkTools(toolset: ToolSet, experimentalContext?: unknown): Too
                     description,
                     parameters,
                     handler: "client",
-                    execute: async (_args: string, _state?: unknown, ctx?: ToolExecutionContext) =>
-                        ctx ? ctx.defer() : "",
+                    execute: async () => {
+                        throw new Error(
+                            `Client tool "${name}" has no server-side execute and must be completed by the frontend.`,
+                        );
+                    },
                 } satisfies ToolDef,
             ];
         }

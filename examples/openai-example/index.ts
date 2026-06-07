@@ -1,5 +1,5 @@
 import Substructure from "@substructure.ai/sdk";
-import { OpenAIAgent } from "@substructure.ai/sdk/openai";
+import { OpenAIAgent } from "@substructure.ai/sdk/adapters/openai";
 import { serve } from "@hono/node-server";
 import { Agent, tool } from "@openai/agents";
 import { z } from "zod";

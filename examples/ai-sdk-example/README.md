@@ -4,7 +4,7 @@ Runs an existing Vercel AI SDK agent on Substructure: construct a
 `ToolLoopAgent` (same settings as the AI SDK's) and drop it into a handler chain.
 
 ```ts
-import { ToolLoopAgent } from "@substructure.ai/sdk/ai";
+import { ToolLoopAgent } from "@substructure.ai/sdk/adapters/ai";
 
 const assistant = new ToolLoopAgent({
     model: openrouter("openai/gpt-5-nano"),

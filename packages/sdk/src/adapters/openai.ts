@@ -1,4 +1,4 @@
-// ── OpenAI adapter (`@substructure.ai/sdk/openai`) ───────────────────────────
+// ── OpenAI adapter (`@substructure.ai/sdk/adapters/openai`) ───────────────────────────
 //
 // Lets an OpenAI user run an existing agent on Substructure. You author with the
 // OpenAI Agents SDK (`new Agent({...})` + `tool()`) and execution runs through
@@ -20,11 +20,11 @@ import { Agent, RunContext } from "@openai/agents";
 import type { ModelSettings, ModelSettingsToolChoice, Tool } from "@openai/agents";
 import OpenAI from "openai";
 
-import { llmLoop, messageHistory, tools } from "./middleware";
-import type { LlmLoopSelection, ToolDef, ToolExecutionContext } from "./middleware";
-import { contentText } from "./types";
-import type { Message, StreamPart, ToolCall } from "./types";
-import type { MiddlewareFn, MiddlewareSource, Next } from "./worker";
+import { llmLoop, messageHistory, tools } from "../middleware";
+import type { LlmLoopSelection, ToolDef, ToolExecutionContext } from "../middleware";
+import { contentText } from "../types";
+import type { Message, StreamPart, ToolCall } from "../types";
+import type { MiddlewareFn, MiddlewareSource, Next } from "../worker";
 
 type ResponsesParams = OpenAI.Responses.ResponseCreateParamsStreaming;
 type ResponseInputItem = OpenAI.Responses.ResponseInputItem;

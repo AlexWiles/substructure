@@ -905,6 +905,7 @@ export function subAgents<S>(config: {
                         typeof ctx.request.trigger.data === "string"
                             ? ctx.request.trigger.data
                             : (JSON.stringify(ctx.request.trigger.data) ?? "");
+
                     const result: ToolResult = {
                         tool_call_id: tracked.toolCallId,
                         name: tracked.name,
@@ -912,7 +913,7 @@ export function subAgents<S>(config: {
                         is_error: false,
                     };
 
-                    return appendToolResultToLlmCalls(
+                    return appendToolResultOnce(
                         await next({ ...ctx, request: { ...ctx.request, trigger: { type: "tool.result", result } } }),
                         result,
                     );
@@ -932,7 +933,7 @@ export function subAgents<S>(config: {
                         is_error: true,
                     };
 
-                    return appendToolResultToLlmCalls(
+                    return appendToolResultOnce(
                         await next({ ...ctx, request: { ...ctx.request, trigger: { type: "tool.result", result } } }),
                         result,
                     );
@@ -979,6 +980,22 @@ function handlersToLlmTools(handlers: Handler[]): LlmTool[] {
 }
 
 /** Append a tool result message to any `call.llm` actions in the response. */
+/**
+ * Append a tool result to any `call.llm`, unless one already carries it. This
+ * makes `subAgents` placement-agnostic: when an inner `messageHistory` already
+ * recorded the rewritten `tool.result` (subAgents wrapping the whole chain),
+ * we skip the append; when nothing downstream recorded it (messageHistory
+ * outside subAgents), we add it. Either way the result lands exactly once.
+ */
+function appendToolResultOnce(response: AgentResponse, result: ToolResult): AgentResponse {
+    const present = response.actions.some(
+        (action) =>
+            action.type === "call.llm" &&
+            action.request.messages.some((m) => m.role === "tool" && m.tool_call_id === result.tool_call_id),
+    );
+    return present ? response : appendToolResultToLlmCalls(response, result);
+}
+
 function appendToolResultToLlmCalls(response: AgentResponse, result: ToolResult): AgentResponse {
     const toolMsg: Message = {
         role: "tool",

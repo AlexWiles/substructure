@@ -4,7 +4,7 @@ Runs an existing OpenAI Agents SDK agent on Substructure: wrap a `new Agent({...
 (or pass `OpenAIAgent` settings directly) and drop it into a handler chain.
 
 ```ts
-import { OpenAIAgent } from "@substructure.ai/sdk/openai";
+import { OpenAIAgent } from "@substructure.ai/sdk/adapters/openai";
 import { Agent, tool } from "@openai/agents";
 
 const assistant = new OpenAIAgent(

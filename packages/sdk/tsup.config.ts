@@ -6,7 +6,7 @@ const pkg = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), 
 };
 
 export default defineConfig({
-    entry: ["src/*.ts"],
+    entry: ["src/*.ts", "src/adapters/*.ts"],
     external: ["@substructure.ai/runtime", "ai", "openai", "@openai/agents"],
     format: ["esm"],
     // Declarations are emitted by `tsc` (see the build script) so we get

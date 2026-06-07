@@ -1,5 +1,5 @@
 import Substructure from "@substructure.ai/sdk";
-import { ToolLoopAgent } from "@substructure.ai/sdk/ai";
+import { ToolLoopAgent } from "@substructure.ai/sdk/adapters/ai";
 import { serve } from "@hono/node-server";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { tool } from "ai";
