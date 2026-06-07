@@ -45,6 +45,11 @@
       "@source": "./src/ai.ts",
       "types": "./dist/ai.d.ts",
       "import": "./dist/ai.js"
+    },
+    "./openai": {
+      "@source": "./src/openai.ts",
+      "types": "./dist/openai.d.ts",
+      "import": "./dist/openai.js"
     }
   },
   "scripts": {
@@ -52,20 +57,30 @@
     "prepublishOnly": "pnpm build"
   },
   "peerDependencies": {
+    "@openai/agents": "^0.11.0",
     "@substructure.ai/runtime": "workspace:*",
-    "ai": "^6.0.0"
+    "ai": "^6.0.0",
+    "openai": "^6.0.0"
   },
   "peerDependenciesMeta": {
+    "@openai/agents": {
+      "optional": true
+    },
     "@substructure.ai/runtime": {
       "optional": true
     },
     "ai": {
       "optional": true
+    },
+    "openai": {
+      "optional": true
     }
   },
   "devDependencies": {
+    "@openai/agents": "^0.11.0",
     "@types/node": "22.19.15",
     "ai": "^6.0.0",
+    "openai": "^6.0.0",
     "tsup": "8.5.1",
     "typescript": "5.9.3"
   }
