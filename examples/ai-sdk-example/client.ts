@@ -7,10 +7,10 @@ const client = sub.backend.client({
 });
 
 const scope = await client.startTurn({
-    agentId: "openrouter-worker",
+    agentId: "ai-sdk-agent",
     payload: {
         type: "message",
-        message: { role: "user", content: "Write a three sentence explanation of worker-side LLM streaming." },
+        message: { role: "user", content: "What's the weather in Paris? Answer in one sentence." },
     },
     identity: { id: "demo" },
 });

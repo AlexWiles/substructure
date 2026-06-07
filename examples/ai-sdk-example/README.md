@@ -1,15 +1,32 @@
 # ai-sdk-example
 
-Runs LLM calls inside the worker with OpenRouter and streams token deltas
-back through Substructure.
+Runs an existing Vercel AI SDK agent on Substructure by dropping `aiSdkAgent`
+into a normal handler chain.
 
-The call is made with the Vercel AI SDK (`ai`) via `@openrouter/ai-sdk-provider`,
-so the worker forwards `streamText().fullStream` parts to `emitDelta` with no
-hand-rolled SSE parsing. Swap providers by changing the `model` line.
+```ts
+import { aiSdkAgent } from "@substructure.ai/sdk/ai";
 
-The worker still receives signed webhooks from Substructure. When the engine
-requests `text/event-stream`, the SDK worker response streams transient
-`llm.token.delta` frames and finishes with the normal decision result.
+const chatAgent = agent({ id: "ai-sdk-agent" }).use(
+    aiSdkAgent({
+        model: openrouter("openai/gpt-5-nano"),
+        instructions: "You are a concise assistant.",
+        tools, // your existing AI SDK ToolSet (zod inputSchema, execute, toModelOutput, …)
+    }),
+);
+
+const worker = sub.worker({ agents: [chatAgent] });
+```
+
+`aiSdkAgent` composes `messageHistory` + `tools` + `llmLoop`, so it behaves just
+like `.use()`ing those three. The chain is a normal Substructure worker agent:
+it answers decisions and is agnostic to whether an embedded or remote engine
+drives it. Substructure
+always owns the loop. Each LLM step runs one `streamText` call (your tools are
+passed to the model without `execute`, so the model returns tool calls instead of
+running them); Substructure executes the tools as durable steps and iterates.
+Token deltas stream back through Substructure to any client (session SSE, AG-UI).
+
+Swap providers by changing the `model` line.
 
 ## Run
 
@@ -33,5 +50,3 @@ In a third terminal, submit a turn and watch token deltas stream:
 ```sh
 pnpm client
 ```
-
-Set `OPENROUTER_MODEL` to override the default model.

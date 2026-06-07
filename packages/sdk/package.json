@@ -40,6 +40,11 @@
       "@source": "./src/embedded.ts",
       "types": "./dist/embedded.d.ts",
       "import": "./dist/embedded.js"
+    },
+    "./ai": {
+      "@source": "./src/ai.ts",
+      "types": "./dist/ai.d.ts",
+      "import": "./dist/ai.js"
     }
   },
   "scripts": {
@@ -47,15 +52,20 @@
     "prepublishOnly": "pnpm build"
   },
   "peerDependencies": {
-    "@substructure.ai/runtime": "workspace:*"
+    "@substructure.ai/runtime": "workspace:*",
+    "ai": "^6.0.0"
   },
   "peerDependenciesMeta": {
     "@substructure.ai/runtime": {
+      "optional": true
+    },
+    "ai": {
       "optional": true
     }
   },
   "devDependencies": {
     "@types/node": "22.19.15",
+    "ai": "^6.0.0",
     "tsup": "8.5.1",
     "typescript": "5.9.3"
   }
