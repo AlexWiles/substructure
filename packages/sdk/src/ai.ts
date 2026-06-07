@@ -161,6 +161,9 @@ function aiSdkCaller<TOOLS extends ToolSet>(
         const result = streamText({
             model: settings.model,
             messages: toModelMessages(request.messages),
+            // Our system prompt comes from the agent's own instructions, not
+            // user input, so a system message in the transcript is safe.
+            allowSystemInMessages: true,
             tools: settings.tools ? modelTools(settings.tools) : undefined,
             toolChoice: settings.toolChoice,
             temperature: request.temperature ?? settings.temperature,

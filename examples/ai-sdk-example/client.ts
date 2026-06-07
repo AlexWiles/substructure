@@ -10,7 +10,10 @@ const scope = await client.startTurn({
     agentId: "ai-sdk-agent",
     payload: {
         type: "message",
-        message: { role: "user", content: "What's the weather in Paris? Answer in one sentence." },
+        message: {
+            role: "user",
+            content: "What's the weather in Paris? write a story about it in the style of tolstoy.",
+        },
     },
     identity: { id: "demo" },
 });
@@ -19,10 +22,5 @@ for await (const event of client.stream(scope, { tokens: true })) {
     if (isTokenDelta(event)) {
         if (event.text) process.stdout.write(event.text);
         continue;
-    }
-
-    if (event.payload.type === "turn.completed") {
-        process.stdout.write("\n");
-        console.log(event.payload.data);
     }
 }

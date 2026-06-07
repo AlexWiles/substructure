@@ -17,17 +17,18 @@ pub struct AuthEnvVars {
 }
 
 pub struct EnvVars {
-    pub provider: ProviderEnv,
+    pub provider: Option<ProviderEnv>,
     pub auth: Option<AuthEnvVars>,
 }
 
 impl EnvVars {
-    pub fn load(provider: LlmProviderArg, dev: bool) -> Result<Self, ()> {
+    pub fn load(provider: Option<LlmProviderArg>, dev: bool) -> Result<Self, ()> {
         let provider_specs: &[(&str, &str)] = match provider {
-            LlmProviderArg::Openrouter => &[(
+            Some(LlmProviderArg::Openrouter) => &[(
                 "OPENROUTER_API_KEY",
                 "API key for OpenRouter (https://openrouter.ai/keys)",
             )],
+            None => &[],
         };
 
         let auth_specs: &[(&str, &str)] = &[
@@ -75,9 +76,10 @@ impl EnvVars {
         }
 
         let provider = match provider {
-            LlmProviderArg::Openrouter => ProviderEnv::Openrouter {
+            Some(LlmProviderArg::Openrouter) => Some(ProviderEnv::Openrouter {
                 api_key: provider_values.into_iter().next().unwrap(),
-            },
+            }),
+            None => None,
         };
 
         let auth = if dev {

@@ -93,12 +93,16 @@ impl EmbeddedRuntime {
             Arc::new(ShardedInMemoryQueue::new(
                 config.sub_agent_executor_workers as u32,
             ));
-        let llm_provider = Arc::new(OpenRouterProvider::new(OpenRouterConfig {
-            base_url: options
-                .openrouter_base_url
-                .unwrap_or_else(|| "https://openrouter.ai/api".to_string()),
-            api_key: options.openrouter_api_key.unwrap_or_default(),
-        }));
+        let llm_provider: Option<Arc<dyn substructure_core::llm::LlmProviderTrait>> =
+            match options.openrouter_api_key {
+                Some(api_key) => Some(Arc::new(OpenRouterProvider::new(OpenRouterConfig {
+                    base_url: options
+                        .openrouter_base_url
+                        .unwrap_or_else(|| "https://openrouter.ai/api".to_string()),
+                    api_key,
+                }))),
+                None => None,
+            };
         let token_delta_transport =
             Arc::new(substructure_core::llm::InMemoryTokenDeltaTransport::new());
 
