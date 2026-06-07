@@ -19,7 +19,7 @@ import { llmLoop, messageHistory, tools } from "./middleware";
 import type { LlmLoopSelection, ToolDef, ToolExecutionContext } from "./middleware";
 import { contentText } from "./types";
 import type { Message, StreamPart, ToolCall } from "./types";
-import type { MiddlewareFn, Next } from "./worker";
+import type { MiddlewareFn, MiddlewareSource, Next } from "./worker";
 
 type StreamTextOptions = Parameters<typeof streamText>[0];
 type ProviderOptions = NonNullable<StreamTextOptions["providerOptions"]>;
@@ -40,6 +40,26 @@ export interface SubstructureAgentSettings<TOOLS extends ToolSet = ToolSet> {
     seed?: number;
     providerOptions?: ProviderOptions;
     experimental_context?: unknown;
+}
+
+// An AI SDK agent you drop into a Substructure handler chain:
+//
+//   const assistant = new ToolLoopAgent({ model, instructions, tools });
+//   agent({ id }).use(assistant);
+//
+// Mirrors the AI SDK `ToolLoopAgent` constructor, but instead of driving its own
+// loop it hands a middleware to the builder. Substructure drives the loop and
+// runs the tools; each `llm.request` is one `streamText` step.
+export class ToolLoopAgent<TOOLS extends ToolSet = ToolSet> implements MiddlewareSource {
+    constructor(private readonly settings: SubstructureAgentSettings<TOOLS>) {}
+
+    get tools(): TOOLS {
+        return (this.settings.tools ?? ({} as TOOLS)) as TOOLS;
+    }
+
+    toMiddleware(): MiddlewareFn<unknown> {
+        return aiSdkAgent(this.settings);
+    }
 }
 
 // Middleware that wires an AI SDK agent into a Substructure handler chain:

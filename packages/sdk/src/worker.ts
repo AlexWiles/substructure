@@ -95,6 +95,15 @@ export interface Handler {
  */
 export type StateContributor<A> = MiddlewareFn<any, any> & { readonly _contributes: A };
 
+/**
+ * An object that can supply a middleware. Lets a constructed agent be passed
+ * straight to `.use()` (e.g. `.use(new ToolLoopAgent({ ... }))`) without the
+ * builder needing to know how the middleware is built.
+ */
+export interface MiddlewareSource {
+    toMiddleware(): MiddlewareFn<any, any>;
+}
+
 // ── HandlerBuilder ──────────────────────────────────────────────────────────
 
 type UnknownMiddleware = MiddlewareFn<unknown, unknown>;
@@ -114,8 +123,11 @@ export class HandlerBuilder<S> implements Handler {
     use<A>(mw: StateContributor<A>): HandlerBuilder<S & A>;
     /** State transformer: replaces state type (e.g. withState). */
     use<Out>(mw: MiddlewareFn<S, Out>): HandlerBuilder<Out>;
-    use<Out>(mw: MiddlewareFn<S, Out>): HandlerBuilder<Out> {
-        this.middlewares.push(mw as UnknownMiddleware);
+    /** Constructed agent or other middleware source (e.g. `new ToolLoopAgent(...)`). */
+    use(mw: MiddlewareSource): HandlerBuilder<unknown>;
+    use<Out>(mw: MiddlewareFn<S, Out> | MiddlewareSource): HandlerBuilder<Out> {
+        const fn = typeof mw === "function" ? mw : mw.toMiddleware();
+        this.middlewares.push(fn as UnknownMiddleware);
         return this as unknown as HandlerBuilder<Out>;
     }
 

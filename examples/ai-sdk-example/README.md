@@ -1,26 +1,25 @@
 # ai-sdk-example
 
-Runs an existing Vercel AI SDK agent on Substructure by dropping `aiSdkAgent`
-into a normal handler chain.
+Runs an existing Vercel AI SDK agent on Substructure: construct a
+`ToolLoopAgent` (same settings as the AI SDK's) and drop it into a handler chain.
 
 ```ts
-import { aiSdkAgent } from "@substructure.ai/sdk/ai";
+import { ToolLoopAgent } from "@substructure.ai/sdk/ai";
 
-const chatAgent = agent({ id: "ai-sdk-agent" }).use(
-    aiSdkAgent({
-        model: openrouter("openai/gpt-5-nano"),
-        instructions: "You are a concise assistant.",
-        tools, // your existing AI SDK ToolSet (zod inputSchema, execute, toModelOutput, …)
-    }),
-);
+const assistant = new ToolLoopAgent({
+    model: openrouter("openai/gpt-5-nano"),
+    instructions: "You are a concise assistant.",
+    tools, // your existing AI SDK ToolSet (zod inputSchema, execute, toModelOutput, …)
+});
 
+const chatAgent = agent({ id: "ai-sdk-agent" }).use(assistant);
 const worker = sub.worker({ agents: [chatAgent] });
 ```
 
-`aiSdkAgent` composes `messageHistory` + `tools` + `llmLoop`, so it behaves just
-like `.use()`ing those three. The chain is a normal Substructure worker agent:
-it answers decisions and is agnostic to whether an embedded or remote engine
-drives it. Substructure
+Passing the agent to `.use()` composes `messageHistory` + `tools` + `llmLoop`
+under the hood. The chain is a normal Substructure worker agent: it answers
+decisions and is agnostic to whether an embedded or remote engine drives it.
+Substructure
 always owns the loop. Each LLM step runs one `streamText` call (your tools are
 passed to the model without `execute`, so the model returns tool calls instead of
 running them); Substructure executes the tools as durable steps and iterates.

@@ -7,7 +7,7 @@
     "client": "tsx client.ts"
   },
   "dependencies": {
-    "@hono/node-server": "1.13.7",
+    "@hono/node-server": "2.0.4",
     "@openrouter/ai-sdk-provider": "^2.0.0",
     "@substructure.ai/sdk": "file:../../packages/sdk",
     "ai": "^6.0.0",
