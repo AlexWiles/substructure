@@ -1,5 +1,6 @@
 import type { WorkerDecisionRequestWire, WorkerAction, SubmitRequest, SpanContext, LlmTokenDeltaInput } from "./types";
 import { jsonState } from "./middleware";
+import { createSseStream, type SseStream } from "./sse";
 export interface NativeRuntime {
     registerWorker(
         tenantId: string,
@@ -241,33 +242,33 @@ export class Worker {
     }
 
     private handleDecisionStream(request: WorkerDecisionRequestWire): Response {
-        const encoder = new TextEncoder();
-        const stream = new TransformStream<Uint8Array, Uint8Array>();
-        const writer = stream.writable.getWriter();
-
-        const writeFrame = async (event: string, data: unknown) => {
-            const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-            await writer.write(encoder.encode(payload));
-        };
+        const sse = createSseStream();
 
         void (async () => {
             try {
-                const submit = await this.handleDecision(request, {
-                    emitDelta: (delta) => writeFrame("llm.token.delta", delta),
-                });
-                await writeFrame("decision.result", submit);
+                const submit = await this.handleDecision(request, sseDecisionRuntime(sse));
+                await sse.writeSSE({ event: "decision.result", data: submit });
+            } catch (err) {
+                const message = err instanceof Error ? err.message : String(err);
+                await sse.writeSSE({ event: "decision.error", data: { message, retryable: true } });
             } finally {
-                await writer.close();
+                await sse.close();
             }
         })();
 
-        return new Response(stream.readable, {
+        return new Response(sse.readable, {
             headers: {
                 "Content-Type": "text/event-stream",
                 "Cache-Control": "no-cache",
             },
         });
     }
+}
+
+function sseDecisionRuntime(sse: SseStream): DecisionRuntime {
+    return {
+        emitDelta: (delta) => sse.writeSSE({ event: "llm.token.delta", data: delta }),
+    };
 }
 
 function embeddedDecisionRuntime(

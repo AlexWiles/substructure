@@ -142,6 +142,17 @@ pub fn http_transport() -> (&'static str, TransportConstructor) {
     )
 }
 
+#[derive(Deserialize)]
+struct DecisionError {
+    message: String,
+    #[serde(default = "retryable_default")]
+    retryable: bool,
+}
+
+fn retryable_default() -> bool {
+    true
+}
+
 /// Reads a streaming worker response: interim `llm.token.delta` frames are
 /// republished onto the token-delta transport; the terminal `decision.result`
 /// frame carries the `SubmitRequest`. The actual SSE framing (UTF-8 across
@@ -178,6 +189,17 @@ where
                 return serde_json::from_str(&event.data).map_err(|e| PushError {
                     message: format!("failed to parse decision.result frame: {e}"),
                     retryable: false,
+                });
+            }
+            "decision.error" => {
+                let err: DecisionError =
+                    serde_json::from_str(&event.data).map_err(|e| PushError {
+                        message: format!("failed to parse decision.error frame: {e}"),
+                        retryable: false,
+                    })?;
+                return Err(PushError {
+                    message: err.message,
+                    retryable: err.retryable,
                 });
             }
             other => {
@@ -347,6 +369,30 @@ mod tests {
             .await
             .expect_err("unknown event should error");
         assert!(!err.retryable, "unknown event is not retryable");
+    }
+
+    #[tokio::test]
+    async fn decision_error_frame_surfaces_its_message_and_retryability() {
+        let transport = Arc::new(RecordingTransport::default());
+        let decision = streaming_decision();
+        let body =
+            "event: decision.error\ndata: {\"message\":\"handler threw\",\"retryable\":false}\n\n";
+        let err = read_sse_response(chunked(body), &decision, transport)
+            .await
+            .expect_err("a decision.error frame should fail the read");
+        assert_eq!(err.message, "handler threw");
+        assert!(!err.retryable);
+    }
+
+    #[tokio::test]
+    async fn decision_error_defaults_to_retryable() {
+        let transport = Arc::new(RecordingTransport::default());
+        let decision = streaming_decision();
+        let body = "event: decision.error\ndata: {\"message\":\"boom\"}\n\n";
+        let err = read_sse_response(chunked(body), &decision, transport)
+            .await
+            .expect_err("a decision.error frame should fail the read");
+        assert!(err.retryable);
     }
 
     #[tokio::test]
