@@ -141,11 +141,15 @@ pub struct LlmCallError {
     pub detail: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StreamDelta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallChunk>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
 }
 

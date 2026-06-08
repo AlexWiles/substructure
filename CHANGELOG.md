@@ -16,6 +16,11 @@ same version.
   events, with live token and reasoning streaming.
 - Reasoning controls on `LlmRequest` (`reasoning`: `effort` or `max_tokens`,
   plus `exclude` and `enabled`), passed through to providers that support them.
+- AI SDK adapter (`@substructure.ai/sdk/adapters/ai`): run an existing Vercel AI
+  SDK agent on Substructure via `ToolLoopAgent`.
+- OpenAI adapter (`@substructure.ai/sdk/adapters/openai`): run an `@openai/agents`
+  `Agent` on Substructure via `OpenAIAgent`.
+- The server and embedded runtime can start without an LLM provider configured.
 
 ### Changed
 
@@ -24,10 +29,20 @@ same version.
   old key.
 - **Breaking:** `Caller::System` is now `System { tenant_id }` (was a unit
   variant); crate consumers constructing or matching it must supply a tenant.
+- **Breaking:** the `llmLoop` middleware (and `agent.llmLoop`) is renamed
+  `llmToolLoop` to make the llm-and-tool loop it drives explicit.
+- **Breaking (worker protocol):** a turn's tool and sub-agent results are
+  delivered as a single batched `effects.complete` trigger, replacing the
+  per-effect `tool.result`, `sub_agent.turn.complete`, and `sub_agent.error`
+  triggers; `spawn.sub_agent` now carries `tool_call_id`. Handled transparently by
+  SDK workers.
 
 ### Fixed
 
 - OpenRouter responses no longer drop image outputs from the stream.
+- The next LLM call in a turn waits for all of the turn's effects to finish, so
+  turns with multiple sub-agents or a mix of tools and sub-agents no longer call
+  the model with partial results. Sub-agents run concurrently.
 
 ## [0.1.15] - 2026-06-02
 

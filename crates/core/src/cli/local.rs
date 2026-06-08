@@ -6,7 +6,7 @@ use tokio::net::TcpListener;
 use crate::cli::auth::AuthWiring;
 use crate::cli::env::{EnvVars, LlmProviderArg, ProviderEnv};
 use crate::cli::register_startup_worker;
-use crate::llm::LlmTask;
+use crate::llm::{LlmProviderTrait, LlmTask};
 use crate::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use crate::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
 use crate::providers::sqlite::{
@@ -40,9 +40,10 @@ pub enum LocalCommand {
         #[arg(long, requires = "worker_url")]
         signing_secret: Option<String>,
         /// LLM provider. Determines which API key env var is required
-        /// (e.g. `openrouter` needs OPENROUTER_API_KEY).
+        /// (e.g. `openrouter` needs OPENROUTER_API_KEY). Optional: omit it to
+        /// run a server that only handles worker-side LLM calls.
         #[arg(long, value_enum)]
-        provider: LlmProviderArg,
+        provider: Option<LlmProviderArg>,
         /// Disable client and worker authentication. For local development only.
         #[arg(long)]
         dev: bool,
@@ -69,7 +70,7 @@ async fn start_server(
     db_path: String,
     worker_url: Option<String>,
     signing_secret: Option<String>,
-    provider: LlmProviderArg,
+    provider: Option<LlmProviderArg>,
     dev: bool,
 ) -> anyhow::Result<()> {
     let env = match EnvVars::load(provider, dev) {
@@ -93,13 +94,17 @@ async fn start_server(
     let sub_agent_task_queue: Arc<dyn TaskQueue<SubAgentTask>> = Arc::new(
         ShardedInMemoryQueue::new(config.sub_agent_executor_workers as u32),
     );
-    let llm_provider = match env.provider {
-        ProviderEnv::Openrouter { api_key } => {
-            Arc::new(OpenRouterProvider::new(OpenRouterConfig {
+    let llm_provider: Option<Arc<dyn LlmProviderTrait>> = match env.provider {
+        Some(ProviderEnv::Openrouter { api_key }) => {
+            Some(Arc::new(OpenRouterProvider::new(OpenRouterConfig {
                 base_url: std::env::var("OPENROUTER_BASE_URL")
                     .unwrap_or_else(|_| "https://openrouter.ai/api".to_string()),
                 api_key,
-            }))
+            })))
+        }
+        None => {
+            tracing::info!("no LLM provider configured; server-side LLM execution is disabled (worker-handled calls only)");
+            None
         }
     };
 

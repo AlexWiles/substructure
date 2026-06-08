@@ -91,7 +91,7 @@ Every interesting thing that happens during a session is recorded as an **event*
 
 You can think of a session as the event log plus the derived state from replaying it.
 
-`client.stream(scope, { tokens: true })` also interleaves transient `llm.token.delta` events when streaming is enabled on the agent's `llmLoop` (they're off by default, so a plain `client.stream(scope)` yields only persisted events). Deltas are *not* persisted — they're a live side channel for progressive UI rendering. The canonical assistant text always arrives via the persisted `llm.call.completed` and `message.new` events that follow.
+`client.stream(scope, { tokens: true })` also interleaves transient `llm.token.delta` events when streaming is enabled on the agent's `llmToolLoop` (they're off by default, so a plain `client.stream(scope)` yields only persisted events). Deltas are *not* persisted — they're a live side channel for progressive UI rendering. The canonical assistant text always arrives via the persisted `llm.call.completed` and `message.new` events that follow.
 
 ## Identity
 

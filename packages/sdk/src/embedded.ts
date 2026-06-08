@@ -47,7 +47,7 @@ export interface StreamOptions {
      *  `stream()` yields only persisted events and you can `switch` on
      *  `event.payload.type` without a guard. Opt in for live token
      *  rendering; deltas only arrive when streaming is enabled on the
-     *  agent's `llmLoop`. */
+     *  agent's `llmToolLoop`. */
     tokens?: boolean;
 }
 

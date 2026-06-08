@@ -3,11 +3,17 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::runtime::llm::TokenDeltaTransport;
+
 use super::WorkerDecisionRequest;
 
 #[async_trait]
 pub trait PushTransport: Send + Sync {
-    async fn push(&self, decision: &WorkerDecisionRequest) -> Result<PushResponse, PushError>;
+    async fn push(
+        &self,
+        decision: &WorkerDecisionRequest,
+        token_delta_transport: std::sync::Arc<dyn TokenDeltaTransport>,
+    ) -> Result<PushResponse, PushError>;
 }
 
 pub struct PushResponse {

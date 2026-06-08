@@ -279,6 +279,10 @@ impl Runtime {
             .await
     }
 
+    pub fn token_delta_transport(&self) -> Arc<dyn TokenDeltaTransport> {
+        self.token_delta_transport.clone()
+    }
+
     // ---- Admin / inspection methods ----
 
     pub async fn list_sessions(&self, filter: &SessionFilter) -> Result<SessionPage, RuntimeError> {
@@ -410,7 +414,7 @@ impl Runtime {
 
 pub fn start(
     store: Arc<dyn EventStore>,
-    llm_provider: Arc<dyn LlmProviderTrait>,
+    llm_provider: Option<Arc<dyn LlmProviderTrait>>,
     llm_task_queue: Arc<dyn TaskQueue<LlmTask>>,
     sub_agent_task_queue: Arc<dyn TaskQueue<SubAgentTask>>,
     worker_queue: Arc<dyn WorkerQueue>,
@@ -422,20 +426,26 @@ pub fn start(
 ) -> Arc<Runtime> {
     let cancel = CancellationToken::new();
 
-    let llm_processor_handle = spawn_llm_dispatch_processor(
-        store.clone(),
-        checkpoint_store.clone(),
-        llm_task_queue.clone(),
-        cancel.clone(),
-    );
-    let llm_executor_handles = spawn_llm_task_executor(
-        store.clone(),
-        llm_provider,
-        llm_task_queue,
-        token_delta_transport.clone(),
-        config.llm_executor_workers,
-        cancel.clone(),
-    );
+    // The LLM dispatch processor + executor only run server-side calls. With no
+    // provider configured the server handles LLM calls worker-side only, so we
+    // skip that subsystem entirely.
+    let mut llm_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    if let Some(llm_provider) = llm_provider {
+        llm_handles.push(spawn_llm_dispatch_processor(
+            store.clone(),
+            checkpoint_store.clone(),
+            llm_task_queue.clone(),
+            cancel.clone(),
+        ));
+        llm_handles.extend(spawn_llm_task_executor(
+            store.clone(),
+            llm_provider,
+            llm_task_queue,
+            token_delta_transport.clone(),
+            config.llm_executor_workers,
+            cancel.clone(),
+        ));
+    }
 
     let sub_agent_processor_handle = spawn_sub_agent_dispatch_processor(
         store.clone(),
@@ -479,14 +489,13 @@ pub fn start(
     let session_subscriptions = session::subscriptions::SessionSubscriptions::new(store.clone());
 
     let mut handles = vec![
-        llm_processor_handle,
         sub_agent_processor_handle,
         worker_handle,
         session_index_processor_handle,
         wake_processor_handle,
         wake_dispatcher_handle,
     ];
-    handles.extend(llm_executor_handles);
+    handles.extend(llm_handles);
     handles.extend(sub_agent_executor_handles);
 
     Arc::new(Runtime {

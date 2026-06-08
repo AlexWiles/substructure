@@ -40,23 +40,51 @@
       "@source": "./src/embedded.ts",
       "types": "./dist/embedded.d.ts",
       "import": "./dist/embedded.js"
+    },
+    "./adapters/ai": {
+      "@source": "./src/adapters/ai.ts",
+      "types": "./dist/adapters/ai.d.ts",
+      "import": "./dist/adapters/ai.js"
+    },
+    "./adapters/openai": {
+      "@source": "./src/adapters/openai.ts",
+      "types": "./dist/adapters/openai.d.ts",
+      "import": "./dist/adapters/openai.js"
     }
   },
   "scripts": {
     "build": "tsup && tsc --emitDeclarationOnly",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "prepublishOnly": "pnpm build"
   },
   "peerDependencies": {
-    "@substructure.ai/runtime": "workspace:*"
+    "@openai/agents": "^0.11.0",
+    "@substructure.ai/runtime": "workspace:*",
+    "ai": "^6.0.0",
+    "openai": "^6.0.0"
   },
   "peerDependenciesMeta": {
+    "@openai/agents": {
+      "optional": true
+    },
     "@substructure.ai/runtime": {
+      "optional": true
+    },
+    "ai": {
+      "optional": true
+    },
+    "openai": {
       "optional": true
     }
   },
   "devDependencies": {
+    "@openai/agents": "^0.11.0",
     "@types/node": "22.19.15",
+    "ai": "^6.0.0",
+    "openai": "^6.0.0",
     "tsup": "8.5.1",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "vitest": "^4.0.0"
   }
 }

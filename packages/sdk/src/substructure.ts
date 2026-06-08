@@ -6,7 +6,7 @@ import {
     action,
     actions,
     jsonState,
-    llmLoop,
+    llmToolLoop,
     logging,
     messageHistory,
     messageHistoryCurrentTurn,
@@ -35,7 +35,7 @@ export interface AgentFactory {
     messageHistory: typeof messageHistory;
     messageHistoryCurrentTurn: typeof messageHistoryCurrentTurn;
     tools: typeof tools;
-    llmLoop: typeof llmLoop;
+    llmToolLoop: typeof llmToolLoop;
     subAgents: typeof subAgents;
 }
 
@@ -53,7 +53,7 @@ function createAgentFactory(): AgentFactory {
     factory.messageHistory = messageHistory;
     factory.messageHistoryCurrentTurn = messageHistoryCurrentTurn;
     factory.tools = tools;
-    factory.llmLoop = llmLoop;
+    factory.llmToolLoop = llmToolLoop;
     factory.subAgents = subAgents;
 
     return factory;

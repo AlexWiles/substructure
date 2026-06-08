@@ -1,5 +1,6 @@
-import type { WorkerDecisionRequestWire, WorkerAction, SubmitRequest, SpanContext } from "./types";
+import type { WorkerDecisionRequestWire, WorkerAction, SubmitRequest, SpanContext, LlmTokenDeltaInput } from "./types";
 import { jsonState } from "./middleware";
+import { createSseStream, type SseStream } from "./sse";
 export interface NativeRuntime {
     registerWorker(
         tenantId: string,
@@ -28,6 +29,7 @@ export interface NativeRuntime {
         turnId?: string,
         sequenceAfter?: number,
     ): AsyncGenerator<string, void, unknown>;
+    emitTokenDelta(deltaJson: string): Promise<void>;
     shutdown(): Promise<void>;
 }
 import { verifyWebhookSignature } from "./webhook";
@@ -39,7 +41,14 @@ export interface DecisionResult {
     state: string;
 }
 
-export type DecisionHandler = (request: WorkerDecisionRequestWire) => Promise<DecisionResult>;
+export interface DecisionRuntime {
+    emitDelta?: (delta: LlmTokenDeltaInput) => Promise<void>;
+}
+
+export type DecisionHandler = (
+    request: WorkerDecisionRequestWire,
+    runtime?: DecisionRuntime,
+) => Promise<DecisionResult>;
 
 export interface AgentContext<S = unknown> {
     /** Mutable agent state, built up across middleware layers. */
@@ -48,6 +57,7 @@ export interface AgentContext<S = unknown> {
      *  engine's `WorkerDecisionRequest`): identity, trigger, session_id,
      *  agent_id, turn_id, span, etc. */
     request: WorkerDecisionRequestWire;
+    emitDelta?: (delta: LlmTokenDeltaInput) => Promise<void>;
 }
 
 export interface AgentResponse {
@@ -86,6 +96,15 @@ export interface Handler {
  */
 export type StateContributor<A> = MiddlewareFn<any, any> & { readonly _contributes: A };
 
+/**
+ * An object that can supply a middleware. Lets a constructed agent be passed
+ * straight to `.use()` (e.g. `.use(new ToolLoopAgent({ ... }))`) without the
+ * builder needing to know how the middleware is built.
+ */
+export interface MiddlewareSource {
+    toMiddleware(): MiddlewareFn<any, any>;
+}
+
 // ── HandlerBuilder ──────────────────────────────────────────────────────────
 
 type UnknownMiddleware = MiddlewareFn<unknown, unknown>;
@@ -105,8 +124,11 @@ export class HandlerBuilder<S> implements Handler {
     use<A>(mw: StateContributor<A>): HandlerBuilder<S & A>;
     /** State transformer: replaces state type (e.g. withState). */
     use<Out>(mw: MiddlewareFn<S, Out>): HandlerBuilder<Out>;
-    use<Out>(mw: MiddlewareFn<S, Out>): HandlerBuilder<Out> {
-        this.middlewares.push(mw as UnknownMiddleware);
+    /** Constructed agent or other middleware source (e.g. `new ToolLoopAgent(...)`). */
+    use(mw: MiddlewareSource): HandlerBuilder<unknown>;
+    use<Out>(mw: MiddlewareFn<S, Out> | MiddlewareSource): HandlerBuilder<Out> {
+        const fn = typeof mw === "function" ? mw : mw.toMiddleware();
+        this.middlewares.push(fn as UnknownMiddleware);
         return this as unknown as HandlerBuilder<Out>;
     }
 
@@ -118,10 +140,11 @@ export class HandlerBuilder<S> implements Handler {
         const middlewares = [jsonState() as UnknownMiddleware, ...this.middlewares];
         const chain = composeChain(middlewares, DEFAULT_FALLBACK);
 
-        return async (request: WorkerDecisionRequestWire) => {
+        return async (request: WorkerDecisionRequestWire, runtime?: DecisionRuntime) => {
             const ctx: AgentContext<unknown> = {
                 state: undefined,
                 request,
+                emitDelta: runtime?.emitDelta,
             };
             const result = await chain(ctx);
             return {
@@ -169,7 +192,7 @@ export class Worker {
         const self = this;
         await runtime.registerWorker(tenantId, this.agentIds, async (decisionJson: string) => {
             const request: WorkerDecisionRequestWire = JSON.parse(decisionJson);
-            const submit = await self.handleDecision(request);
+            const submit = await self.handleDecision(request, embeddedDecisionRuntime(runtime, request));
             return JSON.stringify(submit);
         });
     }
@@ -193,17 +216,22 @@ export class Worker {
                 decision = (await req.json()) as WorkerDecisionRequestWire;
             }
 
+            const wantsStream = req.headers.get("accept")?.includes("text/event-stream") ?? false;
+            if (wantsStream) {
+                return this.handleDecisionStream(decision);
+            }
+
             const submit = await this.handleDecision(decision);
             return Response.json(submit);
         };
     }
 
-    async handleDecision(request: WorkerDecisionRequestWire): Promise<SubmitRequest> {
+    async handleDecision(request: WorkerDecisionRequestWire, runtime?: DecisionRuntime): Promise<SubmitRequest> {
         const handler = this.handlers.get(request.agent_id);
         if (!handler) {
             throw new Error(`No handler registered for agent: ${request.agent_id}`);
         }
-        const result = await handler(request);
+        const result = await handler(request, runtime);
         return {
             session_id: request.session_id,
             decision_id: request.decision_id,
@@ -212,6 +240,67 @@ export class Worker {
             span: childSpan(request.span, "worker_submit"),
         };
     }
+
+    private handleDecisionStream(request: WorkerDecisionRequestWire): Response {
+        const sse = createSseStream();
+
+        void (async () => {
+            try {
+                const submit = await this.handleDecision(request, sseDecisionRuntime(sse));
+                await sse.writeSSE({ event: "decision.result", data: submit });
+            } catch (err) {
+                const message = err instanceof Error ? err.message : String(err);
+                await sse.writeSSE({ event: "decision.error", data: { message, retryable: true } });
+            } finally {
+                await sse.close();
+            }
+        })();
+
+        return new Response(sse.readable, {
+            headers: {
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+            },
+        });
+    }
+}
+
+function sseDecisionRuntime(sse: SseStream): DecisionRuntime {
+    return {
+        emitDelta: (delta) => sse.writeSSE({ event: "llm.token.delta", data: delta }),
+    };
+}
+
+function embeddedDecisionRuntime(
+    runtime: NativeRuntime,
+    request: WorkerDecisionRequestWire,
+): DecisionRuntime | undefined {
+    const { trigger } = request;
+    if (trigger.type !== "llm.request" || !trigger.stream) return undefined;
+
+    const rootSessionId = request.ancestry?.[0] ?? request.session_id;
+    let seq = 0;
+
+    return {
+        emitDelta: async (delta: LlmTokenDeltaInput) => {
+            await runtime.emitTokenDelta(
+                JSON.stringify({
+                    tenant_id: request.tenant_id,
+                    root_session_id: rootSessionId,
+                    session_id: request.session_id,
+                    agent_id: request.agent_id,
+                    turn_id: request.turn_id,
+                    call_id: trigger.call_id,
+                    attempt: trigger.attempt,
+                    seq: seq++,
+                    text: delta.text,
+                    reasoning: delta.reasoning,
+                    tool_calls: delta.tool_calls,
+                    finish_reason: delta.finish_reason,
+                }),
+            );
+        },
+    };
 }
 
 function randomHex(bytes: number): string {

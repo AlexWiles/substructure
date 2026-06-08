@@ -63,6 +63,8 @@ fn token_delta_to_sse(delta: TokenDelta) -> SseEvent {
         "attempt": delta.attempt,
         "seq": delta.seq,
         "text": delta.text,
+        "reasoning": delta.reasoning,
+        "tool_calls": delta.tool_calls,
         "finish_reason": delta.finish_reason,
     });
     SseEvent::default()

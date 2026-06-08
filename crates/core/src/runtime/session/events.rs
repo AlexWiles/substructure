@@ -88,6 +88,8 @@ pub struct LlmCallRequested {
     pub request: LlmRequest,
     pub stream: bool,
     pub retry: RetryPolicy,
+    #[serde(default)]
+    pub handler: LlmHandler,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,10 +126,23 @@ pub enum ToolHandler {
     Client,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmHandler {
+    /// Server-side executor resolves the provider and makes the call.
+    #[default]
+    Server,
+    /// Dispatched to the worker via an `llm.request` decision trigger; the
+    /// worker performs the call and replies with `return.llm.result`/`error`.
+    Worker,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentRequested {
     pub session_id: String,
     pub agent_id: String,
+    #[serde(default)]
+    pub tool_call_id: String,
     pub retry: RetryPolicy,
 }
 
@@ -247,4 +262,7 @@ pub struct SubAgentTurnCompleted {
     pub cost: Decimal,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub token_usage: BTreeMap<String, u64>,
+    /// The child's turn result.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub data: serde_json::Value,
 }

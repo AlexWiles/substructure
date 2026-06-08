@@ -80,6 +80,12 @@ export interface ToolCall {
     function: ToolCallFunction;
 }
 
+export interface ToolCallChunk {
+    id: string;
+    name?: string;
+    arguments?: string;
+}
+
 // ── Multimodal content parts (OpenAI/OpenRouter wire format) ──────────
 
 export interface ImageUrlPart {
@@ -183,6 +189,10 @@ export interface LlmResponse {
 
 export type ToolHandler = "worker" | "client";
 
+// ── LLM Handler ─────────────────────────────────────────────────────────────
+
+export type LlmHandler = "server" | "worker";
+
 // ── Decision Triggers ───────────────────────────────────────────────────────
 
 export interface ToolResult {
@@ -213,6 +223,7 @@ export type DecisionTrigger =
           cost?: Decimal;
       }
     | { type: "llm.error"; call_id: string; error: string; code?: string; detail?: unknown }
+    | { type: "llm.request"; call_id: string; request: LlmRequest; stream: boolean; attempt: number }
     | {
           type: "tool.execute";
           tool_call_id: string;
@@ -221,7 +232,7 @@ export type DecisionTrigger =
           attempt: number;
           deadline?: DateTime;
       }
-    | { type: "tool.result"; result: ToolResult }
+    | { type: "effects.complete"; results: ToolResult[] }
     | { type: "sub_agent.turn.complete"; session_id: Uuid; agent_id: string; turn_id: string; data: unknown }
     | { type: "sub_agent.error"; session_id: Uuid; agent_id: string; error: string }
     | { type: "interrupt.resumed"; interrupt_id: string }
@@ -235,6 +246,7 @@ export type WorkerAction =
           request: LlmRequest;
           stream: boolean;
           retry: RetryPolicy;
+          handler: LlmHandler;
       }
     | {
           type: "call.tool";
@@ -252,7 +264,17 @@ export type WorkerAction =
           retryable: boolean;
           attempt: number;
       }
-    | { type: "spawn.sub_agent"; session_id: Uuid; agent_id: string; retry: RetryPolicy }
+    | { type: "return.llm.result"; call_id: string; response: LlmResponse; attempt: number }
+    | {
+          type: "return.llm.error";
+          call_id: string;
+          error: string;
+          retryable: boolean;
+          code?: string;
+          detail?: unknown;
+          attempt: number;
+      }
+    | { type: "spawn.sub_agent"; session_id: Uuid; agent_id: string; tool_call_id: string; retry: RetryPolicy }
     | { type: "send.message"; session_id: Uuid; message: Message }
     | { type: "done"; data: unknown };
 
@@ -373,8 +395,29 @@ export interface LlmTokenDelta {
     /** Monotonic per-call sequence (0-based). */
     seq: number;
     text?: string;
+    reasoning?: string;
+    tool_calls?: ToolCallChunk[];
     finish_reason?: string;
 }
+
+export interface LlmTokenDeltaInput {
+    text?: string;
+    reasoning?: string;
+    tool_calls?: ToolCallChunk[];
+    finish_reason?: string;
+}
+
+export type StreamPart =
+    | { type: "text-start"; id?: string }
+    | { type: "text-delta"; id?: string; delta: string }
+    | { type: "text-end"; id?: string }
+    | { type: "reasoning-start"; id?: string }
+    | { type: "reasoning-delta"; id?: string; delta: string }
+    | { type: "reasoning-end"; id?: string }
+    | { type: "tool-input-start"; toolCallId: string; toolName: string }
+    | { type: "tool-input-delta"; toolCallId: string; inputTextDelta: string }
+    | { type: "tool-input-available"; toolCallId: string; toolName: string; input: unknown }
+    | { type: "finish"; finishReason?: string };
 
 export interface ToolCallRequested {
     type: "tool.call.requested";
@@ -405,6 +448,7 @@ export interface SubAgentRequested {
     type: "sub_agent.requested";
     session_id: Uuid;
     agent_id: string;
+    tool_call_id?: string;
     retry: RetryPolicy;
 }
 
@@ -425,6 +469,7 @@ export interface SubAgentTurnCompleted {
     session_id: Uuid;
     cost: Decimal;
     token_usage?: Record<string, number>;
+    data?: unknown;
 }
 
 export interface SessionInterrupted {

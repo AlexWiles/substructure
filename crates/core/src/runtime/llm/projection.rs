@@ -9,7 +9,7 @@ use crate::runtime::processor::{
     EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCheckpointStore,
     ProcessorError,
 };
-use crate::runtime::session::events::EventPayload;
+use crate::runtime::session::events::{EventPayload, LlmHandler};
 use crate::runtime::session::state::SessionState;
 
 use super::LlmTask;
@@ -49,6 +49,11 @@ impl EventProcessor for LlmDispatchProjection {
             EventPayload::LlmCallRequested(req) => req,
             _ => return Ok(()),
         };
+
+        // Worker-handled calls run on the worker, not the server-side executor.
+        if req.handler == LlmHandler::Worker {
+            return Ok(());
+        }
 
         let derived = event.derived.as_ref().ok_or_else(|| {
             ProcessorError::Apply("missing derived state on llm event".to_string())

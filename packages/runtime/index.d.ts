@@ -48,5 +48,7 @@ export class EmbeddedRuntime {
         sequenceAfter?: number,
     ): AsyncGenerator<string, void, unknown>;
 
+    emitTokenDelta(deltaJson: string): Promise<void>;
+
     shutdown(): Promise<void>;
 }

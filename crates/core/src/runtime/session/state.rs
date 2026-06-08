@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::decision::DecisionTrigger;
+use super::decision::{DecisionTrigger, ToolResult};
 use super::events::*;
 use super::message::Role;
 use rust_decimal::Decimal;
@@ -99,6 +99,8 @@ pub struct LlmCallState {
     /// Original request, stored for retries and crash recovery.
     pub request: LlmRequest,
     pub stream: bool,
+    #[serde(default)]
+    pub handler: LlmHandler,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,11 +113,27 @@ pub struct ToolCallState {
     /// Original arguments, stored for retries and crash recovery.
     #[serde(default)]
     pub arguments: String,
-    /// Result content, stored for enriching ToolResult trigger.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
     #[serde(default)]
     pub is_error: bool,
+    /// Source event sequence, for stable result ordering.
+    #[serde(default)]
+    pub order: u64,
+    /// Result already emitted to the worker in an effects.complete batch.
+    #[serde(default)]
+    pub result_delivered: bool,
+}
+
+impl ToolCallState {
+    fn to_result(&self) -> ToolResult {
+        ToolResult {
+            tool_call_id: self.tool_call_id.clone(),
+            name: self.name.clone(),
+            content: self.result.clone().unwrap_or_default(),
+            is_error: self.is_error,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +141,30 @@ pub struct SubAgentCallState {
     pub session_id: String,
     pub agent_id: String,
     pub tracking: EffectTracking,
+    /// The model tool-call id this delegation answers.
+    #[serde(default)]
+    pub tool_call_id: String,
+    /// The child's turn result (or error); `Some` once the turn is terminal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    #[serde(default)]
+    pub is_error: bool,
+    #[serde(default)]
+    pub order: u64,
+    /// Result already emitted to the worker in an effects.complete batch.
+    #[serde(default)]
+    pub result_delivered: bool,
+}
+
+impl SubAgentCallState {
+    fn to_result(&self) -> ToolResult {
+        ToolResult {
+            tool_call_id: self.tool_call_id.clone(),
+            name: self.agent_id.clone(),
+            content: self.result.clone().unwrap_or_default(),
+            is_error: self.is_error,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,6 +207,14 @@ pub struct DerivedState {
 
 pub(super) fn new_call_id() -> String {
     Uuid::now_v7().to_string()
+}
+
+/// A JSON string passes through; anything else is serialized.
+pub(super) fn json_to_string(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -267,6 +317,7 @@ impl SessionState {
                     existing.tracking.reset_pending(now);
                     existing.request = payload.request.clone();
                     existing.stream = payload.stream;
+                    existing.handler = payload.handler.clone();
                 } else {
                     self.llm_calls.insert(
                         payload.call_id.clone(),
@@ -275,6 +326,7 @@ impl SessionState {
                             tracking: EffectTracking::new(payload.retry.clone(), now),
                             request: payload.request.clone(),
                             stream: payload.stream,
+                            handler: payload.handler.clone(),
                         },
                     );
                 }
@@ -312,6 +364,8 @@ impl SessionState {
                             arguments: payload.arguments.clone(),
                             result: None,
                             is_error: false,
+                            order: ctx.sequence,
+                            result_delivered: false,
                         },
                     );
                 }
@@ -344,6 +398,11 @@ impl SessionState {
                             session_id: sid,
                             agent_id: payload.agent_id.clone(),
                             tracking: EffectTracking::new(payload.retry.clone(), now),
+                            tool_call_id: payload.tool_call_id.clone(),
+                            result: None,
+                            is_error: false,
+                            order: ctx.sequence,
+                            result_delivered: false,
                         },
                     );
                 }
@@ -357,6 +416,10 @@ impl SessionState {
             EventPayload::SubAgentErrored(payload) => {
                 if let Some(sa) = self.sub_agent_calls.get_mut(&payload.session_id) {
                     sa.tracking.record_error(payload.retryable, now);
+                    if sa.tracking.status == EffectStatus::Failed {
+                        sa.result = Some(payload.error.clone());
+                        sa.is_error = true;
+                    }
                 }
             }
             EventPayload::SessionInterrupted(payload) => {
@@ -387,6 +450,10 @@ impl SessionState {
                         },
                     );
                 }
+                if let DecisionTrigger::EffectsComplete { results } = &p.trigger {
+                    let ids: Vec<String> = results.iter().map(|r| r.tool_call_id.clone()).collect();
+                    self.mark_results_delivered(&ids);
+                }
                 self.status = SessionStatus::Idle;
             }
             EventPayload::WorkerDecisionCompleted(p) => {
@@ -412,6 +479,10 @@ impl SessionState {
                         source_event_sequence: ctx.sequence,
                     },
                 );
+                if let DecisionTrigger::EffectsComplete { results } = &p.trigger {
+                    let ids: Vec<String> = results.iter().map(|r| r.tool_call_id.clone()).collect();
+                    self.mark_results_delivered(&ids);
+                }
             }
             EventPayload::WorkerStateUpdated(p) => {
                 self.worker_state = p.state.clone();
@@ -432,6 +503,10 @@ impl SessionState {
                 for (k, v) in &payload.token_usage {
                     *self.sub_agent_token_usage.entry(k.clone()).or_insert(0) += v;
                     *self.turn_token_usage.entry(k.clone()).or_insert(0) += v;
+                }
+                if let Some(sa) = self.sub_agent_calls.get_mut(&payload.session_id) {
+                    sa.result = Some(json_to_string(&payload.data));
+                    sa.is_error = false;
                 }
             }
             EventPayload::TurnStarted(p) => {
@@ -454,6 +529,101 @@ impl SessionState {
         match &self.status {
             SessionStatus::Interrupted { interrupt_id } => Some(interrupt_id),
             _ => None,
+        }
+    }
+
+    /// Ordered results for the undelivered effects once every one is terminal;
+    /// `None` while any is still pending or there are none.
+    pub fn drainable_batch(&self) -> Option<Vec<ToolResult>> {
+        let any = self.tool_calls.values().any(|t| !t.result_delivered)
+            || self.sub_agent_calls.values().any(|s| !s.result_delivered);
+
+        if !any {
+            return None;
+        }
+
+        let all_terminal = self
+            .tool_calls
+            .values()
+            .filter(|t| !t.result_delivered)
+            .all(|t| t.result.is_some())
+            && self
+                .sub_agent_calls
+                .values()
+                .filter(|s| !s.result_delivered)
+                .all(|s| s.result.is_some());
+
+        if !all_terminal {
+            return None;
+        }
+
+        Some(self.collect_undelivered(None))
+    }
+
+    /// `drainable_batch` for the moment a result arrives: `pending` stands in
+    /// for the effect being completed, whose result is not yet in state. Drains
+    /// once every *other* undelivered effect is terminal.
+    pub fn drainable_with(&self, pending: ToolResult) -> Option<Vec<ToolResult>> {
+        let others_terminal = self
+            .tool_calls
+            .values()
+            .filter(|t| !t.result_delivered && t.tool_call_id != pending.tool_call_id)
+            .all(|t| t.result.is_some())
+            && self
+                .sub_agent_calls
+                .values()
+                .filter(|s| !s.result_delivered && s.tool_call_id != pending.tool_call_id)
+                .all(|s| s.result.is_some());
+
+        if !others_terminal {
+            return None;
+        }
+
+        Some(self.collect_undelivered(Some(&pending)))
+    }
+
+    fn collect_undelivered(&self, overlay: Option<&ToolResult>) -> Vec<ToolResult> {
+        let tools = self
+            .tool_calls
+            .values()
+            .filter(|t| !t.result_delivered)
+            .map(|t| (t.order, t.to_result()));
+
+        let subs = self
+            .sub_agent_calls
+            .values()
+            .filter(|s| !s.result_delivered)
+            .map(|s| (s.order, s.to_result()));
+
+        let mut ordered: Vec<(u64, ToolResult)> = tools.chain(subs).collect();
+
+        ordered.sort_by_key(|(order, _)| *order);
+
+        ordered
+            .into_iter()
+            .map(|(_, result)| match overlay {
+                // The in-flight result isn't in state yet; substitute it in.
+                Some(o) if o.tool_call_id == result.tool_call_id => o.clone(),
+                _ => result,
+            })
+            .collect()
+    }
+
+    pub fn has_undelivered_effects(&self) -> bool {
+        self.tool_calls.values().any(|t| !t.result_delivered)
+            || self.sub_agent_calls.values().any(|s| !s.result_delivered)
+    }
+
+    fn mark_results_delivered(&mut self, tool_call_ids: &[String]) {
+        for id in tool_call_ids {
+            if let Some(t) = self.tool_calls.get_mut(id) {
+                t.result_delivered = true;
+            }
+            for s in self.sub_agent_calls.values_mut() {
+                if &s.tool_call_id == id {
+                    s.result_delivered = true;
+                }
+            }
         }
     }
 
@@ -496,6 +666,9 @@ impl SessionState {
             _ => {}
         }
         if self.has_queued_worker_decision() && !self.has_pending_worker_decision() {
+            return Some(Utc::now());
+        }
+        if !self.has_pending_worker_decision() && self.drainable_batch().is_some() {
             return Some(Utc::now());
         }
         self.llm_calls

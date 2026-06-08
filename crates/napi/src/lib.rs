@@ -93,12 +93,16 @@ impl EmbeddedRuntime {
             Arc::new(ShardedInMemoryQueue::new(
                 config.sub_agent_executor_workers as u32,
             ));
-        let llm_provider = Arc::new(OpenRouterProvider::new(OpenRouterConfig {
-            base_url: options
-                .openrouter_base_url
-                .unwrap_or_else(|| "https://openrouter.ai/api".to_string()),
-            api_key: options.openrouter_api_key.unwrap_or_default(),
-        }));
+        let llm_provider: Option<Arc<dyn substructure_core::llm::LlmProviderTrait>> =
+            match options.openrouter_api_key {
+                Some(api_key) => Some(Arc::new(OpenRouterProvider::new(OpenRouterConfig {
+                    base_url: options
+                        .openrouter_base_url
+                        .unwrap_or_else(|| "https://openrouter.ai/api".to_string()),
+                    api_key,
+                }))),
+                None => None,
+            };
         let token_delta_transport =
             Arc::new(substructure_core::llm::InMemoryTokenDeltaTransport::new());
 
@@ -393,6 +397,14 @@ impl EmbeddedRuntime {
             );
         }
 
+        Ok(())
+    }
+
+    #[napi(js_name = "emitTokenDelta", ts_args_type = "deltaJson: string")]
+    pub async fn emit_token_delta(&self, delta_json: String) -> Result<()> {
+        let delta: substructure_core::runtime::llm::TokenDelta = serde_json::from_str(&delta_json)
+            .map_err(|e| Error::from_reason(format!("invalid deltaJson: {e}")))?;
+        self.inner.token_delta_transport().publish(delta).await;
         Ok(())
     }
 

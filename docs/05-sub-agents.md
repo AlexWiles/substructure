@@ -12,7 +12,7 @@ Sub-agents are ordinary agents. There's nothing special about how they're built:
 const weatherAgent = agent({ id: "weather" })
   .use(agent.messageHistory("Weather assistant. Look up the weather. Be concise."))
   .use(agent.tools([getWeather]))
-  .use(agent.llmLoop({ request: { model: "anthropic/claude-sonnet-4-5" } }));
+  .use(agent.llmToolLoop({ request: { model: "anthropic/claude-sonnet-4-5" } }));
 ```
 
 What makes it a sub-agent is how a parent uses it.
@@ -25,7 +25,7 @@ The parent declares the children it can delegate to with `agent.subAgents`:
 const assistant = agent({ id: "assistant" })
   .use(agent.messageHistory("Helpful assistant. Delegate weather questions to the weather agent."))
   .use(agent.subAgents({ agents: [weatherAgent] }))
-  .use(agent.llmLoop({ request: { model: "anthropic/claude-sonnet-4-5" } }));
+  .use(agent.llmToolLoop({ request: { model: "anthropic/claude-sonnet-4-5" } }));
 ```
 
 Then deploy both agents in the same worker:
@@ -95,7 +95,7 @@ const weatherAgent = agent({ id: "weather" }).use(/* ... */);
 const assistant = agent({ id: "assistant" })
   .use(/* ... */)
   .use(agent.subAgents({ agents: [weatherAgent] }))
-  .use(agent.llmLoop({ request: { model: "anthropic/claude-sonnet-4-5" } }));
+  .use(agent.llmToolLoop({ request: { model: "anthropic/claude-sonnet-4-5" } }));
 
 sub.worker({ agents: [assistant, weatherAgent] });
 ```

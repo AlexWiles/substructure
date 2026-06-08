@@ -11,7 +11,7 @@ interaction in coding agents like Claude Code.
   drive state changes. Sending `{ type: "action", name: "set_mode", ... }`
   flips state inside the worker without producing a user message in
   the transcript.
-- **Selector-form middleware** (`agent.tools`, `agent.llmLoop`) reading
+- **Selector-form middleware** (`agent.tools`, `agent.llmToolLoop`) reading
   the same state slice (`mode`) so the toolset and model swap together
   when the mode changes.
 - **A custom history middleware** built from the `triggerToMessage` and
@@ -48,7 +48,7 @@ Two middlewares:
 Chain order:
 
 ```
-planMode → modeAwareHistory → tools → llmLoop
+planMode → modeAwareHistory → tools → llmToolLoop
 ```
 
 `modeAwareHistory` puts its system prompt ahead of the transcript so it
@@ -92,4 +92,4 @@ The middlewares only care about `mode` and `plan`. To repurpose:
 - Replace the planning / execution system prompts.
 - Add more modes (e.g. `reviewing`, `debugging`) by extending the
   `Mode` union and registering another toolset and prompt branch.
-- Swap the model selection in `agent.llmLoop` for your own routing.
+- Swap the model selection in `agent.llmToolLoop` for your own routing.

@@ -81,8 +81,9 @@ impl PushAdapter {
                         Some(t) => t,
                         None => return,
                     };
+                    let token_delta_transport = runtime.token_delta_transport();
 
-                    match transport.push(&decision).await {
+                    match transport.push(&decision, token_delta_transport).await {
                         Ok(resp) => {
                             let submit = SubmitDecision {
                                 session_id: decision.session_id,
