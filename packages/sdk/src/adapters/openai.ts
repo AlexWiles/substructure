@@ -20,8 +20,8 @@ import { Agent, RunContext } from "@openai/agents";
 import type { ModelSettings, ModelSettingsToolChoice, Tool } from "@openai/agents";
 import OpenAI from "openai";
 
-import { llmLoop, messageHistory, tools } from "../middleware";
-import type { LlmLoopSelection, ToolDef, ToolExecutionContext } from "../middleware";
+import { llmToolLoop, messageHistory, tools } from "../middleware";
+import type { LlmToolLoopSelection, ToolDef, ToolExecutionContext } from "../middleware";
 import { contentText } from "../types";
 import type { Message, StreamPart, ToolCall } from "../types";
 import type { MiddlewareFn, MiddlewareSource, Next } from "../worker";
@@ -115,19 +115,19 @@ function fromAgent(agent: Agent, options?: { client?: OpenAI; apiKey?: string; c
 }
 
 // Middleware that wires an OpenAI agent into a Substructure handler chain. It
-// composes messageHistory + tools + llmLoop, so it behaves exactly as if those
+// composes messageHistory + tools + llmToolLoop, so it behaves exactly as if those
 // three were `.use()`d in order — Substructure drives the loop and runs the
 // tools; each `llm.request` is one `responses.create` step.
 export function openAIAgent(settings: ResolvedSettings): MiddlewareFn<unknown> {
     const ms = settings.modelSettings;
-    const request: LlmLoopSelection["request"] = { model: settings.model };
+    const request: LlmToolLoopSelection["request"] = { model: settings.model };
     if (ms?.temperature !== undefined) request.temperature = ms.temperature;
     if (ms?.maxTokens !== undefined) request.max_completion_tokens = ms.maxTokens;
 
     const chain: MiddlewareFn<any, any>[] = [
         messageHistory(settings.instructions),
         tools(openAITools(settings.tools, settings.context)),
-        llmLoop({ request, stream: true, handler: "worker", caller: openAICaller(settings) }),
+        llmToolLoop({ request, stream: true, handler: "worker", caller: openAICaller(settings) }),
     ];
 
     return (ctx, next) => {
@@ -182,7 +182,7 @@ function modelTools(toolset: Tool[]): OpenAI.Responses.Tool[] {
 
 // ── Caller (one responses.create step per llm.request) ────────────────────────
 
-function openAICaller(settings: ResolvedSettings): NonNullable<LlmLoopSelection["caller"]> {
+function openAICaller(settings: ResolvedSettings): NonNullable<LlmToolLoopSelection["caller"]> {
     const { client } = settings;
     return async (request, ctx) => {
         const ms = settings.modelSettings;

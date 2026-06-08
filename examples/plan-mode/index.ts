@@ -10,7 +10,7 @@
 // What this shows:
 //   - `client.action` as a non-message way for the client to drive
 //     state changes that the chain reacts to.
-//   - Selector-based middleware (`tools`, `llmLoop`) swapping output
+//   - Selector-based middleware (`tools`, `llmToolLoop`) swapping output
 //     based on a state slice. Mode-dependent tool gating means the
 //     agent literally cannot call execution tools while planning, and
 //     a smaller model handles planning while a bigger one handles
@@ -239,7 +239,7 @@ const planner = agent({ id: "planner" })
     .use(modeAwareHistory)
     .use(agent.tools<PlanState>((state) => (state.mode === "planning" ? planningTools : executingTools)))
     .use(
-        agent.llmLoop<PlanState>((state) => ({
+        agent.llmToolLoop<PlanState>((state) => ({
             request: {
                 model: state.mode === "planning" ? "anthropic/claude-opus-4-7" : "anthropic/claude-sonnet-4-6",
             },

@@ -16,7 +16,7 @@ const chatAgent = agent({ id: "ai-sdk-agent" }).use(assistant);
 const worker = sub.worker({ agents: [chatAgent] });
 ```
 
-Passing the agent to `.use()` composes `messageHistory` + `tools` + `llmLoop`
+Passing the agent to `.use()` composes `messageHistory` + `tools` + `llmToolLoop`
 under the hood. The chain is a normal Substructure worker agent: it answers
 decisions and is agnostic to whether an embedded or remote engine drives it.
 Substructure

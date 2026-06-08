@@ -15,8 +15,8 @@
 import { asSchema, streamText } from "ai";
 import type { LanguageModel, ModelMessage, TextStreamPart, Tool, ToolChoice, ToolSet } from "ai";
 
-import { llmLoop, messageHistory, tools } from "../middleware";
-import type { LlmLoopSelection, ToolDef, ToolExecutionContext } from "../middleware";
+import { llmToolLoop, messageHistory, tools } from "../middleware";
+import type { LlmToolLoopSelection, ToolDef, ToolExecutionContext } from "../middleware";
 import { contentText } from "../types";
 import type { Message, StreamPart, ToolCall } from "../types";
 import type { MiddlewareFn, MiddlewareSource, Next } from "../worker";
@@ -66,18 +66,18 @@ export class ToolLoopAgent<TOOLS extends ToolSet = ToolSet> implements Middlewar
 //
 //   agent({ id }).use(aiSdkAgent({ model, instructions, tools }))
 //
-// It composes messageHistory + tools + llmLoop, so it behaves exactly as if
+// It composes messageHistory + tools + llmToolLoop, so it behaves exactly as if
 // those three were `.use()`d in order — Substructure drives the loop and runs
 // the tools; each `llm.request` is one `streamText` step.
 export function aiSdkAgent<TOOLS extends ToolSet>(settings: SubstructureAgentSettings<TOOLS>): MiddlewareFn<unknown> {
-    const request: LlmLoopSelection["request"] = { model: modelId(settings.model) };
+    const request: LlmToolLoopSelection["request"] = { model: modelId(settings.model) };
     if (settings.temperature !== undefined) request.temperature = settings.temperature;
     if (settings.maxOutputTokens !== undefined) request.max_completion_tokens = settings.maxOutputTokens;
 
     const chain: MiddlewareFn<any, any>[] = [
         messageHistory(settings.instructions),
         tools(settings.tools ? aiSdkTools(settings.tools, settings.experimental_context) : []),
-        llmLoop({ request, stream: true, handler: "worker", caller: aiSdkCaller(settings) }),
+        llmToolLoop({ request, stream: true, handler: "worker", caller: aiSdkCaller(settings) }),
     ];
 
     return (ctx, next) => {
@@ -163,7 +163,7 @@ function modelTools<T extends ToolSet>(toolset: T): T {
 
 function aiSdkCaller<TOOLS extends ToolSet>(
     settings: SubstructureAgentSettings<TOOLS>,
-): NonNullable<LlmLoopSelection["caller"]> {
+): NonNullable<LlmToolLoopSelection["caller"]> {
     return async (request, ctx) => {
         const result = streamText({
             model: settings.model,

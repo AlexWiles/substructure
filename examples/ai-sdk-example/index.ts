@@ -21,13 +21,14 @@ const assistant = new ToolLoopAgent({
 
 const sub = new Substructure();
 
-const chatAgent = sub.agent({ id: "ai-sdk-agent" }).use(assistant);
+const chatAgent = sub.agent({ id: "ai-sdk-agent" }).use(sub.agent.logging()).use(assistant);
 
 const worker = sub.worker({ agents: [chatAgent] });
 
 const handler = worker.fetchHandler({ signingSecret: process.env.SIGNING_SECRET });
 
 const port = Number(process.env.PORT ?? 3030);
+
 serve({ fetch: handler, port });
 
 console.log(`ai-sdk-example worker listening on http://localhost:${port}`);

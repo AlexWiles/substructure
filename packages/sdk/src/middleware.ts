@@ -675,7 +675,7 @@ export function tools<S>(selectorOrValue: ToolSelector<S> | ToolInput): Middlewa
 
 // ── LLM loop ───────────────────────────────────────────────────────────────
 
-export interface LlmLoopSelection {
+export interface LlmToolLoopSelection {
     request: Omit<LlmRequest, "messages"> & { messages?: Message[] };
     retry?: RetryPolicy;
     stream?: boolean;
@@ -710,7 +710,7 @@ async function runWorkerLlmCall(
         return {
             type: "return.llm.error",
             call_id: trigger.call_id,
-            error: 'llmLoop received an "llm.request" trigger but no `caller` was configured for worker-handled LLM calls',
+            error: 'llmToolLoop received an "llm.request" trigger but no `caller` was configured for worker-handled LLM calls',
             retryable: false,
             attempt: trigger.attempt,
         };
@@ -740,12 +740,12 @@ async function runWorkerLlmCall(
     }
 }
 
-export function llmLoop<S>(
+export function llmToolLoop<S>(
     selectorOrValue:
-        | ((state: S, ctx: AgentContext<S>) => LlmLoopSelection | Promise<LlmLoopSelection>)
-        | LlmLoopSelection,
+        | ((state: S, ctx: AgentContext<S>) => LlmToolLoopSelection | Promise<LlmToolLoopSelection>)
+        | LlmToolLoopSelection,
 ): MiddlewareFn<S> {
-    const selector: (state: S, ctx: AgentContext<S>) => LlmLoopSelection | Promise<LlmLoopSelection> =
+    const selector: (state: S, ctx: AgentContext<S>) => LlmToolLoopSelection | Promise<LlmToolLoopSelection> =
         typeof selectorOrValue === "function" ? selectorOrValue : () => selectorOrValue;
 
     return middleware({
