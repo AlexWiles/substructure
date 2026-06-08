@@ -82,8 +82,6 @@ pub enum DecisionTrigger {
         attempt: u32,
         deadline: Option<DateTime<Utc>>,
     },
-    #[serde(rename = "tool.result")]
-    ToolResult { result: ToolResult },
     #[serde(rename = "effects.complete")]
     EffectsComplete { results: Vec<ToolResult> },
     #[serde(rename = "sub_agent.done")]

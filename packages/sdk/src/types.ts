@@ -232,7 +232,6 @@ export type DecisionTrigger =
           attempt: number;
           deadline?: DateTime;
       }
-    | { type: "tool.result"; result: ToolResult }
     | { type: "effects.complete"; results: ToolResult[] }
     | { type: "sub_agent.turn.complete"; session_id: Uuid; agent_id: string; turn_id: string; data: unknown }
     | { type: "sub_agent.error"; session_id: Uuid; agent_id: string; error: string }

@@ -378,13 +378,6 @@ export function triggerToMessage(trigger: DecisionTrigger): Message | null {
         case "user.message":
         case "llm.response":
             return trigger.message;
-        case "tool.result":
-            return {
-                role: "tool",
-                content: trigger.result.content,
-                tool_call_id: trigger.result.tool_call_id,
-                name: trigger.result.name,
-            };
         default:
             return null;
     }
@@ -757,7 +750,6 @@ export function llmToolLoop<S>(
             switch (trigger.type) {
                 case "user.message":
                 case "client.action":
-                case "tool.result":
                 case "effects.complete": {
                     return {
                         ...downstream,
