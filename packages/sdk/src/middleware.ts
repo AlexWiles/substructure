@@ -9,7 +9,6 @@ import type {
     RetryPolicy,
     StreamPart,
     ToolHandler,
-    ToolResult,
     WorkerAction,
     WorkerDecisionRequestWire,
 } from "./types";
@@ -391,6 +390,20 @@ export function triggerToMessage(trigger: DecisionTrigger): Message | null {
     }
 }
 
+/** Like `triggerToMessage`, but expands `effects.complete` into one message per result. */
+export function triggerToMessages(trigger: DecisionTrigger): Message[] {
+    if (trigger.type === "effects.complete") {
+        return trigger.results.map((result) => ({
+            role: "tool",
+            content: result.content,
+            tool_call_id: result.tool_call_id,
+            name: result.name,
+        }));
+    }
+    const msg = triggerToMessage(trigger);
+    return msg ? [msg] : [];
+}
+
 /**
  * Prepend a transcript to every `call.llm` action's `messages`. Non-LLM
  * actions pass through unchanged.
@@ -438,8 +451,7 @@ export function messageHistory<S, K extends string = "messages">(
         state: { [key]: [] as Message[] } as Record<K, Message[]>,
         handler: async (ctx, next) => {
             const history = ctx.state[key];
-            const msg = triggerToMessage(ctx.request.trigger);
-            if (msg) history.push(msg);
+            for (const m of triggerToMessages(ctx.request.trigger)) history.push(m);
 
             const sysMsg = select
                 ? {
@@ -486,8 +498,7 @@ export function messageHistoryCurrentTurn<S, K extends string = "messages">(
                 ctx.state.lastTurnId = ctx.request.turn_id;
             }
 
-            const msg = triggerToMessage(ctx.request.trigger);
-            if (msg) history.push(msg);
+            for (const m of triggerToMessages(ctx.request.trigger)) history.push(m);
 
             const sysMsg = select
                 ? {
@@ -530,13 +541,10 @@ function resolveTools(input: ToolInput): Record<string, ToolDef> {
  * On `tool_result`: removes the ID. Suppresses `call_llm` until all results are in.
  * On `tool_execute`: executes the tool and prepends the result to downstream actions.
  */
-export function tools<S>(
-    selectorOrValue: ToolSelector<S> | ToolInput,
-): StateContributor<{ pendingToolCalls: string[] }> & MiddlewareFn<unknown, { pendingToolCalls: string[] }> {
+export function tools<S>(selectorOrValue: ToolSelector<S> | ToolInput): MiddlewareFn<unknown> {
     const selector: ToolSelector<S> = typeof selectorOrValue === "function" ? selectorOrValue : () => selectorOrValue;
 
     return middleware({
-        state: { pendingToolCalls: [] as string[] },
         handler: async (ctx, next) => {
             const toolMap = resolveTools(await selector(ctx.state as S, ctx as unknown as AgentContext<S>));
 
@@ -615,7 +623,6 @@ export function tools<S>(
                 const toolCalls = ctx.request.trigger.message.tool_calls;
                 if (toolCalls && toolCalls.length > 0) {
                     const known = toolCalls.filter((tc) => tc.function.name in toolMap);
-                    ctx.state.pendingToolCalls = known.map((tc) => tc.id);
 
                     const callToolActions: WorkerAction[] = known.map((tc) => {
                         const def = toolMap[tc.function.name];
@@ -660,18 +667,6 @@ export function tools<S>(
                 }
                 return action;
             });
-
-            // Suppress call_llm until all tool results are in
-            if (ctx.request.trigger.type === "tool.result") {
-                const resultId = ctx.request.trigger.result.tool_call_id;
-                ctx.state.pendingToolCalls = ctx.state.pendingToolCalls.filter((id) => id !== resultId);
-                if (ctx.state.pendingToolCalls.length > 0) {
-                    return {
-                        ...downstream,
-                        actions: actions.filter((a) => a.type !== "call.llm"),
-                    };
-                }
-            }
 
             return { ...downstream, actions };
         },
@@ -762,7 +757,8 @@ export function llmLoop<S>(
             switch (trigger.type) {
                 case "user.message":
                 case "client.action":
-                case "tool.result": {
+                case "tool.result":
+                case "effects.complete": {
                     return {
                         ...downstream,
                         actions: [
@@ -802,158 +798,73 @@ export function llmLoop<S>(
 
 // ── Sub-agents ─────────────────────────────────────────────────────────────
 
-export interface SubAgentTrack {
-    toolCallId: string;
-    name: string;
-}
-
 /**
- * Sub-agent delegation middleware.
- * Contributes `{ subAgentTracker: Record<string, SubAgentTrack> }` to state.
+ * Presents each sub-agent to the model as a tool and turns a call into a
+ * `spawn.sub_agent` child session. Results return via `effects.complete`, so
+ * this middleware keeps no state.
  */
-export function subAgents<S>(config: {
-    agents: Handler[];
-    retry?: RetryPolicy;
-}): StateContributor<{ subAgentTracker: Record<string, SubAgentTrack> }> &
-    MiddlewareFn<unknown, { subAgentTracker: Record<string, SubAgentTrack> }> {
+export function subAgents<S>(config: { agents: Handler[]; retry?: RetryPolicy }): MiddlewareFn<unknown> {
     const subAgentMap: Record<string, { agentId: string }> = {};
     for (const handler of config.agents) {
         subAgentMap[handler.agentId] = { agentId: handler.agentId };
     }
 
+    const mergeSubAgentTools = (actions: WorkerAction[]): WorkerAction[] =>
+        actions.map((action) =>
+            action.type === "call.llm"
+                ? {
+                      ...action,
+                      request: {
+                          ...action.request,
+                          tools: mergeTools(action.request.tools, handlersToLlmTools(config.agents)),
+                      },
+                  }
+                : action,
+        );
+
     return middleware({
-        state: { subAgentTracker: {} as Record<string, SubAgentTrack> },
         handler: async (ctx, next) => {
-            const tracker = ctx.state.subAgentTracker;
-
-            switch (ctx.request.trigger.type) {
-                case "llm.response": {
-                    // Intercept tool calls destined for sub-agents directly from
-                    // the trigger, so this middleware works with or without
-                    // agent.tools() in the chain.
-                    const spawnActions: WorkerAction[] = [];
-                    const toolCalls = ctx.request.trigger.message.tool_calls ?? [];
-                    for (const tc of toolCalls) {
-                        const sub = subAgentMap[tc.function.name];
-                        if (!sub) continue;
-
-                        const childSessionId = crypto.randomUUID();
-                        let message = tc.function.arguments;
-                        try {
-                            const args = JSON.parse(tc.function.arguments);
-                            if (typeof args?.message === "string") {
-                                message = args.message;
-                            }
-                        } catch {
-                            // no-op
-                        }
-                        tracker[childSessionId] = {
-                            toolCallId: tc.id,
-                            name: tc.function.name,
-                        };
-                        spawnActions.push(
-                            {
-                                type: "spawn.sub_agent",
-                                session_id: childSessionId,
-                                agent_id: sub.agentId,
-                                retry: config.retry ?? DEFAULT_RETRY,
-                            },
-                            {
-                                type: "send.message",
-                                session_id: childSessionId,
-                                message: {
-                                    role: "user",
-                                    content: message,
-                                },
-                            },
-                        );
-                    }
-
-                    const downstream = await next(ctx);
-
-                    // Merge sub-agent tool defs into any call.llm actions, and
-                    // filter out call.tool actions that we already spawned above.
-                    const actions: WorkerAction[] = [];
-                    for (const action of downstream.actions) {
-                        if (action.type === "call.tool" && subAgentMap[action.name]) {
-                            continue; // already handled via spawn above
-                        }
-                        if (action.type === "call.llm") {
-                            actions.push({
-                                ...action,
-                                request: {
-                                    ...action.request,
-                                    tools: mergeTools(action.request.tools, handlersToLlmTools(config.agents)),
-                                },
-                            });
-                            continue;
-                        }
-                        actions.push(action);
-                    }
-
-                    return { ...downstream, actions: [...spawnActions, ...actions] };
-                }
-
-                case "sub_agent.turn.complete": {
-                    const tracked = tracker[ctx.request.trigger.session_id];
-                    if (!tracked) {
-                        return next(ctx);
-                    }
-                    delete tracker[ctx.request.trigger.session_id];
-
-                    const content =
-                        typeof ctx.request.trigger.data === "string"
-                            ? ctx.request.trigger.data
-                            : (JSON.stringify(ctx.request.trigger.data) ?? "");
-
-                    const result: ToolResult = {
-                        tool_call_id: tracked.toolCallId,
-                        name: tracked.name,
-                        content,
-                        is_error: false,
-                    };
-
-                    return appendToolResultOnce(
-                        await next({ ...ctx, request: { ...ctx.request, trigger: { type: "tool.result", result } } }),
-                        result,
-                    );
-                }
-
-                case "sub_agent.error": {
-                    const tracked = tracker[ctx.request.trigger.session_id];
-                    if (!tracked) {
-                        return next(ctx);
-                    }
-                    delete tracker[ctx.request.trigger.session_id];
-
-                    const result: ToolResult = {
-                        tool_call_id: tracked.toolCallId,
-                        name: tracked.name,
-                        content: `Sub-agent ${ctx.request.trigger.agent_id} failed: ${ctx.request.trigger.error}`,
-                        is_error: true,
-                    };
-
-                    return appendToolResultOnce(
-                        await next({ ...ctx, request: { ...ctx.request, trigger: { type: "tool.result", result } } }),
-                        result,
-                    );
-                }
-
-                default: {
-                    const downstream = await next(ctx);
-                    const actions = downstream.actions.map((action) => {
-                        if (action.type !== "call.llm") return action;
-                        return {
-                            ...action,
-                            request: {
-                                ...action.request,
-                                tools: mergeTools(action.request.tools, handlersToLlmTools(config.agents)),
-                            },
-                        };
-                    });
-                    return { ...downstream, actions };
-                }
+            if (ctx.request.trigger.type !== "llm.response") {
+                const downstream = await next(ctx);
+                return { ...downstream, actions: mergeSubAgentTools(downstream.actions) };
             }
+
+            // Read from the trigger so this works with or without tools() in the chain.
+            const spawnActions: WorkerAction[] = [];
+            for (const tc of ctx.request.trigger.message.tool_calls ?? []) {
+                const sub = subAgentMap[tc.function.name];
+                if (!sub) continue;
+
+                const childSessionId = crypto.randomUUID();
+                let message = tc.function.arguments;
+                try {
+                    const args = JSON.parse(tc.function.arguments);
+                    if (typeof args?.message === "string") message = args.message;
+                } catch {
+                    // leave raw arguments as the message
+                }
+                spawnActions.push(
+                    {
+                        type: "spawn.sub_agent",
+                        session_id: childSessionId,
+                        agent_id: sub.agentId,
+                        tool_call_id: tc.id,
+                        retry: config.retry ?? DEFAULT_RETRY,
+                    },
+                    {
+                        type: "send.message",
+                        session_id: childSessionId,
+                        message: { role: "user", content: message },
+                    },
+                );
+            }
+
+            const downstream = await next(ctx);
+            // Sub-agent names are spawned, not run as tools.
+            const actions = mergeSubAgentTools(
+                downstream.actions.filter((a) => !(a.type === "call.tool" && subAgentMap[a.name])),
+            );
+            return { ...downstream, actions: [...spawnActions, ...actions] };
         },
     });
 }
@@ -977,43 +888,6 @@ function handlersToLlmTools(handlers: Handler[]): LlmTool[] {
             },
         },
     }));
-}
-
-/** Append a tool result message to any `call.llm` actions in the response. */
-/**
- * Append a tool result to any `call.llm`, unless one already carries it. This
- * makes `subAgents` placement-agnostic: when an inner `messageHistory` already
- * recorded the rewritten `tool.result` (subAgents wrapping the whole chain),
- * we skip the append; when nothing downstream recorded it (messageHistory
- * outside subAgents), we add it. Either way the result lands exactly once.
- */
-function appendToolResultOnce(response: AgentResponse, result: ToolResult): AgentResponse {
-    const present = response.actions.some(
-        (action) =>
-            action.type === "call.llm" &&
-            action.request.messages.some((m) => m.role === "tool" && m.tool_call_id === result.tool_call_id),
-    );
-    return present ? response : appendToolResultToLlmCalls(response, result);
-}
-
-function appendToolResultToLlmCalls(response: AgentResponse, result: ToolResult): AgentResponse {
-    const toolMsg: Message = {
-        role: "tool",
-        content: result.content,
-        tool_call_id: result.tool_call_id,
-        name: result.name,
-    };
-    const actions = response.actions.map((action) => {
-        if (action.type !== "call.llm") return action;
-        return {
-            ...action,
-            request: {
-                ...action.request,
-                messages: [...action.request.messages, toolMsg],
-            },
-        };
-    });
-    return { ...response, actions };
 }
 
 function mergeTools(existing: LlmTool[] | undefined, added: LlmTool[]): LlmTool[] {

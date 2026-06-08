@@ -35,7 +35,6 @@ export type {
     MessageHistoryOptions,
     MessageSelector,
     StateSliceMw,
-    SubAgentTrack,
     SystemMessageSelector,
     ToolDef,
     ToolExecutionContext,
@@ -59,6 +58,7 @@ export {
     tool,
     tools,
     triggerToMessage,
+    triggerToMessages,
 } from "./middleware";
 
 // ── Webhook ───────────────────────────────────────────────────────────────

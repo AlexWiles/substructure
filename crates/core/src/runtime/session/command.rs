@@ -6,7 +6,7 @@ use rust_decimal::Decimal;
 use super::decision::{ClientPayload, DecisionTrigger, ToolResult, WorkerAction};
 use super::events::*;
 use super::message::{Content, ContentPart, ImageUrl, Message, Role};
-use super::state::{new_call_id, EffectStatus, SessionState, SessionStatus};
+use super::state::{json_to_string, new_call_id, EffectStatus, SessionState, SessionStatus};
 use crate::runtime::aggregate::Caller;
 use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse};
 use crate::runtime::owner::SessionOwner;
@@ -73,6 +73,7 @@ pub enum CommandPayload {
     RequestSubAgent {
         session_id: String,
         agent_id: String,
+        tool_call_id: String,
         retry: RetryPolicy,
     },
     StartSubAgent {
@@ -146,8 +147,6 @@ pub enum SessionError {
 }
 
 impl SessionState {
-    /// Reject anything but [`Caller::System`]. For commands only ever
-    /// dispatched by internal processors or recursive expansions.
     fn ensure_internal(caller: &Caller) -> Result<(), SessionError> {
         match caller {
             Caller::System { .. } => Ok(()),
@@ -155,9 +154,6 @@ impl SessionState {
         }
     }
 
-    /// Allow [`Caller::Machine`] and [`Caller::System`] only. For
-    /// worker-flavored commands (worker decisions, admin actions) that
-    /// end users should never reach.
     fn ensure_machine_or_system(caller: &Caller) -> Result<(), SessionError> {
         match caller {
             Caller::System { .. } | Caller::Machine { .. } => Ok(()),
@@ -165,9 +161,6 @@ impl SessionState {
         }
     }
 
-    /// Verify that the caller's tenant matches the given session-tenant.
-    /// Catches transport bugs where a route builds a [`Caller`] with a
-    /// different tenant than the one the session was created under.
     fn ensure_tenant_matches(caller: &Caller, tenant_id: &str) -> Result<(), SessionError> {
         match caller {
             Caller::System { .. } => Ok(()),
@@ -187,9 +180,6 @@ impl SessionState {
         }
     }
 
-    /// Verify that the caller is allowed to act on this session.
-    /// `Frontend` callers must own the session (matching `user_id`).
-    /// `Machine` and `System` callers are unconstrained.
     fn ensure_owns_session(&self, caller: &Caller) -> Result<(), SessionError> {
         match caller {
             Caller::System { .. } | Caller::Machine { .. } => Ok(()),
@@ -559,14 +549,19 @@ impl SessionState {
                     .tool_calls
                     .get(&tool_call_id)
                     .ok_or(SessionError::ToolCallNotFound)?;
+
                 if tc.tracking.status != EffectStatus::Pending {
                     return Err(SessionError::ToolCallNotPending);
                 }
+
                 if tc.tracking.retry.attempts != attempt {
                     return Err(SessionError::ToolCallAttemptMismatch);
                 }
+
                 self.check_tool_call_caller(tc, caller)?;
+
                 let name = tc.name.clone();
+
                 let mut events = vec![
                     EventPayload::ToolCallCompleted(ToolCallCompleted {
                         tool_call_id: tool_call_id.clone(),
@@ -588,14 +583,17 @@ impl SessionState {
                         state: ws,
                     }));
                 }
-                events.push(self.emit_decision_request(DecisionTrigger::ToolResult {
-                    result: ToolResult {
-                        tool_call_id,
-                        name,
-                        content: result,
-                        is_error: false,
-                    },
-                }));
+                let pending = ToolResult {
+                    tool_call_id,
+                    name,
+                    content: result,
+                    is_error: false,
+                };
+                if let Some(results) = self.drainable_with(pending) {
+                    events.push(
+                        self.emit_decision_request(DecisionTrigger::EffectsComplete { results }),
+                    );
+                }
                 Ok(events)
             }
 
@@ -618,6 +616,10 @@ impl SessionState {
                 }
                 self.check_tool_call_caller(tc, caller)?;
                 let name = tc.name.clone();
+                let exhausted = tc
+                    .tracking
+                    .retry_policy
+                    .exhausted(&tc.tracking.retry, retryable);
                 let mut events = vec![EventPayload::ToolCallErrored(ToolCallErrored {
                     tool_call_id: tool_call_id.clone(),
                     name: name.clone(),
@@ -629,19 +631,20 @@ impl SessionState {
                         state: ws,
                     }));
                 }
-                if tc
-                    .tracking
-                    .retry_policy
-                    .exhausted(&tc.tracking.retry, retryable)
-                {
-                    events.push(self.emit_decision_request(DecisionTrigger::ToolResult {
-                        result: ToolResult {
-                            tool_call_id,
-                            name,
-                            content: error,
-                            is_error: true,
-                        },
-                    }));
+                if exhausted {
+                    let pending = ToolResult {
+                        tool_call_id,
+                        name,
+                        content: error,
+                        is_error: true,
+                    };
+                    if let Some(results) = self.drainable_with(pending) {
+                        events.push(
+                            self.emit_decision_request(DecisionTrigger::EffectsComplete {
+                                results,
+                            }),
+                        );
+                    }
                 }
                 Ok(events)
             }
@@ -649,6 +652,7 @@ impl SessionState {
             CommandPayload::RequestSubAgent {
                 session_id,
                 agent_id,
+                tool_call_id,
                 retry,
             } => {
                 Self::ensure_internal(caller)?;
@@ -657,6 +661,7 @@ impl SessionState {
                     None => Ok(vec![EventPayload::SubAgentRequested(SubAgentRequested {
                         session_id,
                         agent_id,
+                        tool_call_id,
                         retry,
                     })]),
                 }
@@ -690,52 +695,63 @@ impl SessionState {
                 if sa.tracking.status != EffectStatus::Pending {
                     return Ok(vec![]);
                 }
-                let mut events = vec![EventPayload::SubAgentErrored(SubAgentErrored {
-                    session_id: session_id.clone(),
-                    error: error.clone(),
-                    retryable,
-                })];
-                if sa
+                let pending = ToolResult {
+                    tool_call_id: sa.tool_call_id.clone(),
+                    name: sa.agent_id.clone(),
+                    content: error.clone(),
+                    is_error: true,
+                };
+                let exhausted = sa
                     .tracking
                     .retry_policy
-                    .exhausted(&sa.tracking.retry, retryable)
-                {
-                    events.push(self.emit_decision_request(DecisionTrigger::SubAgentError {
-                        session_id,
-                        agent_id: sa.agent_id.clone(),
-                        error,
-                    }));
+                    .exhausted(&sa.tracking.retry, retryable);
+                let mut events = vec![EventPayload::SubAgentErrored(SubAgentErrored {
+                    session_id,
+                    error,
+                    retryable,
+                })];
+                if exhausted {
+                    if let Some(results) = self.drainable_with(pending) {
+                        events.push(
+                            self.emit_decision_request(DecisionTrigger::EffectsComplete {
+                                results,
+                            }),
+                        );
+                    }
                 }
                 Ok(events)
             }
 
             CommandPayload::CompleteSubAgentTurn {
                 session_id,
-                agent_id,
-                turn_id,
                 data,
                 cost,
                 token_usage,
+                ..
             } => {
                 Self::ensure_internal(caller)?;
-                // Only fire if we know about this sub-agent
-                if self.sub_agent_calls.contains_key(&session_id) {
-                    Ok(vec![
-                        EventPayload::SubAgentTurnCompleted(SubAgentTurnCompleted {
-                            session_id: session_id.clone(),
-                            cost,
-                            token_usage,
-                        }),
-                        self.emit_decision_request(DecisionTrigger::SubAgentTurnComplete {
-                            session_id,
-                            agent_id,
-                            turn_id,
-                            data,
-                        }),
-                    ])
-                } else {
-                    Ok(vec![])
+                // Only fire if we know about this sub-agent.
+                let Some(sa) = self.sub_agent_calls.get(&session_id) else {
+                    return Ok(vec![]);
+                };
+                let pending = ToolResult {
+                    tool_call_id: sa.tool_call_id.clone(),
+                    name: sa.agent_id.clone(),
+                    content: json_to_string(&data),
+                    is_error: false,
+                };
+                let mut events = vec![EventPayload::SubAgentTurnCompleted(SubAgentTurnCompleted {
+                    session_id,
+                    cost,
+                    token_usage,
+                    data,
+                })];
+                if let Some(results) = self.drainable_with(pending) {
+                    events.push(
+                        self.emit_decision_request(DecisionTrigger::EffectsComplete { results }),
+                    );
                 }
+                Ok(events)
             }
 
             CommandPayload::Interrupt {
@@ -830,11 +846,13 @@ impl SessionState {
                         WorkerAction::SpawnSubAgent {
                             session_id,
                             agent_id,
+                            tool_call_id,
                             retry,
                         } => self.handle(
                             CommandPayload::RequestSubAgent {
                                 session_id,
                                 agent_id,
+                                tool_call_id,
                                 retry,
                             },
                             &Caller::System {
@@ -1005,7 +1023,7 @@ impl SessionState {
     }
 
     fn handle_wake(&self, now: DateTime<Utc>) -> Result<Vec<EventPayload>, SessionError> {
-        // 1. Timed-out pending LLM calls → fail
+        // Timed-out pending LLM calls → fail
         for call in self.llm_calls.values() {
             if call.tracking.status == EffectStatus::Pending
                 && call.tracking.deadline.is_some_and(|d| d <= now)
@@ -1021,7 +1039,7 @@ impl SessionState {
             }
         }
 
-        // 2. Timed-out pending tool calls → fail
+        // Timed-out pending tool calls → fail
         for tc in self.tool_calls.values() {
             if tc.tracking.status == EffectStatus::Pending
                 && tc.tracking.deadline.is_some_and(|d| d <= now)
@@ -1035,7 +1053,7 @@ impl SessionState {
             }
         }
 
-        // 3. RetryScheduled LLM calls ready to re-issue
+        // RetryScheduled LLM calls ready to re-issue
         for call in self.llm_calls.values() {
             if call.tracking.status == EffectStatus::RetryScheduled {
                 if let Some(next_at) = call.tracking.retry.next_at {
@@ -1062,7 +1080,7 @@ impl SessionState {
             }
         }
 
-        // 4. RetryScheduled tool calls ready to re-issue
+        // RetryScheduled tool calls ready to re-issue
         for tc in self.tool_calls.values() {
             if tc.tracking.status == EffectStatus::RetryScheduled {
                 if let Some(next_at) = tc.tracking.retry.next_at {
@@ -1090,7 +1108,7 @@ impl SessionState {
             }
         }
 
-        // 5. Timed-out pending sub-agent calls → fail
+        // Timed-out pending sub-agent calls → fail
         for sa in self.sub_agent_calls.values() {
             if sa.tracking.status == EffectStatus::Pending
                 && sa.tracking.deadline.is_some_and(|d| d <= now)
@@ -1103,7 +1121,7 @@ impl SessionState {
             }
         }
 
-        // 6. RetryScheduled sub-agent calls ready to re-issue
+        // RetryScheduled sub-agent calls ready to re-issue
         for sa in self.sub_agent_calls.values() {
             if sa.tracking.status == EffectStatus::RetryScheduled {
                 if let Some(next_at) = sa.tracking.retry.next_at {
@@ -1111,6 +1129,7 @@ impl SessionState {
                         return Ok(vec![EventPayload::SubAgentRequested(SubAgentRequested {
                             session_id: sa.session_id.clone(),
                             agent_id: sa.agent_id.clone(),
+                            tool_call_id: sa.tool_call_id.clone(),
                             retry: sa.tracking.retry_policy.clone(),
                         })]);
                     }
@@ -1118,7 +1137,7 @@ impl SessionState {
             }
         }
 
-        // 7. Timed-out pending worker decisions → fail
+        // Timed-out pending worker decisions → fail
         for wd in self.worker_decisions.values() {
             if wd.tracking.status == EffectStatus::Pending
                 && wd.tracking.deadline.is_some_and(|d| d <= now)
@@ -1133,7 +1152,7 @@ impl SessionState {
             }
         }
 
-        // 8. RetryScheduled worker decisions ready to re-issue
+        // RetryScheduled worker decisions ready to re-issue
         for wd in self.worker_decisions.values() {
             if wd.tracking.status == EffectStatus::RetryScheduled {
                 if let Some(next_at) = wd.tracking.retry.next_at {
@@ -1149,7 +1168,19 @@ impl SessionState {
             }
         }
 
-        // 9. Promote the next queued worker decision
+        // Deliver the batch once every effect is terminal.
+        if !self.has_pending_worker_decision() {
+            if let Some(results) = self.drainable_batch() {
+                return Ok(vec![EventPayload::WorkerDecisionRequested(
+                    WorkerDecisionRequested {
+                        decision_id: new_call_id(),
+                        trigger: DecisionTrigger::EffectsComplete { results },
+                    },
+                )]);
+            }
+        }
+
+        // Promote the next queued worker decision
         if let Some(wd) = self.next_queued_decision() {
             return Ok(vec![EventPayload::WorkerDecisionRequested(
                 WorkerDecisionRequested {
@@ -1159,10 +1190,12 @@ impl SessionState {
             )]);
         }
 
-        // 10. All tools done, no next step → stall recovery
+        // Nothing left in flight or undelivered → stall recovery.
         if self.all_tools_resolved()
             && !self.has_pending_llm()
             && !self.has_queued_worker_decision()
+            && !self.has_pending_worker_decision()
+            && !self.has_undelivered_effects()
         {
             return Ok(vec![EventPayload::WorkerDecisionRequested(
                 WorkerDecisionRequested {
@@ -1187,7 +1220,9 @@ mod tests {
     use crate::runtime::llm::{LlmRequest, LlmResponse};
     use crate::runtime::owner::SessionOwner;
     use crate::runtime::retry::RetryPolicy;
-    use crate::runtime::session::decision::{ClientPayload, DecisionTrigger, WorkerAction};
+    use crate::runtime::session::decision::{
+        ClientPayload, DecisionTrigger, ToolResult, WorkerAction,
+    };
     use crate::runtime::session::events::{EventPayload, LlmHandler, ToolHandler};
     use crate::runtime::session::message::{Content, Message, Role};
     use crate::runtime::session::state::{EffectStatus, SessionState, SessionStatus};
@@ -1513,11 +1548,8 @@ mod tests {
 
     #[test]
     fn machine_completes_worker_handled_tool_call_before_worker_releases_decision() {
-        // Race case: tool result arrives before the worker has acknowledged
-        // its ToolExecute decision. The pending decision is still in flight,
-        // so the follow-up ToolResult decision is queued behind it. It will
-        // be promoted later — either by the worker's eventual response or
-        // by the wake cycle timing out the original decision.
+        // Tool result arrives before the worker has acknowledged its
+        // ToolExecute decision.
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
         dispatch(
             &mut agg,
@@ -2302,8 +2334,6 @@ mod tests {
             &machine,
         );
 
-        // Retry exhausted (no_retry + retryable=false) so the failure
-        // surfaces a follow-up worker decision with is_error=true.
         assert!(
             matches!(
                 events.as_slice(),
@@ -2314,9 +2344,11 @@ mod tests {
             ),
             "expected [ToolCallErrored, WorkerDecisionRequested]; got {events:?}"
         );
+        assert_eq!(effects_complete(&events).map(|r| r.len()), Some(1));
         let tc = agg.state.tool_calls.get("tc-1").expect("tool call present");
         assert_eq!(tc.tracking.status, EffectStatus::Failed);
         assert!(tc.is_error);
+        assert_eq!(tc.result.as_deref(), Some("boom"));
     }
 
     #[test]
@@ -2328,6 +2360,7 @@ mod tests {
             CommandPayload::RequestSubAgent {
                 session_id: "child-1".to_string(),
                 agent_id: "agent-2".to_string(),
+                tool_call_id: "call-sa".to_string(),
                 retry: RetryPolicy::no_retry(),
             },
             &Caller::System {
@@ -2355,6 +2388,7 @@ mod tests {
             CommandPayload::RequestSubAgent {
                 session_id: "child-1".to_string(),
                 agent_id: "agent-2".to_string(),
+                tool_call_id: "call-sa".to_string(),
                 retry: RetryPolicy::no_retry(),
             },
             &Caller::System {
@@ -2386,6 +2420,7 @@ mod tests {
             CommandPayload::RequestSubAgent {
                 session_id: "child-1".to_string(),
                 agent_id: "agent-2".to_string(),
+                tool_call_id: "call-sa".to_string(),
                 retry: RetryPolicy::no_retry(),
             },
             &Caller::System {
@@ -2405,7 +2440,6 @@ mod tests {
             },
         );
 
-        // Retry exhausted → follow-up worker decision with the error.
         assert!(
             matches!(
                 events.as_slice(),
@@ -2422,6 +2456,8 @@ mod tests {
             .get("child-1")
             .expect("sub-agent present");
         assert_eq!(sa.tracking.status, EffectStatus::Failed);
+        assert_eq!(sa.result.as_deref(), Some("child crashed"));
+        assert!(sa.is_error);
     }
 
     #[test]
@@ -2432,6 +2468,7 @@ mod tests {
             CommandPayload::RequestSubAgent {
                 session_id: "child-1".to_string(),
                 agent_id: "agent-2".to_string(),
+                tool_call_id: "call-sa".to_string(),
                 retry: RetryPolicy::no_retry(),
             },
             &Caller::System {
@@ -2445,7 +2482,7 @@ mod tests {
                 session_id: "child-1".to_string(),
                 agent_id: "agent-2".to_string(),
                 turn_id: "turn-x".to_string(),
-                data: serde_json::Value::Null,
+                data: serde_json::json!("done"),
                 cost: rust_decimal::Decimal::ZERO,
                 token_usage: std::collections::BTreeMap::new(),
             },
@@ -2463,6 +2500,386 @@ mod tests {
                 ]
             ),
             "expected [SubAgentTurnCompleted, WorkerDecisionRequested]; got {events:?}"
+        );
+        let sa = agg
+            .state
+            .sub_agent_calls
+            .get("child-1")
+            .expect("sub-agent present");
+        assert_eq!(sa.result.as_deref(), Some("done"));
+        assert!(!sa.is_error);
+    }
+
+    // ── Batched effect completion ────────────────────────────────────────
+
+    fn machine() -> Caller {
+        Caller::Machine {
+            tenant_id: "tenant-a".to_string(),
+            key_id: "prod-key-1".to_string(),
+        }
+    }
+
+    fn system() -> Caller {
+        Caller::System {
+            tenant_id: "tenant-a".to_string(),
+        }
+    }
+
+    fn request_client_tool(agg: &mut Aggregate<SessionState>, id: &str) {
+        dispatch(
+            agg,
+            CommandPayload::RequestToolCall {
+                tool_call_id: id.to_string(),
+                name: format!("tool_{id}"),
+                arguments: "{}".to_string(),
+                handler: ToolHandler::Client,
+                retry: RetryPolicy::no_retry(),
+            },
+            &system(),
+        );
+    }
+
+    fn complete_tool(
+        agg: &mut Aggregate<SessionState>,
+        id: &str,
+        result: &str,
+    ) -> Vec<EventPayload> {
+        dispatch(
+            agg,
+            CommandPayload::CompleteToolCall {
+                tool_call_id: id.to_string(),
+                attempt: 0,
+                result: result.to_string(),
+                worker_state: None,
+            },
+            &machine(),
+        )
+    }
+
+    fn wake(agg: &mut Aggregate<SessionState>) -> Vec<EventPayload> {
+        dispatch(agg, CommandPayload::Wake { now: Utc::now() }, &system())
+    }
+
+    fn effects_complete(events: &[EventPayload]) -> Option<Vec<ToolResult>> {
+        events.iter().find_map(|e| {
+            let trigger = match e {
+                EventPayload::WorkerDecisionRequested(p) => &p.trigger,
+                EventPayload::DecisionRequestQueued(p) => &p.trigger,
+                _ => return None,
+            };
+            match trigger {
+                DecisionTrigger::EffectsComplete { results } => Some(results.clone()),
+                _ => None,
+            }
+        })
+    }
+
+    fn decision_with(
+        events: &[EventPayload],
+        pred: impl Fn(&DecisionTrigger) -> bool,
+    ) -> Option<String> {
+        events.iter().find_map(|e| {
+            let (id, trigger) = match e {
+                EventPayload::WorkerDecisionRequested(p) => (&p.decision_id, &p.trigger),
+                EventPayload::DecisionRequestQueued(p) => (&p.decision_id, &p.trigger),
+                _ => return None,
+            };
+            pred(trigger).then(|| id.clone())
+        })
+    }
+
+    #[test]
+    fn batch_drains_to_one_effects_complete_after_all_tools_done() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        request_client_tool(&mut agg, "a");
+        request_client_tool(&mut agg, "b");
+
+        let first = complete_tool(&mut agg, "a", "RA");
+        assert!(
+            effects_complete(&first).is_none(),
+            "no batch while b is pending"
+        );
+
+        let second = complete_tool(&mut agg, "b", "RB");
+        let results = effects_complete(&second).expect("batch on the last completion");
+        let ids: Vec<_> = results.iter().map(|r| r.tool_call_id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b"], "results ordered by issue order");
+        assert_eq!(results[0].content, "RA");
+        assert_eq!(results[1].content, "RB");
+
+        // The completion itself triggered the decision — no wake is needed.
+        assert!(
+            effects_complete(&wake(&mut agg)).is_none(),
+            "no wake needed"
+        );
+    }
+
+    #[test]
+    fn worker_tool_batch_drains_in_the_completion_commit() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let setup = dispatch(
+            &mut agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Message {
+                    message: Message {
+                        role: Role::User,
+                        content: Some(Content::Text("go".to_string())),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                    },
+                    stream: false,
+                },
+                turn_id: Some("turn-1".to_string()),
+            },
+            &system(),
+        );
+        let decision_id =
+            decision_with(&setup, |t| matches!(t, DecisionTrigger::UserMessage { .. }))
+                .expect("user message decision");
+
+        let dispatched = dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id,
+                actions: vec![WorkerAction::CallTool {
+                    tool_call_id: "t1".to_string(),
+                    name: "getWeather".to_string(),
+                    arguments: "{}".to_string(),
+                    handler: ToolHandler::Worker,
+                    retry: RetryPolicy::no_retry(),
+                }],
+                state: vec![],
+            },
+            &machine(),
+        );
+        let exec = decision_with(&dispatched, |t| {
+            matches!(t, DecisionTrigger::ToolExecute { .. })
+        })
+        .expect("tool.execute decision");
+
+        // The worker returns the result; the batch drains in this same commit
+        // (the effects.complete is queued behind the just-finished tool.execute
+        // decision and promoted inline) — no wake required.
+        let completed = dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: exec,
+                actions: vec![WorkerAction::ReturnToolResult {
+                    tool_call_id: "t1".to_string(),
+                    result: "RA".to_string(),
+                    attempt: 0,
+                }],
+                state: vec![],
+            },
+            &machine(),
+        );
+        assert_eq!(
+            effects_complete(&completed).map(|r| r.len()),
+            Some(1),
+            "batch drains in the completion commit; got {completed:?}"
+        );
+        assert!(
+            effects_complete(&wake(&mut agg)).is_none(),
+            "no wake needed"
+        );
+    }
+
+    #[test]
+    fn batch_mixes_tool_and_sub_agent() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        request_client_tool(&mut agg, "t1");
+        dispatch(
+            &mut agg,
+            CommandPayload::RequestSubAgent {
+                session_id: "child-1".to_string(),
+                agent_id: "researcher".to_string(),
+                tool_call_id: "s1".to_string(),
+                retry: RetryPolicy::no_retry(),
+            },
+            &system(),
+        );
+        dispatch(
+            &mut agg,
+            CommandPayload::StartSubAgent {
+                session_id: "child-1".to_string(),
+            },
+            &system(),
+        );
+
+        let tool_done = complete_tool(&mut agg, "t1", "TOOL");
+        assert!(
+            effects_complete(&tool_done).is_none(),
+            "no batch while sub-agent runs"
+        );
+
+        let sub_done = dispatch(
+            &mut agg,
+            CommandPayload::CompleteSubAgentTurn {
+                session_id: "child-1".to_string(),
+                agent_id: "researcher".to_string(),
+                turn_id: "turn-1".to_string(),
+                data: serde_json::json!("FINDINGS"),
+                cost: rust_decimal::Decimal::ZERO,
+                token_usage: std::collections::BTreeMap::new(),
+            },
+            &system(),
+        );
+
+        let results = effects_complete(&sub_done).expect("batch on the last completion");
+        assert_eq!(results.len(), 2);
+        let sub = results
+            .iter()
+            .find(|r| r.tool_call_id == "s1")
+            .expect("sub-agent result mapped to its tool_call_id");
+        assert_eq!(sub.name, "researcher");
+        assert_eq!(sub.content, "FINDINGS");
+        assert!(!sub.is_error);
+    }
+
+    #[test]
+    fn tool_and_sub_agent_from_one_turn_dispatch_concurrently() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let setup = dispatch(
+            &mut agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Message {
+                    message: Message {
+                        role: Role::User,
+                        content: Some(Content::Text("go".to_string())),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                    },
+                    stream: false,
+                },
+                turn_id: Some("turn-1".to_string()),
+            },
+            &system(),
+        );
+        let decision_id = setup
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(p) => Some(p.decision_id.clone()),
+                _ => None,
+            })
+            .expect("user message requests a worker decision");
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id,
+                actions: vec![
+                    WorkerAction::CallTool {
+                        tool_call_id: "t1".to_string(),
+                        name: "getWeather".to_string(),
+                        arguments: "{}".to_string(),
+                        handler: ToolHandler::Worker,
+                        retry: RetryPolicy::no_retry(),
+                    },
+                    WorkerAction::SpawnSubAgent {
+                        session_id: "child-1".to_string(),
+                        agent_id: "researcher".to_string(),
+                        tool_call_id: "s1".to_string(),
+                        retry: RetryPolicy::no_retry(),
+                    },
+                ],
+                state: vec![],
+            },
+            &machine(),
+        );
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::ToolCallRequested(_))),
+            "tool dispatched; got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::SubAgentRequested(_))),
+            "sub-agent dispatched; got {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                EventPayload::WorkerDecisionRequested(p)
+                    if matches!(p.trigger, DecisionTrigger::ToolExecute { .. })
+            )),
+            "tool's ToolExecute decision dispatched; got {events:?}"
+        );
+
+        assert_eq!(
+            agg.state.tool_calls.get("t1").map(|t| &t.tracking.status),
+            Some(&EffectStatus::Pending)
+        );
+        assert_eq!(
+            agg.state
+                .sub_agent_calls
+                .get("child-1")
+                .map(|s| &s.tracking.status),
+            Some(&EffectStatus::Pending)
+        );
+        assert!(agg.state.drainable_batch().is_none());
+    }
+
+    #[test]
+    fn timed_out_effect_drains_via_wake() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        dispatch(
+            &mut agg,
+            CommandPayload::RequestToolCall {
+                tool_call_id: "t1".to_string(),
+                name: "tool_t1".to_string(),
+                arguments: "{}".to_string(),
+                handler: ToolHandler::Client,
+                retry: RetryPolicy {
+                    timeout_secs: Some(60),
+                    max_retries: 0,
+                    backoff_base_secs: 0,
+                    backoff_max_secs: 0,
+                },
+            },
+            &system(),
+        );
+
+        let past = Utc::now() + chrono::Duration::seconds(120);
+        let errored = dispatch(&mut agg, CommandPayload::Wake { now: past }, &system());
+        assert!(
+            errored
+                .iter()
+                .any(|e| matches!(e, EventPayload::ToolCallErrored(_))),
+            "deadline exceeded errors the tool; got {errored:?}"
+        );
+        assert!(
+            effects_complete(&errored).is_none(),
+            "drain waits for the next wake"
+        );
+
+        let drained = effects_complete(&dispatch(
+            &mut agg,
+            CommandPayload::Wake { now: past },
+            &system(),
+        ))
+        .expect("timed-out effect drains via wake");
+        assert_eq!(drained.len(), 1);
+        assert!(drained[0].is_error);
+    }
+
+    #[test]
+    fn batch_delivers_results_only_once() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        request_client_tool(&mut agg, "a");
+
+        assert!(
+            effects_complete(&complete_tool(&mut agg, "a", "RA")).is_some(),
+            "delivered on completion"
+        );
+        assert!(agg.state.drainable_batch().is_none());
+        assert!(
+            effects_complete(&wake(&mut agg)).is_none(),
+            "wake does not re-deliver"
         );
     }
 

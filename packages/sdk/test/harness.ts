@@ -10,6 +10,7 @@ import type {
     LlmTokenDeltaInput,
     Message,
     ToolCall,
+    ToolResult,
     WorkerAction,
     WorkerDecisionRequestWire,
 } from "../src/types";
@@ -72,17 +73,13 @@ export function toolCall(name: string, args: unknown, id = "tc-0"): ToolCall {
     return { id, type: "function", function: { name, arguments: JSON.stringify(args) } };
 }
 
-export function subAgentComplete(
-    sessionId: string,
-    agentId: string,
-    data: unknown,
-    turnId = "turn-0",
-): DecisionTrigger {
-    return { type: "sub_agent.turn.complete", session_id: sessionId, agent_id: agentId, turn_id: turnId, data };
+export function toolResult(toolCallId: string, content: string, name = "", isError = false): ToolResult {
+    return { tool_call_id: toolCallId, name, content, is_error: isError };
 }
 
-export function subAgentError(sessionId: string, agentId: string, error: string): DecisionTrigger {
-    return { type: "sub_agent.error", session_id: sessionId, agent_id: agentId, error };
+/** The engine's batched delivery of all of a turn's tool + sub-agent results. */
+export function effectsComplete(results: ToolResult[]): DecisionTrigger {
+    return { type: "effects.complete", results };
 }
 
 // ── Assertion helpers ────────────────────────────────────────────────────────

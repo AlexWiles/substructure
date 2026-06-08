@@ -141,6 +141,8 @@ pub enum LlmHandler {
 pub struct SubAgentRequested {
     pub session_id: String,
     pub agent_id: String,
+    #[serde(default)]
+    pub tool_call_id: String,
     pub retry: RetryPolicy,
 }
 
@@ -260,4 +262,7 @@ pub struct SubAgentTurnCompleted {
     pub cost: Decimal,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub token_usage: BTreeMap<String, u64>,
+    /// The child's turn result.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub data: serde_json::Value,
 }

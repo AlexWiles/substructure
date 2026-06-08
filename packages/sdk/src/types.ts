@@ -233,6 +233,7 @@ export type DecisionTrigger =
           deadline?: DateTime;
       }
     | { type: "tool.result"; result: ToolResult }
+    | { type: "effects.complete"; results: ToolResult[] }
     | { type: "sub_agent.turn.complete"; session_id: Uuid; agent_id: string; turn_id: string; data: unknown }
     | { type: "sub_agent.error"; session_id: Uuid; agent_id: string; error: string }
     | { type: "interrupt.resumed"; interrupt_id: string }
@@ -274,7 +275,7 @@ export type WorkerAction =
           detail?: unknown;
           attempt: number;
       }
-    | { type: "spawn.sub_agent"; session_id: Uuid; agent_id: string; retry: RetryPolicy }
+    | { type: "spawn.sub_agent"; session_id: Uuid; agent_id: string; tool_call_id: string; retry: RetryPolicy }
     | { type: "send.message"; session_id: Uuid; message: Message }
     | { type: "done"; data: unknown };
 
@@ -448,6 +449,7 @@ export interface SubAgentRequested {
     type: "sub_agent.requested";
     session_id: Uuid;
     agent_id: string;
+    tool_call_id?: string;
     retry: RetryPolicy;
 }
 
@@ -468,6 +470,7 @@ export interface SubAgentTurnCompleted {
     session_id: Uuid;
     cost: Decimal;
     token_usage?: Record<string, number>;
+    data?: unknown;
 }
 
 export interface SessionInterrupted {

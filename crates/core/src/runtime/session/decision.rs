@@ -84,6 +84,8 @@ pub enum DecisionTrigger {
     },
     #[serde(rename = "tool.result")]
     ToolResult { result: ToolResult },
+    #[serde(rename = "effects.complete")]
+    EffectsComplete { results: Vec<ToolResult> },
     #[serde(rename = "sub_agent.done")]
     SubAgentDone {
         session_id: String,
@@ -163,6 +165,9 @@ pub enum WorkerAction {
     SpawnSubAgent {
         session_id: String,
         agent_id: String,
+        /// The model tool-call id this delegation answers.
+        #[serde(default)]
+        tool_call_id: String,
         retry: RetryPolicy,
     },
     #[serde(rename = "send.message")]
