@@ -120,9 +120,9 @@ pub struct ToolCallState {
     /// Source event sequence, for stable result ordering.
     #[serde(default)]
     pub order: u64,
-    /// Result already delivered to the worker.
+    /// Result already emitted to the worker in an effects.complete batch.
     #[serde(default)]
-    pub delivered: bool,
+    pub result_delivered: bool,
 }
 
 impl ToolCallState {
@@ -151,8 +151,9 @@ pub struct SubAgentCallState {
     pub is_error: bool,
     #[serde(default)]
     pub order: u64,
+    /// Result already emitted to the worker in an effects.complete batch.
     #[serde(default)]
-    pub delivered: bool,
+    pub result_delivered: bool,
 }
 
 impl SubAgentCallState {
@@ -364,7 +365,7 @@ impl SessionState {
                             result: None,
                             is_error: false,
                             order: ctx.sequence,
-                            delivered: false,
+                            result_delivered: false,
                         },
                     );
                 }
@@ -401,7 +402,7 @@ impl SessionState {
                             result: None,
                             is_error: false,
                             order: ctx.sequence,
-                            delivered: false,
+                            result_delivered: false,
                         },
                     );
                 }
@@ -534,8 +535,8 @@ impl SessionState {
     /// Ordered results for the undelivered effects once every one is terminal;
     /// `None` while any is still pending or there are none.
     pub fn drainable_batch(&self) -> Option<Vec<ToolResult>> {
-        let any = self.tool_calls.values().any(|t| !t.delivered)
-            || self.sub_agent_calls.values().any(|s| !s.delivered);
+        let any = self.tool_calls.values().any(|t| !t.result_delivered)
+            || self.sub_agent_calls.values().any(|s| !s.result_delivered);
 
         if !any {
             return None;
@@ -544,12 +545,12 @@ impl SessionState {
         let all_terminal = self
             .tool_calls
             .values()
-            .filter(|t| !t.delivered)
+            .filter(|t| !t.result_delivered)
             .all(|t| t.result.is_some())
             && self
                 .sub_agent_calls
                 .values()
-                .filter(|s| !s.delivered)
+                .filter(|s| !s.result_delivered)
                 .all(|s| s.result.is_some());
 
         if !all_terminal {
@@ -566,12 +567,12 @@ impl SessionState {
         let others_terminal = self
             .tool_calls
             .values()
-            .filter(|t| !t.delivered && t.tool_call_id != pending.tool_call_id)
+            .filter(|t| !t.result_delivered && t.tool_call_id != pending.tool_call_id)
             .all(|t| t.result.is_some())
             && self
                 .sub_agent_calls
                 .values()
-                .filter(|s| !s.delivered && s.tool_call_id != pending.tool_call_id)
+                .filter(|s| !s.result_delivered && s.tool_call_id != pending.tool_call_id)
                 .all(|s| s.result.is_some());
 
         if !others_terminal {
@@ -585,13 +586,13 @@ impl SessionState {
         let tools = self
             .tool_calls
             .values()
-            .filter(|t| !t.delivered)
+            .filter(|t| !t.result_delivered)
             .map(|t| (t.order, t.to_result()));
 
         let subs = self
             .sub_agent_calls
             .values()
-            .filter(|s| !s.delivered)
+            .filter(|s| !s.result_delivered)
             .map(|s| (s.order, s.to_result()));
 
         let mut ordered: Vec<(u64, ToolResult)> = tools.chain(subs).collect();
@@ -609,18 +610,18 @@ impl SessionState {
     }
 
     pub fn has_undelivered_effects(&self) -> bool {
-        self.tool_calls.values().any(|t| !t.delivered)
-            || self.sub_agent_calls.values().any(|s| !s.delivered)
+        self.tool_calls.values().any(|t| !t.result_delivered)
+            || self.sub_agent_calls.values().any(|s| !s.result_delivered)
     }
 
     fn mark_results_delivered(&mut self, tool_call_ids: &[String]) {
         for id in tool_call_ids {
             if let Some(t) = self.tool_calls.get_mut(id) {
-                t.delivered = true;
+                t.result_delivered = true;
             }
             for s in self.sub_agent_calls.values_mut() {
                 if &s.tool_call_id == id {
-                    s.delivered = true;
+                    s.result_delivered = true;
                 }
             }
         }

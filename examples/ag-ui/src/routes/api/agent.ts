@@ -72,6 +72,7 @@ const listTodos = agent.tool({
 });
 
 const todoAgent = agent({ id: AGENT_ID })
+    .use(agent.logging())
     .use(
         agent.messageHistory(
             "You are a concise, friendly to-do list assistant. The user has an on-screen to-do " +
