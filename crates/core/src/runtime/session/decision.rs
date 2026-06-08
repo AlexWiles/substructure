@@ -84,12 +84,6 @@ pub enum DecisionTrigger {
     },
     #[serde(rename = "effects.complete")]
     EffectsComplete { results: Vec<ToolResult> },
-    #[serde(rename = "sub_agent.done")]
-    SubAgentDone {
-        session_id: String,
-        agent_id: String,
-        data: serde_json::Value,
-    },
     #[serde(rename = "sub_agent.turn.complete")]
     SubAgentTurnComplete {
         session_id: String,
