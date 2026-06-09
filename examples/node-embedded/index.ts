@@ -39,7 +39,7 @@ const listTodos = agent.tool({
 const todoAgent = agent({ id: "todo" })
     .use(agent.messageHistory("You are a concise todo assistant. Use tools to manage the list."))
     .use(agent.tools([addTodo, listTodos]))
-    .use(agent.llmToolLoop({ model: "anthropic/claude-sonnet-4-6" }));
+    .use(agent.llmToolLoop({ generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }) }));
 
 const embedded = await SubstructureEmbedded.create({
     agents: [todoAgent],

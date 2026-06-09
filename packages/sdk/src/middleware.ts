@@ -596,9 +596,7 @@ export function tools<S>(selectorOrValue: ToolSelector<S> | ToolInput): Middlewa
 
 export interface LlmToolLoopSelection {
     /** A worker-side provider generator (e.g. `anthropicGenerate`) or `serverGenerate`. */
-    generator?: LlmGenerator;
-    /** Shorthand for `serverGenerate({ model })`; ignored when `generator` is set. */
-    model?: string;
+    generator: LlmGenerator;
     /** Override the generator's streaming setting. */
     stream?: boolean;
     retry?: RetryPolicy;
@@ -639,12 +637,6 @@ export function serverGenerate(settings: {
     if (settings.maxTokens !== undefined) request.max_completion_tokens = settings.maxTokens;
     if (settings.reasoning !== undefined) request.reasoning = settings.reasoning;
     return { request, handler: "server", stream: settings.stream ?? false };
-}
-
-function resolveGenerator(selection: LlmToolLoopSelection): LlmGenerator {
-    if (selection.generator) return selection.generator;
-    if (selection.model !== undefined) return serverGenerate({ model: selection.model });
-    throw new Error("llmToolLoop requires a `generator` or a `model` shorthand");
 }
 
 function flattenStreamPart(part: StreamPart): LlmTokenDeltaInput | null {
@@ -714,7 +706,7 @@ export function llmToolLoop<S>(
     return middleware({
         handler: async (ctx: AgentContext<S>, next: Next<S>) => {
             const selection = await selector(ctx.state, ctx);
-            const generator = resolveGenerator(selection);
+            const generator = selection.generator;
             const stream = selection.stream ?? generator.stream ?? false;
             const downstream = await next(ctx);
 

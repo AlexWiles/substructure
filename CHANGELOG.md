@@ -18,8 +18,7 @@ same version.
   plus `exclude` and `enabled`), passed through to providers that support them.
 - `llmToolLoop` takes a `generator`: a worker-side provider generator that runs
   the LLM call on your worker, or `serverGenerate` to let the Substructure
-  server's configured provider make the call. `llmToolLoop({ model })` is
-  shorthand for the latter.
+  server's configured provider make the call.
 - Anthropic adapter (`@substructure.ai/sdk/adapters/anthropic`): call the
   Anthropic Messages API from a worker via the `anthropicGenerate` generator.
 - AI SDK adapter (`@substructure.ai/sdk/adapters/ai`): run an existing Vercel AI
