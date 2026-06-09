@@ -145,7 +145,7 @@ const assistant = agent({ id: "assistant" })
     .use(agent.actions([approveCommand]))
     .use(approvalGate)
     .use(agent.tools([runCommand]))
-    .use(agent.llmToolLoop({ request: { model: "anthropic/claude-sonnet-4-6" } }));
+    .use(agent.llmToolLoop({ generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }) }));
 
 // ── CLI driver ──────────────────────────────────────────────────────────────
 // Usage:

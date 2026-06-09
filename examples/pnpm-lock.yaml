@@ -88,8 +88,8 @@ importers:
         specifier: ^2.0.0
         version: 2.9.0(ai@6.0.197(zod@4.4.3))(zod@4.4.3)
       '@substructure.ai/sdk':
-        specifier: file:../../packages/sdk
-        version: file:../packages/sdk(@openai/agents@0.11.6(ws@8.21.0)(zod@4.4.3))(ai@6.0.197(zod@4.4.3))(openai@6.42.0(ws@8.21.0)(zod@4.4.3))
+        specifier: link:../../packages/sdk
+        version: link:../../packages/sdk
       ai:
         specifier: ^6.0.0
         version: 6.0.197(zod@4.4.3)
@@ -107,14 +107,36 @@ importers:
         specifier: 5.9.3
         version: 5.9.3
 
+  anthropic-example:
+    dependencies:
+      '@anthropic-ai/sdk':
+        specifier: ^0.102.0
+        version: 0.102.0(zod@4.4.3)
+      '@hono/node-server':
+        specifier: 2.0.4
+        version: 2.0.4(hono@4.12.23)
+      '@substructure.ai/sdk':
+        specifier: link:../../packages/sdk
+        version: link:../../packages/sdk
+    devDependencies:
+      '@types/node':
+        specifier: 24.12.2
+        version: 24.12.2
+      tsx:
+        specifier: 4.20.6
+        version: 4.20.6
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+
   cloudflare-worker:
     dependencies:
       '@substructure.ai/cli':
-        specifier: ^0.1.15
-        version: 0.1.15
+        specifier: link:../../packages/cli
+        version: link:../../packages/cli
       '@substructure.ai/sdk':
-        specifier: ^0.1.15
-        version: 0.1.15(@substructure.ai/runtime@0.1.15)
+        specifier: link:../../packages/sdk
+        version: link:../../packages/sdk
     devDependencies:
       '@types/node':
         specifier: 24.12.2
@@ -132,11 +154,11 @@ importers:
   deferred-tool:
     dependencies:
       '@substructure.ai/runtime':
-        specifier: ^0.1.15
-        version: 0.1.15
+        specifier: link:../../packages/runtime
+        version: link:../../packages/runtime
       '@substructure.ai/sdk':
-        specifier: ^0.1.15
-        version: 0.1.15(@substructure.ai/runtime@0.1.15)
+        specifier: link:../../packages/sdk
+        version: link:../../packages/sdk
     devDependencies:
       '@types/node':
         specifier: 24.12.2
@@ -154,8 +176,8 @@ importers:
         specifier: 2.0.4
         version: 2.0.4(hono@4.6.14)
       '@substructure.ai/sdk':
-        specifier: ^0.1.15
-        version: 0.1.15(@substructure.ai/runtime@0.1.15)
+        specifier: link:../../packages/sdk
+        version: link:../../packages/sdk
       hono:
         specifier: 4.6.14
         version: 4.6.14
@@ -179,8 +201,8 @@ importers:
         specifier: 1.13.7
         version: 1.13.7(hono@4.6.14)
       '@substructure.ai/sdk':
-        specifier: ^0.1.15
-        version: 0.1.15(@substructure.ai/runtime@0.1.15)
+        specifier: link:../../packages/sdk
+        version: link:../../packages/sdk
       hono:
         specifier: 4.6.14
         version: 4.6.14
@@ -198,11 +220,11 @@ importers:
   hybrid-state:
     dependencies:
       '@substructure.ai/runtime':
-        specifier: ^0.1.15
-        version: 0.1.15
+        specifier: link:../../packages/runtime
+        version: link:../../packages/runtime
       '@substructure.ai/sdk':
-        specifier: ^0.1.15
-        version: 0.1.15(@substructure.ai/runtime@0.1.15)
+        specifier: link:../../packages/sdk
+        version: link:../../packages/sdk
     devDependencies:
       '@types/node':
         specifier: 24.12.2
@@ -217,11 +239,11 @@ importers:
   node-embedded:
     dependencies:
       '@substructure.ai/runtime':
-        specifier: ^0.1.15
-        version: 0.1.15
+        specifier: link:../../packages/runtime
+        version: link:../../packages/runtime
       '@substructure.ai/sdk':
-        specifier: ^0.1.15
-        version: 0.1.15(@substructure.ai/runtime@0.1.15)
+        specifier: link:../../packages/sdk
+        version: link:../../packages/sdk
     devDependencies:
       '@types/node':
         specifier: 24.12.2
@@ -242,8 +264,8 @@ importers:
         specifier: ^0.11.0
         version: 0.11.6(ws@8.21.0)(zod@4.4.3)
       '@substructure.ai/sdk':
-        specifier: file:../../packages/sdk
-        version: file:../packages/sdk(@openai/agents@0.11.6(ws@8.21.0)(zod@4.4.3))(ai@6.0.197(zod@4.4.3))(openai@6.42.0(ws@8.21.0)(zod@4.4.3))
+        specifier: link:../../packages/sdk
+        version: link:../../packages/sdk
       openai:
         specifier: ^6.0.0
         version: 6.42.0(ws@8.21.0)(zod@4.4.3)
@@ -264,11 +286,11 @@ importers:
   plan-mode:
     dependencies:
       '@substructure.ai/runtime':
-        specifier: ^0.1.15
-        version: 0.1.15
+        specifier: link:../../packages/runtime
+        version: link:../../packages/runtime
       '@substructure.ai/sdk':
-        specifier: ^0.1.15
-        version: 0.1.15(@substructure.ai/runtime@0.1.15)
+        specifier: link:../../packages/sdk
+        version: link:../../packages/sdk
     devDependencies:
       '@types/node':
         specifier: 24.12.2
@@ -283,11 +305,11 @@ importers:
   state-hydration:
     dependencies:
       '@substructure.ai/runtime':
-        specifier: ^0.1.15
-        version: 0.1.15
+        specifier: link:../../packages/runtime
+        version: link:../../packages/runtime
       '@substructure.ai/sdk':
-        specifier: ^0.1.15
-        version: 0.1.15(@substructure.ai/runtime@0.1.15)
+        specifier: link:../../packages/sdk
+        version: link:../../packages/sdk
     devDependencies:
       '@types/node':
         specifier: 24.12.2
@@ -302,11 +324,11 @@ importers:
   sub-agent:
     dependencies:
       '@substructure.ai/runtime':
-        specifier: ^0.1.15
-        version: 0.1.15
+        specifier: link:../../packages/runtime
+        version: link:../../packages/runtime
       '@substructure.ai/sdk':
-        specifier: ^0.1.15
-        version: 0.1.15(@substructure.ai/runtime@0.1.15)
+        specifier: link:../../packages/sdk
+        version: link:../../packages/sdk
     devDependencies:
       '@types/node':
         specifier: 24.12.2
@@ -321,11 +343,11 @@ importers:
   tool-approval:
     dependencies:
       '@substructure.ai/runtime':
-        specifier: ^0.1.15
-        version: 0.1.15
+        specifier: link:../../packages/runtime
+        version: link:../../packages/runtime
       '@substructure.ai/sdk':
-        specifier: ^0.1.15
-        version: 0.1.15(@substructure.ai/runtime@0.1.15)
+        specifier: link:../../packages/sdk
+        version: link:../../packages/sdk
     devDependencies:
       '@types/node':
         specifier: 24.12.2
@@ -340,8 +362,8 @@ importers:
   vercel:
     dependencies:
       '@substructure.ai/sdk':
-        specifier: ^0.1.15
-        version: 0.1.15(@substructure.ai/runtime@0.1.15)
+        specifier: link:../../packages/sdk
+        version: link:../../packages/sdk
     devDependencies:
       '@types/node':
         specifier: 24.12.2
@@ -411,6 +433,15 @@ packages:
 
   '@antfu/install-pkg@1.1.0':
     resolution: {integrity: sha512-MGQsmw10ZyI+EJo45CdSER4zEb+p31LpDAFp2Z3gkSd1yqVZGi0Ebx++YTEMonJy4oChEMLsxZ64j8FH6sSqtQ==}
+
+  '@anthropic-ai/sdk@0.102.0':
+    resolution: {integrity: sha512-cThh3KcPW3lzkFyTz1cjyhJvOVw45NkLMoowO2ZJ/76CBz44ADUon+NsjEc/PypAkARs72Xu8qxTnx6PAOTQUQ==}
+    hasBin: true
+    peerDependencies:
+      zod: ^3.25.0 || ^4.0.0
+    peerDependenciesMeta:
+      zod:
+        optional: true
 
   '@assistant-ui/core@0.2.9':
     resolution: {integrity: sha512-L/+5uj4kAYXh7KLOSdvOOeM285LWfGjrym9qfSXxFSv3+eqSfqp6ynIPZm7IZpIREAlBAyixrVOP/VR3u7cFhg==}
@@ -3172,84 +3203,11 @@ packages:
   '@speed-highlight/core@1.2.15':
     resolution: {integrity: sha512-BMq1K3DsElxDWawkX6eLg9+CKJrTVGCBAWVuHXVUV2u0s2711qiChLSId6ikYPfxhdYocLNt3wWwSvDiTvFabw==}
 
+  '@stablelib/base64@1.0.1':
+    resolution: {integrity: sha512-1bnPQqSxSuc3Ii6MhBysoWCg58j97aUjuCSZrGSmDxNqtytIi0k8utUenAwTZN4V5mXXYGsVUI9zeBqy+jBOSQ==}
+
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
-
-  '@substructure.ai/cli-darwin-arm64@0.1.15':
-    resolution: {integrity: sha512-bBCNG2f813Z57AYceMtWZ/kb1a9eIhxt+kcjxJGDzFostMV3d0qbaD0J+pkqtdVZYhaMbPjqpRlbHDAwhOQyvQ==}
-    cpu: [arm64]
-    os: [darwin]
-
-  '@substructure.ai/cli-darwin-x64@0.1.15':
-    resolution: {integrity: sha512-2rbri3ToFvLN7lz7gFwEAu2heZNBdkC3QCt9tf7CjxHphFbcrZIpO1pqxkfUd7aTh5ekSt20QkjJKRmSWnTZpg==}
-    cpu: [x64]
-    os: [darwin]
-
-  '@substructure.ai/cli-linux-arm64@0.1.15':
-    resolution: {integrity: sha512-wmzwsMZM4/aWwgIvBai0XZJlz+UL0yQjRZmUbSe9FMYlnxfeSz1PacT3a7ps7bAl6CNltOD6xLQzaIoKTvaYhg==}
-    cpu: [arm64]
-    os: [linux]
-    libc: [glibc]
-
-  '@substructure.ai/cli-linux-x64@0.1.15':
-    resolution: {integrity: sha512-oODERIIu04Rnzcvcmn/EVglEWI09/geBm8UdsqdVZA1+ohWdB2VcsJt/iCzmCv5lCraZpXRxc/Ou02hTCecGIA==}
-    cpu: [x64]
-    os: [linux]
-    libc: [glibc]
-
-  '@substructure.ai/cli@0.1.15':
-    resolution: {integrity: sha512-9Dk0pBd9jPjymb2uwpdSJrqoG0enMJojAIj7FrDT2m4W/FyI1TbMH9fTyv5VZqMVuq129utOuFqVNn7SohZb5g==}
-    hasBin: true
-
-  '@substructure.ai/runtime-darwin-arm64@0.1.15':
-    resolution: {integrity: sha512-QHxIyqC6UzzRNXTwHZWWetNnTmma4ZQlEg4pwJA2ZO53791bF0+alR7l/oVA6FKY152jqX9iQPyJQhMl3vtioA==}
-    cpu: [arm64]
-    os: [darwin]
-
-  '@substructure.ai/runtime-darwin-x64@0.1.15':
-    resolution: {integrity: sha512-j8gMpuMovEFhOU9XDoI1jLZy9Xw6s0Aq+jH8hMYMCD0xt79QOHI8g/bWBo6Ua6KOrPnxbuHhHPr+nIBLhSqBlg==}
-    cpu: [x64]
-    os: [darwin]
-
-  '@substructure.ai/runtime-linux-arm64-gnu@0.1.15':
-    resolution: {integrity: sha512-fugv3fbxFim8SxPV4aSCWqis2bIAHNFz/0CuHg8hJbMEPE48PicTPEQAdKUtICWrkuMNtw7bjW/Qs1SN4YDB1Q==}
-    cpu: [arm64]
-    os: [linux]
-    libc: [glibc]
-
-  '@substructure.ai/runtime-linux-x64-gnu@0.1.15':
-    resolution: {integrity: sha512-80olHq0T+9O6iK43+xIoNUpRKLwOB/+M1YMmrArpTIrhCposWtT1NUQZ1oOWmzRqZf0b78Sgxaz/Gr2Ki0B9lQ==}
-    cpu: [x64]
-    os: [linux]
-    libc: [glibc]
-
-  '@substructure.ai/runtime@0.1.15':
-    resolution: {integrity: sha512-NIe12b3fm6s0nRXgXzjERavNr8iu/UWobao3pwp+zC0uzOVrobbv/5kUZP7avRJ7k0sPiidN2r1Y6hSw4Mg9Fg==}
-
-  '@substructure.ai/sdk@0.1.15':
-    resolution: {integrity: sha512-hwhEMe4VqLaqflKf6RPqejTxVn2TbERLTxJToGPIHkxLQnDEbJNDK5JeZUjreQSfyh1gyweEAJvrqxdqA6WvBQ==}
-    peerDependencies:
-      '@substructure.ai/runtime': 0.1.15
-    peerDependenciesMeta:
-      '@substructure.ai/runtime':
-        optional: true
-
-  '@substructure.ai/sdk@file:../packages/sdk':
-    resolution: {directory: ../packages/sdk, type: directory}
-    peerDependencies:
-      '@openai/agents': ^0.11.0
-      '@substructure.ai/runtime': workspace:*
-      ai: ^6.0.0
-      openai: ^6.0.0
-    peerDependenciesMeta:
-      '@openai/agents':
-        optional: true
-      '@substructure.ai/runtime':
-        optional: true
-      ai:
-        optional: true
-      openai:
-        optional: true
 
   '@swc/helpers@0.5.23':
     resolution: {integrity: sha512-5lSsMOTXURePglDfvuAQUqkGek9Hg2kksOYay2m0+XR++b2NWYL/4sWyuvVBIs8oKnJaxkdi9whaL/sqN13afw==}
@@ -4481,6 +4439,9 @@ packages:
   fast-json-patch@3.1.1:
     resolution: {integrity: sha512-vf6IHUX2SBcA+5/+4883dsIjpBTqmfBjmYiWK1savxQmFk4JfBMLa7ynTYOs1Rolp/T1betJxHiGD3g1Mn8lUQ==}
 
+  fast-sha256@1.3.0:
+    resolution: {integrity: sha512-n11RGP/lrWEFI/bWdygLxhI+pVeo1ZYIVwvvPkW7azl/rOy+F3HYRZ2K5zeE9mmkhQppyv9sQFx0JM9UabnpPQ==}
+
   fast-uri@3.1.2:
     resolution: {integrity: sha512-rVjf7ArG3LTk+FS6Yw81V1DLuZl1bRbNrev6Tmd/9RaroeeRRJhAt7jg/6YFxbvAQXUCavSoZhPPj6oOx+5KjQ==}
 
@@ -4871,6 +4832,10 @@ packages:
 
   json-schema-to-ts@1.6.4:
     resolution: {integrity: sha512-pR4yQ9DHz6itqswtHCm26mw45FSNfQ9rEQjosaZErhn5J3J2sIViQiz8rDaezjKAhFGpmsoczYVBgGHzFw/stA==}
+
+  json-schema-to-ts@3.1.1:
+    resolution: {integrity: sha512-+DWg8jCJG2TEnpy7kOm/7/AxaYoaRbjVB4LFZLySZlWn8exGs3A4OLJR966cVvU26N7X9TWxl+Jsw7dzAqKT6g==}
+    engines: {node: '>=16'}
 
   json-schema-traverse@1.0.0:
     resolution: {integrity: sha512-NM8/P9n3XjXhIZn1lLhkFaACTOURQXjWhV4BA/RnOv8xvgqtqpAX9IO4mRQxSx1Rlo4tqzeqb0sOlruaOy3dug==}
@@ -6054,6 +6019,9 @@ packages:
     engines: {node: '>=20.16.0'}
     hasBin: true
 
+  standardwebhooks@1.0.0:
+    resolution: {integrity: sha512-BbHGOQK9olHPMvQNHWul6MYlrRTAOKn03rOe4A8O3CLWhNf4YHBqq2HJKKC+sfqpxiBY52pNeesD6jIiLDz8jg==}
+
   stat-mode@0.3.0:
     resolution: {integrity: sha512-QjMLR0A3WwFY2aZdV0okfFEJB5TRjkggXZjxP3A1RsWsNHNu3YPv8btmtc6iCFZ0Rul3FE93OYogvhOUClU+ng==}
 
@@ -6173,6 +6141,9 @@ packages:
 
   trough@2.2.0:
     resolution: {integrity: sha512-tmMpK00BjZiUyVyvrBK7knerNgmgvcV/KLVyuma/SC+TQN167GrMRciANTz09+k3zW8L8t60jWO1GpfkZdjTaw==}
+
+  ts-algebra@2.0.0:
+    resolution: {integrity: sha512-FPAhNPFMrkwz76P7cdjdmiShwMynZYN6SgOujD1urY4oNm80Ou9oMdmbR45LotcKOXoy7wSmHkRFE6Mxbrhefw==}
 
   ts-dedent@2.2.0:
     resolution: {integrity: sha512-q5W7tVM71e2xjHZTlgfTDoPF/SmqKG5hddq9SzR49CH2hayqRKJtQ4mtRlSxKaJlR/+9rEM+mnBHf7I2/BQcpQ==}
@@ -6756,6 +6727,13 @@ snapshots:
     dependencies:
       package-manager-detector: 1.6.0
       tinyexec: 1.2.4
+
+  '@anthropic-ai/sdk@0.102.0(zod@4.4.3)':
+    dependencies:
+      json-schema-to-ts: 3.1.1
+      standardwebhooks: 1.0.0
+    optionalDependencies:
+      zod: 4.4.3
 
   '@assistant-ui/core@0.2.9(@assistant-ui/store@0.2.13(@assistant-ui/tap@0.5.14(@types/react@19.2.16)(react@19.2.7))(@types/react@19.2.16)(react@19.2.7))(@assistant-ui/tap@0.5.14(@types/react@19.2.16)(react@19.2.7))(@types/react@19.2.16)(assistant-cloud@0.1.30)(react@19.2.7)(zustand@5.0.14(@types/react@19.2.16)(react@19.2.7)(use-sync-external-store@1.6.0(react@19.2.7)))':
     dependencies:
@@ -9127,55 +9105,9 @@ snapshots:
 
   '@speed-highlight/core@1.2.15': {}
 
+  '@stablelib/base64@1.0.1': {}
+
   '@standard-schema/spec@1.1.0': {}
-
-  '@substructure.ai/cli-darwin-arm64@0.1.15':
-    optional: true
-
-  '@substructure.ai/cli-darwin-x64@0.1.15':
-    optional: true
-
-  '@substructure.ai/cli-linux-arm64@0.1.15':
-    optional: true
-
-  '@substructure.ai/cli-linux-x64@0.1.15':
-    optional: true
-
-  '@substructure.ai/cli@0.1.15':
-    optionalDependencies:
-      '@substructure.ai/cli-darwin-arm64': 0.1.15
-      '@substructure.ai/cli-darwin-x64': 0.1.15
-      '@substructure.ai/cli-linux-arm64': 0.1.15
-      '@substructure.ai/cli-linux-x64': 0.1.15
-
-  '@substructure.ai/runtime-darwin-arm64@0.1.15':
-    optional: true
-
-  '@substructure.ai/runtime-darwin-x64@0.1.15':
-    optional: true
-
-  '@substructure.ai/runtime-linux-arm64-gnu@0.1.15':
-    optional: true
-
-  '@substructure.ai/runtime-linux-x64-gnu@0.1.15':
-    optional: true
-
-  '@substructure.ai/runtime@0.1.15':
-    optionalDependencies:
-      '@substructure.ai/runtime-darwin-arm64': 0.1.15
-      '@substructure.ai/runtime-darwin-x64': 0.1.15
-      '@substructure.ai/runtime-linux-arm64-gnu': 0.1.15
-      '@substructure.ai/runtime-linux-x64-gnu': 0.1.15
-
-  '@substructure.ai/sdk@0.1.15(@substructure.ai/runtime@0.1.15)':
-    optionalDependencies:
-      '@substructure.ai/runtime': 0.1.15
-
-  '@substructure.ai/sdk@file:../packages/sdk(@openai/agents@0.11.6(ws@8.21.0)(zod@4.4.3))(ai@6.0.197(zod@4.4.3))(openai@6.42.0(ws@8.21.0)(zod@4.4.3))':
-    optionalDependencies:
-      '@openai/agents': 0.11.6(ws@8.21.0)(zod@4.4.3)
-      ai: 6.0.197(zod@4.4.3)
-      openai: 6.42.0(ws@8.21.0)(zod@4.4.3)
 
   '@swc/helpers@0.5.23':
     dependencies:
@@ -10849,6 +10781,8 @@ snapshots:
 
   fast-json-patch@3.1.1: {}
 
+  fast-sha256@1.3.0: {}
+
   fast-uri@3.1.2:
     optional: true
 
@@ -11298,6 +11232,11 @@ snapshots:
     dependencies:
       '@types/json-schema': 7.0.15
       ts-toolbelt: 6.15.5
+
+  json-schema-to-ts@3.1.1:
+    dependencies:
+      '@babel/runtime': 7.29.7
+      ts-algebra: 2.0.0
 
   json-schema-traverse@1.0.0: {}
 
@@ -13038,6 +12977,11 @@ snapshots:
     dependencies:
       cookie-es: 2.0.1
 
+  standardwebhooks@1.0.0:
+    dependencies:
+      '@stablelib/base64': 1.0.1
+      fast-sha256: 1.3.0
+
   stat-mode@0.3.0: {}
 
   statuses@1.5.0: {}
@@ -13191,6 +13135,8 @@ snapshots:
   trim-lines@3.0.1: {}
 
   trough@2.2.0: {}
+
+  ts-algebra@2.0.0: {}
 
   ts-dedent@2.2.0: {}
 

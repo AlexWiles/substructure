@@ -59,11 +59,9 @@ export interface StartTurnRequest {
 
 export interface StreamOptions {
     sequenceAfter?: number;
-    /** Include transient `llm.token.delta` events. Off by default, so
-     *  `stream()` yields only persisted events and you can `switch` on
-     *  `event.payload.type` without a guard. Opt in for live token
-     *  rendering; deltas only arrive when streaming is enabled on the
-     *  agent's `llmToolLoop`. */
+    /** Include transient `llm.token.delta` events. Off by default, so `stream()`
+     *  yields only persisted events. Deltas only arrive when streaming is enabled
+     *  on the agent's `llmToolLoop`. */
     tokens?: boolean;
 }
 
@@ -106,9 +104,8 @@ export class BackendClient {
         return { sessionId: response.session_id, turnId: response.turn_id };
     }
 
-    /** Stream events for a session. If `scope.turnId` is set, the stream is
-     *  filtered to that turn and auto-closes on completion. Yields only
-     *  persisted events unless `{ tokens: true }` is passed. */
+    /** When `scope.turnId` is set, the stream is filtered to that turn and
+     *  auto-closes on completion. */
     stream(scope: SessionScope, options?: StreamOptions & { tokens?: false }): AsyncGenerator<PersistedEvent>;
     stream(scope: SessionScope, options: StreamOptions & { tokens: true }): AsyncGenerator<Event>;
     stream(scope: SessionScope, options: StreamOptions): AsyncGenerator<Event>;
@@ -120,7 +117,7 @@ export class BackendClient {
         return options?.tokens ? raw : persistedOnly(raw);
     }
 
-    /** Stream a turn to completion and return its result. Requires `scope.turnId`. */
+    /** Requires `scope.turnId`. */
     turnResult(scope: SessionScope): Promise<TurnResult> {
         if (!scope.turnId) {
             throw new Error("turnResult requires scope.turnId");
@@ -128,22 +125,19 @@ export class BackendClient {
         return drainToTurnResult(this.stream(scope));
     }
 
-    /** List sessions for the tenant scoped by this client's API key. */
+    /** Lists sessions for the tenant scoped by this client's API key. */
     listSessions(params?: ListSessionsParams): Promise<SessionListResponse> {
         return this.admin.listSessions(params);
     }
 
-    /** Fetch the current state snapshot for a session. */
     getSession(sessionId: string): Promise<SessionDetail> {
         return this.admin.getSession(sessionId);
     }
 
-    /** Fetch historical events for a session. */
     sessionEvents(sessionId: string, params?: SessionEventsParams): Promise<Event[]> {
         return this.admin.getSessionEvents(sessionId, params);
     }
 
-    /** Stream session events as they are appended (SSE). */
     streamSessionEvents(sessionId: string, params?: SessionEventsParams, opts?: RequestOptions): AsyncGenerator<Event> {
         return this.admin.streamSessionEvents(sessionId, params, opts);
     }

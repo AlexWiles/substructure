@@ -34,8 +34,6 @@ export interface NativeRuntime {
 }
 import { verifyWebhookSignature } from "./webhook";
 
-// ── Handler types ────────────────────────────────────────────────────────────
-
 export interface DecisionResult {
     actions: WorkerAction[];
     state: string;
@@ -51,11 +49,8 @@ export type DecisionHandler = (
 ) => Promise<DecisionResult>;
 
 export interface AgentContext<S = unknown> {
-    /** Mutable agent state, built up across middleware layers. */
     state: S;
-    /** The raw decision envelope off the wire (snake_case, mirrors the
-     *  engine's `WorkerDecisionRequest`): identity, trigger, session_id,
-     *  agent_id, turn_id, span, etc. */
+    /** Raw decision envelope off the wire (snake_case). */
     request: WorkerDecisionRequestWire;
     emitDelta?: (delta: LlmTokenDeltaInput) => Promise<void>;
 }
@@ -66,46 +61,30 @@ export interface AgentResponse {
     workerState?: string;
 }
 
-/** Terminal handler: receives context with state S, returns actions. */
 export type Next<S = unknown> = (ctx: AgentContext<S>) => Promise<AgentResponse> | AgentResponse;
 
-/**
- * Middleware function. Receives the current context and a `next` callback.
- * The Out type parameter determines what state type downstream sees.
- *
- * Most middleware is passthrough (In=Out). State providers transform the type.
- */
+/** The `Out` type parameter is the state type downstream middleware sees:
+ *  passthrough middleware leaves it unchanged, state providers transform it. */
 export interface MiddlewareFn<In = unknown, Out = In> {
     (ctx: AgentContext<In>, next: Next<Out>): Promise<AgentResponse> | AgentResponse;
     /** Type brand carrying the output state type — never set at runtime. */
     readonly _out?: Out;
 }
 
-// ── Handler ─────────────────────────────────────────────────────────────────
-
 export interface Handler {
     readonly agentId: string;
     toDecisionHandler(): DecisionHandler;
 }
 
-// ── State ───────────────────────────────────────────────────────────────────
-
-/**
- * Middleware that contributes state keys. The `_contributes` brand
- * tells the builder to intersect `A` onto the current state type.
- */
+/** The `_contributes` brand tells the builder to intersect `A` onto the
+ *  current state type. */
 export type StateContributor<A> = MiddlewareFn<any, any> & { readonly _contributes: A };
 
-/**
- * An object that can supply a middleware. Lets a constructed agent be passed
- * straight to `.use()` (e.g. `.use(new ToolLoopAgent({ ... }))`) without the
- * builder needing to know how the middleware is built.
- */
+/** Lets a constructed agent be passed straight to `.use()` without the builder
+ *  knowing how its middleware is built. */
 export interface MiddlewareSource {
     toMiddleware(): MiddlewareFn<any, any>;
 }
-
-// ── HandlerBuilder ──────────────────────────────────────────────────────────
 
 type UnknownMiddleware = MiddlewareFn<unknown, unknown>;
 type UnknownNext = Next<unknown>;
@@ -165,16 +144,11 @@ function composeChain(middlewares: UnknownMiddleware[], handle: UnknownNext): Un
     return fn;
 }
 
-// ── Fetch handler options ───────────────────────────────────────────────────
-
 export interface FetchHandlerOptions {
-    /** Webhook signing secret for signature verification */
     signingSecret?: string;
-    /** Tolerance in seconds for timestamp validation (default: 300) */
+    /** Timestamp validation tolerance in seconds (default: 300) */
     tolerance?: number;
 }
-
-// ── Worker (internal) ───────────────────────────────────────────────────────
 
 export class Worker {
     readonly agentIds: string[];
@@ -197,13 +171,8 @@ export class Worker {
         });
     }
 
-    /**
-     * Returns a fetch-compatible handler: (Request) => Promise<Response>.
-     * Works with Bun.serve, Deno.serve, Cloudflare Workers, or any Node adapter.
-     *
-     * When `options.signingSecret` is provided, incoming requests are verified
-     * against the HMAC-SHA256 signature in the `X-Substructure-Signature` header.
-     */
+    /** When `options.signingSecret` is provided, incoming requests are verified
+     *  against the HMAC-SHA256 signature in the `X-Substructure-Signature` header. */
     fetchHandler(options?: FetchHandlerOptions): (req: Request) => Promise<Response> {
         return async (req: Request) => {
             let decision: WorkerDecisionRequestWire;

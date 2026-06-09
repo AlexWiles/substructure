@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { llmToolLoop, messageHistory } from "../src/middleware";
+import { llmToolLoop, messageHistory, serverGenerate } from "../src/middleware";
 import { callLlm, effectsComplete, historyMessages, runChain, toolResult } from "./harness";
 
-const llm = llmToolLoop({ request: { model: "test-model" } });
+const llm = llmToolLoop({ generator: serverGenerate({ model: "test-model" }) });
 
 // The assistant turn that issued the calls is already in history.
 const issued = {

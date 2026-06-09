@@ -32,7 +32,7 @@ const getWeather = agent.tool({
 const weatherAgent = agent({ id: "weather" })
     .use(agent.messageHistory("Weather assistant. Be concise."))
     .use(agent.tools([getWeather]))
-    .use(agent.llmToolLoop({ request: { model: "anthropic/claude-sonnet-4-6" } }));
+    .use(agent.llmToolLoop({ generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }) }));
 
 const worker = sub.worker({ agents: [weatherAgent] });
 const agentHandler = worker.fetchHandler({ signingSecret: process.env.SIGNING_SECRET });

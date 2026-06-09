@@ -1,8 +1,6 @@
 import { BaseClient, type RequestOptions } from "./base";
 import type { Uuid, DateTime, Decimal, Event, SessionState, SessionStatus } from "./types";
 
-// ── Admin response types ────────────────────────────────────────────────────
-
 export interface AggregateSummary {
     aggregate_id: Uuid;
     aggregate_type: string;
@@ -40,8 +38,6 @@ export interface SessionDetail {
     state: SessionState;
 }
 
-// ── Query params ────────────────────────────────────────────────────────────
-
 export type AggregateSort = "last_event_desc" | "first_event_asc" | "first_event_desc" | "wake_at_asc";
 
 export interface ListSessionsParams {
@@ -56,8 +52,6 @@ export interface SessionEventsParams {
     sequence_after?: number;
     limit?: number;
 }
-
-// ── Client ──────────────────────────────────────────────────────────────────
 
 export class AdminClient extends BaseClient {
     async listSessions(params?: ListSessionsParams): Promise<SessionListResponse> {
