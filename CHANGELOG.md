@@ -10,6 +10,12 @@ same version.
 
 ## [Unreleased]
 
+### Added
+
+- `openaiAgent` factory in the OpenAI adapter: converts an `@openai/agents`
+  `Agent` (or `OpenAIAgentSettings`) without a second `new`, e.g.
+  `openaiAgent(new Agent({ ... }))`.
+
 ## [0.1.16] - 2026-06-09
 
 ### Added

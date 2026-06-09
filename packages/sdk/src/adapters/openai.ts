@@ -130,6 +130,15 @@ export class OpenAIAgent implements MiddlewareSource {
     }
 }
 
+// Factory for `OpenAIAgent` so an `@openai/agents` Agent can be converted without
+// a second `new`: `openaiAgent(new Agent({ ... }))`.
+export function openaiAgent(
+    input: OpenAIAgentSettings | Agent,
+    options?: { client?: OpenAI; context?: unknown },
+): OpenAIAgent {
+    return new OpenAIAgent(input, options);
+}
+
 function resolveSettings(settings: OpenAIAgentSettings): ResolvedSettings {
     return {
         client: settings.client ?? new OpenAI(),
