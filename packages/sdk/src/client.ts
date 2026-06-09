@@ -1,13 +1,7 @@
-// ── Default export ────────────────────────────────────────────────────────
-
 export type { AgentFactory, AgentOptions } from "./substructure";
 export { Substructure as default, Substructure } from "./substructure";
 
-// ── Turns ────────────────────────────────────────────────────────────────
-
 export type { SessionScope, TurnResult } from "./types";
-
-// ── Worker & Agent ────────────────────────────────────────────────────────
 
 export type {
     AgentContext,
@@ -22,12 +16,12 @@ export type {
 } from "./worker";
 export { HandlerBuilder } from "./worker";
 
-// ── Middleware ─────────────────────────────────────────────────────────────
-
 export type {
     ActionDef,
     ActionHandlerResult,
     Deferred,
+    LlmGenerate,
+    LlmGenerator,
     LlmToolLoopSelection,
     Logger,
     LoggingOptions,
@@ -53,6 +47,7 @@ export {
     messageHistory,
     middleware,
     prependHistoryToLlmCalls,
+    serverGenerate,
     stateSlice,
     subAgents,
     tool,
@@ -61,11 +56,7 @@ export {
     triggerToMessages,
 } from "./middleware";
 
-// ── Webhook ───────────────────────────────────────────────────────────────
-
 export { verifyWebhookSignature, WebhookVerificationError } from "./webhook";
-
-// ── Types ─────────────────────────────────────────────────────────────────
 
 export type {
     ClientAction,

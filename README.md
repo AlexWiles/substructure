@@ -67,7 +67,7 @@ const weatherAgent = agent({ id: "weather-agent" })
   .use(agent.messageHistory("You are a helpful weather assistant."))
   .use(agent.tools([getWeather]))
   .use(agent.llmToolLoop({
-    request: { model: "anthropic/claude-sonnet-4-6" },
+    model: "anthropic/claude-sonnet-4-6",
   }));
 
 const worker = sub.worker({ agents: [weatherAgent] });
@@ -131,7 +131,7 @@ const { agent } = sub;
 
 const chatAgent = agent({ id: "chat" })
   .use(agent.messageHistory("You are a helpful assistant."))
-  .use(agent.llmToolLoop({ request: { model: "anthropic/claude-sonnet-4-6" } }));
+  .use(agent.llmToolLoop({ model: "anthropic/claude-sonnet-4-6" }));
 ```
 
 ### Tools
@@ -170,7 +170,7 @@ const listTodos = agent.tool({
 const todoAgent = agent({ id: "todo" })
   .use(agent.messageHistory("You are a concise todo assistant. Use tools to manage the list."))
   .use(agent.tools([addTodo, listTodos]))
-  .use(agent.llmToolLoop({ request: { model: "anthropic/claude-sonnet-4-6" } }));
+  .use(agent.llmToolLoop({ model: "anthropic/claude-sonnet-4-6" }));
 ```
 
 ### State hydration
@@ -209,7 +209,7 @@ const todoAgent = agent({ id: "todo" })
   .use(todoSlice)
   .use(agent.messageHistory("Concise todo assistant. Use tools to manage the list."))
   .use(agent.tools([addTodo]))
-  .use(agent.llmToolLoop({ request: { model: "anthropic/claude-sonnet-4-6" } }));
+  .use(agent.llmToolLoop({ model: "anthropic/claude-sonnet-4-6" }));
 ```
 
 ### Mixed state: user and session
@@ -247,7 +247,7 @@ const todoAgent = agent({ id: "todo" })
   .use(hydrate)
   .use(agent.messageHistory("Concise todo assistant. Use the tools to manage the list."))
   .use(agent.tools([addTodo, listTodos]))
-  .use(agent.llmToolLoop({ request: { model: "anthropic/claude-sonnet-4-6" } }));
+  .use(agent.llmToolLoop({ model: "anthropic/claude-sonnet-4-6" }));
 ```
 
 ### Bring your own agent framework
@@ -256,6 +256,7 @@ An existing agent built on another framework can run on Substructure through an 
 
 - **[Vercel AI SDK](https://sdk.vercel.ai):** `ToolLoopAgent` from `@substructure.ai/sdk/adapters/ai`. See [`examples/ai-sdk-example`](./examples/ai-sdk-example).
 - **[OpenAI Agents](https://github.com/openai/openai-agents-js):** `OpenAIAgent` from `@substructure.ai/sdk/adapters/openai`. See [`examples/openai-example`](./examples/openai-example).
+- **[Anthropic SDK](https://github.com/anthropics/anthropic-sdk-typescript):** `anthropicGenerate` from `@substructure.ai/sdk/adapters/anthropic` — a generator you plug into `llmToolLoop` (the core SDK has no agent type to wrap). See [`examples/anthropic-example`](./examples/anthropic-example).
 
 Each adapter produces a middleware you `.use()` like any other:
 

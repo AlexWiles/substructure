@@ -240,9 +240,7 @@ const planner = agent({ id: "planner" })
     .use(agent.tools<PlanState>((state) => (state.mode === "planning" ? planningTools : executingTools)))
     .use(
         agent.llmToolLoop<PlanState>((state) => ({
-            request: {
-                model: state.mode === "planning" ? "anthropic/claude-opus-4-7" : "anthropic/claude-sonnet-4-6",
-            },
+            model: state.mode === "planning" ? "anthropic/claude-opus-4-7" : "anthropic/claude-sonnet-4-6",
         })),
     );
 

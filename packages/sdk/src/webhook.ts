@@ -10,10 +10,7 @@ export interface VerifyOptions {
     tolerance?: number;
 }
 
-/**
- * Verify a webhook signature from a Request object.
- * Returns the parsed JSON body if valid, throws WebhookVerificationError otherwise.
- */
+/** Returns the parsed JSON body if valid, throws WebhookVerificationError otherwise. */
 export async function verifyWebhookSignature<T = unknown>(
     req: Request,
     secret: string,

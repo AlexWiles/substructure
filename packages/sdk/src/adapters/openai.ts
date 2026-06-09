@@ -1,48 +1,106 @@
-// ── OpenAI adapter (`@substructure.ai/sdk/adapters/openai`) ───────────────────────────
-//
-// Lets an OpenAI user run an existing agent on Substructure. You author with the
-// OpenAI Agents SDK (`new Agent({...})` + `tool()`) and execution runs through
-// the core `openai` Responses API. Substructure always owns the loop: each
-// `llm.request` runs exactly one `responses.create` step (tools are passed as
-// definitions only, so the model returns function calls instead of executing
-// them) and Substructure executes the tools and iterates.
-//
-// Two authoring surfaces, one execution path:
-//   const assistant = new OpenAIAgent({ model, instructions, tools });
-//   const assistant = new OpenAIAgent(existingAgentsSdkAgent);  // an @openai/agents Agent
-//   agent({ id }).use(assistant);
-//
-// Like `./ai`, this is the only entry importing `openai`/`@openai/agents`, kept
-// off the main `@substructure.ai/sdk` entry so consumers who don't use it never
-// pull it into their bundle.
+// OpenAI adapter (`@substructure.ai/sdk/adapters/openai`). `openaiGenerate` is an
+// `LlmGenerator` backed by the Responses API; `OpenAIAgent` adapts an
+// `@openai/agents` Agent into a handler chain. Substructure owns the loop; each
+// `llm.request` runs one `responses.create` step.
 
 import { Agent, RunContext } from "@openai/agents";
 import type { ModelSettings, ModelSettingsToolChoice, Tool } from "@openai/agents";
 import OpenAI from "openai";
 
 import { llmToolLoop, messageHistory, tools } from "../middleware";
-import type { LlmToolLoopSelection, ToolDef, ToolExecutionContext } from "../middleware";
+import type { LlmGenerate, LlmGenerator, ToolDef, ToolExecutionContext } from "../middleware";
 import { contentText } from "../types";
-import type { Message, StreamPart, ToolCall } from "../types";
+import type { LlmTool, Message, StreamPart, ToolCall } from "../types";
 import type { MiddlewareFn, MiddlewareSource, Next } from "../worker";
 
-type ResponsesParams = OpenAI.Responses.ResponseCreateParamsStreaming;
 type ResponseInputItem = OpenAI.Responses.ResponseInputItem;
 type ResponseStreamEvent = OpenAI.Responses.ResponseStreamEvent;
 type ResponseOutputItem = OpenAI.Responses.ResponseOutputItem;
+
+// The Responses API's own create params minus what the loop supplies: `input` is
+// the transcript and `tools` are declared in `tools()`. `model` is re-required
+// (optional upstream); `stream` is always on.
+export type OpenAIGenerateSettings = Omit<
+    OpenAI.Responses.ResponseCreateParamsStreaming,
+    "input" | "tools" | "stream" | "model"
+> & {
+    model: NonNullable<OpenAI.Responses.ResponseCreateParams["model"]>;
+    /** Defaults to `new OpenAI()` (reads `OPENAI_API_KEY`). */
+    client?: OpenAI;
+};
+
+export function openaiGenerate(settings: OpenAIGenerateSettings): LlmGenerator {
+    const client = settings.client ?? new OpenAI();
+    const { client: _client, ...params } = settings;
+
+    const request: LlmGenerator["request"] = { model: String(settings.model) };
+    if (settings.temperature != null) request.temperature = settings.temperature;
+    if (settings.max_output_tokens != null) request.max_completion_tokens = settings.max_output_tokens;
+
+    const run: LlmGenerate = async (req, ctx) => {
+        const modelToolList = modelTools(req.tools);
+        const stream = await client.responses.create({
+            ...params,
+            model: req.model,
+            input: toResponsesInput(req.messages),
+            tools: modelToolList.length ? modelToolList : undefined,
+            stream: true,
+            temperature: req.temperature ?? params.temperature,
+            max_output_tokens: req.max_completion_tokens ?? params.max_output_tokens,
+        });
+
+        const callIdByItem = new Map<string, string>();
+        let final: OpenAI.Responses.Response | undefined;
+        for await (const event of stream) {
+            const part = toStreamPart(event, callIdByItem);
+            if (part) await ctx.emitDelta?.(part);
+            if (event.type === "response.completed") final = event.response;
+        }
+
+        const output = final?.output ?? [];
+        const toolCalls = output
+            .filter((i): i is Extract<ResponseOutputItem, { type: "function_call" }> => i.type === "function_call")
+            .map(
+                (i): ToolCall => ({
+                    id: i.call_id,
+                    type: "function",
+                    function: { name: i.name, arguments: i.arguments },
+                }),
+            );
+        const content = outputText(output);
+        await ctx.emitDelta?.({ type: "finish", finishReason: toolCalls.length ? "tool_calls" : "stop" });
+        return {
+            model: req.model,
+            content: content || undefined,
+            tool_calls: toolCalls,
+            finish_reason: toolCalls.length ? "tool_calls" : "stop",
+            usage: final?.usage as Record<string, unknown> | undefined,
+        };
+    };
+
+    return { request, handler: "worker", stream: true, run };
+}
+
+function modelTools(toolList: LlmTool[] | undefined): OpenAI.Responses.Tool[] {
+    return (toolList ?? []).map(
+        (t): OpenAI.Responses.Tool => ({
+            type: "function",
+            name: t.function.name,
+            description: t.function.description || undefined,
+            parameters: (t.function.parameters ?? {}) as Record<string, unknown>,
+            strict: null,
+        }),
+    );
+}
 
 export interface OpenAIAgentSettings {
     model: string;
     instructions?: string;
     tools?: Tool[];
     modelSettings?: ModelSettings;
-    toolChoice?: ModelSettingsToolChoice;
-    /** Existing OpenAI client to reuse. Defaults to `new OpenAI()` (which reads
-     *  `OPENAI_API_KEY`), or `new OpenAI({ apiKey })` when `apiKey` is set. */
+    /** Defaults to `new OpenAI()` (reads `OPENAI_API_KEY`). */
     client?: OpenAI;
-    apiKey?: string;
-    /** Run context passed to each tool's `execute` (the OpenAI Agents SDK
-     *  `RunContext` local context). */
+    /** Run context passed to each tool's `execute` (the Agents SDK `RunContext`). */
     context?: unknown;
 }
 
@@ -52,18 +110,14 @@ interface ResolvedSettings {
     instructions?: string | (() => string | Promise<string>);
     tools: Tool[];
     modelSettings?: ModelSettings;
-    toolChoice?: ModelSettingsToolChoice;
     context?: unknown;
 }
 
-// An OpenAI agent you drop into a Substructure handler chain. Accepts either an
-// `OpenAIAgentSettings` object or an existing `@openai/agents` `Agent` instance;
-// either way Substructure drives the loop and runs the tools, and each
-// `llm.request` is one `responses.create` step.
+// Adapts an `@openai/agents` Agent (or `OpenAIAgentSettings`) into a handler chain.
 export class OpenAIAgent implements MiddlewareSource {
     private readonly settings: ResolvedSettings;
 
-    constructor(input: OpenAIAgentSettings | Agent, options?: { client?: OpenAI; apiKey?: string; context?: unknown }) {
+    constructor(input: OpenAIAgentSettings | Agent, options?: { client?: OpenAI; context?: unknown }) {
         this.settings = input instanceof Agent ? fromAgent(input, options) : resolveSettings(input);
     }
 
@@ -78,17 +132,16 @@ export class OpenAIAgent implements MiddlewareSource {
 
 function resolveSettings(settings: OpenAIAgentSettings): ResolvedSettings {
     return {
-        client: settings.client ?? new OpenAI(settings.apiKey ? { apiKey: settings.apiKey } : {}),
+        client: settings.client ?? new OpenAI(),
         model: settings.model,
         instructions: settings.instructions,
         tools: settings.tools ?? [],
         modelSettings: settings.modelSettings,
-        toolChoice: settings.toolChoice ?? settings.modelSettings?.toolChoice,
         context: settings.context,
     };
 }
 
-function fromAgent(agent: Agent, options?: { client?: OpenAI; apiKey?: string; context?: unknown }): ResolvedSettings {
+function fromAgent(agent: Agent, options?: { client?: OpenAI; context?: unknown }): ResolvedSettings {
     if (typeof agent.model !== "string") {
         throw new Error(
             "OpenAIAgent executes via the OpenAI Responses API and needs a model id string. Pass `model` as a string on the Agent, or use `new OpenAIAgent({ model, ... })`.",
@@ -104,30 +157,22 @@ function fromAgent(agent: Agent, options?: { client?: OpenAI; apiKey?: string; c
                   )
             : agent.instructions;
     return {
-        client: options?.client ?? new OpenAI(options?.apiKey ? { apiKey: options.apiKey } : {}),
+        client: options?.client ?? new OpenAI(),
         model: agent.model,
         instructions,
         tools: agent.tools,
         modelSettings: agent.modelSettings,
-        toolChoice: agent.modelSettings?.toolChoice,
         context,
     };
 }
 
-// Middleware that wires an OpenAI agent into a Substructure handler chain. It
-// composes messageHistory + tools + llmToolLoop, so it behaves exactly as if those
-// three were `.use()`d in order — Substructure drives the loop and runs the
-// tools; each `llm.request` is one `responses.create` step.
 export function openAIAgent(settings: ResolvedSettings): MiddlewareFn<unknown> {
-    const ms = settings.modelSettings;
-    const request: LlmToolLoopSelection["request"] = { model: settings.model };
-    if (ms?.temperature !== undefined) request.temperature = ms.temperature;
-    if (ms?.maxTokens !== undefined) request.max_completion_tokens = ms.maxTokens;
+    const generator = openaiGenerate(toGenerateSettings(settings));
 
     const chain: MiddlewareFn<any, any>[] = [
         messageHistory(settings.instructions),
         tools(openAITools(settings.tools, settings.context)),
-        llmToolLoop({ request, stream: true, handler: "worker", caller: openAICaller(settings) }),
+        llmToolLoop({ generator }),
     ];
 
     return (ctx, next) => {
@@ -141,8 +186,22 @@ export function openAIAgent(settings: ResolvedSettings): MiddlewareFn<unknown> {
     };
 }
 
-// ── Tools (Substructure-side execution) ───────────────────────────────────────
+// Map the Agents SDK `ModelSettings` onto Responses create params; `providerData`
+// passes through to the request unchanged.
+function toGenerateSettings(s: ResolvedSettings): OpenAIGenerateSettings {
+    const ms = s.modelSettings;
+    const out: OpenAIGenerateSettings = { model: s.model, client: s.client };
+    if (ms?.temperature != null) out.temperature = ms.temperature;
+    if (ms?.maxTokens != null) out.max_output_tokens = ms.maxTokens;
+    if (ms?.topP != null) out.top_p = ms.topP;
+    if (ms?.parallelToolCalls != null) out.parallel_tool_calls = ms.parallelToolCalls;
+    if (ms?.store != null) out.store = ms.store;
+    if (ms?.truncation != null) out.truncation = ms.truncation;
+    if (ms?.toolChoice != null) out.tool_choice = toResponsesToolChoice(ms.toolChoice);
+    return Object.assign(out, ms?.providerData);
+}
 
+// Substructure-side execution of `@openai/agents` function tools as `ToolDef`s.
 export function openAITools(toolset: Tool[], context?: unknown): ToolDef[] {
     return toolset.flatMap((t): ToolDef[] => {
         if (t.type !== "function") return [];
@@ -159,83 +218,6 @@ export function openAITools(toolset: Tool[], context?: unknown): ToolDef[] {
         ];
     });
 }
-
-// Function-tool definitions for the model: name/description/parameters/strict,
-// with no `invoke` — the SDK returns function calls instead of running them
-// (Substructure runs them).
-function modelTools(toolset: Tool[]): OpenAI.Responses.Tool[] {
-    return toolset.flatMap((t): OpenAI.Responses.Tool[] => {
-        if (t.type !== "function") return [];
-        return [
-            {
-                type: "function",
-                name: t.name,
-                description: t.description ?? "",
-                // agents normalizes `parameters` to JSON Schema; widen to the
-                // looser JSON-object shape the Responses tool param expects.
-                parameters: t.parameters as Record<string, unknown>,
-                strict: t.strict,
-            },
-        ];
-    });
-}
-
-// ── Caller (one responses.create step per llm.request) ────────────────────────
-
-function openAICaller(settings: ResolvedSettings): NonNullable<LlmToolLoopSelection["caller"]> {
-    const { client } = settings;
-    return async (request, ctx) => {
-        const ms = settings.modelSettings;
-        const modelToolList = modelTools(settings.tools);
-        const params: ResponsesParams = {
-            model: request.model,
-            input: toResponsesInput(request.messages),
-            stream: true,
-            tools: modelToolList.length ? modelToolList : undefined,
-            tool_choice: settings.toolChoice ? toResponsesToolChoice(settings.toolChoice) : undefined,
-            temperature: request.temperature ?? ms?.temperature,
-            max_output_tokens: request.max_completion_tokens ?? ms?.maxTokens,
-            top_p: ms?.topP,
-            parallel_tool_calls: ms?.parallelToolCalls,
-            store: ms?.store,
-            truncation: ms?.truncation,
-            ...ms?.providerData,
-        };
-
-        const stream = await client.responses.create(params);
-        const callIdByItem = new Map<string, string>();
-        let final: OpenAI.Responses.Response | undefined;
-
-        for await (const event of stream as AsyncIterable<ResponseStreamEvent>) {
-            const part = toStreamPart(event, callIdByItem);
-            if (part) await ctx.emitDelta?.(part);
-            if (event.type === "response.completed") final = event.response;
-        }
-
-        const output = final?.output ?? [];
-        const toolCalls = output
-            .filter((i): i is Extract<ResponseOutputItem, { type: "function_call" }> => i.type === "function_call")
-            .map(
-                (i): ToolCall => ({
-                    id: i.call_id,
-                    type: "function",
-                    function: { name: i.name, arguments: i.arguments },
-                }),
-            );
-
-        const content = outputText(output);
-        await ctx.emitDelta?.({ type: "finish", finishReason: toolCalls.length ? "tool_calls" : "stop" });
-        return {
-            model: request.model,
-            content: content || undefined,
-            tool_calls: toolCalls,
-            finish_reason: toolCalls.length ? "tool_calls" : "stop",
-            usage: final?.usage as Record<string, unknown> | undefined,
-        };
-    };
-}
-
-// ── Conversions ──────────────────────────────────────────────────────────────
 
 export function toStreamPart(event: ResponseStreamEvent, callIdByItem: Map<string, string>): StreamPart | null {
     switch (event.type) {
@@ -295,8 +277,6 @@ export function toResponsesInput(messages: Message[]): ResponseInputItem[] {
     return out;
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
 function outputText(output: ResponseOutputItem[]): string {
     return output
         .filter((i): i is Extract<ResponseOutputItem, { type: "message" }> => i.type === "message")
@@ -308,7 +288,7 @@ function outputText(output: ResponseOutputItem[]): string {
 
 const TOOL_CHOICE_OPTIONS = ["auto", "required", "none"] as const;
 
-function toResponsesToolChoice(choice: ModelSettingsToolChoice): ResponsesParams["tool_choice"] {
+function toResponsesToolChoice(choice: ModelSettingsToolChoice): OpenAIGenerateSettings["tool_choice"] {
     const option = TOOL_CHOICE_OPTIONS.find((o) => o === choice);
     return option ?? { type: "function", name: choice };
 }

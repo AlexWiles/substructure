@@ -200,7 +200,7 @@ const weatherAgent = agent({ id: "weather-agent" })
   .use(agent.messageHistory("You are a helpful weather assistant."))
   .use(agent.tools([getWeather]))
   .use(agent.llmToolLoop({
-    request: { model: "anthropic/claude-sonnet-4-5" },
+    model: "anthropic/claude-sonnet-4-5",
   }));
 ```
 
@@ -214,7 +214,7 @@ The built-in middleware:
 | `agent.messageHistoryCurrentTurn(system?, opts?)` | Same arguments, but scoped to a single turn. |
 | `agent.tools([...])` | Registers tools, dispatches tool calls from the LLM, and feeds results back. |
 | `agent.actions([...])` | Dispatches `client.action` triggers to their handlers. See [Defining client actions](#defining-client-actions). |
-| `agent.llmToolLoop({ request })` | Drives the core loop: on a user message or tool result, call the LLM; on an LLM response with no tool calls, finish the turn. |
+| `agent.llmToolLoop({ generator })` | Drives the core loop: on a user message or tool result, call the LLM; on an LLM response with no tool calls, finish the turn. |
 | `agent.subAgents({ agents })` | Lets the agent delegate to child agents as if they were tools. See [Sub-agents](./05-sub-agents.md). |
 | `agent.logging()` | Logs each decision lifecycle to stdout. Handy in development. |
 
@@ -286,7 +286,7 @@ const myAgent = agent({ id: "support" })
   .use(dbState(db))
   .use(agent.messageHistory("You are a support agent."))
   .use(agent.tools([/* ... */]))
-  .use(agent.llmToolLoop({ request: { model: "anthropic/claude-sonnet-4-5" } }));
+  .use(agent.llmToolLoop({ model: "anthropic/claude-sonnet-4-5" }));
 ```
 
 The `state` field on `middleware` does two things: it gives you the initial value used on the first turn, and it locks in the type so `ctx.state` is typed inside `handler` and any tool that takes `state: this slice` gets the same type. Downstream middleware like `messageHistory` will populate `ctx.state.messages` for you; `ticketId` is a slot you can read and write from your own tools.
@@ -352,7 +352,7 @@ const todoAgent = agent({ id: "todo" })
   .use(todoSlice)                  // contributes + hydrates `todos`
   .use(agent.messageHistory())     // rides the wire by default
   .use(agent.tools([addTodo]))
-  .use(agent.llmToolLoop({ request: { model: "anthropic/claude-sonnet-4-5" } }));
+  .use(agent.llmToolLoop({ model: "anthropic/claude-sonnet-4-5" }));
 ```
 
 What ends up where:
@@ -576,7 +576,7 @@ Models are specified inside `llmToolLoop`:
 
 ```ts
 agent.llmToolLoop({
-  request: { model: "anthropic/claude-sonnet-4-5" },
+  model: "anthropic/claude-sonnet-4-5",
 });
 ```
 

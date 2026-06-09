@@ -1,55 +1,91 @@
-// ── AI SDK adapter (`@substructure.ai/sdk/adapters/ai`) ───────────────────────────────
-//
-// Lets a Vercel AI SDK user run their existing agent on Substructure by
-// swapping `new ToolLoopAgent(settings)` for `new SubstructureAgent(settings)`.
-// The result is a normal Substructure worker agent (a `Handler`): it answers
-// decisions and is agnostic to whether an embedded or remote engine drives the
-// loop. Substructure always owns the loop; each `llm.request` runs exactly one
-// `streamText` step (tools are passed without `execute` so the model returns
-// tool calls instead of executing them), and Substructure executes the tools
-// and iterates.
-//
-// This is the only entry that imports `ai`, kept off the main `@substructure.ai/sdk`
-// entry so consumers who don't use it never pull it into their bundle.
+// AI SDK adapter (`@substructure.ai/sdk/adapters/ai`). `aiGenerate` is an
+// `LlmGenerator` backed by `streamText`; `ToolLoopAgent` wires an AI SDK agent into
+// a handler chain. Substructure owns the loop; each `llm.request` runs one
+// `streamText` step.
 
-import { asSchema, streamText } from "ai";
+import { asSchema, jsonSchema, streamText, tool } from "ai";
 import type { LanguageModel, ModelMessage, TextStreamPart, Tool, ToolChoice, ToolSet } from "ai";
 
 import { llmToolLoop, messageHistory, tools } from "../middleware";
-import type { LlmToolLoopSelection, ToolDef, ToolExecutionContext } from "../middleware";
+import type { LlmGenerate, LlmGenerator, ToolDef, ToolExecutionContext } from "../middleware";
 import { contentText } from "../types";
-import type { Message, StreamPart, ToolCall } from "../types";
+import type { LlmTool, Message, StreamPart, ToolCall } from "../types";
 import type { MiddlewareFn, MiddlewareSource, Next } from "../worker";
 
 type StreamTextOptions = Parameters<typeof streamText>[0];
-type ProviderOptions = NonNullable<StreamTextOptions["providerOptions"]>;
 type ToolResultOutput = Awaited<ReturnType<NonNullable<Tool["toModelOutput"]>>>;
 
-export interface SubstructureAgentSettings<TOOLS extends ToolSet = ToolSet> {
-    model: LanguageModel;
+// `streamText`'s own options minus what the loop supplies: `messages`/`prompt`/
+// `system` come from the transcript, and tools are declared in `tools()`.
+export type AIGenerateSettings = Omit<StreamTextOptions, "messages" | "prompt" | "system" | "tools">;
+
+export function aiGenerate(settings: AIGenerateSettings): LlmGenerator {
+    const request: LlmGenerator["request"] = { model: modelId(settings.model) };
+    if (settings.temperature !== undefined) request.temperature = settings.temperature;
+    if (settings.maxOutputTokens !== undefined) request.max_completion_tokens = settings.maxOutputTokens;
+
+    const run: LlmGenerate = async (req, ctx) => {
+        const result = streamText({
+            ...settings,
+            model: settings.model,
+            messages: toModelMessages(req.messages),
+            // The system prompt is the agent's own instructions, not user input.
+            allowSystemInMessages: true,
+            tools: modelTools(req.tools),
+            temperature: req.temperature ?? settings.temperature,
+            maxOutputTokens: req.max_completion_tokens ?? settings.maxOutputTokens,
+        });
+
+        for await (const part of result.fullStream) {
+            const mapped = toStreamPart(part);
+            if (mapped) await ctx.emitDelta?.(mapped);
+        }
+
+        const toolCalls = (await result.toolCalls).filter(
+            (tc) => !(tc as { providerExecuted?: boolean }).providerExecuted,
+        );
+        return {
+            model: req.model,
+            content: (await result.text) || undefined,
+            tool_calls: toolCalls.map(
+                (tc): ToolCall => ({
+                    id: tc.toolCallId,
+                    type: "function",
+                    function: { name: tc.toolName, arguments: JSON.stringify(tc.input) },
+                }),
+            ),
+            finish_reason: await result.finishReason,
+            usage: (await result.usage) as Record<string, unknown>,
+        };
+    };
+
+    return { request, handler: "worker", stream: true, run };
+}
+
+// Model-facing tools from `request.tools` — schema only, no `execute`, so the SDK
+// returns tool calls instead of running them (Substructure runs them).
+function modelTools(toolList: LlmTool[] | undefined): ToolSet {
+    const out: ToolSet = {};
+    for (const t of toolList ?? []) {
+        out[t.function.name] = tool({
+            description: t.function.description || undefined,
+            inputSchema: jsonSchema(t.function.parameters as Parameters<typeof jsonSchema>[0]),
+        });
+    }
+    return out;
+}
+
+export type SubstructureAgentSettings<TOOLS extends ToolSet = ToolSet> = Omit<
+    AIGenerateSettings,
+    "tools" | "toolChoice"
+> & {
     instructions?: string;
     tools?: TOOLS;
     toolChoice?: ToolChoice<TOOLS>;
-    temperature?: number;
-    maxOutputTokens?: number;
-    topP?: number;
-    topK?: number;
-    presencePenalty?: number;
-    frequencyPenalty?: number;
-    stopSequences?: string[];
-    seed?: number;
-    providerOptions?: ProviderOptions;
-    experimental_context?: unknown;
-}
+};
 
-// An AI SDK agent you drop into a Substructure handler chain:
-//
-//   const assistant = new ToolLoopAgent({ model, instructions, tools });
-//   agent({ id }).use(assistant);
-//
-// Mirrors the AI SDK `ToolLoopAgent` constructor, but instead of driving its own
-// loop it hands a middleware to the builder. Substructure drives the loop and
-// runs the tools; each `llm.request` is one `streamText` step.
+// Mirrors the AI SDK `ToolLoopAgent`, but hands a middleware to the builder
+// instead of driving its own loop.
 export class ToolLoopAgent<TOOLS extends ToolSet = ToolSet> implements MiddlewareSource {
     constructor(private readonly settings: SubstructureAgentSettings<TOOLS>) {}
 
@@ -62,22 +98,16 @@ export class ToolLoopAgent<TOOLS extends ToolSet = ToolSet> implements Middlewar
     }
 }
 
-// Middleware that wires an AI SDK agent into a Substructure handler chain:
-//
-//   agent({ id }).use(aiSdkAgent({ model, instructions, tools }))
-//
-// It composes messageHistory + tools + llmToolLoop, so it behaves exactly as if
-// those three were `.use()`d in order — Substructure drives the loop and runs
-// the tools; each `llm.request` is one `streamText` step.
+// Composes `messageHistory` + `tools` + `llmToolLoop`, behaving as if those three
+// were `.use()`d in order.
 export function aiSdkAgent<TOOLS extends ToolSet>(settings: SubstructureAgentSettings<TOOLS>): MiddlewareFn<unknown> {
-    const request: LlmToolLoopSelection["request"] = { model: modelId(settings.model) };
-    if (settings.temperature !== undefined) request.temperature = settings.temperature;
-    if (settings.maxOutputTokens !== undefined) request.max_completion_tokens = settings.maxOutputTokens;
+    const { instructions, tools: toolset, ...generateSettings } = settings;
+    const generator = aiGenerate(generateSettings);
 
     const chain: MiddlewareFn<any, any>[] = [
-        messageHistory(settings.instructions),
-        tools(settings.tools ? aiSdkTools(settings.tools, settings.experimental_context) : []),
-        llmToolLoop({ request, stream: true, handler: "worker", caller: aiSdkCaller(settings) }),
+        messageHistory(instructions),
+        tools(toolset ? aiSdkTools(toolset, settings.experimental_context) : []),
+        llmToolLoop({ generator }),
     ];
 
     return (ctx, next) => {
@@ -91,8 +121,7 @@ export function aiSdkAgent<TOOLS extends ToolSet>(settings: SubstructureAgentSet
     };
 }
 
-// ── Tools (Substructure-side execution) ───────────────────────────────────────
-
+// AI SDK tools as Substructure-executed `ToolDef`s.
 export function aiSdkTools(toolset: ToolSet, experimentalContext?: unknown): ToolDef[] {
     return Object.entries(toolset).flatMap(([name, t]): ToolDef[] => {
         if (t.type === "provider") return [];
@@ -101,10 +130,8 @@ export function aiSdkTools(toolset: ToolSet, experimentalContext?: unknown): Too
         const parameters = asSchema(t.inputSchema).jsonSchema;
         const execute = t.execute;
 
-        // A tool without `execute` is one the AI SDK doesn't run server-side; it
-        // maps to a Substructure client tool, completed by the frontend via
-        // `submitToolCallResult`. The worker is never asked to execute it, so
-        // `execute` only exists to satisfy the type — fail loud if it ever runs.
+        // No `execute` means a client tool: the worker never runs it (the frontend
+        // completes it via `submitToolCallResult`), so this only satisfies the type.
         if (!execute) {
             return [
                 {
@@ -145,71 +172,6 @@ export function aiSdkTools(toolset: ToolSet, experimentalContext?: unknown): Too
         ];
     });
 }
-
-// Pass tools to the model with `execute`/`needsApproval` removed so the SDK
-// returns tool calls instead of running them (Substructure runs them) and never
-// pauses for approval — but keeps every model-facing field and the
-// `onInput*` streaming callbacks intact.
-function modelTools<T extends ToolSet>(toolset: T): T {
-    const out: Record<string, Tool> = {};
-    for (const [name, t] of Object.entries(toolset)) {
-        const { execute: _execute, needsApproval: _needsApproval, ...rest } = t as Tool;
-        out[name] = rest;
-    }
-    return out as T;
-}
-
-// ── Caller (one streamText step per llm.request) ──────────────────────────────
-
-function aiSdkCaller<TOOLS extends ToolSet>(
-    settings: SubstructureAgentSettings<TOOLS>,
-): NonNullable<LlmToolLoopSelection["caller"]> {
-    return async (request, ctx) => {
-        const result = streamText({
-            model: settings.model,
-            messages: toModelMessages(request.messages),
-            // Our system prompt comes from the agent's own instructions, not
-            // user input, so a system message in the transcript is safe.
-            allowSystemInMessages: true,
-            tools: settings.tools ? modelTools(settings.tools) : undefined,
-            toolChoice: settings.toolChoice,
-            temperature: request.temperature ?? settings.temperature,
-            maxOutputTokens: request.max_completion_tokens ?? settings.maxOutputTokens,
-            topP: settings.topP,
-            topK: settings.topK,
-            presencePenalty: settings.presencePenalty,
-            frequencyPenalty: settings.frequencyPenalty,
-            stopSequences: settings.stopSequences,
-            seed: settings.seed,
-            providerOptions: settings.providerOptions,
-            experimental_context: settings.experimental_context,
-        });
-
-        for await (const part of result.fullStream) {
-            const mapped = toStreamPart(part);
-            if (mapped) await ctx.emitDelta?.(mapped);
-        }
-
-        const toolCalls = (await result.toolCalls).filter(
-            (tc) => !(tc as { providerExecuted?: boolean }).providerExecuted,
-        );
-        return {
-            model: request.model,
-            content: (await result.text) || undefined,
-            tool_calls: toolCalls.map(
-                (tc): ToolCall => ({
-                    id: tc.toolCallId,
-                    type: "function",
-                    function: { name: tc.toolName, arguments: JSON.stringify(tc.input) },
-                }),
-            ),
-            finish_reason: await result.finishReason,
-            usage: (await result.usage) as Record<string, unknown>,
-        };
-    };
-}
-
-// ── Conversions ──────────────────────────────────────────────────────────────
 
 export function toStreamPart<T extends ToolSet>(part: TextStreamPart<T>): StreamPart | null {
     switch (part.type) {
@@ -270,8 +232,6 @@ export function toModelMessages(messages: Message[]): ModelMessage[] {
     }
     return out;
 }
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
 
 function modelOutputToString(output: ToolResultOutput): string {
     if (output.type === "text" || output.type === "error-text") return output.value;

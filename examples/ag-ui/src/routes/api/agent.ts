@@ -86,7 +86,7 @@ const todoAgent = agent({ id: AGENT_ID })
     .use(agent.tools([addTodo, toggleTodo, removeTodo, clearCompleted, listTodos]))
     .use(
         agent.llmToolLoop({
-            request: { model: "minimax/minimax-m3" },
+            model: "minimax/minimax-m3",
             stream: true,
         }),
     );

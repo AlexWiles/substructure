@@ -5,7 +5,7 @@ import { HandlerBuilder } from "../src/worker";
 import { actionsOfType, callLlm, llmResponse, runChain, toolCall, userMessage } from "./harness";
 
 const researcher = new HandlerBuilder("researcher");
-const llm = llmToolLoop({ request: { model: "test-model" } });
+const llm = llmToolLoop({ model: "test-model" });
 
 const delegation = (toolCallId = "call_sub") =>
     llmResponse({

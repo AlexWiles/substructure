@@ -6,6 +6,7 @@ import type {
     LlmTokenDeltaInput,
     LlmTool,
     Message,
+    ReasoningConfig,
     RetryPolicy,
     StreamPart,
     ToolHandler,
@@ -21,8 +22,6 @@ export const DEFAULT_RETRY: RetryPolicy = {
     backoff_max_secs: 10,
 };
 
-// ── Core primitives ────────────────────────────────────────────────────────
-
 function decodeWorkerState(raw: string): unknown {
     if (!raw || raw === "") return {};
     return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(raw), (c) => c.charCodeAt(0))));
@@ -32,7 +31,6 @@ function encodeWorkerState(value: unknown): string {
     return btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(value))));
 }
 
-/** Initialize a state slice's keys on a raw state object. */
 function initSlice<A extends object>(rawState: unknown, init: A): A {
     const state = (rawState && typeof rawState === "object" ? rawState : {}) as Record<string, unknown>;
     for (const key of Object.keys(init)) {
@@ -42,15 +40,13 @@ function initSlice<A extends object>(rawState: unknown, init: A): A {
 }
 
 /**
- * The single primitive for defining middleware.
- *
  * With `state`: initializes a state slice and returns a `StateContributor`.
  * Without `state`: wraps a handler function.
  */
-export function middleware<A extends object>(config: {
+export function middleware<A extends object, S = unknown>(config: {
     state: A;
-    handler?: (ctx: AgentContext<A>, next: Next<A>) => Promise<AgentResponse> | AgentResponse;
-}): StateContributor<A> & MiddlewareFn<unknown, A> & { _init: A };
+    handler?: (ctx: AgentContext<S & A>, next: Next<S & A>) => Promise<AgentResponse> | AgentResponse;
+}): StateContributor<A> & MiddlewareFn<S, S & A> & { _init: A };
 export function middleware<S = unknown>(config: {
     handler: (ctx: AgentContext<S>, next: Next<S>) => Promise<AgentResponse> | AgentResponse;
 }): MiddlewareFn<S>;
@@ -86,13 +82,7 @@ export function stateSlice<A extends object>(init: A): StateSliceMw<A> {
     return middleware({ state: init });
 }
 
-// ── JSON state codec ───────────────────────────────────────────────────────
-
-/**
- * Base64 JSON state serialization middleware.
- * Decodes `request.worker_state` into `ctx.state` (falling back to `{}`),
- * runs the chain, then encodes `res.state` back into `workerState`.
- */
+/** Round-trips base64 JSON state between `request.worker_state` and `workerState`. */
 export function jsonState(): MiddlewareFn<unknown> {
     return middleware({
         handler: async (ctx: AgentContext<unknown>, next: Next<unknown>) => {
@@ -109,33 +99,20 @@ export function jsonState(): MiddlewareFn<unknown> {
     });
 }
 
-// ── Tool ───────────────────────────────────────────────────────────────────
-
 /**
- * Sentinel returned by `ctx.defer()` to tell the `tools` middleware to
- * skip emitting `return.tool.result` / `return.tool.error` for this call.
- * The worker submits zero actions for the `tool.execute` trigger and the
- * engine leaves the tool call pending until `submitToolCallResult` is
- * called with the eventual outcome.
- *
- * Tools should call `ctx.defer()` rather than importing this value.
+ * Sentinel from `ctx.defer()`: the worker emits no result for this `tool.execute`,
+ * and the engine leaves the call pending until `submitToolCallResult` is called.
+ * Tools call `ctx.defer()` rather than importing this.
  */
 export const DEFERRED: unique symbol = Symbol.for("substructure.tool.deferred");
 export type Deferred = typeof DEFERRED;
 
-/** Per-call context passed to a tool's `execute`. Carries the
- *  identifiers needed to complete the call out-of-band, plus the
- *  `defer()` helper used to signal that completion will arrive later. */
 export interface ToolExecutionContext {
     sessionId: string;
     toolCallId: string;
     attempt: number;
-    /** The full worker decision request that triggered this tool call,
-     *  including the client `identity` that created the session, the
-     *  tenant, agent, span, and trigger details. */
     request: WorkerDecisionRequestWire;
-    /** Signal that this tool will deliver its result later via
-     *  `submitToolCallResult`. Return the value: `return ctx.defer();`. */
+    /** Signal out-of-band completion: `return ctx.defer();`. */
     defer: () => Deferred;
 }
 
@@ -148,10 +125,8 @@ export interface ToolDef {
     execute: ToolFn;
     retry?: RetryPolicy;
     stateSlice?: StateSliceMw<any>;
-    /** Who completes this tool. Defaults to "worker". Set to "client" to
-     *  declare a browser/frontend tool: the worker's `execute` should
-     *  return `ctx.defer()`, and the result is submitted via
-     *  `submitToolCallResult` from a frontend client. */
+    /** "worker" (default) or "client" for a frontend tool: `execute` returns
+     *  `ctx.defer()` and the result arrives via `submitToolCallResult`. */
     handler?: ToolHandler;
 }
 
@@ -166,7 +141,6 @@ export interface ToolDef {
  */
 type SliceState<Slice> = Slice extends { _init: infer A } ? A : never;
 
-/** Define a tool from plain data. */
 export function tool<Slice extends StateSliceMw<object> = never>(config: {
     name: string;
     description: string;
@@ -208,8 +182,6 @@ export function tool<Slice extends StateSliceMw<object> = never>(config: {
     };
 }
 
-// ── Client actions ─────────────────────────────────────────────────────────
-
 export type ActionHandlerResult = void | WorkerAction[];
 
 export interface ActionDef<Args = unknown, S = unknown> {
@@ -222,13 +194,8 @@ export interface ActionDef<Args = unknown, S = unknown> {
 }
 
 /**
- * Define a client.action handler with typed args.
- *
- * Pair with `actions()` to dispatch by `client.action.name`. The handler
- * receives `args` cast to `Args` (no runtime validation) and the typed
- * state slice if `state` was supplied. A `void` return lets the chain
- * proceed (e.g. the LLM call fires on the trigger); returning a
- * `WorkerAction[]` short-circuits with those actions.
+ * Pair with `actions()` to dispatch by name. `args` is cast to `Args` (no runtime
+ * validation). A `void` return continues the chain; a `WorkerAction[]` short-circuits.
  */
 export function action<Args = unknown, S extends object = never>(config: {
     name: string;
@@ -246,10 +213,7 @@ export function action<Args = unknown, S extends object = never>(config: {
     };
 }
 
-/**
- * Dispatch `client.action` triggers to matching `ActionDef`s by name.
- * Non-matching triggers and non-client-action triggers pass through.
- */
+/** Dispatch `client.action` triggers to a matching `ActionDef` by name; others pass through. */
 export function actions(defs: ActionDef<any, any>[]): MiddlewareFn<unknown> {
     const byName: Record<string, ActionDef<any, any>> = {};
     for (const def of defs) byName[def.name] = def;
@@ -272,8 +236,6 @@ export function actions(defs: ActionDef<any, any>[]): MiddlewareFn<unknown> {
         },
     });
 }
-
-// ── Logging ────────────────────────────────────────────────────────────────
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -348,8 +310,6 @@ export function logging(options?: string | LoggingOptions): MiddlewareFn<unknown
     });
 }
 
-// ── Message history ────────────────────────────────────────────────────────
-
 export type MessageSelector<S> = (state: S, ctx: AgentContext<S>) => Message[] | Promise<Message[]>;
 
 export type SystemMessageSelector<S> = (state: S, ctx: AgentContext<S>) => string | Promise<string>;
@@ -359,20 +319,13 @@ export interface MessageHistoryOptions<K extends string = "messages"> {
     stateKey?: K;
 }
 
-/** Normalize the `system` option into a selector (or null when absent). */
 function toSystemSelector<S>(system: SystemMessageSelector<S> | string | undefined): SystemMessageSelector<S> | null {
     if (system === undefined) return null;
     return typeof system === "function" ? system : () => system;
 }
 
-/**
- * Translate a decision trigger into the message (if any) that belongs in the
- * conversation transcript. Returns `null` for triggers that don't correspond
- * to a turn entry (`client.action`, `tool.execute`, `llm.error`, ...).
- *
- * Building block for custom history middleware. Pair with `withHistory`
- * on the way out.
- */
+/** The transcript message for a trigger, or `null` for triggers with no turn entry
+ *  (`client.action`, `tool.execute`, `llm.error`, …). */
 export function triggerToMessage(trigger: DecisionTrigger): Message | null {
     switch (trigger.type) {
         case "user.message":
@@ -397,14 +350,7 @@ export function triggerToMessages(trigger: DecisionTrigger): Message[] {
     return msg ? [msg] : [];
 }
 
-/**
- * Prepend a transcript to every `call.llm` action's `messages`. Non-LLM
- * actions pass through unchanged.
- *
- * Building block for custom history middleware: pair with `triggerToMessage`
- * to record on the way in, then call this on the way out to attach the
- * transcript to whatever LLM call the chain below produced.
- */
+/** Prepend a transcript to every `call.llm` action's `messages`; other actions pass through. */
 export function prependHistoryToLlmCalls(history: Message[], actions: WorkerAction[]): WorkerAction[] {
     return actions.map((action) =>
         action.type === "call.llm"
@@ -420,27 +366,18 @@ export function prependHistoryToLlmCalls(history: Message[], actions: WorkerActi
 }
 
 /**
- * Conversation history middleware. Contributes `{ [stateKey]: Message[] }` to
- * state (default key `messages`). Records incoming messages and augments
- * `call_llm` actions with the full history.
- *
- * Pass `system` — a string or a `(state, ctx) => string` selector — to also
- * prepend a system message to every LLM call; it lands ahead of the transcript.
- * Use the second argument to move the transcript to a different state key.
- *
- * Implementation is intentionally tiny: `triggerToMessage` +
- * `prependHistoryToLlmCalls` composed against a state slice. For anything
- * non-default (clear on a signal, cap at N, persist out-of-band) write
- * your own middleware using the same helpers.
+ * Conversation history middleware. Contributes `{ [stateKey]: Message[] }` to state
+ * and prepends the full transcript to every LLM call. Pass `system` (string or
+ * `(state, ctx) => string`) to prepend a system message ahead of the transcript.
  */
 export function messageHistory<S, K extends string = "messages">(
     system?: SystemMessageSelector<S> | string,
     options?: MessageHistoryOptions<K>,
-): StateContributor<Record<K, Message[]>> & MiddlewareFn<unknown, Record<K, Message[]>> {
+): StateContributor<Record<K, Message[]>> & MiddlewareFn<S, S & Record<K, Message[]>> {
     const key = (options?.stateKey ?? "messages") as K;
     const select = toSystemSelector(system);
 
-    return middleware({
+    return middleware<Record<K, Message[]>, S>({
         state: { [key]: [] as Message[] } as Record<K, Message[]>,
         handler: async (ctx, next) => {
             const history = ctx.state[key];
@@ -449,7 +386,7 @@ export function messageHistory<S, K extends string = "messages">(
             const sysMsg = select
                 ? {
                       role: "system",
-                      content: await select(ctx.state as unknown as S, ctx as unknown as AgentContext<S>),
+                      content: await select(ctx.state, ctx),
                   }
                 : null;
 
@@ -464,23 +401,19 @@ export function messageHistory<S, K extends string = "messages">(
 }
 
 /**
- * Like `messageHistory`, but only retains messages from the current turn.
- * Resets the buffer whenever `ctx.request.turn_id` changes.
- *
- * Accepts the same `system` / `stateKey` arguments as `messageHistory`.
- *
- * Requires callers to supply a distinct `turn_id` per submit. If `turn_id` is
- * omitted by the caller, this degrades to the same behavior as `messageHistory`.
+ * Like `messageHistory`, but retains only the current turn's messages, resetting
+ * whenever `ctx.request.turn_id` changes. Without a distinct `turn_id` per submit
+ * it degrades to `messageHistory`.
  */
 export function messageHistoryCurrentTurn<S, K extends string = "messages">(
     system?: SystemMessageSelector<S> | string,
     options?: MessageHistoryOptions<K>,
 ): StateContributor<Record<K, Message[]> & { lastTurnId?: string }> &
-    MiddlewareFn<unknown, Record<K, Message[]> & { lastTurnId?: string }> {
+    MiddlewareFn<S, S & Record<K, Message[]> & { lastTurnId?: string }> {
     const key = (options?.stateKey ?? "messages") as K;
     const select = toSystemSelector(system);
 
-    return middleware({
+    return middleware<Record<K, Message[]> & { lastTurnId?: string }, S>({
         state: { [key]: [] as Message[], lastTurnId: undefined as string | undefined } as Record<K, Message[]> & {
             lastTurnId?: string;
         },
@@ -496,7 +429,7 @@ export function messageHistoryCurrentTurn<S, K extends string = "messages">(
             const sysMsg = select
                 ? {
                       role: "system",
-                      content: await select(ctx.state as unknown as S, ctx as unknown as AgentContext<S>),
+                      content: await select(ctx.state, ctx),
                   }
                 : null;
 
@@ -527,23 +460,18 @@ function resolveTools(input: ToolInput): Record<string, ToolDef> {
 }
 
 /**
- * Tool execution and pending-tracking middleware.
- * Contributes `{ pendingToolCalls: string[] }` to state.
- *
- * On `llm_response`: records tool_call_ids as pending.
- * On `tool_result`: removes the ID. Suppresses `call_llm` until all results are in.
- * On `tool_execute`: executes the tool and prepends the result to downstream actions.
+ * Tool middleware: executes `tool.execute` triggers, turns `llm.response` tool
+ * calls into `call.tool` actions, and merges tool definitions into every `call.llm`.
  */
-export function tools<S>(selectorOrValue: ToolSelector<S> | ToolInput): MiddlewareFn<unknown> {
+export function tools<S>(selectorOrValue: ToolSelector<S> | ToolInput): MiddlewareFn<S, S> {
     const selector: ToolSelector<S> = typeof selectorOrValue === "function" ? selectorOrValue : () => selectorOrValue;
 
     return middleware({
-        handler: async (ctx, next) => {
-            const toolMap = resolveTools(await selector(ctx.state as S, ctx as unknown as AgentContext<S>));
+        handler: async (ctx: AgentContext<S>, next: Next<S>) => {
+            const toolMap = resolveTools(await selector(ctx.state, ctx));
 
             const downstream = await next(ctx);
 
-            // Handle tool execution
             if (ctx.request.trigger.type === "tool.execute") {
                 const t = toolMap[ctx.request.trigger.name];
                 if (!t) {
@@ -610,8 +538,7 @@ export function tools<S>(selectorOrValue: ToolSelector<S> | ToolInput): Middlewa
                 }
             }
 
-            // Track pending tool calls from LLM response and emit call_tool actions
-            // Only emit call.tool for tools this middleware knows about.
+            // Only emit `call.tool` for tools this middleware knows about.
             if (ctx.request.trigger.type === "llm.response") {
                 const toolCalls = ctx.request.trigger.message.tool_calls;
                 if (toolCalls && toolCalls.length > 0) {
@@ -636,7 +563,6 @@ export function tools<S>(selectorOrValue: ToolSelector<S> | ToolInput): Middlewa
                 }
             }
 
-            // Augment actions with tool definitions and retry policies
             const actions = downstream.actions.map((action) => {
                 if (action.type === "call.llm") {
                     return {
@@ -669,12 +595,56 @@ export function tools<S>(selectorOrValue: ToolSelector<S> | ToolInput): Middlewa
 // ── LLM loop ───────────────────────────────────────────────────────────────
 
 export interface LlmToolLoopSelection {
-    request: Omit<LlmRequest, "messages"> & { messages?: Message[] };
-    retry?: RetryPolicy;
+    /** A worker-side provider generator (e.g. `anthropicGenerate`) or `serverGenerate`. */
+    generator?: LlmGenerator;
+    /** Shorthand for `serverGenerate({ model })`; ignored when `generator` is set. */
+    model?: string;
+    /** Override the generator's streaming setting. */
     stream?: boolean;
+    retry?: RetryPolicy;
     toolRetries?: Record<string, RetryPolicy>;
-    handler?: LlmHandler;
-    caller?: (request: LlmRequest, ctx: { emitDelta?: (part: StreamPart) => Promise<void> }) => Promise<LlmResponse>;
+}
+
+/**
+ * One worker-side LLM call, used as a worker generator's `run`. `request.tools` is
+ * already merged in by `tools()`; stream deltas via `ctx.emitDelta`.
+ */
+export type LlmGenerate = (
+    request: LlmRequest,
+    ctx: { emitDelta?: (part: StreamPart) => Promise<void> },
+) => Promise<LlmResponse>;
+
+/**
+ * A bound LLM backend for `llmToolLoop`. A worker generator supplies `run` (the call
+ * runs on your worker); a server generator omits it (the Substructure server calls
+ * its configured provider).
+ */
+export interface LlmGenerator {
+    request: Omit<LlmRequest, "messages" | "tools">;
+    handler: LlmHandler;
+    stream?: boolean;
+    run?: LlmGenerate;
+}
+
+/** `model` is the server's provider model id, e.g. "anthropic/claude-sonnet-4-6". */
+export function serverGenerate(settings: {
+    model: string;
+    temperature?: number;
+    maxTokens?: number;
+    reasoning?: ReasoningConfig;
+    stream?: boolean;
+}): LlmGenerator {
+    const request: Omit<LlmRequest, "messages" | "tools"> = { model: settings.model };
+    if (settings.temperature !== undefined) request.temperature = settings.temperature;
+    if (settings.maxTokens !== undefined) request.max_completion_tokens = settings.maxTokens;
+    if (settings.reasoning !== undefined) request.reasoning = settings.reasoning;
+    return { request, handler: "server", stream: settings.stream ?? false };
+}
+
+function resolveGenerator(selection: LlmToolLoopSelection): LlmGenerator {
+    if (selection.generator) return selection.generator;
+    if (selection.model !== undefined) return serverGenerate({ model: selection.model });
+    throw new Error("llmToolLoop requires a `generator` or a `model` shorthand");
 }
 
 function flattenStreamPart(part: StreamPart): LlmTokenDeltaInput | null {
@@ -696,14 +666,14 @@ function flattenStreamPart(part: StreamPart): LlmTokenDeltaInput | null {
 
 async function runWorkerLlmCall(
     trigger: Extract<DecisionTrigger, { type: "llm.request" }>,
-    caller?: (request: LlmRequest, ctx: { emitDelta?: (part: StreamPart) => Promise<void> }) => Promise<LlmResponse>,
+    generate: LlmGenerate | undefined,
     emitDelta?: (delta: LlmTokenDeltaInput) => Promise<void>,
 ): Promise<WorkerAction> {
-    if (!caller) {
+    if (!generate) {
         return {
             type: "return.llm.error",
             call_id: trigger.call_id,
-            error: 'llmToolLoop received an "llm.request" trigger but no `caller` was configured for worker-handled LLM calls',
+            error: 'llmToolLoop received an "llm.request" trigger but the generator has no `run` for worker-handled LLM calls',
             retryable: false,
             attempt: trigger.attempt,
         };
@@ -715,7 +685,7 @@ async function runWorkerLlmCall(
           }
         : undefined;
     try {
-        const response = await caller(trigger.request, { emitDelta: emitPart });
+        const response = await generate(trigger.request, { emitDelta: emitPart });
         return {
             type: "return.llm.result",
             call_id: trigger.call_id,
@@ -737,13 +707,15 @@ export function llmToolLoop<S>(
     selectorOrValue:
         | ((state: S, ctx: AgentContext<S>) => LlmToolLoopSelection | Promise<LlmToolLoopSelection>)
         | LlmToolLoopSelection,
-): MiddlewareFn<S> {
+): MiddlewareFn<S, S> {
     const selector: (state: S, ctx: AgentContext<S>) => LlmToolLoopSelection | Promise<LlmToolLoopSelection> =
         typeof selectorOrValue === "function" ? selectorOrValue : () => selectorOrValue;
 
     return middleware({
         handler: async (ctx: AgentContext<S>, next: Next<S>) => {
             const selection = await selector(ctx.state, ctx);
+            const generator = resolveGenerator(selection);
+            const stream = selection.stream ?? generator.stream ?? false;
             const downstream = await next(ctx);
 
             const { trigger } = ctx.request;
@@ -757,19 +729,19 @@ export function llmToolLoop<S>(
                             {
                                 type: "call.llm",
                                 request: {
-                                    ...selection.request,
+                                    ...generator.request,
                                     messages: [],
                                 },
                                 retry: selection.retry ?? DEFAULT_RETRY,
-                                stream: selection.stream ?? false,
-                                handler: selection.handler ?? "server",
+                                stream,
+                                handler: generator.handler,
                             },
                             ...downstream.actions,
                         ],
                     };
                 }
                 case "llm.request": {
-                    const action = await runWorkerLlmCall(trigger, selection.caller, ctx.emitDelta);
+                    const action = await runWorkerLlmCall(trigger, generator.run, ctx.emitDelta);
                     return { ...downstream, actions: [action, ...downstream.actions] };
                 }
                 case "llm.response": {
@@ -788,14 +760,12 @@ export function llmToolLoop<S>(
     });
 }
 
-// ── Sub-agents ─────────────────────────────────────────────────────────────
-
 /**
  * Presents each sub-agent to the model as a tool and turns a call into a
  * `spawn.sub_agent` child session. Results return via `effects.complete`, so
  * this middleware keeps no state.
  */
-export function subAgents<S>(config: { agents: Handler[]; retry?: RetryPolicy }): MiddlewareFn<unknown> {
+export function subAgents<S>(config: { agents: Handler[]; retry?: RetryPolicy }): MiddlewareFn<S, S> {
     const subAgentMap: Record<string, { agentId: string }> = {};
     for (const handler of config.agents) {
         subAgentMap[handler.agentId] = { agentId: handler.agentId };
@@ -815,7 +785,7 @@ export function subAgents<S>(config: { agents: Handler[]; retry?: RetryPolicy })
         );
 
     return middleware({
-        handler: async (ctx, next) => {
+        handler: async (ctx: AgentContext<S>, next: Next<S>) => {
             if (ctx.request.trigger.type !== "llm.response") {
                 const downstream = await next(ctx);
                 return { ...downstream, actions: mergeSubAgentTools(downstream.actions) };
@@ -860,8 +830,6 @@ export function subAgents<S>(config: { agents: Handler[]; retry?: RetryPolicy })
         },
     });
 }
-
-// ── Helpers ────────────────────────────────────────────────────────────────
 
 function handlersToLlmTools(handlers: Handler[]): LlmTool[] {
     return handlers.map((handler) => ({

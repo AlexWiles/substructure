@@ -10,6 +10,7 @@ import {
     logging,
     messageHistory,
     messageHistoryCurrentTurn,
+    serverGenerate,
     stateSlice,
     subAgents,
     tool,
@@ -17,8 +18,6 @@ import {
 } from "./middleware";
 import type { Handler } from "./worker";
 import { HandlerBuilder, Worker } from "./worker";
-
-// ── Agent factory ───────────────────────────────────────────────────────────
 
 export interface AgentOptions {
     id: string;
@@ -36,6 +35,7 @@ export interface AgentFactory {
     messageHistoryCurrentTurn: typeof messageHistoryCurrentTurn;
     tools: typeof tools;
     llmToolLoop: typeof llmToolLoop;
+    serverGenerate: typeof serverGenerate;
     subAgents: typeof subAgents;
 }
 
@@ -54,12 +54,11 @@ function createAgentFactory(): AgentFactory {
     factory.messageHistoryCurrentTurn = messageHistoryCurrentTurn;
     factory.tools = tools;
     factory.llmToolLoop = llmToolLoop;
+    factory.serverGenerate = serverGenerate;
     factory.subAgents = subAgents;
 
     return factory;
 }
-
-// ── Namespace objects ───────────────────────────────────────────────────────
 
 class BackendNamespace {
     client(options: BackendClientOptions): BackendClient {
@@ -72,8 +71,6 @@ class FrontendNamespace {
         return new FrontendClient(options);
     }
 }
-
-// ── Substructure ────────────────────────────────────────────────────────────
 
 export class Substructure {
     readonly backend: BackendNamespace;

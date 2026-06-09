@@ -28,11 +28,9 @@ export interface StartTurnRequest {
 
 export interface StreamOptions {
     sequenceAfter?: number;
-    /** Include transient `llm.token.delta` events. Off by default, so
-     *  `stream()` yields only persisted events and you can `switch` on
-     *  `event.payload.type` without a guard. Opt in for live token
-     *  rendering; deltas only arrive when streaming is enabled on the
-     *  agent's `llmToolLoop`. */
+    /** Include transient `llm.token.delta` events. Off by default, so `stream()`
+     *  yields only persisted events. Deltas only arrive when streaming is enabled
+     *  on the agent's `llmToolLoop`. */
     tokens?: boolean;
 }
 
@@ -61,9 +59,8 @@ export class FrontendClient {
         return this.user.submitToolCallResult(args.sessionId, toSubmitToolCallResultRequest(args));
     }
 
-    /** Stream events for a session. If `scope.turnId` is set, the stream is
-     *  filtered to that turn and auto-closes on completion. Yields only
-     *  persisted events unless `{ tokens: true }` is passed. */
+    /** When `scope.turnId` is set, the stream is filtered to that turn and
+     *  auto-closes on completion. */
     stream(scope: SessionScope, options?: StreamOptions & { tokens?: false }): AsyncGenerator<PersistedEvent>;
     stream(scope: SessionScope, options: StreamOptions & { tokens: true }): AsyncGenerator<Event>;
     stream(scope: SessionScope, options: StreamOptions): AsyncGenerator<Event>;
@@ -75,7 +72,7 @@ export class FrontendClient {
         return options?.tokens ? raw : persistedOnly(raw);
     }
 
-    /** Stream a turn to completion and return its result. Requires `scope.turnId`. */
+    /** Requires `scope.turnId`. */
     turnResult(scope: SessionScope): Promise<TurnResult> {
         if (!scope.turnId) {
             throw new Error("turnResult requires scope.turnId");

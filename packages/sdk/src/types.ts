@@ -1,5 +1,3 @@
-// ── Primitives ──────────────────────────────────────────────────────────────
-
 /** UUID v7 string */
 export type Uuid = string;
 
@@ -14,8 +12,6 @@ export type TraceId = string;
 
 /** Hex-encoded 8-byte span ID */
 export type SpanId = string;
-
-// ── Identity ────────────────────────────────────────────────────────────────
 
 /**
  * The full identity shape as seen in the event log and admin views. `id` is
@@ -40,8 +36,6 @@ export interface WorkerIdentity {
     metadata?: Record<string, string>;
 }
 
-// ── Retry ───────────────────────────────────────────────────────────────────
-
 export interface RetryPolicy {
     timeout_secs: number | null;
     max_retries: number;
@@ -54,8 +48,6 @@ export interface RetryState {
     next_at?: DateTime;
 }
 
-// ── Tracing ─────────────────────────────────────────────────────────────────
-
 export interface SpanContext {
     trace_id: TraceId;
     span_id: SpanId;
@@ -64,8 +56,6 @@ export interface SpanContext {
     trace_state?: string;
     name?: string;
 }
-
-// ── Messages ────────────────────────────────────────────────────────────────
 
 export type Role = "system" | "user" | "assistant" | "tool";
 
@@ -86,8 +76,7 @@ export interface ToolCallChunk {
     arguments?: string;
 }
 
-// ── Multimodal content parts (OpenAI/OpenRouter wire format) ──────────
-
+// Multimodal content parts use the OpenAI/OpenRouter wire format.
 export interface ImageUrlPart {
     type: "image_url";
     image_url: { url: string };
@@ -115,7 +104,6 @@ export interface TextPart {
 
 export type ContentPart = TextPart | ImageUrlPart | FilePart | InputAudioPart | VideoUrlPart;
 
-/** Message content: plain string or array of typed parts. */
 export type Content = string | ContentPart[];
 
 export interface Message {
@@ -126,7 +114,6 @@ export interface Message {
     name?: string;
 }
 
-/** Extract concatenated text from message content. */
 export function contentText(content: Content | undefined): string {
     if (content === undefined) return "";
     if (typeof content === "string") return content;
@@ -135,8 +122,6 @@ export function contentText(content: Content | undefined): string {
         .map((p) => p.text)
         .join("\n");
 }
-
-// ── LLM ─────────────────────────────────────────────────────────────────────
 
 export interface LlmToolFunction {
     name: string;
@@ -185,15 +170,9 @@ export interface LlmResponse {
     images?: ResponseImage[];
 }
 
-// ── Tool Handler ────────────────────────────────────────────────────────────
-
 export type ToolHandler = "worker" | "client";
 
-// ── LLM Handler ─────────────────────────────────────────────────────────────
-
 export type LlmHandler = "server" | "worker";
-
-// ── Decision Triggers ───────────────────────────────────────────────────────
 
 export interface ToolResult {
     tool_call_id: string;
@@ -237,8 +216,6 @@ export type DecisionTrigger =
     | { type: "sub_agent.error"; session_id: Uuid; agent_id: string; error: string }
     | { type: "interrupt.resumed"; interrupt_id: string }
     | { type: "stall" };
-
-// ── Worker Actions ──────────────────────────────────────────────────────────
 
 export type WorkerAction =
     | {
@@ -285,21 +262,18 @@ export interface SubmitToolCallResultResponse {
     error?: string;
 }
 
-/** Identifies a single deferred tool call. */
 export interface SubmitToolCallResultTarget {
     sessionId: string;
     toolCallId: string;
     attempt: number;
 }
 
-/** Successful completion of a deferred tool call. */
 export interface SubmitToolCallSuccess {
     result: string;
     error?: never;
     retryable?: never;
 }
 
-/** Failed completion of a deferred tool call. */
 export interface SubmitToolCallFailure {
     error: string;
     retryable?: boolean;
@@ -313,10 +287,8 @@ export interface SubmitToolCallFailure {
  */
 export type SubmitToolCallResultOutcome = SubmitToolCallSuccess | SubmitToolCallFailure;
 
-/** Arguments for completing a deferred tool call. */
 export type SubmitToolCallResultArgs = SubmitToolCallResultTarget & SubmitToolCallResultOutcome;
 
-/** Translate the ergonomic args object into the wire shape. */
 export function toSubmitToolCallResultRequest(args: SubmitToolCallResultArgs): SubmitToolCallResultRequest {
     if (args.result !== undefined) {
         return {
@@ -334,8 +306,6 @@ export function toSubmitToolCallResultRequest(args: SubmitToolCallResultArgs): S
         attempt: args.attempt,
     };
 }
-
-// ── Event Payloads ──────────────────────────────────────────────────────────
 
 export interface SessionCreated {
     type: "session.created";
@@ -530,8 +500,6 @@ export interface TurnCompleted {
     turn_token_usage?: Record<string, number>;
 }
 
-// ── Event (tagged union) ────────────────────────────────────────────────────
-
 export type EventPayload =
     | SessionCreated
     | NewMessage
@@ -556,8 +524,6 @@ export type EventPayload =
     | SessionDone
     | TurnStarted
     | TurnCompleted;
-
-// ── Event Envelope ──────────────────────────────────────────────────────────
 
 export interface DerivedState {
     status: SessionStatus;
@@ -604,8 +570,6 @@ export async function* persistedOnly(stream: AsyncIterable<Event>): AsyncGenerat
     }
 }
 
-// ── Turns ───────────────────────────────────────────────────────────────────
-
 /** Scope of events to observe within a session. With `turnId` omitted, the
  *  scope is the whole session. `startTurn` always returns one with `turnId`
  *  set; `turnResult` requires it at runtime. */
@@ -640,8 +604,6 @@ export async function drainToTurnResult(stream: AsyncIterable<Event>): Promise<T
         tokenUsage: completed.turn_token_usage ?? {},
     };
 }
-
-// ── Session State ───────────────────────────────────────────────────────────
 
 export type SessionStatus = "idle" | { interrupted: { interrupt_id: string } } | "done";
 
@@ -705,8 +667,6 @@ export interface SessionState {
     worker_decisions: Record<string, WorkerDecisionState>;
 }
 
-// ── Client HTTP API ─────────────────────────────────────────────────────────
-
 export interface SubmitPayloadRequest {
     agent_id: string;
     payload: ClientPayload;
@@ -750,8 +710,6 @@ export interface StreamSessionEventsParams {
     turn_id?: string;
     sequence_after?: number;
 }
-
-// ── Worker HTTP API ─────────────────────────────────────────────────────────
 
 export interface WorkerAuthOptions {
     bearerToken: string;
