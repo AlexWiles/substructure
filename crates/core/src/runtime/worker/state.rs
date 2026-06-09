@@ -2,13 +2,12 @@ use std::fmt;
 use std::ops::Deref;
 
 use base64::Engine;
-use serde::de::{self, SeqAccess, Visitor};
+use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Opaque worker state: bytes the engine stores but never interprets (workers
 /// own the format). Serializes as base64; the encoding lives in the type, so a
-/// field can't forget it. Deserialize tolerates a legacy byte-array form so
-/// already-persisted state still loads.
+/// field can't forget it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkerState(pub Vec<u8>);
 
@@ -32,7 +31,7 @@ impl<'de> Deserialize<'de> for WorkerState {
             type Value = WorkerState;
 
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.write_str("a base64 string or a byte array")
+                f.write_str("a base64 string")
             }
 
             fn visit_str<E: de::Error>(self, v: &str) -> Result<WorkerState, E> {
@@ -41,17 +40,9 @@ impl<'de> Deserialize<'de> for WorkerState {
                     .map(WorkerState)
                     .map_err(de::Error::custom)
             }
-
-            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<WorkerState, A::Error> {
-                let mut bytes = Vec::with_capacity(seq.size_hint().unwrap_or(0));
-                while let Some(byte) = seq.next_element::<u8>()? {
-                    bytes.push(byte);
-                }
-                Ok(WorkerState(bytes))
-            }
         }
 
-        deserializer.deserialize_any(WorkerStateVisitor)
+        deserializer.deserialize_str(WorkerStateVisitor)
     }
 }
 
@@ -85,10 +76,13 @@ mod tests {
     }
 
     #[test]
-    fn deserializes_base64_and_legacy_byte_array() {
+    fn deserializes_base64() {
         let from_b64: WorkerState = serde_json::from_str("\"eyJ9\"").unwrap();
-        let from_array: WorkerState = serde_json::from_str("[123,34,125]").unwrap();
         assert_eq!(from_b64.0, vec![123, 34, 125]);
-        assert_eq!(from_array.0, vec![123, 34, 125]);
+    }
+
+    #[test]
+    fn rejects_byte_array() {
+        assert!(serde_json::from_str::<WorkerState>("[123,34,125]").is_err());
     }
 }
