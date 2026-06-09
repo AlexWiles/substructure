@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use clap::Subcommand;
+use clap::Args;
 use tokio::net::TcpListener;
 
 use crate::cli::auth::AuthWiring;
@@ -23,45 +23,41 @@ use crate::transport::worker_http::{self, WorkerHttpState};
 use crate::worker::push::{PushRegistry, TransportRegistry};
 use crate::{start, RuntimeConfig};
 
-#[derive(Subcommand)]
-pub enum LocalCommand {
-    /// Start the local server.
-    Start {
-        #[arg(long, default_value = "127.0.0.1")]
-        host: String,
-        #[arg(long, default_value_t = 8080)]
-        port: u16,
-        #[arg(long, default_value = "data.db")]
-        db: String,
-        /// Pre-register an HTTP worker at startup.
-        #[arg(long)]
-        worker_url: Option<String>,
-        /// Signing secret for the pre-registered HTTP worker (auto-generated if omitted).
-        #[arg(long, requires = "worker_url")]
-        signing_secret: Option<String>,
-        /// LLM provider. Determines which API key env var is required
-        /// (e.g. `openrouter` needs OPENROUTER_API_KEY). Optional: omit it to
-        /// run a server that only handles worker-side LLM calls.
-        #[arg(long, value_enum)]
-        provider: Option<LlmProviderArg>,
-        /// Disable client and worker authentication. For local development only.
-        #[arg(long)]
-        dev: bool,
-    },
+#[derive(Args)]
+pub struct ServeArgs {
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+    #[arg(long, default_value_t = 8080)]
+    port: u16,
+    #[arg(long, default_value = "data.db")]
+    db: String,
+    /// Pre-register an HTTP worker at startup.
+    #[arg(long)]
+    worker_url: Option<String>,
+    /// Signing secret for the pre-registered HTTP worker (auto-generated if omitted).
+    #[arg(long, requires = "worker_url")]
+    signing_secret: Option<String>,
+    /// LLM provider. Determines which API key env var is required
+    /// (e.g. `openrouter` needs OPENROUTER_API_KEY). Optional: omit it to
+    /// run a server that only handles worker-side LLM calls.
+    #[arg(long, value_enum)]
+    provider: Option<LlmProviderArg>,
+    /// Disable client and worker authentication. For local development only.
+    #[arg(long)]
+    dev: bool,
 }
 
-pub async fn run(command: LocalCommand) -> anyhow::Result<()> {
-    match command {
-        LocalCommand::Start {
-            host,
-            port,
-            db,
-            worker_url,
-            signing_secret,
-            provider,
-            dev,
-        } => start_server(host, port, db, worker_url, signing_secret, provider, dev).await,
-    }
+pub async fn serve(args: ServeArgs) -> anyhow::Result<()> {
+    start_server(
+        args.host,
+        args.port,
+        args.db,
+        args.worker_url,
+        args.signing_secret,
+        args.provider,
+        args.dev,
+    )
+    .await
 }
 
 async fn start_server(
@@ -151,11 +147,14 @@ async fn start_server(
         auth: auth.admin.clone(),
         shutdown: shutdown.clone(),
     });
-    let v1_routes = admin_http::v1_router(AdminHttpState {
-        runtime: rt.clone(),
-        auth: auth.admin,
-        shutdown: shutdown.clone(),
-    });
+    let v1_routes = admin_http::v1_router(
+        AdminHttpState {
+            runtime: rt.clone(),
+            auth: auth.admin,
+            shutdown: shutdown.clone(),
+        },
+        adapter.clone(),
+    );
     let client_routes = client_http::router(ClientHttpState {
         runtime: rt.clone(),
         auth: auth.client,

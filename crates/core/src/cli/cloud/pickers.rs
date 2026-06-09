@@ -4,20 +4,10 @@ use anyhow::{bail, Context as _, Result};
 use dialoguer::{theme::ColorfulTheme, Input, Select};
 use serde::{Deserialize, Serialize};
 
+use crate::api::v1::{App, Org};
+
 use super::context::Context;
 use super::CloudGlobals;
-
-#[derive(Debug, Deserialize)]
-pub struct OrgRef {
-    pub id: String,
-    pub name: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AppRef {
-    pub id: String,
-    pub name: String,
-}
 
 /// True when we may show interactive prompts: stdin is a TTY and
 /// `--no-interaction` is not set.
@@ -26,7 +16,7 @@ pub fn interactive(globals: &CloudGlobals) -> bool {
 }
 
 pub async fn pick_org(ctx: &Context) -> Result<String> {
-    let orgs: Vec<OrgRef> = ctx.client.get("/api/v1/orgs").await?;
+    let orgs: Vec<Org> = ctx.client.get("/api/v1/orgs").await?;
     if orgs.is_empty() {
         bail!("no organizations. Create one in the web UI first.");
     }
@@ -52,7 +42,7 @@ pub async fn pick_org(ctx: &Context) -> Result<String> {
 }
 
 pub async fn pick_app(ctx: &Context, org_id: &str) -> Result<Option<String>> {
-    let apps: Vec<AppRef> = ctx
+    let apps: Vec<App> = ctx
         .client
         .get(&format!("/api/v1/orgs/{org_id}/apps"))
         .await?;
@@ -113,7 +103,7 @@ struct NamePayload<'a> {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateAppResponse {
-    app: AppRef,
+    app: App,
     signing_secret: String,
 }
 

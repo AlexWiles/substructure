@@ -103,7 +103,7 @@ pub async fn run(
 
     let token = loop {
         if started.elapsed() > total_window {
-            bail!("login expired before approval. Run `substructure cloud login` to start over.");
+            bail!("login expired before approval. Run `substructure login` to start over.");
         }
         sleep(interval).await;
 
@@ -135,7 +135,7 @@ pub async fn run(
             }
             "access_denied" => bail!("login denied by user"),
             "expired_token" => {
-                bail!("login code expired. Run `substructure cloud login` to start over.")
+                bail!("login code expired. Run `substructure login` to start over.")
             }
             other => bail!(
                 "OAuth error `{other}`: {}",
@@ -146,9 +146,9 @@ pub async fn run(
         }
     };
 
-    creds.token = Some(token);
+    creds.set_token(&api_url, token);
     credentials::save(&path, &creds)?;
 
-    println!("Logged in. Token saved to {}", path.display());
+    println!("Logged in to {api_url}. Token saved to {}", path.display());
     Ok(())
 }

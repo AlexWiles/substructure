@@ -16,7 +16,7 @@ pub enum KeysCommand {
         scope: AppScope,
     },
     /// Issue a new API key. The plaintext is printed to stdout and shown once.
-    /// Pipe-friendly: `substructure cloud keys create --label foo | wrangler secret put X`.
+    /// Pipe-friendly: `substructure keys create --label foo | wrangler secret put X`.
     Create {
         label: Option<String>,
         #[command(flatten)]

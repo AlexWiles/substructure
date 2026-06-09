@@ -39,6 +39,8 @@ pub async fn run(cmd: LinkCommand) -> Result<()> {
 
     let org = if let Some(o) = cmd.org.clone() {
         o
+    } else if let Some(o) = ctx.server_default_org().await {
+        o
     } else if interactive {
         pickers::pick_org(&ctx).await?
     } else {
@@ -50,7 +52,9 @@ pub async fn run(cmd: LinkCommand) -> Result<()> {
         Some(s) if s.is_empty() => None,
         Some(s) => Some(s),
         None => {
-            if interactive {
+            if let Some(a) = ctx.server_default_app().await {
+                Some(a)
+            } else if interactive {
                 pickers::pick_app(&ctx, &org).await?
             } else {
                 None

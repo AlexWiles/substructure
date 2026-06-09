@@ -2,6 +2,8 @@ use anyhow::{bail, Result};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 
+use crate::api::v1::App;
+
 use super::context::Context;
 use super::pickers;
 use super::print;
@@ -44,22 +46,8 @@ pub enum AppsCommand {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct AppRecord {
-    id: String,
-    organization_id: String,
-    name: String,
-    #[serde(default)]
-    created_at: Option<String>,
-    #[serde(default)]
-    balance_usd: Option<String>,
-    #[serde(default)]
-    session_count: Option<i64>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct CreateAppResponse {
-    app: AppRecord,
+    app: App,
     signing_secret: String,
 }
 
@@ -90,7 +78,7 @@ pub async fn run(command: AppsCommand) -> Result<()> {
 
 async fn list(scope: OrgScope) -> Result<()> {
     let (ctx, org) = Context::from_org(&scope).await?;
-    let apps: Vec<AppRecord> = ctx.client.get(&format!("/api/v1/orgs/{org}/apps")).await?;
+    let apps: Vec<App> = ctx.client.get(&format!("/api/v1/orgs/{org}/apps")).await?;
 
     if scope.globals.json {
         return print::json(&apps);
@@ -160,7 +148,7 @@ async fn show(app_id: Option<String>, scope: AppScope) -> Result<()> {
         ..scope
     };
     let (ctx, app_id) = Context::from_app(&scope).await?;
-    let a: AppRecord = ctx.client.get(&format!("/api/v1/apps/{app_id}")).await?;
+    let a: App = ctx.client.get(&format!("/api/v1/apps/{app_id}")).await?;
 
     if scope.globals.json {
         return print::json(&a);
@@ -195,7 +183,7 @@ async fn rename(app_id: Option<String>, new_name: Option<String>, scope: AppScop
             pickers::prompt_text("New name")?
         }
     };
-    let a: AppRecord = ctx
+    let a: App = ctx
         .client
         .patch_json(
             &format!("/api/v1/apps/{app_id}"),

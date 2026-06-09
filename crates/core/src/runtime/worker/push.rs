@@ -98,6 +98,10 @@ impl PushRegistry {
         self.store.remove(tenant_id).await
     }
 
+    pub async fn registration(&self, tenant_id: &str) -> Option<PushRegistrationRecord> {
+        self.store.get(tenant_id).await.ok().flatten()
+    }
+
     pub async fn lookup(&self, tenant_id: &str) -> Option<Arc<dyn PushTransport>> {
         let record = self.store.get(tenant_id).await.ok()??;
         self.transports

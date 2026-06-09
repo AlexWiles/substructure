@@ -39,6 +39,18 @@ impl PushAdapter {
         Ok(())
     }
 
+    pub async fn registration(&self, tenant_id: &str) -> Option<PushRegistrationRecord> {
+        self.registry.registration(tenant_id).await
+    }
+
+    pub async fn unregister(&self, tenant_id: &str) -> Result<(), String> {
+        let handle = self.handles.lock().unwrap().remove(tenant_id);
+        if let Some(h) = handle {
+            h.abort();
+        }
+        self.registry.unregister(tenant_id).await
+    }
+
     fn spawn_loop(&self, tenant_id: String) {
         let mut handles = self.handles.lock().unwrap();
         if let Some(existing) = handles.get(&tenant_id) {

@@ -28,9 +28,17 @@ same version.
   `Agent` on Substructure via `OpenAIAgent`, or drive the loop directly with the
   `openaiGenerate` generator.
 - The server and embedded runtime can start without an LLM provider configured.
+- `$SUBS_API_TOKEN` sets the CLI's bearer token without a login — for targeting a
+  self-hosted server with auth enabled (a `serve --dev` server needs no token).
+- `substructure login` now stores tokens per server URL, so you can stay logged
+  in to several servers at once (e.g. cloud and a staging deploy); each command
+  sends only the token for the server it targets.
 
 ### Changed
 
+- **Breaking (CLI):** subcommands are now top-level — `substructure cloud <cmd>`
+  becomes `substructure <cmd>` (e.g. `substructure sessions list`), and
+  `substructure local start` becomes `substructure serve`.
 - **Breaking:** session events identify a session's end user as `owner` (was
   `identity`); consumers reading raw events should read `owner`. No alias for the
   old key.
