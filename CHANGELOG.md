@@ -39,6 +39,9 @@ same version.
 - **Breaking (CLI):** subcommands are now top-level — `substructure cloud <cmd>`
   becomes `substructure <cmd>` (e.g. `substructure sessions list`), and
   `substructure local start` becomes `substructure serve`.
+- **Breaking (CLI):** the credentials file is now keyed by server URL with no
+  migration of the old single top-level `token`; existing logins must re-run
+  `substructure login`.
 - **Breaking:** session events identify a session's end user as `owner` (was
   `identity`); consumers reading raw events should read `owner`. No alias for the
   old key.

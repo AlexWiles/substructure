@@ -14,10 +14,6 @@ pub const TOKEN_ENV: &str = "SUBS_API_TOKEN";
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Credentials {
-    // Pre-URL-aware single token. Still read so existing logins keep working
-    // against the default cloud; migrated into `servers` on the next login.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    token: Option<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     servers: BTreeMap<String, ServerCreds>,
 }
@@ -29,30 +25,18 @@ struct ServerCreds {
 
 impl Credentials {
     pub fn token_for(&self, url: &str) -> Option<&str> {
-        let url = normalize_url(url);
-        if let Some(s) = self.servers.get(&url) {
-            return Some(s.token.as_str());
-        }
-        // A legacy flat token was always issued by the default cloud.
-        if url == DEFAULT_API_URL {
-            return self.token.as_deref();
-        }
-        None
+        self.servers
+            .get(&normalize_url(url))
+            .map(|s| s.token.as_str())
     }
 
     pub fn set_token(&mut self, url: &str, token: String) {
         self.servers
             .insert(normalize_url(url), ServerCreds { token });
-        self.token = None;
     }
 
     pub fn clear_token(&mut self, url: &str) -> bool {
-        let url = normalize_url(url);
-        let mut cleared = self.servers.remove(&url).is_some();
-        if url == DEFAULT_API_URL {
-            cleared |= self.token.take().is_some();
-        }
-        cleared
+        self.servers.remove(&normalize_url(url)).is_some()
     }
 }
 
@@ -159,9 +143,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_flat_token_maps_to_default_cloud() {
-        // Older files carried a top-level `token` (and a now-unused `api_url`).
-        // The flat token must keep working against the default cloud only.
+    fn unknown_top_level_keys_are_ignored() {
+        // Pre-URL-aware files carried a top-level `token` and `api_url`. Those
+        // keys are no longer recognized and must not break loading.
         let dir = tmpdir();
         let path = dir.join("credentials.toml");
         fs::write(
@@ -170,8 +154,7 @@ mod tests {
         )
         .unwrap();
         let loaded = load(&path).unwrap();
-        assert_eq!(loaded.token_for(DEFAULT_API_URL), Some("ba_secret"));
-        assert_eq!(loaded.token_for("https://other.example"), None);
+        assert_eq!(loaded.token_for(DEFAULT_API_URL), None);
     }
 
     #[test]
