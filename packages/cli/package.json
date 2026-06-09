@@ -1,6 +1,6 @@
 {
   "name": "@substructure.ai/cli",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "description": "CLI for Substructure",
   "license": "FSL-1.1-ALv2",
   "type": "module",
@@ -36,9 +36,9 @@
     "README.md"
   ],
   "optionalDependencies": {
-    "@substructure.ai/cli-darwin-arm64": "0.1.15",
-    "@substructure.ai/cli-darwin-x64": "0.1.15",
-    "@substructure.ai/cli-linux-arm64": "0.1.15",
-    "@substructure.ai/cli-linux-x64": "0.1.15"
+    "@substructure.ai/cli-darwin-arm64": "0.1.16",
+    "@substructure.ai/cli-darwin-x64": "0.1.16",
+    "@substructure.ai/cli-linux-arm64": "0.1.16",
+    "@substructure.ai/cli-linux-x64": "0.1.16"
   }
 }

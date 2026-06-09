@@ -10,6 +10,8 @@ same version.
 
 ## [Unreleased]
 
+## [0.1.16] - 2026-06-09
+
 ### Added
 
 - Native AG-UI protocol support: endpoints that stream an agent turn as AG-UI SSE
@@ -87,6 +89,7 @@ same version.
 
 - SDK typing and developer-experience improvements.
 
-[Unreleased]: https://github.com/substructureai/substructure/compare/v0.1.15...HEAD
+[Unreleased]: https://github.com/substructureai/substructure/compare/v0.1.16...HEAD
+[0.1.16]: https://github.com/substructureai/substructure/compare/v0.1.15...v0.1.16
 [0.1.15]: https://github.com/substructureai/substructure/compare/v0.1.14...v0.1.15
 [0.1.14]: https://github.com/substructureai/substructure/releases/tag/v0.1.14
