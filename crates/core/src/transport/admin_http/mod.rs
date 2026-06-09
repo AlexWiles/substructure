@@ -1,4 +1,7 @@
 mod routes;
+mod v1;
+
+pub use v1::router as v1_router;
 
 use std::sync::Arc;
 
@@ -39,12 +42,12 @@ pub fn router(state: AdminHttpState) -> Router {
         )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
-            admin_auth_middleware,
+            machine_auth_middleware,
         ))
         .with_state(state)
 }
 
-async fn admin_auth_middleware(
+async fn machine_auth_middleware(
     State(state): State<AdminHttpState>,
     mut request: axum::http::Request<axum::body::Body>,
     next: Next,

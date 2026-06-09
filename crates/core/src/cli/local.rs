@@ -148,6 +148,11 @@ async fn start_server(
 
     let admin_routes = admin_http::router(AdminHttpState {
         runtime: rt.clone(),
+        auth: auth.admin.clone(),
+        shutdown: shutdown.clone(),
+    });
+    let v1_routes = admin_http::v1_router(AdminHttpState {
+        runtime: rt.clone(),
         auth: auth.admin,
         shutdown: shutdown.clone(),
     });
@@ -163,7 +168,8 @@ async fn start_server(
         shutdown: shutdown.clone(),
     });
 
-    let server = SubstructureServer::new(vec![admin_routes, client_routes, worker_routes]);
+    let server =
+        SubstructureServer::new(vec![admin_routes, client_routes, worker_routes, v1_routes]);
 
     let addr = format!("{host}:{port}");
     if dev {

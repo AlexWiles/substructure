@@ -88,7 +88,10 @@ impl Context {
         else {
             return;
         };
-        let raw = a.balance_usd.as_deref().unwrap_or("0");
+        // A missing balance is not a zero balance: local servers omit it.
+        let Some(raw) = a.balance_usd.as_deref() else {
+            return;
+        };
         if print::is_zero_usd(raw) {
             print::warn_zero_balance(&a.name, self.client.base_url(), app_id);
         }
