@@ -35,7 +35,6 @@ pub mod llm;
 pub mod owner;
 pub mod processor;
 pub mod retry;
-pub mod serde_helpers;
 pub mod session;
 pub mod span;
 pub mod sub_agent;

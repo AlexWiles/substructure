@@ -8,7 +8,7 @@ use super::message::Message;
 use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse};
 use crate::runtime::owner::SessionOwner;
 use crate::runtime::retry::RetryPolicy;
-use crate::runtime::serde_helpers::base64_bytes;
+use crate::runtime::worker::WorkerState;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -209,8 +209,7 @@ pub struct WorkerDecisionRequested {
 pub struct WorkerDecisionCompleted {
     pub decision_id: String,
     /// Opaque worker state — session stores but never interprets.
-    #[serde(with = "base64_bytes")]
-    pub state: Vec<u8>,
+    pub state: WorkerState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -229,8 +228,7 @@ pub struct SessionMessageRequested {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerStateUpdated {
-    #[serde(with = "base64_bytes")]
-    pub state: Vec<u8>,
+    pub state: WorkerState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

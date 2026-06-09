@@ -11,6 +11,7 @@ use crate::runtime::aggregate::Caller;
 use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse};
 use crate::runtime::owner::SessionOwner;
 use crate::runtime::retry::RetryPolicy;
+use crate::runtime::worker::WorkerState;
 
 #[derive(Debug, Clone)]
 pub enum CommandPayload {
@@ -61,14 +62,14 @@ pub enum CommandPayload {
         tool_call_id: String,
         attempt: u32,
         result: String,
-        worker_state: Option<Vec<u8>>,
+        worker_state: Option<WorkerState>,
     },
     FailToolCall {
         tool_call_id: String,
         attempt: u32,
         error: String,
         retryable: bool,
-        worker_state: Option<Vec<u8>>,
+        worker_state: Option<WorkerState>,
     },
     RequestSubAgent {
         session_id: String,
@@ -104,7 +105,7 @@ pub enum CommandPayload {
     SubmitWorkerDecision {
         decision_id: String,
         actions: Vec<WorkerAction>,
-        state: Vec<u8>,
+        state: WorkerState,
     },
     FailWorkerDecision {
         decision_id: String,
@@ -1513,7 +1514,7 @@ mod tests {
             CommandPayload::SubmitWorkerDecision {
                 decision_id: d1,
                 actions: vec![],
-                state: vec![],
+                state: vec![].into(),
             },
             &machine,
         );
@@ -1727,7 +1728,7 @@ mod tests {
                         handler: ToolHandler::Worker,
                         retry: RetryPolicy::no_retry(),
                     }],
-                    state: vec![],
+                    state: vec![].into(),
                 },
                 &machine,
             )
@@ -1788,7 +1789,7 @@ mod tests {
             CommandPayload::SubmitWorkerDecision {
                 decision_id: decision_id.clone(),
                 actions: vec![],
-                state: vec![],
+                state: vec![].into(),
             },
             &machine,
         );
@@ -1806,7 +1807,7 @@ mod tests {
                         handler: ToolHandler::Worker,
                         retry: RetryPolicy::no_retry(),
                     }],
-                    state: vec![],
+                    state: vec![].into(),
                 },
                 &machine,
             )
@@ -2260,7 +2261,7 @@ mod tests {
                     },
                     attempt: 0,
                 }],
-                state: vec![],
+                state: vec![].into(),
             },
             &machine,
         );
@@ -2317,7 +2318,7 @@ mod tests {
             CommandPayload::SubmitWorkerDecision {
                 decision_id: d1,
                 actions: vec![],
-                state: vec![],
+                state: vec![].into(),
             },
             &machine,
         );
@@ -2649,7 +2650,7 @@ mod tests {
                     handler: ToolHandler::Worker,
                     retry: RetryPolicy::no_retry(),
                 }],
-                state: vec![],
+                state: vec![].into(),
             },
             &machine(),
         );
@@ -2670,7 +2671,7 @@ mod tests {
                     result: "RA".to_string(),
                     attempt: 0,
                 }],
-                state: vec![],
+                state: vec![].into(),
             },
             &machine(),
         );
@@ -2784,7 +2785,7 @@ mod tests {
                         retry: RetryPolicy::no_retry(),
                     },
                 ],
-                state: vec![],
+                state: vec![].into(),
             },
             &machine(),
         );

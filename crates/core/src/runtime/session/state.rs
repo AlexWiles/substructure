@@ -13,6 +13,7 @@ use crate::runtime::aggregate::ApplyContext;
 use crate::runtime::llm::LlmRequest;
 use crate::runtime::owner::SessionOwner;
 use crate::runtime::retry::{RetryPolicy, RetryState};
+use crate::runtime::worker::WorkerState;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -183,7 +184,7 @@ pub struct DerivedState {
     pub owner: Option<SessionOwner>,
     pub agent_id: Option<String>,
     #[serde(default)]
-    pub worker_state: Vec<u8>,
+    pub worker_state: WorkerState,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ancestry: Vec<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -246,7 +247,7 @@ pub struct SessionState {
     pub sub_agent_token_usage: BTreeMap<String, u64>,
 
     #[serde(default)]
-    pub worker_state: Vec<u8>,
+    pub worker_state: WorkerState,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ancestry: Vec<String>,
@@ -283,7 +284,7 @@ impl SessionState {
             turn_cost: Decimal::ZERO,
             turn_token_usage: BTreeMap::new(),
             sub_agent_token_usage: BTreeMap::new(),
-            worker_state: Vec::new(),
+            worker_state: WorkerState::default(),
             ancestry: Vec::new(),
             data: serde_json::Value::Null,
             worker_retry: None,

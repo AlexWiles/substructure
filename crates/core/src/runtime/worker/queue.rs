@@ -2,9 +2,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use super::WorkerState;
 use crate::runtime::aggregate::Caller;
 use crate::runtime::owner::SessionOwner;
-use crate::runtime::serde_helpers::base64_bytes;
 use crate::runtime::session::decision::DecisionTrigger;
 use crate::runtime::session::decision::WorkerAction;
 use crate::runtime::span::SpanContext;
@@ -18,8 +18,7 @@ pub struct WorkerDecisionRequest {
     pub agent_id: String,
     pub owner: SessionOwner,
     pub trigger: DecisionTrigger,
-    #[serde(with = "base64_bytes")]
-    pub worker_state: Vec<u8>,
+    pub worker_state: WorkerState,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ancestry: Vec<String>,
     pub span: SpanContext,
@@ -39,7 +38,7 @@ pub struct SubmitDecision {
     pub caller: Caller,
     pub decision_id: String,
     pub actions: Vec<WorkerAction>,
-    pub state: Vec<u8>,
+    pub state: WorkerState,
     pub span: SpanContext,
 }
 

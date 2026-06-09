@@ -125,9 +125,8 @@ impl Context {
         self.client.default_app()
     }
 
-    // Probe the server once for an advertised default org/app. Single-tenant
-    // servers set them as response headers; the cloud sends nothing, leaving
-    // the picker as the fallback.
+    // Defaults ride on response headers (captured in CloudClient), so one
+    // throwaway request is enough to learn them; the cloud sends none.
     async fn probe_server_defaults(&self) {
         if self.client.needs_default_probe() {
             let _ = self.client.get::<serde_json::Value>("/api/v1/orgs").await;
