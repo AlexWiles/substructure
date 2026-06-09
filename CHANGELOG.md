@@ -16,10 +16,18 @@ same version.
   events, with live token and reasoning streaming.
 - Reasoning controls on `LlmRequest` (`reasoning`: `effort` or `max_tokens`,
   plus `exclude` and `enabled`), passed through to providers that support them.
+- `llmToolLoop` takes a `generator`: a worker-side provider generator that runs
+  the LLM call on your worker, or `serverGenerate` to let the Substructure
+  server's configured provider make the call. `llmToolLoop({ model })` is
+  shorthand for the latter.
+- Anthropic adapter (`@substructure.ai/sdk/adapters/anthropic`): call the
+  Anthropic Messages API from a worker via the `anthropicGenerate` generator.
 - AI SDK adapter (`@substructure.ai/sdk/adapters/ai`): run an existing Vercel AI
-  SDK agent on Substructure via `ToolLoopAgent`.
+  SDK agent on Substructure via `ToolLoopAgent`, or drive the loop directly with
+  the `aiGenerate` generator.
 - OpenAI adapter (`@substructure.ai/sdk/adapters/openai`): run an `@openai/agents`
-  `Agent` on Substructure via `OpenAIAgent`.
+  `Agent` on Substructure via `OpenAIAgent`, or drive the loop directly with the
+  `openaiGenerate` generator.
 - The server and embedded runtime can start without an LLM provider configured.
 
 ### Changed
