@@ -317,7 +317,7 @@ mod tests {
                 stream: true,
                 attempt: 0,
             },
-            worker_state: vec![],
+            worker_state: vec![].into(),
             ancestry: vec![],
             span: SpanContext::root(),
             attempts: 0,

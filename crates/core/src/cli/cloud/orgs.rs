@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Subcommand;
-use serde::{Deserialize, Serialize};
+
+use crate::api::v1::Org;
 
 use super::context::Context;
 use super::print;
@@ -16,13 +17,6 @@ pub enum OrgsCommand {
     },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct OrgRef {
-    id: String,
-    name: String,
-    role: String,
-}
-
 pub async fn run(command: OrgsCommand) -> Result<()> {
     match command {
         OrgsCommand::List { globals } => list(globals).await,
@@ -31,7 +25,7 @@ pub async fn run(command: OrgsCommand) -> Result<()> {
 
 async fn list(globals: CloudGlobals) -> Result<()> {
     let ctx = Context::load(&globals)?;
-    let orgs: Vec<OrgRef> = ctx.client.get("/api/v1/orgs").await?;
+    let orgs: Vec<Org> = ctx.client.get("/api/v1/orgs").await?;
 
     if globals.json {
         return print::json(&orgs);

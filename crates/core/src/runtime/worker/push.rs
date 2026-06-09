@@ -3,6 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use super::WorkerState;
 use crate::runtime::llm::TokenDeltaTransport;
 
 use super::WorkerDecisionRequest;
@@ -18,7 +19,7 @@ pub trait PushTransport: Send + Sync {
 
 pub struct PushResponse {
     pub actions: Vec<crate::runtime::session::decision::WorkerAction>,
-    pub state: Vec<u8>,
+    pub state: WorkerState,
 }
 
 #[derive(Debug)]
@@ -96,6 +97,10 @@ impl PushRegistry {
 
     pub async fn unregister(&self, tenant_id: &str) -> Result<(), String> {
         self.store.remove(tenant_id).await
+    }
+
+    pub async fn registration(&self, tenant_id: &str) -> Option<PushRegistrationRecord> {
+        self.store.get(tenant_id).await.ok().flatten()
     }
 
     pub async fn lookup(&self, tenant_id: &str) -> Option<Arc<dyn PushTransport>> {

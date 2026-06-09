@@ -1,17 +1,16 @@
 use serde::{Deserialize, Serialize};
 
 use crate::runtime::session::decision::ClientPayload;
-use crate::serde_helpers::base64_bytes;
 use crate::session::decision::WorkerAction;
 use crate::span::SpanContext;
+use crate::worker::WorkerState;
 
 #[derive(Debug, Deserialize)]
 pub struct SubmitRequest {
     pub session_id: String,
     pub decision_id: String,
     pub actions: Vec<WorkerAction>,
-    #[serde(with = "base64_bytes")]
-    pub state: Vec<u8>,
+    pub state: WorkerState,
     #[serde(default)]
     pub span: Option<SpanContext>,
 }

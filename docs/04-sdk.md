@@ -409,7 +409,7 @@ The worker is stateless. Each request is one decision; the engine holds the dura
 
 ### Signing secrets
 
-`signingSecret` is the secret you got when you ran `substructure cloud apps create`. The handler verifies an HMAC-SHA256 `X-Substructure-Signature` header on every request. Skip the option to disable verification (only for local development).
+`signingSecret` is the secret you got when you ran `substructure apps create`. The handler verifies an HMAC-SHA256 `X-Substructure-Signature` header on every request. Skip the option to disable verification (only for local development).
 
 ## Submitting turns from a client
 
@@ -422,7 +422,7 @@ The two have the same core surface (`startTurn`, `stream`, `turnResult`), so mos
 
 ### Backend client
 
-Use the backend client from any server. It authenticates with an API key minted via `substructure cloud keys create`.
+Use the backend client from any server. It authenticates with an API key minted via `substructure keys create`.
 
 ```ts
 const client = sub.backend.client({

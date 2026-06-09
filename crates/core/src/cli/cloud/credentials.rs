@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -8,11 +9,39 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_API_URL: &str = "https://api.substructure.ai";
 pub const API_URL_ENV: &str = "SUBS_API_URL";
+pub const TOKEN_ENV: &str = "SUBS_API_TOKEN";
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Credentials {
-    pub token: Option<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    servers: BTreeMap<String, ServerCreds>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct ServerCreds {
+    token: String,
+}
+
+impl Credentials {
+    pub fn token_for(&self, url: &str) -> Option<&str> {
+        self.servers
+            .get(&normalize_url(url))
+            .map(|s| s.token.as_str())
+    }
+
+    pub fn set_token(&mut self, url: &str, token: String) {
+        self.servers
+            .insert(normalize_url(url), ServerCreds { token });
+    }
+
+    pub fn clear_token(&mut self, url: &str) -> bool {
+        self.servers.remove(&normalize_url(url)).is_some()
+    }
+}
+
+fn normalize_url(url: &str) -> String {
+    url.trim_end_matches('/').to_string()
 }
 
 pub fn resolve_api_url(flag: Option<&str>) -> String {
@@ -79,12 +108,16 @@ pub fn save(path: &Path, creds: &Credentials) -> Result<()> {
     Ok(())
 }
 
-impl Credentials {
-    pub fn require_token(&self) -> Result<&str> {
-        self.token
-            .as_deref()
-            .context("not logged in. Run `substructure cloud login` to authenticate.")
+/// $SUBS_API_TOKEN wins over the stored credentials token, letting a single
+/// env var point the CLI at a self-hosted server without a login. Absent both,
+/// the request carries no auth and the server's 401 drives the login hint.
+pub fn resolve_token(creds: &Credentials, url: &str) -> Option<String> {
+    if let Ok(t) = std::env::var(TOKEN_ENV) {
+        if !t.is_empty() {
+            return Some(t);
+        }
     }
+    creds.token_for(url).map(str::to_string)
 }
 
 #[cfg(test)]
@@ -106,13 +139,13 @@ mod tests {
     fn load_missing_returns_default() {
         let path = tmpdir().join("missing.toml");
         let creds = load(&path).unwrap();
-        assert!(creds.token.is_none());
+        assert!(creds.token_for(DEFAULT_API_URL).is_none());
     }
 
     #[test]
-    fn load_ignores_unknown_fields() {
-        // Older credentials files carried an `api_url` key. After the move to
-        // env-var-only URL config, leftover keys must not break loading.
+    fn unknown_top_level_keys_are_ignored() {
+        // Pre-URL-aware files carried a top-level `token` and `api_url`. Those
+        // keys are no longer recognized and must not break loading.
         let dir = tmpdir();
         let path = dir.join("credentials.toml");
         fs::write(
@@ -121,16 +154,15 @@ mod tests {
         )
         .unwrap();
         let loaded = load(&path).unwrap();
-        assert_eq!(loaded.token.as_deref(), Some("ba_secret"));
+        assert_eq!(loaded.token_for(DEFAULT_API_URL), None);
     }
 
     #[test]
-    fn save_round_trip_with_0600_perms() {
+    fn save_round_trip_is_url_keyed_with_0600_perms() {
         let dir = tmpdir();
         let path = dir.join("credentials.toml");
-        let creds = Credentials {
-            token: Some("ba_secret".into()),
-        };
+        let mut creds = Credentials::default();
+        creds.set_token("https://staging.example/", "ba_secret".into());
 
         save(&path, &creds).unwrap();
 
@@ -138,7 +170,23 @@ mod tests {
         assert_eq!(mode, 0o600, "expected 0600, got {:o}", mode);
 
         let loaded = load(&path).unwrap();
-        assert_eq!(loaded.token.as_deref(), Some("ba_secret"));
+        // Trailing slash is normalized away on both set and lookup.
+        assert_eq!(
+            loaded.token_for("https://staging.example"),
+            Some("ba_secret")
+        );
+        assert_eq!(loaded.token_for(DEFAULT_API_URL), None);
+    }
+
+    #[test]
+    fn clear_token_removes_only_the_named_server() {
+        let mut creds = Credentials::default();
+        creds.set_token("https://a.example", "ta".into());
+        creds.set_token("https://b.example", "tb".into());
+
+        assert!(creds.clear_token("https://a.example"));
+        assert_eq!(creds.token_for("https://a.example"), None);
+        assert_eq!(creds.token_for("https://b.example"), Some("tb"));
     }
 
     #[test]

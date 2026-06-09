@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use clap::Subcommand;
-use serde::{Deserialize, Serialize};
+
+use crate::api::v1::{WorkerConfig, WorkerUpsert};
 
 use super::context::Context;
 use super::print;
@@ -26,7 +27,7 @@ pub enum WebhookCommand {
         scope: AppScope,
     },
     /// Print the current signing secret to stdout (raw, pipe-friendly).
-    /// E.g. `substructure cloud webhook secret | wrangler secret put SUBS_SIGNING_SECRET`.
+    /// E.g. `substructure webhook secret | wrangler secret put SUBS_SIGNING_SECRET`.
     Secret {
         #[command(flatten)]
         scope: AppScope,
@@ -36,25 +37,6 @@ pub enum WebhookCommand {
         #[command(flatten)]
         scope: AppScope,
     },
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct WorkerConfig {
-    #[serde(default)]
-    endpoint_url: Option<String>,
-    #[serde(default)]
-    state: Option<String>,
-    #[serde(default)]
-    signing_secret: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct UpsertBody<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    endpoint_url: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    state: Option<&'a str>,
 }
 
 pub async fn run(command: WebhookCommand) -> Result<()> {
@@ -100,9 +82,9 @@ async fn set(endpoint: String, scope: AppScope) -> Result<()> {
         .client
         .put_json(
             &format!("/api/v1/apps/{app}/worker"),
-            &UpsertBody {
-                endpoint_url: Some(&endpoint),
-                state: Some("enabled"),
+            &WorkerUpsert {
+                endpoint_url: Some(endpoint),
+                state: Some("enabled".into()),
             },
         )
         .await?;
@@ -120,9 +102,9 @@ async fn disable(scope: AppScope) -> Result<()> {
         .client
         .put_json(
             &format!("/api/v1/apps/{app}/worker"),
-            &UpsertBody {
+            &WorkerUpsert {
                 endpoint_url: None,
-                state: Some("disabled"),
+                state: Some("disabled".into()),
             },
         )
         .await?;

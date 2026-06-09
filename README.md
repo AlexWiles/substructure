@@ -80,17 +80,17 @@ export default {
 **2. Provision Substructure Cloud and point it at your deployed worker.**
 
 ```sh
-substructure cloud login
+substructure login
 
-substructure cloud link                                          # link this directory to an org & app
+substructure link                                          # link this directory to an org & app
 
-substructure cloud webhook set https://your-worker.example.com   # tell the substructure where to call
+substructure webhook set https://your-worker.example.com   # tell the substructure where to call
 
 # Prints out the signing secret for the webhook. Copy into your worker's env as SIGNING_SECRET:
-substructure cloud webhook secret
+substructure webhook secret
 
 # Mint an API key for your client:
-export SUBSTRUCTURE_API_KEY=$(substructure cloud keys create demo)
+export SUBSTRUCTURE_API_KEY=$(substructure keys create demo)
 ```
 
 **3. Submit a turn from your client.**

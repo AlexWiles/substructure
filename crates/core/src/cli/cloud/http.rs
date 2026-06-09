@@ -1,10 +1,14 @@
 use std::error::Error as _;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use anyhow::{anyhow, bail, Context, Result};
 use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{header, Method, Response, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
+
+use crate::api::v1::ApiError;
 
 use super::telemetry;
 
@@ -13,17 +17,9 @@ pub struct CloudClient {
     base_url: String,
     token: Option<String>,
     http: reqwest::Client,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct ErrorBody {
-    error: Option<ErrorPayload>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct ErrorPayload {
-    code: Option<String>,
-    message: Option<String>,
+    default_org: Mutex<Option<String>>,
+    default_app: Mutex<Option<String>>,
+    defaults_probed: AtomicBool,
 }
 
 impl CloudClient {
@@ -52,11 +48,44 @@ impl CloudClient {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             token,
             http,
+            default_org: Mutex::new(None),
+            default_app: Mutex::new(None),
+            defaults_probed: AtomicBool::new(false),
         }
     }
 
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    /// Org/app a single-tenant server advertised via response headers (None
+    /// against the cloud). Populated as a side effect of any request.
+    pub fn default_org(&self) -> Option<String> {
+        self.default_org.lock().unwrap().clone()
+    }
+
+    pub fn default_app(&self) -> Option<String> {
+        self.default_app.lock().unwrap().clone()
+    }
+
+    /// True the first time only, so callers probe the server for defaults once.
+    pub fn needs_default_probe(&self) -> bool {
+        !self.defaults_probed.swap(true, Ordering::Relaxed)
+    }
+
+    fn capture_defaults(&self, headers: &HeaderMap) {
+        if let Some(v) = headers
+            .get("x-substructure-org")
+            .and_then(|v| v.to_str().ok())
+        {
+            *self.default_org.lock().unwrap() = Some(v.to_string());
+        }
+        if let Some(v) = headers
+            .get("x-substructure-app")
+            .and_then(|v| v.to_str().ok())
+        {
+            *self.default_app.lock().unwrap() = Some(v.to_string());
+        }
     }
 
     fn url(&self, path: &str) -> String {
@@ -76,7 +105,9 @@ impl CloudClient {
     }
 
     async fn send(&self, req: reqwest::RequestBuilder) -> Result<Response> {
-        req.send().await.map_err(|e| self.transport_error(e))
+        let res = req.send().await.map_err(|e| self.transport_error(e))?;
+        self.capture_defaults(res.headers());
+        Ok(res)
     }
 
     // Turn reqwest's nested connect/TLS/timeout chain into one actionable
@@ -208,10 +239,9 @@ async fn check_status(res: Response) -> Result<Response> {
     }
 
     let body_text = res.text().await.unwrap_or_default();
-    let parsed: Option<ErrorBody> = serde_json::from_str(&body_text).ok();
+    let parsed: Option<ApiError> = serde_json::from_str(&body_text).ok();
     let (code, message) = parsed
-        .and_then(|b| b.error)
-        .map(|e| (e.code, e.message))
+        .map(|b| (b.error.code, b.error.message))
         .unwrap_or((None, None));
 
     let raw_msg = message.unwrap_or_else(|| body_text.lines().next().unwrap_or("").to_string());
@@ -221,7 +251,7 @@ async fn check_status(res: Response) -> Result<Response> {
         _ => format!("HTTP {}", status.as_u16()),
     };
     let suffix = match status {
-        StatusCode::UNAUTHORIZED => " Run `substructure cloud login` to authenticate.",
+        StatusCode::UNAUTHORIZED => " Run `substructure login` to authenticate.",
         StatusCode::FORBIDDEN => " Your account does not have access to this resource.",
         _ => "",
     };

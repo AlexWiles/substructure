@@ -185,7 +185,8 @@ impl EmbeddedRuntime {
                                                 .decode(s)
                                                 .unwrap_or_default()
                                         })
-                                        .unwrap_or_default(),
+                                        .unwrap_or_default()
+                                        .into(),
                                     span: decision.span.child("js_worker"),
                                 };
 

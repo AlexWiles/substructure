@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
-use serde::Deserialize;
+
+use crate::api::v1::App;
 
 use super::credentials;
 use super::http::CloudClient;
@@ -7,14 +8,6 @@ use super::pickers;
 use super::print;
 use super::project_config::{self, ProjectConfig};
 use super::{AppScope, CloudGlobals, OrgScope};
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AppBalance {
-    name: String,
-    #[serde(default)]
-    balance_usd: Option<String>,
-}
 
 pub struct Context {
     pub project: Option<ProjectConfig>,
@@ -36,8 +29,8 @@ impl Context {
             .as_deref()
             .or_else(|| project.as_ref().and_then(|p| p.url.as_deref()));
         let api_url = credentials::resolve_api_url(url_override);
-        let token = creds.require_token()?.to_string();
-        let client = CloudClient::new(api_url, Some(token));
+        let token = credentials::resolve_token(&creds, &api_url);
+        let client = CloudClient::new(api_url, token);
         Ok(Self {
             project,
             client,
@@ -65,6 +58,13 @@ impl Context {
             return Ok((ctx, app));
         }
 
+        // A single-tenant server (e.g. a local server) advertises its org/app
+        // in response headers; adopt the app and skip the picker entirely.
+        if let Some(app) = ctx.server_default_app().await {
+            ctx.maybe_warn_zero_balance(&app).await;
+            return Ok((ctx, app));
+        }
+
         // Need to pick. Picker enumerates apps via /orgs/:org/apps, so it
         // still needs an org — but only for the picker, not for the URL we
         // act on afterwards.
@@ -83,12 +83,15 @@ impl Context {
     async fn maybe_warn_zero_balance(&self, app_id: &str) {
         let Ok(a) = self
             .client
-            .get::<AppBalance>(&format!("/api/v1/apps/{app_id}"))
+            .get::<App>(&format!("/api/v1/apps/{app_id}"))
             .await
         else {
             return;
         };
-        let raw = a.balance_usd.as_deref().unwrap_or("0");
+        // A missing balance is not a zero balance: local servers omit it.
+        let Some(raw) = a.balance_usd.as_deref() else {
+            return;
+        };
         if print::is_zero_usd(raw) {
             print::warn_zero_balance(&a.name, self.client.base_url(), app_id);
         }
@@ -101,9 +104,32 @@ impl Context {
         if let Some(org) = self.project.as_ref().and_then(|p| p.org.clone()) {
             return Ok(org);
         }
+        if let Some(org) = self.server_default_org().await {
+            return Ok(org);
+        }
         if pickers::interactive(&self.globals) {
             return pickers::pick_org(self).await;
         }
         bail!("no org selected. Pass --org <id>.")
+    }
+
+    /// The org a single-tenant server advertises, or None against the cloud.
+    pub async fn server_default_org(&self) -> Option<String> {
+        self.probe_server_defaults().await;
+        self.client.default_org()
+    }
+
+    /// The app a single-tenant server advertises, or None against the cloud.
+    pub async fn server_default_app(&self) -> Option<String> {
+        self.probe_server_defaults().await;
+        self.client.default_app()
+    }
+
+    // Defaults ride on response headers (captured in CloudClient), so one
+    // throwaway request is enough to learn them; the cloud sends none.
+    async fn probe_server_defaults(&self) {
+        if self.client.needs_default_probe() {
+            let _ = self.client.get::<serde_json::Value>("/api/v1/orgs").await;
+        }
     }
 }

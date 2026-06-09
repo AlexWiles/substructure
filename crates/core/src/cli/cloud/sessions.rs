@@ -1,6 +1,7 @@
 use anyhow::{bail, Context as _, Result};
 use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 
 use super::context::Context;
 use super::print;
@@ -11,8 +12,8 @@ pub enum SessionsCommand {
     /// List debug sessions for an app.
     #[command(name = "list", visible_alias = "ls")]
     List(ListCommand),
-    /// Stream events for a session as they arrive. Default starts from
-    /// sequence 0 (full history + live). Ctrl-C to stop.
+    /// Print a session's events. Prints all events and exits; pass --stream to
+    /// follow live (Ctrl-C to stop).
     Events(EventsCommand),
 }
 
@@ -34,9 +35,12 @@ pub struct ListCommand {
 pub struct EventsCommand {
     /// Session id. If omitted, you'll be prompted to pick from recent sessions.
     pub session_id: Option<String>,
-    /// Only stream events with sequence > this value (defaults to 0 = full history).
+    /// Only include events with sequence > this value (0 = full history).
     #[arg(long, default_value_t = 0)]
     pub from: u64,
+    /// Follow the session live instead of printing all events and exiting.
+    #[arg(long, short = 'f')]
+    pub stream: bool,
     #[command(flatten)]
     pub scope: AppScope,
 }
@@ -133,19 +137,31 @@ async fn events(cmd: EventsCommand) -> Result<()> {
         Some(id) => id,
         None => bail!("missing <SESSION_ID>. (Session picker not yet implemented.)"),
     };
-    let path = format!(
-        "/api/v1/apps/{app}/sessions/{session_id}/events/stream?sequence_after={}",
-        cmd.from
-    );
-    ctx.client
-        .stream_sse(&path, |line| {
-            // SSE frames: each event is a series of lines, blank-line separated.
-            // Print as-is so users can pipe into jq / awk / less. Comments
-            // (lines starting with `:`) and keep-alives are suppressed.
-            if line.starts_with(':') {
-                return;
-            }
-            println!("{line}");
-        })
-        .await
+
+    if cmd.stream {
+        let path = format!(
+            "/api/v1/apps/{app}/sessions/{session_id}/events/stream?sequence_after={}",
+            cmd.from
+        );
+        return ctx
+            .client
+            .stream_sse(&path, |line| {
+                if let Some(data) = line.strip_prefix("data:") {
+                    println!("{}", data.trim());
+                }
+            })
+            .await;
+    }
+
+    let events: Vec<Box<RawValue>> = ctx
+        .client
+        .get(&format!(
+            "/api/v1/apps/{app}/sessions/{session_id}/events?sequence_after={}",
+            cmd.from
+        ))
+        .await?;
+    for event in &events {
+        println!("{}", event.get());
+    }
+    Ok(())
 }

@@ -8,7 +8,7 @@ Before you build with Substructure, it helps to have a mental model of the piece
 
 Substructure is structured around three roles that talk to each other over HTTP:
 
-- The **engine** is the Rust server that drives the agent loop. It owns the event log, schedules retries, makes LLM calls, and decides what should happen next. You can run it as Substructure Cloud, locally with `substructure local start`, or in-process via the embedded runtime.
+- The **engine** is the Rust server that drives the agent loop. It owns the event log, schedules retries, makes LLM calls, and decides what should happen next. You can run it as Substructure Cloud, locally with `substructure serve`, or in-process via the embedded runtime.
 - A **worker** is your code. It's an HTTP endpoint that the engine calls into whenever it needs you to make a decision: which tool to run, which sub-agent to delegate to, when to finish a turn. Workers are stateless and run wherever you deploy them.
 - A **client** is whatever submits work to the engine: a backend service kicking off a turn, a browser streaming events into a chat UI, a script running a one-off task.
 
