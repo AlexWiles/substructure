@@ -16,6 +16,8 @@ pub enum AgUiEvent {
         run_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         result: Option<Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        outcome: Option<RunOutcome>,
     },
 
     #[serde(rename = "RUN_ERROR")]
@@ -77,6 +79,56 @@ pub enum AgUiEvent {
 
     #[serde(rename = "REASONING_END", rename_all = "camelCase")]
     ReasoningEnd { message_id: String },
+}
+
+/// `RUN_FINISHED.outcome` per the AG-UI interrupt-aware run lifecycle.
+/// Omitted entirely for legacy normal completion.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum RunOutcome {
+    Success,
+    Interrupt { interrupts: Vec<AgUiInterrupt> },
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgUiInterrupt {
+    pub id: String,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_schema: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
+}
+
+impl AgUiInterrupt {
+    /// Lift the AG-UI interrupt fields out of a session interrupt. The
+    /// interrupt payload's `message`, `toolCallId`, `responseSchema`,
+    /// `expiresAt` and `metadata` keys map onto the spec fields.
+    pub fn from_session(p: &crate::session::events::SessionInterrupted) -> Self {
+        let obj = p.payload.as_object();
+        let take = |key: &str| obj.and_then(|o| o.get(key)).cloned();
+        let take_str = |key: &str| {
+            obj.and_then(|o| o.get(key))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        };
+        Self {
+            id: p.interrupt_id.clone(),
+            reason: p.reason.clone(),
+            message: take_str("message"),
+            tool_call_id: take_str("toolCallId"),
+            response_schema: take("responseSchema"),
+            expires_at: take_str("expiresAt"),
+            metadata: take("metadata"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

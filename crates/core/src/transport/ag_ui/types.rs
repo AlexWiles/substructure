@@ -21,6 +21,33 @@ pub struct RunAgentInput {
     #[serde(default)]
     #[allow(dead_code)]
     pub forwarded_props: Option<serde_json::Value>,
+    #[serde(default)]
+    pub resume: Vec<ResumeEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResumeEntry {
+    pub interrupt_id: String,
+    pub status: ResumeStatus,
+    #[serde(default)]
+    pub payload: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ResumeStatus {
+    Resolved,
+    Cancelled,
+}
+
+impl ResumeStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ResumeStatus::Resolved => "resolved",
+            ResumeStatus::Cancelled => "cancelled",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -39,6 +66,7 @@ pub struct AgUiMessage {
 pub enum AgUiInput {
     UserTurn(Message),
     ToolResults(Vec<ToolResultItem>),
+    Resume(Vec<ResumeEntry>),
 }
 
 pub struct ToolResultItem {
@@ -51,6 +79,9 @@ impl RunAgentInput {
     /// transient reasoning back after the tool result, which would otherwise
     /// mask the tool block and look like a fresh user turn.
     pub fn classify(&self) -> Option<AgUiInput> {
+        if !self.resume.is_empty() {
+            return Some(AgUiInput::Resume(self.resume.clone()));
+        }
         let mut results: Vec<ToolResultItem> = Vec::new();
         for m in self.messages.iter().rev() {
             if m.role.eq_ignore_ascii_case("reasoning") {
@@ -235,6 +266,30 @@ mod tests {
                 assert_eq!(ids, ["call-a", "call-b"]);
             }
             _ => panic!("expected ToolResults"),
+        }
+    }
+
+    #[test]
+    fn classify_resume_takes_precedence() {
+        let input: RunAgentInput = serde_json::from_value(json!({
+            "threadId": "t1", "runId": "r2",
+            "messages": [{"role": "user", "content": "hi"}],
+            "resume": [
+                {"interruptId": "int-1", "status": "resolved", "payload": {"approved": true}},
+                {"interruptId": "int-2", "status": "cancelled"},
+            ],
+        }))
+        .unwrap();
+        match input.classify() {
+            Some(AgUiInput::Resume(entries)) => {
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0].interrupt_id, "int-1");
+                assert_eq!(entries[0].status, ResumeStatus::Resolved);
+                assert_eq!(entries[0].payload, Some(json!({"approved": true})));
+                assert_eq!(entries[1].status, ResumeStatus::Cancelled);
+                assert!(entries[1].payload.is_none());
+            }
+            _ => panic!("expected Resume"),
         }
     }
 

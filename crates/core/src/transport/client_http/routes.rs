@@ -325,6 +325,34 @@ pub async fn ag_ui_run(
             }
             outcome
         }
+        AgUiInput::Resume(entries) => {
+            // AG-UI resume entries answer the session's pending interrupt. The
+            // worker receives `{status, payload}` as the `interrupt.resumed`
+            // trigger payload. Stale interrupt ids no-op in the core, which
+            // keeps resumes idempotent as the spec requires.
+            let mut outcome: Result<(), RuntimeError> = Ok(());
+            for entry in entries {
+                let payload = serde_json::json!({
+                    "status": entry.status.as_str(),
+                    "payload": entry.payload.unwrap_or(serde_json::Value::Null),
+                });
+                let r = state
+                    .runtime
+                    .resume_interrupt(ResumeInterruptInput {
+                        session_id: session_id.clone(),
+                        interrupt_id: entry.interrupt_id,
+                        payload,
+                        caller: caller.clone(),
+                        span: crate::span::SpanContext::root().child("ag_ui_resume"),
+                    })
+                    .await;
+                if let Err(e) = r {
+                    outcome = Err(e);
+                    break;
+                }
+            }
+            outcome
+        }
     };
     if let Err(e) = submit {
         return runtime_error_response(e);

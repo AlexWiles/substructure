@@ -15,24 +15,11 @@ same version.
 - `openaiAgent` factory in the OpenAI adapter: converts an `@openai/agents`
   `Agent` (or `OpenAIAgentSettings`) without a second `new`, e.g.
   `openaiAgent(new Agent({ ... }))`.
-- Interrupts record an `origin` (`system` | `machine` | `frontend`) derived
-  from the authenticated caller. Resuming requires a caller at or above the
-  origin's privilege (system > machine > frontend); an under-privileged resume
-  gets `SessionAccessDenied` instead of a silent no-op.
-  `SessionStatus::Interrupted` (and the SDK `SessionStatus` type) now carries
-  `origin` and `reason` so clients can see why a session is paused without
-  scanning the event log.
-- Client-initiated interrupts: frontend callers can pause and resume their own
-  sessions via `POST /api/client/sessions/{id}/interrupt` and
-  `POST /api/client/sessions/{id}/interrupt/resume`, exposed in the SDK as
-  `FrontendClient.interrupt()` / `FrontendClient.resume()` (and on
-  `UserClient`). New `Runtime::interrupt_session` / `Runtime::resume_interrupt`
-  methods for embedders.
-
-### Changed
-
-- `SessionState::active_interrupt()` returns `(interrupt_id, origin)` instead
-  of just the id.
+- Interrupts record the issuing caller's origin; resuming requires equal or
+  higher privilege.
+- Clients can interrupt and resume their own sessions via the client API.
+- New `interrupt` worker action lets an agent pause awaiting external input.
+- AG-UI interrupt-aware run lifecycle: interrupt outcomes and `resume[]`.
 
 ## [0.1.16] - 2026-06-09
 

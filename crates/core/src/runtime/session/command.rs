@@ -793,10 +793,11 @@ impl SessionState {
                         Ok(vec![
                             EventPayload::InterruptResumed(InterruptResumed {
                                 interrupt_id: interrupt_id.clone(),
-                                payload,
+                                payload: payload.clone(),
                             }),
                             self.emit_decision_request(DecisionTrigger::InterruptResumed {
                                 interrupt_id,
+                                payload,
                             }),
                         ])
                     }
@@ -883,6 +884,23 @@ impl SessionState {
                                 message,
                             },
                         )]),
+                        WorkerAction::Interrupt {
+                            interrupt_id,
+                            reason,
+                            payload,
+                        } => match self.status {
+                            SessionStatus::Interrupted { .. } => Ok(vec![]),
+                            _ => Ok(vec![EventPayload::SessionInterrupted(SessionInterrupted {
+                                interrupt_id: if interrupt_id.is_empty() {
+                                    new_call_id()
+                                } else {
+                                    interrupt_id
+                                },
+                                origin: InterruptOrigin::Frontend,
+                                reason,
+                                payload,
+                            })]),
+                        },
                         WorkerAction::ReturnToolResult {
                             tool_call_id,
                             result,
@@ -3090,7 +3108,7 @@ mod tests {
 
     #[test]
     fn non_owner_frontend_cannot_interrupt() {
-        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let agg = create_session("sess-1", "tenant-a", "user-1");
 
         let err = agg
             .state
@@ -3103,6 +3121,50 @@ mod tests {
                 &frontend_caller("tenant-a", "user-2"),
             )
             .expect_err("frontend caller should not interrupt another user's session");
+        assert!(
+            matches!(err, SessionError::SessionAccessDenied),
+            "expected SessionAccessDenied; got {err:?}"
+        );
+    }
+
+    #[test]
+    fn non_owner_frontend_cannot_resume() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        dispatch(
+            &mut agg,
+            CommandPayload::Interrupt {
+                interrupt_id: "int-1".to_string(),
+                reason: "user paused".to_string(),
+                payload: serde_json::Value::Null,
+            },
+            &frontend_caller("tenant-a", "user-1"),
+        );
+
+        let err = agg
+            .state
+            .handle(
+                CommandPayload::ResumeInterrupt {
+                    interrupt_id: "int-1".to_string(),
+                    payload: serde_json::Value::Null,
+                },
+                &frontend_caller("tenant-a", "user-2"),
+            )
+            .expect_err("frontend caller should not resume another user's session");
+        assert!(
+            matches!(err, SessionError::SessionAccessDenied),
+            "expected SessionAccessDenied; got {err:?}"
+        );
+
+        let err = agg
+            .state
+            .handle(
+                CommandPayload::ResumeInterrupt {
+                    interrupt_id: "int-1".to_string(),
+                    payload: serde_json::Value::Null,
+                },
+                &frontend_caller("tenant-b", "user-1"),
+            )
+            .expect_err("frontend caller from another tenant should be denied");
         assert!(
             matches!(err, SessionError::SessionAccessDenied),
             "expected SessionAccessDenied; got {err:?}"
@@ -3175,6 +3237,92 @@ mod tests {
             ),
             "machine caller should resume a frontend interrupt; got {events:?}"
         );
+    }
+
+    #[test]
+    fn worker_interrupt_action_pauses_session_and_resume_carries_payload() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let setup_events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Message {
+                    message: Message {
+                        role: Role::User,
+                        content: Some(Content::Text("send the email".to_string())),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                    },
+                    stream: false,
+                },
+                turn_id: Some("turn-1".to_string()),
+            },
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
+        );
+        let decision_id = setup_events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(p) => Some(p.decision_id.clone()),
+                _ => None,
+            })
+            .expect("user message should request a worker decision");
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id,
+                actions: vec![WorkerAction::Interrupt {
+                    interrupt_id: "int-1".to_string(),
+                    reason: "confirmation".to_string(),
+                    payload: serde_json::json!({"message": "Send the email?"}),
+                }],
+                state: vec![].into(),
+            },
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::SessionInterrupted(_))),
+            "interrupt action should emit SessionInterrupted; got {events:?}"
+        );
+        assert!(matches!(
+            agg.state.status,
+            SessionStatus::Interrupted {
+                origin: InterruptOrigin::Frontend,
+                ..
+            }
+        ));
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::ResumeInterrupt {
+                interrupt_id: "int-1".to_string(),
+                payload: serde_json::json!({"approved": true}),
+            },
+            &frontend_caller("tenant-a", "user-1"),
+        );
+        let trigger = events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(p) => Some(p.trigger.clone()),
+                _ => None,
+            })
+            .expect("resume should request a worker decision");
+        match trigger {
+            DecisionTrigger::InterruptResumed {
+                interrupt_id,
+                payload,
+            } => {
+                assert_eq!(interrupt_id, "int-1");
+                assert_eq!(payload, serde_json::json!({"approved": true}));
+            }
+            other => panic!("expected InterruptResumed trigger; got {other:?}"),
+        }
     }
 
     #[test]
