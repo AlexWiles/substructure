@@ -257,7 +257,12 @@ impl SessionState {
 
     fn emit_decision_request(&self, trigger: DecisionTrigger) -> EventPayload {
         let decision_id = new_call_id();
-        if self.has_pending_worker_decision() {
+        // Queue while another decision is in flight, or while interrupted —
+        // an interrupted session records what happened (e.g. a late tool
+        // result) but defers acting on it until resume promotes the queue.
+        if self.has_pending_worker_decision()
+            || matches!(self.status, SessionStatus::Interrupted { .. })
+        {
             EventPayload::DecisionRequestQueued(DecisionRequestQueued {
                 decision_id,
                 trigger,
@@ -320,6 +325,9 @@ impl SessionState {
                         }
                     }
                     ClientPayload::Action { action } => {
+                        if matches!(self.status, SessionStatus::Interrupted { .. }) {
+                            return Err(SessionError::SessionInterrupted);
+                        }
                         events.push(self.emit_decision_request(DecisionTrigger::ClientAction {
                             name: action.name,
                             args: action.args,
@@ -790,14 +798,22 @@ impl SessionState {
                         if Self::caller_interrupt_origin(caller).privilege() < origin.privilege() {
                             return Err(SessionError::SessionAccessDenied);
                         }
+                        // Emitted directly rather than via emit_decision_request:
+                        // pre-event state is still Interrupted (which would queue
+                        // it), and nothing can be pending — interrupt voided any
+                        // in-flight decision. Decisions queued during the pause
+                        // promote after this one completes.
                         Ok(vec![
                             EventPayload::InterruptResumed(InterruptResumed {
                                 interrupt_id: interrupt_id.clone(),
                                 payload: payload.clone(),
                             }),
-                            self.emit_decision_request(DecisionTrigger::InterruptResumed {
-                                interrupt_id,
-                                payload,
+                            EventPayload::WorkerDecisionRequested(WorkerDecisionRequested {
+                                decision_id: new_call_id(),
+                                trigger: DecisionTrigger::InterruptResumed {
+                                    interrupt_id,
+                                    payload,
+                                },
                             }),
                         ])
                     }
@@ -822,6 +838,13 @@ impl SessionState {
                 let mut events: Vec<EventPayload> = vec![EventPayload::WorkerDecisionCompleted(
                     WorkerDecisionCompleted { decision_id, state },
                 )];
+                let system = Caller::System {
+                    tenant_id: self
+                        .owner
+                        .as_ref()
+                        .map(|o| o.tenant_id.clone())
+                        .unwrap_or_default(),
+                };
                 for action in actions {
                     let sub_events = match action {
                         WorkerAction::CallLlm {
@@ -837,9 +860,7 @@ impl SessionState {
                                 retry,
                                 handler,
                             },
-                            &Caller::System {
-                                tenant_id: "tenant-a".to_string(),
-                            },
+                            &system,
                         ),
                         WorkerAction::CallTool {
                             tool_call_id,
@@ -855,9 +876,7 @@ impl SessionState {
                                 handler,
                                 retry,
                             },
-                            &Caller::System {
-                                tenant_id: "tenant-a".to_string(),
-                            },
+                            &system,
                         ),
                         WorkerAction::SpawnSubAgent {
                             session_id,
@@ -871,9 +890,7 @@ impl SessionState {
                                 tool_call_id,
                                 retry,
                             },
-                            &Caller::System {
-                                tenant_id: "tenant-a".to_string(),
-                            },
+                            &system,
                         ),
                         WorkerAction::SendMessage {
                             session_id,
@@ -912,9 +929,7 @@ impl SessionState {
                                 result,
                                 worker_state: None,
                             },
-                            &Caller::System {
-                                tenant_id: "tenant-a".to_string(),
-                            },
+                            &system,
                         ),
                         WorkerAction::ReturnToolError {
                             tool_call_id,
@@ -929,9 +944,7 @@ impl SessionState {
                                 retryable,
                                 worker_state: None,
                             },
-                            &Caller::System {
-                                tenant_id: "tenant-a".to_string(),
-                            },
+                            &system,
                         ),
                         WorkerAction::ReturnLlmResult {
                             call_id,
@@ -943,9 +956,7 @@ impl SessionState {
                                 attempt,
                                 response,
                             },
-                            &Caller::System {
-                                tenant_id: "tenant-a".to_string(),
-                            },
+                            &system,
                         ),
                         WorkerAction::ReturnLlmError {
                             call_id,
@@ -963,16 +974,11 @@ impl SessionState {
                                 code,
                                 detail,
                             },
-                            &Caller::System {
-                                tenant_id: "tenant-a".to_string(),
-                            },
+                            &system,
                         ),
-                        WorkerAction::Done { data } => self.handle(
-                            CommandPayload::MarkDone { data },
-                            &Caller::System {
-                                tenant_id: "tenant-a".to_string(),
-                            },
-                        ),
+                        WorkerAction::Done { data } => {
+                            self.handle(CommandPayload::MarkDone { data }, &system)
+                        }
                     };
                     if let Ok(sub) = sub_events {
                         events.extend(sub);
@@ -980,7 +986,12 @@ impl SessionState {
                 }
 
                 // Promote the next queued decision inline so it dispatches
-                // in the same commit rather than waiting for a wake cycle.
+                // in the same commit rather than waiting for a wake cycle —
+                // unless an action in this batch interrupted the session, in
+                // which case the queue waits for resume.
+                let interrupted_in_batch = events
+                    .iter()
+                    .any(|e| matches!(e, EventPayload::SessionInterrupted(_)));
                 let next_decision = self
                     .next_queued_decision()
                     .map(|d| (d.decision_id.clone(), d.trigger.clone()))
@@ -994,12 +1005,14 @@ impl SessionState {
                     });
 
                 if let Some((decision_id, trigger)) = next_decision {
-                    events.push(EventPayload::WorkerDecisionRequested(
-                        WorkerDecisionRequested {
-                            decision_id,
-                            trigger,
-                        },
-                    ));
+                    if !interrupted_in_batch {
+                        events.push(EventPayload::WorkerDecisionRequested(
+                            WorkerDecisionRequested {
+                                decision_id,
+                                trigger,
+                            },
+                        ));
+                    }
                 }
 
                 Ok(events)
@@ -3237,6 +3250,325 @@ mod tests {
             ),
             "machine caller should resume a frontend interrupt; got {events:?}"
         );
+    }
+
+    #[test]
+    fn client_action_rejected_while_interrupted() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        dispatch(
+            &mut agg,
+            CommandPayload::Interrupt {
+                interrupt_id: "int-1".to_string(),
+                reason: "paused".to_string(),
+                payload: serde_json::Value::Null,
+            },
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
+        );
+
+        let err = agg
+            .state
+            .handle(
+                CommandPayload::SubmitClientPayload {
+                    payload: ClientPayload::Action {
+                        action: crate::session::decision::ClientAction {
+                            name: "refresh".to_string(),
+                            args: None,
+                        },
+                    },
+                    turn_id: None,
+                },
+                &Caller::System {
+                    tenant_id: "tenant-a".to_string(),
+                },
+            )
+            .expect_err("client actions should be rejected while interrupted");
+        assert!(
+            matches!(err, SessionError::SessionInterrupted),
+            "expected SessionInterrupted; got {err:?}"
+        );
+    }
+
+    #[test]
+    fn cancel_voids_pending_effects() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let setup_events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Message {
+                    message: Message {
+                        role: Role::User,
+                        content: Some(Content::Text("hi".to_string())),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                    },
+                    stream: false,
+                },
+                turn_id: Some("turn-1".to_string()),
+            },
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
+        );
+        let decision_id = setup_events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(p) => Some(p.decision_id.clone()),
+                _ => None,
+            })
+            .expect("user message should request a worker decision");
+
+        dispatch(
+            &mut agg,
+            CommandPayload::CancelSession,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
+        );
+        assert!(!agg.state.has_pending_worker_decision());
+
+        let stale = dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id,
+                actions: vec![WorkerAction::Done {
+                    data: serde_json::Value::Null,
+                }],
+                state: vec![].into(),
+            },
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
+        );
+        assert!(
+            stale.is_empty(),
+            "stale submission after cancel should no-op; got {stale:?}"
+        );
+    }
+
+    #[test]
+    fn interrupt_voids_pending_worker_decision() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let setup_events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Message {
+                    message: Message {
+                        role: Role::User,
+                        content: Some(Content::Text("hi".to_string())),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                    },
+                    stream: false,
+                },
+                turn_id: Some("turn-1".to_string()),
+            },
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
+        );
+        let decision_id = setup_events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(p) => Some(p.decision_id.clone()),
+                _ => None,
+            })
+            .expect("user message should request a worker decision");
+
+        dispatch(
+            &mut agg,
+            CommandPayload::Interrupt {
+                interrupt_id: "int-1".to_string(),
+                reason: "quota_exhausted".to_string(),
+                payload: serde_json::Value::Null,
+            },
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
+        );
+        assert!(!agg.state.has_pending_worker_decision());
+
+        // A late submission from the worker is a no-op, not an error.
+        let stale = dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id,
+                actions: vec![WorkerAction::Done {
+                    data: serde_json::Value::Null,
+                }],
+                state: vec![].into(),
+            },
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
+        );
+        assert!(
+            stale.is_empty(),
+            "stale submission should no-op; got {stale:?}"
+        );
+
+        // Resume requests a fresh decision immediately rather than queueing
+        // it behind the voided one.
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::ResumeInterrupt {
+                interrupt_id: "int-1".to_string(),
+                payload: serde_json::Value::Null,
+            },
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
+        );
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    EventPayload::InterruptResumed(_),
+                    EventPayload::WorkerDecisionRequested(_),
+                ]
+            ),
+            "expected immediate WorkerDecisionRequested; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn tool_result_during_interrupt_queues_until_resume() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let system = Caller::System {
+            tenant_id: "tenant-a".to_string(),
+        };
+        let setup_events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Message {
+                    message: Message {
+                        role: Role::User,
+                        content: Some(Content::Text("crawl the site".to_string())),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                    },
+                    stream: false,
+                },
+                turn_id: Some("turn-1".to_string()),
+            },
+            &system,
+        );
+        let decision_id = setup_events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(p) => Some(p.decision_id.clone()),
+                _ => None,
+            })
+            .expect("user message should request a worker decision");
+
+        dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id,
+                actions: vec![WorkerAction::CallTool {
+                    tool_call_id: "tc-1".to_string(),
+                    name: "crawl".to_string(),
+                    arguments: "{}".to_string(),
+                    handler: ToolHandler::Worker,
+                    retry: RetryPolicy::no_retry(),
+                }],
+                state: vec![].into(),
+            },
+            &system,
+        );
+
+        dispatch(
+            &mut agg,
+            CommandPayload::Interrupt {
+                interrupt_id: "int-1".to_string(),
+                reason: "quota_exhausted".to_string(),
+                payload: serde_json::Value::Null,
+            },
+            &system,
+        );
+
+        // The late tool result is recorded but the decision it drains into
+        // is queued, not delivered.
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::CompleteToolCall {
+                tool_call_id: "tc-1".to_string(),
+                attempt: 0,
+                result: "done".to_string(),
+                worker_state: None,
+            },
+            &system,
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::ToolCallCompleted(_))),
+            "tool result should be recorded; got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::DecisionRequestQueued(_))),
+            "decision should be queued while interrupted; got {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, EventPayload::WorkerDecisionRequested(_))),
+            "no decision should be delivered while interrupted; got {events:?}"
+        );
+
+        // Resume delivers interrupt.resumed first...
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::ResumeInterrupt {
+                interrupt_id: "int-1".to_string(),
+                payload: serde_json::Value::Null,
+            },
+            &system,
+        );
+        let resumed_decision_id = events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(p)
+                    if matches!(p.trigger, DecisionTrigger::InterruptResumed { .. }) =>
+                {
+                    Some(p.decision_id.clone())
+                }
+                _ => None,
+            })
+            .expect("resume should request an interrupt.resumed decision");
+
+        // ...and completing it promotes the queued effects.complete decision
+        // with the tool result, exactly once.
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: resumed_decision_id,
+                actions: vec![],
+                state: vec![].into(),
+            },
+            &system,
+        );
+        let trigger = events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(p) => Some(p.trigger.clone()),
+                _ => None,
+            })
+            .expect("queued decision should promote after the resumed decision completes");
+        match trigger {
+            DecisionTrigger::EffectsComplete { results } => {
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0].tool_call_id, "tc-1");
+                assert_eq!(results[0].content, "done");
+            }
+            other => panic!("expected EffectsComplete trigger; got {other:?}"),
+        }
     }
 
     #[test]

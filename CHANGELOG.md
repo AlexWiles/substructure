@@ -10,6 +10,12 @@ same version.
 
 ## [Unreleased]
 
+### Changed
+
+- Interrupts and cancels now fully fence the session: pending work is voided,
+  late results and client actions can't wake a paused session, and decision
+  requests raised mid-pause queue until resume.
+
 ## [0.1.17] - 2026-06-10
 
 ### Added

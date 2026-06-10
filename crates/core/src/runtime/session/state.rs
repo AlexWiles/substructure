@@ -438,6 +438,15 @@ impl SessionState {
                         call.tracking.status = EffectStatus::Failed;
                     }
                 }
+                // Pending worker decisions are voided like pending LLM calls:
+                // late submissions no-op via the pending check, and the
+                // decision request emitted on resume isn't queued behind a
+                // decision that will never complete.
+                for wd in self.worker_decisions.values_mut() {
+                    if wd.tracking.status == EffectStatus::Pending {
+                        wd.tracking.status = EffectStatus::Failed;
+                    }
+                }
             }
             EventPayload::InterruptResumed(_) => {
                 self.status = SessionStatus::Idle;
@@ -496,6 +505,29 @@ impl SessionState {
             }
             EventPayload::SessionCancelled => {
                 self.status = SessionStatus::Done;
+                // Cancellation is terminal: void every pending effect so late
+                // results and submissions no-op instead of landing in a
+                // cancelled session.
+                for call in self.llm_calls.values_mut() {
+                    if call.tracking.status == EffectStatus::Pending {
+                        call.tracking.status = EffectStatus::Failed;
+                    }
+                }
+                for wd in self.worker_decisions.values_mut() {
+                    if wd.tracking.status == EffectStatus::Pending {
+                        wd.tracking.status = EffectStatus::Failed;
+                    }
+                }
+                for tc in self.tool_calls.values_mut() {
+                    if tc.tracking.status == EffectStatus::Pending {
+                        tc.tracking.status = EffectStatus::Failed;
+                    }
+                }
+                for sa in self.sub_agent_calls.values_mut() {
+                    if sa.tracking.status == EffectStatus::Pending {
+                        sa.tracking.status = EffectStatus::Failed;
+                    }
+                }
             }
             EventPayload::SessionDone(_) => {
                 if !self.ancestry.is_empty() {
