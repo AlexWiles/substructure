@@ -161,11 +161,6 @@ pub fn fmt_usd(raw: &str) -> String {
     )
 }
 
-/// True if a decimal USD string parses to exactly zero.
-pub fn is_zero_usd(raw: &str) -> bool {
-    raw.trim().parse::<f64>().map(|n| n == 0.0).unwrap_or(false)
-}
-
 /// Web origin for the admin UI, given the CLI's configured API URL. In prod
 /// we swap `api.` for `app.`; in dev (same-origin) we leave the host alone.
 fn web_base(api_url: &str) -> String {
@@ -184,22 +179,6 @@ pub fn admin_url(api_url: &str, app_id: &str) -> String {
     format!("{}/apps/{app_id}", web_base(api_url))
 }
 
-/// Print the standard zero-balance warning line for an app. Goes to stderr
-/// so it doesn't pollute `--json` stdout.
-pub fn warn_zero_balance(app_name: &str, api_url: &str, app_id: &str) {
-    use std::io::IsTerminal;
-    let line = format!(
-        "⚠ {app_name} balance is $0. Top up at {}",
-        admin_url(api_url, app_id)
-    );
-    if std::io::stderr().is_terminal() {
-        // 33 = yellow, 0 = reset
-        eprintln!("\x1b[33m{line}\x1b[0m");
-    } else {
-        eprintln!("{line}");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,17 +192,6 @@ mod tests {
         assert_eq!(fmt_usd("1234567.89"), "$1,234,567.89");
         assert_eq!(fmt_usd("-5.25"), "-$5.25");
         assert_eq!(fmt_usd("not a number"), "not a number");
-    }
-
-    #[test]
-    fn is_zero_usd_checks() {
-        assert!(is_zero_usd("0"));
-        assert!(is_zero_usd("0.0"));
-        assert!(is_zero_usd("0.00"));
-        assert!(is_zero_usd(" 0 "));
-        assert!(!is_zero_usd("0.01"));
-        assert!(!is_zero_usd("-1"));
-        assert!(!is_zero_usd("not a number"));
     }
 
     #[test]

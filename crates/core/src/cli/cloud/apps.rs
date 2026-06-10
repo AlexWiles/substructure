@@ -137,8 +137,6 @@ async fn create(name: String, scope: OrgScope) -> Result<()> {
     println!("  name:            {}", res.app.name);
     println!("  organization_id: {}", res.app.organization_id);
     println!("  signing_secret:  {}", res.signing_secret);
-    println!();
-    print::warn_zero_balance(&res.app.name, ctx.client.base_url(), &res.app.id);
     Ok(())
 }
 

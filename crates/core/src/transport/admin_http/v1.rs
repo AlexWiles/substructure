@@ -250,7 +250,7 @@ fn local_org() -> Org {
     }
 }
 
-// balance_usd is left None so the CLI's zero-balance warning stays cloud-only.
+// balance_usd is left None: local servers don't track a balance.
 fn local_app() -> App {
     App {
         id: LOCAL_APP.into(),

@@ -1,11 +1,8 @@
 use anyhow::{bail, Result};
 
-use crate::api::v1::App;
-
 use super::credentials;
 use super::http::CloudClient;
 use super::pickers;
-use super::print;
 use super::project_config::{self, ProjectConfig};
 use super::{AppScope, CloudGlobals, OrgScope};
 
@@ -54,14 +51,12 @@ impl Context {
             .clone()
             .or_else(|| ctx.project.as_ref().and_then(|p| p.app.clone()))
         {
-            ctx.maybe_warn_zero_balance(&app).await;
             return Ok((ctx, app));
         }
 
         // A single-tenant server (e.g. a local server) advertises its org/app
         // in response headers; adopt the app and skip the picker entirely.
         if let Some(app) = ctx.server_default_app().await {
-            ctx.maybe_warn_zero_balance(&app).await;
             return Ok((ctx, app));
         }
 
@@ -76,25 +71,7 @@ impl Context {
             Some(a) => a,
             None => bail!("no app selected"),
         };
-        ctx.maybe_warn_zero_balance(&app).await;
         Ok((ctx, app))
-    }
-
-    async fn maybe_warn_zero_balance(&self, app_id: &str) {
-        let Ok(a) = self
-            .client
-            .get::<App>(&format!("/api/v1/apps/{app_id}"))
-            .await
-        else {
-            return;
-        };
-        // A missing balance is not a zero balance: local servers omit it.
-        let Some(raw) = a.balance_usd.as_deref() else {
-            return;
-        };
-        if print::is_zero_usd(raw) {
-            print::warn_zero_balance(&a.name, self.client.base_url(), app_id);
-        }
     }
 
     pub async fn require_org(&self, flag: Option<&str>) -> Result<String> {

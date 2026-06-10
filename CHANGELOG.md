@@ -10,6 +10,11 @@ same version.
 
 ## [Unreleased]
 
+### Removed
+
+- The CLI no longer prints zero-balance warnings when targeting an app. App
+  balances are still shown by `apps list` and `apps show`.
+
 ### Changed
 
 - Interrupts and cancels now fully fence the session: pending work is voided,
