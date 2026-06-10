@@ -44,6 +44,34 @@ pub struct SubmitToolCallResultResponse {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct InterruptSessionRequest {
+    #[serde(default)]
+    pub interrupt_id: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub payload: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InterruptSessionResponse {
+    pub ok: bool,
+    pub interrupt_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResumeInterruptRequest {
+    pub interrupt_id: String,
+    #[serde(default)]
+    pub payload: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ResumeInterruptResponse {
+    pub ok: bool,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct StreamSessionEventsParams {
     #[serde(default)]
     pub turn_id: Option<String>,

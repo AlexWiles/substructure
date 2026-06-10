@@ -102,6 +102,23 @@ pub struct SubmitToolCallResultInput {
     pub span: SpanContext,
 }
 
+pub struct InterruptSessionInput {
+    pub session_id: String,
+    pub interrupt_id: String,
+    pub reason: String,
+    pub payload: serde_json::Value,
+    pub caller: Caller,
+    pub span: SpanContext,
+}
+
+pub struct ResumeInterruptInput {
+    pub session_id: String,
+    pub interrupt_id: String,
+    pub payload: serde_json::Value,
+    pub caller: Caller,
+    pub span: SpanContext,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
     #[error(transparent)]
@@ -381,6 +398,48 @@ impl Runtime {
                 aggregate_id: input.session_id,
                 caller: input.caller,
                 command,
+                span: input.span,
+            },
+            &ConflictRetry::default(),
+        )
+        .await
+        .map(|_| ())
+        .map_err(RuntimeError::from)
+    }
+
+    pub async fn interrupt_session(
+        &self,
+        input: InterruptSessionInput,
+    ) -> Result<(), RuntimeError> {
+        execute::<SessionState>(
+            &*self.store,
+            ExecuteInput {
+                aggregate_id: input.session_id,
+                caller: input.caller,
+                command: CommandPayload::Interrupt {
+                    interrupt_id: input.interrupt_id,
+                    reason: input.reason,
+                    payload: input.payload,
+                },
+                span: input.span,
+            },
+            &ConflictRetry::default(),
+        )
+        .await
+        .map(|_| ())
+        .map_err(RuntimeError::from)
+    }
+
+    pub async fn resume_interrupt(&self, input: ResumeInterruptInput) -> Result<(), RuntimeError> {
+        execute::<SessionState>(
+            &*self.store,
+            ExecuteInput {
+                aggregate_id: input.session_id,
+                caller: input.caller,
+                command: CommandPayload::ResumeInterrupt {
+                    interrupt_id: input.interrupt_id,
+                    payload: input.payload,
+                },
                 span: input.span,
             },
             &ConflictRetry::default(),

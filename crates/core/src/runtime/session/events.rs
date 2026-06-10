@@ -186,9 +186,31 @@ pub struct ToolCallErrored {
     pub retryable: bool,
 }
 
+/// Privilege level of the caller that issued an interrupt. Derived from the
+/// authenticated `Caller`, never from request data; resuming requires a
+/// caller at or above the origin's privilege.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InterruptOrigin {
+    System,
+    Machine,
+    Frontend,
+}
+
+impl InterruptOrigin {
+    pub fn privilege(self) -> u8 {
+        match self {
+            InterruptOrigin::System => 2,
+            InterruptOrigin::Machine => 1,
+            InterruptOrigin::Frontend => 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInterrupted {
     pub interrupt_id: String,
+    pub origin: InterruptOrigin,
     pub reason: String,
     pub payload: serde_json::Value,
 }

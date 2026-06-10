@@ -181,6 +181,14 @@ impl SessionState {
         }
     }
 
+    fn caller_interrupt_origin(caller: &Caller) -> InterruptOrigin {
+        match caller {
+            Caller::System { .. } => InterruptOrigin::System,
+            Caller::Machine { .. } => InterruptOrigin::Machine,
+            Caller::Frontend { .. } => InterruptOrigin::Frontend,
+        }
+    }
+
     fn ensure_owns_session(&self, caller: &Caller) -> Result<(), SessionError> {
         match caller {
             Caller::System { .. } | Caller::Machine { .. } => Ok(()),
@@ -760,11 +768,12 @@ impl SessionState {
                 reason,
                 payload,
             } => {
-                Self::ensure_machine_or_system(caller)?;
+                self.ensure_owns_session(caller)?;
                 match self.status {
                     SessionStatus::Interrupted { .. } => Ok(vec![]),
                     _ => Ok(vec![EventPayload::SessionInterrupted(SessionInterrupted {
                         interrupt_id,
+                        origin: Self::caller_interrupt_origin(caller),
                         reason,
                         payload,
                     })]),
@@ -775,17 +784,22 @@ impl SessionState {
                 interrupt_id,
                 payload,
             } => {
-                Self::ensure_machine_or_system(caller)?;
+                self.ensure_owns_session(caller)?;
                 match self.active_interrupt() {
-                    Some(id) if id == interrupt_id => Ok(vec![
-                        EventPayload::InterruptResumed(InterruptResumed {
-                            interrupt_id: interrupt_id.clone(),
-                            payload,
-                        }),
-                        self.emit_decision_request(DecisionTrigger::InterruptResumed {
-                            interrupt_id,
-                        }),
-                    ]),
+                    Some((id, origin)) if id == interrupt_id => {
+                        if Self::caller_interrupt_origin(caller).privilege() < origin.privilege() {
+                            return Err(SessionError::SessionAccessDenied);
+                        }
+                        Ok(vec![
+                            EventPayload::InterruptResumed(InterruptResumed {
+                                interrupt_id: interrupt_id.clone(),
+                                payload,
+                            }),
+                            self.emit_decision_request(DecisionTrigger::InterruptResumed {
+                                interrupt_id,
+                            }),
+                        ])
+                    }
                     _ => Ok(vec![]),
                 }
             }
@@ -2921,6 +2935,246 @@ mod tests {
             "expected [InterruptResumed, WorkerDecisionRequested]; got {events:?}"
         );
         assert_eq!(agg.state.status, SessionStatus::Idle);
+    }
+
+    #[test]
+    fn machine_cannot_resume_system_interrupt() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        dispatch(
+            &mut agg,
+            CommandPayload::Interrupt {
+                interrupt_id: "int-1".to_string(),
+                reason: "budget_exhausted".to_string(),
+                payload: serde_json::Value::Null,
+            },
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
+        );
+
+        let err = agg
+            .state
+            .handle(
+                CommandPayload::ResumeInterrupt {
+                    interrupt_id: "int-1".to_string(),
+                    payload: serde_json::Value::Null,
+                },
+                &Caller::Machine {
+                    tenant_id: "tenant-a".to_string(),
+                    key_id: "prod-key-1".to_string(),
+                },
+            )
+            .expect_err("machine caller should not resume a system interrupt");
+        assert!(
+            matches!(err, SessionError::SessionAccessDenied),
+            "expected SessionAccessDenied; got {err:?}"
+        );
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::ResumeInterrupt {
+                interrupt_id: "int-1".to_string(),
+                payload: serde_json::Value::Null,
+            },
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
+        );
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    EventPayload::InterruptResumed(_),
+                    EventPayload::WorkerDecisionRequested(_),
+                ]
+            ),
+            "system caller should resume a system interrupt; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn machine_resumes_machine_interrupt() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let machine = Caller::Machine {
+            tenant_id: "tenant-a".to_string(),
+            key_id: "prod-key-1".to_string(),
+        };
+        dispatch(
+            &mut agg,
+            CommandPayload::Interrupt {
+                interrupt_id: "int-1".to_string(),
+                reason: "awaiting approval".to_string(),
+                payload: serde_json::Value::Null,
+            },
+            &machine,
+        );
+        assert!(matches!(
+            agg.state.status,
+            SessionStatus::Interrupted {
+                origin: InterruptOrigin::Machine,
+                ..
+            }
+        ));
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::ResumeInterrupt {
+                interrupt_id: "int-1".to_string(),
+                payload: serde_json::Value::Null,
+            },
+            &machine,
+        );
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    EventPayload::InterruptResumed(_),
+                    EventPayload::WorkerDecisionRequested(_),
+                ]
+            ),
+            "machine caller should resume its own interrupt; got {events:?}"
+        );
+        assert_eq!(agg.state.status, SessionStatus::Idle);
+    }
+
+    fn frontend_caller(tenant_id: &str, user_id: &str) -> Caller {
+        Caller::Frontend {
+            tenant_id: tenant_id.to_string(),
+            user_id: user_id.to_string(),
+            attrs: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn frontend_interrupts_and_resumes_own_session() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let frontend = frontend_caller("tenant-a", "user-1");
+
+        dispatch(
+            &mut agg,
+            CommandPayload::Interrupt {
+                interrupt_id: "int-1".to_string(),
+                reason: "user paused".to_string(),
+                payload: serde_json::Value::Null,
+            },
+            &frontend,
+        );
+        assert!(matches!(
+            agg.state.status,
+            SessionStatus::Interrupted {
+                origin: InterruptOrigin::Frontend,
+                ..
+            }
+        ));
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::ResumeInterrupt {
+                interrupt_id: "int-1".to_string(),
+                payload: serde_json::Value::Null,
+            },
+            &frontend,
+        );
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    EventPayload::InterruptResumed(_),
+                    EventPayload::WorkerDecisionRequested(_),
+                ]
+            ),
+            "frontend owner should resume its own interrupt; got {events:?}"
+        );
+        assert_eq!(agg.state.status, SessionStatus::Idle);
+    }
+
+    #[test]
+    fn non_owner_frontend_cannot_interrupt() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+
+        let err = agg
+            .state
+            .handle(
+                CommandPayload::Interrupt {
+                    interrupt_id: "int-1".to_string(),
+                    reason: "user paused".to_string(),
+                    payload: serde_json::Value::Null,
+                },
+                &frontend_caller("tenant-a", "user-2"),
+            )
+            .expect_err("frontend caller should not interrupt another user's session");
+        assert!(
+            matches!(err, SessionError::SessionAccessDenied),
+            "expected SessionAccessDenied; got {err:?}"
+        );
+    }
+
+    #[test]
+    fn frontend_cannot_resume_machine_interrupt() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        dispatch(
+            &mut agg,
+            CommandPayload::Interrupt {
+                interrupt_id: "int-1".to_string(),
+                reason: "awaiting approval".to_string(),
+                payload: serde_json::Value::Null,
+            },
+            &Caller::Machine {
+                tenant_id: "tenant-a".to_string(),
+                key_id: "prod-key-1".to_string(),
+            },
+        );
+
+        let err = agg
+            .state
+            .handle(
+                CommandPayload::ResumeInterrupt {
+                    interrupt_id: "int-1".to_string(),
+                    payload: serde_json::Value::Null,
+                },
+                &frontend_caller("tenant-a", "user-1"),
+            )
+            .expect_err("frontend caller should not resume a machine interrupt");
+        assert!(
+            matches!(err, SessionError::SessionAccessDenied),
+            "expected SessionAccessDenied; got {err:?}"
+        );
+    }
+
+    #[test]
+    fn machine_resumes_frontend_interrupt() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        dispatch(
+            &mut agg,
+            CommandPayload::Interrupt {
+                interrupt_id: "int-1".to_string(),
+                reason: "user paused".to_string(),
+                payload: serde_json::Value::Null,
+            },
+            &frontend_caller("tenant-a", "user-1"),
+        );
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::ResumeInterrupt {
+                interrupt_id: "int-1".to_string(),
+                payload: serde_json::Value::Null,
+            },
+            &Caller::Machine {
+                tenant_id: "tenant-a".to_string(),
+                key_id: "prod-key-1".to_string(),
+            },
+        );
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    EventPayload::InterruptResumed(_),
+                    EventPayload::WorkerDecisionRequested(_),
+                ]
+            ),
+            "machine caller should resume a frontend interrupt; got {events:?}"
+        );
     }
 
     #[test]

@@ -262,6 +262,26 @@ export interface SubmitToolCallResultResponse {
     error?: string;
 }
 
+export interface InterruptSessionRequest {
+    interrupt_id?: string;
+    reason?: string;
+    payload?: unknown;
+}
+
+export interface InterruptSessionResponse {
+    ok: boolean;
+    interrupt_id: string;
+}
+
+export interface ResumeInterruptRequest {
+    interrupt_id: string;
+    payload?: unknown;
+}
+
+export interface ResumeInterruptResponse {
+    ok: boolean;
+}
+
 export interface SubmitToolCallResultTarget {
     sessionId: string;
     toolCallId: string;
@@ -442,9 +462,12 @@ export interface SubAgentTurnCompleted {
     data?: unknown;
 }
 
+export type InterruptOrigin = "system" | "machine" | "frontend";
+
 export interface SessionInterrupted {
     type: "session.interrupted";
     interrupt_id: string;
+    origin: InterruptOrigin;
     reason: string;
     payload: unknown;
 }
@@ -605,7 +628,10 @@ export async function drainToTurnResult(stream: AsyncIterable<Event>): Promise<T
     };
 }
 
-export type SessionStatus = "idle" | { interrupted: { interrupt_id: string } } | "done";
+export type SessionStatus =
+    | "idle"
+    | { interrupted: { interrupt_id: string; origin: InterruptOrigin; reason: string } }
+    | "done";
 
 export type EffectStatus = "pending" | "completed" | "failed" | "retry_scheduled";
 

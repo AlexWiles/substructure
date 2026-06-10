@@ -21,7 +21,11 @@ pub enum SessionStatus {
     /// Waiting for external input: LLM responses, tool results, worker decisions.
     Idle,
     /// Paused for external input (e.g., human approval).
-    Interrupted { interrupt_id: String },
+    Interrupted {
+        interrupt_id: String,
+        origin: InterruptOrigin,
+        reason: String,
+    },
     /// Agent loop finished. Waiting for next user input.
     Done,
 }
@@ -426,6 +430,8 @@ impl SessionState {
             EventPayload::SessionInterrupted(payload) => {
                 self.status = SessionStatus::Interrupted {
                     interrupt_id: payload.interrupt_id.clone(),
+                    origin: payload.origin,
+                    reason: payload.reason.clone(),
                 };
                 for call in self.llm_calls.values_mut() {
                     if call.tracking.status == EffectStatus::Pending {
@@ -526,9 +532,13 @@ impl SessionState {
         }
     }
 
-    pub fn active_interrupt(&self) -> Option<&str> {
+    pub fn active_interrupt(&self) -> Option<(&str, InterruptOrigin)> {
         match &self.status {
-            SessionStatus::Interrupted { interrupt_id } => Some(interrupt_id),
+            SessionStatus::Interrupted {
+                interrupt_id,
+                origin,
+                ..
+            } => Some((interrupt_id, *origin)),
             _ => None,
         }
     }

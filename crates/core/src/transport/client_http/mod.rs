@@ -48,6 +48,14 @@ pub fn router(state: ClientHttpState) -> Router {
             get(routes::stream_session_events),
         )
         .route(
+            "/api/client/sessions/{session_id}/interrupt",
+            post(routes::interrupt_session),
+        )
+        .route(
+            "/api/client/sessions/{session_id}/interrupt/resume",
+            post(routes::resume_interrupt),
+        )
+        .route(
             "/api/client/ag-ui/agents/{agent_id}/run",
             post(routes::ag_ui_run),
         )
