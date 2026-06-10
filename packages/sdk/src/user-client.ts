@@ -1,6 +1,10 @@
 import { BaseClient } from "./base";
 import type {
     Event,
+    InterruptSessionRequest,
+    InterruptSessionResponse,
+    ResumeInterruptRequest,
+    ResumeInterruptResponse,
     StreamSessionEventsParams,
     SubmitClientPayloadResponse,
     SubmitPayloadRequest,
@@ -18,6 +22,17 @@ export class UserClient extends BaseClient {
         request: SubmitToolCallResultRequest,
     ): Promise<SubmitToolCallResultResponse> {
         return this.post(`/api/client/sessions/${sessionId}/tool-call-results`, request);
+    }
+
+    async interruptSession(
+        sessionId: string,
+        request: InterruptSessionRequest = {},
+    ): Promise<InterruptSessionResponse> {
+        return this.post(`/api/client/sessions/${sessionId}/interrupt`, request);
+    }
+
+    async resumeInterrupt(sessionId: string, request: ResumeInterruptRequest): Promise<ResumeInterruptResponse> {
+        return this.post(`/api/client/sessions/${sessionId}/interrupt/resume`, request);
     }
 
     async *streamSessionEvents(sessionId: string, params?: StreamSessionEventsParams): AsyncGenerator<Event> {

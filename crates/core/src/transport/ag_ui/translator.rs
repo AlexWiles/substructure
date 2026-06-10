@@ -4,7 +4,7 @@ use axum::response::sse::Event as SseEvent;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::events::AgUiEvent;
+use super::events::{AgUiEvent, AgUiInterrupt, RunOutcome};
 use crate::event_store::Event;
 use crate::llm::TokenDelta;
 use crate::session::events::{EventPayload, ToolHandler};
@@ -255,12 +255,29 @@ impl AgUiTranslator {
             }
             EventPayload::LlmCallErrored(e) if !e.retryable => self.finalize_error(e.error),
             EventPayload::SessionCancelled => self.finalize_error("session cancelled".to_string()),
+            EventPayload::SessionInterrupted(p) => {
+                if self.terminated {
+                    return vec![];
+                }
+                let mut out = self.close_all_open();
+                out.push(AgUiEvent::RunFinished {
+                    thread_id: self.thread_id.clone(),
+                    run_id: self.run_id.clone(),
+                    result: None,
+                    outcome: Some(RunOutcome::Interrupt {
+                        interrupts: vec![AgUiInterrupt::from_session(&p)],
+                    }),
+                });
+                self.terminated = true;
+                out
+            }
             EventPayload::TurnCompleted(t) => {
                 let mut out = self.close_all_open();
                 out.push(AgUiEvent::RunFinished {
                     thread_id: self.thread_id.clone(),
                     run_id: self.run_id.clone(),
                     result: if t.data.is_null() { None } else { Some(t.data) },
+                    outcome: None,
                 });
                 self.terminated = true;
                 out
@@ -318,6 +335,7 @@ impl AgUiTranslator {
             thread_id: self.thread_id.clone(),
             run_id: self.run_id.clone(),
             result: None,
+            outcome: None,
         });
         self.terminated = true;
         self.batch = None;
@@ -990,5 +1008,40 @@ mod tests {
         assert!(t
             .on_event(ev(json!({"type": "turn.completed", "turn_id": "r1"})))
             .is_empty());
+    }
+
+    #[test]
+    fn session_interrupt_finishes_run_with_interrupt_outcome() {
+        let mut t = AgUiTranslator::new("t1".into(), "r1".into());
+        let _ = t.on_delta(delta("c1", "r1", "thinking..."));
+        let e = vals(t.on_event(ev(json!({
+            "type": "session.interrupted",
+            "interrupt_id": "int-1",
+            "origin": "frontend",
+            "reason": "confirmation",
+            "payload": {
+                "message": "Send the email?",
+                "toolCallId": "tc-1",
+                "responseSchema": {"type": "object"},
+            },
+        }))));
+        assert_eq!(kinds(&e), ["TEXT_MESSAGE_END", "RUN_FINISHED"]);
+        let finished = &e[1];
+        assert_eq!(finished["outcome"]["type"], "interrupt");
+        let interrupt = &finished["outcome"]["interrupts"][0];
+        assert_eq!(interrupt["id"], "int-1");
+        assert_eq!(interrupt["reason"], "confirmation");
+        assert_eq!(interrupt["message"], "Send the email?");
+        assert_eq!(interrupt["toolCallId"], "tc-1");
+        assert_eq!(interrupt["responseSchema"]["type"], "object");
+        assert!(t.terminated);
+    }
+
+    #[test]
+    fn normal_completion_has_no_outcome() {
+        let mut t = AgUiTranslator::new("t1".into(), "r1".into());
+        let e = vals(t.on_event(ev(json!({"type": "turn.completed", "turn_id": "r1"}))));
+        assert_eq!(kinds(&e), ["RUN_FINISHED"]);
+        assert!(e[0].get("outcome").is_none());
     }
 }

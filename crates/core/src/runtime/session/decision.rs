@@ -98,7 +98,11 @@ pub enum DecisionTrigger {
         error: String,
     },
     #[serde(rename = "interrupt.resumed")]
-    InterruptResumed { interrupt_id: String },
+    InterruptResumed {
+        interrupt_id: String,
+        #[serde(default)]
+        payload: serde_json::Value,
+    },
     #[serde(rename = "stall")]
     Stall,
 }
@@ -166,6 +170,16 @@ pub enum WorkerAction {
     SendMessage {
         session_id: String,
         message: Message,
+    },
+    /// Pause the session awaiting external input. Recorded with
+    /// `InterruptOrigin::Frontend` so the session owner can resume it.
+    #[serde(rename = "interrupt")]
+    Interrupt {
+        #[serde(default)]
+        interrupt_id: String,
+        reason: String,
+        #[serde(default)]
+        payload: serde_json::Value,
     },
     #[serde(rename = "done")]
     Done {

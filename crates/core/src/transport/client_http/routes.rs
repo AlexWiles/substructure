@@ -16,12 +16,14 @@ use crate::transport::ag_ui::translator::run_ag_ui_translation;
 use crate::transport::ag_ui::types::{AgUiInput, RunAgentInput};
 use crate::transport::session_sse::merge_session_stream;
 use crate::{
-    Caller, RuntimeError, SubmitClientPayload, SubmitToolCallResult, SubmitToolCallResultInput,
+    Caller, InterruptSessionInput, ResumeInterruptInput, RuntimeError, SubmitClientPayload,
+    SubmitToolCallResult, SubmitToolCallResultInput,
 };
 
 use super::types::{
-    StreamSessionEventsParams, SubmitClientPayloadRequest, SubmitClientPayloadResponse,
-    SubmitToolCallResultRequest, SubmitToolCallResultResponse,
+    InterruptSessionRequest, InterruptSessionResponse, ResumeInterruptRequest,
+    ResumeInterruptResponse, StreamSessionEventsParams, SubmitClientPayloadRequest,
+    SubmitClientPayloadResponse, SubmitToolCallResultRequest, SubmitToolCallResultResponse,
 };
 use super::ClientHttpState;
 
@@ -115,6 +117,61 @@ pub async fn submit_tool_call_result(
             )
                 .into_response()
         }
+    }
+}
+
+pub async fn interrupt_session(
+    State(state): State<ClientHttpState>,
+    Extension(caller): Extension<Caller>,
+    Path(session_id): Path<String>,
+    Json(req): Json<InterruptSessionRequest>,
+) -> Response {
+    let interrupt_id = req
+        .interrupt_id
+        .unwrap_or_else(|| Uuid::now_v7().to_string());
+
+    let result = state
+        .runtime
+        .interrupt_session(InterruptSessionInput {
+            session_id,
+            interrupt_id: interrupt_id.clone(),
+            reason: req.reason.unwrap_or_default(),
+            payload: req.payload.unwrap_or(serde_json::Value::Null),
+            caller,
+            span: crate::span::SpanContext::root().child("client_interrupt"),
+        })
+        .await;
+
+    match result {
+        Ok(()) => Json(InterruptSessionResponse {
+            ok: true,
+            interrupt_id,
+        })
+        .into_response(),
+        Err(e) => runtime_error_response(e),
+    }
+}
+
+pub async fn resume_interrupt(
+    State(state): State<ClientHttpState>,
+    Extension(caller): Extension<Caller>,
+    Path(session_id): Path<String>,
+    Json(req): Json<ResumeInterruptRequest>,
+) -> Response {
+    let result = state
+        .runtime
+        .resume_interrupt(ResumeInterruptInput {
+            session_id,
+            interrupt_id: req.interrupt_id,
+            payload: req.payload.unwrap_or(serde_json::Value::Null),
+            caller,
+            span: crate::span::SpanContext::root().child("client_resume_interrupt"),
+        })
+        .await;
+
+    match result {
+        Ok(()) => Json(ResumeInterruptResponse { ok: true }).into_response(),
+        Err(e) => runtime_error_response(e),
     }
 }
 
@@ -264,6 +321,34 @@ pub async fn ag_ui_run(
                         outcome = Err(e);
                         break;
                     }
+                }
+            }
+            outcome
+        }
+        AgUiInput::Resume(entries) => {
+            // AG-UI resume entries answer the session's pending interrupt. The
+            // worker receives `{status, payload}` as the `interrupt.resumed`
+            // trigger payload. Stale interrupt ids no-op in the core, which
+            // keeps resumes idempotent as the spec requires.
+            let mut outcome: Result<(), RuntimeError> = Ok(());
+            for entry in entries {
+                let payload = serde_json::json!({
+                    "status": entry.status.as_str(),
+                    "payload": entry.payload.unwrap_or(serde_json::Value::Null),
+                });
+                let r = state
+                    .runtime
+                    .resume_interrupt(ResumeInterruptInput {
+                        session_id: session_id.clone(),
+                        interrupt_id: entry.interrupt_id,
+                        payload,
+                        caller: caller.clone(),
+                        span: crate::span::SpanContext::root().child("ag_ui_resume"),
+                    })
+                    .await;
+                if let Err(e) = r {
+                    outcome = Err(e);
+                    break;
                 }
             }
             outcome

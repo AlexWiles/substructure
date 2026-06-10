@@ -214,7 +214,7 @@ export type DecisionTrigger =
     | { type: "effects.complete"; results: ToolResult[] }
     | { type: "sub_agent.turn.complete"; session_id: Uuid; agent_id: string; turn_id: string; data: unknown }
     | { type: "sub_agent.error"; session_id: Uuid; agent_id: string; error: string }
-    | { type: "interrupt.resumed"; interrupt_id: string }
+    | { type: "interrupt.resumed"; interrupt_id: string; payload?: unknown }
     | { type: "stall" };
 
 export type WorkerAction =
@@ -253,6 +253,7 @@ export type WorkerAction =
       }
     | { type: "spawn.sub_agent"; session_id: Uuid; agent_id: string; tool_call_id: string; retry: RetryPolicy }
     | { type: "send.message"; session_id: Uuid; message: Message }
+    | { type: "interrupt"; interrupt_id?: string; reason: string; payload?: unknown }
     | { type: "done"; data: unknown };
 
 export type SubmitToolCallResultRequest = Extract<WorkerAction, { type: "return.tool.result" | "return.tool.error" }>;
@@ -260,6 +261,26 @@ export type SubmitToolCallResultRequest = Extract<WorkerAction, { type: "return.
 export interface SubmitToolCallResultResponse {
     ok: boolean;
     error?: string;
+}
+
+export interface InterruptSessionRequest {
+    interrupt_id?: string;
+    reason?: string;
+    payload?: unknown;
+}
+
+export interface InterruptSessionResponse {
+    ok: boolean;
+    interrupt_id: string;
+}
+
+export interface ResumeInterruptRequest {
+    interrupt_id: string;
+    payload?: unknown;
+}
+
+export interface ResumeInterruptResponse {
+    ok: boolean;
 }
 
 export interface SubmitToolCallResultTarget {
@@ -442,9 +463,12 @@ export interface SubAgentTurnCompleted {
     data?: unknown;
 }
 
+export type InterruptOrigin = "system" | "machine" | "frontend";
+
 export interface SessionInterrupted {
     type: "session.interrupted";
     interrupt_id: string;
+    origin: InterruptOrigin;
     reason: string;
     payload: unknown;
 }
@@ -605,7 +629,10 @@ export async function drainToTurnResult(stream: AsyncIterable<Event>): Promise<T
     };
 }
 
-export type SessionStatus = "idle" | { interrupted: { interrupt_id: string } } | "done";
+export type SessionStatus =
+    | "idle"
+    | { interrupted: { interrupt_id: string; origin: InterruptOrigin; reason: string } }
+    | "done";
 
 export type EffectStatus = "pending" | "completed" | "failed" | "retry_scheduled";
 

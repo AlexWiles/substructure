@@ -15,6 +15,11 @@ same version.
 - `openaiAgent` factory in the OpenAI adapter: converts an `@openai/agents`
   `Agent` (or `OpenAIAgentSettings`) without a second `new`, e.g.
   `openaiAgent(new Agent({ ... }))`.
+- Interrupts record the issuing caller's origin; resuming requires equal or
+  higher privilege.
+- Clients can interrupt and resume their own sessions via the client API.
+- New `interrupt` worker action lets an agent pause awaiting external input.
+- AG-UI interrupt-aware run lifecycle: interrupt outcomes and `resume[]`.
 
 ## [0.1.16] - 2026-06-09
 

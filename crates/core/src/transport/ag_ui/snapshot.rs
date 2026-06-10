@@ -1,8 +1,8 @@
 use crate::event_store::Event;
-use crate::session::events::EventPayload;
+use crate::session::events::{EventPayload, SessionInterrupted};
 use crate::session::message::{Content, ContentPart, Role};
 
-use super::events::{AgUiEvent, SnapshotMessage};
+use super::events::{AgUiEvent, AgUiInterrupt, RunOutcome, SnapshotMessage};
 
 pub fn session_messages(events: &[Event]) -> Vec<SnapshotMessage> {
     let mut out = Vec::new();
@@ -39,7 +39,22 @@ pub fn session_messages(events: &[Event]) -> Vec<SnapshotMessage> {
     out
 }
 
+fn active_interrupt(events: &[Event]) -> Option<SessionInterrupted> {
+    let mut active: Option<SessionInterrupted> = None;
+    for event in events {
+        match serde_json::from_value::<EventPayload>(event.payload.clone()) {
+            Ok(EventPayload::SessionInterrupted(p)) => active = Some(p),
+            Ok(EventPayload::InterruptResumed(_)) => active = None,
+            _ => {}
+        }
+    }
+    active
+}
+
 pub fn snapshot_events(thread_id: String, run_id: String, events: &[Event]) -> Vec<AgUiEvent> {
+    let outcome = active_interrupt(events).map(|p| RunOutcome::Interrupt {
+        interrupts: vec![AgUiInterrupt::from_session(&p)],
+    });
     vec![
         AgUiEvent::RunStarted {
             thread_id: thread_id.clone(),
@@ -52,6 +67,7 @@ pub fn snapshot_events(thread_id: String, run_id: String, events: &[Event]) -> V
             thread_id,
             run_id,
             result: None,
+            outcome,
         },
     ]
 }
@@ -237,5 +253,77 @@ mod tests {
     #[test]
     fn empty_session_yields_empty_message_list() {
         assert!(session_messages(&[]).is_empty());
+    }
+
+    fn lifecycle_event(id: u128, payload: Value) -> Event {
+        let ts = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+        Event {
+            position: 0,
+            id: Uuid::from_u128(id),
+            tenant_id: "t".into(),
+            aggregate_type: "session".into(),
+            aggregate_id: "s".into(),
+            sequence: id as u64,
+            span: SpanContext::root(),
+            occurred_at: ts,
+            payload,
+            derived: None,
+            metadata: HashMap::new(),
+            start_time: ts,
+            end_time: ts,
+        }
+    }
+
+    #[test]
+    fn snapshot_reports_pending_interrupt() {
+        let events = vec![
+            message_event(1, user("send the email")),
+            lifecycle_event(
+                2,
+                json!({
+                    "type": "session.interrupted",
+                    "interrupt_id": "int-1",
+                    "origin": "frontend",
+                    "reason": "confirmation",
+                    "payload": {"message": "Send the email?"},
+                }),
+            ),
+        ];
+        let out = snapshot_events("thread-1".into(), "snap-1".into(), &events);
+        let finished = serde_json::to_value(&out[2]).unwrap();
+        assert_eq!(finished["type"], "RUN_FINISHED");
+        assert_eq!(finished["outcome"]["type"], "interrupt");
+        let interrupt = &finished["outcome"]["interrupts"][0];
+        assert_eq!(interrupt["id"], "int-1");
+        assert_eq!(interrupt["reason"], "confirmation");
+        assert_eq!(interrupt["message"], "Send the email?");
+    }
+
+    #[test]
+    fn snapshot_omits_outcome_after_resume() {
+        let events = vec![
+            lifecycle_event(
+                1,
+                json!({
+                    "type": "session.interrupted",
+                    "interrupt_id": "int-1",
+                    "origin": "frontend",
+                    "reason": "confirmation",
+                    "payload": null,
+                }),
+            ),
+            lifecycle_event(
+                2,
+                json!({
+                    "type": "session.interrupt_resumed",
+                    "interrupt_id": "int-1",
+                    "payload": null,
+                }),
+            ),
+        ];
+        let out = snapshot_events("thread-1".into(), "snap-1".into(), &events);
+        let finished = serde_json::to_value(&out[2]).unwrap();
+        assert_eq!(finished["type"], "RUN_FINISHED");
+        assert!(finished.get("outcome").is_none());
     }
 }
