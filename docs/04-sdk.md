@@ -584,7 +584,7 @@ Server models are identified by `provider/model` strings. When running embedded 
 
 ## Examples
 
-See [`examples/`](https://github.com/substructure-ai/substructure/tree/main/examples) for full deployments:
+See [`examples/`](https://github.com/substructureai/substructure/tree/main/examples) for full deployments:
 
 - `node-embedded` — in-process agent with persistent SQLite state.
 - `cloudflare-worker` — worker deployed to Cloudflare, with a backend client driving turns.

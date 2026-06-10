@@ -15,10 +15,10 @@ Supported platforms: macOS (arm64, x64), Linux (arm64, x64).
 ## Usage
 
 ```sh
-substructure local start --dev --provider openrouter --worker-url http://localhost:4444
+substructure serve --dev --provider openrouter --worker-url http://localhost:4444
 ```
 
-Run `substructure --help` for the full command list. Cloud management commands live under `substructure cloud …`.
+Run `substructure --help` for the full command list. Cloud management commands (`apps`, `keys`, `webhook`, `sessions`, …) are top-level subcommands.
 
 ## Links
 
