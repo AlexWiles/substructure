@@ -10,6 +10,8 @@ same version.
 
 ## [Unreleased]
 
+## [0.1.17] - 2026-06-10
+
 ### Added
 
 - `openaiAgent` factory in the OpenAI adapter: converts an `@openai/agents`
@@ -100,7 +102,8 @@ same version.
 
 - SDK typing and developer-experience improvements.
 
-[Unreleased]: https://github.com/substructureai/substructure/compare/v0.1.16...HEAD
+[Unreleased]: https://github.com/substructureai/substructure/compare/v0.1.17...HEAD
+[0.1.17]: https://github.com/substructureai/substructure/compare/v0.1.16...v0.1.17
 [0.1.16]: https://github.com/substructureai/substructure/compare/v0.1.15...v0.1.16
 [0.1.15]: https://github.com/substructureai/substructure/compare/v0.1.14...v0.1.15
 [0.1.14]: https://github.com/substructureai/substructure/releases/tag/v0.1.14
