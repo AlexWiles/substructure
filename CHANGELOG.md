@@ -10,6 +10,16 @@ same version.
 
 ## [Unreleased]
 
+### Added
+
+- `substructure new [template] [dir]` scaffolds a project from a starter
+  template in the monorepo's `templates/` folder. It fetches the `index.toml`
+  catalog and the chosen template's tarball from GitHub (raw + codeload, no API
+  rate limits), then copies the folder verbatim into the target dir and prints
+  the catalog's `next_steps`. Running `new` with no template launches an
+  interactive picker. Pure copy: no substitution, no control-plane calls, no
+  dependency install. Refuses to write into a non-empty directory.
+
 ## [0.1.18] - 2026-06-10
 
 ### Removed

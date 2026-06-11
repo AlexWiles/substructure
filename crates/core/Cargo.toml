@@ -21,8 +21,10 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 eventsource-stream = "0.2"
+flate2 = "1"
 futures-util = "0.3"
 hex = "0.4"
+tar = "0.4"
 hmac = "0.12"
 jsonwebtoken = "9"
 rand = "0.9"
