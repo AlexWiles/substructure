@@ -60,7 +60,15 @@ pub async fn run(cmd: NewCommand) -> Result<()> {
             .iter()
             .find(|t| &t.id == id)
             .ok_or_else(|| anyhow!("unknown template '{id}'.\n\n{}", available(&catalog)))?,
-        None => pick(&catalog)?,
+        None => {
+            // No id and no TTY (a pipe or CI): there's nothing to prompt, so
+            // print the catalog as the non-interactive form of the picker.
+            if !std::io::stdin().is_terminal() {
+                println!("{}", available(&catalog));
+                return Ok(());
+            }
+            pick(&catalog)?
+        }
     };
 
     let target = PathBuf::from(cmd.dir.clone().unwrap_or_else(|| template.id.clone()));
@@ -148,10 +156,9 @@ fn available(catalog: &Catalog) -> String {
     out
 }
 
+/// Interactive picker. Callers must confirm stdin is a TTY first; the
+/// non-interactive path lists the catalog instead.
 fn pick(catalog: &Catalog) -> Result<&Template> {
-    if !std::io::stdin().is_terminal() {
-        bail!("no template specified and not running interactively. Pass a template id: substructure new <template>");
-    }
     let items: Vec<String> = catalog
         .templates
         .iter()
@@ -328,6 +335,30 @@ mod tests {
                 "bare-worker"
             ),
             None
+        );
+    }
+
+    #[test]
+    fn lists_available_templates() {
+        let cat = parse_catalog(
+            r#"
+            schema = 1
+            [[template]]
+            id = "tool-loop-agent"
+            description = "Durable tool-loop agent"
+            language = "typescript"
+            next_steps = "cd {dir}"
+            [[template]]
+            id = "bare-worker"
+            description = "Minimal stateless worker"
+            language = "typescript"
+            next_steps = "cd {dir}"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            available(&cat),
+            "Available templates:\n  tool-loop-agent  —  Durable tool-loop agent [typescript]\n  bare-worker  —  Minimal stateless worker [typescript]"
         );
     }
 
