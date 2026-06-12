@@ -16,6 +16,7 @@
         "includes": [
             "packages/**/*.ts",
             "examples/**/*.ts",
+            "templates/**/*.ts",
             "!**/worker-configuration.d.ts"
         ]
     }

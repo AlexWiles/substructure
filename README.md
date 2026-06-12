@@ -7,7 +7,7 @@
 
 Substructure is an open-source engine for building durable, long-running AI agents using just an HTTP endpoint hosted on your infrastructure, in your code.
 
-Substructure drives the agentic loop, handling retries, sub-agent supervision, llm calls, real-time event streaming and more. Tool execution, agent decisions, llm calls (optionally) live in your codebase and execute on your infrastructure.
+Substructure drives the agent loop, handling retries, sub-agent supervision, llm calls, real-time event streaming and more. Tool execution, agent decisions, llm calls (optionally) live in your codebase and execute on your infrastructure.
 
 ## How it works
 

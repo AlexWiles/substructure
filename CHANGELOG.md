@@ -10,6 +10,12 @@ same version.
 
 ## [Unreleased]
 
+### Added
+
+- `substructure new [template] [dir]` scaffolds a project by copying a starter
+  template from the monorepo. With no template it shows a picker (or lists
+  templates when non-interactive).
+
 ## [0.1.18] - 2026-06-10
 
 ### Removed
