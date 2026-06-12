@@ -1,0 +1,13 @@
+schema = 1
+
+[[template]]
+id = "embedded-node-openai-starter"
+description = "Minimal local embedded agent (Node, embedded, OpenAI generator)"
+language = "typescript"
+requires_remote = false
+next_steps = """
+  cd {dir}
+  export OPENAI_API_KEY=sk-...
+  pnpm install
+  pnpm start
+"""
