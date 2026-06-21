@@ -17,13 +17,6 @@ Substructure drives the agent loop, handling retries, sub-agent supervision, llm
 - **CLI:** Substructure comes with a CLI to help you provision, observe, and debug from the terminal. You can also start a local server.
 - **SDK:** We provide a TypeScript SDK for building agents and setting up your worker with a just a few lines of code. It also includes server-to-server and browser clients.
 
-## Why Substructure
-- **Write agent logic, not agent infrastructure.** The event log, retries, timeouts, streaming, etc. are Substructure's job.
-- **Add agents to the codebase you already have.** Workers are plain HTTP handlers. You can drop them into your app, deploy them to your infrastructure.
-- **Ship to serverless.** Stateless workers means they can be deployed to any serverless platform. There are no long running processes.
-
-
-
 ## Install
 
 The CLI is available at:

@@ -125,8 +125,9 @@ export interface ToolDef {
     execute: ToolFn;
     retry?: RetryPolicy;
     stateSlice?: StateSliceMw<any>;
-    /** "worker" (default) or "client" for a frontend tool: `execute` returns
-     *  `ctx.defer()` and the result arrives via `submitToolCallResult`. */
+    /** "worker" (default) runs `execute` on the worker; "client" routes the call
+     *  to the frontend, which completes it via `submitToolCallResult` — the
+     *  worker never runs `execute` for a client tool. */
     handler?: ToolHandler;
 }
 
@@ -141,29 +142,43 @@ export interface ToolDef {
  */
 type SliceState<Slice> = Slice extends { _init: infer A } ? A : never;
 
-export function tool<Slice extends StateSliceMw<object> = never>(config: {
-    name: string;
-    description: string;
-    parameters: unknown;
-    state?: Slice;
-    // Tools return the result string directly (no implicit serialization — call
-    // `JSON.stringify` yourself for structured data), or `ctx.defer()` to
-    // complete the call out-of-band.
-    execute: [Slice] extends [never]
-        ? (args: string, ctx: ToolExecutionContext) => string | Deferred | Promise<string | Deferred>
-        : (
-              args: string,
-              state: SliceState<Slice>,
-              ctx: ToolExecutionContext,
-          ) => string | Deferred | Promise<string | Deferred>;
-    retry?: RetryPolicy;
-    handler?: ToolHandler;
-}): ToolDef {
+type ToolResult = string | Deferred | Promise<string | Deferred>;
+
+// Tools return the result string directly (no implicit serialization — call
+// `JSON.stringify` yourself for structured data), or `ctx.defer()` to complete
+// the call out-of-band. A `state` slice gives the executor typed access to it.
+//
+// `handler` discriminates how the tool runs:
+//   - "worker" (default): the engine runs `execute`, so it's required.
+//   - "client": the call is completed in the browser, so `execute` is optional
+//     and never runs on the worker.
+export function tool<Slice extends StateSliceMw<object> = never>(
+    config: {
+        name: string;
+        description: string;
+        parameters: unknown;
+        state?: Slice;
+        retry?: RetryPolicy;
+    } & (
+        | {
+              handler?: "worker";
+              execute: [Slice] extends [never]
+                  ? (args: string, ctx: ToolExecutionContext) => ToolResult
+                  : (args: string, state: SliceState<Slice>, ctx: ToolExecutionContext) => ToolResult;
+          }
+        | { handler: "client"; execute?: (args: string, ctx: ToolExecutionContext) => ToolResult }
+    ),
+): ToolDef {
     return {
         name: config.name,
         description: config.description,
         parameters: config.parameters,
         execute: async (args: string, state?: unknown, ctx?: ToolExecutionContext) => {
+            if (!config.execute) {
+                // Client tools are completed by the frontend; reaching here means
+                // a worker tool was declared without an executor.
+                throw new Error(`Tool "${config.name}" has no server-side execute.`);
+            }
             if (config.state) {
                 return (config.execute as (a: string, s: unknown, c: ToolExecutionContext) => unknown)(
                     args,

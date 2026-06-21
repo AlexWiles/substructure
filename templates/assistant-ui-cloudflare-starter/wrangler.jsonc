@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "substructure-assistant-ui",
+  "main": "@tanstack/react-start/server-entry",
+  "compatibility_date": "2026-05-14",
+  // nodejs_compat also populates process.env from the vars/secrets below.
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "vars": {
+    // The engine the worker talks to (server-to-server).
+    "SUBSTRUCTURE_URL": "https://api.substructure.ai",
+    // The engine the BROWSER talks to (must be publicly reachable + CORS-open).
+    "SUBSTRUCTURE_PUBLIC_URL": "https://api.substructure.ai"
+  }
+  // Secrets (set once):
+  //   wrangler secret put SUBSTRUCTURE_API_KEY
+  //   wrangler secret put SIGNING_SECRET     # only if the engine signs webhooks
+}

@@ -1,5 +1,5 @@
 ---
-title: SDK
+title: TypeScript SDK
 ---
 
 The `@substructure.ai/sdk` package is how you build agents and connect to Substructure from TypeScript. It gives you three things in one package:

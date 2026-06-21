@@ -19,7 +19,6 @@ const addTodo = agent.tool({
         required: ["title"],
     },
     handler: "client",
-    execute: (_args: string, ctx) => ctx.defer(),
 });
 
 const toggleTodo = agent.tool({
@@ -36,7 +35,6 @@ const toggleTodo = agent.tool({
         required: ["id"],
     },
     handler: "client",
-    execute: (_args: string, ctx) => ctx.defer(),
 });
 
 const removeTodo = agent.tool({
@@ -48,7 +46,6 @@ const removeTodo = agent.tool({
         required: ["id"],
     },
     handler: "client",
-    execute: (_args: string, ctx) => ctx.defer(),
 });
 
 const clearCompleted = agent.tool({
@@ -56,7 +53,6 @@ const clearCompleted = agent.tool({
     description: "Remove every completed task from the list. Runs in the user's browser.",
     parameters: { type: "object", properties: {} },
     handler: "client",
-    execute: (_args: string, ctx) => ctx.defer(),
 });
 
 const listTodos = agent.tool({
@@ -66,7 +62,6 @@ const listTodos = agent.tool({
         "Runs in the user's browser.",
     parameters: { type: "object", properties: {} },
     handler: "client",
-    execute: (_args: string, ctx) => ctx.defer(),
 });
 
 const todoAgent = agent({ id: AGENT_ID })

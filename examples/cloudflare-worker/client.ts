@@ -6,6 +6,7 @@
 import Substructure from "@substructure.ai/sdk";
 
 const sub = new Substructure();
+
 const client = sub.backend.client({
     url: "https://api.substructure.ai",
     apiKey: process.env.SUBSTRUCTURE_API_KEY!,

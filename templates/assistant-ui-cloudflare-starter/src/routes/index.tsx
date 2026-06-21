@@ -1,0 +1,111 @@
+import { AuiProvider, defineToolkit, Suggestions, Tools, useAui } from "@assistant-ui/react";
+import { createFileRoute } from "@tanstack/react-router";
+import { PlusIcon } from "lucide-react";
+
+import { MyRuntimeProvider } from "@/components/MyRuntimeProvider";
+import { Thread } from "@/components/assistant-ui/thread";
+import { mintToken } from "@/lib/token";
+
+// The loader mints the short-lived client token server-side, so the chat has it
+// at first paint and the API key never reaches the browser.
+export const Route = createFileRoute("/")({
+    loader: () => mintToken(),
+    component: Page,
+});
+
+// browser_alert runs entirely in the browser. The agent declares it as a
+// client-handled tool (src/substructure.ts), the engine emits the call, and this
+// toolkit's execute() runs here and returns the result. Mirrors with-ag-ui's
+// client-side tool demo.
+const toolkit = defineToolkit({
+    browser_alert: {
+        description: "Display a native browser alert dialog to the user.",
+        parameters: {
+            type: "object",
+            properties: {
+                message: {
+                    type: "string",
+                    description: "Text to display inside the alert dialog.",
+                },
+            },
+            required: ["message"],
+        },
+        execute: async ({ message }) => {
+            alert(message);
+            return { status: "shown" };
+        },
+        render: ({ args, result }) => (
+            <div className="mt-3 w-full max-w-(--thread-max-width) rounded-lg border px-4 py-3 text-sm">
+                <p className="text-muted-foreground font-semibold">browser_alert</p>
+                <p className="mt-1">
+                    Requested alert with message:
+                    <span className="text-foreground ml-1 font-mono">{JSON.stringify(args.message)}</span>
+                </p>
+                {result?.status === "shown" && (
+                    <p className="text-foreground/70 mt-2 text-xs">Alert displayed in this tab.</p>
+                )}
+            </div>
+        ),
+    },
+});
+
+function NewThreadButton() {
+    const aui = useAui();
+
+    return (
+        <button
+            type="button"
+            onClick={() => aui.threads().switchToNewThread()}
+            className="bg-background hover:bg-accent absolute top-4 right-4 z-10 flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium shadow-sm transition-colors"
+        >
+            <PlusIcon className="size-4" />
+            New Thread
+        </button>
+    );
+}
+
+function ThreadWithSuggestions() {
+    const aui = useAui({
+        suggestions: Suggestions([
+            {
+                title: "What time is it?",
+                label: "calls the time tool",
+                prompt: "What time is it right now?",
+            },
+            {
+                title: "Show a browser alert",
+                label: "using the alert tool",
+                prompt: "Show me a browser alert saying hello!",
+            },
+        ]),
+    });
+    return (
+        <AuiProvider value={aui}>
+            <Thread />
+        </AuiProvider>
+    );
+}
+
+function Home() {
+    const aui = useAui({
+        tools: Tools({ toolkit }),
+    });
+
+    return (
+        <AuiProvider value={aui}>
+            <main className="relative h-dvh">
+                <NewThreadButton />
+                <ThreadWithSuggestions />
+            </main>
+        </AuiProvider>
+    );
+}
+
+function Page() {
+    const session = Route.useLoaderData();
+    return (
+        <MyRuntimeProvider session={session}>
+            <Home />
+        </MyRuntimeProvider>
+    );
+}

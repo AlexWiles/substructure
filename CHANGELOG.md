@@ -10,6 +10,17 @@ same version.
 
 ## [Unreleased]
 
+### Added
+
+- `assistant-ui-cloudflare-starter` template: an assistant-ui chat on a
+  Cloudflare Worker (TanStack Start) that streams from the AG-UI endpoint.
+
+### Changed
+
+- `agent.tool` no longer requires `execute` for client tools
+  (`handler: "client"`) — the call is completed in the browser, so `execute` is
+  optional for them. Worker tools still require it.
+
 ## [0.1.19] - 2026-06-12
 
 ### Added
