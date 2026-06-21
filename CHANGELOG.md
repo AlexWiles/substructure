@@ -14,8 +14,17 @@ same version.
 
 - `assistant-ui-cloudflare-starter` template: an assistant-ui chat on a
   Cloudflare Worker (TanStack Start) that streams from the AG-UI endpoint.
+- Session messages now form a tree: each carries a stable id and a parent link,
+  and the session tracks the active head. A client message payload accepts an
+  optional `parent_id` to branch from a specific message, and the worker's
+  `user.message`/`llm.response` decision triggers now carry each message's id
+  and parent — groundwork for branching threads (edits/regenerations).
 
 ### Changed
+
+- Tool and sub-agent results are recorded as messages in the order they're
+  delivered to the model. Sub-agent results were previously absent from the
+  message stream, and parallel tool results could be recorded out of order.
 
 - `agent.tool` no longer requires `execute` for client tools
   (`handler: "client"`) — the call is completed in the browser, so `execute` is

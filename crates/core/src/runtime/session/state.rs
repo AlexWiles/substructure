@@ -214,6 +214,10 @@ pub(super) fn new_call_id() -> String {
     Uuid::now_v7().to_string()
 }
 
+pub(super) fn new_message_id() -> String {
+    Uuid::now_v7().to_string()
+}
+
 /// A JSON string passes through; anything else is serialized.
 pub(super) fn json_to_string(v: &serde_json::Value) -> String {
     match v {
@@ -273,6 +277,11 @@ pub struct SessionState {
     /// Turn IDs that have completed, used for idempotency checks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub completed_turn_ids: Vec<String>,
+
+    /// The active branch's leaf: new messages link to it and it advances to each
+    /// appended message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_id: Option<String>,
 }
 
 impl SessionState {
@@ -298,6 +307,7 @@ impl SessionState {
             worker_decisions: HashMap::new(),
             turn_id: None,
             completed_turn_ids: Vec::new(),
+            head_id: None,
         }
     }
 
@@ -314,6 +324,9 @@ impl SessionState {
             EventPayload::NewMessage(payload) => {
                 if payload.message.role == Role::User {
                     self.status = SessionStatus::Idle;
+                }
+                if !payload.id.is_empty() {
+                    self.head_id = Some(payload.id.clone());
                 }
             }
             EventPayload::LlmCallRequested(payload) => {

@@ -278,6 +278,7 @@ pub async fn ag_ui_run(
                 payload: ClientPayload::Message {
                     message,
                     stream: true,
+                    parent_id: None,
                 },
                 turn_id: Some(input.run_id.clone()),
             })

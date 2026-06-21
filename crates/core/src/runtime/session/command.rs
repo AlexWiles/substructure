@@ -6,7 +6,9 @@ use rust_decimal::Decimal;
 use super::decision::{ClientPayload, DecisionTrigger, ToolResult, WorkerAction};
 use super::events::*;
 use super::message::{Content, ContentPart, ImageUrl, Message, Role};
-use super::state::{json_to_string, new_call_id, EffectStatus, SessionState, SessionStatus};
+use super::state::{
+    json_to_string, new_call_id, new_message_id, EffectStatus, SessionState, SessionStatus,
+};
 use crate::runtime::aggregate::Caller;
 use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse};
 use crate::runtime::owner::SessionOwner;
@@ -30,6 +32,7 @@ pub enum CommandPayload {
         #[allow(dead_code)]
         stream: bool,
         turn_id: Option<String>,
+        parent_id: Option<String>,
     },
     RequestLlmCall {
         call_id: String,
@@ -147,6 +150,23 @@ pub enum SessionError {
     ToolCallWrongHandler,
 }
 
+/// A new message's identity, shared between its `NewMessage` event and the
+/// worker trigger that echoes the same id.
+struct MessageNode {
+    id: String,
+    parent_id: Option<String>,
+}
+
+impl MessageNode {
+    fn event(&self, message: Message) -> EventPayload {
+        EventPayload::NewMessage(NewMessage {
+            id: self.id.clone(),
+            parent_id: self.parent_id.clone(),
+            message,
+        })
+    }
+}
+
 impl SessionState {
     fn ensure_internal(caller: &Caller) -> Result<(), SessionError> {
         match caller {
@@ -255,6 +275,38 @@ impl SessionState {
         }
     }
 
+    fn next_message_node(&self, parent_id: Option<String>) -> MessageNode {
+        MessageNode {
+            id: new_message_id(),
+            parent_id: parent_id.or_else(|| self.head_id.clone()),
+        }
+    }
+
+    /// One tool-role message per drained effect result, recorded in the batch's
+    /// (issue) order. Parents chain explicitly off the head — within a single
+    /// command `head_id` doesn't advance between events, so siblings would
+    /// otherwise all attach to the same parent.
+    fn effect_result_messages(&self, results: &[ToolResult]) -> Vec<EventPayload> {
+        let mut parent_id = self.head_id.clone();
+        let mut events = Vec::with_capacity(results.len());
+        for result in results {
+            let id = new_message_id();
+            events.push(EventPayload::NewMessage(NewMessage {
+                id: id.clone(),
+                parent_id: parent_id.clone(),
+                message: Message {
+                    role: Role::Tool,
+                    content: Some(Content::Text(result.content.clone())),
+                    tool_calls: None,
+                    tool_call_id: Some(result.tool_call_id.clone()),
+                    name: Some(result.name.clone()),
+                },
+            }));
+            parent_id = Some(id);
+        }
+        events
+    }
+
     fn emit_decision_request(&self, trigger: DecisionTrigger) -> EventPayload {
         let decision_id = new_call_id();
         // Queue while another decision is in flight, or while interrupted —
@@ -308,19 +360,24 @@ impl SessionState {
                 }
 
                 match payload {
-                    ClientPayload::Message { message, stream } => {
+                    ClientPayload::Message {
+                        message,
+                        stream,
+                        parent_id,
+                    } => {
                         if matches!(self.status, SessionStatus::Interrupted { .. })
                             && message.role == Role::User
                         {
                             return Err(SessionError::SessionInterrupted);
                         }
-                        events.push(EventPayload::NewMessage(NewMessage {
-                            message: message.clone(),
-                        }));
+                        let node = self.next_message_node(parent_id);
+                        events.push(node.event(message.clone()));
                         if message.role == Role::User {
                             events.push(self.emit_decision_request(DecisionTrigger::UserMessage {
                                 stream,
                                 message,
+                                id: node.id,
+                                parent_id: node.parent_id,
                             }));
                         }
                     }
@@ -342,6 +399,7 @@ impl SessionState {
                 message,
                 stream,
                 turn_id,
+                parent_id,
             } => {
                 Self::ensure_internal(caller)?;
                 // Idempotency guard: reject if this turn_id was already seen
@@ -363,9 +421,8 @@ impl SessionState {
                         Err(SessionError::SessionInterrupted)
                     }
                     _ => {
-                        let mut events = vec![EventPayload::NewMessage(NewMessage {
-                            message: message.clone(),
-                        })];
+                        let node = self.next_message_node(parent_id);
+                        let mut events = vec![node.event(message.clone())];
                         if let Some(turn_id) = turn_id {
                             events.push(EventPayload::TurnStarted(TurnStarted { turn_id }));
                         }
@@ -373,6 +430,8 @@ impl SessionState {
                             events.push(self.emit_decision_request(DecisionTrigger::UserMessage {
                                 stream,
                                 message,
+                                id: node.id,
+                                parent_id: node.parent_id,
                             }));
                         }
                         Ok(events)
@@ -463,21 +522,22 @@ impl SessionState {
                             tool_call_id: None,
                             name: None,
                         };
+                        let node = self.next_message_node(None);
                         Ok(vec![
                             EventPayload::LlmCallCompleted(LlmCallCompleted {
                                 call_id: call_id.clone(),
                                 attempt,
                                 response,
                             }),
-                            EventPayload::NewMessage(NewMessage {
-                                message: message.clone(),
-                            }),
+                            node.event(message.clone()),
                             self.emit_decision_request(DecisionTrigger::LlmResponse {
                                 call_id,
                                 message,
                                 truncated,
                                 usage,
                                 cost,
+                                id: node.id,
+                                parent_id: node.parent_id,
                             }),
                         ])
                     }
@@ -579,22 +639,11 @@ impl SessionState {
 
                 let name = tc.name.clone();
 
-                let mut events = vec![
-                    EventPayload::ToolCallCompleted(ToolCallCompleted {
-                        tool_call_id: tool_call_id.clone(),
-                        name: name.clone(),
-                        result: result.clone(),
-                    }),
-                    EventPayload::NewMessage(NewMessage {
-                        message: Message {
-                            role: Role::Tool,
-                            content: Some(Content::Text(result.clone())),
-                            tool_calls: None,
-                            tool_call_id: Some(tool_call_id.clone()),
-                            name: Some(name.clone()),
-                        },
-                    }),
-                ];
+                let mut events = vec![EventPayload::ToolCallCompleted(ToolCallCompleted {
+                    tool_call_id: tool_call_id.clone(),
+                    name: name.clone(),
+                    result: result.clone(),
+                })];
                 if let Some(ws) = worker_state {
                     events.push(EventPayload::WorkerStateUpdated(WorkerStateUpdated {
                         state: ws,
@@ -607,6 +656,7 @@ impl SessionState {
                     is_error: false,
                 };
                 if let Some(results) = self.drainable_with(pending) {
+                    events.extend(self.effect_result_messages(&results));
                     events.push(
                         self.emit_decision_request(DecisionTrigger::EffectsComplete { results }),
                     );
@@ -656,6 +706,7 @@ impl SessionState {
                         is_error: true,
                     };
                     if let Some(results) = self.drainable_with(pending) {
+                        events.extend(self.effect_result_messages(&results));
                         events.push(
                             self.emit_decision_request(DecisionTrigger::EffectsComplete {
                                 results,
@@ -729,6 +780,7 @@ impl SessionState {
                 })];
                 if exhausted {
                     if let Some(results) = self.drainable_with(pending) {
+                        events.extend(self.effect_result_messages(&results));
                         events.push(
                             self.emit_decision_request(DecisionTrigger::EffectsComplete {
                                 results,
@@ -764,6 +816,7 @@ impl SessionState {
                     data,
                 })];
                 if let Some(results) = self.drainable_with(pending) {
+                    events.extend(self.effect_result_messages(&results));
                     events.push(
                         self.emit_decision_request(DecisionTrigger::EffectsComplete { results }),
                     );
@@ -1217,12 +1270,14 @@ impl SessionState {
         // Deliver the batch once every effect is terminal.
         if !self.has_pending_worker_decision() {
             if let Some(results) = self.drainable_batch() {
-                return Ok(vec![EventPayload::WorkerDecisionRequested(
+                let mut events = self.effect_result_messages(&results);
+                events.push(EventPayload::WorkerDecisionRequested(
                     WorkerDecisionRequested {
                         decision_id: new_call_id(),
                         trigger: DecisionTrigger::EffectsComplete { results },
                     },
-                )]);
+                ));
+                return Ok(events);
             }
         }
 
@@ -1694,6 +1749,7 @@ mod tests {
                 name: None,
             },
             stream: false,
+            parent_id: None,
         };
 
         dispatch(
@@ -1741,6 +1797,7 @@ mod tests {
                         name: None,
                     },
                     stream: false,
+                    parent_id: None,
                 },
                 turn_id: Some("turn-1".to_string()),
             },
@@ -1808,6 +1865,7 @@ mod tests {
                         name: None,
                     },
                     stream: false,
+                    parent_id: None,
                 },
                 turn_id: Some("turn-1".to_string()),
             },
@@ -1888,6 +1946,7 @@ mod tests {
                 name: None,
             },
             stream: false,
+            parent_id: None,
         };
 
         let err = agg
@@ -1953,6 +2012,7 @@ mod tests {
                 },
                 stream: false,
                 turn_id: None,
+                parent_id: None,
             },
             &Caller::System {
                 tenant_id: "tenant-a".to_string(),
@@ -2385,10 +2445,11 @@ mod tests {
                 events.as_slice(),
                 [
                     EventPayload::ToolCallErrored(_),
+                    EventPayload::NewMessage(_),
                     EventPayload::WorkerDecisionRequested(_),
                 ]
             ),
-            "expected [ToolCallErrored, WorkerDecisionRequested]; got {events:?}"
+            "expected [ToolCallErrored, NewMessage, WorkerDecisionRequested]; got {events:?}"
         );
         assert_eq!(effects_complete(&events).map(|r| r.len()), Some(1));
         let tc = agg.state.tool_calls.get("tc-1").expect("tool call present");
@@ -2491,10 +2552,11 @@ mod tests {
                 events.as_slice(),
                 [
                     EventPayload::SubAgentErrored(_),
+                    EventPayload::NewMessage(_),
                     EventPayload::WorkerDecisionRequested(_),
                 ]
             ),
-            "expected [SubAgentErrored, WorkerDecisionRequested]; got {events:?}"
+            "expected [SubAgentErrored, NewMessage, WorkerDecisionRequested]; got {events:?}"
         );
         let sa = agg
             .state
@@ -2542,10 +2604,11 @@ mod tests {
                 events.as_slice(),
                 [
                     EventPayload::SubAgentTurnCompleted(_),
+                    EventPayload::NewMessage(_),
                     EventPayload::WorkerDecisionRequested(_),
                 ]
             ),
-            "expected [SubAgentTurnCompleted, WorkerDecisionRequested]; got {events:?}"
+            "expected [SubAgentTurnCompleted, NewMessage, WorkerDecisionRequested]; got {events:?}"
         );
         let sa = agg
             .state
@@ -2675,6 +2738,7 @@ mod tests {
                         name: None,
                     },
                     stream: false,
+                    parent_id: None,
                 },
                 turn_id: Some("turn-1".to_string()),
             },
@@ -2798,6 +2862,7 @@ mod tests {
                         name: None,
                     },
                     stream: false,
+                    parent_id: None,
                 },
                 turn_id: Some("turn-1".to_string()),
             },
@@ -3305,6 +3370,7 @@ mod tests {
                         name: None,
                     },
                     stream: false,
+                    parent_id: None,
                 },
                 turn_id: Some("turn-1".to_string()),
             },
@@ -3363,6 +3429,7 @@ mod tests {
                         name: None,
                     },
                     stream: false,
+                    parent_id: None,
                 },
                 turn_id: Some("turn-1".to_string()),
             },
@@ -3452,6 +3519,7 @@ mod tests {
                         name: None,
                     },
                     stream: false,
+                    parent_id: None,
                 },
                 turn_id: Some("turn-1".to_string()),
             },
@@ -3586,6 +3654,7 @@ mod tests {
                         name: None,
                     },
                     stream: false,
+                    parent_id: None,
                 },
                 turn_id: Some("turn-1".to_string()),
             },
@@ -3672,6 +3741,7 @@ mod tests {
                         name: None,
                     },
                     stream: false,
+                    parent_id: None,
                 },
                 turn_id: Some("turn-1".to_string()),
             },
@@ -3775,5 +3845,166 @@ mod tests {
             matches!(err, SessionError::SessionAccessDenied),
             "expected SessionAccessDenied; got {err:?}"
         );
+    }
+
+    fn user_msg(text: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: Some(Content::Text(text.to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    fn recorded_node(events: &[EventPayload]) -> (String, Option<String>) {
+        events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::NewMessage(m) => Some((m.id.clone(), m.parent_id.clone())),
+                _ => None,
+            })
+            .expect("expected a NewMessage event")
+    }
+
+    #[test]
+    fn messages_link_to_head_and_head_advances() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let caller = Caller::System {
+            tenant_id: "tenant-a".to_string(),
+        };
+        let send = |agg: &mut Aggregate<SessionState>, text: &str, parent_id: Option<String>| {
+            dispatch(
+                agg,
+                CommandPayload::SendMessage {
+                    message: user_msg(text),
+                    stream: false,
+                    turn_id: None,
+                    parent_id,
+                },
+                &caller,
+            )
+        };
+
+        let (id1, parent1) = recorded_node(&send(&mut agg, "one", None));
+        assert_eq!(parent1, None);
+        assert_eq!(agg.state.head_id.as_deref(), Some(id1.as_str()));
+
+        let (id2, parent2) = recorded_node(&send(&mut agg, "two", None));
+        assert_eq!(parent2.as_deref(), Some(id1.as_str()));
+        assert_eq!(agg.state.head_id.as_deref(), Some(id2.as_str()));
+
+        // Explicit parent branches from message one — a sibling of message two.
+        let (id3, parent3) = recorded_node(&send(&mut agg, "three", Some(id1.clone())));
+        assert_ne!(id3, id2);
+        assert_eq!(parent3.as_deref(), Some(id1.as_str()));
+        assert_eq!(agg.state.head_id.as_deref(), Some(id3.as_str()));
+    }
+
+    fn user_trigger_node(events: &[EventPayload]) -> (String, Option<String>) {
+        events
+            .iter()
+            .find_map(|e| {
+                let trigger = match e {
+                    EventPayload::WorkerDecisionRequested(w) => &w.trigger,
+                    EventPayload::DecisionRequestQueued(q) => &q.trigger,
+                    _ => return None,
+                };
+                match trigger {
+                    DecisionTrigger::UserMessage { id, parent_id, .. } => {
+                        Some((id.clone(), parent_id.clone()))
+                    }
+                    _ => None,
+                }
+            })
+            .expect("expected a UserMessage trigger")
+    }
+
+    #[test]
+    fn user_message_trigger_carries_the_node_id() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let caller = Caller::System {
+            tenant_id: "tenant-a".to_string(),
+        };
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::SendMessage {
+                message: user_msg("hi"),
+                stream: false,
+                turn_id: None,
+                parent_id: None,
+            },
+            &caller,
+        );
+
+        let (msg_id, _) = recorded_node(&events);
+        let (trigger_id, trigger_parent) = user_trigger_node(&events);
+        assert_eq!(trigger_id, msg_id);
+        assert!(!trigger_id.is_empty());
+        assert_eq!(trigger_parent, None);
+    }
+
+    #[test]
+    fn parallel_tool_results_record_in_issue_order_not_completion_order() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let sys = Caller::System {
+            tenant_id: "tenant-a".to_string(),
+        };
+
+        let request = |agg: &mut Aggregate<SessionState>, id: &str| {
+            dispatch(
+                agg,
+                CommandPayload::RequestToolCall {
+                    tool_call_id: id.to_string(),
+                    name: "t".to_string(),
+                    arguments: "{}".to_string(),
+                    handler: ToolHandler::Client,
+                    retry: RetryPolicy::no_retry(),
+                },
+                &sys,
+            );
+        };
+        // Issued a before b.
+        request(&mut agg, "tc-a");
+        request(&mut agg, "tc-b");
+
+        let complete = |agg: &mut Aggregate<SessionState>, id: &str| {
+            dispatch(
+                agg,
+                CommandPayload::CompleteToolCall {
+                    tool_call_id: id.to_string(),
+                    attempt: 0,
+                    result: format!("result-{id}"),
+                    worker_state: None,
+                },
+                &sys,
+            )
+        };
+
+        // b finishes first, but the batch isn't drainable yet, so no message.
+        let first = complete(&mut agg, "tc-b");
+        assert!(
+            !first
+                .iter()
+                .any(|e| matches!(e, EventPayload::NewMessage(_))),
+            "no message until the batch drains; got {first:?}"
+        );
+
+        // a finishes last and drains the batch.
+        let second = complete(&mut agg, "tc-a");
+        let msgs: Vec<&NewMessage> = second
+            .iter()
+            .filter_map(|e| match e {
+                EventPayload::NewMessage(m) => Some(m),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(msgs.len(), 2);
+        // Recorded in issue order (a, b) — not completion order (b, a).
+        assert_eq!(msgs[0].message.tool_call_id.as_deref(), Some("tc-a"));
+        assert_eq!(msgs[1].message.tool_call_id.as_deref(), Some("tc-b"));
+        // Chained: the second result parents off the first.
+        assert_eq!(msgs[1].parent_id.as_deref(), Some(msgs[0].id.as_str()));
     }
 }

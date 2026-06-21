@@ -12,7 +12,11 @@ pub fn session_messages(events: &[Event]) -> Vec<SnapshotMessage> {
         else {
             continue;
         };
-        let id = event.id.to_string();
+        let id = if new_message.id.is_empty() {
+            event.id.to_string()
+        } else {
+            new_message.id
+        };
         let message = new_message.message;
         let content = content_text(message.content);
         out.push(match message.role {
@@ -102,8 +106,12 @@ mod tests {
 
     fn message_event(id: u128, message: Message) -> Event {
         let ts = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
-        let payload =
-            serde_json::to_value(EventPayload::NewMessage(NewMessage { message })).unwrap();
+        let payload = serde_json::to_value(EventPayload::NewMessage(NewMessage {
+            message,
+            id: String::new(),
+            parent_id: None,
+        }))
+        .unwrap();
         Event {
             position: 0,
             id: Uuid::from_u128(id),

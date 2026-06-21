@@ -79,6 +79,11 @@ pub struct SessionDone {}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewMessage {
     pub message: Message,
+    /// Stable node id, independent of the event's storage id. Empty on pre-tree events.
+    #[serde(default)]
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

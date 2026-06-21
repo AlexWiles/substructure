@@ -21,6 +21,9 @@ pub enum ClientPayload {
         message: Message,
         #[serde(default)]
         stream: bool,
+        /// When set, the message branches from here instead of the current head.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
     },
     Action {
         #[serde(flatten)]
@@ -40,7 +43,14 @@ pub struct ToolResult {
 #[serde(tag = "type")]
 pub enum DecisionTrigger {
     #[serde(rename = "user.message")]
-    UserMessage { stream: bool, message: Message },
+    UserMessage {
+        stream: bool,
+        message: Message,
+        #[serde(default)]
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
+    },
     #[serde(rename = "client.action")]
     ClientAction {
         name: String,
@@ -57,6 +67,11 @@ pub enum DecisionTrigger {
         usage: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cost: Option<Decimal>,
+        /// Node id of the assistant message (distinct from `call_id`).
+        #[serde(default)]
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
     },
     #[serde(rename = "llm.error")]
     LlmError {
