@@ -16,15 +16,33 @@ same version.
   Cloudflare Worker (TanStack Start) that streams from the AG-UI endpoint.
 - Session messages now form a tree: each carries a stable id and a parent link,
   and the session tracks the active head. A client message payload accepts an
-  optional `parent_id` to branch from a specific message, and the worker's
-  `user.message`/`llm.response` decision triggers now carry each message's id
-  and parent — groundwork for branching threads (edits/regenerations).
+  optional `parent_id` to branch from a specific message, and every
+  message-bearing worker trigger (`user.message`, `llm.response`, and the
+  batched `tool.results`) carries each message's id and parent — groundwork for
+  branching threads (edits/regenerations).
 
 ### Changed
 
+- The engine now materializes the message tree and ships it on every worker
+  decision (`message_tree` on the decision request). The conversation is no
+  longer worker state. `messageHistory`/`messageHistoryCurrentTurn` are removed;
+  the LLM loop is now composed from two middleware: `agent.llm({ generator,
+  instructions })` builds the prompt from the shipped tree's active path and
+  drives the loop, and `agent.stopWhen(cond)` halts it (e.g.
+  `agent.stepCountIs(20)` to cap the rounds; chain several for OR). The
+  adapters (`ToolLoopAgent`, `OpenAIAgent`) take an optional `stopWhen`.
+  `activePath(tree)` is exported for tools or custom middleware that need the
+  transcript; custom prompt shaping is a middleware over `call.llm` (e.g. via
+  `prependHistoryToLlmCalls`).
 - Tool and sub-agent results are recorded as messages in the order they're
   delivered to the model. Sub-agent results were previously absent from the
   message stream, and parallel tool results could be recorded out of order.
+- The batched results trigger is renamed `effects.complete` → `tool.results`
+  and now carries recorded message nodes (`{ id, parent_id, message }`) rather
+  than raw tool-result rows, so the worker folds them into history without
+  reconstructing messages. The unused `sub_agent.turn.complete` and
+  `sub_agent.error` worker triggers are removed — results have flowed through
+  the batch since 0.1.16.
 
 - `agent.tool` no longer requires `execute` for client tools
   (`handler: "client"`) — the call is completed in the browser, so `execute` is

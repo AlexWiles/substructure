@@ -20,11 +20,11 @@ const getWeather = sub.agent.tool({
 
 const chatAgent = sub
     .agent({ id: "anthropic-agent" })
-    .use(sub.agent.messageHistory("You are a concise assistant."))
     .use(sub.agent.tools([getWeather]))
     .use(
-        sub.agent.llmToolLoop({
+        sub.agent.llm({
             generator: anthropicGenerate({ model: "claude-haiku-4-5", max_tokens: 1024 }),
+            instructions: "You are a concise assistant.",
         }),
     );
 

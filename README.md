@@ -57,10 +57,10 @@ const getWeather = agent.tool({
 });
 
 const weatherAgent = agent({ id: "weather-agent" })
-  .use(agent.messageHistory("You are a helpful weather assistant."))
   .use(agent.tools([getWeather]))
-  .use(agent.llmToolLoop({
+  .use(agent.llm({
     generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }),
+    instructions: "You are a helpful weather assistant.",
   }));
 
 const worker = sub.worker({ agents: [weatherAgent] });
@@ -123,8 +123,10 @@ const sub = new Substructure();
 const { agent } = sub;
 
 const chatAgent = agent({ id: "chat" })
-  .use(agent.messageHistory("You are a helpful assistant."))
-  .use(agent.llmToolLoop({ generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }) }));
+  .use(agent.llm({
+    generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }),
+    instructions: "You are a helpful assistant.",
+  }));
 ```
 
 ### Tools
@@ -161,9 +163,11 @@ const listTodos = agent.tool({
 });
 
 const todoAgent = agent({ id: "todo" })
-  .use(agent.messageHistory("You are a concise todo assistant. Use tools to manage the list."))
   .use(agent.tools([addTodo, listTodos]))
-  .use(agent.llmToolLoop({ generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }) }));
+  .use(agent.llm({
+    generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }),
+    instructions: "You are a concise todo assistant. Use tools to manage the list.",
+  }));
 ```
 
 ### State hydration
@@ -200,9 +204,11 @@ const addTodo = agent.tool({
 
 const todoAgent = agent({ id: "todo" })
   .use(todoSlice)
-  .use(agent.messageHistory("Concise todo assistant. Use tools to manage the list."))
   .use(agent.tools([addTodo]))
-  .use(agent.llmToolLoop({ generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }) }));
+  .use(agent.llm({
+    generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }),
+    instructions: "Concise todo assistant. Use tools to manage the list.",
+  }));
 ```
 
 ### Mixed state: user and session
@@ -238,9 +244,11 @@ const hydrate: MiddlewareFn<Refs, Hydrated> = async (ctx, next) => {
 const todoAgent = agent({ id: "todo" })
   .use(agent.stateSlice<Refs>({ historyId: "", todosId: "" }))
   .use(hydrate)
-  .use(agent.messageHistory("Concise todo assistant. Use the tools to manage the list."))
   .use(agent.tools([addTodo, listTodos]))
-  .use(agent.llmToolLoop({ generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }) }));
+  .use(agent.llm({
+    generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }),
+    instructions: "Concise todo assistant. Use the tools to manage the list.",
+  }));
 ```
 
 ### Bring your own agent framework
@@ -249,7 +257,7 @@ An existing agent built on another framework can run on Substructure through an 
 
 - **[Vercel AI SDK](https://sdk.vercel.ai):** `ToolLoopAgent` from `@substructure.ai/sdk/adapters/ai`. See [`examples/ai-sdk-example`](./examples/ai-sdk-example).
 - **[OpenAI Agents](https://github.com/openai/openai-agents-js):** `OpenAIAgent` from `@substructure.ai/sdk/adapters/openai`. See [`examples/openai-example`](./examples/openai-example).
-- **[Anthropic SDK](https://github.com/anthropics/anthropic-sdk-typescript):** `anthropicGenerate` from `@substructure.ai/sdk/adapters/anthropic` — a generator you plug into `llmToolLoop` (the core SDK has no agent type to wrap). See [`examples/anthropic-example`](./examples/anthropic-example).
+- **[Anthropic SDK](https://github.com/anthropics/anthropic-sdk-typescript):** `anthropicGenerate` from `@substructure.ai/sdk/adapters/anthropic` — a generator you plug into `llm` (the core SDK has no agent type to wrap). See [`examples/anthropic-example`](./examples/anthropic-example).
 
 The agent adapters produce a middleware you `.use()` like any other:
 
@@ -276,18 +284,18 @@ const assistant = new ToolLoopAgent({
 const chatAgent = sub.agent({ id: "ai-sdk-agent" }).use(assistant);
 ```
 
-The Anthropic adapter is a generator rather than an agent: you plug it into `llmToolLoop` and declare tools the usual way with `tools()`.
+The Anthropic adapter is a generator rather than an agent: you plug it into `llm` and declare tools the usual way with `tools()`.
 
 ```typescript
 import { anthropicGenerate } from "@substructure.ai/sdk/adapters/anthropic";
 
 const chatAgent = sub
   .agent({ id: "anthropic-agent" })
-  .use(sub.agent.messageHistory("You are a concise assistant."))
   .use(sub.agent.tools([getWeather]))
   .use(
-    sub.agent.llmToolLoop({
+    sub.agent.llm({
       generator: anthropicGenerate({ model: "claude-haiku-4-5", max_tokens: 1024 }),
+      instructions: "You are a concise assistant.",
     }),
   );
 ```

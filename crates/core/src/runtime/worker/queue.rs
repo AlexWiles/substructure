@@ -7,6 +7,7 @@ use crate::runtime::aggregate::Caller;
 use crate::runtime::owner::SessionOwner;
 use crate::runtime::session::decision::DecisionTrigger;
 use crate::runtime::session::decision::WorkerAction;
+use crate::runtime::session::events::MessageTree;
 use crate::runtime::span::SpanContext;
 
 /// Wire format sent to workers (via poll or push) when a decision is needed.
@@ -19,6 +20,10 @@ pub struct WorkerDecisionRequest {
     pub owner: SessionOwner,
     pub trigger: DecisionTrigger,
     pub worker_state: WorkerState,
+    /// The conversation tree as of this decision; the worker reads its active
+    /// path from here rather than keeping its own copy.
+    #[serde(default)]
+    pub message_tree: MessageTree,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ancestry: Vec<String>,
     pub span: SpanContext,

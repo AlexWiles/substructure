@@ -61,7 +61,7 @@ export interface StreamOptions {
     sequenceAfter?: number;
     /** Include transient `llm.token.delta` events. Off by default, so `stream()`
      *  yields only persisted events. Deltas only arrive when streaming is enabled
-     *  on the agent's `llmToolLoop`. */
+     *  on the agent's `llm`. */
     tokens?: boolean;
 }
 

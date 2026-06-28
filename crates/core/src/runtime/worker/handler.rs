@@ -90,6 +90,7 @@ fn try_extract(raw: &Event) -> Option<WorkerDecisionRequest> {
         owner: owner.clone(),
         trigger: req.trigger.clone(),
         worker_state: derived.worker_state.clone(),
+        message_tree: derived.message_tree.clone(),
         ancestry: derived.ancestry.clone(),
         span: event.span.clone(),
         attempts: wd.tracking.retry.attempts,

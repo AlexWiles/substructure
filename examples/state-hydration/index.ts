@@ -121,9 +121,13 @@ const listTodos = agent.tool({
 const todoAgent = agent({ id: "todo" })
     .use(agent.stateSlice<Refs>({ historyId: "", todosId: "" }))
     .use(hydrate)
-    .use(agent.messageHistory("Concise todo assistant. Use the tools to manage the list."))
     .use(agent.tools([addTodo, listTodos]))
-    .use(agent.llmToolLoop({ generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }) }));
+    .use(
+        agent.llm({
+            generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }),
+            instructions: "Concise todo assistant. Use the tools to manage the list.",
+        }),
+    );
 
 // ── Run ───────────────────────────────────────────────────────────────────────
 

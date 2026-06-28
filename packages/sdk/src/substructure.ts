@@ -6,12 +6,12 @@ import {
     action,
     actions,
     jsonState,
-    llmToolLoop,
+    llm,
     logging,
-    messageHistory,
-    messageHistoryCurrentTurn,
     serverGenerate,
     stateSlice,
+    stepCountIs,
+    stopWhen,
     subAgents,
     tool,
     tools,
@@ -31,10 +31,10 @@ export interface AgentFactory {
     action: typeof action;
     actions: typeof actions;
     logging: typeof logging;
-    messageHistory: typeof messageHistory;
-    messageHistoryCurrentTurn: typeof messageHistoryCurrentTurn;
     tools: typeof tools;
-    llmToolLoop: typeof llmToolLoop;
+    llm: typeof llm;
+    stopWhen: typeof stopWhen;
+    stepCountIs: typeof stepCountIs;
     serverGenerate: typeof serverGenerate;
     subAgents: typeof subAgents;
 }
@@ -50,10 +50,10 @@ function createAgentFactory(): AgentFactory {
     factory.action = action;
     factory.actions = actions;
     factory.logging = logging;
-    factory.messageHistory = messageHistory;
-    factory.messageHistoryCurrentTurn = messageHistoryCurrentTurn;
     factory.tools = tools;
-    factory.llmToolLoop = llmToolLoop;
+    factory.llm = llm;
+    factory.stopWhen = stopWhen;
+    factory.stepCountIs = stepCountIs;
     factory.serverGenerate = serverGenerate;
     factory.subAgents = subAgents;
 

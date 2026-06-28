@@ -137,15 +137,16 @@ const runCommand = agent.tool({
 // ── Agent ───────────────────────────────────────────────────────────────────
 
 const assistant = agent({ id: "assistant" })
-    .use(
-        agent.messageHistory(
-            "You are a shell assistant. Use `run_command` to run real shell commands on the user's machine. Every command requires explicit user approval before it runs and may be denied with a reason. If a command is denied, adapt rather than retrying the same command.",
-        ),
-    )
     .use(agent.actions([approveCommand]))
     .use(approvalGate)
     .use(agent.tools([runCommand]))
-    .use(agent.llmToolLoop({ generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }) }));
+    .use(
+        agent.llm({
+            generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }),
+            instructions:
+                "You are a shell assistant. Use `run_command` to run real shell commands on the user's machine. Every command requires explicit user approval before it runs and may be denied with a reason. If a command is denied, adapt rather than retrying the same command.",
+        }),
+    );
 
 // ── CLI driver ──────────────────────────────────────────────────────────────
 // Usage:

@@ -38,17 +38,14 @@ const browserAlert = agent.tool({
 });
 
 const assistant = agent({ id: AGENT_ID })
-    .use(
-        agent.messageHistory(
-            "You are a concise, friendly assistant. Use get_current_time when asked about the " +
-                "current date or time, and browser_alert to pop a native alert in the user's browser.",
-        ),
-    )
     .use(agent.tools([getCurrentTime, browserAlert]))
     .use(
-        agent.llmToolLoop({
+        agent.llm({
             generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }),
             stream: true,
+            instructions:
+                "You are a concise, friendly assistant. Use get_current_time when asked about the " +
+                "current date or time, and browser_alert to pop a native alert in the user's browser.",
         }),
     );
 

@@ -6,6 +6,7 @@ import type {
     LlmTokenDeltaInput,
     LlmTool,
     Message,
+    MessageTree,
     ReasoningConfig,
     RetryPolicy,
     StreamPart,
@@ -329,16 +330,6 @@ export type MessageSelector<S> = (state: S, ctx: AgentContext<S>) => Message[] |
 
 export type SystemMessageSelector<S> = (state: S, ctx: AgentContext<S>) => string | Promise<string>;
 
-export interface MessageHistoryOptions<K extends string = "messages"> {
-    /** State key the transcript array lives at. Defaults to `"messages"`. */
-    stateKey?: K;
-}
-
-function toSystemSelector<S>(system: SystemMessageSelector<S> | string | undefined): SystemMessageSelector<S> | null {
-    if (system === undefined) return null;
-    return typeof system === "function" ? system : () => system;
-}
-
 /** The transcript message for a trigger, or `null` for triggers with no turn entry
  *  (`client.action`, `tool.execute`, `llm.error`, …). */
 export function triggerToMessage(trigger: DecisionTrigger): Message | null {
@@ -351,15 +342,10 @@ export function triggerToMessage(trigger: DecisionTrigger): Message | null {
     }
 }
 
-/** Like `triggerToMessage`, but expands `effects.complete` into one message per result. */
+/** Like `triggerToMessage`, but expands a `tool.results` batch into its messages. */
 export function triggerToMessages(trigger: DecisionTrigger): Message[] {
-    if (trigger.type === "effects.complete") {
-        return trigger.results.map((result) => ({
-            role: "tool",
-            content: result.content,
-            tool_call_id: result.tool_call_id,
-            name: result.name,
-        }));
+    if (trigger.type === "tool.results") {
+        return trigger.messages.map((n) => n.message);
     }
     const msg = triggerToMessage(trigger);
     return msg ? [msg] : [];
@@ -380,82 +366,20 @@ export function prependHistoryToLlmCalls(history: Message[], actions: WorkerActi
     );
 }
 
-/**
- * Conversation history middleware. Contributes `{ [stateKey]: Message[] }` to state
- * and prepends the full transcript to every LLM call. Pass `system` (string or
- * `(state, ctx) => string`) to prepend a system message ahead of the transcript.
- */
-export function messageHistory<S, K extends string = "messages">(
-    system?: SystemMessageSelector<S> | string,
-    options?: MessageHistoryOptions<K>,
-): StateContributor<Record<K, Message[]>> & MiddlewareFn<S, S & Record<K, Message[]>> {
-    const key = (options?.stateKey ?? "messages") as K;
-    const select = toSystemSelector(system);
-
-    return middleware<Record<K, Message[]>, S>({
-        state: { [key]: [] as Message[] } as Record<K, Message[]>,
-        handler: async (ctx, next) => {
-            const history = ctx.state[key];
-            for (const m of triggerToMessages(ctx.request.trigger)) history.push(m);
-
-            const sysMsg = select
-                ? {
-                      role: "system",
-                      content: await select(ctx.state, ctx),
-                  }
-                : null;
-
-            const result = await next(ctx);
-            const prefix = sysMsg ? [sysMsg as Message, ...history] : history;
-            return {
-                ...result,
-                actions: prependHistoryToLlmCalls(prefix, result.actions),
-            };
-        },
-    });
-}
-
-/**
- * Like `messageHistory`, but retains only the current turn's messages, resetting
- * whenever `ctx.request.turn_id` changes. Without a distinct `turn_id` per submit
- * it degrades to `messageHistory`.
- */
-export function messageHistoryCurrentTurn<S, K extends string = "messages">(
-    system?: SystemMessageSelector<S> | string,
-    options?: MessageHistoryOptions<K>,
-): StateContributor<Record<K, Message[]> & { lastTurnId?: string }> &
-    MiddlewareFn<S, S & Record<K, Message[]> & { lastTurnId?: string }> {
-    const key = (options?.stateKey ?? "messages") as K;
-    const select = toSystemSelector(system);
-
-    return middleware<Record<K, Message[]> & { lastTurnId?: string }, S>({
-        state: { [key]: [] as Message[], lastTurnId: undefined as string | undefined } as Record<K, Message[]> & {
-            lastTurnId?: string;
-        },
-        handler: async (ctx, next) => {
-            const history = ctx.state[key];
-            if (ctx.request.turn_id !== ctx.state.lastTurnId) {
-                history.length = 0;
-                ctx.state.lastTurnId = ctx.request.turn_id;
-            }
-
-            for (const m of triggerToMessages(ctx.request.trigger)) history.push(m);
-
-            const sysMsg = select
-                ? {
-                      role: "system",
-                      content: await select(ctx.state, ctx),
-                  }
-                : null;
-
-            const result = await next(ctx);
-            const prefix = sysMsg ? [sysMsg as Message, ...history] : history;
-            return {
-                ...result,
-                actions: prependHistoryToLlmCalls(prefix, result.actions),
-            };
-        },
-    });
+/** The active transcript: the `head_id`-to-root path of the engine-owned tree. */
+export function activePath(tree?: MessageTree): Message[] {
+    if (!tree) return [];
+    const out: Message[] = [];
+    let target = tree.head_id;
+    // Parents are appended before their children, so one reverse pass collects
+    // the head-to-root chain (and stops at a missing parent).
+    for (let i = tree.nodes.length - 1; i >= 0 && target != null; i--) {
+        if (tree.nodes[i].id === target) {
+            out.push(tree.nodes[i].message);
+            target = tree.nodes[i].parent_id;
+        }
+    }
+    return out.reverse();
 }
 
 // ── Tools ──────────────────────────────────────────────────────────────────
@@ -609,13 +533,14 @@ export function tools<S>(selectorOrValue: ToolSelector<S> | ToolInput): Middlewa
 
 // ── LLM loop ───────────────────────────────────────────────────────────────
 
-export interface LlmToolLoopSelection {
+export interface LlmSelection {
     /** A worker-side provider generator (e.g. `anthropicGenerate`) or `serverGenerate`. */
     generator: LlmGenerator;
+    /** System prompt prepended to the transcript; a function is resolved per call. */
+    instructions?: string | (() => string | Promise<string>);
     /** Override the generator's streaming setting. */
     stream?: boolean;
     retry?: RetryPolicy;
-    toolRetries?: Record<string, RetryPolicy>;
 }
 
 /**
@@ -628,7 +553,7 @@ export type LlmGenerate = (
 ) => Promise<LlmResponse>;
 
 /**
- * A bound LLM backend for `llmToolLoop`. A worker generator supplies `run` (the call
+ * A bound LLM backend for `llm`. A worker generator supplies `run` (the call
  * runs on your worker); a server generator omits it (the Substructure server calls
  * its configured provider).
  */
@@ -680,7 +605,7 @@ async function runWorkerLlmCall(
         return {
             type: "return.llm.error",
             call_id: trigger.call_id,
-            error: 'llmToolLoop received an "llm.request" trigger but the generator has no `run` for worker-handled LLM calls',
+            error: 'llm received an "llm.request" trigger but the generator has no `run` for worker-handled LLM calls',
             retryable: false,
             attempt: trigger.attempt,
         };
@@ -710,12 +635,16 @@ async function runWorkerLlmCall(
     }
 }
 
-export function llmToolLoop<S>(
-    selectorOrValue:
-        | ((state: S, ctx: AgentContext<S>) => LlmToolLoopSelection | Promise<LlmToolLoopSelection>)
-        | LlmToolLoopSelection,
+/**
+ * The loop body: on a turn-continuing trigger emit a `call.llm` built from the
+ * tree's active path (plus `instructions`); on `llm.request` run the worker-side
+ * call; on an `llm.response` with no tool calls emit `done`. Compose with
+ * `stopWhen` to cap or otherwise halt the loop.
+ */
+export function llm<S>(
+    selectorOrValue: ((state: S, ctx: AgentContext<S>) => LlmSelection | Promise<LlmSelection>) | LlmSelection,
 ): MiddlewareFn<S, S> {
-    const selector: (state: S, ctx: AgentContext<S>) => LlmToolLoopSelection | Promise<LlmToolLoopSelection> =
+    const selector: (state: S, ctx: AgentContext<S>) => LlmSelection | Promise<LlmSelection> =
         typeof selectorOrValue === "function" ? selectorOrValue : () => selectorOrValue;
 
     return middleware({
@@ -729,7 +658,15 @@ export function llmToolLoop<S>(
             switch (trigger.type) {
                 case "user.message":
                 case "client.action":
-                case "effects.complete": {
+                case "tool.results": {
+                    const active = activePath(ctx.request.message_tree);
+                    const instructions =
+                        typeof selection.instructions === "function"
+                            ? await selection.instructions()
+                            : selection.instructions;
+                    const messages = instructions
+                        ? [{ role: "system", content: instructions } as Message, ...active]
+                        : active;
                     return {
                         ...downstream,
                         actions: [
@@ -737,7 +674,7 @@ export function llmToolLoop<S>(
                                 type: "call.llm",
                                 request: {
                                     ...generator.request,
-                                    messages: [],
+                                    messages,
                                 },
                                 retry: selection.retry ?? DEFAULT_RETRY,
                                 stream,
@@ -767,9 +704,69 @@ export function llmToolLoop<S>(
     });
 }
 
+// ── Loop control ─────────────────────────────────────────────────────────────
+
+export interface StopInfo<S = unknown> {
+    /** Assistant rounds taken since the last user message. */
+    steps: number;
+    /** The assistant message whose tool calls just ran. */
+    lastResponse: Message | undefined;
+    tree: MessageTree;
+    ctx: AgentContext<S>;
+}
+
+export type StopCondition<S = unknown> = (info: StopInfo<S>) => boolean | Promise<boolean>;
+
+function stopInfo<S>(ctx: AgentContext<S>): StopInfo<S> {
+    const tree = ctx.request.message_tree ?? { nodes: [] };
+    const path = activePath(tree);
+    let steps = 0;
+    let lastResponse: Message | undefined;
+    for (let i = path.length - 1; i >= 0; i--) {
+        if (path[i].role === "user") break;
+        if (path[i].role === "assistant") {
+            steps++;
+            lastResponse ??= path[i];
+        }
+    }
+    return { steps, lastResponse, tree, ctx };
+}
+
+/**
+ * Guards the loop's back-edge: on `tool.results`, if a continuation `call.llm` is
+ * still pending and `cond` holds, replace it with `done`. No-ops when nothing is
+ * continuing, so chaining several `stopWhen`s gives OR with no duplicate `done`.
+ */
+export function stopWhen<S>(cond: StopCondition<S>): MiddlewareFn<S, S> {
+    return middleware({
+        handler: async (ctx: AgentContext<S>, next: Next<S>) => {
+            const down = await next(ctx);
+            if (ctx.request.trigger.type !== "tool.results") return down;
+            if (!down.actions.some((a) => a.type === "call.llm")) return down;
+
+            const info = stopInfo(ctx);
+            if (!(await cond(info))) return down;
+
+            return {
+                ...down,
+                actions: [
+                    { type: "done", data: info.lastResponse?.content ?? "" },
+                    ...down.actions.filter((a) => a.type !== "call.llm"),
+                ],
+            };
+        },
+    });
+}
+
+/** Stop once the turn has taken `n` assistant rounds. */
+export const stepCountIs =
+    (n: number): StopCondition =>
+    (info) =>
+        info.steps >= n;
+
 /**
  * Presents each sub-agent to the model as a tool and turns a call into a
- * `spawn.sub_agent` child session. Results return via `effects.complete`, so
+ * `spawn.sub_agent` child session. Results return via `tool.results`, so
  * this middleware keeps no state.
  */
 export function subAgents<S>(config: { agents: Handler[]; retry?: RetryPolicy }): MiddlewareFn<S, S> {

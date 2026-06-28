@@ -143,7 +143,7 @@ What happens on the wire:
 
 1. The LLM emits a tool call. The engine records it as pending and dispatches a `tool.execute` trigger to your worker.
 2. Your `execute` returns `ctx.defer()`. The `tools` middleware emits no `return.tool.result`, so the worker submits zero actions for that decision. The engine leaves the tool call pending.
-3. Later — minutes, hours, however long — the external work completes. You call `submitToolCallResult({ tool_call_id, result, attempt })`. The engine treats this exactly like a synchronous tool return: emits `tool.call.completed`, fires a `tool.result` trigger, the chain runs, and `llmToolLoop` issues the next `call.llm` once every pending tool result is in.
+3. Later — minutes, hours, however long — the external work completes. You call `submitToolCallResult({ tool_call_id, result, attempt })`. The engine treats this exactly like a synchronous tool return: emits `tool.call.completed`, fires a `tool.result` trigger, the chain runs, and `llm` issues the next `call.llm` once every pending tool result is in.
 
 `submitToolCallResult` is available on every flavor of client — `sub.backend.client(...)` on your servers, `sub.frontend.client(...)` in the browser, and `SubstructureEmbedded.create(...)` for in-process runs — so the call back can come from wherever finishes the work (a webhook handler, a queue worker, a UI button). To report a failure instead of a result, pass `error` (and optional `retryable`) in place of `result`.
 
@@ -177,7 +177,7 @@ const myAgent = agent({ id: "..." })
 A few notes:
 
 - `handler` receives `args` cast to the type you declare. There's no runtime validation; treat it like a typed `JSON.parse`.
-- Return `void` to let the chain continue, so `llmToolLoop` runs as it would for a normal trigger. Return a `WorkerAction[]` to short-circuit with exactly those actions.
+- Return `void` to let the chain continue, so `llm` runs as it would for a normal trigger. Return a `WorkerAction[]` to short-circuit with exactly those actions.
 - Pass `state: someSlice` to get typed access to that slice inside the handler, same as `agent.tool`.
 
 Clients submit an action the same way they submit a message, just with a different payload shape:
@@ -197,10 +197,10 @@ An agent is a chain of middleware. You start with `agent({ id })` and stack beha
 
 ```ts
 const weatherAgent = agent({ id: "weather-agent" })
-  .use(agent.messageHistory("You are a helpful weather assistant."))
   .use(agent.tools([getWeather]))
-  .use(agent.llmToolLoop({
+  .use(agent.llm({
     generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-5" }),
+    instructions: "You are a helpful weather assistant.",
   }));
 ```
 
@@ -210,15 +210,14 @@ The built-in middleware:
 
 | Middleware | What it does |
 | --- | --- |
-| `agent.messageHistory(system?, opts?)` | Tracks the full message history across turns and injects it into LLM calls. Pass `system`, a string or a `(state, ctx) => string` selector, to also prepend a system message. Pass `{ stateKey }` as a second arg to change where the transcript lives (default `"messages"`). |
-| `agent.messageHistoryCurrentTurn(system?, opts?)` | Same arguments, but scoped to a single turn. |
 | `agent.tools([...])` | Registers tools, dispatches tool calls from the LLM, and feeds results back. |
 | `agent.actions([...])` | Dispatches `client.action` triggers to their handlers. See [Defining client actions](#defining-client-actions). |
-| `agent.llmToolLoop({ generator })` | Drives the core loop: on a user message or tool result, call the LLM; on an LLM response with no tool calls, finish the turn. |
+| `agent.llm({ generator, instructions? })` | Drives the loop: on a user message or tool result, build the prompt from the engine's conversation tree (prepending `instructions` as the system message) and call the LLM; on an LLM response with no tool calls, finish the turn. With a worker-side generator it also runs the call on `llm.request`. |
+| `agent.stopWhen(cond)` | Halts the loop when `cond` holds — e.g. `agent.stepCountIs(20)` to cap the rounds — instead of looping after tool results. Place it just outside `agent.llm`; chain several for OR. |
 | `agent.subAgents({ agents })` | Lets the agent delegate to child agents as if they were tools. See [Sub-agents](./05-sub-agents.md). |
 | `agent.logging()` | Logs each decision lifecycle to stdout. Handy in development. |
 
-The order matters. State middleware first, then context (history, which also carries the system message), then tools, then `llmToolLoop` at the end to drive the loop.
+The order matters. State middleware first, then tools, then `agent.llm` at the end to drive the loop — with `agent.stopWhen` just outside it to cap the loop. `agent.llm` builds the prompt from the engine-owned conversation tree, so there's no separate history middleware; pass `instructions` to set the system message.
 
 ### Writing your own middleware
 
@@ -284,12 +283,14 @@ const dbState = (db: MyDatabase) =>
 
 const myAgent = agent({ id: "support" })
   .use(dbState(db))
-  .use(agent.messageHistory("You are a support agent."))
   .use(agent.tools([/* ... */]))
-  .use(agent.llmToolLoop({ generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-5" }) }));
+  .use(agent.llm({
+    generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-5" }),
+    instructions: "You are a support agent.",
+  }));
 ```
 
-The `state` field on `middleware` does two things: it gives you the initial value used on the first turn, and it locks in the type so `ctx.state` is typed inside `handler` and any tool that takes `state: this slice` gets the same type. Downstream middleware like `messageHistory` will populate `ctx.state.messages` for you; `ticketId` is a slot you can read and write from your own tools.
+The `state` field on `middleware` does two things: it gives you the initial value used on the first turn, and it locks in the type so `ctx.state` is typed inside `handler` and any tool that takes `state: this slice` gets the same type. `ticketId` is a slot you can read and write from your own tools.
 
 `ctx.request.identity.id` is the user id the client passed when calling `startTurn`, and `ctx.request.session_id` is the conversation. Keying on both means a single user can have multiple parallel conversations and you can scope, list, or delete state per user without ever touching Substructure.
 
@@ -350,14 +351,13 @@ And the chain stays small: one middleware covers both the slice and the persiste
 ```ts
 const todoAgent = agent({ id: "todo" })
   .use(todoSlice)                  // contributes + hydrates `todos`
-  .use(agent.messageHistory())     // rides the wire by default
   .use(agent.tools([addTodo]))
-  .use(agent.llmToolLoop({ generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-5" }) }));
+  .use(agent.llm({ generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-5" }) }));
 ```
 
 What ends up where:
 
-- **On the wire:** `{ messages: [...], todos: { ref: "session-123" } }`. The conversation history rides along, the todos are just a pointer.
+- **On the wire:** `{ todos: { ref: "session-123" } }`. Just a pointer; the conversation history is owned by the engine (the message tree), so it never rides the wire.
 - **In your database:** the actual `{ items: [...] }`, keyed by session id.
 
 The same trick scales to multiple DB-backed slices: chain a `hydrateX(db)` for each one. Keep all consumers (tools, other middleware) below the hydrate middleware so they see the loaded form, not the ref.
@@ -446,7 +446,7 @@ console.log(data);
 `startTurn` returns a `SessionScope` containing `sessionId` and `turnId`. From there you have two choices:
 
 - `await client.turnResult(scope)` waits for the turn to finish and returns `{ data, cost, tokenUsage }`.
-- `for await (const event of client.stream(scope))` streams individual events as they arrive: LLM responses, tool calls, sub-agent updates, and so on. Use `sequenceAfter` to resume from a known event. By default the stream yields only persisted events, so you can `switch` on `event.payload.type` directly. Pass `{ tokens: true }` to also receive transient `llm.token.delta` items for progressive rendering (only emitted when the agent's `llmToolLoop` has `stream: true`) — they arrive as bare payloads (no envelope, no `sequence`), are not replayed on reconnect, and are discriminated with the exported `isTokenDelta(event)` guard.
+- `for await (const event of client.stream(scope))` streams individual events as they arrive: LLM responses, tool calls, sub-agent updates, and so on. Use `sequenceAfter` to resume from a known event. By default the stream yields only persisted events, so you can `switch` on `event.payload.type` directly. Pass `{ tokens: true }` to also receive transient `llm.token.delta` items for progressive rendering (only emitted when the agent's `llm` has `stream: true`) — they arrive as bare payloads (no envelope, no `sequence`), are not replayed on reconnect, and are discriminated with the exported `isTokenDelta(event)` guard.
 
 The client also exposes admin APIs: `listSessions`, `getSession`, and `sessionEvents` for tooling and dashboards.
 
@@ -526,7 +526,7 @@ for await (const event of client.stream(scope, { tokens: true })) {
 }
 ```
 
-Token deltas only flow when the agent's `llmToolLoop` was configured with `stream: true`. They're transient: the engine does not persist them, and a client reconnecting mid-call will not see deltas already emitted — only the final `message.new` once the call completes.
+Token deltas only flow when the agent's `llm` was configured with `stream: true`. They're transient: the engine does not persist them, and a client reconnecting mid-call will not see deltas already emitted — only the final `message.new` once the call completes.
 
 Note that the browser does not pass `identity`: it's already baked into the token. Mint a fresh token when the current one nears `expiresAt`, or on every page load if your TTL is short.
 
@@ -572,10 +572,10 @@ The embedded instance exposes the same `startTurn` / `stream` / `turnResult` sur
 
 ## Models
 
-For the Substructure server to make the LLM call, pass a `serverGenerate` generator to `llmToolLoop`:
+For the Substructure server to make the LLM call, pass a `serverGenerate` generator to `llm`:
 
 ```ts
-agent.llmToolLoop({
+agent.llm({
   generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-5" }),
 });
 ```
@@ -593,4 +593,4 @@ See [`examples/`](https://github.com/substructureai/substructure/tree/main/examp
 - `sub-agent` — a parent agent delegating to a child via `subAgents`.
 - `hybrid-state` — most state on the wire as JSON, one slice swapped in and out of a database.
 - `deferred-tool` — async tool call: `execute` returns `ctx.defer()`, the result is posted later via `submitToolCallResult`.
-- `frontend-tool` — chat UI where tools run in the browser (geolocation, theme). The worker defers; the page executes locally and posts the result back via `submitToolCallResult` using the frontend client. Also demonstrates `stream: true` on `llmToolLoop` — the assistant message renders token-by-token from `llm.token.delta` events.
+- `frontend-tool` — chat UI where tools run in the browser (geolocation, theme). The worker defers; the page executes locally and posts the result back via `submitToolCallResult` using the frontend client. Also demonstrates `stream: true` on `llm` — the assistant message renders token-by-token from `llm.token.delta` events.

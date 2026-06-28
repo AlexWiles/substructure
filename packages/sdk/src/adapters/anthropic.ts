@@ -1,4 +1,4 @@
-// Anthropic Messages API generator for `llmToolLoop`. Each `llm.request` runs one
+// Anthropic Messages API generator for `llm`. Each `llm.request` runs one
 // `messages.stream` call.
 
 import Anthropic from "@anthropic-ai/sdk";
@@ -8,7 +8,7 @@ import { contentText } from "../types";
 import type { LlmTool, Message, StreamPart, ToolCall } from "../types";
 
 // `MessageCreateParams` minus what the loop supplies: `messages`/`system` and
-// `tools` come from the request; `stream` is set on `llmToolLoop`.
+// `tools` come from the request; `stream` is set on `llm`.
 export type AnthropicGenerateSettings = Omit<
     Anthropic.MessageCreateParamsNonStreaming,
     "messages" | "system" | "tools" | "stream"

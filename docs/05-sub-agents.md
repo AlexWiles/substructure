@@ -10,9 +10,11 @@ Sub-agents are ordinary agents. There's nothing special about how they're built:
 
 ```ts
 const weatherAgent = agent({ id: "weather" })
-  .use(agent.messageHistory("Weather assistant. Look up the weather. Be concise."))
   .use(agent.tools([getWeather]))
-  .use(agent.llmToolLoop({ generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-5" }) }));
+  .use(agent.llm({
+    generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-5" }),
+    instructions: "Weather assistant. Look up the weather. Be concise.",
+  }));
 ```
 
 What makes it a sub-agent is how a parent uses it.
@@ -23,9 +25,11 @@ The parent declares the children it can delegate to with `agent.subAgents`:
 
 ```ts
 const assistant = agent({ id: "assistant" })
-  .use(agent.messageHistory("Helpful assistant. Delegate weather questions to the weather agent."))
   .use(agent.subAgents({ agents: [weatherAgent] }))
-  .use(agent.llmToolLoop({ generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-5" }) }));
+  .use(agent.llm({
+    generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-5" }),
+    instructions: "Helpful assistant. Delegate weather questions to the weather agent.",
+  }));
 ```
 
 Then deploy both agents in the same worker:
@@ -38,17 +42,13 @@ That's the whole setup. From the parent's LLM, `weather` looks like a tool with 
 
 ## Under the hood
 
-When the parent's LLM emits a tool call for a sub-agent name, the `subAgents` middleware does four things:
+When the parent's LLM emits a tool call for a sub-agent name, the `subAgents` middleware does three things:
 
 1. Generates a new `sessionId` for the child.
-2. Emits a `spawn.sub_agent` action with the child's session and agent ids.
+2. Emits a `spawn.sub_agent` action carrying the child's session id, the agent id, and the originating `tool_call_id`.
 3. Emits a `send.message` action that delivers the LLM's `message` argument to the child as a user message.
-4. Records `childSessionId -> { toolCallId, agentName }` in `state.subAgentTracker` so it can correlate the result later.
 
-The engine creates the child session, runs it to completion, and sends a trigger back to the parent:
-
-- `sub_agent.turn.complete` if the child finished with a `done` action. The middleware converts this into a `tool.result` trigger with the child's output as the content, on the original tool call id.
-- `sub_agent.error` if the child failed past its retries. Same path, but `is_error: true` and the error message as content.
+The engine creates the child session and runs it to completion. The child's result — its `done` output, or its error if it failed past retries — returns to the parent in the batched `tool.results` trigger, as a tool message on that `tool_call_id`, alongside any sibling tool results from the same turn. The middleware keeps no correlation state; the engine threads the `tool_call_id` through the child's lifetime.
 
 From the parent LLM's perspective, the whole thing looks like a tool call that took a while and returned a string. It doesn't see the child's intermediate steps, tool calls, or LLM responses.
 
@@ -95,7 +95,7 @@ const weatherAgent = agent({ id: "weather" }).use(/* ... */);
 const assistant = agent({ id: "assistant" })
   .use(/* ... */)
   .use(agent.subAgents({ agents: [weatherAgent] }))
-  .use(agent.llmToolLoop({ generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-5" }) }));
+  .use(agent.llm({ generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-5" }) }));
 
 sub.worker({ agents: [assistant, weatherAgent] });
 ```

@@ -7,8 +7,8 @@ import { Agent, RunContext } from "@openai/agents";
 import type { ModelSettings, ModelSettingsToolChoice, Tool } from "@openai/agents";
 import OpenAI from "openai";
 
-import { llmToolLoop, messageHistory, tools } from "../middleware";
-import type { LlmGenerate, LlmGenerator, ToolDef, ToolExecutionContext } from "../middleware";
+import { llm, stopWhen, tools } from "../middleware";
+import type { LlmGenerate, LlmGenerator, StopCondition, ToolDef, ToolExecutionContext } from "../middleware";
 import { contentText } from "../types";
 import type { LlmTool, Message, StreamPart, ToolCall } from "../types";
 import type { MiddlewareFn, MiddlewareSource, Next } from "../worker";
@@ -102,6 +102,8 @@ export interface OpenAIAgentSettings {
     client?: OpenAI;
     /** Run context passed to each tool's `execute` (the Agents SDK `RunContext`). */
     context?: unknown;
+    /** Halt the loop when the condition holds (e.g. `stepCountIs(20)`). */
+    stopWhen?: StopCondition;
 }
 
 interface ResolvedSettings {
@@ -111,6 +113,7 @@ interface ResolvedSettings {
     tools: Tool[];
     modelSettings?: ModelSettings;
     context?: unknown;
+    stopWhen?: StopCondition;
 }
 
 // Adapts an `@openai/agents` Agent (or `OpenAIAgentSettings`) into a handler chain.
@@ -147,6 +150,7 @@ function resolveSettings(settings: OpenAIAgentSettings): ResolvedSettings {
         tools: settings.tools ?? [],
         modelSettings: settings.modelSettings,
         context: settings.context,
+        stopWhen: settings.stopWhen,
     };
 }
 
@@ -179,9 +183,9 @@ export function openAIAgent(settings: ResolvedSettings): MiddlewareFn<unknown> {
     const generator = openaiGenerate(toGenerateSettings(settings));
 
     const chain: MiddlewareFn<any, any>[] = [
-        messageHistory(settings.instructions),
         tools(openAITools(settings.tools, settings.context)),
-        llmToolLoop({ generator }),
+        ...(settings.stopWhen ? [stopWhen(settings.stopWhen)] : []),
+        llm({ generator, instructions: settings.instructions }),
     ];
 
     return (ctx, next) => {

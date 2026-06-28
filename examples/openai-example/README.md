@@ -26,8 +26,7 @@ You can also skip the Agents SDK `Agent` and pass settings directly:
 const assistant = new OpenAIAgent({ model: "gpt-5-nano", instructions, tools });
 ```
 
-Passing the agent to `.use()` composes `messageHistory` + `tools` + `llmToolLoop`
-under the hood. The chain is a normal Substructure worker agent: it answers
+Passing the agent to `.use()` composes `tools` + `llm` under the hood. The chain is a normal Substructure worker agent: it answers
 decisions and is agnostic to whether an embedded or remote engine drives it.
 Substructure always owns the loop. Each LLM step runs one `responses.create`
 call (your tools are passed to the model as definitions only, so the model

@@ -9,6 +9,8 @@ import type {
     DecisionTrigger,
     LlmTokenDeltaInput,
     Message,
+    MessageNode,
+    MessageTree,
     ToolCall,
     ToolResult,
     WorkerAction,
@@ -26,6 +28,8 @@ export interface RunResult {
 export interface RunOptions {
     trigger: DecisionTrigger;
     state?: Record<string, unknown>;
+    /** The conversation tree the engine ships on the request. */
+    messageTree?: MessageTree;
     emitDelta?: (delta: LlmTokenDeltaInput) => Promise<void>;
 }
 
@@ -39,13 +43,13 @@ export async function runChain(middlewares: MiddlewareFn<any, any>[], opts: RunO
     const ctx: AgentContext<unknown> = {
         state: structuredClone(opts.state ?? {}),
         emitDelta: opts.emitDelta,
-        request: makeRequest(opts.trigger),
+        request: makeRequest(opts.trigger, opts.messageTree),
     };
     const result = await fn(ctx);
     return { actions: result.actions, state: result.state };
 }
 
-function makeRequest(trigger: DecisionTrigger): WorkerDecisionRequestWire {
+function makeRequest(trigger: DecisionTrigger, messageTree?: MessageTree): WorkerDecisionRequestWire {
     return {
         session_id: "00000000-0000-0000-0000-000000000000",
         tenant_id: "test",
@@ -54,32 +58,55 @@ function makeRequest(trigger: DecisionTrigger): WorkerDecisionRequestWire {
         identity: { tenant_id: "test", id: "tester" },
         trigger,
         worker_state: "",
+        message_tree: messageTree,
         span: { trace_id: "0".repeat(32), span_id: "0".repeat(16), trace_flags: 1 },
         attempts: 0,
     };
 }
 
+/** Build a linear (unbranched) conversation tree from messages in order. */
+export function linearTree(...messages: Message[]): MessageTree {
+    const nodes: MessageNode[] = messages.map((message, i) => ({
+        id: `n${i}`,
+        parent_id: i === 0 ? undefined : `n${i - 1}`,
+        message,
+    }));
+    return { nodes, head_id: nodes.at(-1)?.id };
+}
+
 // ── Trigger builders ─────────────────────────────────────────────────────────
 
+let nodeCounter = 0;
+function nextNodeId(): string {
+    return `node-${nodeCounter++}`;
+}
+
 export function userMessage(content: string, stream = false): DecisionTrigger {
-    return { type: "user.message", stream, message: { role: "user", content } };
+    return { type: "user.message", stream, message: { role: "user", content }, id: nextNodeId() };
 }
 
 export function llmResponse(message: Message, callId = "call-0"): DecisionTrigger {
-    return { type: "llm.response", call_id: callId, message, truncated: false };
+    return { type: "llm.response", call_id: callId, message, truncated: false, id: nextNodeId() };
 }
 
 export function toolCall(name: string, args: unknown, id = "tc-0"): ToolCall {
     return { id, type: "function", function: { name, arguments: JSON.stringify(args) } };
 }
 
-export function toolResult(toolCallId: string, content: string, name = "", isError = false): ToolResult {
-    return { tool_call_id: toolCallId, name, content, is_error: isError };
+export function toolResult(toolCallId: string, content: string, name = ""): ToolResult {
+    return { tool_call_id: toolCallId, name, content };
 }
 
-/** The engine's batched delivery of all of a turn's tool + sub-agent results. */
-export function effectsComplete(results: ToolResult[]): DecisionTrigger {
-    return { type: "effects.complete", results };
+/** The engine's batched delivery of a turn's tool + sub-agent results, recorded
+ *  as chained tool-role message nodes. */
+export function toolResults(results: ToolResult[]): DecisionTrigger {
+    const ids = results.map(() => nextNodeId());
+    const messages: MessageNode[] = results.map((r, i) => ({
+        id: ids[i],
+        parent_id: i === 0 ? undefined : ids[i - 1],
+        message: { role: "tool", content: r.content, tool_call_id: r.tool_call_id, name: r.name },
+    }));
+    return { type: "tool.results", messages };
 }
 
 // ── Assertion helpers ────────────────────────────────────────────────────────
@@ -97,10 +124,4 @@ export function callLlm(result: RunResult): Extract<WorkerAction, { type: "call.
 
 export function toolMessages(result: RunResult, toolCallId: string): Message[] {
     return (callLlm(result)?.request.messages ?? []).filter((m) => m.role === "tool" && m.tool_call_id === toolCallId);
-}
-
-/** The conversation history retained in the returned worker state. */
-export function historyMessages(result: RunResult, key = "messages"): Message[] {
-    const state = result.state as Record<string, Message[] | undefined>;
-    return state[key] ?? [];
 }

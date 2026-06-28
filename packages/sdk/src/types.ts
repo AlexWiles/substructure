@@ -178,7 +178,21 @@ export interface ToolResult {
     tool_call_id: string;
     name: string;
     content: string;
-    is_error: boolean;
+}
+
+/** A message and the node it follows in the conversation tree. `parent_id` is
+ *  absent only for the thread root. */
+export interface MessageNode {
+    id: string;
+    parent_id?: string;
+    message: Message;
+}
+
+/** Conversation nodes plus the active leaf; the active transcript is the
+ *  `head_id`-to-root path. */
+export interface MessageTree {
+    nodes: MessageNode[];
+    head_id?: string;
 }
 
 export interface ClientAction {
@@ -191,7 +205,7 @@ export type ClientPayload =
     | ({ type: "action" } & ClientAction);
 
 export type DecisionTrigger =
-    | { type: "user.message"; stream: boolean; message: Message }
+    | { type: "user.message"; stream: boolean; message: Message; id: string; parent_id?: string }
     | ({ type: "client.action" } & ClientAction)
     | {
           type: "llm.response";
@@ -200,6 +214,8 @@ export type DecisionTrigger =
           truncated: boolean;
           usage?: Record<string, unknown>;
           cost?: Decimal;
+          id: string;
+          parent_id?: string;
       }
     | { type: "llm.error"; call_id: string; error: string; code?: string; detail?: unknown }
     | { type: "llm.request"; call_id: string; request: LlmRequest; stream: boolean; attempt: number }
@@ -211,9 +227,7 @@ export type DecisionTrigger =
           attempt: number;
           deadline?: DateTime;
       }
-    | { type: "effects.complete"; results: ToolResult[] }
-    | { type: "sub_agent.turn.complete"; session_id: Uuid; agent_id: string; turn_id: string; data: unknown }
-    | { type: "sub_agent.error"; session_id: Uuid; agent_id: string; error: string }
+    | { type: "tool.results"; messages: MessageNode[] }
     | { type: "interrupt.resumed"; interrupt_id: string; payload?: unknown }
     | { type: "stall" };
 
@@ -345,9 +359,8 @@ export interface SessionCancelled {
     type: "session.cancelled";
 }
 
-export interface NewMessage {
+export interface NewMessage extends MessageNode {
     type: "message.new";
-    message: Message;
 }
 
 export interface LlmCallRequested {
@@ -750,6 +763,8 @@ export interface WorkerDecisionRequestWire {
     identity: WorkerIdentity;
     trigger: DecisionTrigger;
     worker_state: string;
+    /** The conversation tree as of this decision. */
+    message_tree?: MessageTree;
     ancestry?: Uuid[];
     span: SpanContext;
     attempts: number;

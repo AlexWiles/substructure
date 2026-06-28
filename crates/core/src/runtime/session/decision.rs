@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use super::events::{LlmHandler, ToolHandler};
+use super::events::{LlmHandler, NewMessage, ToolHandler};
 use super::message::Message;
 use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse};
 use crate::runtime::retry::RetryPolicy;
@@ -31,12 +31,14 @@ pub enum ClientPayload {
     },
 }
 
+/// A drained effect result, before it's recorded as a thread message. Internal
+/// to the engine's undelivered-effects queue; the worker sees the recorded
+/// `NewMessage` nodes on the `tool.results` trigger, not this.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
     pub tool_call_id: String,
     pub name: String,
     pub content: String,
-    pub is_error: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,7 +48,6 @@ pub enum DecisionTrigger {
     UserMessage {
         stream: bool,
         message: Message,
-        #[serde(default)]
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_id: Option<String>,
@@ -68,7 +69,6 @@ pub enum DecisionTrigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cost: Option<Decimal>,
         /// Node id of the assistant message (distinct from `call_id`).
-        #[serde(default)]
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_id: Option<String>,
@@ -97,21 +97,10 @@ pub enum DecisionTrigger {
         attempt: u32,
         deadline: Option<DateTime<Utc>>,
     },
-    #[serde(rename = "effects.complete")]
-    EffectsComplete { results: Vec<ToolResult> },
-    #[serde(rename = "sub_agent.turn.complete")]
-    SubAgentTurnComplete {
-        session_id: String,
-        agent_id: String,
-        turn_id: String,
-        data: serde_json::Value,
-    },
-    #[serde(rename = "sub_agent.error")]
-    SubAgentError {
-        session_id: String,
-        agent_id: String,
-        error: String,
-    },
+    /// A turn's tool and sub-agent results, recorded as thread messages and
+    /// delivered as one batch once every effect is terminal.
+    #[serde(rename = "tool.results")]
+    ToolResults { messages: Vec<NewMessage> },
     #[serde(rename = "interrupt.resumed")]
     InterruptResumed {
         interrupt_id: String,

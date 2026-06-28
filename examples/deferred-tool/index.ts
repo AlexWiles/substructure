@@ -43,9 +43,13 @@ const wait = agent.tool({
 });
 
 const waitAgent = agent({ id: "waiter" })
-    .use(agent.messageHistory("You wait for the requested number of seconds, then tell the user you're done."))
     .use(agent.tools([wait]))
-    .use(agent.llmToolLoop({ generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }) }));
+    .use(
+        agent.llm({
+            generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }),
+            instructions: "You wait for the requested number of seconds, then tell the user you're done.",
+        }),
+    );
 
 embedded = await SubstructureEmbedded.create({
     agents: [waitAgent],

@@ -6,8 +6,8 @@
 import { asSchema, jsonSchema, streamText, tool } from "ai";
 import type { LanguageModel, ModelMessage, TextStreamPart, Tool, ToolChoice, ToolSet } from "ai";
 
-import { llmToolLoop, messageHistory, tools } from "../middleware";
-import type { LlmGenerate, LlmGenerator, ToolDef, ToolExecutionContext } from "../middleware";
+import { llm, stopWhen, tools } from "../middleware";
+import type { LlmGenerate, LlmGenerator, StopCondition, ToolDef, ToolExecutionContext } from "../middleware";
 import { contentText } from "../types";
 import type { LlmTool, Message, StreamPart, ToolCall } from "../types";
 import type { MiddlewareFn, MiddlewareSource, Next } from "../worker";
@@ -82,6 +82,8 @@ export type SubstructureAgentSettings<TOOLS extends ToolSet = ToolSet> = Omit<
     instructions?: string;
     tools?: TOOLS;
     toolChoice?: ToolChoice<TOOLS>;
+    /** Halt the loop when the condition holds (e.g. `stepCountIs(20)`). */
+    stopWhen?: StopCondition;
 };
 
 // Mirrors the AI SDK `ToolLoopAgent`, but hands a middleware to the builder
@@ -98,16 +100,15 @@ export class ToolLoopAgent<TOOLS extends ToolSet = ToolSet> implements Middlewar
     }
 }
 
-// Composes `messageHistory` + `tools` + `llmToolLoop`, behaving as if those three
-// were `.use()`d in order.
+// Composes `tools` + `stopWhen` + `llm`, behaving as if those were `.use()`d in order.
 export function aiSdkAgent<TOOLS extends ToolSet>(settings: SubstructureAgentSettings<TOOLS>): MiddlewareFn<unknown> {
-    const { instructions, tools: toolset, ...generateSettings } = settings;
+    const { instructions, tools: toolset, stopWhen: stop, ...generateSettings } = settings;
     const generator = aiGenerate(generateSettings);
 
     const chain: MiddlewareFn<any, any>[] = [
-        messageHistory(instructions),
         tools(toolset ? aiSdkTools(toolset, settings.experimental_context) : []),
-        llmToolLoop({ generator }),
+        ...(stop ? [stopWhen(stop)] : []),
+        llm({ generator, instructions }),
     ];
 
     return (ctx, next) => {

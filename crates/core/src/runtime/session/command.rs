@@ -282,29 +282,31 @@ impl SessionState {
         }
     }
 
-    /// One tool-role message per drained effect result, recorded in the batch's
-    /// (issue) order. Parents chain explicitly off the head — within a single
-    /// command `head_id` doesn't advance between events, so siblings would
-    /// otherwise all attach to the same parent.
-    fn effect_result_messages(&self, results: &[ToolResult]) -> Vec<EventPayload> {
-        let mut parent_id = self.head_id.clone();
-        let mut events = Vec::with_capacity(results.len());
-        for result in results {
-            let id = new_message_id();
-            events.push(EventPayload::NewMessage(NewMessage {
-                id: id.clone(),
-                parent_id: parent_id.clone(),
+    /// Record a drained batch of results as tool-role message nodes. Ids are
+    /// minted up front and chained — the first parents off the head, each later
+    /// one off its predecessor — because `head_id` doesn't advance between
+    /// events within a single command.
+    fn result_nodes(&self, results: Vec<ToolResult>) -> Vec<NewMessage> {
+        let ids: Vec<String> = results.iter().map(|_| new_message_id()).collect();
+        results
+            .into_iter()
+            .enumerate()
+            .map(|(i, result)| NewMessage {
+                id: ids[i].clone(),
+                parent_id: if i == 0 {
+                    self.head_id.clone()
+                } else {
+                    Some(ids[i - 1].clone())
+                },
                 message: Message {
                     role: Role::Tool,
-                    content: Some(Content::Text(result.content.clone())),
+                    content: Some(Content::Text(result.content)),
                     tool_calls: None,
-                    tool_call_id: Some(result.tool_call_id.clone()),
-                    name: Some(result.name.clone()),
+                    tool_call_id: Some(result.tool_call_id),
+                    name: Some(result.name),
                 },
-            }));
-            parent_id = Some(id);
-        }
-        events
+            })
+            .collect()
     }
 
     fn emit_decision_request(&self, trigger: DecisionTrigger) -> EventPayload {
@@ -653,12 +655,14 @@ impl SessionState {
                     tool_call_id,
                     name,
                     content: result,
-                    is_error: false,
                 };
                 if let Some(results) = self.drainable_with(pending) {
-                    events.extend(self.effect_result_messages(&results));
+                    let nodes = self.result_nodes(results);
+                    events.extend(nodes.iter().cloned().map(EventPayload::NewMessage));
                     events.push(
-                        self.emit_decision_request(DecisionTrigger::EffectsComplete { results }),
+                        self.emit_decision_request(DecisionTrigger::ToolResults {
+                            messages: nodes,
+                        }),
                     );
                 }
                 Ok(events)
@@ -703,15 +707,13 @@ impl SessionState {
                         tool_call_id,
                         name,
                         content: error,
-                        is_error: true,
                     };
                     if let Some(results) = self.drainable_with(pending) {
-                        events.extend(self.effect_result_messages(&results));
-                        events.push(
-                            self.emit_decision_request(DecisionTrigger::EffectsComplete {
-                                results,
-                            }),
-                        );
+                        let nodes = self.result_nodes(results);
+                        events.extend(nodes.iter().cloned().map(EventPayload::NewMessage));
+                        events.push(self.emit_decision_request(DecisionTrigger::ToolResults {
+                            messages: nodes,
+                        }));
                     }
                 }
                 Ok(events)
@@ -767,7 +769,6 @@ impl SessionState {
                     tool_call_id: sa.tool_call_id.clone(),
                     name: sa.agent_id.clone(),
                     content: error.clone(),
-                    is_error: true,
                 };
                 let exhausted = sa
                     .tracking
@@ -780,12 +781,11 @@ impl SessionState {
                 })];
                 if exhausted {
                     if let Some(results) = self.drainable_with(pending) {
-                        events.extend(self.effect_result_messages(&results));
-                        events.push(
-                            self.emit_decision_request(DecisionTrigger::EffectsComplete {
-                                results,
-                            }),
-                        );
+                        let nodes = self.result_nodes(results);
+                        events.extend(nodes.iter().cloned().map(EventPayload::NewMessage));
+                        events.push(self.emit_decision_request(DecisionTrigger::ToolResults {
+                            messages: nodes,
+                        }));
                     }
                 }
                 Ok(events)
@@ -807,7 +807,6 @@ impl SessionState {
                     tool_call_id: sa.tool_call_id.clone(),
                     name: sa.agent_id.clone(),
                     content: json_to_string(&data),
-                    is_error: false,
                 };
                 let mut events = vec![EventPayload::SubAgentTurnCompleted(SubAgentTurnCompleted {
                     session_id,
@@ -816,9 +815,12 @@ impl SessionState {
                     data,
                 })];
                 if let Some(results) = self.drainable_with(pending) {
-                    events.extend(self.effect_result_messages(&results));
+                    let nodes = self.result_nodes(results);
+                    events.extend(nodes.iter().cloned().map(EventPayload::NewMessage));
                     events.push(
-                        self.emit_decision_request(DecisionTrigger::EffectsComplete { results }),
+                        self.emit_decision_request(DecisionTrigger::ToolResults {
+                            messages: nodes,
+                        }),
                     );
                 }
                 Ok(events)
@@ -1270,11 +1272,16 @@ impl SessionState {
         // Deliver the batch once every effect is terminal.
         if !self.has_pending_worker_decision() {
             if let Some(results) = self.drainable_batch() {
-                let mut events = self.effect_result_messages(&results);
+                let nodes = self.result_nodes(results);
+                let mut events: Vec<EventPayload> = nodes
+                    .iter()
+                    .cloned()
+                    .map(EventPayload::NewMessage)
+                    .collect();
                 events.push(EventPayload::WorkerDecisionRequested(
                     WorkerDecisionRequested {
                         decision_id: new_call_id(),
-                        trigger: DecisionTrigger::EffectsComplete { results },
+                        trigger: DecisionTrigger::ToolResults { messages: nodes },
                     },
                 ));
                 return Ok(events);
@@ -1321,9 +1328,7 @@ mod tests {
     use crate::runtime::llm::{LlmRequest, LlmResponse};
     use crate::runtime::owner::SessionOwner;
     use crate::runtime::retry::RetryPolicy;
-    use crate::runtime::session::decision::{
-        ClientPayload, DecisionTrigger, ToolResult, WorkerAction,
-    };
+    use crate::runtime::session::decision::{ClientPayload, DecisionTrigger, WorkerAction};
     use crate::runtime::session::events::{EventPayload, LlmHandler, ToolHandler};
     use crate::runtime::session::message::{Content, Message, Role};
     use crate::runtime::session::state::{EffectStatus, SessionState, SessionStatus};
@@ -2451,7 +2456,7 @@ mod tests {
             ),
             "expected [ToolCallErrored, NewMessage, WorkerDecisionRequested]; got {events:?}"
         );
-        assert_eq!(effects_complete(&events).map(|r| r.len()), Some(1));
+        assert_eq!(tool_results(&events).map(|r| r.len()), Some(1));
         let tc = agg.state.tool_calls.get("tc-1").expect("tool call present");
         assert_eq!(tc.tracking.status, EffectStatus::Failed);
         assert!(tc.is_error);
@@ -2669,7 +2674,7 @@ mod tests {
         dispatch(agg, CommandPayload::Wake { now: Utc::now() }, &system())
     }
 
-    fn effects_complete(events: &[EventPayload]) -> Option<Vec<ToolResult>> {
+    fn tool_results(events: &[EventPayload]) -> Option<Vec<NewMessage>> {
         events.iter().find_map(|e| {
             let trigger = match e {
                 EventPayload::WorkerDecisionRequested(p) => &p.trigger,
@@ -2677,10 +2682,17 @@ mod tests {
                 _ => return None,
             };
             match trigger {
-                DecisionTrigger::EffectsComplete { results } => Some(results.clone()),
+                DecisionTrigger::ToolResults { messages } => Some(messages.clone()),
                 _ => None,
             }
         })
+    }
+
+    fn node_text(node: &NewMessage) -> &str {
+        match &node.message.content {
+            Some(Content::Text(t)) => t.as_str(),
+            _ => "",
+        }
     }
 
     fn decision_with(
@@ -2698,29 +2710,29 @@ mod tests {
     }
 
     #[test]
-    fn batch_drains_to_one_effects_complete_after_all_tools_done() {
+    fn batch_drains_to_one_tool_results_after_all_tools_done() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
         request_client_tool(&mut agg, "a");
         request_client_tool(&mut agg, "b");
 
         let first = complete_tool(&mut agg, "a", "RA");
         assert!(
-            effects_complete(&first).is_none(),
+            tool_results(&first).is_none(),
             "no batch while b is pending"
         );
 
         let second = complete_tool(&mut agg, "b", "RB");
-        let results = effects_complete(&second).expect("batch on the last completion");
-        let ids: Vec<_> = results.iter().map(|r| r.tool_call_id.as_str()).collect();
+        let results = tool_results(&second).expect("batch on the last completion");
+        let ids: Vec<_> = results
+            .iter()
+            .map(|r| r.message.tool_call_id.as_deref().unwrap())
+            .collect();
         assert_eq!(ids, vec!["a", "b"], "results ordered by issue order");
-        assert_eq!(results[0].content, "RA");
-        assert_eq!(results[1].content, "RB");
+        assert_eq!(node_text(&results[0]), "RA");
+        assert_eq!(node_text(&results[1]), "RB");
 
         // The completion itself triggered the decision — no wake is needed.
-        assert!(
-            effects_complete(&wake(&mut agg)).is_none(),
-            "no wake needed"
-        );
+        assert!(tool_results(&wake(&mut agg)).is_none(), "no wake needed");
     }
 
     #[test]
@@ -2769,7 +2781,7 @@ mod tests {
         .expect("tool.execute decision");
 
         // The worker returns the result; the batch drains in this same commit
-        // (the effects.complete is queued behind the just-finished tool.execute
+        // (the tool.results is queued behind the just-finished tool.execute
         // decision and promoted inline) — no wake required.
         let completed = dispatch(
             &mut agg,
@@ -2785,14 +2797,11 @@ mod tests {
             &machine(),
         );
         assert_eq!(
-            effects_complete(&completed).map(|r| r.len()),
+            tool_results(&completed).map(|r| r.len()),
             Some(1),
             "batch drains in the completion commit; got {completed:?}"
         );
-        assert!(
-            effects_complete(&wake(&mut agg)).is_none(),
-            "no wake needed"
-        );
+        assert!(tool_results(&wake(&mut agg)).is_none(), "no wake needed");
     }
 
     #[test]
@@ -2819,7 +2828,7 @@ mod tests {
 
         let tool_done = complete_tool(&mut agg, "t1", "TOOL");
         assert!(
-            effects_complete(&tool_done).is_none(),
+            tool_results(&tool_done).is_none(),
             "no batch while sub-agent runs"
         );
 
@@ -2836,15 +2845,14 @@ mod tests {
             &system(),
         );
 
-        let results = effects_complete(&sub_done).expect("batch on the last completion");
+        let results = tool_results(&sub_done).expect("batch on the last completion");
         assert_eq!(results.len(), 2);
         let sub = results
             .iter()
-            .find(|r| r.tool_call_id == "s1")
+            .find(|r| r.message.tool_call_id.as_deref() == Some("s1"))
             .expect("sub-agent result mapped to its tool_call_id");
-        assert_eq!(sub.name, "researcher");
-        assert_eq!(sub.content, "FINDINGS");
-        assert!(!sub.is_error);
+        assert_eq!(sub.message.name.as_deref(), Some("researcher"));
+        assert_eq!(node_text(sub), "FINDINGS");
     }
 
     #[test]
@@ -2964,18 +2972,18 @@ mod tests {
             "deadline exceeded errors the tool; got {errored:?}"
         );
         assert!(
-            effects_complete(&errored).is_none(),
+            tool_results(&errored).is_none(),
             "drain waits for the next wake"
         );
 
-        let drained = effects_complete(&dispatch(
+        let drained = tool_results(&dispatch(
             &mut agg,
             CommandPayload::Wake { now: past },
             &system(),
         ))
         .expect("timed-out effect drains via wake");
         assert_eq!(drained.len(), 1);
-        assert!(drained[0].is_error);
+        assert_eq!(drained[0].message.tool_call_id.as_deref(), Some("t1"));
     }
 
     #[test]
@@ -2984,12 +2992,12 @@ mod tests {
         request_client_tool(&mut agg, "a");
 
         assert!(
-            effects_complete(&complete_tool(&mut agg, "a", "RA")).is_some(),
+            tool_results(&complete_tool(&mut agg, "a", "RA")).is_some(),
             "delivered on completion"
         );
         assert!(agg.state.drainable_batch().is_none());
         assert!(
-            effects_complete(&wake(&mut agg)).is_none(),
+            tool_results(&wake(&mut agg)).is_none(),
             "wake does not re-deliver"
         );
     }
@@ -3611,7 +3619,7 @@ mod tests {
             })
             .expect("resume should request an interrupt.resumed decision");
 
-        // ...and completing it promotes the queued effects.complete decision
+        // ...and completing it promotes the queued tool.results decision
         // with the tool result, exactly once.
         let events = dispatch(
             &mut agg,
@@ -3630,12 +3638,12 @@ mod tests {
             })
             .expect("queued decision should promote after the resumed decision completes");
         match trigger {
-            DecisionTrigger::EffectsComplete { results } => {
-                assert_eq!(results.len(), 1);
-                assert_eq!(results[0].tool_call_id, "tc-1");
-                assert_eq!(results[0].content, "done");
+            DecisionTrigger::ToolResults { messages } => {
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].message.tool_call_id.as_deref(), Some("tc-1"));
+                assert_eq!(node_text(&messages[0]), "done");
             }
-            other => panic!("expected EffectsComplete trigger; got {other:?}"),
+            other => panic!("expected ToolResults trigger; got {other:?}"),
         }
     }
 
@@ -4006,5 +4014,14 @@ mod tests {
         assert_eq!(msgs[1].message.tool_call_id.as_deref(), Some("tc-b"));
         // Chained: the second result parents off the first.
         assert_eq!(msgs[1].parent_id.as_deref(), Some(msgs[0].id.as_str()));
+
+        // The tool.results trigger carries the very nodes recorded as messages,
+        // so the worker can place them in the thread.
+        let nodes = tool_results(&second).expect("expected a tool.results trigger");
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].id, msgs[0].id);
+        assert_eq!(nodes[0].parent_id, msgs[0].parent_id);
+        assert_eq!(nodes[1].id, msgs[1].id);
+        assert_eq!(nodes[1].parent_id, msgs[1].parent_id);
     }
 }

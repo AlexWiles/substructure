@@ -19,9 +19,8 @@ const SYSTEM_PROMPT = "You are a concise assistant. Use tools when relevant.";
 
 const assistant = sub
     .agent({ id: "assistant" })
-    .use(sub.agent.messageHistory(SYSTEM_PROMPT))
     .use(sub.agent.tools([getCurrentTime]))
-    .use(sub.agent.llmToolLoop({ generator: openaiGenerate({ model: "gpt-5-nano" }) }));
+    .use(sub.agent.llm({ generator: openaiGenerate({ model: "gpt-5-nano" }), instructions: SYSTEM_PROMPT }));
 
 const embedded = await SubstructureEmbedded.create({
     agents: [assistant],

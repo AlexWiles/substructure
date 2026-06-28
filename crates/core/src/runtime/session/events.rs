@@ -79,11 +79,20 @@ pub struct SessionDone {}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewMessage {
     pub message: Message,
-    /// Stable node id, independent of the event's storage id. Empty on pre-tree events.
-    #[serde(default)]
+    /// Stable node id, independent of the event's storage id.
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
+}
+
+/// Conversation nodes in append order plus the active leaf; the active
+/// transcript is the `head_id`-to-root path.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MessageTree {
+    #[serde(default)]
+    pub nodes: Vec<NewMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

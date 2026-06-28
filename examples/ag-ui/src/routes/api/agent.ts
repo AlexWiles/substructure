@@ -73,21 +73,18 @@ const listTodos = agent.tool({
 
 const todoAgent = agent({ id: AGENT_ID })
     .use(agent.logging())
+    .use(agent.tools([addTodo, toggleTodo, removeTodo, clearCompleted, listTodos]))
     .use(
-        agent.messageHistory(
-            "You are a concise, friendly to-do list assistant. The user has an on-screen to-do " +
+        agent.llm({
+            generator: agent.serverGenerate({ model: "minimax/minimax-m3" }),
+            stream: true,
+            instructions:
+                "You are a concise, friendly to-do list assistant. The user has an on-screen to-do " +
                 "list you drive with tools. Use add_todo to add a task (call it once per item when " +
                 "adding several). Call list_todos to see the current tasks and their ids before you " +
                 "toggle or remove anything — toggle_todo and remove_todo take an id. Use toggle_todo " +
                 "to check off or reopen a task, and clear_completed to drop all finished tasks. When " +
                 "the user asks what's on their list, call list_todos and summarize it.",
-        ),
-    )
-    .use(agent.tools([addTodo, toggleTodo, removeTodo, clearCompleted, listTodos]))
-    .use(
-        agent.llmToolLoop({
-            generator: agent.serverGenerate({ model: "minimax/minimax-m3" }),
-            stream: true,
         }),
     );
 

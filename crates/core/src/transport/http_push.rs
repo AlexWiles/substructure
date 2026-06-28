@@ -318,6 +318,7 @@ mod tests {
                 attempt: 0,
             },
             worker_state: vec![].into(),
+            message_tree: Default::default(),
             ancestry: vec![],
             span: SpanContext::root(),
             attempts: 0,

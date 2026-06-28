@@ -24,14 +24,22 @@ const getWeather = agent.tool({
 });
 
 const weatherAgent = agent({ id: "weather" })
-    .use(agent.messageHistory("Weather assistant. Look up the weather. Be concise."))
     .use(agent.tools([getWeather]))
-    .use(agent.llmToolLoop({ generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }) }));
+    .use(
+        agent.llm({
+            generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }),
+            instructions: "Weather assistant. Look up the weather. Be concise.",
+        }),
+    );
 
 const assistant = agent({ id: "assistant" })
-    .use(agent.messageHistory("Helpful assistant. Delegate weather questions to the weather agent."))
     .use(agent.subAgents({ agents: [weatherAgent] }))
-    .use(agent.llmToolLoop({ generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }) }));
+    .use(
+        agent.llm({
+            generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }),
+            instructions: "Helpful assistant. Delegate weather questions to the weather agent.",
+        }),
+    );
 
 const embedded = await SubstructureEmbedded.create({
     agents: [assistant, weatherAgent],

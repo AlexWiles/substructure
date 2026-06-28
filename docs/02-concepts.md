@@ -49,9 +49,7 @@ The full set of triggers your worker may receive:
 | `llm.response` | An LLM call completed. Payload includes the assistant message and any tool calls. |
 | `llm.error` | An LLM call failed permanently (after retries). |
 | `tool.execute` | The engine is asking your worker to run a tool. The SDK's `tools` middleware handles this and dispatches to your `execute` function. |
-| `tool.result` | A tool finished, here is the result. |
-| `sub_agent.turn.complete` | A child agent finished a turn; here's its output. |
-| `sub_agent.error` | A child agent failed. |
+| `tool.results` | A turn's tool and sub-agent calls all finished; here are their results, recorded as tool messages. Delivered as one batch once every effect is terminal. |
 | `interrupt.resumed` | A paused session was resumed by an external signal. |
 | `stall` | Nothing has happened for a while; the worker has a chance to break the deadlock or finish. |
 
@@ -67,7 +65,7 @@ What your worker can return from a decision:
 | `call.tool` | Have the engine schedule a tool call. Produces a `tool.execute` trigger back at the worker. |
 | `return.tool.result` | Return a result for a tool call the worker executed itself. |
 | `return.tool.error` | Return an error for a tool call the worker executed itself. |
-| `spawn.sub_agent` | Start a child session under a different agent. Produces `sub_agent.turn.complete` or `sub_agent.error` triggers. |
+| `spawn.sub_agent` | Start a child session under a different agent. Its output (or error) comes back in the next `tool.results` batch. |
 | `send.message` | Push a message into another session (handy for fan-out or notifying a parent). |
 | `done` | Finish the turn. The `data` payload becomes the turn's result, returned from `client.turnResult(scope)`. |
 
@@ -91,7 +89,7 @@ Every interesting thing that happens during a session is recorded as an **event*
 
 You can think of a session as the event log plus the derived state from replaying it.
 
-`client.stream(scope, { tokens: true })` also interleaves transient `llm.token.delta` events when streaming is enabled on the agent's `llmToolLoop` (they're off by default, so a plain `client.stream(scope)` yields only persisted events). Deltas are *not* persisted — they're a live side channel for progressive UI rendering. The canonical assistant text always arrives via the persisted `llm.call.completed` and `message.new` events that follow.
+`client.stream(scope, { tokens: true })` also interleaves transient `llm.token.delta` events when streaming is enabled on the agent's `llm` (they're off by default, so a plain `client.stream(scope)` yields only persisted events). Deltas are *not* persisted — they're a live side channel for progressive UI rendering. The canonical assistant text always arrives via the persisted `llm.call.completed` and `message.new` events that follow.
 
 ## Identity
 

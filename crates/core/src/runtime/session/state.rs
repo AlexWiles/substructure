@@ -125,7 +125,7 @@ pub struct ToolCallState {
     /// Source event sequence, for stable result ordering.
     #[serde(default)]
     pub order: u64,
-    /// Result already emitted to the worker in an effects.complete batch.
+    /// Result already emitted to the worker in a tool.results batch.
     #[serde(default)]
     pub result_delivered: bool,
 }
@@ -136,7 +136,6 @@ impl ToolCallState {
             tool_call_id: self.tool_call_id.clone(),
             name: self.name.clone(),
             content: self.result.clone().unwrap_or_default(),
-            is_error: self.is_error,
         }
     }
 }
@@ -156,7 +155,7 @@ pub struct SubAgentCallState {
     pub is_error: bool,
     #[serde(default)]
     pub order: u64,
-    /// Result already emitted to the worker in an effects.complete batch.
+    /// Result already emitted to the worker in a tool.results batch.
     #[serde(default)]
     pub result_delivered: bool,
 }
@@ -167,7 +166,6 @@ impl SubAgentCallState {
             tool_call_id: self.tool_call_id.clone(),
             name: self.agent_id.clone(),
             content: self.result.clone().unwrap_or_default(),
-            is_error: self.is_error,
         }
     }
 }
@@ -189,6 +187,8 @@ pub struct DerivedState {
     pub agent_id: Option<String>,
     #[serde(default)]
     pub worker_state: WorkerState,
+    #[serde(default)]
+    pub message_tree: MessageTree,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ancestry: Vec<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -282,6 +282,11 @@ pub struct SessionState {
     /// appended message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_id: Option<String>,
+
+    /// Conversation nodes in append order. The active transcript is the
+    /// `head_id`-to-root path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<NewMessage>,
 }
 
 impl SessionState {
@@ -308,6 +313,7 @@ impl SessionState {
             turn_id: None,
             completed_turn_ids: Vec::new(),
             head_id: None,
+            messages: Vec::new(),
         }
     }
 
@@ -328,6 +334,7 @@ impl SessionState {
                 if !payload.id.is_empty() {
                     self.head_id = Some(payload.id.clone());
                 }
+                self.messages.push(payload.clone());
             }
             EventPayload::LlmCallRequested(payload) => {
                 self.status = SessionStatus::Idle;
@@ -479,8 +486,11 @@ impl SessionState {
                         },
                     );
                 }
-                if let DecisionTrigger::EffectsComplete { results } = &p.trigger {
-                    let ids: Vec<String> = results.iter().map(|r| r.tool_call_id.clone()).collect();
+                if let DecisionTrigger::ToolResults { messages } = &p.trigger {
+                    let ids: Vec<String> = messages
+                        .iter()
+                        .filter_map(|m| m.message.tool_call_id.clone())
+                        .collect();
                     self.mark_results_delivered(&ids);
                 }
                 self.status = SessionStatus::Idle;
@@ -508,8 +518,11 @@ impl SessionState {
                         source_event_sequence: ctx.sequence,
                     },
                 );
-                if let DecisionTrigger::EffectsComplete { results } = &p.trigger {
-                    let ids: Vec<String> = results.iter().map(|r| r.tool_call_id.clone()).collect();
+                if let DecisionTrigger::ToolResults { messages } = &p.trigger {
+                    let ids: Vec<String> = messages
+                        .iter()
+                        .filter_map(|m| m.message.tool_call_id.clone())
+                        .collect();
                     self.mark_results_delivered(&ids);
                 }
             }
@@ -748,6 +761,13 @@ impl SessionState {
             .min()
     }
 
+    pub fn message_tree(&self) -> MessageTree {
+        MessageTree {
+            nodes: self.messages.clone(),
+            head_id: self.head_id.clone(),
+        }
+    }
+
     pub fn derived_state(&self) -> DerivedState {
         DerivedState {
             status: self.status.clone(),
@@ -755,6 +775,7 @@ impl SessionState {
             owner: self.owner.clone(),
             agent_id: self.agent_id.clone(),
             worker_state: self.worker_state.clone(),
+            message_tree: self.message_tree(),
             ancestry: self.ancestry.clone(),
             sub_agent_calls: self.sub_agent_calls.clone(),
             worker_decisions: self.worker_decisions.clone(),
