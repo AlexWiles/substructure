@@ -152,7 +152,6 @@ pub enum SessionError {
     ToolCallWrongHandler,
 }
 
-/// Mint a node id for a message that doesn't have one yet (boundary assignment).
 fn assign_id(mut message: Message) -> Message {
     if message.id.is_empty() {
         message.id = new_message_id();
@@ -268,9 +267,6 @@ impl SessionState {
         }
     }
 
-    /// Append just-completed effect results as tool-role nodes and fire a
-    /// `tool.result` decision. The worker decides whether to continue by reading
-    /// the tree; `completed` just names what landed (the content is in the tree).
     fn record_results(&self, results: Vec<ToolResult>) -> Vec<EventPayload> {
         let completed: Vec<CompletedToolCall> = results
             .iter()
@@ -289,9 +285,7 @@ impl SessionState {
         events
     }
 
-    /// Mint tool-role message nodes for results, chained — the first parents off
-    /// the head, each later one off its predecessor — because `head_id` doesn't
-    /// advance between events within a single command.
+    /// Chained: `head_id` doesn't advance between events within a single command.
     fn result_nodes(&self, results: Vec<ToolResult>) -> Vec<NewMessage> {
         let ids: Vec<String> = results.iter().map(|_| new_message_id()).collect();
         results
@@ -315,9 +309,6 @@ impl SessionState {
             .collect()
     }
 
-    /// A submitted message that answers a pending client-handled tool call. The
-    /// aggregate classifies the submission against effect state here, rather than
-    /// the transport sniffing it from a flat list.
     fn pending_client_result(&self, m: &Message) -> Option<ToolResult> {
         if m.role != Role::Tool {
             return None;
@@ -339,9 +330,6 @@ impl SessionState {
         })
     }
 
-    /// Reconcile a `call.llm` message list into the tree: each message with a new
-    /// (or absent) id mints a node parented off the preceding message; existing
-    /// ids no-op. The last minted node carries the head forward.
     fn merge_messages(&self, list: &[Message]) -> Vec<EventPayload> {
         let mut known: HashSet<String> = self.nodes.iter().map(|n| n.id().to_string()).collect();
 
@@ -420,8 +408,6 @@ impl SessionState {
                         {
                             return Err(SessionError::SessionInterrupted);
                         }
-                        // Forwarded to the worker, which appends it and records it
-                        // via the single call.llm merge.
                         if message.role == Role::User {
                             events.push(self.emit_decision_request(DecisionTrigger::UserMessage {
                                 messages: vec![assign_id(message)],
@@ -433,10 +419,7 @@ impl SessionState {
                     ClientPayload::Messages { messages, stream } => {
                         let messages: Vec<Message> = messages.into_iter().map(assign_id).collect();
 
-                        // A transcript ending in a tool message is a tool-result
-                        // continuation, not a new user turn. Resolve the effects
-                        // its results answer; an echo of already-resolved results
-                        // matches nothing and no-ops.
+                        // A transcript ending in a tool message is a tool-result continuation, not a new user turn.
                         if matches!(messages.last(), Some(m) if m.role == Role::Tool) {
                             let completions: Vec<ToolResult> = messages
                                 .iter()
@@ -452,17 +435,12 @@ impl SessionState {
                                         },
                                     ));
                                 }
-                                // Append the results as nodes and continue the
-                                // turn — the same path a worker tool takes on
-                                // completion.
                                 events.extend(self.record_results(completions));
                             }
                         } else {
                             if matches!(self.status, SessionStatus::Interrupted { .. }) {
                                 return Err(SessionError::SessionInterrupted);
                             }
-                            // A plain turn: forwarded as a full transcript; the
-                            // call.llm merge reconciles it.
                             events.push(self.emit_decision_request(DecisionTrigger::UserMessage {
                                 messages,
                                 anchor: Anchor::Replace,
@@ -608,9 +586,7 @@ impl SessionState {
                             Some(Content::Parts(parts))
                         };
                         let id = new_message_id();
-                        // The response parents under the call's prompt leaf, not the
-                        // head — on a regenerated turn the head is a stale sibling,
-                        // while the leaf is exactly the node the call replied to.
+                        // Parent under the prompt leaf, not the head: on a regenerated turn the head is a stale sibling.
                         let parent_id = self
                             .llm_calls
                             .get(&call_id)
@@ -1227,8 +1203,6 @@ impl SessionState {
                     error: "deadline exceeded".to_string(),
                     retryable: true,
                 })];
-                // A terminal timeout is a result: append its node and continue,
-                // the same as a `FailToolCall` command.
                 if tc.tracking.retry_policy.exhausted(&tc.tracking.retry, true) {
                     events.extend(self.record_results(vec![ToolResult {
                         tool_call_id: tc.tool_call_id.clone(),
@@ -1371,9 +1345,7 @@ impl SessionState {
             }
         }
 
-        // Promote the next queued worker decision. Each effect completion fires
-        // its own `tool.result`; lost ones are recovered by work-queue
-        // redelivery, not by re-firing here.
+        // Lost `tool.results` are recovered by work-queue redelivery, not by re-firing here.
         if let Some(wd) = self.next_queued_decision() {
             return Ok(vec![EventPayload::WorkerDecisionRequested(
                 WorkerDecisionRequested {
@@ -2111,7 +2083,6 @@ mod tests {
             },
         );
 
-        // A user message wakes a worker decision; the worker records it via call.llm.
         assert!(
             matches!(
                 events.as_slice(),
@@ -2292,8 +2263,6 @@ mod tests {
                 tenant_id: "tenant-a".to_string(),
             },
         );
-        // tree: sys -> u1, head = u1
-
         let echo = agg.state.merge_messages(&[
             node_msg("sys", Role::System, "s"),
             node_msg("u1", Role::User, "hi"),
@@ -2346,8 +2315,6 @@ mod tests {
             },
         );
 
-        // Forwarded, not merged: no nodes recorded, just a replace submission for
-        // the worker to reconcile via call.llm.
         assert!(!events
             .iter()
             .any(|e| matches!(e, EventPayload::NewMessage(_))));
@@ -2408,8 +2375,6 @@ mod tests {
 
         let events = submit_messages(&mut agg, vec![tool_msg("tc-1", "the answer")]);
 
-        // The client result completes the effect, appends its node, and fires a
-        // tool.result naming it — no user.message is fabricated.
         assert!(events
             .iter()
             .any(|e| matches!(e, EventPayload::ToolCallCompleted(_))));
@@ -2456,7 +2421,6 @@ mod tests {
             fired_tool_result(&second).map(|c| c.into_iter().map(|c| c.tool_call_id).collect()),
             Some(vec!["b".to_string()])
         );
-        // Both results are on the active path, in completion order.
         assert_eq!(tree_tool_ids(&agg), vec!["a", "b"]);
     }
 
@@ -2466,8 +2430,6 @@ mod tests {
         request_client_tool(&mut agg, "a");
         request_client_tool(&mut agg, "b");
 
-        // One submission resolves both client tools → one commit, one tool.result
-        // naming both (firing one per result would double-continue).
         let events = submit_messages(&mut agg, vec![tool_msg("a", "RA"), tool_msg("b", "RB")]);
         assert_eq!(result_nodes_in(&events).len(), 2);
         let decisions: Vec<_> = events
@@ -2504,8 +2466,7 @@ mod tests {
         request_client_tool(&mut agg, "tc-1");
         submit_messages(&mut agg, vec![tool_msg("tc-1", "done")]);
 
-        // A later run re-sends the already-delivered tool result with no new
-        // turn: it matches nothing pending and must not fabricate a response.
+        // A re-sent, already-resolved tool result matches nothing pending and must not fabricate a response.
         let echo = submit_messages(&mut agg, vec![tool_msg("tc-1", "done")]);
         assert!(
             !echo
@@ -2627,14 +2588,11 @@ mod tests {
                     .expect("a recorded response")
             };
 
-        // First turn: prompt ends at u1 → response a1 parents under u1; head → a1.
         request(&mut agg, "c1", vec![node_msg("u1", Role::User, "hi")]);
         let (a1, a1_parent) = complete(&mut agg, "c1");
         assert_eq!(a1_parent.as_deref(), Some("u1"));
         assert_eq!(agg.state.head_id.as_deref(), Some(a1.as_str()));
 
-        // Regenerate: re-ask the existing u1. Head is a1, but the new response must
-        // parent under the prompt leaf u1 — a sibling of a1, not its child.
         request(&mut agg, "c2", vec![node_msg("u1", Role::User, "hi")]);
         let (a1b, a1b_parent) = complete(&mut agg, "c2");
         assert_ne!(a1b, a1);
@@ -2720,7 +2678,6 @@ mod tests {
             &system(),
         );
 
-        // The call stores a tree pointer to its prompt leaf, not the messages.
         let call = agg.state.llm_calls.get("llm-1").expect("call present");
         assert_eq!(call.prompt_leaf.as_deref(), Some("u1"));
 
@@ -2751,8 +2708,6 @@ mod tests {
             })
             .expect("retry re-issues the llm call");
 
-        // The prompt is reconstructed from the tree at `prompt_leaf` — same ids,
-        // content, and order — and the spec (model) carries through.
         assert_eq!(reissued.request.model, "test-model");
         assert_eq!(reissued.request.messages.len(), 2);
         assert_eq!(reissued.request.messages[0].id, "sys");
@@ -2973,7 +2928,6 @@ mod tests {
             ),
             "expected [ToolCallErrored, NewMessage, WorkerDecisionRequested]; got {events:?}"
         );
-        // The error is a result: its node lands and the tool.result flags it.
         let completed = fired_tool_result(&events).expect("a tool.result decision");
         assert_eq!(completed.len(), 1);
         assert_eq!(completed[0].tool_call_id, "tc-1");
@@ -3195,8 +3149,6 @@ mod tests {
         dispatch(agg, CommandPayload::Wake { now: Utc::now() }, &system())
     }
 
-    /// The `completed` payload of the `tool.result` decision a commit fired, or
-    /// `None` if it fired none.
     fn fired_tool_result(events: &[EventPayload]) -> Option<Vec<CompletedToolCall>> {
         events.iter().find_map(|e| {
             let trigger = match e {
@@ -3211,7 +3163,6 @@ mod tests {
         })
     }
 
-    /// Tool-role result nodes appended in this commit (in append order).
     fn result_nodes_in(events: &[EventPayload]) -> Vec<NewMessage> {
         events
             .iter()
@@ -3222,7 +3173,6 @@ mod tests {
             .collect()
     }
 
-    /// Tool result `tool_call_id`s on the active path, in tree order.
     fn tree_tool_ids(agg: &Aggregate<SessionState>) -> Vec<String> {
         let tree = agg.state.message_tree();
         match &tree.head_id {
@@ -3263,8 +3213,6 @@ mod tests {
         request_client_tool(&mut agg, "a");
         request_client_tool(&mut agg, "b");
 
-        // Each result lands as a node and fires a tool.result naming it the
-        // moment its tool completes — the worker decides whether to continue.
         let first = complete_tool(&mut agg, "a", "RA");
         let a = result_nodes_in(&first);
         assert_eq!(a.len(), 1);
@@ -3284,7 +3232,6 @@ mod tests {
             Some(vec!["b".to_string()])
         );
 
-        // Completion order, both on the active path.
         assert_eq!(tree_tool_ids(&agg), vec!["a", "b"]);
     }
 
@@ -3333,8 +3280,6 @@ mod tests {
         })
         .expect("tool.execute decision");
 
-        // The worker returns the result; the tool.result fires in this same
-        // commit (queued behind the just-finished tool.execute decision).
         let completed = dispatch(
             &mut agg,
             CommandPayload::SubmitWorkerDecision {
@@ -3382,7 +3327,6 @@ mod tests {
             &system(),
         );
 
-        // Tools and sub-agents flow through the same per-completion path.
         let tool_done = complete_tool(&mut agg, "t1", "TOOL");
         assert_eq!(result_nodes_in(&tool_done).len(), 1);
         assert_eq!(
@@ -3403,7 +3347,6 @@ mod tests {
             &system(),
         );
 
-        // The sub-agent result maps to its tool_call_id with the agent name.
         let nodes = result_nodes_in(&sub_done);
         assert_eq!(nodes.len(), 1);
         let sub = &nodes[0];
@@ -3536,8 +3479,6 @@ mod tests {
                 .any(|e| matches!(e, EventPayload::ToolCallErrored(_))),
             "deadline exceeded errors the tool; got {errored:?}"
         );
-        // A terminal timeout records its node and fires a tool.result in the
-        // same wake.
         assert!(
             fired_tool_result(&errored).is_some(),
             "the timed-out effect fires a tool.result"
@@ -4149,8 +4090,7 @@ mod tests {
                 .any(|e| matches!(e, EventPayload::ToolCallCompleted(_))),
             "tool result should be recorded; got {events:?}"
         );
-        // The result node is appended even while interrupted; only its
-        // continuation is deferred.
+        // The result node is appended even while interrupted; only its continuation is deferred.
         let recorded = result_nodes_in(&events);
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].message.tool_call_id.as_deref(), Some("tc-1"));
@@ -4189,7 +4129,6 @@ mod tests {
             })
             .expect("resume should request an interrupt.resumed decision");
 
-        // ...and completing it promotes the queued tool.result decision.
         let events = dispatch(
             &mut agg,
             CommandPayload::SubmitWorkerDecision {
@@ -4440,7 +4379,6 @@ mod tests {
                 &sys,
             );
         };
-        // Issued a before b.
         request(&mut agg, "tc-a");
         request(&mut agg, "tc-b");
 
@@ -4457,7 +4395,6 @@ mod tests {
             )
         };
 
-        // b finishes first: its result lands now.
         let first = complete(&mut agg, "tc-b");
         let b = result_nodes_in(&first);
         assert_eq!(b.len(), 1);
@@ -4467,7 +4404,6 @@ mod tests {
             Some(vec!["tc-b".to_string()])
         );
 
-        // a finishes last: its result lands.
         let second = complete(&mut agg, "tc-a");
         let a = result_nodes_in(&second);
         assert_eq!(a.len(), 1);
@@ -4476,10 +4412,8 @@ mod tests {
             fired_tool_result(&second).map(|c| c.into_iter().map(|c| c.tool_call_id).collect()),
             Some(vec!["tc-a".to_string()])
         );
-        // Chained off the head: a's node parents off b's.
         assert_eq!(a[0].parent_id.as_deref(), Some(b[0].message.id.as_str()));
 
-        // Recorded in completion order (b, a) — not issue order (a, b).
         assert_eq!(tree_tool_ids(&agg), vec!["tc-b", "tc-a"]);
     }
 }

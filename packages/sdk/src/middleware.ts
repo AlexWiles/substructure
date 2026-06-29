@@ -331,14 +331,12 @@ export type MessageSelector<S> = (state: S, ctx: AgentContext<S>) => Message[] |
 
 export type SystemMessageSelector<S> = (state: S, ctx: AgentContext<S>) => string | Promise<string>;
 
-/** The single transcript message for a trigger, or `null` for triggers without
- *  one (`user.message` carries a list — use `triggerToMessages`). */
+/** The transcript message for a trigger, or `null` (`user.message` carries a list — use `triggerToMessages`). */
 export function triggerToMessage(trigger: DecisionTrigger): Message | null {
     return trigger.type === "llm.response" ? trigger.message : null;
 }
 
-/** All transcript messages a trigger carries. `tool.results` carries none — the
- *  result is already in the tree; read it from `activePath` / `toolResultNode`. */
+/** All transcript messages a trigger carries; `tool.results` carries none (result is in the tree — read via `activePath`/`toolResultNode`). */
 export function triggerToMessages(trigger: DecisionTrigger): Message[] {
     switch (trigger.type) {
         case "user.message":
@@ -365,14 +363,12 @@ export function prependHistoryToLlmCalls(history: Message[], actions: WorkerActi
     );
 }
 
-/** The active transcript: the `head_id`-to-root path of the engine-owned tree,
- *  with control nodes (interrupts) filtered out — they're not part of the prompt. */
+/** The active transcript: the `head_id`-to-root path, with control nodes (interrupts) filtered out. */
 export function activePath(tree?: MessageTree): Message[] {
     if (!tree) return [];
     const out: Message[] = [];
     let target = tree.head_id;
-    // Parents are appended before their children, so one reverse pass collects
-    // the head-to-root chain (and stops at a missing parent).
+    // Parents precede children, so one reverse pass collects the head-to-root chain.
     for (let i = tree.nodes.length - 1; i >= 0 && target != null; i--) {
         const node = tree.nodes[i];
         if (nodeId(node) !== target) continue;
@@ -382,16 +378,12 @@ export function activePath(tree?: MessageTree): Message[] {
     return out.reverse();
 }
 
-/** The tool-result node answering `toolCallId` on the active path, or undefined.
- *  Searches the active path (not raw nodes) so a regenerated/abandoned branch's
- *  stale result doesn't shadow the live one. */
+/** The tool-result for `toolCallId` on the active path (not raw nodes), so a stale branch's result doesn't shadow the live one. */
 export function toolResultNode(tree: MessageTree | undefined, toolCallId: string): Message | undefined {
     return activePath(tree).find((m) => m.role === "tool" && m.tool_call_id === toolCallId);
 }
 
-/** Whether the latest assistant turn issued tool calls and every one now has an
- *  answering tool node on the active path — i.e. the round is ready to continue.
- *  Returns false for a turn that made no tool calls (nothing to continue). */
+/** Whether the latest assistant turn's tool calls are all answered on the active path (false if it made none). */
 export function toolRoundComplete(tree: MessageTree | undefined): boolean {
     const path = activePath(tree);
     let last: Message | undefined;
@@ -412,9 +404,7 @@ export function stamp(message: Message): Message {
     return { ...message, id: crypto.randomUUID() };
 }
 
-/** Root the prompt at a system message carrying `instructions`, reusing the
- *  thread's existing system node id (so the merge no-ops it) or minting one.
- *  No-op when there's no `instructions` or the path already leads with a system. */
+/** Prepend a system message with `instructions`, reusing the existing system node id so the tree merge no-ops it. */
 function ensureSystem(messages: Message[], tree: MessageTree | undefined, instructions?: string): Message[] {
     if (!instructions || messages[0]?.role === "system") return messages;
     const root = activePath(tree)[0];
@@ -675,12 +665,7 @@ async function runWorkerLlmCall(
     }
 }
 
-/**
- * The loop body: on a turn-continuing trigger emit a `call.llm` built from the
- * tree's active path (plus `instructions`); on `llm.request` run the worker-side
- * call; on an `llm.response` with no tool calls emit `done`. Compose with
- * `stopWhen` to cap or otherwise halt the loop.
- */
+/** The core agent loop: builds `call.llm` from the active path; emits `done` when the model stops calling tools. */
 export function llm<S>(
     selectorOrValue: ((state: S, ctx: AgentContext<S>) => LlmSelection | Promise<LlmSelection>) | LlmSelection,
 ): MiddlewareFn<S, S> {
@@ -748,8 +733,6 @@ export function llm<S>(
     });
 }
 
-// ── Loop control ─────────────────────────────────────────────────────────────
-
 export interface StopInfo<S = unknown> {
     /** Assistant rounds taken since the last user message. */
     steps: number;
@@ -776,11 +759,7 @@ function stopInfo<S>(ctx: AgentContext<S>): StopInfo<S> {
     return { steps, lastResponse, tree, ctx };
 }
 
-/**
- * Guards the loop's back-edge: on `tool.results`, if a continuation `call.llm` is
- * still pending and `cond` holds, replace it with `done`. No-ops when nothing is
- * continuing, so chaining several `stopWhen`s gives OR with no duplicate `done`.
- */
+/** On `tool.results`, replaces a pending continuation `call.llm` with `done` when `cond` holds; no-ops otherwise, so chained `stopWhen`s compose as OR. */
 export function stopWhen<S>(cond: StopCondition<S>): MiddlewareFn<S, S> {
     return middleware({
         handler: async (ctx: AgentContext<S>, next: Next<S>) => {
@@ -802,7 +781,6 @@ export function stopWhen<S>(cond: StopCondition<S>): MiddlewareFn<S, S> {
     });
 }
 
-/** Stop once the turn has taken `n` assistant rounds. */
 export const stepCountIs =
     (n: number): StopCondition =>
     (info) =>

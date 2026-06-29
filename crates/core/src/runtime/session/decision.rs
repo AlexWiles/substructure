@@ -32,8 +32,7 @@ pub enum ClientPayload {
         #[serde(default)]
         stream: bool,
     },
-    /// A full transcript (e.g. an AG-UI client's view). Forwarded to the worker
-    /// as a `replace` submission; the single `call.llm` merge reconciles it.
+    /// A full transcript (e.g. an AG-UI client view), forwarded to the worker as a `replace` submission.
     Messages {
         messages: Vec<Message>,
         #[serde(default)]
@@ -45,8 +44,7 @@ pub enum ClientPayload {
     },
 }
 
-/// An effect result on its way to becoming a tool-role thread message. Internal
-/// to the engine; the worker reads the recorded node from the tree, not this.
+/// Engine-internal; the worker reads the recorded tool node from the tree, not this.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
     pub tool_call_id: String,
@@ -56,8 +54,7 @@ pub struct ToolResult {
     pub is_error: bool,
 }
 
-/// Names a completed tool/sub-agent call on the `tool.result` trigger. The
-/// result content lives in the tree, looked up by `tool_call_id`.
+/// Names a completed call on the `tool.results` trigger; result content lives in the tree, keyed by `tool_call_id`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletedToolCall {
     pub tool_call_id: String,
@@ -121,10 +118,7 @@ pub enum DecisionTrigger {
         attempt: u32,
         deadline: Option<DateTime<Utc>>,
     },
-    /// A tool/sub-agent effect completed; its result node is in the tree. The
-    /// worker decides whether to continue (it reads the tree). `completed` names
-    /// what landed — convenience for reacting to a specific call; usually one,
-    /// several only when a single client submission resolves multiple at once.
+    /// A completed tool/sub-agent effect; its result node is in the tree. `completed` names what landed.
     #[serde(rename = "tool.results")]
     ToolResults { completed: Vec<CompletedToolCall> },
     #[serde(rename = "interrupt.resumed")]

@@ -18,7 +18,6 @@ describe("activePath", () => {
     });
 
     it("follows the active leaf past an abandoned branch", () => {
-        // u2/a2 were abandoned when u2b forked off a1; head points at u2b.
         const tree: MessageTree = {
             nodes: [
                 node("u1", undefined, "U1"),

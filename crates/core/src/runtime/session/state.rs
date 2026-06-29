@@ -101,19 +101,16 @@ impl EffectTracking {
 pub struct LlmCallState {
     pub call_id: String,
     pub tracking: EffectTracking,
-    /// Tree pointer to the call's last prompt message. The prompt is rebuilt by
-    /// walking the tree from here, so the call holds no copy of the messages.
+    /// The prompt is rebuilt from the tree here; the call holds no copy of the messages.
     #[serde(default)]
     pub prompt_leaf: Option<String>,
-    /// Request parameters (model, tools, …) sans messages, for retries.
     pub spec: LlmCallSpec,
     pub stream: bool,
     #[serde(default)]
     pub handler: LlmHandler,
 }
 
-/// An `LlmRequest` without its message list — the messages live in the tree and
-/// are rebuilt from `LlmCallState::prompt_leaf` on demand.
+/// An `LlmRequest` without its message list; messages are rebuilt from the tree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmCallSpec {
     pub model: String,
@@ -291,13 +288,10 @@ pub struct SessionState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub completed_turn_ids: Vec<String>,
 
-    /// The active branch's leaf: new messages link to it and it advances to each
-    /// appended message.
+    /// The active branch's leaf; advances to each appended message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_id: Option<String>,
 
-    /// Tree nodes (messages and controls) in append order. The active transcript
-    /// is the `head_id`-to-root path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nodes: Vec<Node>,
 }

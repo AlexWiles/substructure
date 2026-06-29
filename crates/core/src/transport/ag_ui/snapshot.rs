@@ -4,8 +4,7 @@ use crate::session::message::{Content, ContentPart, Message, Role};
 
 use super::events::{AgUiEvent, AgUiInterrupt, RunOutcome, SnapshotMessage};
 
-/// The active conversation — the materialized tree's head-to-root path — so a
-/// branched session snapshots its live thread, not the branches it abandoned.
+/// The active conversation: the tree's head-to-root path, not abandoned branches.
 pub fn session_messages(tree: &MessageTree) -> Vec<SnapshotMessage> {
     match &tree.head_id {
         Some(head) => tree.path_to(head).into_iter().map(to_snapshot).collect(),
@@ -119,7 +118,6 @@ mod tests {
         }
     }
 
-    /// A linear thread: each message parents off the previous, head at the last.
     fn linear(messages: Vec<Message>) -> MessageTree {
         let nodes: Vec<Node> = messages
             .into_iter()
@@ -190,7 +188,6 @@ mod tests {
 
     #[test]
     fn snapshot_returns_the_active_branch_only() {
-        // 1 ← 2 ← 3, then an edit forks node 4 off 1 and head moves to it.
         let t = tree(
             vec![
                 node(1, None, user("first")),

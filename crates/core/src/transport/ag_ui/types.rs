@@ -63,7 +63,6 @@ pub struct AgUiMessage {
 }
 
 impl RunAgentInput {
-    /// The client's full message list as id-bearing tree messages, for merging.
     /// Unknown roles (e.g. `reasoning`) are dropped.
     pub fn to_messages(&self) -> Vec<Message> {
         self.messages

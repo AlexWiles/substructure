@@ -249,9 +249,7 @@ pub async fn ag_ui_run(
 ) -> Response {
     let session_id = input.thread_id.clone();
 
-    // Pure passthrough: resume entries answer a pending interrupt; everything
-    // else forwards the client's full transcript and the aggregate classifies
-    // it against effect state (new turn vs. client tool results).
+    // Pure passthrough: the aggregate classifies the submission against effect state (new turn vs. client tool results).
     if input.resume.is_empty() && input.to_messages().is_empty() {
         let body = serde_json::json!({"error": "no messages or resume in RunAgentInput"});
         return (StatusCode::BAD_REQUEST, Json(body)).into_response();
@@ -272,10 +270,7 @@ pub async fn ag_ui_run(
         .await;
 
     let submit = if !input.resume.is_empty() {
-        // AG-UI resume entries answer the session's pending interrupt. The
-        // worker receives `{status, payload}` as the `interrupt.resumed`
-        // trigger payload. Stale interrupt ids no-op in the core, which
-        // keeps resumes idempotent as the spec requires.
+        // Stale interrupt ids no-op in the core, keeping resumes idempotent.
         let mut outcome: Result<(), RuntimeError> = Ok(());
         for entry in input.resume.clone() {
             let payload = serde_json::json!({
@@ -306,8 +301,7 @@ pub async fn ag_ui_run(
                 caller,
                 owner,
                 agent_id,
-                // Merge the client's full view so edits/branches reconcile into
-                // the tree; trailing client tool results resolve their effects.
+                // Full client view so edits/branches reconcile into the tree.
                 payload: ClientPayload::Messages {
                     messages: input.to_messages(),
                     stream: true,
@@ -340,8 +334,7 @@ pub async fn ag_ui_connect(
     Path(_agent_id): Path<String>,
     Json(input): Json<RunAgentInput>,
 ) -> Response {
-    // Authorizes the read and carries the active interrupt (its payload lives
-    // only in the event log, not the materialized state).
+    // Reads events to authorize and to carry the active interrupt (payload lives only in the event log).
     let events = match state
         .runtime
         .read_session_events(&caller, &input.thread_id, None, None)
@@ -351,8 +344,7 @@ pub async fn ag_ui_connect(
         Err(e) => return runtime_error_response(e),
     };
 
-    // No events ⇒ the session isn't created yet (a fresh thread); its snapshot
-    // is an empty tree. Otherwise load it and read the materialized tree.
+    // No events ⇒ session not yet created (fresh thread); empty tree.
     let tree = if events.is_empty() {
         MessageTree::default()
     } else {

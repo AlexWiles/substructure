@@ -12,7 +12,6 @@ const assistant: Message = {
     tool_calls: [{ id: "call_a", type: "function", function: { name: "getWeather", arguments: "{}" } }],
 };
 
-// One completed round: user -> assistant(tool call) -> tool result.
 const oneRound = linearTree({ role: "user", content: "go" }, assistant, {
     role: "tool",
     content: "RA",
@@ -51,7 +50,6 @@ describe("stopWhen", () => {
     });
 
     it("ignores triggers other than tool.results", async () => {
-        // A user message enters the loop; it is not a back-edge to guard.
         const result = await runChain([stopWhen(stepCountIs(1)), loop], {
             trigger: userMessage("hi"),
             messageTree: oneRound,

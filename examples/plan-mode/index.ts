@@ -1,19 +1,5 @@
-// Plan mode: build a plan over several turns, then flip a switch and execute
-// it. Entering execution starts a fresh conversation branch — a static
-// executing system prompt as the root, the finished plan as the first user
-// message — so the execution model sees only the plan, not the planning
-// chatter. The planning thread stays in the tree as an abandoned branch.
-//
-// What this shows:
-//   - `client.action` as a non-message way to drive state the chain reacts to.
-//   - Selector-based middleware (`tools`, `llm`) swapping output by mode: the
-//     agent cannot call execution tools while planning, and a smaller model
-//     plans while a bigger one executes.
-//   - Branching the engine-owned tree from a worker: `stamp`-ing fresh
-//     messages into a `call.llm` mints a new thread.
-//
-// Domain is a TODO list. Planning mode edits the steps; executing mode walks
-// them with a single `complete_step` tool.
+// Plan mode: build a plan over several turns, then flip a switch to execute it.
+// Entering execution branches a fresh thread so the executor sees only the plan.
 
 import Substructure, { middleware, stamp, type Message } from "@substructure.ai/sdk";
 import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
@@ -37,10 +23,6 @@ const initialState: PlanState = {
 };
 
 // ── planMode: flips `mode` and branches into execution ──────────────────────
-// On `set_mode`, records the new mode. When that transition enters execution,
-// it replaces the call.llm prompt with a fresh thread — a static executing
-// system prompt plus the plan as the first user message — which the engine
-// merges as a new root, leaving the planning thread behind as a branch.
 
 const planMode = middleware<PlanState>({
     state: initialState,
@@ -177,8 +159,7 @@ const renderPlan = (plan: Plan) => {
     return [goalLine, ...stepLines].join("\n");
 };
 
-// Static prompts: the live plan reaches the planning model through its own tool
-// results, and the executing model through the plan node that roots its thread.
+// Prompts stay static; the live plan reaches each model via tool results / the plan node.
 
 const planningPrompt = () =>
     [

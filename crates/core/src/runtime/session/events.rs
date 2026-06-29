@@ -92,8 +92,7 @@ pub struct NewControl {
     pub parent_id: Option<String>,
 }
 
-/// A non-conversational marker in the tree: an interrupt and, later, its resume.
-/// Filtered out when building an LLM prompt; surfaced to clients as run outcome.
+/// A non-conversational tree marker (interrupt/resume); filtered out of LLM prompts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Control {
     pub id: String,
@@ -113,8 +112,6 @@ pub enum ControlKind {
     Resume,
 }
 
-/// A tree node: a conversation message or a control marker. The node id is the
-/// message id or the control id; `parent_id` links it to its predecessor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Node {
@@ -152,8 +149,6 @@ impl Node {
     }
 }
 
-/// Tree nodes in append order plus the active leaf; the active transcript is the
-/// `head_id`-to-root path.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MessageTree {
     #[serde(default)]
@@ -163,9 +158,7 @@ pub struct MessageTree {
 }
 
 impl MessageTree {
-    /// Messages from the root down to `leaf`, following parent pointers — the
-    /// prompt that produced that node, with control nodes filtered out. Empty if
-    /// `leaf` is unknown.
+    /// Root-to-`leaf` messages with control nodes filtered out; empty if `leaf` is unknown.
     pub fn path_to(&self, leaf: &str) -> Vec<Message> {
         let mut by_id: HashMap<&str, &Node> = self.nodes.iter().map(|n| (n.id(), n)).collect();
         let mut path = Vec::new();

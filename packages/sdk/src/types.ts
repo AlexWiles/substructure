@@ -182,15 +182,13 @@ export interface ToolResult {
     content: string;
 }
 
-/** A message node: the message's `id` is the node id; `parent_id` is the node it
- *  follows (absent only for the thread root). */
+/** The message's `id` is the node id; `parent_id` is absent only for the thread root. */
 export interface MessageNode {
     parent_id?: string;
     message: Message;
 }
 
-/** A control marker in the tree — an interrupt and, later, its resume. Filtered
- *  out when building an LLM prompt; surfaced to clients as run outcome. */
+/** A control marker (interrupt/resume); filtered out of LLM prompts, surfaced to clients as run outcome. */
 export interface Control {
     id: string;
     interrupt_id: string;
@@ -205,12 +203,10 @@ export interface ControlNode {
     control: Control;
 }
 
-/** A tree node: a conversation message or a control marker. The node id is the
- *  message id or the control id. */
+/** A tree node: a conversation message or a control marker. */
 export type Node = ({ kind: "message" } & MessageNode) | ({ kind: "control" } & ControlNode);
 
-/** Tree nodes plus the active leaf; the active transcript is the
- *  `head_id`-to-root path. */
+/** Tree nodes plus `head_id`, the active leaf; the active transcript is its path to root. */
 export interface MessageTree {
     nodes: Node[];
     head_id?: string;
@@ -226,8 +222,7 @@ export interface ClientAction {
     args?: unknown;
 }
 
-/** How a submission attaches to the tree: `continue` extends the active path,
- *  `replace` is the full path the worker prompts with as-is. */
+/** How a submission attaches: `continue` extends the active path; `replace` is the full path, used as-is. */
 export type Anchor = "continue" | "replace";
 
 export type ClientPayload =
@@ -261,8 +256,7 @@ export type DecisionTrigger =
     | { type: "interrupt.resumed"; interrupt_id: string; payload?: unknown }
     | { type: "stall" };
 
-/** Names a completed tool/sub-agent call on a `tool.results` trigger. The result
- *  content lives in the tree — look it up by `tool_call_id` (`toolResultNode`). */
+/** A completed tool/sub-agent call; the result content is in the tree — look it up via `toolResultNode`. */
 export interface CompletedToolCall {
     tool_call_id: string;
     name: string;

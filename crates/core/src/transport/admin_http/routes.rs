@@ -209,8 +209,7 @@ pub async fn connect_session_ag_ui(
                 .into_response()
         }
     };
-    // No events ⇒ the session isn't created yet (a fresh thread); its snapshot
-    // is an empty tree. Otherwise load it and read the materialized tree.
+    // No events ⇒ session not yet created (fresh thread); empty tree.
     let tree = if events.is_empty() {
         MessageTree::default()
     } else {

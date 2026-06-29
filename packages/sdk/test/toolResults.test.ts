@@ -6,7 +6,6 @@ import { callLlm, linearTree, runChain, toolResults } from "./harness";
 
 const loop = llm({ generator: serverGenerate({ model: "test-model" }), instructions: "SYS" });
 
-// The assistant turn that issued the calls, as the engine recorded it.
 const assistant: Message = {
     role: "assistant",
     content: "",
@@ -18,7 +17,6 @@ const assistant: Message = {
 
 describe("tool.results", () => {
     it("continues once every tool call is answered", async () => {
-        // Both results are in the tree → the loop continues.
         const messageTree = linearTree(
             { role: "user", content: "go" },
             assistant,
@@ -28,7 +26,6 @@ describe("tool.results", () => {
         const result = await runChain([loop], { trigger: toolResults(), messageTree });
         expect(result.actions.filter((a) => a.type === "call.llm")).toHaveLength(1);
 
-        // The recorded results reach the model, read from the tree.
         const toolMsgs = (callLlm(result)?.request.messages ?? []).filter((m) => m.role === "tool");
         expect(toolMsgs).toMatchObject([
             { role: "tool", content: "RA", tool_call_id: "call_a", name: "getWeather" },
@@ -37,7 +34,6 @@ describe("tool.results", () => {
     });
 
     it("does not continue while a tool call is still unanswered", async () => {
-        // Only call_a has landed; call_b is still pending → no continuation.
         const messageTree = linearTree({ role: "user", content: "go" }, assistant, {
             role: "tool",
             content: "RA",

@@ -13,68 +13,29 @@ same version.
 ### Added
 
 - `assistant-ui-cloudflare-starter` template: an assistant-ui chat on a
-  Cloudflare Worker (TanStack Start) that streams from the AG-UI endpoint.
-- Conversation messages form an append-only tree, and the tree **is** the
-  LLM-call message history: a message becomes a node exactly when it flows
-  through a `call.llm`. Each `Message` carries its own node `id` (so
-  `MessageNode` is just `{ parent_id, message }`), and the session tracks the
-  active head. `stamp(message)` mints a fresh node id.
+  Cloudflare Worker that streams from the AG-UI endpoint.
+- Conversation history is an append-only message tree owned by the engine and
+  shipped on every worker decision (`message_tree` on the request), no longer
+  worker state. Sending a fresh-id message list through `call.llm` *branches* the
+  conversation — the basis for edits, regenerations, and plan-mode's handoff.
 
 ### Changed
 
-- A worker's `call.llm` reconciles its message list into the tree: any message
-  with a new `id` is minted as a node (parent = the preceding message in the
-  list) and the head moves to the last — so sending a fresh-id list *branches*
-  the conversation. This is the basis for edits, regenerations, and plan-mode's
-  execution handoff. The engine no longer pre-records submitted user messages;
-  the worker records them by including them in `call.llm` (the `user.message`
-  trigger carries the content, and `agent.llm` appends a stamped copy). System
-  prompts are nodes too: `instructions` seeds one at the thread root. The
-  `plan-mode` example branches into a fresh execution thread rooted at the plan.
-- Client submissions carry `{ messages, anchor }` (`continue` extends the active
-  path, `replace` is a full transcript); the engine forwards them to the worker,
-  which assembles the prompt and reconciles it through the single `call.llm`
-  merge — so AG-UI edits and regenerations branch the conversation without a
-  second merge point. The `MESSAGES_SNAPSHOT` reflects the active head→root path
-  rather than every branch. The system prompt is a node rooted at the thread;
-  `instructions` is the default when a submission doesn't carry one.
-- The engine now materializes the message tree and ships it on every worker
-  decision (`message_tree` on the decision request). The conversation is no
-  longer worker state. `messageHistory`/`messageHistoryCurrentTurn` are removed;
-  the LLM loop is now composed from two middleware: `agent.llm({ generator,
-  instructions })` builds the prompt from the shipped tree's active path and
-  drives the loop, and `agent.stopWhen(cond)` halts it (e.g.
-  `agent.stepCountIs(20)` to cap the rounds; chain several for OR). The
-  adapters (`ToolLoopAgent`, `OpenAIAgent`) take an optional `stopWhen`.
-  `activePath(tree)` is exported for tools or custom middleware that need the
-  transcript; custom prompt shaping is a middleware over `call.llm` (e.g. via
-  `prependHistoryToLlmCalls`).
-- Tool/sub-agent continuation is now the worker's decision, not the engine's.
-  Each effect appends its result node and fires a `tool.results` trigger the
-  moment it completes (completion order); the trigger carries `completed`
-  (`{ tool_call_id, name, is_error }`) naming what landed — the content stays in
-  the tree, looked up with the new `toolResultNode(tree, id)` helper. The engine
-  no longer tracks turn completion: the old batched-`tool.results` payload, the
-  undelivered-results queue, per-result ordering, and the consumed-marker are all
-  gone. The default `agent.llm` loop continues when every tool call on the latest
-  assistant turn is answered in the tree (`toolRoundComplete(tree)`); because each
-  decision ships a point-in-time tree, only the last-completing decision sees all
-  answered, so the turn continues exactly once without any idempotency state.
-  This makes background/short-circuit continuation a pure worker concern. The
-  unused `sub_agent.turn.complete` and `sub_agent.error` worker triggers are
-  removed — results have flowed through this path since 0.1.16.
-
+- The LLM loop is now composed from middleware: `agent.llm({ generator,
+  instructions })` builds the prompt from the shipped tree and drives the loop,
+  `agent.stopWhen(cond)` halts it (e.g. `agent.stepCountIs(20)`). Removes
+  `messageHistory`/`messageHistoryCurrentTurn`; `activePath(tree)` is exported
+  for tools and custom middleware.
+- Tool/sub-agent continuation is now the worker's decision. Each effect fires a
+  `tool.results` trigger as it completes; the default loop continues once every
+  tool call on the latest turn is answered in the tree (`toolRoundComplete`,
+  `toolResultNode` helpers). Replaces the engine's batched effect delivery and
+  turn-completion tracking.
 - The AG-UI `/run` endpoint is now a passthrough: it forwards the client's full
-  transcript (and any `resume` entries) and the engine classifies the submission
-  against effect state instead of the transport sniffing the message list. A
-  transcript ending in a tool message is a tool-result submission — its results
-  complete the matching client-handled tool calls (firing `tool.result` per
-  completion); a re-sent, already-resolved result is inert. Everything else is a
-  user turn. The transport-side `classify`/tail-sniffing (and its `reasoning`-skip
-  hack) is gone.
+  transcript and the engine classifies it — a transcript ending in a tool message
+  completes the matching client tool calls, everything else is a user turn.
 - `agent.tool` no longer requires `execute` for client tools
-  (`handler: "client"`) — the call is completed in the browser, so `execute` is
-  optional for them. Worker tools still require it.
+  (`handler: "client"`); worker tools still require it.
 
 ## [0.1.19] - 2026-06-12
 

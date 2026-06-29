@@ -28,7 +28,6 @@ export interface RunResult {
 export interface RunOptions {
     trigger: DecisionTrigger;
     state?: Record<string, unknown>;
-    /** The conversation tree the engine ships on the request. */
     messageTree?: MessageTree;
     emitDelta?: (delta: LlmTokenDeltaInput) => Promise<void>;
 }
@@ -64,7 +63,6 @@ function makeRequest(trigger: DecisionTrigger, messageTree?: MessageTree): Worke
     };
 }
 
-/** Build a linear (unbranched) conversation tree from messages in order. */
 export function linearTree(...messages: Message[]): MessageTree {
     const nodes: Node[] = messages.map((message, i) => ({
         kind: "message",
@@ -93,9 +91,7 @@ export function toolCall(name: string, args: unknown, id = "tc-0"): ToolCall {
     return { id, type: "function", function: { name, arguments: JSON.stringify(args) } };
 }
 
-/** A tool/sub-agent completion. The result is already a node in the tree; the
- *  trigger just names what landed (the default loop reads continuation off the
- *  tree, so `completed` is irrelevant to it). */
+/** The result already lands as a tree node, so the default loop ignores `completed`. */
 export function toolResults(completed: CompletedToolCall[] = []): DecisionTrigger {
     return { type: "tool.results", completed };
 }
