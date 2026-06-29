@@ -107,6 +107,8 @@ export type ContentPart = TextPart | ImageUrlPart | FilePart | InputAudioPart | 
 export type Content = string | ContentPart[];
 
 export interface Message {
+    /** Node id; absent until the message is recorded as a tree node. */
+    id?: string;
     role: Role;
     content?: Content;
     tool_calls?: ToolCall[];
@@ -180,19 +182,43 @@ export interface ToolResult {
     content: string;
 }
 
-/** A message and the node it follows in the conversation tree. `parent_id` is
- *  absent only for the thread root. */
+/** A message node: the message's `id` is the node id; `parent_id` is the node it
+ *  follows (absent only for the thread root). */
 export interface MessageNode {
-    id: string;
     parent_id?: string;
     message: Message;
 }
 
-/** Conversation nodes plus the active leaf; the active transcript is the
+/** A control marker in the tree — an interrupt and, later, its resume. Filtered
+ *  out when building an LLM prompt; surfaced to clients as run outcome. */
+export interface Control {
+    id: string;
+    interrupt_id: string;
+    kind: "interrupt" | "resume";
+    reason?: string;
+    payload?: unknown;
+    origin: InterruptOrigin;
+}
+
+export interface ControlNode {
+    parent_id?: string;
+    control: Control;
+}
+
+/** A tree node: a conversation message or a control marker. The node id is the
+ *  message id or the control id. */
+export type Node = ({ kind: "message" } & MessageNode) | ({ kind: "control" } & ControlNode);
+
+/** Tree nodes plus the active leaf; the active transcript is the
  *  `head_id`-to-root path. */
 export interface MessageTree {
-    nodes: MessageNode[];
+    nodes: Node[];
     head_id?: string;
+}
+
+/** The node id, regardless of node kind. */
+export function nodeId(node: Node): string | undefined {
+    return node.kind === "message" ? node.message.id : node.control.id;
 }
 
 export interface ClientAction {
@@ -200,12 +226,16 @@ export interface ClientAction {
     args?: unknown;
 }
 
+/** How a submission attaches to the tree: `continue` extends the active path,
+ *  `replace` is the full path the worker prompts with as-is. */
+export type Anchor = "continue" | "replace";
+
 export type ClientPayload =
     | { type: "message"; message: Message; stream?: boolean }
     | ({ type: "action" } & ClientAction);
 
 export type DecisionTrigger =
-    | { type: "user.message"; stream: boolean; message: Message; id: string; parent_id?: string }
+    | { type: "user.message"; messages: Message[]; anchor: Anchor; stream?: boolean }
     | ({ type: "client.action" } & ClientAction)
     | {
           type: "llm.response";
@@ -227,9 +257,17 @@ export type DecisionTrigger =
           attempt: number;
           deadline?: DateTime;
       }
-    | { type: "tool.results"; messages: MessageNode[] }
+    | { type: "tool.results"; completed: CompletedToolCall[] }
     | { type: "interrupt.resumed"; interrupt_id: string; payload?: unknown }
     | { type: "stall" };
+
+/** Names a completed tool/sub-agent call on a `tool.results` trigger. The result
+ *  content lives in the tree — look it up by `tool_call_id` (`toolResultNode`). */
+export interface CompletedToolCall {
+    tool_call_id: string;
+    name: string;
+    is_error?: boolean;
+}
 
 export type WorkerAction =
     | {
@@ -763,7 +801,6 @@ export interface WorkerDecisionRequestWire {
     identity: WorkerIdentity;
     trigger: DecisionTrigger;
     worker_state: string;
-    /** The conversation tree as of this decision. */
     message_tree?: MessageTree;
     ancestry?: Uuid[];
     span: SpanContext;

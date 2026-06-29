@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use super::events::{LlmHandler, NewMessage, ToolHandler};
+use super::events::{LlmHandler, ToolHandler};
 use super::message::Message;
 use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse};
 use crate::runtime::retry::RetryPolicy;
@@ -14,6 +14,16 @@ pub struct ClientAction {
     pub args: Option<serde_json::Value>,
 }
 
+/// How a submission attaches to the tree.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Anchor {
+    /// Extend the active path — the worker appends to it.
+    Continue,
+    /// The messages are the path — the worker prompts with them as-is.
+    Replace,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientPayload {
@@ -21,9 +31,13 @@ pub enum ClientPayload {
         message: Message,
         #[serde(default)]
         stream: bool,
-        /// When set, the message branches from here instead of the current head.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        parent_id: Option<String>,
+    },
+    /// A full transcript (e.g. an AG-UI client's view). Forwarded to the worker
+    /// as a `replace` submission; the single `call.llm` merge reconciles it.
+    Messages {
+        messages: Vec<Message>,
+        #[serde(default)]
+        stream: bool,
     },
     Action {
         #[serde(flatten)]
@@ -31,14 +45,25 @@ pub enum ClientPayload {
     },
 }
 
-/// A drained effect result, before it's recorded as a thread message. Internal
-/// to the engine's undelivered-effects queue; the worker sees the recorded
-/// `NewMessage` nodes on the `tool.results` trigger, not this.
+/// An effect result on its way to becoming a tool-role thread message. Internal
+/// to the engine; the worker reads the recorded node from the tree, not this.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
     pub tool_call_id: String,
     pub name: String,
     pub content: String,
+    #[serde(default)]
+    pub is_error: bool,
+}
+
+/// Names a completed tool/sub-agent call on the `tool.result` trigger. The
+/// result content lives in the tree, looked up by `tool_call_id`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletedToolCall {
+    pub tool_call_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub is_error: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,11 +71,10 @@ pub struct ToolResult {
 pub enum DecisionTrigger {
     #[serde(rename = "user.message")]
     UserMessage {
+        messages: Vec<Message>,
+        anchor: Anchor,
+        #[serde(default)]
         stream: bool,
-        message: Message,
-        id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        parent_id: Option<String>,
     },
     #[serde(rename = "client.action")]
     ClientAction {
@@ -97,10 +121,12 @@ pub enum DecisionTrigger {
         attempt: u32,
         deadline: Option<DateTime<Utc>>,
     },
-    /// A turn's tool and sub-agent results, recorded as thread messages and
-    /// delivered as one batch once every effect is terminal.
+    /// A tool/sub-agent effect completed; its result node is in the tree. The
+    /// worker decides whether to continue (it reads the tree). `completed` names
+    /// what landed — convenience for reacting to a specific call; usually one,
+    /// several only when a single client submission resolves multiple at once.
     #[serde(rename = "tool.results")]
-    ToolResults { messages: Vec<NewMessage> },
+    ToolResults { completed: Vec<CompletedToolCall> },
     #[serde(rename = "interrupt.resumed")]
     InterruptResumed {
         interrupt_id: String,

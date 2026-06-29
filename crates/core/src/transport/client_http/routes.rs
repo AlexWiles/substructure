@@ -10,10 +10,11 @@ use uuid::Uuid;
 use crate::owner::SessionOwner;
 use crate::session::command::SessionError;
 use crate::session::decision::ClientPayload;
+use crate::session::events::MessageTree;
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use crate::transport::ag_ui::snapshot::snapshot_events;
 use crate::transport::ag_ui::translator::run_ag_ui_translation;
-use crate::transport::ag_ui::types::{AgUiInput, RunAgentInput};
+use crate::transport::ag_ui::types::RunAgentInput;
 use crate::transport::session_sse::merge_session_stream;
 use crate::{
     Caller, InterruptSessionInput, ResumeInterruptInput, RuntimeError, SubmitClientPayload,
@@ -246,12 +247,15 @@ pub async fn ag_ui_run(
     Path(agent_id): Path<String>,
     Json(input): Json<RunAgentInput>,
 ) -> Response {
-    let Some(action) = input.classify() else {
-        let body = serde_json::json!({"error": "no user message or tool result in RunAgentInput"});
-        return (StatusCode::BAD_REQUEST, Json(body)).into_response();
-    };
-
     let session_id = input.thread_id.clone();
+
+    // Pure passthrough: resume entries answer a pending interrupt; everything
+    // else forwards the client's full transcript and the aggregate classifies
+    // it against effect state (new turn vs. client tool results).
+    if input.resume.is_empty() && input.to_messages().is_empty() {
+        let body = serde_json::json!({"error": "no messages or resume in RunAgentInput"});
+        return (StatusCode::BAD_REQUEST, Json(body)).into_response();
+    }
 
     let spec = SessionSubscriptionSpec {
         scope: SubscriptionScope::All,
@@ -267,93 +271,51 @@ pub async fn ag_ui_run(
         .subscribe_token_deltas(&caller, &session_id)
         .await;
 
-    let submit = match action {
-        AgUiInput::UserTurn(message) => state
+    let submit = if !input.resume.is_empty() {
+        // AG-UI resume entries answer the session's pending interrupt. The
+        // worker receives `{status, payload}` as the `interrupt.resumed`
+        // trigger payload. Stale interrupt ids no-op in the core, which
+        // keeps resumes idempotent as the spec requires.
+        let mut outcome: Result<(), RuntimeError> = Ok(());
+        for entry in input.resume.clone() {
+            let payload = serde_json::json!({
+                "status": entry.status.as_str(),
+                "payload": entry.payload.unwrap_or(serde_json::Value::Null),
+            });
+            let r = state
+                .runtime
+                .resume_interrupt(ResumeInterruptInput {
+                    session_id: session_id.clone(),
+                    interrupt_id: entry.interrupt_id,
+                    payload,
+                    caller: caller.clone(),
+                    span: crate::span::SpanContext::root().child("ag_ui_resume"),
+                })
+                .await;
+            if let Err(e) = r {
+                outcome = Err(e);
+                break;
+            }
+        }
+        outcome
+    } else {
+        state
             .runtime
             .submit_client_payload(SubmitClientPayload {
                 session_id: session_id.clone(),
                 caller,
                 owner,
                 agent_id,
-                payload: ClientPayload::Message {
-                    message,
+                // Merge the client's full view so edits/branches reconcile into
+                // the tree; trailing client tool results resolve their effects.
+                payload: ClientPayload::Messages {
+                    messages: input.to_messages(),
                     stream: true,
-                    parent_id: None,
                 },
                 turn_id: Some(input.run_id.clone()),
             })
             .await
-            .map(|_| ()),
-        AgUiInput::ToolResults(results) => {
-            // A client echoes its whole result history on resume, including
-            // already-resolved worker tools and prior submissions. Submit every
-            // result; tolerate the benign "not pending" errors those produce
-            // (skipping them keeps the genuinely-pending client result moving).
-            let mut outcome: Result<(), RuntimeError> = Ok(());
-            for item in results {
-                let tool_call_id = item.tool_call_id.clone();
-                let r = state
-                    .runtime
-                    .submit_tool_call_result(SubmitToolCallResultInput {
-                        session_id: session_id.clone(),
-                        tool_call_id: item.tool_call_id,
-                        attempt: 0,
-                        result: SubmitToolCallResult::Result {
-                            result: item.content,
-                        },
-                        caller: caller.clone(),
-                        span: crate::span::SpanContext::root().child("ag_ui_tool_result"),
-                    })
-                    .await;
-                match r {
-                    Ok(()) => {}
-                    Err(RuntimeError::Session(
-                        SessionError::ToolCallNotPending
-                        | SessionError::ToolCallNotFound
-                        | SessionError::ToolCallAttemptMismatch
-                        | SessionError::ToolCallWrongHandler,
-                    )) => {
-                        tracing::debug!(
-                            %tool_call_id,
-                            "ag_ui_run: skipping non-pending tool result on resume"
-                        );
-                    }
-                    Err(e) => {
-                        outcome = Err(e);
-                        break;
-                    }
-                }
-            }
-            outcome
-        }
-        AgUiInput::Resume(entries) => {
-            // AG-UI resume entries answer the session's pending interrupt. The
-            // worker receives `{status, payload}` as the `interrupt.resumed`
-            // trigger payload. Stale interrupt ids no-op in the core, which
-            // keeps resumes idempotent as the spec requires.
-            let mut outcome: Result<(), RuntimeError> = Ok(());
-            for entry in entries {
-                let payload = serde_json::json!({
-                    "status": entry.status.as_str(),
-                    "payload": entry.payload.unwrap_or(serde_json::Value::Null),
-                });
-                let r = state
-                    .runtime
-                    .resume_interrupt(ResumeInterruptInput {
-                        session_id: session_id.clone(),
-                        interrupt_id: entry.interrupt_id,
-                        payload,
-                        caller: caller.clone(),
-                        span: crate::span::SpanContext::root().child("ag_ui_resume"),
-                    })
-                    .await;
-                if let Err(e) = r {
-                    outcome = Err(e);
-                    break;
-                }
-            }
-            outcome
-        }
+            .map(|_| ())
     };
     if let Err(e) = submit {
         return runtime_error_response(e);
@@ -378,6 +340,8 @@ pub async fn ag_ui_connect(
     Path(_agent_id): Path<String>,
     Json(input): Json<RunAgentInput>,
 ) -> Response {
+    // Authorizes the read and carries the active interrupt (its payload lives
+    // only in the event log, not the materialized state).
     let events = match state
         .runtime
         .read_session_events(&caller, &input.thread_id, None, None)
@@ -387,7 +351,22 @@ pub async fn ag_ui_connect(
         Err(e) => return runtime_error_response(e),
     };
 
-    let frames = snapshot_events(input.thread_id, input.run_id, &events)
+    // No events ⇒ the session isn't created yet (a fresh thread); its snapshot
+    // is an empty tree. Otherwise load it and read the materialized tree.
+    let tree = if events.is_empty() {
+        MessageTree::default()
+    } else {
+        match state
+            .runtime
+            .get_session(caller.tenant_id(), &input.thread_id)
+            .await
+        {
+            Ok((_, session)) => session.message_tree(),
+            Err(e) => return runtime_error_response(e),
+        }
+    };
+
+    let frames = snapshot_events(input.thread_id, input.run_id, &tree, &events)
         .into_iter()
         .map(|ev| Ok::<_, std::convert::Infallible>(ev.to_sse()))
         .collect::<Vec<_>>();

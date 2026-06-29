@@ -14,6 +14,7 @@ import type {
     WorkerAction,
     WorkerDecisionRequestWire,
 } from "./types";
+import { nodeId } from "./types";
 import type { Handler, AgentContext, AgentResponse, MiddlewareFn, Next, StateContributor } from "./worker";
 
 export const DEFAULT_RETRY: RetryPolicy = {
@@ -330,25 +331,23 @@ export type MessageSelector<S> = (state: S, ctx: AgentContext<S>) => Message[] |
 
 export type SystemMessageSelector<S> = (state: S, ctx: AgentContext<S>) => string | Promise<string>;
 
-/** The transcript message for a trigger, or `null` for triggers with no turn entry
- *  (`client.action`, `tool.execute`, `llm.error`, …). */
+/** The single transcript message for a trigger, or `null` for triggers without
+ *  one (`user.message` carries a list — use `triggerToMessages`). */
 export function triggerToMessage(trigger: DecisionTrigger): Message | null {
-    switch (trigger.type) {
-        case "user.message":
-        case "llm.response":
-            return trigger.message;
-        default:
-            return null;
-    }
+    return trigger.type === "llm.response" ? trigger.message : null;
 }
 
-/** Like `triggerToMessage`, but expands a `tool.results` batch into its messages. */
+/** All transcript messages a trigger carries. `tool.results` carries none — the
+ *  result is already in the tree; read it from `activePath` / `toolResultNode`. */
 export function triggerToMessages(trigger: DecisionTrigger): Message[] {
-    if (trigger.type === "tool.results") {
-        return trigger.messages.map((n) => n.message);
+    switch (trigger.type) {
+        case "user.message":
+            return trigger.messages;
+        case "llm.response":
+            return [trigger.message];
+        default:
+            return [];
     }
-    const msg = triggerToMessage(trigger);
-    return msg ? [msg] : [];
 }
 
 /** Prepend a transcript to every `call.llm` action's `messages`; other actions pass through. */
@@ -366,7 +365,8 @@ export function prependHistoryToLlmCalls(history: Message[], actions: WorkerActi
     );
 }
 
-/** The active transcript: the `head_id`-to-root path of the engine-owned tree. */
+/** The active transcript: the `head_id`-to-root path of the engine-owned tree,
+ *  with control nodes (interrupts) filtered out — they're not part of the prompt. */
 export function activePath(tree?: MessageTree): Message[] {
     if (!tree) return [];
     const out: Message[] = [];
@@ -374,12 +374,52 @@ export function activePath(tree?: MessageTree): Message[] {
     // Parents are appended before their children, so one reverse pass collects
     // the head-to-root chain (and stops at a missing parent).
     for (let i = tree.nodes.length - 1; i >= 0 && target != null; i--) {
-        if (tree.nodes[i].id === target) {
-            out.push(tree.nodes[i].message);
-            target = tree.nodes[i].parent_id;
-        }
+        const node = tree.nodes[i];
+        if (nodeId(node) !== target) continue;
+        if (node.kind === "message") out.push(node.message);
+        target = node.parent_id;
     }
     return out.reverse();
+}
+
+/** The tool-result node answering `toolCallId` on the active path, or undefined.
+ *  Searches the active path (not raw nodes) so a regenerated/abandoned branch's
+ *  stale result doesn't shadow the live one. */
+export function toolResultNode(tree: MessageTree | undefined, toolCallId: string): Message | undefined {
+    return activePath(tree).find((m) => m.role === "tool" && m.tool_call_id === toolCallId);
+}
+
+/** Whether the latest assistant turn issued tool calls and every one now has an
+ *  answering tool node on the active path — i.e. the round is ready to continue.
+ *  Returns false for a turn that made no tool calls (nothing to continue). */
+export function toolRoundComplete(tree: MessageTree | undefined): boolean {
+    const path = activePath(tree);
+    let last: Message | undefined;
+    for (let i = path.length - 1; i >= 0; i--) {
+        if (path[i].role === "assistant") {
+            last = path[i];
+            break;
+        }
+    }
+    const calls = last?.tool_calls ?? [];
+    if (calls.length === 0) return false;
+    const answered = new Set(path.filter((m) => m.role === "tool").map((m) => m.tool_call_id));
+    return calls.every((tc) => answered.has(tc.id));
+}
+
+/** Stamp a fresh node id onto a message so a `call.llm` records it as canonical. */
+export function stamp(message: Message): Message {
+    return { ...message, id: crypto.randomUUID() };
+}
+
+/** Root the prompt at a system message carrying `instructions`, reusing the
+ *  thread's existing system node id (so the merge no-ops it) or minting one.
+ *  No-op when there's no `instructions` or the path already leads with a system. */
+function ensureSystem(messages: Message[], tree: MessageTree | undefined, instructions?: string): Message[] {
+    if (!instructions || messages[0]?.role === "system") return messages;
+    const root = activePath(tree)[0];
+    const id = root?.role === "system" ? root.id : crypto.randomUUID();
+    return [{ role: "system", content: instructions, id }, ...messages];
 }
 
 // ── Tools ──────────────────────────────────────────────────────────────────
@@ -655,35 +695,39 @@ export function llm<S>(
             const downstream = await next(ctx);
 
             const { trigger } = ctx.request;
+            const tree = ctx.request.message_tree;
+            const callLlmFrom = async (base: Message[]): Promise<AgentResponse> => {
+                const instructions =
+                    typeof selection.instructions === "function"
+                        ? await selection.instructions()
+                        : selection.instructions;
+                const messages = ensureSystem(base, tree, instructions);
+                return {
+                    ...downstream,
+                    actions: [
+                        {
+                            type: "call.llm",
+                            request: { ...generator.request, messages },
+                            retry: selection.retry ?? DEFAULT_RETRY,
+                            stream,
+                            handler: generator.handler,
+                        },
+                        ...downstream.actions,
+                    ],
+                };
+            };
+
             switch (trigger.type) {
                 case "user.message":
+                    const messages =
+                        trigger.anchor === "replace" ? trigger.messages : [...activePath(tree), ...trigger.messages];
+
+                    return callLlmFrom(messages);
                 case "client.action":
-                case "tool.results": {
-                    const active = activePath(ctx.request.message_tree);
-                    const instructions =
-                        typeof selection.instructions === "function"
-                            ? await selection.instructions()
-                            : selection.instructions;
-                    const messages = instructions
-                        ? [{ role: "system", content: instructions } as Message, ...active]
-                        : active;
-                    return {
-                        ...downstream,
-                        actions: [
-                            {
-                                type: "call.llm",
-                                request: {
-                                    ...generator.request,
-                                    messages,
-                                },
-                                retry: selection.retry ?? DEFAULT_RETRY,
-                                stream,
-                                handler: generator.handler,
-                            },
-                            ...downstream.actions,
-                        ],
-                    };
-                }
+                    return callLlmFrom(activePath(tree));
+                case "tool.results":
+                    if (!toolRoundComplete(tree)) return downstream;
+                    return callLlmFrom(activePath(tree));
                 case "llm.request": {
                     const action = await runWorkerLlmCall(trigger, generator.run, ctx.emitDelta);
                     return { ...downstream, actions: [action, ...downstream.actions] };

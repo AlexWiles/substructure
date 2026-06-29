@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { llm, serverGenerate, stepCountIs, stopWhen } from "../src/middleware";
 import type { Message } from "../src/types";
-import { actionsOfType, linearTree, runChain, toolResult, toolResults, userMessage } from "./harness";
+import { actionsOfType, linearTree, runChain, toolResults, userMessage } from "./harness";
 
 const loop = llm({ generator: serverGenerate({ model: "test-model" }) });
 
@@ -20,7 +20,7 @@ const oneRound = linearTree({ role: "user", content: "go" }, assistant, {
     name: "getWeather",
 });
 
-const backEdge = () => toolResults([toolResult("call_a", "RA", "getWeather")]);
+const backEdge = () => toolResults();
 
 describe("stopWhen", () => {
     it("lets the loop continue when the condition is false", async () => {

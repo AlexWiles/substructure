@@ -1,9 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 
-use super::decision::{ClientPayload, DecisionTrigger, ToolResult, WorkerAction};
+use super::decision::{
+    Anchor, ClientPayload, CompletedToolCall, DecisionTrigger, ToolResult, WorkerAction,
+};
 use super::events::*;
 use super::message::{Content, ContentPart, ImageUrl, Message, Role};
 use super::state::{
@@ -150,21 +152,12 @@ pub enum SessionError {
     ToolCallWrongHandler,
 }
 
-/// A new message's identity, shared between its `NewMessage` event and the
-/// worker trigger that echoes the same id.
-struct MessageNode {
-    id: String,
-    parent_id: Option<String>,
-}
-
-impl MessageNode {
-    fn event(&self, message: Message) -> EventPayload {
-        EventPayload::NewMessage(NewMessage {
-            id: self.id.clone(),
-            parent_id: self.parent_id.clone(),
-            message,
-        })
+/// Mint a node id for a message that doesn't have one yet (boundary assignment).
+fn assign_id(mut message: Message) -> Message {
+    if message.id.is_empty() {
+        message.id = new_message_id();
     }
+    message
 }
 
 impl SessionState {
@@ -275,30 +268,43 @@ impl SessionState {
         }
     }
 
-    fn next_message_node(&self, parent_id: Option<String>) -> MessageNode {
-        MessageNode {
-            id: new_message_id(),
-            parent_id: parent_id.or_else(|| self.head_id.clone()),
-        }
+    /// Append just-completed effect results as tool-role nodes and fire a
+    /// `tool.result` decision. The worker decides whether to continue by reading
+    /// the tree; `completed` just names what landed (the content is in the tree).
+    fn record_results(&self, results: Vec<ToolResult>) -> Vec<EventPayload> {
+        let completed: Vec<CompletedToolCall> = results
+            .iter()
+            .map(|r| CompletedToolCall {
+                tool_call_id: r.tool_call_id.clone(),
+                name: r.name.clone(),
+                is_error: r.is_error,
+            })
+            .collect();
+        let mut events: Vec<EventPayload> = self
+            .result_nodes(results)
+            .into_iter()
+            .map(EventPayload::NewMessage)
+            .collect();
+        events.push(self.emit_decision_request(DecisionTrigger::ToolResults { completed }));
+        events
     }
 
-    /// Record a drained batch of results as tool-role message nodes. Ids are
-    /// minted up front and chained — the first parents off the head, each later
-    /// one off its predecessor — because `head_id` doesn't advance between
-    /// events within a single command.
+    /// Mint tool-role message nodes for results, chained — the first parents off
+    /// the head, each later one off its predecessor — because `head_id` doesn't
+    /// advance between events within a single command.
     fn result_nodes(&self, results: Vec<ToolResult>) -> Vec<NewMessage> {
         let ids: Vec<String> = results.iter().map(|_| new_message_id()).collect();
         results
             .into_iter()
             .enumerate()
             .map(|(i, result)| NewMessage {
-                id: ids[i].clone(),
                 parent_id: if i == 0 {
                     self.head_id.clone()
                 } else {
                     Some(ids[i - 1].clone())
                 },
                 message: Message {
+                    id: ids[i].clone(),
                     role: Role::Tool,
                     content: Some(Content::Text(result.content)),
                     tool_calls: None,
@@ -307,6 +313,52 @@ impl SessionState {
                 },
             })
             .collect()
+    }
+
+    /// A submitted message that answers a pending client-handled tool call. The
+    /// aggregate classifies the submission against effect state here, rather than
+    /// the transport sniffing it from a flat list.
+    fn pending_client_result(&self, m: &Message) -> Option<ToolResult> {
+        if m.role != Role::Tool {
+            return None;
+        }
+        let id = m.tool_call_id.as_deref()?;
+        let tc = self.tool_calls.get(id)?;
+        if tc.handler != ToolHandler::Client || tc.tracking.status != EffectStatus::Pending {
+            return None;
+        }
+        Some(ToolResult {
+            tool_call_id: id.to_string(),
+            name: tc.name.clone(),
+            content: m
+                .content
+                .as_ref()
+                .map(Content::text_owned)
+                .unwrap_or_default(),
+            is_error: false,
+        })
+    }
+
+    /// Reconcile a `call.llm` message list into the tree: each message with a new
+    /// (or absent) id mints a node parented off the preceding message; existing
+    /// ids no-op. The last minted node carries the head forward.
+    fn merge_messages(&self, list: &[Message]) -> Vec<EventPayload> {
+        let mut known: HashSet<String> = self.nodes.iter().map(|n| n.id().to_string()).collect();
+
+        let mut events = Vec::new();
+        let mut prev: Option<String> = None;
+
+        for m in list {
+            let m = assign_id(m.clone());
+            if known.insert(m.id.clone()) {
+                events.push(EventPayload::NewMessage(NewMessage {
+                    parent_id: prev.clone(),
+                    message: m.clone(),
+                }));
+            }
+            prev = Some(m.id);
+        }
+        events
     }
 
     fn emit_decision_request(&self, trigger: DecisionTrigger) -> EventPayload {
@@ -362,24 +414,59 @@ impl SessionState {
                 }
 
                 match payload {
-                    ClientPayload::Message {
-                        message,
-                        stream,
-                        parent_id,
-                    } => {
+                    ClientPayload::Message { message, stream } => {
                         if matches!(self.status, SessionStatus::Interrupted { .. })
                             && message.role == Role::User
                         {
                             return Err(SessionError::SessionInterrupted);
                         }
-                        let node = self.next_message_node(parent_id);
-                        events.push(node.event(message.clone()));
+                        // Forwarded to the worker, which appends it and records it
+                        // via the single call.llm merge.
                         if message.role == Role::User {
                             events.push(self.emit_decision_request(DecisionTrigger::UserMessage {
+                                messages: vec![assign_id(message)],
+                                anchor: Anchor::Continue,
                                 stream,
-                                message,
-                                id: node.id,
-                                parent_id: node.parent_id,
+                            }));
+                        }
+                    }
+                    ClientPayload::Messages { messages, stream } => {
+                        let messages: Vec<Message> = messages.into_iter().map(assign_id).collect();
+
+                        // A transcript ending in a tool message is a tool-result
+                        // continuation, not a new user turn. Resolve the effects
+                        // its results answer; an echo of already-resolved results
+                        // matches nothing and no-ops.
+                        if matches!(messages.last(), Some(m) if m.role == Role::Tool) {
+                            let completions: Vec<ToolResult> = messages
+                                .iter()
+                                .filter_map(|m| self.pending_client_result(m))
+                                .collect();
+                            if !completions.is_empty() {
+                                for r in &completions {
+                                    events.push(EventPayload::ToolCallCompleted(
+                                        ToolCallCompleted {
+                                            tool_call_id: r.tool_call_id.clone(),
+                                            name: r.name.clone(),
+                                            result: r.content.clone(),
+                                        },
+                                    ));
+                                }
+                                // Append the results as nodes and continue the
+                                // turn — the same path a worker tool takes on
+                                // completion.
+                                events.extend(self.record_results(completions));
+                            }
+                        } else {
+                            if matches!(self.status, SessionStatus::Interrupted { .. }) {
+                                return Err(SessionError::SessionInterrupted);
+                            }
+                            // A plain turn: forwarded as a full transcript; the
+                            // call.llm merge reconciles it.
+                            events.push(self.emit_decision_request(DecisionTrigger::UserMessage {
+                                messages,
+                                anchor: Anchor::Replace,
+                                stream,
                             }));
                         }
                     }
@@ -401,7 +488,7 @@ impl SessionState {
                 message,
                 stream,
                 turn_id,
-                parent_id,
+                parent_id: _,
             } => {
                 Self::ensure_internal(caller)?;
                 // Idempotency guard: reject if this turn_id was already seen
@@ -423,17 +510,15 @@ impl SessionState {
                         Err(SessionError::SessionInterrupted)
                     }
                     _ => {
-                        let node = self.next_message_node(parent_id);
-                        let mut events = vec![node.event(message.clone())];
+                        let mut events = Vec::new();
                         if let Some(turn_id) = turn_id {
                             events.push(EventPayload::TurnStarted(TurnStarted { turn_id }));
                         }
                         if message.role == Role::User {
                             events.push(self.emit_decision_request(DecisionTrigger::UserMessage {
+                                messages: vec![assign_id(message)],
+                                anchor: Anchor::Continue,
                                 stream,
-                                message,
-                                id: node.id,
-                                parent_id: node.parent_id,
                             }));
                         }
                         Ok(events)
@@ -460,14 +545,19 @@ impl SessionState {
                 );
 
                 if issue {
-                    let mut events = vec![EventPayload::LlmCallRequested(LlmCallRequested {
+                    let request = LlmRequest {
+                        messages: request.messages.into_iter().map(assign_id).collect(),
+                        ..request
+                    };
+                    let mut events = self.merge_messages(&request.messages);
+                    events.push(EventPayload::LlmCallRequested(LlmCallRequested {
                         call_id: call_id.clone(),
                         attempt: 0,
                         request: request.clone(),
                         stream,
                         retry,
                         handler: handler.clone(),
-                    })];
+                    }));
 
                     if handler == LlmHandler::Worker {
                         events.push(self.emit_decision_request(DecisionTrigger::LlmRequest {
@@ -517,29 +607,41 @@ impl SessionState {
                             }
                             Some(Content::Parts(parts))
                         };
+                        let id = new_message_id();
+                        // The response parents under the call's prompt leaf, not the
+                        // head — on a regenerated turn the head is a stale sibling,
+                        // while the leaf is exactly the node the call replied to.
+                        let parent_id = self
+                            .llm_calls
+                            .get(&call_id)
+                            .and_then(|c| c.prompt_leaf.clone())
+                            .or_else(|| self.head_id.clone());
                         let message = Message {
+                            id: id.clone(),
                             role: Role::Assistant,
                             content,
                             tool_calls,
                             tool_call_id: None,
                             name: None,
                         };
-                        let node = self.next_message_node(None);
                         Ok(vec![
                             EventPayload::LlmCallCompleted(LlmCallCompleted {
                                 call_id: call_id.clone(),
                                 attempt,
                                 response,
                             }),
-                            node.event(message.clone()),
+                            EventPayload::NewMessage(NewMessage {
+                                parent_id: parent_id.clone(),
+                                message: message.clone(),
+                            }),
                             self.emit_decision_request(DecisionTrigger::LlmResponse {
                                 call_id,
                                 message,
                                 truncated,
                                 usage,
                                 cost,
-                                id: node.id,
-                                parent_id: node.parent_id,
+                                id,
+                                parent_id,
                             }),
                         ])
                     }
@@ -651,20 +753,12 @@ impl SessionState {
                         state: ws,
                     }));
                 }
-                let pending = ToolResult {
+                events.extend(self.record_results(vec![ToolResult {
                     tool_call_id,
                     name,
                     content: result,
-                };
-                if let Some(results) = self.drainable_with(pending) {
-                    let nodes = self.result_nodes(results);
-                    events.extend(nodes.iter().cloned().map(EventPayload::NewMessage));
-                    events.push(
-                        self.emit_decision_request(DecisionTrigger::ToolResults {
-                            messages: nodes,
-                        }),
-                    );
-                }
+                    is_error: false,
+                }]));
                 Ok(events)
             }
 
@@ -703,18 +797,12 @@ impl SessionState {
                     }));
                 }
                 if exhausted {
-                    let pending = ToolResult {
+                    events.extend(self.record_results(vec![ToolResult {
                         tool_call_id,
                         name,
                         content: error,
-                    };
-                    if let Some(results) = self.drainable_with(pending) {
-                        let nodes = self.result_nodes(results);
-                        events.extend(nodes.iter().cloned().map(EventPayload::NewMessage));
-                        events.push(self.emit_decision_request(DecisionTrigger::ToolResults {
-                            messages: nodes,
-                        }));
-                    }
+                        is_error: true,
+                    }]));
                 }
                 Ok(events)
             }
@@ -769,6 +857,7 @@ impl SessionState {
                     tool_call_id: sa.tool_call_id.clone(),
                     name: sa.agent_id.clone(),
                     content: error.clone(),
+                    is_error: true,
                 };
                 let exhausted = sa
                     .tracking
@@ -780,13 +869,7 @@ impl SessionState {
                     retryable,
                 })];
                 if exhausted {
-                    if let Some(results) = self.drainable_with(pending) {
-                        let nodes = self.result_nodes(results);
-                        events.extend(nodes.iter().cloned().map(EventPayload::NewMessage));
-                        events.push(self.emit_decision_request(DecisionTrigger::ToolResults {
-                            messages: nodes,
-                        }));
-                    }
+                    events.extend(self.record_results(vec![pending]));
                 }
                 Ok(events)
             }
@@ -807,6 +890,7 @@ impl SessionState {
                     tool_call_id: sa.tool_call_id.clone(),
                     name: sa.agent_id.clone(),
                     content: json_to_string(&data),
+                    is_error: false,
                 };
                 let mut events = vec![EventPayload::SubAgentTurnCompleted(SubAgentTurnCompleted {
                     session_id,
@@ -814,15 +898,7 @@ impl SessionState {
                     token_usage,
                     data,
                 })];
-                if let Some(results) = self.drainable_with(pending) {
-                    let nodes = self.result_nodes(results);
-                    events.extend(nodes.iter().cloned().map(EventPayload::NewMessage));
-                    events.push(
-                        self.emit_decision_request(DecisionTrigger::ToolResults {
-                            messages: nodes,
-                        }),
-                    );
-                }
+                events.extend(self.record_results(vec![pending]));
                 Ok(events)
             }
 
@@ -1145,12 +1221,23 @@ impl SessionState {
             if tc.tracking.status == EffectStatus::Pending
                 && tc.tracking.deadline.is_some_and(|d| d <= now)
             {
-                return Ok(vec![EventPayload::ToolCallErrored(ToolCallErrored {
+                let mut events = vec![EventPayload::ToolCallErrored(ToolCallErrored {
                     tool_call_id: tc.tool_call_id.clone(),
                     name: tc.name.clone(),
                     error: "deadline exceeded".to_string(),
                     retryable: true,
-                })]);
+                })];
+                // A terminal timeout is a result: append its node and continue,
+                // the same as a `FailToolCall` command.
+                if tc.tracking.retry_policy.exhausted(&tc.tracking.retry, true) {
+                    events.extend(self.record_results(vec![ToolResult {
+                        tool_call_id: tc.tool_call_id.clone(),
+                        name: tc.name.clone(),
+                        content: "deadline exceeded".to_string(),
+                        is_error: true,
+                    }]));
+                }
+                return Ok(events);
             }
         }
 
@@ -1159,10 +1246,16 @@ impl SessionState {
             if call.tracking.status == EffectStatus::RetryScheduled {
                 if let Some(next_at) = call.tracking.retry.next_at {
                     if next_at <= now {
+                        let messages = call
+                            .prompt_leaf
+                            .as_deref()
+                            .map(|leaf| self.message_tree().path_to(leaf))
+                            .unwrap_or_default();
+                        let request = call.spec.to_request(messages);
                         let mut events = vec![EventPayload::LlmCallRequested(LlmCallRequested {
                             call_id: call.call_id.clone(),
                             attempt: call.tracking.retry.attempts,
-                            request: call.request.clone(),
+                            request: request.clone(),
                             stream: call.stream,
                             retry: call.tracking.retry_policy.clone(),
                             handler: call.handler.clone(),
@@ -1170,7 +1263,7 @@ impl SessionState {
                         if call.handler == LlmHandler::Worker {
                             events.push(self.emit_decision_request(DecisionTrigger::LlmRequest {
                                 call_id: call.call_id.clone(),
-                                request: call.request.clone(),
+                                request,
                                 stream: call.stream,
                                 attempt: call.tracking.retry.attempts,
                             }));
@@ -1214,11 +1307,20 @@ impl SessionState {
             if sa.tracking.status == EffectStatus::Pending
                 && sa.tracking.deadline.is_some_and(|d| d <= now)
             {
-                return Ok(vec![EventPayload::SubAgentErrored(SubAgentErrored {
+                let mut events = vec![EventPayload::SubAgentErrored(SubAgentErrored {
                     session_id: sa.session_id.clone(),
                     error: "deadline exceeded".to_string(),
                     retryable: true,
-                })]);
+                })];
+                if sa.tracking.retry_policy.exhausted(&sa.tracking.retry, true) {
+                    events.extend(self.record_results(vec![ToolResult {
+                        tool_call_id: sa.tool_call_id.clone(),
+                        name: sa.agent_id.clone(),
+                        content: "deadline exceeded".to_string(),
+                        is_error: true,
+                    }]));
+                }
+                return Ok(events);
             }
         }
 
@@ -1269,26 +1371,9 @@ impl SessionState {
             }
         }
 
-        // Deliver the batch once every effect is terminal.
-        if !self.has_pending_worker_decision() {
-            if let Some(results) = self.drainable_batch() {
-                let nodes = self.result_nodes(results);
-                let mut events: Vec<EventPayload> = nodes
-                    .iter()
-                    .cloned()
-                    .map(EventPayload::NewMessage)
-                    .collect();
-                events.push(EventPayload::WorkerDecisionRequested(
-                    WorkerDecisionRequested {
-                        decision_id: new_call_id(),
-                        trigger: DecisionTrigger::ToolResults { messages: nodes },
-                    },
-                ));
-                return Ok(events);
-            }
-        }
-
-        // Promote the next queued worker decision
+        // Promote the next queued worker decision. Each effect completion fires
+        // its own `tool.result`; lost ones are recovered by work-queue
+        // redelivery, not by re-firing here.
         if let Some(wd) = self.next_queued_decision() {
             return Ok(vec![EventPayload::WorkerDecisionRequested(
                 WorkerDecisionRequested {
@@ -1298,12 +1383,11 @@ impl SessionState {
             )]);
         }
 
-        // Nothing left in flight or undelivered → stall recovery.
+        // Nothing left in flight → stall recovery.
         if self.all_tools_resolved()
             && !self.has_pending_llm()
             && !self.has_queued_worker_decision()
             && !self.has_pending_worker_decision()
-            && !self.has_undelivered_effects()
         {
             return Ok(vec![EventPayload::WorkerDecisionRequested(
                 WorkerDecisionRequested {
@@ -1328,7 +1412,9 @@ mod tests {
     use crate::runtime::llm::{LlmRequest, LlmResponse};
     use crate::runtime::owner::SessionOwner;
     use crate::runtime::retry::RetryPolicy;
-    use crate::runtime::session::decision::{ClientPayload, DecisionTrigger, WorkerAction};
+    use crate::runtime::session::decision::{
+        ClientPayload, CompletedToolCall, DecisionTrigger, WorkerAction,
+    };
     use crate::runtime::session::events::{EventPayload, LlmHandler, ToolHandler};
     use crate::runtime::session::message::{Content, Message, Role};
     use crate::runtime::session::state::{EffectStatus, SessionState, SessionStatus};
@@ -1747,6 +1833,7 @@ mod tests {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
         let payload = ClientPayload::Message {
             message: Message {
+                id: String::new(),
                 role: Role::User,
                 content: Some(Content::Text("hello".to_string())),
                 tool_calls: None,
@@ -1754,7 +1841,6 @@ mod tests {
                 name: None,
             },
             stream: false,
-            parent_id: None,
         };
 
         dispatch(
@@ -1795,6 +1881,7 @@ mod tests {
             CommandPayload::SubmitClientPayload {
                 payload: ClientPayload::Message {
                     message: Message {
+                        id: String::new(),
                         role: Role::User,
                         content: Some(Content::Text("hi".to_string())),
                         tool_calls: None,
@@ -1802,7 +1889,6 @@ mod tests {
                         name: None,
                     },
                     stream: false,
-                    parent_id: None,
                 },
                 turn_id: Some("turn-1".to_string()),
             },
@@ -1863,6 +1949,7 @@ mod tests {
             CommandPayload::SubmitClientPayload {
                 payload: ClientPayload::Message {
                     message: Message {
+                        id: String::new(),
                         role: Role::User,
                         content: Some(Content::Text("hi".to_string())),
                         tool_calls: None,
@@ -1870,7 +1957,6 @@ mod tests {
                         name: None,
                     },
                     stream: false,
-                    parent_id: None,
                 },
                 turn_id: Some("turn-1".to_string()),
             },
@@ -1944,6 +2030,7 @@ mod tests {
 
         let user_message = ClientPayload::Message {
             message: Message {
+                id: String::new(),
                 role: Role::User,
                 content: Some(Content::Text("hello".to_string())),
                 tool_calls: None,
@@ -1951,7 +2038,6 @@ mod tests {
                 name: None,
             },
             stream: false,
-            parent_id: None,
         };
 
         let err = agg
@@ -2002,13 +2088,14 @@ mod tests {
     }
 
     #[test]
-    fn send_message_emits_new_message() {
+    fn send_message_wakes_a_decision() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
 
         let events = dispatch(
             &mut agg,
             CommandPayload::SendMessage {
                 message: Message {
+                    id: String::new(),
                     role: Role::User,
                     content: Some(Content::Text("hi".to_string())),
                     tool_calls: None,
@@ -2024,16 +2111,13 @@ mod tests {
             },
         );
 
-        // A user message wakes a worker decision so the LLM can respond.
+        // A user message wakes a worker decision; the worker records it via call.llm.
         assert!(
             matches!(
                 events.as_slice(),
-                [
-                    EventPayload::NewMessage(_),
-                    EventPayload::WorkerDecisionRequested(_),
-                ]
+                [EventPayload::WorkerDecisionRequested(_)]
             ),
-            "expected [NewMessage, WorkerDecisionRequested]; got {events:?}"
+            "expected [WorkerDecisionRequested]; got {events:?}"
         );
         assert_eq!(agg.state.status, SessionStatus::Idle);
     }
@@ -2132,6 +2216,309 @@ mod tests {
         assert_eq!(call.tracking.status, EffectStatus::Pending);
     }
 
+    fn node_msg(id: &str, role: Role, content: &str) -> Message {
+        Message {
+            id: id.into(),
+            role,
+            content: Some(Content::Text(content.into())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    fn request_with(messages: Vec<Message>) -> LlmRequest {
+        LlmRequest {
+            model: "test-model".to_string(),
+            messages,
+            tools: None,
+            temperature: None,
+            max_completion_tokens: None,
+            reasoning: None,
+        }
+    }
+
+    #[test]
+    fn request_llm_call_mints_prompt_nodes() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::RequestLlmCall {
+                call_id: "llm-1".to_string(),
+                request: request_with(vec![
+                    node_msg("sys", Role::System, "be helpful"),
+                    node_msg("u1", Role::User, "hi"),
+                ]),
+                stream: false,
+                retry: RetryPolicy::no_retry(),
+                handler: LlmHandler::Server,
+            },
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
+        );
+
+        let minted: Vec<&NewMessage> = events
+            .iter()
+            .filter_map(|e| match e {
+                EventPayload::NewMessage(m) => Some(m),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(minted.len(), 2);
+        assert_eq!(minted[0].message.id, "sys");
+        assert_eq!(minted[0].parent_id, None);
+        assert_eq!(minted[1].message.id, "u1");
+        assert_eq!(minted[1].parent_id.as_deref(), Some("sys"));
+        assert_eq!(agg.state.head_id.as_deref(), Some("u1"));
+    }
+
+    #[test]
+    fn merge_reconciles_echo_edit_and_switch() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        dispatch(
+            &mut agg,
+            CommandPayload::RequestLlmCall {
+                call_id: "llm-1".to_string(),
+                request: request_with(vec![
+                    node_msg("sys", Role::System, "s"),
+                    node_msg("u1", Role::User, "hi"),
+                ]),
+                stream: false,
+                retry: RetryPolicy::no_retry(),
+                handler: LlmHandler::Server,
+            },
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
+        );
+        // tree: sys -> u1, head = u1
+
+        let echo = agg.state.merge_messages(&[
+            node_msg("sys", Role::System, "s"),
+            node_msg("u1", Role::User, "hi"),
+        ]);
+        assert!(echo.is_empty(), "echo is a no-op: {echo:?}");
+
+        let edit = agg.state.merge_messages(&[
+            node_msg("sys", Role::System, "s"),
+            node_msg("u1b", Role::User, "hey"),
+        ]);
+        assert!(
+            matches!(edit.as_slice(), [EventPayload::NewMessage(m)]
+                if m.message.id == "u1b" && m.parent_id.as_deref() == Some("sys")),
+            "edit forks under the shared parent: {edit:?}"
+        );
+
+        let echo_only = agg
+            .state
+            .merge_messages(&[node_msg("sys", Role::System, "s")]);
+        assert!(
+            echo_only.is_empty(),
+            "echoing an existing node mints nothing: {echo_only:?}"
+        );
+
+        let fresh = agg.state.merge_messages(&[node_msg("", Role::User, "x")]);
+        assert!(
+            matches!(fresh.as_slice(), [EventPayload::NewMessage(m)] if !m.message.id.is_empty()),
+            "an id-less message mints a fresh node: {fresh:?}"
+        );
+    }
+
+    #[test]
+    fn submit_messages_forwards_a_replace_submission() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Messages {
+                    messages: vec![
+                        node_msg("c1", Role::User, "hi"),
+                        node_msg("a1", Role::Assistant, "hello"),
+                        node_msg("c2", Role::User, "more"),
+                    ],
+                    stream: false,
+                },
+                turn_id: None,
+            },
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
+        );
+
+        // Forwarded, not merged: no nodes recorded, just a replace submission for
+        // the worker to reconcile via call.llm.
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, EventPayload::NewMessage(_))));
+        let trigger = events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(w) => Some(&w.trigger),
+                EventPayload::DecisionRequestQueued(q) => Some(&q.trigger),
+                _ => None,
+            })
+            .expect("a decision request");
+        match trigger {
+            DecisionTrigger::UserMessage {
+                messages, anchor, ..
+            } => {
+                assert_eq!(*anchor, Anchor::Replace);
+                assert_eq!(
+                    messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+                    vec!["c1", "a1", "c2"]
+                );
+            }
+            t => panic!("expected a UserMessage trigger; got {t:?}"),
+        }
+    }
+
+    fn tool_msg(tool_call_id: &str, content: &str) -> Message {
+        Message {
+            id: String::new(),
+            role: Role::Tool,
+            content: Some(Content::Text(content.into())),
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id.into()),
+            name: None,
+        }
+    }
+
+    fn submit_messages(
+        agg: &mut Aggregate<SessionState>,
+        messages: Vec<Message>,
+    ) -> Vec<EventPayload> {
+        dispatch(
+            agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Messages {
+                    messages,
+                    stream: false,
+                },
+                turn_id: None,
+            },
+            &system(),
+        )
+    }
+
+    #[test]
+    fn submit_messages_resolves_a_client_tool_result() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        request_client_tool(&mut agg, "tc-1");
+
+        let events = submit_messages(&mut agg, vec![tool_msg("tc-1", "the answer")]);
+
+        // The client result completes the effect, appends its node, and fires a
+        // tool.result naming it — no user.message is fabricated.
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, EventPayload::ToolCallCompleted(_))));
+        let nodes = result_nodes_in(&events);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].message.tool_call_id.as_deref(), Some("tc-1"));
+        assert_eq!(node_text(&nodes[0]), "the answer");
+        assert_eq!(
+            fired_tool_result(&events).map(|c| c.into_iter().map(|c| c.tool_call_id).collect()),
+            Some(vec!["tc-1".to_string()])
+        );
+        assert!(
+            decision_with(&events, |t| matches!(
+                t,
+                DecisionTrigger::UserMessage { .. }
+            ))
+            .is_none(),
+            "a tool-result submission is not a user turn"
+        );
+
+        let tc = agg.state.tool_calls.get("tc-1").expect("tool call present");
+        assert_eq!(tc.tracking.status, EffectStatus::Completed);
+        assert_eq!(tc.result.as_deref(), Some("the answer"));
+    }
+
+    #[test]
+    fn submit_messages_fires_a_tool_result_per_client_completion() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        request_client_tool(&mut agg, "a");
+        request_client_tool(&mut agg, "b");
+
+        let first = submit_messages(&mut agg, vec![tool_msg("a", "RA")]);
+        assert_eq!(
+            fired_tool_result(&first).map(|c| c.into_iter().map(|c| c.tool_call_id).collect()),
+            Some(vec!["a".to_string()])
+        );
+        assert_eq!(
+            agg.state.tool_calls.get("a").unwrap().result.as_deref(),
+            Some("RA")
+        );
+
+        let second = submit_messages(&mut agg, vec![tool_msg("b", "RB")]);
+        assert_eq!(
+            fired_tool_result(&second).map(|c| c.into_iter().map(|c| c.tool_call_id).collect()),
+            Some(vec!["b".to_string()])
+        );
+        // Both results are on the active path, in completion order.
+        assert_eq!(tree_tool_ids(&agg), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn submit_messages_resolving_several_client_tools_fires_one_tool_result() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        request_client_tool(&mut agg, "a");
+        request_client_tool(&mut agg, "b");
+
+        // One submission resolves both client tools → one commit, one tool.result
+        // naming both (firing one per result would double-continue).
+        let events = submit_messages(&mut agg, vec![tool_msg("a", "RA"), tool_msg("b", "RB")]);
+        assert_eq!(result_nodes_in(&events).len(), 2);
+        let decisions: Vec<_> = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    EventPayload::WorkerDecisionRequested(p)
+                        if matches!(p.trigger, DecisionTrigger::ToolResults { .. })
+                ) || matches!(
+                    e,
+                    EventPayload::DecisionRequestQueued(p)
+                        if matches!(p.trigger, DecisionTrigger::ToolResults { .. })
+                )
+            })
+            .collect();
+        assert_eq!(
+            decisions.len(),
+            1,
+            "exactly one tool.result; got {events:?}"
+        );
+        let ids: Vec<String> = fired_tool_result(&events)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.tool_call_id)
+            .collect();
+        assert_eq!(ids, vec!["a", "b"]);
+        assert_eq!(tree_tool_ids(&agg), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn submit_messages_echoing_a_resolved_tool_result_is_inert() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        request_client_tool(&mut agg, "tc-1");
+        submit_messages(&mut agg, vec![tool_msg("tc-1", "done")]);
+
+        // A later run re-sends the already-delivered tool result with no new
+        // turn: it matches nothing pending and must not fabricate a response.
+        let echo = submit_messages(&mut agg, vec![tool_msg("tc-1", "done")]);
+        assert!(
+            !echo
+                .iter()
+                .any(|e| matches!(e, EventPayload::ToolCallCompleted(_))),
+            "nothing to complete; got {echo:?}"
+        );
+        assert!(
+            decision_with(&echo, |_| true).is_none(),
+            "no worker decision; got {echo:?}"
+        );
+    }
+
     #[test]
     fn complete_llm_call_emits_completed() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
@@ -2192,6 +2579,69 @@ mod tests {
     }
 
     #[test]
+    fn response_parents_under_the_prompt_leaf_on_regenerate() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let sys = Caller::System {
+            tenant_id: "tenant-a".to_string(),
+        };
+        let request = |agg: &mut Aggregate<SessionState>, call: &str, messages: Vec<Message>| {
+            dispatch(
+                agg,
+                CommandPayload::RequestLlmCall {
+                    call_id: call.to_string(),
+                    request: request_with(messages),
+                    stream: false,
+                    retry: RetryPolicy::no_retry(),
+                    handler: LlmHandler::Server,
+                },
+                &sys,
+            );
+        };
+        let complete =
+            |agg: &mut Aggregate<SessionState>, call: &str| -> (String, Option<String>) {
+                let events = dispatch(
+                    agg,
+                    CommandPayload::CompleteLlmCall {
+                        call_id: call.to_string(),
+                        attempt: 0,
+                        response: LlmResponse {
+                            model: "test-model".to_string(),
+                            content: Some("reply".to_string()),
+                            tool_calls: vec![],
+                            finish_reason: Some("stop".to_string()),
+                            usage: None,
+                            cost: None,
+                            images: vec![],
+                        },
+                    },
+                    &sys,
+                );
+                events
+                    .iter()
+                    .find_map(|e| match e {
+                        EventPayload::NewMessage(n) => {
+                            Some((n.message.id.clone(), n.parent_id.clone()))
+                        }
+                        _ => None,
+                    })
+                    .expect("a recorded response")
+            };
+
+        // First turn: prompt ends at u1 → response a1 parents under u1; head → a1.
+        request(&mut agg, "c1", vec![node_msg("u1", Role::User, "hi")]);
+        let (a1, a1_parent) = complete(&mut agg, "c1");
+        assert_eq!(a1_parent.as_deref(), Some("u1"));
+        assert_eq!(agg.state.head_id.as_deref(), Some(a1.as_str()));
+
+        // Regenerate: re-ask the existing u1. Head is a1, but the new response must
+        // parent under the prompt leaf u1 — a sibling of a1, not its child.
+        request(&mut agg, "c2", vec![node_msg("u1", Role::User, "hi")]);
+        let (a1b, a1b_parent) = complete(&mut agg, "c2");
+        assert_ne!(a1b, a1);
+        assert_eq!(a1b_parent.as_deref(), Some("u1"));
+    }
+
+    #[test]
     fn fail_llm_call_emits_errored() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
         dispatch(
@@ -2244,6 +2694,73 @@ mod tests {
         );
         let call = agg.state.llm_calls.get("llm-1").expect("llm call present");
         assert_eq!(call.tracking.status, EffectStatus::Failed);
+    }
+
+    #[test]
+    fn llm_retry_rebuilds_the_prompt_from_the_tree() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let retry = RetryPolicy {
+            timeout_secs: None,
+            max_retries: 3,
+            backoff_base_secs: 1,
+            backoff_max_secs: 1,
+        };
+        dispatch(
+            &mut agg,
+            CommandPayload::RequestLlmCall {
+                call_id: "llm-1".to_string(),
+                request: request_with(vec![
+                    node_msg("sys", Role::System, "sys prompt"),
+                    node_msg("u1", Role::User, "hi"),
+                ]),
+                stream: false,
+                retry,
+                handler: LlmHandler::Server,
+            },
+            &system(),
+        );
+
+        // The call stores a tree pointer to its prompt leaf, not the messages.
+        let call = agg.state.llm_calls.get("llm-1").expect("call present");
+        assert_eq!(call.prompt_leaf.as_deref(), Some("u1"));
+
+        dispatch(
+            &mut agg,
+            CommandPayload::FailLlmCall {
+                call_id: "llm-1".to_string(),
+                attempt: 0,
+                error: "provider hiccup".to_string(),
+                retryable: true,
+                code: None,
+                detail: None,
+            },
+            &system(),
+        );
+        assert_eq!(
+            agg.state.llm_calls.get("llm-1").map(|c| &c.tracking.status),
+            Some(&EffectStatus::RetryScheduled)
+        );
+
+        let later = Utc::now() + chrono::Duration::seconds(120);
+        let events = dispatch(&mut agg, CommandPayload::Wake { now: later }, &system());
+        let reissued = events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::LlmCallRequested(p) => Some(p),
+                _ => None,
+            })
+            .expect("retry re-issues the llm call");
+
+        // The prompt is reconstructed from the tree at `prompt_leaf` — same ids,
+        // content, and order — and the spec (model) carries through.
+        assert_eq!(reissued.request.model, "test-model");
+        assert_eq!(reissued.request.messages.len(), 2);
+        assert_eq!(reissued.request.messages[0].id, "sys");
+        assert_eq!(reissued.request.messages[1].id, "u1");
+        assert!(matches!(
+            &reissued.request.messages[1].content,
+            Some(Content::Text(t)) if t == "hi"
+        ));
     }
 
     fn test_llm_request() -> LlmRequest {
@@ -2456,7 +2973,11 @@ mod tests {
             ),
             "expected [ToolCallErrored, NewMessage, WorkerDecisionRequested]; got {events:?}"
         );
-        assert_eq!(tool_results(&events).map(|r| r.len()), Some(1));
+        // The error is a result: its node lands and the tool.result flags it.
+        let completed = fired_tool_result(&events).expect("a tool.result decision");
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].tool_call_id, "tc-1");
+        assert!(completed[0].is_error);
         let tc = agg.state.tool_calls.get("tc-1").expect("tool call present");
         assert_eq!(tc.tracking.status, EffectStatus::Failed);
         assert!(tc.is_error);
@@ -2674,7 +3195,9 @@ mod tests {
         dispatch(agg, CommandPayload::Wake { now: Utc::now() }, &system())
     }
 
-    fn tool_results(events: &[EventPayload]) -> Option<Vec<NewMessage>> {
+    /// The `completed` payload of the `tool.result` decision a commit fired, or
+    /// `None` if it fired none.
+    fn fired_tool_result(events: &[EventPayload]) -> Option<Vec<CompletedToolCall>> {
         events.iter().find_map(|e| {
             let trigger = match e {
                 EventPayload::WorkerDecisionRequested(p) => &p.trigger,
@@ -2682,10 +3205,35 @@ mod tests {
                 _ => return None,
             };
             match trigger {
-                DecisionTrigger::ToolResults { messages } => Some(messages.clone()),
+                DecisionTrigger::ToolResults { completed } => Some(completed.clone()),
                 _ => None,
             }
         })
+    }
+
+    /// Tool-role result nodes appended in this commit (in append order).
+    fn result_nodes_in(events: &[EventPayload]) -> Vec<NewMessage> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                EventPayload::NewMessage(m) if m.message.role == Role::Tool => Some(m.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Tool result `tool_call_id`s on the active path, in tree order.
+    fn tree_tool_ids(agg: &Aggregate<SessionState>) -> Vec<String> {
+        let tree = agg.state.message_tree();
+        match &tree.head_id {
+            Some(head) => tree
+                .path_to(head)
+                .into_iter()
+                .filter(|m| m.role == Role::Tool)
+                .filter_map(|m| m.tool_call_id)
+                .collect(),
+            None => Vec::new(),
+        }
     }
 
     fn node_text(node: &NewMessage) -> &str {
@@ -2710,39 +3258,45 @@ mod tests {
     }
 
     #[test]
-    fn batch_drains_to_one_tool_results_after_all_tools_done() {
+    fn each_completion_appends_its_node_and_fires_a_tool_result() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
         request_client_tool(&mut agg, "a");
         request_client_tool(&mut agg, "b");
 
+        // Each result lands as a node and fires a tool.result naming it the
+        // moment its tool completes — the worker decides whether to continue.
         let first = complete_tool(&mut agg, "a", "RA");
-        assert!(
-            tool_results(&first).is_none(),
-            "no batch while b is pending"
+        let a = result_nodes_in(&first);
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].message.tool_call_id.as_deref(), Some("a"));
+        assert_eq!(node_text(&a[0]), "RA");
+        assert_eq!(
+            fired_tool_result(&first).map(|c| c.into_iter().map(|c| c.tool_call_id).collect()),
+            Some(vec!["a".to_string()])
         );
 
         let second = complete_tool(&mut agg, "b", "RB");
-        let results = tool_results(&second).expect("batch on the last completion");
-        let ids: Vec<_> = results
-            .iter()
-            .map(|r| r.message.tool_call_id.as_deref().unwrap())
-            .collect();
-        assert_eq!(ids, vec!["a", "b"], "results ordered by issue order");
-        assert_eq!(node_text(&results[0]), "RA");
-        assert_eq!(node_text(&results[1]), "RB");
+        let b = result_nodes_in(&second);
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].message.tool_call_id.as_deref(), Some("b"));
+        assert_eq!(
+            fired_tool_result(&second).map(|c| c.into_iter().map(|c| c.tool_call_id).collect()),
+            Some(vec!["b".to_string()])
+        );
 
-        // The completion itself triggered the decision — no wake is needed.
-        assert!(tool_results(&wake(&mut agg)).is_none(), "no wake needed");
+        // Completion order, both on the active path.
+        assert_eq!(tree_tool_ids(&agg), vec!["a", "b"]);
     }
 
     #[test]
-    fn worker_tool_batch_drains_in_the_completion_commit() {
+    fn worker_tool_fires_tool_result_in_the_completion_commit() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
         let setup = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
                 payload: ClientPayload::Message {
                     message: Message {
+                        id: String::new(),
                         role: Role::User,
                         content: Some(Content::Text("go".to_string())),
                         tool_calls: None,
@@ -2750,7 +3304,6 @@ mod tests {
                         name: None,
                     },
                     stream: false,
-                    parent_id: None,
                 },
                 turn_id: Some("turn-1".to_string()),
             },
@@ -2780,9 +3333,8 @@ mod tests {
         })
         .expect("tool.execute decision");
 
-        // The worker returns the result; the batch drains in this same commit
-        // (the tool.results is queued behind the just-finished tool.execute
-        // decision and promoted inline) — no wake required.
+        // The worker returns the result; the tool.result fires in this same
+        // commit (queued behind the just-finished tool.execute decision).
         let completed = dispatch(
             &mut agg,
             CommandPayload::SubmitWorkerDecision {
@@ -2796,12 +3348,16 @@ mod tests {
             },
             &machine(),
         );
+        assert_eq!(result_nodes_in(&completed).len(), 1);
         assert_eq!(
-            tool_results(&completed).map(|r| r.len()),
+            fired_tool_result(&completed).map(|c| c.len()),
             Some(1),
-            "batch drains in the completion commit; got {completed:?}"
+            "tool.result fires in the completion commit; got {completed:?}"
         );
-        assert!(tool_results(&wake(&mut agg)).is_none(), "no wake needed");
+        assert!(
+            fired_tool_result(&wake(&mut agg)).is_none(),
+            "no wake needed"
+        );
     }
 
     #[test]
@@ -2826,10 +3382,12 @@ mod tests {
             &system(),
         );
 
+        // Tools and sub-agents flow through the same per-completion path.
         let tool_done = complete_tool(&mut agg, "t1", "TOOL");
-        assert!(
-            tool_results(&tool_done).is_none(),
-            "no batch while sub-agent runs"
+        assert_eq!(result_nodes_in(&tool_done).len(), 1);
+        assert_eq!(
+            fired_tool_result(&tool_done).map(|c| c.into_iter().map(|c| c.tool_call_id).collect()),
+            Some(vec!["t1".to_string()])
         );
 
         let sub_done = dispatch(
@@ -2845,14 +3403,18 @@ mod tests {
             &system(),
         );
 
-        let results = tool_results(&sub_done).expect("batch on the last completion");
-        assert_eq!(results.len(), 2);
-        let sub = results
-            .iter()
-            .find(|r| r.message.tool_call_id.as_deref() == Some("s1"))
-            .expect("sub-agent result mapped to its tool_call_id");
+        // The sub-agent result maps to its tool_call_id with the agent name.
+        let nodes = result_nodes_in(&sub_done);
+        assert_eq!(nodes.len(), 1);
+        let sub = &nodes[0];
+        assert_eq!(sub.message.tool_call_id.as_deref(), Some("s1"));
         assert_eq!(sub.message.name.as_deref(), Some("researcher"));
         assert_eq!(node_text(sub), "FINDINGS");
+        assert_eq!(
+            fired_tool_result(&sub_done).map(|c| c.into_iter().map(|c| c.tool_call_id).collect()),
+            Some(vec!["s1".to_string()])
+        );
+        assert_eq!(tree_tool_ids(&agg), vec!["t1", "s1"]);
     }
 
     #[test]
@@ -2863,6 +3425,7 @@ mod tests {
             CommandPayload::SubmitClientPayload {
                 payload: ClientPayload::Message {
                     message: Message {
+                        id: String::new(),
                         role: Role::User,
                         content: Some(Content::Text("go".to_string())),
                         tool_calls: None,
@@ -2870,7 +3433,6 @@ mod tests {
                         name: None,
                     },
                     stream: false,
-                    parent_id: None,
                 },
                 turn_id: Some("turn-1".to_string()),
             },
@@ -2940,11 +3502,14 @@ mod tests {
                 .map(|s| &s.tracking.status),
             Some(&EffectStatus::Pending)
         );
-        assert!(agg.state.drainable_batch().is_none());
+        assert!(
+            fired_tool_result(&events).is_none(),
+            "nothing has completed yet"
+        );
     }
 
     #[test]
-    fn timed_out_effect_drains_via_wake() {
+    fn timed_out_effect_fires_tool_result_via_wake() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
         dispatch(
             &mut agg,
@@ -2971,34 +3536,33 @@ mod tests {
                 .any(|e| matches!(e, EventPayload::ToolCallErrored(_))),
             "deadline exceeded errors the tool; got {errored:?}"
         );
+        // A terminal timeout records its node and fires a tool.result in the
+        // same wake.
         assert!(
-            tool_results(&errored).is_none(),
-            "drain waits for the next wake"
+            fired_tool_result(&errored).is_some(),
+            "the timed-out effect fires a tool.result"
         );
-
-        let drained = tool_results(&dispatch(
-            &mut agg,
-            CommandPayload::Wake { now: past },
-            &system(),
-        ))
-        .expect("timed-out effect drains via wake");
-        assert_eq!(drained.len(), 1);
-        assert_eq!(drained[0].message.tool_call_id.as_deref(), Some("t1"));
+        let nodes = result_nodes_in(&errored);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].message.tool_call_id.as_deref(), Some("t1"));
+        assert!(
+            fired_tool_result(&wake(&mut agg)).is_none(),
+            "the next wake does not re-fire"
+        );
     }
 
     #[test]
-    fn batch_delivers_results_only_once() {
+    fn completion_fires_tool_result_once_and_wake_does_not_re_fire() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
         request_client_tool(&mut agg, "a");
 
         assert!(
-            tool_results(&complete_tool(&mut agg, "a", "RA")).is_some(),
-            "delivered on completion"
+            fired_tool_result(&complete_tool(&mut agg, "a", "RA")).is_some(),
+            "fires on completion"
         );
-        assert!(agg.state.drainable_batch().is_none());
         assert!(
-            tool_results(&wake(&mut agg)).is_none(),
-            "wake does not re-deliver"
+            fired_tool_result(&wake(&mut agg)).is_none(),
+            "wake does not re-fire"
         );
     }
 
@@ -3371,6 +3935,7 @@ mod tests {
             CommandPayload::SubmitClientPayload {
                 payload: ClientPayload::Message {
                     message: Message {
+                        id: String::new(),
                         role: Role::User,
                         content: Some(Content::Text("hi".to_string())),
                         tool_calls: None,
@@ -3378,7 +3943,6 @@ mod tests {
                         name: None,
                     },
                     stream: false,
-                    parent_id: None,
                 },
                 turn_id: Some("turn-1".to_string()),
             },
@@ -3430,6 +3994,7 @@ mod tests {
             CommandPayload::SubmitClientPayload {
                 payload: ClientPayload::Message {
                     message: Message {
+                        id: String::new(),
                         role: Role::User,
                         content: Some(Content::Text("hi".to_string())),
                         tool_calls: None,
@@ -3437,7 +4002,6 @@ mod tests {
                         name: None,
                     },
                     stream: false,
-                    parent_id: None,
                 },
                 turn_id: Some("turn-1".to_string()),
             },
@@ -3520,6 +4084,7 @@ mod tests {
             CommandPayload::SubmitClientPayload {
                 payload: ClientPayload::Message {
                     message: Message {
+                        id: String::new(),
                         role: Role::User,
                         content: Some(Content::Text("crawl the site".to_string())),
                         tool_calls: None,
@@ -3527,7 +4092,6 @@ mod tests {
                         name: None,
                     },
                     stream: false,
-                    parent_id: None,
                 },
                 turn_id: Some("turn-1".to_string()),
             },
@@ -3585,6 +4149,12 @@ mod tests {
                 .any(|e| matches!(e, EventPayload::ToolCallCompleted(_))),
             "tool result should be recorded; got {events:?}"
         );
+        // The result node is appended even while interrupted; only its
+        // continuation is deferred.
+        let recorded = result_nodes_in(&events);
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].message.tool_call_id.as_deref(), Some("tc-1"));
+        assert_eq!(node_text(&recorded[0]), "done");
         assert!(
             events
                 .iter()
@@ -3619,8 +4189,7 @@ mod tests {
             })
             .expect("resume should request an interrupt.resumed decision");
 
-        // ...and completing it promotes the queued tool.results decision
-        // with the tool result, exactly once.
+        // ...and completing it promotes the queued tool.result decision.
         let events = dispatch(
             &mut agg,
             CommandPayload::SubmitWorkerDecision {
@@ -3637,14 +4206,10 @@ mod tests {
                 _ => None,
             })
             .expect("queued decision should promote after the resumed decision completes");
-        match trigger {
-            DecisionTrigger::ToolResults { messages } => {
-                assert_eq!(messages.len(), 1);
-                assert_eq!(messages[0].message.tool_call_id.as_deref(), Some("tc-1"));
-                assert_eq!(node_text(&messages[0]), "done");
-            }
-            other => panic!("expected ToolResults trigger; got {other:?}"),
-        }
+        assert!(
+            matches!(trigger, DecisionTrigger::ToolResults { .. }),
+            "expected ToolResult trigger; got {trigger:?}"
+        );
     }
 
     #[test]
@@ -3655,6 +4220,7 @@ mod tests {
             CommandPayload::SubmitClientPayload {
                 payload: ClientPayload::Message {
                     message: Message {
+                        id: String::new(),
                         role: Role::User,
                         content: Some(Content::Text("send the email".to_string())),
                         tool_calls: None,
@@ -3662,7 +4228,6 @@ mod tests {
                         name: None,
                     },
                     stream: false,
-                    parent_id: None,
                 },
                 turn_id: Some("turn-1".to_string()),
             },
@@ -3742,6 +4307,7 @@ mod tests {
             CommandPayload::SubmitClientPayload {
                 payload: ClientPayload::Message {
                     message: Message {
+                        id: String::new(),
                         role: Role::User,
                         content: Some(Content::Text("hi".to_string())),
                         tool_calls: None,
@@ -3749,7 +4315,6 @@ mod tests {
                         name: None,
                     },
                     stream: false,
-                    parent_id: None,
                 },
                 turn_id: Some("turn-1".to_string()),
             },
@@ -3855,105 +4420,8 @@ mod tests {
         );
     }
 
-    fn user_msg(text: &str) -> Message {
-        Message {
-            role: Role::User,
-            content: Some(Content::Text(text.to_string())),
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        }
-    }
-
-    fn recorded_node(events: &[EventPayload]) -> (String, Option<String>) {
-        events
-            .iter()
-            .find_map(|e| match e {
-                EventPayload::NewMessage(m) => Some((m.id.clone(), m.parent_id.clone())),
-                _ => None,
-            })
-            .expect("expected a NewMessage event")
-    }
-
     #[test]
-    fn messages_link_to_head_and_head_advances() {
-        let mut agg = create_session("sess-1", "tenant-a", "user-1");
-        let caller = Caller::System {
-            tenant_id: "tenant-a".to_string(),
-        };
-        let send = |agg: &mut Aggregate<SessionState>, text: &str, parent_id: Option<String>| {
-            dispatch(
-                agg,
-                CommandPayload::SendMessage {
-                    message: user_msg(text),
-                    stream: false,
-                    turn_id: None,
-                    parent_id,
-                },
-                &caller,
-            )
-        };
-
-        let (id1, parent1) = recorded_node(&send(&mut agg, "one", None));
-        assert_eq!(parent1, None);
-        assert_eq!(agg.state.head_id.as_deref(), Some(id1.as_str()));
-
-        let (id2, parent2) = recorded_node(&send(&mut agg, "two", None));
-        assert_eq!(parent2.as_deref(), Some(id1.as_str()));
-        assert_eq!(agg.state.head_id.as_deref(), Some(id2.as_str()));
-
-        // Explicit parent branches from message one — a sibling of message two.
-        let (id3, parent3) = recorded_node(&send(&mut agg, "three", Some(id1.clone())));
-        assert_ne!(id3, id2);
-        assert_eq!(parent3.as_deref(), Some(id1.as_str()));
-        assert_eq!(agg.state.head_id.as_deref(), Some(id3.as_str()));
-    }
-
-    fn user_trigger_node(events: &[EventPayload]) -> (String, Option<String>) {
-        events
-            .iter()
-            .find_map(|e| {
-                let trigger = match e {
-                    EventPayload::WorkerDecisionRequested(w) => &w.trigger,
-                    EventPayload::DecisionRequestQueued(q) => &q.trigger,
-                    _ => return None,
-                };
-                match trigger {
-                    DecisionTrigger::UserMessage { id, parent_id, .. } => {
-                        Some((id.clone(), parent_id.clone()))
-                    }
-                    _ => None,
-                }
-            })
-            .expect("expected a UserMessage trigger")
-    }
-
-    #[test]
-    fn user_message_trigger_carries_the_node_id() {
-        let mut agg = create_session("sess-1", "tenant-a", "user-1");
-        let caller = Caller::System {
-            tenant_id: "tenant-a".to_string(),
-        };
-        let events = dispatch(
-            &mut agg,
-            CommandPayload::SendMessage {
-                message: user_msg("hi"),
-                stream: false,
-                turn_id: None,
-                parent_id: None,
-            },
-            &caller,
-        );
-
-        let (msg_id, _) = recorded_node(&events);
-        let (trigger_id, trigger_parent) = user_trigger_node(&events);
-        assert_eq!(trigger_id, msg_id);
-        assert!(!trigger_id.is_empty());
-        assert_eq!(trigger_parent, None);
-    }
-
-    #[test]
-    fn parallel_tool_results_record_in_issue_order_not_completion_order() {
+    fn parallel_tool_results_record_in_completion_order() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
         let sys = Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -3989,39 +4457,29 @@ mod tests {
             )
         };
 
-        // b finishes first, but the batch isn't drainable yet, so no message.
+        // b finishes first: its result lands now.
         let first = complete(&mut agg, "tc-b");
-        assert!(
-            !first
-                .iter()
-                .any(|e| matches!(e, EventPayload::NewMessage(_))),
-            "no message until the batch drains; got {first:?}"
+        let b = result_nodes_in(&first);
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].message.tool_call_id.as_deref(), Some("tc-b"));
+        assert_eq!(
+            fired_tool_result(&first).map(|c| c.into_iter().map(|c| c.tool_call_id).collect()),
+            Some(vec!["tc-b".to_string()])
         );
 
-        // a finishes last and drains the batch.
+        // a finishes last: its result lands.
         let second = complete(&mut agg, "tc-a");
-        let msgs: Vec<&NewMessage> = second
-            .iter()
-            .filter_map(|e| match e {
-                EventPayload::NewMessage(m) => Some(m),
-                _ => None,
-            })
-            .collect();
+        let a = result_nodes_in(&second);
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].message.tool_call_id.as_deref(), Some("tc-a"));
+        assert_eq!(
+            fired_tool_result(&second).map(|c| c.into_iter().map(|c| c.tool_call_id).collect()),
+            Some(vec!["tc-a".to_string()])
+        );
+        // Chained off the head: a's node parents off b's.
+        assert_eq!(a[0].parent_id.as_deref(), Some(b[0].message.id.as_str()));
 
-        assert_eq!(msgs.len(), 2);
-        // Recorded in issue order (a, b) — not completion order (b, a).
-        assert_eq!(msgs[0].message.tool_call_id.as_deref(), Some("tc-a"));
-        assert_eq!(msgs[1].message.tool_call_id.as_deref(), Some("tc-b"));
-        // Chained: the second result parents off the first.
-        assert_eq!(msgs[1].parent_id.as_deref(), Some(msgs[0].id.as_str()));
-
-        // The tool.results trigger carries the very nodes recorded as messages,
-        // so the worker can place them in the thread.
-        let nodes = tool_results(&second).expect("expected a tool.results trigger");
-        assert_eq!(nodes.len(), 2);
-        assert_eq!(nodes[0].id, msgs[0].id);
-        assert_eq!(nodes[0].parent_id, msgs[0].parent_id);
-        assert_eq!(nodes[1].id, msgs[1].id);
-        assert_eq!(nodes[1].parent_id, msgs[1].parent_id);
+        // Recorded in completion order (b, a) — not issue order (a, b).
+        assert_eq!(tree_tool_ids(&agg), vec!["tc-b", "tc-a"]);
     }
 }

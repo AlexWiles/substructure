@@ -1,33 +1,21 @@
-// Plan mode: build a plan iteratively over multiple turns, then flip a
-// switch and execute it. Two middlewares split the work — `planMode`
-// owns `{ mode, plan }` and records mode changes from `client.action`
-// payloads; `modeAwareHistory` owns the conversation transcript and
-// resets it whenever it observes the mode change. The same `set_mode`
-// action that flips the state also kicks off execution: the chain
-// proceeds normally, system prompt and tools swap to the executing
-// variants, and the LLM call fires on the client.action trigger.
+// Plan mode: build a plan over several turns, then flip a switch and execute
+// it. Entering execution starts a fresh conversation branch — a static
+// executing system prompt as the root, the finished plan as the first user
+// message — so the execution model sees only the plan, not the planning
+// chatter. The planning thread stays in the tree as an abandoned branch.
 //
 // What this shows:
-//   - `client.action` as a non-message way for the client to drive
-//     state changes that the chain reacts to.
-//   - Selector-based middleware (`tools`, `llm`) swapping output
-//     based on a state slice. Mode-dependent tool gating means the
-//     agent literally cannot call execution tools while planning, and
-//     a smaller model handles planning while a bigger one handles
-//     execution.
-//   - A custom history middleware that reads a foreign slice (`mode`)
-//     to know when to reset itself and to swap its own system prompt.
+//   - `client.action` as a non-message way to drive state the chain reacts to.
+//   - Selector-based middleware (`tools`, `llm`) swapping output by mode: the
+//     agent cannot call execution tools while planning, and a smaller model
+//     plans while a bigger one executes.
+//   - Branching the engine-owned tree from a worker: `stamp`-ing fresh
+//     messages into a `call.llm` mints a new thread.
 //
-// Domain is intentionally generic: a TODO list. Planning mode edits
-// the steps; executing mode walks them one by one with a single
-// `complete_step` tool. Swap that tool for real work to adapt.
+// Domain is a TODO list. Planning mode edits the steps; executing mode walks
+// them with a single `complete_step` tool.
 
-import Substructure, {
-    middleware,
-    prependHistoryToLlmCalls,
-    triggerToMessage,
-    type Message,
-} from "@substructure.ai/sdk";
+import Substructure, { middleware, stamp, type Message } from "@substructure.ai/sdk";
 import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
 
 const sub = new Substructure();
@@ -40,64 +28,42 @@ type Step = { id: string; text: string; done: boolean };
 type Plan = { goal: string; steps: Step[]; nextId: number };
 
 // ── Shared state ────────────────────────────────────────────────────────────
-// Both middlewares (and downstream tools / selectors) operate on this shape.
-// Multiple `middleware<PlanState>` calls below all declare the same type and
-// the same initial values; `??=` semantics in the runtime mean redeclaring
-// keys is harmless (whichever middleware initializes a key first wins).
 
-type PlanState = {
-    mode: Mode;
-    plan: Plan;
-    messages: Message[];
-    lastMode?: Mode;
-};
+type PlanState = { mode: Mode; plan: Plan };
 
 const initialState: PlanState = {
     mode: "planning",
     plan: { goal: "", steps: [], nextId: 1 },
-    messages: [],
-    lastMode: undefined,
 };
 
-// ── planMode: records `mode` changes from client.action payloads ────────────
+// ── planMode: flips `mode` and branches into execution ──────────────────────
+// On `set_mode`, records the new mode. When that transition enters execution,
+// it replaces the call.llm prompt with a fresh thread — a static executing
+// system prompt plus the plan as the first user message — which the engine
+// merges as a new root, leaving the planning thread behind as a branch.
 
 const planMode = middleware<PlanState>({
     state: initialState,
     handler: async (ctx, next) => {
         const { trigger } = ctx.request;
+        const wasMode = ctx.state.mode;
         if (trigger.type === "client.action" && trigger.name === "set_mode") {
-            const args = (trigger.args ?? {}) as { mode?: Mode };
-            if (args.mode === "planning" || args.mode === "executing") {
-                ctx.state.mode = args.mode;
-            }
+            const mode = (trigger.args as { mode?: Mode } | undefined)?.mode;
+            if (mode === "planning" || mode === "executing") ctx.state.mode = mode;
         }
-        return next(ctx);
-    },
-});
-
-// ── modeAwareHistory: transcript that resets on mode transition ─────────────
-
-const modeAwareHistory = middleware<PlanState>({
-    state: initialState,
-    handler: async (ctx, next) => {
-        if (ctx.state.mode !== ctx.state.lastMode) {
-            ctx.state.messages = [];
-            ctx.state.lastMode = ctx.state.mode;
-        }
-
-        const msg = triggerToMessage(ctx.request.trigger);
-        if (msg) ctx.state.messages.push(msg);
-
-        // System prompt swaps with the mode and rides ahead of the transcript.
-        const sysMsg: Message = {
-            role: "system",
-            content: ctx.state.mode === "executing" ? executingPrompt(ctx.state.plan) : planningPrompt(ctx.state.plan),
-        };
 
         const result = await next(ctx);
+        if (!(ctx.state.mode === "executing" && wasMode !== "executing")) return result;
+
+        const messages: Message[] = [
+            stamp({ role: "system", content: executingPrompt() }),
+            stamp({ role: "user", content: renderPlan(ctx.state.plan) }),
+        ];
         return {
             ...result,
-            actions: prependHistoryToLlmCalls([sysMsg, ...ctx.state.messages], result.actions),
+            actions: result.actions.map((a) =>
+                a.type === "call.llm" ? { ...a, request: { ...a.request, messages } } : a,
+            ),
         };
     },
 });
@@ -211,38 +177,36 @@ const renderPlan = (plan: Plan) => {
     return [goalLine, ...stepLines].join("\n");
 };
 
-const planningPrompt = (plan: Plan) =>
+// Static prompts: the live plan reaches the planning model through its own tool
+// results, and the executing model through the plan node that roots its thread.
+
+const planningPrompt = () =>
     [
         "You are in PLANNING MODE.",
         "Work with the user to break the goal down into concrete steps.",
         "Use the plan tools: set_goal, add_step, update_step, remove_step.",
         "Do not execute anything yet. Be concise. After tool calls, summarize the change in one line.",
-        "",
-        "Current plan:",
-        renderPlan(plan),
     ].join("\n");
 
-const executingPrompt = (plan: Plan) =>
+const executingPrompt = () =>
     [
         "You are in EXECUTING MODE.",
-        "Work through every pending step in order. For each one, call complete_step",
-        "with a one-line note about how you handled it. Stop when every step is done.",
-        "",
-        "Plan:",
-        renderPlan(plan),
+        "Work through every pending step in the plan above, in order. For each one,",
+        "call complete_step with a one-line note about how you handled it.",
+        "Stop when every step is done.",
     ].join("\n");
 
 // ── Agent ───────────────────────────────────────────────────────────────────
 
 const planner = agent({ id: "planner" })
     .use(planMode)
-    .use(modeAwareHistory)
     .use(agent.tools<PlanState>((state) => (state.mode === "planning" ? planningTools : executingTools)))
     .use(
         agent.llm<PlanState>((state) => ({
             generator: agent.serverGenerate({
                 model: state.mode === "planning" ? "anthropic/claude-opus-4-7" : "anthropic/claude-sonnet-4-6",
             }),
+            instructions: state.mode === "planning" ? planningPrompt() : executingPrompt(),
         })),
     );
 

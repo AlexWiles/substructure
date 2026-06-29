@@ -6,13 +6,13 @@
 // base64, no `jsonState`, no engine. Deterministic and synchronous.
 
 import type {
+    CompletedToolCall,
     DecisionTrigger,
     LlmTokenDeltaInput,
     Message,
-    MessageNode,
     MessageTree,
+    Node,
     ToolCall,
-    ToolResult,
     WorkerAction,
     WorkerDecisionRequestWire,
 } from "../src/types";
@@ -66,12 +66,12 @@ function makeRequest(trigger: DecisionTrigger, messageTree?: MessageTree): Worke
 
 /** Build a linear (unbranched) conversation tree from messages in order. */
 export function linearTree(...messages: Message[]): MessageTree {
-    const nodes: MessageNode[] = messages.map((message, i) => ({
-        id: `n${i}`,
+    const nodes: Node[] = messages.map((message, i) => ({
+        kind: "message",
         parent_id: i === 0 ? undefined : `n${i - 1}`,
-        message,
+        message: { ...message, id: `n${i}` },
     }));
-    return { nodes, head_id: nodes.at(-1)?.id };
+    return { nodes, head_id: nodes.at(-1) ? `n${messages.length - 1}` : undefined };
 }
 
 // ── Trigger builders ─────────────────────────────────────────────────────────
@@ -82,7 +82,7 @@ function nextNodeId(): string {
 }
 
 export function userMessage(content: string, stream = false): DecisionTrigger {
-    return { type: "user.message", stream, message: { role: "user", content }, id: nextNodeId() };
+    return { type: "user.message", stream, messages: [{ role: "user", content }], anchor: "continue" };
 }
 
 export function llmResponse(message: Message, callId = "call-0"): DecisionTrigger {
@@ -93,20 +93,11 @@ export function toolCall(name: string, args: unknown, id = "tc-0"): ToolCall {
     return { id, type: "function", function: { name, arguments: JSON.stringify(args) } };
 }
 
-export function toolResult(toolCallId: string, content: string, name = ""): ToolResult {
-    return { tool_call_id: toolCallId, name, content };
-}
-
-/** The engine's batched delivery of a turn's tool + sub-agent results, recorded
- *  as chained tool-role message nodes. */
-export function toolResults(results: ToolResult[]): DecisionTrigger {
-    const ids = results.map(() => nextNodeId());
-    const messages: MessageNode[] = results.map((r, i) => ({
-        id: ids[i],
-        parent_id: i === 0 ? undefined : ids[i - 1],
-        message: { role: "tool", content: r.content, tool_call_id: r.tool_call_id, name: r.name },
-    }));
-    return { type: "tool.results", messages };
+/** A tool/sub-agent completion. The result is already a node in the tree; the
+ *  trigger just names what landed (the default loop reads continuation off the
+ *  tree, so `completed` is irrelevant to it). */
+export function toolResults(completed: CompletedToolCall[] = []): DecisionTrigger {
+    return { type: "tool.results", completed };
 }
 
 // ── Assertion helpers ────────────────────────────────────────────────────────

@@ -4,13 +4,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::decision::{DecisionTrigger, ToolResult};
+use super::decision::DecisionTrigger;
 use super::events::*;
-use super::message::Role;
+use super::message::{Message, Role};
 use rust_decimal::Decimal;
 
 use crate::runtime::aggregate::ApplyContext;
-use crate::runtime::llm::LlmRequest;
+use crate::runtime::llm::{LlmRequest, LlmTool, ReasoningConfig};
 use crate::runtime::owner::SessionOwner;
 use crate::runtime::retry::{RetryPolicy, RetryState};
 use crate::runtime::worker::WorkerState;
@@ -101,11 +101,55 @@ impl EffectTracking {
 pub struct LlmCallState {
     pub call_id: String,
     pub tracking: EffectTracking,
-    /// Original request, stored for retries and crash recovery.
-    pub request: LlmRequest,
+    /// Tree pointer to the call's last prompt message. The prompt is rebuilt by
+    /// walking the tree from here, so the call holds no copy of the messages.
+    #[serde(default)]
+    pub prompt_leaf: Option<String>,
+    /// Request parameters (model, tools, …) sans messages, for retries.
+    pub spec: LlmCallSpec,
     pub stream: bool,
     #[serde(default)]
     pub handler: LlmHandler,
+}
+
+/// An `LlmRequest` without its message list — the messages live in the tree and
+/// are rebuilt from `LlmCallState::prompt_leaf` on demand.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmCallSpec {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<LlmTool>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ReasoningConfig>,
+}
+
+impl LlmCallSpec {
+    pub fn to_request(&self, messages: Vec<Message>) -> LlmRequest {
+        LlmRequest {
+            model: self.model.clone(),
+            messages,
+            tools: self.tools.clone(),
+            temperature: self.temperature,
+            max_completion_tokens: self.max_completion_tokens,
+            reasoning: self.reasoning.clone(),
+        }
+    }
+}
+
+impl From<&LlmRequest> for LlmCallSpec {
+    fn from(r: &LlmRequest) -> Self {
+        Self {
+            model: r.model.clone(),
+            tools: r.tools.clone(),
+            temperature: r.temperature,
+            max_completion_tokens: r.max_completion_tokens,
+            reasoning: r.reasoning.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,22 +166,6 @@ pub struct ToolCallState {
     pub result: Option<String>,
     #[serde(default)]
     pub is_error: bool,
-    /// Source event sequence, for stable result ordering.
-    #[serde(default)]
-    pub order: u64,
-    /// Result already emitted to the worker in a tool.results batch.
-    #[serde(default)]
-    pub result_delivered: bool,
-}
-
-impl ToolCallState {
-    fn to_result(&self) -> ToolResult {
-        ToolResult {
-            tool_call_id: self.tool_call_id.clone(),
-            name: self.name.clone(),
-            content: self.result.clone().unwrap_or_default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,21 +181,6 @@ pub struct SubAgentCallState {
     pub result: Option<String>,
     #[serde(default)]
     pub is_error: bool,
-    #[serde(default)]
-    pub order: u64,
-    /// Result already emitted to the worker in a tool.results batch.
-    #[serde(default)]
-    pub result_delivered: bool,
-}
-
-impl SubAgentCallState {
-    fn to_result(&self) -> ToolResult {
-        ToolResult {
-            tool_call_id: self.tool_call_id.clone(),
-            name: self.agent_id.clone(),
-            content: self.result.clone().unwrap_or_default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -283,10 +296,10 @@ pub struct SessionState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_id: Option<String>,
 
-    /// Conversation nodes in append order. The active transcript is the
-    /// `head_id`-to-root path.
+    /// Tree nodes (messages and controls) in append order. The active transcript
+    /// is the `head_id`-to-root path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub messages: Vec<NewMessage>,
+    pub nodes: Vec<Node>,
 }
 
 impl SessionState {
@@ -313,7 +326,7 @@ impl SessionState {
             turn_id: None,
             completed_turn_ids: Vec::new(),
             head_id: None,
-            messages: Vec::new(),
+            nodes: Vec::new(),
         }
     }
 
@@ -331,16 +344,25 @@ impl SessionState {
                 if payload.message.role == Role::User {
                     self.status = SessionStatus::Idle;
                 }
-                if !payload.id.is_empty() {
-                    self.head_id = Some(payload.id.clone());
+                if !payload.message.id.is_empty() {
+                    self.head_id = Some(payload.message.id.clone());
                 }
-                self.messages.push(payload.clone());
+                self.nodes.push(Node::Message(payload.clone()));
+            }
+            EventPayload::NewControl(payload) => {
+                if !payload.control.id.is_empty() {
+                    self.head_id = Some(payload.control.id.clone());
+                }
+                self.nodes.push(Node::Control(payload.clone()));
             }
             EventPayload::LlmCallRequested(payload) => {
                 self.status = SessionStatus::Idle;
+                let prompt_leaf = payload.request.messages.last().map(|m| m.id.clone());
+                let spec = LlmCallSpec::from(&payload.request);
                 if let Some(existing) = self.llm_calls.get_mut(&payload.call_id) {
                     existing.tracking.reset_pending(now);
-                    existing.request = payload.request.clone();
+                    existing.prompt_leaf = prompt_leaf;
+                    existing.spec = spec;
                     existing.stream = payload.stream;
                     existing.handler = payload.handler.clone();
                 } else {
@@ -349,7 +371,8 @@ impl SessionState {
                         LlmCallState {
                             call_id: payload.call_id.clone(),
                             tracking: EffectTracking::new(payload.retry.clone(), now),
-                            request: payload.request.clone(),
+                            prompt_leaf,
+                            spec,
                             stream: payload.stream,
                             handler: payload.handler.clone(),
                         },
@@ -389,8 +412,6 @@ impl SessionState {
                             arguments: payload.arguments.clone(),
                             result: None,
                             is_error: false,
-                            order: ctx.sequence,
-                            result_delivered: false,
                         },
                     );
                 }
@@ -426,8 +447,6 @@ impl SessionState {
                             tool_call_id: payload.tool_call_id.clone(),
                             result: None,
                             is_error: false,
-                            order: ctx.sequence,
-                            result_delivered: false,
                         },
                     );
                 }
@@ -486,13 +505,6 @@ impl SessionState {
                         },
                     );
                 }
-                if let DecisionTrigger::ToolResults { messages } = &p.trigger {
-                    let ids: Vec<String> = messages
-                        .iter()
-                        .filter_map(|m| m.message.tool_call_id.clone())
-                        .collect();
-                    self.mark_results_delivered(&ids);
-                }
                 self.status = SessionStatus::Idle;
             }
             EventPayload::WorkerDecisionCompleted(p) => {
@@ -518,13 +530,6 @@ impl SessionState {
                         source_event_sequence: ctx.sequence,
                     },
                 );
-                if let DecisionTrigger::ToolResults { messages } = &p.trigger {
-                    let ids: Vec<String> = messages
-                        .iter()
-                        .filter_map(|m| m.message.tool_call_id.clone())
-                        .collect();
-                    self.mark_results_delivered(&ids);
-                }
             }
             EventPayload::WorkerStateUpdated(p) => {
                 self.worker_state = p.state.clone();
@@ -601,101 +606,6 @@ impl SessionState {
         }
     }
 
-    /// Ordered results for the undelivered effects once every one is terminal;
-    /// `None` while any is still pending or there are none.
-    pub fn drainable_batch(&self) -> Option<Vec<ToolResult>> {
-        let any = self.tool_calls.values().any(|t| !t.result_delivered)
-            || self.sub_agent_calls.values().any(|s| !s.result_delivered);
-
-        if !any {
-            return None;
-        }
-
-        let all_terminal = self
-            .tool_calls
-            .values()
-            .filter(|t| !t.result_delivered)
-            .all(|t| t.result.is_some())
-            && self
-                .sub_agent_calls
-                .values()
-                .filter(|s| !s.result_delivered)
-                .all(|s| s.result.is_some());
-
-        if !all_terminal {
-            return None;
-        }
-
-        Some(self.collect_undelivered(None))
-    }
-
-    /// `drainable_batch` for the moment a result arrives: `pending` stands in
-    /// for the effect being completed, whose result is not yet in state. Drains
-    /// once every *other* undelivered effect is terminal.
-    pub fn drainable_with(&self, pending: ToolResult) -> Option<Vec<ToolResult>> {
-        let others_terminal = self
-            .tool_calls
-            .values()
-            .filter(|t| !t.result_delivered && t.tool_call_id != pending.tool_call_id)
-            .all(|t| t.result.is_some())
-            && self
-                .sub_agent_calls
-                .values()
-                .filter(|s| !s.result_delivered && s.tool_call_id != pending.tool_call_id)
-                .all(|s| s.result.is_some());
-
-        if !others_terminal {
-            return None;
-        }
-
-        Some(self.collect_undelivered(Some(&pending)))
-    }
-
-    fn collect_undelivered(&self, overlay: Option<&ToolResult>) -> Vec<ToolResult> {
-        let tools = self
-            .tool_calls
-            .values()
-            .filter(|t| !t.result_delivered)
-            .map(|t| (t.order, t.to_result()));
-
-        let subs = self
-            .sub_agent_calls
-            .values()
-            .filter(|s| !s.result_delivered)
-            .map(|s| (s.order, s.to_result()));
-
-        let mut ordered: Vec<(u64, ToolResult)> = tools.chain(subs).collect();
-
-        ordered.sort_by_key(|(order, _)| *order);
-
-        ordered
-            .into_iter()
-            .map(|(_, result)| match overlay {
-                // The in-flight result isn't in state yet; substitute it in.
-                Some(o) if o.tool_call_id == result.tool_call_id => o.clone(),
-                _ => result,
-            })
-            .collect()
-    }
-
-    pub fn has_undelivered_effects(&self) -> bool {
-        self.tool_calls.values().any(|t| !t.result_delivered)
-            || self.sub_agent_calls.values().any(|s| !s.result_delivered)
-    }
-
-    fn mark_results_delivered(&mut self, tool_call_ids: &[String]) {
-        for id in tool_call_ids {
-            if let Some(t) = self.tool_calls.get_mut(id) {
-                t.result_delivered = true;
-            }
-            for s in self.sub_agent_calls.values_mut() {
-                if &s.tool_call_id == id {
-                    s.result_delivered = true;
-                }
-            }
-        }
-    }
-
     pub fn all_tools_resolved(&self) -> bool {
         !self.tool_calls.is_empty()
             && self.tool_calls.values().all(|tc| {
@@ -737,9 +647,6 @@ impl SessionState {
         if self.has_queued_worker_decision() && !self.has_pending_worker_decision() {
             return Some(Utc::now());
         }
-        if !self.has_pending_worker_decision() && self.drainable_batch().is_some() {
-            return Some(Utc::now());
-        }
         self.llm_calls
             .values()
             .filter_map(|c| c.tracking.earliest_wake())
@@ -763,7 +670,7 @@ impl SessionState {
 
     pub fn message_tree(&self) -> MessageTree {
         MessageTree {
-            nodes: self.messages.clone(),
+            nodes: self.nodes.clone(),
             head_id: self.head_id.clone(),
         }
     }

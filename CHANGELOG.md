@@ -14,15 +14,30 @@ same version.
 
 - `assistant-ui-cloudflare-starter` template: an assistant-ui chat on a
   Cloudflare Worker (TanStack Start) that streams from the AG-UI endpoint.
-- Session messages now form a tree: each carries a stable id and a parent link,
-  and the session tracks the active head. A client message payload accepts an
-  optional `parent_id` to branch from a specific message, and every
-  message-bearing worker trigger (`user.message`, `llm.response`, and the
-  batched `tool.results`) carries each message's id and parent — groundwork for
-  branching threads (edits/regenerations).
+- Conversation messages form an append-only tree, and the tree **is** the
+  LLM-call message history: a message becomes a node exactly when it flows
+  through a `call.llm`. Each `Message` carries its own node `id` (so
+  `MessageNode` is just `{ parent_id, message }`), and the session tracks the
+  active head. `stamp(message)` mints a fresh node id.
 
 ### Changed
 
+- A worker's `call.llm` reconciles its message list into the tree: any message
+  with a new `id` is minted as a node (parent = the preceding message in the
+  list) and the head moves to the last — so sending a fresh-id list *branches*
+  the conversation. This is the basis for edits, regenerations, and plan-mode's
+  execution handoff. The engine no longer pre-records submitted user messages;
+  the worker records them by including them in `call.llm` (the `user.message`
+  trigger carries the content, and `agent.llm` appends a stamped copy). System
+  prompts are nodes too: `instructions` seeds one at the thread root. The
+  `plan-mode` example branches into a fresh execution thread rooted at the plan.
+- Client submissions carry `{ messages, anchor }` (`continue` extends the active
+  path, `replace` is a full transcript); the engine forwards them to the worker,
+  which assembles the prompt and reconciles it through the single `call.llm`
+  merge — so AG-UI edits and regenerations branch the conversation without a
+  second merge point. The `MESSAGES_SNAPSHOT` reflects the active head→root path
+  rather than every branch. The system prompt is a node rooted at the thread;
+  `instructions` is the default when a submission doesn't carry one.
 - The engine now materializes the message tree and ships it on every worker
   decision (`message_tree` on the decision request). The conversation is no
   longer worker state. `messageHistory`/`messageHistoryCurrentTurn` are removed;
@@ -34,16 +49,29 @@ same version.
   `activePath(tree)` is exported for tools or custom middleware that need the
   transcript; custom prompt shaping is a middleware over `call.llm` (e.g. via
   `prependHistoryToLlmCalls`).
-- Tool and sub-agent results are recorded as messages in the order they're
-  delivered to the model. Sub-agent results were previously absent from the
-  message stream, and parallel tool results could be recorded out of order.
-- The batched results trigger is renamed `effects.complete` → `tool.results`
-  and now carries recorded message nodes (`{ id, parent_id, message }`) rather
-  than raw tool-result rows, so the worker folds them into history without
-  reconstructing messages. The unused `sub_agent.turn.complete` and
-  `sub_agent.error` worker triggers are removed — results have flowed through
-  the batch since 0.1.16.
+- Tool/sub-agent continuation is now the worker's decision, not the engine's.
+  Each effect appends its result node and fires a `tool.results` trigger the
+  moment it completes (completion order); the trigger carries `completed`
+  (`{ tool_call_id, name, is_error }`) naming what landed — the content stays in
+  the tree, looked up with the new `toolResultNode(tree, id)` helper. The engine
+  no longer tracks turn completion: the old batched-`tool.results` payload, the
+  undelivered-results queue, per-result ordering, and the consumed-marker are all
+  gone. The default `agent.llm` loop continues when every tool call on the latest
+  assistant turn is answered in the tree (`toolRoundComplete(tree)`); because each
+  decision ships a point-in-time tree, only the last-completing decision sees all
+  answered, so the turn continues exactly once without any idempotency state.
+  This makes background/short-circuit continuation a pure worker concern. The
+  unused `sub_agent.turn.complete` and `sub_agent.error` worker triggers are
+  removed — results have flowed through this path since 0.1.16.
 
+- The AG-UI `/run` endpoint is now a passthrough: it forwards the client's full
+  transcript (and any `resume` entries) and the engine classifies the submission
+  against effect state instead of the transport sniffing the message list. A
+  transcript ending in a tool message is a tool-result submission — its results
+  complete the matching client-handled tool calls (firing `tool.result` per
+  completion); a re-sent, already-resolved result is inert. Everything else is a
+  user turn. The transport-side `classify`/tail-sniffing (and its `reasoning`-skip
+  hack) is gone.
 - `agent.tool` no longer requires `execute` for client tools
   (`handler: "client"`) — the call is completed in the browser, so `execute` is
   optional for them. Worker tools still require it.

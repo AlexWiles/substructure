@@ -9,6 +9,7 @@ use serde::Deserialize;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::event_store::AggregateSort;
+use crate::session::events::MessageTree;
 use crate::session::index::{SessionCursor, SessionFilter};
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use crate::transport::ag_ui::snapshot::snapshot_events;
@@ -208,7 +209,27 @@ pub async fn connect_session_ag_ui(
                 .into_response()
         }
     };
-    let frames = snapshot_events(session_id, input.run_id, &events)
+    // No events ⇒ the session isn't created yet (a fresh thread); its snapshot
+    // is an empty tree. Otherwise load it and read the materialized tree.
+    let tree = if events.is_empty() {
+        MessageTree::default()
+    } else {
+        match state
+            .runtime
+            .get_session(caller.tenant_id(), &session_id)
+            .await
+        {
+            Ok((_, session)) => session.message_tree(),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": e.to_string()})),
+                )
+                    .into_response()
+            }
+        }
+    };
+    let frames = snapshot_events(session_id, input.run_id, &tree, &events)
         .into_iter()
         .map(|e| Ok::<_, std::convert::Infallible>(e.to_sse()));
     Sse::new(futures_util::stream::iter(frames))

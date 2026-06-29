@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,8 @@ pub enum EventPayload {
     SessionCreated(Box<SessionCreated>),
     #[serde(rename = "message.new")]
     NewMessage(NewMessage),
+    #[serde(rename = "control.new")]
+    NewControl(NewControl),
     #[serde(rename = "llm.call.requested")]
     LlmCallRequested(LlmCallRequested),
     #[serde(rename = "llm.call.completed")]
@@ -79,20 +81,108 @@ pub struct SessionDone {}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewMessage {
     pub message: Message,
-    /// Stable node id, independent of the event's storage id.
-    pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
 }
 
-/// Conversation nodes in append order plus the active leaf; the active
-/// transcript is the `head_id`-to-root path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewControl {
+    pub control: Control,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+}
+
+/// A non-conversational marker in the tree: an interrupt and, later, its resume.
+/// Filtered out when building an LLM prompt; surfaced to clients as run outcome.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Control {
+    pub id: String,
+    pub interrupt_id: String,
+    pub kind: ControlKind,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub payload: serde_json::Value,
+    pub origin: InterruptOrigin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlKind {
+    Interrupt,
+    Resume,
+}
+
+/// A tree node: a conversation message or a control marker. The node id is the
+/// message id or the control id; `parent_id` links it to its predecessor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Node {
+    Message(NewMessage),
+    Control(NewControl),
+}
+
+impl Node {
+    pub fn id(&self) -> &str {
+        match self {
+            Node::Message(n) => &n.message.id,
+            Node::Control(n) => &n.control.id,
+        }
+    }
+
+    pub fn parent_id(&self) -> Option<&str> {
+        match self {
+            Node::Message(n) => n.parent_id.as_deref(),
+            Node::Control(n) => n.parent_id.as_deref(),
+        }
+    }
+
+    pub fn message(&self) -> Option<&Message> {
+        match self {
+            Node::Message(n) => Some(&n.message),
+            Node::Control(_) => None,
+        }
+    }
+
+    pub fn control(&self) -> Option<&Control> {
+        match self {
+            Node::Control(n) => Some(&n.control),
+            Node::Message(_) => None,
+        }
+    }
+}
+
+/// Tree nodes in append order plus the active leaf; the active transcript is the
+/// `head_id`-to-root path.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MessageTree {
     #[serde(default)]
-    pub nodes: Vec<NewMessage>,
+    pub nodes: Vec<Node>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_id: Option<String>,
+}
+
+impl MessageTree {
+    /// Messages from the root down to `leaf`, following parent pointers — the
+    /// prompt that produced that node, with control nodes filtered out. Empty if
+    /// `leaf` is unknown.
+    pub fn path_to(&self, leaf: &str) -> Vec<Message> {
+        let mut by_id: HashMap<&str, &Node> = self.nodes.iter().map(|n| (n.id(), n)).collect();
+        let mut path = Vec::new();
+        let mut cursor = Some(leaf.to_string());
+        // `remove` so a malformed parent cycle can't loop forever.
+        while let Some(id) = cursor.take() {
+            let Some(node) = by_id.remove(id.as_str()) else {
+                break;
+            };
+            if let Some(message) = node.message() {
+                path.push(message.clone());
+            }
+            cursor = node.parent_id().map(str::to_string);
+        }
+        path.reverse();
+        path
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
