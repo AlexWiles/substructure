@@ -1,4 +1,4 @@
-import type { Agent, DecisionRequest } from "./core";
+import type { Agent, DecisionRequest, NamedAgent } from "./core";
 import { createSseStream, type SseStream } from "./sse";
 import type { LlmTokenDeltaInput, SpanContext, SubmitRequest, WorkerDecisionRequestWire } from "./types";
 import { verifyWebhookSignature } from "./webhook";
@@ -45,10 +45,10 @@ export interface FetchHandlerOptions {
     tolerance?: number;
 }
 
-/** The agents to serve — each must be named (`agent({ name, ... })`). They carry
- *  independent state types, so the collection is `Agent<any>`. */
+/** The agents to serve — each a `NamedAgent` from `agent({ name, ... })`. They
+ *  carry independent state types, so the collection is `NamedAgent<any>`. */
 // biome-ignore lint/suspicious/noExplicitAny: heterogeneous state types across agents
-export type Agents = Agent<any>[];
+export type Agents = NamedAgent<any>[];
 
 // ── State codec (base64 JSON, the worker boundary) ───────────────────────────
 
@@ -91,9 +91,6 @@ export class Worker {
     constructor(agents: Agents) {
         this.agents = {};
         for (const a of agents) {
-            if (!a.agentName) {
-                throw new Error("agent passed to worker() has no name — give it agent({ name, ... })");
-            }
             this.agents[a.agentName] = a;
         }
         this.agentIds = Object.keys(this.agents);

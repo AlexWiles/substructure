@@ -1,30 +1,19 @@
 export type { AgentConfig, LoopConfig, Model } from "./agent";
-export { agent, callLlm, callTool, done, sendMessage, server, spawn, toolError, toolLoop, toolResult } from "./agent";
+export { agent, callLlm, callTool, done, server, toolError, toolLoop, toolResult } from "./agent";
 export type {
     Agent,
     Decision,
     DecisionRequest,
     LlmGenerate,
     LlmGenerator,
+    NamedAgent,
     StopCondition,
     StopInfo,
     ToolDef,
     ToolExecutionContext,
     ToolFn,
 } from "./core";
-export {
-    activePath,
-    DEFAULT_RETRY,
-    DEFERRED,
-    pathTo,
-    serverGenerate,
-    stamp,
-    stepCountIs,
-    tool,
-    toolResultNode,
-    triggerToMessage,
-    triggerToMessages,
-} from "./core";
+export { activePath, stepCountIs, tool } from "./core";
 export { Substructure as default, Substructure } from "./substructure";
 export type {
     ClientAction,

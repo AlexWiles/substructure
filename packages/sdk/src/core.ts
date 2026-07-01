@@ -1,5 +1,4 @@
 import type {
-    DecisionTrigger,
     LlmHandler,
     LlmRequest,
     LlmResponse,
@@ -35,20 +34,18 @@ export interface Decision {
     state?: unknown;
 }
 
-/** An agent: `decide` takes a `DecisionRequest` and returns a `Decision`. Compose
- *  it by calling it; `agent({ name, ... })` it to deploy or use as a sub-agent. */
+/** An agent: takes a `DecisionRequest` and returns a `Decision`. Compose it by
+ *  calling it; `agent({ name, decide })` names it into a `NamedAgent`. */
 export interface Agent<S = unknown> {
     (req: DecisionRequest<S>): Decision | Promise<Decision>;
-    /** The id this agent is deployed and addressed under. */
-    agentName?: string;
 }
 
-export const DEFAULT_RETRY: RetryPolicy = {
-    timeout_secs: 120,
-    max_retries: 0,
-    backoff_base_secs: 1,
-    backoff_max_secs: 10,
-};
+/** A named agent — what `agent({ name, decide })` returns. `agentName` is the id
+ *  the engine deploys and addresses it under, so only a `NamedAgent` can be served
+ *  by `worker([...])` or delegated to as a sub-agent. */
+export interface NamedAgent<S = unknown> extends Agent<S> {
+    agentName: string;
+}
 
 // ── Tools ────────────────────────────────────────────────────────────────────
 
@@ -165,32 +162,9 @@ export function activePath(tree?: MessageTree): Message[] {
     return pathTo(tree, tree?.head_id);
 }
 
-/** The tool-result for `toolCallId` on the active path, so a stale branch's result doesn't shadow the live one. */
-export function toolResultNode(tree: MessageTree | undefined, toolCallId: string): Message | undefined {
-    return activePath(tree).find((m) => m.role === "tool" && m.tool_call_id === toolCallId);
-}
-
 /** Stamp a fresh node id onto a message so the engine records it as a new node. */
 export function stamp(message: Message): Message {
     return { ...message, id: crypto.randomUUID() };
-}
-
-/** The single message a trigger carries (`user.message`/`llm.response`), or `null`. */
-export function triggerToMessage(trigger: DecisionTrigger): Message | null {
-    return trigger.type === "llm.response" || trigger.type === "user.message" ? trigger.message : null;
-}
-
-/** All messages a trigger carries into the tree. */
-export function triggerToMessages(trigger: DecisionTrigger): Message[] {
-    switch (trigger.type) {
-        case "user.message":
-        case "llm.response":
-            return [trigger.message];
-        case "user.transcript":
-            return trigger.messages;
-        default:
-            return [];
-    }
 }
 
 // ── Stop conditions ──────────────────────────────────────────────────────────

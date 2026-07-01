@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { toolLoop } from "../src/agent";
-import { serverGenerate, toolResultNode } from "../src/core";
+import { serverGenerate } from "../src/core";
 import type { Message } from "../src/types";
 import { actionsOfType, appendedMessages, callLlm, linearTree, runAgent, toolResult } from "./harness";
 
@@ -57,16 +57,5 @@ describe("tool.result", () => {
             { role: "tool", content: "RA", tool_call_id: "call_a", name: "getWeather" },
         ]);
         expect(actionsOfType(result, "call.llm")).toHaveLength(0);
-    });
-
-    it("looks up a landed result node by tool_call_id", () => {
-        const messageTree = linearTree({ role: "user", content: "go" }, assistant, {
-            role: "tool",
-            content: "RA",
-            tool_call_id: "call_a",
-            name: "getWeather",
-        });
-        expect(toolResultNode(messageTree, "call_a")?.content).toBe("RA");
-        expect(toolResultNode(messageTree, "call_b")).toBeUndefined();
     });
 });

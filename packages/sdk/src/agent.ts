@@ -2,12 +2,13 @@ import type {
     Agent,
     DecisionRequest,
     LlmGenerator,
+    NamedAgent,
     StopCondition,
     StopInfo,
     ToolDef,
     ToolExecutionContext,
 } from "./core";
-import { DEFAULT_RETRY, DEFERRED, serverGenerate, stamp } from "./core";
+import { DEFERRED, serverGenerate, stamp } from "./core";
 import type {
     DecisionTrigger,
     LlmRequest,
@@ -54,7 +55,7 @@ export function callLlm(opts: {
         request,
         handler: opts.model.handler,
         stream: opts.stream ?? opts.model.stream ?? false,
-        retry: opts.retry ?? DEFAULT_RETRY,
+        retry: opts.retry,
     };
 }
 
@@ -75,7 +76,7 @@ export function callTool(opts: {
         name: opts.name,
         arguments: opts.arguments,
         handler: opts.handler ?? "worker",
-        retry: opts.retry ?? DEFAULT_RETRY,
+        retry: opts.retry,
     };
 }
 
@@ -87,25 +88,6 @@ export function toolError(toolCallId: string, error: string, attempt: number, re
     return { type: "return.tool.error", tool_call_id: toolCallId, error, retryable, attempt };
 }
 
-export function spawn(opts: {
-    sessionId: string;
-    agentId: string;
-    toolCallId: string;
-    retry?: RetryPolicy;
-}): WorkerAction {
-    return {
-        type: "spawn.sub_agent",
-        session_id: opts.sessionId,
-        agent_id: opts.agentId,
-        tool_call_id: opts.toolCallId,
-        retry: opts.retry ?? DEFAULT_RETRY,
-    };
-}
-
-export function sendMessage(sessionId: string, message: Message): WorkerAction {
-    return { type: "send.message", session_id: sessionId, message };
-}
-
 // ── agent(config): the default tool/sub-agent loop ───────────────────────────
 
 /** The default loop's configuration. */
@@ -115,7 +97,7 @@ export interface LoopConfig<S = unknown> {
     tools?: ToolDef[];
     /** Named agents the model can delegate to (reference them by value). */
     // biome-ignore lint/suspicious/noExplicitAny: sub-agents carry their own state type
-    subAgents?: Agent<any>[];
+    subAgents?: NamedAgent<any>[];
     stopWhen?: StopCondition<S>;
     stream?: boolean;
     retry?: RetryPolicy;
@@ -129,14 +111,6 @@ export interface AgentConfig<S = unknown> {
     decide: Agent<S>;
 }
 
-// biome-ignore lint/suspicious/noExplicitAny: sub-agents carry their own state type
-function subAgentId(sub: Agent<any>): string {
-    if (!sub.agentName) {
-        throw new Error("a sub-agent must be a named agent — give it agent({ name, ... })");
-    }
-    return sub.agentName;
-}
-
 function toolSchema(def: ToolDef): LlmTool {
     return { function: { name: def.name, description: def.description, parameters: def.parameters } };
 }
@@ -148,7 +122,9 @@ function subAgentSchema(agentId: string): LlmTool {
             description: `Delegate to ${agentId}`,
             parameters: {
                 type: "object",
-                properties: { message: { type: "string", description: "The message to send to the agent" } },
+                properties: {
+                    message: { type: "string", description: "The message to send to the agent" },
+                },
                 required: ["message"],
             },
         },
@@ -178,7 +154,7 @@ export function toolLoop<S = unknown>(config: LoopConfig<S>): Agent<S> {
     const toolMap: Record<string, ToolDef> = {};
     for (const t of toolList) toolMap[t.name] = t;
 
-    const subIds = new Set((config.subAgents ?? []).map(subAgentId));
+    const subIds = new Set((config.subAgents ?? []).map((sub) => sub.agentName));
     const schemas: LlmTool[] = [...toolList.map(toolSchema), ...[...subIds].map(subAgentSchema)];
 
     return async (d) => {
@@ -189,10 +165,16 @@ export function toolLoop<S = unknown>(config: LoopConfig<S>): Agent<S> {
 
         const instructions =
             typeof config.instructions === "function" ? await config.instructions() : config.instructions;
-        const withSystem = (base: Message[]): Message[] =>
-            instructions && base[0]?.role !== "system"
-                ? [{ role: "system", content: instructions, id: crypto.randomUUID() } as Message, ...base]
-                : base;
+        // Guarantee the transcript starts with the system message, reusing the
+        // stored one (stable id) when the branch already has it.
+        const withSystem = (messages: Message[]): Message[] => {
+            if (messages[0]?.role === "system") return messages;
+            const existing = history[0]?.role === "system" ? history[0] : undefined;
+            const system =
+                existing ??
+                (instructions ? { role: "system", content: instructions, id: crypto.randomUUID() } : undefined);
+            return system ? [system, ...messages] : messages;
+        };
 
         switch (trigger.type) {
             case "user.message": {
@@ -200,14 +182,7 @@ export function toolLoop<S = unknown>(config: LoopConfig<S>): Agent<S> {
                 return { transcript, actions: [ask(transcript)], state };
             }
             case "user.transcript": {
-                const sys: Message | undefined =
-                    history[0]?.role === "system"
-                        ? history[0]
-                        : instructions
-                          ? { role: "system", content: instructions, id: crypto.randomUUID() }
-                          : undefined;
-                const body = trigger.messages.filter((m) => m.role !== "system");
-                const transcript = sys ? [sys, ...body] : body;
+                const transcript = withSystem(trigger.messages.filter((m) => m.role !== "system"));
                 return { transcript, actions: [ask(transcript)], state };
             }
             case "client.action": {
@@ -232,13 +207,18 @@ export function toolLoop<S = unknown>(config: LoopConfig<S>): Agent<S> {
                             // leave raw arguments as the message
                         }
                         actions.push(
-                            spawn({
-                                sessionId: childId,
-                                agentId: tc.function.name,
-                                toolCallId: tc.id,
+                            {
+                                type: "spawn.sub_agent",
+                                session_id: childId,
+                                agent_id: tc.function.name,
+                                tool_call_id: tc.id,
                                 retry: config.retry,
-                            }),
-                            sendMessage(childId, { role: "user", content: message }),
+                            },
+                            {
+                                type: "send.message",
+                                session_id: childId,
+                                message: { role: "user", content: message },
+                            },
                         );
                     } else if (toolMap[tc.function.name]) {
                         const def = toolMap[tc.function.name];
@@ -314,9 +294,8 @@ export function toolLoop<S = unknown>(config: LoopConfig<S>): Agent<S> {
 
 /** Name a decision function so it can be deployed (`worker([...])`) or used as a
  *  sub-agent. `decide` is `toolLoop(...)` for the default loop, or your own. */
-export function agent<S = unknown>(config: AgentConfig<S>): Agent<S> {
-    config.decide.agentName = config.name;
-    return config.decide;
+export function agent<S = unknown>(config: AgentConfig<S>): NamedAgent<S> {
+    return Object.assign(config.decide, { agentName: config.name });
 }
 
 // ── Worker-run LLM (handler: "worker") ───────────────────────────────────────

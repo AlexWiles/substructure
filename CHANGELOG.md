@@ -12,6 +12,10 @@ same version.
 
 ### Added
 
+- `docs/07-protocol.md`: the language-neutral decision protocol — the
+  request/decision exchange, the trigger and action tables, the message shapes,
+  and a ~40-line reference tool loop — so a worker (and the tool loop) can be
+  implemented in any language.
 - `assistant-ui-cloudflare-starter` template: an assistant-ui chat on a
   Cloudflare Worker that streams from the AG-UI endpoint.
 - Conversation history is a message tree shipped on every worker decision
@@ -30,8 +34,8 @@ same version.
   `decide(req: DecisionRequest) => Decision` is either `toolLoop({ model,
   instructions, tools, subAgents, stopWhen, stream, retry })` — the default
   tool/sub-agent loop — or your own function, built from pure action builders
-  (`callLlm`, `callTool`, `toolResult`, `toolError`, `done`, `spawn`,
-  `sendMessage`). A `DecisionRequest` is the engine's wire envelope with
+  (`callLlm`, `callTool`, `toolResult`, `toolError`, `done`) or plain action
+  objects. A `DecisionRequest` is the engine's wire envelope with
   `worker_state` decoded into `state` (read `req.trigger`/`req.transcript`/
   `req.pending`/`req.session_id`/… directly); a `Decision` is the result
   `{ actions?, transcript?, state? }`. `toolLoop` is the loop implementation, so a
@@ -40,7 +44,10 @@ same version.
   wrapping agent threads its own through with `loop({ ...req, state })`. Deploy
   named agents by value: `worker([agent]).fetch({ signingSecret })` /
   `serve([agent], opts)` / `SubstructureEmbedded.create({ agents: [agent] })`;
-  sub-agents are referenced by value (`subAgents: [child]`). Models are
+  sub-agents are referenced by value (`subAgents: [child]`). `agent({...})`
+  returns a `NamedAgent`, which is what deployment and `subAgents` require, so
+  passing an unnamed decision function is a type error rather than a runtime one.
+  Models are
   `server("provider/model")` or an adapter generator (`anthropicGenerate`,
   `aiGenerate`, `openaiGenerate`). Exports `activePath(tree)`/`pathTo(tree, leaf)`;
   removes `messageHistory`/`messageHistoryCurrentTurn`.
