@@ -89,6 +89,8 @@ same version.
   OpenAI adapters' `ToolLoopAgent`/`OpenAIAgent` classes are replaced by
   `aiSdkAgent(settings)` / `openaiAgent(input)`, which return a `Handler` directly
   (both now take an `id`).
+- The `substructure new` command that scaffolded a project from a starter
+  template.
 
 ## [0.1.19] - 2026-06-12
 
