@@ -1,17 +1,15 @@
 // OpenAI adapter (`@substructure.ai/sdk/adapters/openai`). `openaiGenerate` is an
-// `LlmGenerator` backed by the Responses API; `OpenAIAgent` adapts an
-// `@openai/agents` Agent into a handler chain. Substructure owns the loop; each
+// `LlmGenerator` backed by the Responses API; `openaiAgent` builds a `toolLoop`
+// from an `@openai/agents` Agent (or settings). Substructure owns the loop; each
 // `llm.request` runs one `responses.create` step.
 
-import { Agent, RunContext } from "@openai/agents";
 import type { ModelSettings, ModelSettingsToolChoice, Tool } from "@openai/agents";
+import { Agent, RunContext } from "@openai/agents";
 import OpenAI from "openai";
-
-import { llm, stopWhen, tools } from "../middleware";
-import type { LlmGenerate, LlmGenerator, StopCondition, ToolDef, ToolExecutionContext } from "../middleware";
-import { contentText } from "../types";
+import { toolLoop } from "../agent";
+import type { LlmGenerate, LlmGenerator, Agent as SdkAgent, StopCondition, ToolDef } from "../core";
 import type { LlmTool, Message, StreamPart, ToolCall } from "../types";
-import type { MiddlewareFn, MiddlewareSource, Next } from "../worker";
+import { contentText } from "../types";
 
 type ResponseInputItem = OpenAI.Responses.ResponseInputItem;
 type ResponseStreamEvent = OpenAI.Responses.ResponseStreamEvent;
@@ -116,30 +114,21 @@ interface ResolvedSettings {
     stopWhen?: StopCondition;
 }
 
-// Adapts an `@openai/agents` Agent (or `OpenAIAgentSettings`) into a handler chain.
-export class OpenAIAgent implements MiddlewareSource {
-    private readonly settings: ResolvedSettings;
-
-    constructor(input: OpenAIAgentSettings | Agent, options?: { client?: OpenAI; context?: unknown }) {
-        this.settings = input instanceof Agent ? fromAgent(input, options) : resolveSettings(input);
-    }
-
-    get tools(): Tool[] {
-        return this.settings.tools;
-    }
-
-    toMiddleware(): MiddlewareFn<unknown> {
-        return openAIAgent(this.settings);
-    }
-}
-
-// Factory for `OpenAIAgent` so an `@openai/agents` Agent can be converted without
-// a second `new`: `openaiAgent(new Agent({ ... }))`.
+/** The loop for running an `@openai/agents` Agent (or `OpenAIAgentSettings`) on
+ *  Substructure: `openaiGenerate` as the model, the Agent's function tools
+ *  executed by the worker. Name and deploy it with
+ *  `worker([agent({ name, decide: openaiAgent(...) })])`. */
 export function openaiAgent(
     input: OpenAIAgentSettings | Agent,
     options?: { client?: OpenAI; context?: unknown },
-): OpenAIAgent {
-    return new OpenAIAgent(input, options);
+): SdkAgent {
+    const settings = input instanceof Agent ? fromAgent(input, options) : resolveSettings(input);
+    return toolLoop({
+        model: openaiGenerate(toGenerateSettings(settings)),
+        instructions: settings.instructions,
+        tools: openAITools(settings.tools, settings.context),
+        stopWhen: settings.stopWhen,
+    });
 }
 
 function resolveSettings(settings: OpenAIAgentSettings): ResolvedSettings {
@@ -154,48 +143,28 @@ function resolveSettings(settings: OpenAIAgentSettings): ResolvedSettings {
     };
 }
 
-function fromAgent(agent: Agent, options?: { client?: OpenAI; context?: unknown }): ResolvedSettings {
-    if (typeof agent.model !== "string") {
+function fromAgent(oaiAgent: Agent, options?: { client?: OpenAI; context?: unknown }): ResolvedSettings {
+    if (typeof oaiAgent.model !== "string") {
         throw new Error(
-            "OpenAIAgent executes via the OpenAI Responses API and needs a model id string. Pass `model` as a string on the Agent, or use `new OpenAIAgent({ model, ... })`.",
+            "openaiAgent executes via the OpenAI Responses API and needs a model id string. Pass `model` as a string on the Agent, or use `openaiAgent({ model, ... })`.",
         );
     }
     const context = options?.context;
     const instructions =
-        typeof agent.instructions === "function"
+        typeof oaiAgent.instructions === "function"
             ? () =>
-                  (agent.instructions as (rc: RunContext, a: Agent) => string | Promise<string>)(
+                  (oaiAgent.instructions as (rc: RunContext, a: Agent) => string | Promise<string>)(
                       new RunContext(context),
-                      agent,
+                      oaiAgent,
                   )
-            : agent.instructions;
+            : oaiAgent.instructions;
     return {
         client: options?.client ?? new OpenAI(),
-        model: agent.model,
+        model: oaiAgent.model,
         instructions,
-        tools: agent.tools,
-        modelSettings: agent.modelSettings,
+        tools: oaiAgent.tools,
+        modelSettings: oaiAgent.modelSettings,
         context,
-    };
-}
-
-export function openAIAgent(settings: ResolvedSettings): MiddlewareFn<unknown> {
-    const generator = openaiGenerate(toGenerateSettings(settings));
-
-    const chain: MiddlewareFn<any, any>[] = [
-        tools(openAITools(settings.tools, settings.context)),
-        ...(settings.stopWhen ? [stopWhen(settings.stopWhen)] : []),
-        llm({ generator, instructions: settings.instructions }),
-    ];
-
-    return (ctx, next) => {
-        let fn: Next<unknown> = next;
-        for (let i = chain.length - 1; i >= 0; i--) {
-            const mw = chain[i];
-            const downstream = fn;
-            fn = (c) => mw(c, downstream);
-        }
-        return fn(ctx);
     };
 }
 
@@ -223,7 +192,7 @@ export function openAITools(toolset: Tool[], context?: unknown): ToolDef[] {
                 name: t.name,
                 description: t.description ?? "",
                 parameters: t.parameters,
-                execute: async (args: string, _state?: unknown, _ctx?: ToolExecutionContext) => {
+                execute: async (args) => {
                     const result = await t.invoke(new RunContext(context), args || "{}");
                     return typeof result === "string" ? result : JSON.stringify(result);
                 },

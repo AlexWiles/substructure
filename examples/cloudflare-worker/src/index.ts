@@ -1,9 +1,11 @@
 // Cloudflare Worker that serves the agent over HTTP, with per-session
 // agent state stored in a Durable Object. Point a Substructure backend
 // at this Worker's URL.
+//
+// State is worker-managed: there is no SDK-held tool state. Each tool reaches
+// its own store (the Durable Object, keyed by `ctx.sessionId`) directly.
 
-import Substructure from "@substructure.ai/sdk";
-import type { AgentContext, MiddlewareFn, Next } from "@substructure.ai/sdk";
+import { agent, server, tool, toolLoop, worker } from "@substructure.ai/sdk";
 import { DurableObject } from "cloudflare:workers";
 
 type Todo = { id: string; title: string; done: boolean };
@@ -36,71 +38,56 @@ export class AgentState extends DurableObject {
     }
 }
 
-function durableObjectState(namespace: DurableObjectNamespace<AgentState>): MiddlewareFn<unknown, State> {
-    return async (ctx: AgentContext<unknown>, next: Next<State>) => {
-        const sessionId = ctx.request.session_id;
-        const stub = namespace.getByName(sessionId);
-        const state = await stub.getState();
-
-        const result = await next({ ...ctx, state });
-
-        await stub.setState(result.state as State);
-
-        return {
-            ...result,
-            workerState: btoa(JSON.stringify({ ref: sessionId })),
-        };
-    };
-}
-
 interface WorkerEnv extends Env {
     AGENT_STATE: DurableObjectNamespace<AgentState>;
     SIGNING_SECRET?: string;
 }
 
-const sub = new Substructure();
-const { agent } = sub;
+function todoTools(namespace: DurableObjectNamespace<AgentState>) {
+    const addTodo = tool({
+        name: "add_todo",
+        description: "Add a todo item",
+        parameters: {
+            type: "object",
+            properties: { title: { type: "string" } },
+            required: ["title"],
+        },
+        execute: async (args, ctx) => {
+            const { title } = JSON.parse(args);
+            const stub = namespace.getByName(ctx.sessionId);
+            const state = await stub.getState();
+            const item: Todo = { id: crypto.randomUUID().slice(0, 8), title, done: false };
+            await stub.setState({ items: [...state.items, item] });
+            return JSON.stringify(item);
+        },
+    });
 
-const todos = agent.stateSlice<State>({ items: [] });
+    const listTodos = tool({
+        name: "list_todos",
+        description: "List all todos",
+        parameters: { type: "object", properties: {} },
+        execute: async (_args, ctx) => {
+            const stub = namespace.getByName(ctx.sessionId);
+            const state = await stub.getState();
+            return JSON.stringify(state.items);
+        },
+    });
 
-const addTodo = agent.tool({
-    name: "add_todo",
-    description: "Add a todo item",
-    parameters: {
-        type: "object",
-        properties: { title: { type: "string" } },
-        required: ["title"],
-    },
-    state: todos,
-    execute: (args, state) => {
-        const { title } = JSON.parse(args);
-        const item: Todo = { id: crypto.randomUUID().slice(0, 8), title, done: false };
-        state.items.push(item);
-        return JSON.stringify(item);
-    },
-});
-
-const listTodos = agent.tool({
-    name: "list_todos",
-    description: "List all todos",
-    parameters: { type: "object", properties: {} },
-    state: todos,
-    execute: (_args, state) => JSON.stringify(state.items),
-});
+    return [addTodo, listTodos];
+}
 
 export default {
     async fetch(request: Request, env: WorkerEnv): Promise<Response> {
-        const todoAgent = agent({ id: "todo" })
-            .use(durableObjectState(env.AGENT_STATE))
-            .use(agent.tools([addTodo, listTodos]))
-            .use(
-                agent.llm({
-                    generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }),
-                    instructions: "Concise todo assistant. Use tools to manage the list.",
-                }),
-            );
+        const todoAgent = agent({
+            name: "todo",
+            decide: toolLoop({
+                model: server("anthropic/claude-sonnet-4-6"),
+                instructions: "Concise todo assistant. Use tools to manage the list.",
+                tools: todoTools(env.AGENT_STATE),
+            }),
+        });
 
-        const handler = sub.worker({ agents: [todoAgent] }).fetchHandler({ signingSecret: env.SIGNING_SECRET });
+        const handler = worker([todoAgent]).fetch({ signingSecret: env.SIGNING_SECRET });
 
         return handler(request);
     },

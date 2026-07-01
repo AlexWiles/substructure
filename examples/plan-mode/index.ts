@@ -1,156 +1,105 @@
 // Plan mode: build a plan over several turns, then flip a switch to execute it.
 // Entering execution branches a fresh thread so the executor sees only the plan.
+//
+// A modal agent is just a decision function that reads its mode from state and
+// picks the model, prompt, and tools for that mode. The tool loop itself is the
+// SDK default — `toolLoop` builds the tool schemas and dispatches calls — so all
+// this handler writes is (a) the per-mode tools and (b) the mode switch. The
+// tools are built per decision, closing over the live `state`, so their
+// `execute` can mutate `state.plan` directly. State (mode + plan) rides the wire
+// as `worker_state`.
 
-import Substructure, { middleware, stamp, type Message } from "@substructure.ai/sdk";
+import { agent, server, tool, toolLoop } from "@substructure.ai/sdk";
+import type { DecisionTrigger } from "@substructure.ai/sdk";
 import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
-
-const sub = new Substructure();
-const { agent } = sub;
 
 // ── Domain ──────────────────────────────────────────────────────────────────
 
 type Mode = "planning" | "executing";
 type Step = { id: string; text: string; done: boolean };
 type Plan = { goal: string; steps: Step[]; nextId: number };
+type State = { mode: Mode; plan: Plan };
 
-// ── Shared state ────────────────────────────────────────────────────────────
+const initialPlan = (): Plan => ({ goal: "", steps: [], nextId: 1 });
 
-type PlanState = { mode: Mode; plan: Plan };
+// ── Tools, per mode ───────────────────────────────────────────────────────────
+// Built fresh each decision so `execute` closes over the live plan. `toolLoop`
+// turns these into the model's tool schemas and runs `execute` on `tool.execute`.
 
-const initialState: PlanState = {
-    mode: "planning",
-    plan: { goal: "", steps: [], nextId: 1 },
-};
+function planTools(state: State) {
+    const plan = state.plan;
+    const planning = [
+        tool({
+            name: "set_goal",
+            description: "Set or replace the overall goal the plan is working toward.",
+            parameters: { type: "object", properties: { goal: { type: "string" } }, required: ["goal"] },
+            execute: (args) => {
+                plan.goal = JSON.parse(args).goal;
+                return JSON.stringify(plan);
+            },
+        }),
+        tool({
+            name: "add_step",
+            description: "Append a new step to the plan. Returns the created step.",
+            parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+            execute: (args) => {
+                const step: Step = { id: `s${plan.nextId++}`, text: JSON.parse(args).text, done: false };
+                plan.steps.push(step);
+                return JSON.stringify(step);
+            },
+        }),
+        tool({
+            name: "update_step",
+            description: "Rewrite the text of an existing step by id.",
+            parameters: {
+                type: "object",
+                properties: { id: { type: "string" }, text: { type: "string" } },
+                required: ["id", "text"],
+            },
+            execute: (args) => {
+                const { id, text } = JSON.parse(args);
+                const step = plan.steps.find((s) => s.id === id);
+                if (!step) throw new Error(`unknown step: ${id}`);
+                step.text = text;
+                return JSON.stringify(step);
+            },
+        }),
+        tool({
+            name: "remove_step",
+            description: "Remove a step from the plan by id.",
+            parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+            execute: (args) => {
+                const idx = plan.steps.findIndex((s) => s.id === JSON.parse(args).id);
+                if (idx === -1) throw new Error(`unknown step: ${JSON.parse(args).id}`);
+                return JSON.stringify(plan.steps.splice(idx, 1)[0]);
+            },
+        }),
+    ];
+    const executing = [
+        tool({
+            name: "complete_step",
+            description: "Mark a plan step as completed with a one-line summary of what was done.",
+            parameters: {
+                type: "object",
+                properties: {
+                    id: { type: "string" },
+                    note: { type: "string", description: "Short summary of how the step was completed." },
+                },
+                required: ["id", "note"],
+            },
+            execute: (args) => {
+                const { id, note } = JSON.parse(args);
+                const step = plan.steps.find((s) => s.id === id);
+                if (!step) throw new Error(`unknown step: ${id}`);
+                step.done = true;
+                return JSON.stringify({ id: step.id, text: step.text, note });
+            },
+        }),
+    ];
+    return state.mode === "planning" ? planning : executing;
+}
 
-// ── planMode: flips `mode` and branches into execution ──────────────────────
-
-const planMode = middleware<PlanState>({
-    state: initialState,
-    handler: async (ctx, next) => {
-        const { trigger } = ctx.request;
-        const wasMode = ctx.state.mode;
-        if (trigger.type === "client.action" && trigger.name === "set_mode") {
-            const mode = (trigger.args as { mode?: Mode } | undefined)?.mode;
-            if (mode === "planning" || mode === "executing") ctx.state.mode = mode;
-        }
-
-        const result = await next(ctx);
-        if (!(ctx.state.mode === "executing" && wasMode !== "executing")) return result;
-
-        const messages: Message[] = [
-            stamp({ role: "system", content: executingPrompt() }),
-            stamp({ role: "user", content: renderPlan(ctx.state.plan) }),
-        ];
-        return {
-            ...result,
-            actions: result.actions.map((a) =>
-                a.type === "call.llm" ? { ...a, request: { ...a.request, messages } } : a,
-            ),
-        };
-    },
-});
-
-// ── Plan-editing tools (planning mode only) ─────────────────────────────────
-
-const setGoal = agent.tool({
-    name: "set_goal",
-    description: "Set or replace the overall goal the plan is working toward.",
-    parameters: {
-        type: "object",
-        properties: { goal: { type: "string" } },
-        required: ["goal"],
-    },
-    state: planMode,
-    execute: (args, state) => {
-        const { goal } = JSON.parse(args) as { goal: string };
-        state.plan.goal = goal;
-        return JSON.stringify(state.plan);
-    },
-});
-
-const addStep = agent.tool({
-    name: "add_step",
-    description: "Append a new step to the plan. Returns the created step.",
-    parameters: {
-        type: "object",
-        properties: { text: { type: "string" } },
-        required: ["text"],
-    },
-    state: planMode,
-    execute: (args, state) => {
-        const { text } = JSON.parse(args) as { text: string };
-        const step: Step = { id: `s${state.plan.nextId++}`, text, done: false };
-        state.plan.steps.push(step);
-        return JSON.stringify(step);
-    },
-});
-
-const updateStep = agent.tool({
-    name: "update_step",
-    description: "Rewrite the text of an existing step by id.",
-    parameters: {
-        type: "object",
-        properties: { id: { type: "string" }, text: { type: "string" } },
-        required: ["id", "text"],
-    },
-    state: planMode,
-    execute: (args, state) => {
-        const { id, text } = JSON.parse(args) as { id: string; text: string };
-        const step = state.plan.steps.find((s: Step) => s.id === id);
-        if (!step) throw new Error(`unknown step: ${id}`);
-        step.text = text;
-        return JSON.stringify(step);
-    },
-});
-
-const removeStep = agent.tool({
-    name: "remove_step",
-    description: "Remove a step from the plan by id.",
-    parameters: {
-        type: "object",
-        properties: { id: { type: "string" } },
-        required: ["id"],
-    },
-    state: planMode,
-    execute: (args, state) => {
-        const { id } = JSON.parse(args) as { id: string };
-        const idx = state.plan.steps.findIndex((s: Step) => s.id === id);
-        if (idx === -1) throw new Error(`unknown step: ${id}`);
-        const [removed] = state.plan.steps.splice(idx, 1);
-        return JSON.stringify(removed);
-    },
-});
-
-// ── Execution tool (executing mode only) ────────────────────────────────────
-// One tool. Mark a step done with a short note about how it was completed.
-// Real agents would have richer execution surfaces (file ops, shell, network,
-// sub-agents); the example only needs one to demonstrate the mode handoff.
-
-const completeStep = agent.tool({
-    name: "complete_step",
-    description: "Mark a plan step as completed with a one-line summary of what was done.",
-    parameters: {
-        type: "object",
-        properties: {
-            id: { type: "string" },
-            note: { type: "string", description: "Short summary of how the step was completed." },
-        },
-        required: ["id", "note"],
-    },
-    state: planMode,
-    execute: (args, state) => {
-        const { id, note } = JSON.parse(args) as { id: string; note: string };
-        const step = state.plan.steps.find((s: Step) => s.id === id);
-        if (!step) throw new Error(`unknown step: ${id}`);
-        step.done = true;
-        return JSON.stringify({ id, text: step.text, note });
-    },
-});
-
-const planningTools = [setGoal, addStep, updateStep, removeStep];
-const executingTools = [completeStep];
-
-// ── Prompt construction ─────────────────────────────────────────────────────
+// ── Prompts ───────────────────────────────────────────────────────────────────
 
 const renderPlan = (plan: Plan) => {
     const goalLine = `Goal: ${plan.goal || "(unset)"}`;
@@ -159,37 +108,65 @@ const renderPlan = (plan: Plan) => {
     return [goalLine, ...stepLines].join("\n");
 };
 
-// Prompts stay static; the live plan reaches each model via tool results / the plan node.
-
-const planningPrompt = () =>
-    [
-        "You are in PLANNING MODE.",
-        "Work with the user to break the goal down into concrete steps.",
-        "Use the plan tools: set_goal, add_step, update_step, remove_step.",
-        "Do not execute anything yet. Be concise. After tool calls, summarize the change in one line.",
-    ].join("\n");
-
-const executingPrompt = () =>
-    [
-        "You are in EXECUTING MODE.",
-        "Work through every pending step in the plan above, in order. For each one,",
-        "call complete_step with a one-line note about how you handled it.",
-        "Stop when every step is done.",
-    ].join("\n");
+const profiles = {
+    planning: {
+        model: server("anthropic/claude-opus-4-7"),
+        instructions: [
+            "You are in PLANNING MODE.",
+            "Work with the user to break the goal down into concrete steps.",
+            "Use the plan tools: set_goal, add_step, update_step, remove_step.",
+            "Do not execute anything yet. Be concise. After tool calls, summarize the change in one line.",
+        ].join("\n"),
+    },
+    executing: {
+        model: server("anthropic/claude-sonnet-4-6"),
+        instructions: [
+            "You are in EXECUTING MODE.",
+            "Work through every pending step in the plan above, in order. For each one,",
+            "call complete_step with a one-line note about how you handled it.",
+            "Stop when every step is done.",
+        ].join("\n"),
+    },
+} satisfies Record<Mode, { model: ReturnType<typeof server>; instructions: string }>;
 
 // ── Agent ───────────────────────────────────────────────────────────────────
 
-const planner = agent({ id: "planner" })
-    .use(planMode)
-    .use(agent.tools<PlanState>((state) => (state.mode === "planning" ? planningTools : executingTools)))
-    .use(
-        agent.llm<PlanState>((state) => ({
-            generator: agent.serverGenerate({
-                model: state.mode === "planning" ? "anthropic/claude-opus-4-7" : "anthropic/claude-sonnet-4-6",
-            }),
-            instructions: state.mode === "planning" ? planningPrompt() : executingPrompt(),
-        })),
-    );
+const planner = agent<State>({
+    name: "planner",
+    decide: async (req) => {
+        const state: State = {
+            mode: req.state?.mode ?? "planning",
+            plan: req.state?.plan ?? initialPlan(),
+        };
+
+        // A `set_mode` action switches modes; entering execution forks a fresh
+        // thread seeded with only the plan — an empty transcript plus a synthetic
+        // user message, which the executing loop roots with its own system prompt.
+        let trigger: DecisionTrigger = req.trigger;
+        let transcript = req.transcript;
+        if (req.trigger.type === "client.action" && req.trigger.name === "set_mode") {
+            const requested = (req.trigger.args as { mode?: Mode } | undefined)?.mode;
+            if (requested !== "planning" && requested !== "executing") return { actions: [], state };
+            const entering = requested !== state.mode;
+            state.mode = requested;
+            if (entering && requested === "executing") {
+                transcript = [];
+                trigger = { type: "user.message", message: { role: "user", content: renderPlan(state.plan) } };
+            }
+        }
+
+        // Everything else is the SDK's default loop, parameterized by the current
+        // mode. Passing `state` in is what the loop persists back out, so the tools'
+        // edits to `state.plan` (and any mode change) ride the wire.
+        const loop = toolLoop<State>({
+            model: profiles[state.mode].model,
+            instructions: profiles[state.mode].instructions,
+            tools: planTools(state),
+        });
+
+        return loop({ ...req, trigger, transcript, state });
+    },
+});
 
 // ── CLI driver ──────────────────────────────────────────────────────────────
 // Usage:
@@ -217,7 +194,7 @@ const embedded = await SubstructureEmbedded.create({
 });
 
 const scope = await embedded.startTurn({
-    agentId: planner.agentId,
+    agentId: "planner",
     payload,
     identity: { tenant_id: "default", id: "demo" },
     sessionId,

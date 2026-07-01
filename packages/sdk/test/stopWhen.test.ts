@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { llm, serverGenerate, stepCountIs, stopWhen } from "../src/middleware";
+import { toolLoop } from "../src/agent";
+import { serverGenerate, stepCountIs } from "../src/core";
 import type { Message } from "../src/types";
-import { actionsOfType, linearTree, runChain, toolResults, userMessage } from "./harness";
+import { actionsOfType, appendedMessages, linearTree, runAgent, toolResult, userMessage } from "./harness";
 
-const loop = llm({ generator: serverGenerate({ model: "test-model" }) });
+const model = serverGenerate({ model: "test-model" });
 
 const assistant: Message = {
     role: "assistant",
@@ -12,48 +13,30 @@ const assistant: Message = {
     tool_calls: [{ id: "call_a", type: "function", function: { name: "getWeather", arguments: "{}" } }],
 };
 
-const oneRound = linearTree({ role: "user", content: "go" }, assistant, {
-    role: "tool",
-    content: "RA",
-    tool_call_id: "call_a",
-    name: "getWeather",
-});
+// The tool result is not in the tree yet — firing the back edge appends it and completes the round.
+const pending = linearTree({ role: "user", content: "go" }, assistant);
 
-const backEdge = () => toolResults();
+const backEdge = () => toolResult("call_a", "getWeather", "RA");
 
 describe("stopWhen", () => {
     it("lets the loop continue when the condition is false", async () => {
-        const result = await runChain([stopWhen(stepCountIs(5)), loop], {
-            trigger: backEdge(),
-            messageTree: oneRound,
-        });
+        const loop = toolLoop({ model, stopWhen: stepCountIs(5) });
+        const result = await runAgent(loop, { trigger: backEdge(), messageTree: pending });
         expect(actionsOfType(result, "call.llm")).toHaveLength(1);
         expect(actionsOfType(result, "done")).toHaveLength(0);
     });
 
-    it("replaces the back-edge call.llm with done when the condition holds", async () => {
-        const result = await runChain([stopWhen(stepCountIs(1)), loop], {
-            trigger: backEdge(),
-            messageTree: oneRound,
-        });
+    it("replaces the back-edge call.llm with done while keeping the result in the transcript when the condition holds", async () => {
+        const loop = toolLoop({ model, stopWhen: stepCountIs(1) });
+        const result = await runAgent(loop, { trigger: backEdge(), messageTree: pending });
+        expect(appendedMessages(result)).toMatchObject([{ role: "tool", tool_call_id: "call_a" }]);
         expect(actionsOfType(result, "call.llm")).toHaveLength(0);
         expect(actionsOfType(result, "done")[0]?.data).toBe("round 1");
     });
 
-    it("chains as OR with a single done when multiple conditions hold", async () => {
-        const result = await runChain([stopWhen(stepCountIs(1)), stopWhen(stepCountIs(1)), loop], {
-            trigger: backEdge(),
-            messageTree: oneRound,
-        });
-        expect(actionsOfType(result, "done")).toHaveLength(1);
-        expect(actionsOfType(result, "call.llm")).toHaveLength(0);
-    });
-
-    it("ignores triggers other than tool.results", async () => {
-        const result = await runChain([stopWhen(stepCountIs(1)), loop], {
-            trigger: userMessage("hi"),
-            messageTree: oneRound,
-        });
+    it("ignores triggers other than tool.result", async () => {
+        const loop = toolLoop({ model, stopWhen: stepCountIs(1) });
+        const result = await runAgent(loop, { trigger: userMessage("hi"), messageTree: pending });
         expect(actionsOfType(result, "call.llm")).toHaveLength(1);
         expect(actionsOfType(result, "done")).toHaveLength(0);
     });

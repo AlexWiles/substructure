@@ -41,6 +41,7 @@ pub async fn submit(
             session_id: req.session_id,
             caller,
             decision_id: req.decision_id,
+            transcript: req.transcript,
             actions: req.actions,
             state: req.state,
             span,

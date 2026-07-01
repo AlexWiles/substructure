@@ -360,6 +360,7 @@ impl Runtime {
                 caller: input.caller,
                 command: CommandPayload::SubmitWorkerDecision {
                     decision_id: input.decision_id,
+                    transcript: input.transcript,
                     actions: input.actions,
                     state: input.state,
                 },

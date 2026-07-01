@@ -177,6 +177,7 @@ impl EmbeddedRuntime {
                                         tenant_id: decision.tenant_id.clone(),
                                     },
                                     decision_id: decision.decision_id.clone(),
+                                    transcript: submit.transcript,
                                     actions: submit.actions,
                                     state: submit
                                         .state
@@ -424,6 +425,8 @@ impl EmbeddedRuntime {
 /// Response format expected from JS worker callbacks.
 #[derive(serde::Deserialize)]
 struct WorkerResponse {
+    #[serde(default)]
+    transcript: Vec<substructure_core::session::message::Message>,
     actions: Vec<substructure_core::session::decision::WorkerAction>,
     #[serde(default)]
     state: Option<String>,

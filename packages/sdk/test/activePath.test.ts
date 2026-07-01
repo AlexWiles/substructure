@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { activePath, llm, serverGenerate } from "../src/middleware";
+import { toolLoop } from "../src/agent";
+import { activePath, serverGenerate } from "../src/core";
 import type { Message, MessageTree, Node } from "../src/types";
-import { callLlm, runChain, userMessage } from "./harness";
+import { appendedMessages, callLlm, runAgent, userMessage } from "./harness";
 
 function node(id: string, parentId: string | undefined, content: string, role: Message["role"] = "user"): Node {
     return { kind: "message", parent_id: parentId, message: { id, role, content } };
@@ -41,22 +42,31 @@ describe("activePath", () => {
     });
 });
 
-describe("llm prompt", () => {
-    const loop = llm({ generator: serverGenerate({ model: "test-model" }), instructions: "SYS" });
-    const promptOf = (result: Awaited<ReturnType<typeof runChain>>) =>
+describe("agent prompt", () => {
+    const loop = toolLoop({ model: serverGenerate({ model: "test-model" }), instructions: "SYS" });
+    const promptOf = (result: Awaited<ReturnType<typeof runAgent>>) =>
         (callLlm(result)?.request.messages ?? []).map((m) => m.content);
 
-    it("seeds [system, user] on the first turn (empty tree)", async () => {
-        const result = await runChain([loop], { trigger: userMessage("hi") });
+    it("seeds [system, user] on a cold start (empty tree)", async () => {
+        const result = await runAgent(loop, { trigger: userMessage("hi") });
+        expect(appendedMessages(result).map((m) => m.role)).toEqual(["system", "user"]);
+        expect(appendedMessages(result).map((m) => m.content)).toEqual(["SYS", "hi"]);
         expect(promptOf(result)).toEqual(["SYS", "hi"]);
     });
 
-    it("appends the new user turn after the system and the active path", async () => {
+    it("appends the new user turn under the head, after the active path", async () => {
         const tree: MessageTree = {
-            nodes: [node("u1", undefined, "U1"), node("a1", "u1", "A1", "assistant")],
+            nodes: [
+                node("s1", undefined, "SYS", "system"),
+                node("u1", "s1", "U1"),
+                node("a1", "u1", "A1", "assistant"),
+            ],
             head_id: "a1",
         };
-        const result = await runChain([loop], { trigger: userMessage("U2"), messageTree: tree });
+        const result = await runAgent(loop, { trigger: userMessage("U2"), messageTree: tree });
+        expect(appendedMessages(result).map((m) => m.content)).toEqual(["U2"]);
+        // The new turn is the tail of the transcript, continuing the active path.
+        expect(result.transcript.map((m) => m.content)).toEqual(["SYS", "U1", "A1", "U2"]);
         expect(promptOf(result)).toEqual(["SYS", "U1", "A1", "U2"]);
     });
 
@@ -65,14 +75,16 @@ describe("llm prompt", () => {
             nodes: [node("s1", undefined, "SYS-IN-TREE", "system"), node("u1", "s1", "U1")],
             head_id: "u1",
         };
-        const result = await runChain([loop], { trigger: userMessage("U2"), messageTree: tree });
+        const result = await runAgent(loop, { trigger: userMessage("U2"), messageTree: tree });
+        expect(appendedMessages(result).map((m) => m.role)).toEqual(["user"]);
         expect(promptOf(result)).toEqual(["SYS-IN-TREE", "U1", "U2"]);
     });
 
     it("omits the system message when no instructions are given", async () => {
-        const bare = llm({ generator: serverGenerate({ model: "test-model" }) });
+        const bare = toolLoop({ model: serverGenerate({ model: "test-model" }) });
         const tree: MessageTree = { nodes: [node("u1", undefined, "U1")], head_id: "u1" };
-        const result = await runChain([bare], { trigger: userMessage("U2"), messageTree: tree });
+        const result = await runAgent(bare, { trigger: userMessage("U2"), messageTree: tree });
+        expect(appendedMessages(result).map((m) => m.content)).toEqual(["U2"]);
         expect(promptOf(result)).toEqual(["U1", "U2"]);
     });
 });

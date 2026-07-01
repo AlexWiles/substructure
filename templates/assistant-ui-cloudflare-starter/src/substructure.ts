@@ -2,16 +2,15 @@
 // engine calls (server-to-server), and the browser-token minter. Never imported
 // into the client bundle.
 
-import Substructure from "@substructure.ai/sdk";
+import Substructure, { agent, server, tool, toolLoop, worker } from "@substructure.ai/sdk";
 
 export const AGENT_ID = "assistant";
 
 const sub = new Substructure();
-const { agent } = sub;
 
 // A server-side tool: the engine runs `execute` and feeds the result back to
 // the model.
-const getCurrentTime = agent.tool({
+const getCurrentTime = tool({
     name: "get_current_time",
     description: "Get the current date and time.",
     parameters: { type: "object", properties: {} },
@@ -24,7 +23,7 @@ const getCurrentTime = agent.tool({
 // needed. The browser executor lives in the chat client (src/routes/index.tsx).
 // The engine ignores AG-UI's client-declared `tools`, so the tool is declared
 // here for the model to see.
-const browserAlert = agent.tool({
+const browserAlert = tool({
     name: "browser_alert",
     description: "Display a native browser alert dialog to the user. Runs in the user's browser.",
     parameters: {
@@ -37,21 +36,19 @@ const browserAlert = agent.tool({
     handler: "client",
 });
 
-const assistant = agent({ id: AGENT_ID })
-    .use(agent.tools([getCurrentTime, browserAlert]))
-    .use(
-        agent.llm({
-            generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }),
-            stream: true,
-            instructions:
-                "You are a concise, friendly assistant. Use get_current_time when asked about the " +
-                "current date or time, and browser_alert to pop a native alert in the user's browser.",
-        }),
-    );
+const assistant = agent({
+    name: AGENT_ID,
+    decide: toolLoop({
+        model: server("anthropic/claude-sonnet-4-6"),
+        stream: true,
+        instructions:
+            "You are a concise, friendly assistant. Use get_current_time when asked about the " +
+            "current date or time, and browser_alert to pop a native alert in the user's browser.",
+        tools: [getCurrentTime, browserAlert],
+    }),
+});
 
-const worker = sub.worker({ agents: [assistant] });
-
-export const substructureHandler = worker.fetchHandler({ signingSecret: process.env.SIGNING_SECRET });
+export const substructureHandler = worker([assistant]).fetch({ signingSecret: process.env.SIGNING_SECRET });
 
 // Mint a short-lived, identity-locked client token for the browser. In a real
 // app, authenticate the user first and bind `identity.id` to them.

@@ -15,17 +15,16 @@
 
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
-import Substructure from "@substructure.ai/sdk";
+import Substructure, { agent, server, tool, toolLoop, worker } from "@substructure.ai/sdk";
 import { Hono } from "hono";
 
 const sub = new Substructure();
-const { agent } = sub;
 
 // `handler: "client"` tells the engine this tool is completed by the
 // browser. The worker is never asked to execute it; the SDK's
 // `submitToolCallResult` call from the frontend client delivers the
 // result. `execute` is required by the type but never runs.
-const getUserLocation = agent.tool({
+const getUserLocation = tool({
     name: "get_user_location",
     description:
         "Get the user's current latitude and longitude from their browser via geolocation. Requires user permission.",
@@ -34,7 +33,7 @@ const getUserLocation = agent.tool({
     execute: (_args, ctx) => ctx.defer(),
 });
 
-const setTheme = agent.tool({
+const setTheme = tool({
     name: "set_theme",
     description: "Set the page's background and accent colors. Use valid CSS colors (hex, rgb, hsl, or named).",
     parameters: {
@@ -49,22 +48,21 @@ const setTheme = agent.tool({
     execute: (_args, ctx) => ctx.defer(),
 });
 
-const browserAgent = agent({ id: "browser-assistant" })
-    .use(agent.tools([getUserLocation, setTheme]))
-    .use(
-        agent.llm({
-            generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }),
-            stream: true,
-            instructions:
-                "You are a friendly assistant embedded in a web page. Two tools run in the user's browser: " +
-                "`get_user_location` reads the device's GPS (the user is prompted to allow it), and `set_theme` " +
-                "repaints the page. Use them when the user asks about where they are or how the page looks. " +
-                "Keep replies short and conversational.",
-        }),
-    );
+const browserAgent = agent({
+    name: "browser-assistant",
+    decide: toolLoop({
+        model: server("anthropic/claude-sonnet-4-6"),
+        stream: true,
+        instructions:
+            "You are a friendly assistant embedded in a web page. Two tools run in the user's browser: " +
+            "`get_user_location` reads the device's GPS (the user is prompted to allow it), and `set_theme` " +
+            "repaints the page. Use them when the user asks about where they are or how the page looks. " +
+            "Keep replies short and conversational.",
+        tools: [getUserLocation, setTheme],
+    }),
+});
 
-const worker = sub.worker({ agents: [browserAgent] });
-const agentHandler = worker.fetchHandler({ signingSecret: process.env.SIGNING_SECRET });
+const agentHandler = worker([browserAgent]).fetch({ signingSecret: process.env.SIGNING_SECRET });
 
 const substructureUrl = process.env.SUBSTRUCTURE_URL ?? "http://localhost:9000";
 const backend = sub.backend.client({

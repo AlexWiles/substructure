@@ -3,9 +3,9 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 
-import type { LlmGenerate, LlmGenerator } from "../middleware";
-import { contentText } from "../types";
+import type { LlmGenerate, LlmGenerator } from "../core";
 import type { LlmTool, Message, StreamPart, ToolCall } from "../types";
+import { contentText } from "../types";
 
 // `MessageCreateParams` minus what the loop supplies: `messages`/`system` and
 // `tools` come from the request; `stream` is set on `llm`.

@@ -7,15 +7,12 @@
 // This is the pattern for tools that kick off real async work (webhooks,
 // long jobs, human approvals) where the result arrives out-of-band.
 
-import Substructure from "@substructure.ai/sdk";
+import { agent, server, tool, toolLoop } from "@substructure.ai/sdk";
 import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
-
-const sub = new Substructure();
-const { agent } = sub;
 
 let embedded: SubstructureEmbedded;
 
-const wait = agent.tool({
+const wait = tool({
     name: "wait",
     description: "Wait for the given number of seconds, then return.",
     parameters: {
@@ -42,14 +39,14 @@ const wait = agent.tool({
     },
 });
 
-const waitAgent = agent({ id: "waiter" })
-    .use(agent.tools([wait]))
-    .use(
-        agent.llm({
-            generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }),
-            instructions: "You wait for the requested number of seconds, then tell the user you're done.",
-        }),
-    );
+const waitAgent = agent({
+    name: "waiter",
+    decide: toolLoop({
+        model: server("anthropic/claude-sonnet-4-6"),
+        instructions: "You wait for the requested number of seconds, then tell the user you're done.",
+        tools: [wait],
+    }),
+});
 
 embedded = await SubstructureEmbedded.create({
     agents: [waitAgent],
@@ -57,7 +54,7 @@ embedded = await SubstructureEmbedded.create({
 });
 
 const scope = await embedded.startTurn({
-    agentId: waitAgent.agentId,
+    agentId: "waiter",
     payload: { type: "message", message: { role: "user", content: "Wait 3 seconds." } },
     identity: { tenant_id: "default", id: "demo" },
 });

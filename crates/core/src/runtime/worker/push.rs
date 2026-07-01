@@ -18,6 +18,7 @@ pub trait PushTransport: Send + Sync {
 }
 
 pub struct PushResponse {
+    pub transcript: Vec<crate::runtime::session::message::Message>,
     pub actions: Vec<crate::runtime::session::decision::WorkerAction>,
     pub state: WorkerState,
 }

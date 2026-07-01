@@ -101,16 +101,17 @@ impl EffectTracking {
 pub struct LlmCallState {
     pub call_id: String,
     pub tracking: EffectTracking,
-    /// The prompt is rebuilt from the tree here; the call holds no copy of the messages.
+    /// The verbatim prompt the worker sent, stored for retries. Disposable
+    /// w.r.t. the tree — it is never reconstructed from the conversation.
     #[serde(default)]
-    pub prompt_leaf: Option<String>,
+    pub prompt: Vec<Message>,
     pub spec: LlmCallSpec,
     pub stream: bool,
     #[serde(default)]
     pub handler: LlmHandler,
 }
 
-/// An `LlmRequest` without its message list; messages are rebuilt from the tree.
+/// An `LlmRequest` without its message list; the prompt is stored alongside.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmCallSpec {
     pub model: String,
@@ -189,10 +190,22 @@ pub struct WorkerDecisionState {
     pub source_event_sequence: u64,
 }
 
+/// Counts of in-flight effects, surfaced on every worker decision so the worker
+/// can branch on what's still outstanding (e.g. prompt once no tool/sub-agent
+/// result is pending) without tracking the round itself.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PendingEffects {
+    pub tool_calls: u32,
+    pub sub_agents: u32,
+    pub llm_calls: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DerivedState {
     pub status: SessionStatus,
     pub wake_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub pending_effects: PendingEffects,
     pub owner: Option<SessionOwner>,
     pub agent_id: Option<String>,
     #[serde(default)]
@@ -351,11 +364,11 @@ impl SessionState {
             }
             EventPayload::LlmCallRequested(payload) => {
                 self.status = SessionStatus::Idle;
-                let prompt_leaf = payload.request.messages.last().map(|m| m.id.clone());
+                let prompt = payload.request.messages.clone();
                 let spec = LlmCallSpec::from(&payload.request);
                 if let Some(existing) = self.llm_calls.get_mut(&payload.call_id) {
                     existing.tracking.reset_pending(now);
-                    existing.prompt_leaf = prompt_leaf;
+                    existing.prompt = prompt;
                     existing.spec = spec;
                     existing.stream = payload.stream;
                     existing.handler = payload.handler.clone();
@@ -365,7 +378,7 @@ impl SessionState {
                         LlmCallState {
                             call_id: payload.call_id.clone(),
                             tracking: EffectTracking::new(payload.retry.clone(), now),
-                            prompt_leaf,
+                            prompt,
                             spec,
                             stream: payload.stream,
                             handler: payload.handler.clone(),
@@ -669,10 +682,37 @@ impl SessionState {
         }
     }
 
+    /// Effects still in flight (Pending or RetryScheduled) — results the worker
+    /// is still waiting on. Each completion fires its own decision right after
+    /// its completion event, so a not-yet-folded sibling is still counted here
+    /// (it hasn't completed at that decision's snapshot).
+    pub fn pending_effects(&self) -> PendingEffects {
+        let in_flight =
+            |s: &EffectStatus| matches!(s, EffectStatus::Pending | EffectStatus::RetryScheduled);
+        PendingEffects {
+            tool_calls: self
+                .tool_calls
+                .values()
+                .filter(|c| in_flight(&c.tracking.status))
+                .count() as u32,
+            sub_agents: self
+                .sub_agent_calls
+                .values()
+                .filter(|c| in_flight(&c.tracking.status))
+                .count() as u32,
+            llm_calls: self
+                .llm_calls
+                .values()
+                .filter(|c| in_flight(&c.tracking.status))
+                .count() as u32,
+        }
+    }
+
     pub fn derived_state(&self) -> DerivedState {
         DerivedState {
             status: self.status.clone(),
             wake_at: self.wake_at(),
+            pending_effects: self.pending_effects(),
             owner: self.owner.clone(),
             agent_id: self.agent_id.clone(),
             worker_state: self.worker_state.clone(),

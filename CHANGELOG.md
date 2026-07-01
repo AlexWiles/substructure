@@ -14,28 +14,74 @@ same version.
 
 - `assistant-ui-cloudflare-starter` template: an assistant-ui chat on a
   Cloudflare Worker that streams from the AG-UI endpoint.
-- Conversation history is an append-only message tree owned by the engine and
-  shipped on every worker decision (`message_tree` on the request), no longer
-  worker state. Sending a fresh-id message list through `call.llm` *branches* the
-  conversation — the basis for edits, regenerations, and plan-mode's handoff.
+- Conversation history is a message tree shipped on every worker decision
+  (`message_tree` on the request), no longer worker state. The worker returns a
+  flat `transcript` (the conversation as it should now be) and the engine
+  reconciles it into the tree: known message ids continue the branch, id-less or
+  unknown messages are appended (forking automatically). Branching is just a
+  transcript that diverges from a known prefix — the basis for edits,
+  regenerations, modal plan/execute, and prompt compaction, each a branch with
+  its own system root.
 
 ### Changed
 
-- The LLM loop is now composed from middleware: `agent.llm({ generator,
-  instructions })` builds the prompt from the shipped tree and drives the loop,
-  `agent.stopWhen(cond)` halts it (e.g. `agent.stepCountIs(20)`). Removes
-  `messageHistory`/`messageHistoryCurrentTurn`; `activePath(tree)` is exported
-  for tools and custom middleware.
-- Tool/sub-agent continuation is now the worker's decision. Each effect fires a
-  `tool.results` trigger as it completes; the default loop continues once every
-  tool call on the latest turn is answered in the tree (`toolRoundComplete`,
-  `toolResultNode` helpers). Replaces the engine's batched effect delivery and
-  turn-completion tracking.
-- The AG-UI `/run` endpoint is now a passthrough: it forwards the client's full
-  transcript and the engine classifies it — a transcript ending in a tool message
-  completes the matching client tool calls, everything else is a user turn.
-- `agent.tool` no longer requires `execute` for client tools
-  (`handler: "client"`); worker tools still require it.
+- **Breaking (SDK):** rebuilt around an agent that is a decision function; the
+  middleware/builder API is gone. An agent is `agent({ name, decide })`, where
+  `decide(req: DecisionRequest) => Decision` is either `toolLoop({ model,
+  instructions, tools, subAgents, stopWhen, stream, retry })` — the default
+  tool/sub-agent loop — or your own function, built from pure action builders
+  (`callLlm`, `callTool`, `toolResult`, `toolError`, `done`, `spawn`,
+  `sendMessage`). A `DecisionRequest` is the engine's wire envelope with
+  `worker_state` decoded into `state` (read `req.trigger`/`req.transcript`/
+  `req.pending`/`req.session_id`/… directly); a `Decision` is the result
+  `{ actions?, transcript?, state? }`. `toolLoop` is the loop implementation, so a
+  custom `decide` can build one and override a single case (e.g. run
+  `tool.execute` against its own state); it echoes the request's `state`, so a
+  wrapping agent threads its own through with `loop({ ...req, state })`. Deploy
+  named agents by value: `worker([agent]).fetch({ signingSecret })` /
+  `serve([agent], opts)` / `SubstructureEmbedded.create({ agents: [agent] })`;
+  sub-agents are referenced by value (`subAgents: [child]`). Models are
+  `server("provider/model")` or an adapter generator (`anthropicGenerate`,
+  `aiGenerate`, `openaiGenerate`). Exports `activePath(tree)`/`pathTo(tree, leaf)`;
+  removes `messageHistory`/`messageHistoryCurrentTurn`.
+- **Breaking (SDK):** `tool({...})` executes are pure `(args, ctx) => result` —
+  there is no SDK-held tool state. State lives in your own store reached through
+  `ctx` (e.g. a database keyed by `ctx.sessionId`), or on the wire as
+  `worker_state` in a raw handler that owns `tool.execute`.
+- Effect completion now carries content to the worker, which folds it into the
+  transcript. Each LLM/tool/sub-agent completion fires a content-bearing trigger
+  (`llm.response`, `tool.result`) as it lands, so the tree fills incrementally.
+  Every decision also carries `pending` (counts of in-flight tool/sub-agent/LLM
+  effects), so the default loop prompts the LLM once no result is pending —
+  without tracking the round itself. Removes the `append` action and
+  `toolRoundComplete`; `toolResultNode` still resolves a landed result.
+- `call.llm` keeps its full message list (the prompt), now read-only w.r.t. the
+  tree — a per-call prompt the worker can shape (compaction, injected context)
+  without changing the record.
+- A worker's effect actions default their engine-machinery fields, so a
+  hand-written (no-SDK) worker can omit them: `call.llm`, `call.tool`, and
+  `spawn.sub_agent` default `retry` to no retries when absent (retries are
+  opt-in, never a surprise), and `call.llm` defaults `stream` to false and
+  `handler` to `worker` — the worker makes the provider call and returns
+  `return.llm.result`; pass `handler: "server"` to have the engine's
+  configured provider make the call instead.
+- The AG-UI `/run` endpoint forwards the client's full transcript; the engine
+  classifies it (a tool-message tail completes the matching client tool calls,
+  everything else is a `user.transcript` whose returned transcript the engine
+  reconciles into the tree).
+- `tool` no longer requires `execute` for client tools (`handler: "client"`);
+  worker tools still require it.
+
+### Removed
+
+- **Breaking (SDK):** the middleware system and everything built on it —
+  `HandlerBuilder`/`.use()`, `middleware()`, `stateSlice`/`jsonState`,
+  `action()`/`actions()`, `logging()`, and the `llm`/`tools`/`subAgents`/`stopWhen`
+  composable middleware — plus the `Substructure.agent` factory. The default
+  export `Substructure` now exposes only `backend`/`frontend` clients. The AI and
+  OpenAI adapters' `ToolLoopAgent`/`OpenAIAgent` classes are replaced by
+  `aiSdkAgent(settings)` / `openaiAgent(input)`, which return a `Handler` directly
+  (both now take an `id`).
 
 ## [0.1.19] - 2026-06-12
 

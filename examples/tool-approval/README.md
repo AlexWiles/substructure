@@ -6,42 +6,48 @@ whole exchange looks like a normal tool call that just took a while.
 
 ## How it works
 
-State adds two fields:
+State rides the wire as `worker_state` and carries two fields:
 
 ```ts
-type ApprovalState = {
+type State = {
     pendingCommand: { toolCallId: string; cmd: string } | null;
     approvalDecision: { approved: boolean; reason?: string } | null;
 };
 ```
 
-The `approvalGate` middleware sits *outside* the `agent.tools`
-middleware so it can see the `call.tool` actions tools emits.
+The default `toolLoop` drives the whole conversation — prompting,
+running the tool, and continuing after the result. The agent is a custom
+`decide` function that delegates to that loop and overrides only the two gate
+triggers: parking a requested command, and resuming it on approval. The
+approval decision itself is read inside the tool's `execute`.
 
-**On the way out (any trigger):** if a `call.tool` action targets
-`run_command`, the middleware:
-1. Parks the request in `state.pendingCommand`.
-2. Removes the `call.tool` from the action list.
-3. Drops any pending `call.llm` so the turn pauses cleanly.
-4. Appends a `done` action with the pending command in its data.
+**The tool** (`run_command`, built per decision, closing over `state`):
+its `execute` reads `state.approvalDecision`. On a denial it returns
+`{ exit_code: 1, stderr: "User denied this command. Reason: ..." }` as
+its result; otherwise it runs the command via `spawnSync`. Because the
+tool closes over `state`, the loop runs it normally on `tool.execute` —
+the host shell actually executes here, so approve carefully.
 
-The turn ends. The session is now waiting for a decision.
+**On `llm.response`:** if the model called `run_command`, the `decide`
+records the assistant turn, parks `{ toolCallId, cmd }` in
+`state.pendingCommand`, and ends the turn with `done({ pendingCommand })`
+instead of letting the loop run the call. The session is now waiting for
+a decision. (Any other response falls through to `loop`, which finishes
+it.)
 
-**On a `client.action approve_command` trigger:** the middleware:
+**On `client.action approve_command`:** the `decide`:
 1. Writes `{ approved, reason? }` to `state.approvalDecision`.
 2. Clears `state.pendingCommand`.
-3. Re-emits the original `call.tool` action — same `tool_call_id`,
-   same arguments.
+3. Re-emits the parked call as `callTool({ toolCallId, name: "run_command",
+   arguments })` — same `tool_call_id`, same arguments.
 
-The runtime dispatches the re-emitted call as a normal `tool.execute`.
-`run_command`'s body reads `state.approvalDecision`: on approve it
-runs the command; on deny it returns `{ exit_code: 1, stderr: "User
-denied this command. Reason: ..." }`. Either way the result rides
-back through tool history → triggers `call.llm` → the LLM sees a
-matched tool_call_id pair and continues.
+**Everything else** — prompting, actually running the approved command
+(the tool's `execute`), and continuing after the result — is
+`loop({ ...req, state })`.
 
 Because the same `tool_call_id` is reused on the resume, the LLM
-never sees the pause. The conversation transcript stays well-formed.
+sees a single matched pair and never the pause. To it, the gate was
+just a slow tool call, and the conversation transcript stays well-formed.
 
 ## Run
 
@@ -68,16 +74,16 @@ result, the LLM reads it, and adapts on the next call.
 
 ## Adapt
 
-- **Gate more tools**: change the filter in `approvalGate` to match
-  whichever tool names need approval. Generalize to a list or a
-  predicate.
+- **Gate more tools**: broaden the check in the `llm.response` case
+  (it currently looks for a `run_command` tool call) to match whichever
+  tool names need approval. Generalize to a list or a predicate.
 - **Different approval shapes**: pass extra fields in
   `approve_command.args` (timeout overrides, modified arguments, an
   approver id) and propagate them through `state.approvalDecision`.
-- **Auto-approve trusted commands**: in `approvalGate`, check the
-  command against an allowlist before parking; emit it directly if
-  it matches.
+- **Auto-approve trusted commands**: in the `llm.response` case, check
+  the command against an allowlist before parking; re-emit the
+  `callTool` directly if it matches.
 - **Multiple pending approvals**: replace `pendingCommand` with a
-  `Record<toolCallId, ...>` and match on the action id when the
+  `Record<toolCallId, ...>` and match on the action when the
   client responds. Useful if multiple sensitive tools can fire in
   parallel.

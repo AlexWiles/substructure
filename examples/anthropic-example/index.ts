@@ -1,10 +1,8 @@
-import Substructure from "@substructure.ai/sdk";
+import { agent, tool, toolLoop, worker } from "@substructure.ai/sdk";
 import { anthropicGenerate } from "@substructure.ai/sdk/adapters/anthropic";
-import { serve } from "@hono/node-server";
+import { serve as honoServe } from "@hono/node-server";
 
-const sub = new Substructure();
-
-const getWeather = sub.agent.tool({
+const getWeather = tool({
     name: "getWeather",
     description: "Get the current weather for a city.",
     parameters: {
@@ -18,21 +16,18 @@ const getWeather = sub.agent.tool({
     },
 });
 
-const chatAgent = sub
-    .agent({ id: "anthropic-agent" })
-    .use(sub.agent.tools([getWeather]))
-    .use(
-        sub.agent.llm({
-            generator: anthropicGenerate({ model: "claude-haiku-4-5", max_tokens: 1024 }),
-            instructions: "You are a concise assistant.",
-        }),
-    );
+const chatAgent = agent({
+    name: "anthropic-agent",
+    decide: toolLoop({
+        model: anthropicGenerate({ model: "claude-haiku-4-5", max_tokens: 1024 }),
+        instructions: "You are a concise assistant.",
+        tools: [getWeather],
+    }),
+});
 
-const worker = sub.worker({ agents: [chatAgent] });
-
-const handler = worker.fetchHandler({ signingSecret: process.env.SIGNING_SECRET });
+const handler = worker([chatAgent]).fetch({ signingSecret: process.env.SIGNING_SECRET });
 
 const port = Number(process.env.PORT ?? 3030);
-serve({ fetch: handler, port });
+honoServe({ fetch: handler, port });
 
 console.log(`anthropic-example worker listening on http://localhost:${port}`);

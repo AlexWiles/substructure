@@ -222,15 +222,13 @@ export interface ClientAction {
     args?: unknown;
 }
 
-/** How a submission attaches: `continue` extends the active path; `replace` is the full path, used as-is. */
-export type Anchor = "continue" | "replace";
-
 export type ClientPayload =
     | { type: "message"; message: Message; stream?: boolean }
     | ({ type: "action" } & ClientAction);
 
 export type DecisionTrigger =
-    | { type: "user.message"; messages: Message[]; anchor: Anchor; stream?: boolean }
+    | { type: "user.message"; message: Message }
+    | { type: "user.transcript"; messages: Message[] }
     | ({ type: "client.action" } & ClientAction)
     | {
           type: "llm.response";
@@ -239,8 +237,6 @@ export type DecisionTrigger =
           truncated: boolean;
           usage?: Record<string, unknown>;
           cost?: Decimal;
-          id: string;
-          parent_id?: string;
       }
     | { type: "llm.error"; call_id: string; error: string; code?: string; detail?: unknown }
     | { type: "llm.request"; call_id: string; request: LlmRequest; stream: boolean; attempt: number }
@@ -252,24 +248,23 @@ export type DecisionTrigger =
           attempt: number;
           deadline?: DateTime;
       }
-    | { type: "tool.results"; completed: CompletedToolCall[] }
+    | {
+          type: "tool.result";
+          tool_call_id: string;
+          name: string;
+          result: string;
+          is_error?: boolean;
+      }
     | { type: "interrupt.resumed"; interrupt_id: string; payload?: unknown }
     | { type: "stall" };
-
-/** A completed tool/sub-agent call; the result content is in the tree — look it up via `toolResultNode`. */
-export interface CompletedToolCall {
-    tool_call_id: string;
-    name: string;
-    is_error?: boolean;
-}
 
 export type WorkerAction =
     | {
           type: "call.llm";
           request: LlmRequest;
-          stream: boolean;
-          retry: RetryPolicy;
-          handler: LlmHandler;
+          stream?: boolean;
+          retry?: RetryPolicy;
+          handler?: LlmHandler;
       }
     | {
           type: "call.tool";
@@ -277,7 +272,7 @@ export type WorkerAction =
           name: string;
           arguments: string;
           handler: ToolHandler;
-          retry: RetryPolicy;
+          retry?: RetryPolicy;
       }
     | { type: "return.tool.result"; tool_call_id: string; result: string; attempt: number }
     | {
@@ -297,7 +292,7 @@ export type WorkerAction =
           detail?: unknown;
           attempt: number;
       }
-    | { type: "spawn.sub_agent"; session_id: Uuid; agent_id: string; tool_call_id: string; retry: RetryPolicy }
+    | { type: "spawn.sub_agent"; session_id: Uuid; agent_id: string; tool_call_id: string; retry?: RetryPolicy }
     | { type: "send.message"; session_id: Uuid; message: Message }
     | { type: "interrupt"; interrupt_id?: string; reason: string; payload?: unknown }
     | { type: "done"; data: unknown };
@@ -787,6 +782,13 @@ export interface WorkerAuthOptions {
     bearerToken: string;
 }
 
+/** Counts of in-flight effects, surfaced on every decision request. */
+export interface PendingEffects {
+    tool_calls: number;
+    sub_agents: number;
+    llm_calls: number;
+}
+
 export interface WorkerDecisionRequestWire {
     session_id: Uuid;
     tenant_id: string;
@@ -795,6 +797,11 @@ export interface WorkerDecisionRequestWire {
     identity: WorkerIdentity;
     trigger: DecisionTrigger;
     worker_state: string;
+    /** In-flight effect counts; branch on these instead of tracking rounds. */
+    pending?: PendingEffects;
+    /** The active conversation as a flat list; a worker only needs this. */
+    transcript?: Message[];
+    /** The full tree, for clients that need branch structure. */
     message_tree?: MessageTree;
     ancestry?: Uuid[];
     span: SpanContext;
@@ -807,6 +814,9 @@ export interface SubmitRequest {
     session_id: Uuid;
     decision_id: string;
     actions: WorkerAction[];
+    /** Flat conversation the engine reconciles into the message tree: known ids
+     *  continue, id-less/unknown messages are appended (forking automatically). */
+    transcript: Message[];
     /** Base64-encoded opaque worker state */
     state: string;
     span?: SpanContext;

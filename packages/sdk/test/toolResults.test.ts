@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { llm, serverGenerate, toolResultNode } from "../src/middleware";
+import { toolLoop } from "../src/agent";
+import { serverGenerate, toolResultNode } from "../src/core";
 import type { Message } from "../src/types";
-import { callLlm, linearTree, runChain, toolResults } from "./harness";
+import { actionsOfType, appendedMessages, callLlm, linearTree, runAgent, toolResult } from "./harness";
 
-const loop = llm({ generator: serverGenerate({ model: "test-model" }), instructions: "SYS" });
+const loop = toolLoop({ model: serverGenerate({ model: "test-model" }), instructions: "SYS" });
 
 const assistant: Message = {
     role: "assistant",
@@ -15,16 +16,25 @@ const assistant: Message = {
     ],
 };
 
-describe("tool.results", () => {
-    it("continues once every tool call is answered", async () => {
-        const messageTree = linearTree(
-            { role: "user", content: "go" },
-            assistant,
-            { role: "tool", content: "RA", tool_call_id: "call_a", name: "getWeather" },
+describe("tool.result", () => {
+    it("records the result and continues when nothing is left pending", async () => {
+        // call_a already landed; call_b just completed and no effect is pending.
+        const messageTree = linearTree({ role: "user", content: "go" }, assistant, {
+            role: "tool",
+            content: "RA",
+            tool_call_id: "call_a",
+            name: "getWeather",
+        });
+        const result = await runAgent(loop, {
+            trigger: toolResult("call_b", "researcher", "RB"),
+            messageTree,
+            pending: { tool_calls: 0, sub_agents: 0, llm_calls: 0 },
+        });
+
+        expect(appendedMessages(result)).toMatchObject([
             { role: "tool", content: "RB", tool_call_id: "call_b", name: "researcher" },
-        );
-        const result = await runChain([loop], { trigger: toolResults(), messageTree });
-        expect(result.actions.filter((a) => a.type === "call.llm")).toHaveLength(1);
+        ]);
+        expect(actionsOfType(result, "call.llm")).toHaveLength(1);
 
         const toolMsgs = (callLlm(result)?.request.messages ?? []).filter((m) => m.role === "tool");
         expect(toolMsgs).toMatchObject([
@@ -33,24 +43,20 @@ describe("tool.results", () => {
         ]);
     });
 
-    it("does not continue while a tool call is still unanswered", async () => {
-        const messageTree = linearTree({ role: "user", content: "go" }, assistant, {
-            role: "tool",
-            content: "RA",
-            tool_call_id: "call_a",
-            name: "getWeather",
-        });
-        const result = await runChain([loop], {
-            trigger: toolResults([{ tool_call_id: "call_a", name: "getWeather" }]),
+    it("records but does not continue while another result is still pending", async () => {
+        // call_a lands first; call_b (a sub-agent) is still pending, so the worker
+        // records the result but does not prompt.
+        const messageTree = linearTree({ role: "user", content: "go" }, assistant);
+        const result = await runAgent(loop, {
+            trigger: toolResult("call_a", "getWeather", "RA"),
             messageTree,
+            pending: { tool_calls: 0, sub_agents: 1, llm_calls: 0 },
         });
-        expect(result.actions.filter((a) => a.type === "call.llm")).toHaveLength(0);
-    });
 
-    it("does not continue when the latest assistant turn issued no tool calls", async () => {
-        const messageTree = linearTree({ role: "user", content: "go" }, { role: "assistant", content: "all done" });
-        const result = await runChain([loop], { trigger: toolResults(), messageTree });
-        expect(result.actions.filter((a) => a.type === "call.llm")).toHaveLength(0);
+        expect(appendedMessages(result)).toMatchObject([
+            { role: "tool", content: "RA", tool_call_id: "call_a", name: "getWeather" },
+        ]);
+        expect(actionsOfType(result, "call.llm")).toHaveLength(0);
     });
 
     it("looks up a landed result node by tool_call_id", () => {

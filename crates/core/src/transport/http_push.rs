@@ -111,6 +111,7 @@ impl PushTransport for HttpPushTransport {
         }
 
         Ok(PushResponse {
+            transcript: submit.transcript,
             actions: submit.actions,
             state: submit.state,
         })
@@ -318,6 +319,8 @@ mod tests {
                 attempt: 0,
             },
             worker_state: vec![].into(),
+            pending: Default::default(),
+            transcript: vec![],
             message_tree: Default::default(),
             ancestry: vec![],
             span: SpanContext::root(),

@@ -1,152 +1,125 @@
-// Tool-call approval against real shell access: the agent has
-// `run_command`, a tool that actually executes commands on the host
-// via `child_process.spawnSync`. Before any command runs, the
-// `approvalGate` middleware intercepts the `call.tool`, parks it in
-// state, and ends the turn. The client decides to approve or deny via
-// a `client.action approve_command` payload; on resume the middleware
-// re-emits the original `call.tool` so the LLM sees a single matched
-// pair (to the model it just looks like a slow tool call).
+// Tool-call approval against real shell access: the agent has `run_command`, a
+// tool that actually executes commands on the host via `child_process.spawnSync`.
 //
-// Denials carry an optional reason that surfaces to the LLM as part of
-// the tool result, so it can adapt (try a different command, ask the
-// user, or give up on the task).
+// This is a raw `handler` — the agent IS a function of the decision, so the
+// approval gate is just control flow you write. When the model calls
+// `run_command`, the handler parks the command in its state and ends the turn
+// instead of running it. The client approves or denies via a
+// `client.action approve_command`; on approval the handler re-emits the original
+// `call.tool` so the model sees a single matched pair (to it, just a slow tool
+// call). A denial surfaces to the model as the tool result, so it can adapt.
+//
+// State (the parked command and the latest decision) rides the wire as
+// `worker_state`, round-tripped every decision.
 //
 // WARNING: this example runs real shell commands. Approve carefully.
 
 import { spawnSync } from "node:child_process";
-import Substructure, { DEFAULT_RETRY, middleware } from "@substructure.ai/sdk";
+import { agent, callTool, done, type Message, server, tool, toolLoop } from "@substructure.ai/sdk";
 import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
 
-const sub = new Substructure();
-const { agent } = sub;
+// ── State (rides the wire) ───────────────────────────────────────────────────
 
-// ── State ───────────────────────────────────────────────────────────────────
-
-type ApprovalState = {
+type State = {
     pendingCommand: { toolCallId: string; cmd: string } | null;
     approvalDecision: { approved: boolean; reason?: string } | null;
 };
 
-const initialState: ApprovalState = {
-    pendingCommand: null,
-    approvalDecision: null,
-};
+const instructions =
+    "You are a shell assistant. Use `run_command` to run real shell commands on the user's machine. " +
+    "Every command requires explicit user approval before it runs and may be denied with a reason. " +
+    "If a command is denied, adapt rather than retrying the same command.";
 
-// ── approvalGate middleware ─────────────────────────────────────────────────
-// Owns the shared state slice (`{ pendingCommand, approvalDecision }`) and
-// the gating logic: sits OUTER of `agent.tools` so it sees the `call.tool`
-// actions the tools middleware emits. On the way out, if any action is
-// `call.tool` for `run_command`, park it in state and end the turn.
+function runShell(cmd: string): string {
+    const result = spawnSync(cmd, { shell: true, encoding: "utf8", timeout: 30_000, maxBuffer: 1_000_000 });
+    return JSON.stringify({
+        cmd,
+        exit_code: result.status ?? -1,
+        stdout: result.stdout ?? "",
+        stderr: result.stderr ?? result.error?.message ?? "",
+    });
+}
 
-const approvalGate = middleware<ApprovalState>({
-    state: initialState,
-    handler: async (ctx, next) => {
-        const result = await next(ctx);
-
-        let intercepted = false;
-        const kept = result.actions.filter((action) => {
-            if (action.type === "call.tool" && action.name === "run_command") {
-                const a = JSON.parse(action.arguments) as { cmd: string };
-                ctx.state.pendingCommand = { toolCallId: action.tool_call_id, cmd: a.cmd };
-                intercepted = true;
-                return false;
+// The tool reads the decision the gate recorded: run the command, or return the
+// denial as its result so the model can adapt. Built per decision, closing over
+// `state`, so `toolLoop` can run it on `tool.execute`.
+function commandTool(state: State) {
+    return tool({
+        name: "run_command",
+        description:
+            "Run a shell command on the host machine. Requires user approval — the call pauses until the user approves or denies. Output is the real exit code, stdout, and stderr.",
+        parameters: { type: "object", properties: { cmd: { type: "string" } }, required: ["cmd"] },
+        execute: (args) => {
+            const { cmd } = JSON.parse(args) as { cmd: string };
+            const decision = state.approvalDecision;
+            state.approvalDecision = null;
+            if (decision && !decision.approved) {
+                return JSON.stringify({
+                    cmd,
+                    exit_code: 1,
+                    stdout: "",
+                    stderr: `User denied this command.${decision.reason ? ` Reason: ${decision.reason}` : ""}`,
+                });
             }
-            return true;
-        });
-
-        if (!intercepted) return result;
-
-        // Drop any pending `call.llm` so the turn truly pauses, then end it
-        // with a `done` action carrying the pending command for the client.
-        const finalActions = kept.filter((a) => a.type !== "call.llm");
-        finalActions.push({
-            type: "done",
-            data: { pendingCommand: ctx.state.pendingCommand },
-        });
-        return { ...result, actions: finalActions };
-    },
-});
-
-// ── Approval action ─────────────────────────────────────────────────────────
-// On `client.action approve_command`: write the decision, re-emit the
-// original `call.tool` so it flows through the normal tool execution path
-// (and `run_command` reads the decision to either run or return a denial).
-
-const approveCommand = agent.action({
-    name: "approve_command",
-    state: approvalGate,
-    handler: (args: { approved: boolean; reason?: string }, state) => {
-        const pending = state.pendingCommand;
-        if (!pending) return [{ type: "done", data: "no pending command to approve" }];
-
-        state.approvalDecision = { approved: args.approved, reason: args.reason };
-        state.pendingCommand = null;
-        return [
-            {
-                type: "call.tool",
-                tool_call_id: pending.toolCallId,
-                name: "run_command",
-                arguments: JSON.stringify({ cmd: pending.cmd }),
-                handler: "worker",
-                retry: DEFAULT_RETRY,
-            },
-        ];
-    },
-});
-
-// ── Tool ────────────────────────────────────────────────────────────────────
-
-const runCommand = agent.tool({
-    name: "run_command",
-    description:
-        "Run a shell command on the host machine. Requires user approval — the call pauses until the user approves or denies. Output is the real exit code, stdout, and stderr.",
-    parameters: {
-        type: "object",
-        properties: { cmd: { type: "string" } },
-        required: ["cmd"],
-    },
-    state: approvalGate,
-    execute: (args, state) => {
-        const { cmd } = JSON.parse(args) as { cmd: string };
-        const decision = state.approvalDecision;
-        state.approvalDecision = null;
-        if (decision && !decision.approved) {
-            const reason = decision.reason ? ` Reason: ${decision.reason}` : "";
-            return JSON.stringify({
-                cmd,
-                exit_code: 1,
-                stdout: "",
-                stderr: `User denied this command.${reason}`,
-            });
-        }
-        const result = spawnSync(cmd, {
-            shell: true,
-            encoding: "utf8",
-            timeout: 30_000,
-            maxBuffer: 1_000_000,
-        });
-        return JSON.stringify({
-            cmd,
-            exit_code: result.status ?? -1,
-            stdout: result.stdout ?? "",
-            stderr: result.stderr ?? result.error?.message ?? "",
-        });
-    },
-});
+            return runShell(cmd);
+        },
+    });
+}
 
 // ── Agent ───────────────────────────────────────────────────────────────────
+// The default loop drives the conversation; the handler overrides only the two
+// gate triggers — parking a requested command, and resuming it on approval.
 
-const assistant = agent({ id: "assistant" })
-    .use(agent.actions([approveCommand]))
-    .use(approvalGate)
-    .use(agent.tools([runCommand]))
-    .use(
-        agent.llm({
-            generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }),
-            instructions:
-                "You are a shell assistant. Use `run_command` to run real shell commands on the user's machine. Every command requires explicit user approval before it runs and may be denied with a reason. If a command is denied, adapt rather than retrying the same command.",
-        }),
-    );
+const assistant = agent<State>({
+    name: "assistant",
+    decide: async (req) => {
+        const state: State = {
+            pendingCommand: req.state?.pendingCommand ?? null,
+            approvalDecision: req.state?.approvalDecision ?? null,
+        };
+        const loop = toolLoop<State>({
+            model: server("anthropic/claude-sonnet-4-6"),
+            instructions,
+            tools: [commandTool(state)],
+        });
+
+        // The model asked to run a command: record the turn, park the call, end it.
+        if (req.trigger.type === "llm.response") {
+            const call = (req.trigger.message.tool_calls ?? []).find((tc) => tc.function.name === "run_command");
+            if (call) {
+                const assistantMsg: Message = { ...req.trigger.message, id: crypto.randomUUID() };
+                state.pendingCommand = { toolCallId: call.id, cmd: JSON.parse(call.function.arguments).cmd };
+                return {
+                    transcript: [...(req.transcript ?? []), assistantMsg],
+                    actions: [done({ pendingCommand: state.pendingCommand })],
+                    state,
+                };
+            }
+        }
+
+        // The user approved or denied: re-emit the parked call so the loop runs it.
+        if (req.trigger.type === "client.action" && req.trigger.name === "approve_command") {
+            const pending = state.pendingCommand;
+            if (!pending) return { actions: [done("no pending command to approve")], state };
+            const args = (req.trigger.args ?? {}) as { approved: boolean; reason?: string };
+            state.approvalDecision = { approved: args.approved, reason: args.reason };
+            state.pendingCommand = null;
+            return {
+                actions: [
+                    callTool({
+                        toolCallId: pending.toolCallId,
+                        name: "run_command",
+                        arguments: JSON.stringify({ cmd: pending.cmd }),
+                    }),
+                ],
+                state,
+            };
+        }
+
+        // Prompting, running the approved command, and continuing are the default loop.
+        return loop({ ...req, state });
+    },
+});
 
 // ── CLI driver ──────────────────────────────────────────────────────────────
 // Usage:
@@ -182,7 +155,7 @@ const embedded = await SubstructureEmbedded.create({
 });
 
 const scope = await embedded.startTurn({
-    agentId: assistant.agentId,
+    agentId: "assistant",
     payload,
     identity: { tenant_id: "default", id: "demo" },
     sessionId,

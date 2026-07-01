@@ -1,11 +1,9 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 
-use super::decision::{
-    Anchor, ClientPayload, CompletedToolCall, DecisionTrigger, ToolResult, WorkerAction,
-};
+use super::decision::{ClientPayload, DecisionTrigger, WorkerAction};
 use super::events::*;
 use super::message::{Content, ContentPart, ImageUrl, Message, Role};
 use super::state::{
@@ -109,6 +107,8 @@ pub enum CommandPayload {
     },
     SubmitWorkerDecision {
         decision_id: String,
+        /// The worker's flat transcript; the engine reconciles it into the tree.
+        transcript: Vec<Message>,
         actions: Vec<WorkerAction>,
         state: WorkerState,
     },
@@ -267,49 +267,52 @@ impl SessionState {
         }
     }
 
-    fn record_results(&self, results: Vec<ToolResult>) -> Vec<EventPayload> {
-        let completed: Vec<CompletedToolCall> = results
-            .iter()
-            .map(|r| CompletedToolCall {
-                tool_call_id: r.tool_call_id.clone(),
-                name: r.name.clone(),
-                is_error: r.is_error,
-            })
-            .collect();
-        let mut events: Vec<EventPayload> = self
-            .result_nodes(results)
-            .into_iter()
-            .map(EventPayload::NewMessage)
-            .collect();
-        events.push(self.emit_decision_request(DecisionTrigger::ToolResults { completed }));
+    /// Reconcile a worker's returned transcript into the tree: known ids are the
+    /// path it continues, unknown/id-less messages append (chaining under the
+    /// previous), forking automatically when the parent already has a child.
+    fn reconcile_transcript(&self, transcript: Vec<Message>) -> Vec<EventPayload> {
+        if transcript.is_empty() {
+            return vec![];
+        }
+        let existing: std::collections::HashSet<String> =
+            self.nodes.iter().map(|n| n.id().to_string()).collect();
+        let mut events = Vec::new();
+        let mut parent: Option<String> = None;
+        for msg in transcript {
+            if !msg.id.is_empty() && existing.contains(&msg.id) {
+                parent = Some(msg.id);
+            } else {
+                let msg = assign_id(msg);
+                let id = msg.id.clone();
+                events.push(EventPayload::NewMessage(NewMessage {
+                    message: msg,
+                    parent_id: parent.take(),
+                }));
+                parent = Some(id);
+            }
+        }
         events
     }
 
-    /// Chained: `head_id` doesn't advance between events within a single command.
-    fn result_nodes(&self, results: Vec<ToolResult>) -> Vec<NewMessage> {
-        let ids: Vec<String> = results.iter().map(|_| new_message_id()).collect();
-        results
-            .into_iter()
-            .enumerate()
-            .map(|(i, result)| NewMessage {
-                parent_id: if i == 0 {
-                    self.head_id.clone()
-                } else {
-                    Some(ids[i - 1].clone())
-                },
-                message: Message {
-                    id: ids[i].clone(),
-                    role: Role::Tool,
-                    content: Some(Content::Text(result.content)),
-                    tool_calls: None,
-                    tool_call_id: Some(result.tool_call_id),
-                    name: Some(result.name),
-                },
-            })
-            .collect()
+    /// A completed effect fires a `tool.result` decision as it lands. The worker
+    /// decides when to prompt from `pending_effects` on the request.
+    fn emit_tool_result(
+        &self,
+        tool_call_id: String,
+        name: String,
+        result: String,
+        is_error: bool,
+    ) -> EventPayload {
+        self.emit_decision_request(DecisionTrigger::ToolResult {
+            tool_call_id,
+            name,
+            result,
+            is_error,
+        })
     }
 
-    fn pending_client_result(&self, m: &Message) -> Option<ToolResult> {
+    /// `(tool_call_id, name, content)` for a transcript tool message answering a pending client tool call.
+    fn pending_client_result(&self, m: &Message) -> Option<(String, String, String)> {
         if m.role != Role::Tool {
             return None;
         }
@@ -318,35 +321,12 @@ impl SessionState {
         if tc.handler != ToolHandler::Client || tc.tracking.status != EffectStatus::Pending {
             return None;
         }
-        Some(ToolResult {
-            tool_call_id: id.to_string(),
-            name: tc.name.clone(),
-            content: m
-                .content
-                .as_ref()
-                .map(Content::text_owned)
-                .unwrap_or_default(),
-            is_error: false,
-        })
-    }
-
-    fn merge_messages(&self, list: &[Message]) -> Vec<EventPayload> {
-        let mut known: HashSet<String> = self.nodes.iter().map(|n| n.id().to_string()).collect();
-
-        let mut events = Vec::new();
-        let mut prev: Option<String> = None;
-
-        for m in list {
-            let m = assign_id(m.clone());
-            if known.insert(m.id.clone()) {
-                events.push(EventPayload::NewMessage(NewMessage {
-                    parent_id: prev.clone(),
-                    message: m.clone(),
-                }));
-            }
-            prev = Some(m.id);
-        }
-        events
+        let content = m
+            .content
+            .as_ref()
+            .map(Content::text_owned)
+            .unwrap_or_default();
+        Some((id.to_string(), tc.name.clone(), content))
     }
 
     fn emit_decision_request(&self, trigger: DecisionTrigger) -> EventPayload {
@@ -402,7 +382,7 @@ impl SessionState {
                 }
 
                 match payload {
-                    ClientPayload::Message { message, stream } => {
+                    ClientPayload::Message { message, stream: _ } => {
                         if matches!(self.status, SessionStatus::Interrupted { .. })
                             && message.role == Role::User
                         {
@@ -410,42 +390,65 @@ impl SessionState {
                         }
                         if message.role == Role::User {
                             events.push(self.emit_decision_request(DecisionTrigger::UserMessage {
-                                messages: vec![assign_id(message)],
-                                anchor: Anchor::Continue,
-                                stream,
+                                message: assign_id(message),
                             }));
                         }
                     }
-                    ClientPayload::Messages { messages, stream } => {
+                    ClientPayload::Messages {
+                        messages,
+                        stream: _,
+                    } => {
                         let messages: Vec<Message> = messages.into_iter().map(assign_id).collect();
 
-                        // A transcript ending in a tool message is a tool-result continuation, not a new user turn.
+                        // A transcript ending in a tool message answers pending client tools, not a new turn.
                         if matches!(messages.last(), Some(m) if m.role == Role::Tool) {
-                            let completions: Vec<ToolResult> = messages
+                            let completions: Vec<(String, String, String)> = messages
                                 .iter()
                                 .filter_map(|m| self.pending_client_result(m))
                                 .collect();
-                            if !completions.is_empty() {
-                                for r in &completions {
-                                    events.push(EventPayload::ToolCallCompleted(
-                                        ToolCallCompleted {
-                                            tool_call_id: r.tool_call_id.clone(),
-                                            name: r.name.clone(),
-                                            result: r.content.clone(),
+                            // Pair each completion with its decision. The live
+                            // decision's snapshot is then taken before later
+                            // siblings complete, so they still count as in-flight
+                            // `pending` and it won't prompt before they land.
+                            let mut live = self.has_pending_worker_decision()
+                                || matches!(self.status, SessionStatus::Interrupted { .. });
+                            for (tool_call_id, name, content) in completions {
+                                events.push(EventPayload::ToolCallCompleted(ToolCallCompleted {
+                                    tool_call_id: tool_call_id.clone(),
+                                    name: name.clone(),
+                                    result: content.clone(),
+                                }));
+                                let trigger = DecisionTrigger::ToolResult {
+                                    tool_call_id,
+                                    name,
+                                    result: content,
+                                    is_error: false,
+                                };
+                                let decision_id = new_call_id();
+                                if live {
+                                    events.push(EventPayload::DecisionRequestQueued(
+                                        DecisionRequestQueued {
+                                            decision_id,
+                                            trigger,
+                                        },
+                                    ));
+                                } else {
+                                    live = true;
+                                    events.push(EventPayload::WorkerDecisionRequested(
+                                        WorkerDecisionRequested {
+                                            decision_id,
+                                            trigger,
                                         },
                                     ));
                                 }
-                                events.extend(self.record_results(completions));
                             }
                         } else {
                             if matches!(self.status, SessionStatus::Interrupted { .. }) {
                                 return Err(SessionError::SessionInterrupted);
                             }
-                            events.push(self.emit_decision_request(DecisionTrigger::UserMessage {
-                                messages,
-                                anchor: Anchor::Replace,
-                                stream,
-                            }));
+                            events.push(self.emit_decision_request(
+                                DecisionTrigger::UserTranscript { messages },
+                            ));
                         }
                     }
                     ClientPayload::Action { action } => {
@@ -464,7 +467,7 @@ impl SessionState {
 
             CommandPayload::SendMessage {
                 message,
-                stream,
+                stream: _,
                 turn_id,
                 parent_id: _,
             } => {
@@ -494,9 +497,7 @@ impl SessionState {
                         }
                         if message.role == Role::User {
                             events.push(self.emit_decision_request(DecisionTrigger::UserMessage {
-                                messages: vec![assign_id(message)],
-                                anchor: Anchor::Continue,
-                                stream,
+                                message: assign_id(message),
                             }));
                         }
                         Ok(events)
@@ -527,15 +528,16 @@ impl SessionState {
                         messages: request.messages.into_iter().map(assign_id).collect(),
                         ..request
                     };
-                    let mut events = self.merge_messages(&request.messages);
-                    events.push(EventPayload::LlmCallRequested(LlmCallRequested {
+                    // The prompt is the worker's disposable message list, stored verbatim
+                    // for retries; it is never reconstructed from the tree.
+                    let mut events = vec![EventPayload::LlmCallRequested(LlmCallRequested {
                         call_id: call_id.clone(),
                         attempt: 0,
                         request: request.clone(),
                         stream,
                         retry,
                         handler: handler.clone(),
-                    }));
+                    })];
 
                     if handler == LlmHandler::Worker {
                         events.push(self.emit_decision_request(DecisionTrigger::LlmRequest {
@@ -585,15 +587,11 @@ impl SessionState {
                             }
                             Some(Content::Parts(parts))
                         };
-                        let id = new_message_id();
-                        // Parent under the prompt leaf, not the head: on a regenerated turn the head is a stale sibling.
-                        let parent_id = self
-                            .llm_calls
-                            .get(&call_id)
-                            .and_then(|c| c.prompt_leaf.clone())
-                            .or_else(|| self.head_id.clone());
+                        // The worker folds this assistant into its transcript; the
+                        // engine reconciles it (id-less → a fresh node), so no parent
+                        // pointer is needed here.
                         let message = Message {
-                            id: id.clone(),
+                            id: String::new(),
                             role: Role::Assistant,
                             content,
                             tool_calls,
@@ -606,18 +604,12 @@ impl SessionState {
                                 attempt,
                                 response,
                             }),
-                            EventPayload::NewMessage(NewMessage {
-                                parent_id: parent_id.clone(),
-                                message: message.clone(),
-                            }),
                             self.emit_decision_request(DecisionTrigger::LlmResponse {
                                 call_id,
                                 message,
                                 truncated,
                                 usage,
                                 cost,
-                                id,
-                                parent_id,
                             }),
                         ])
                     }
@@ -729,12 +721,7 @@ impl SessionState {
                         state: ws,
                     }));
                 }
-                events.extend(self.record_results(vec![ToolResult {
-                    tool_call_id,
-                    name,
-                    content: result,
-                    is_error: false,
-                }]));
+                events.push(self.emit_tool_result(tool_call_id, name, result, false));
                 Ok(events)
             }
 
@@ -773,12 +760,7 @@ impl SessionState {
                     }));
                 }
                 if exhausted {
-                    events.extend(self.record_results(vec![ToolResult {
-                        tool_call_id,
-                        name,
-                        content: error,
-                        is_error: true,
-                    }]));
+                    events.push(self.emit_tool_result(tool_call_id, name, error, true));
                 }
                 Ok(events)
             }
@@ -829,23 +811,19 @@ impl SessionState {
                 if sa.tracking.status != EffectStatus::Pending {
                     return Ok(vec![]);
                 }
-                let pending = ToolResult {
-                    tool_call_id: sa.tool_call_id.clone(),
-                    name: sa.agent_id.clone(),
-                    content: error.clone(),
-                    is_error: true,
-                };
+                let tool_call_id = sa.tool_call_id.clone();
+                let name = sa.agent_id.clone();
                 let exhausted = sa
                     .tracking
                     .retry_policy
                     .exhausted(&sa.tracking.retry, retryable);
                 let mut events = vec![EventPayload::SubAgentErrored(SubAgentErrored {
                     session_id,
-                    error,
+                    error: error.clone(),
                     retryable,
                 })];
                 if exhausted {
-                    events.extend(self.record_results(vec![pending]));
+                    events.push(self.emit_tool_result(tool_call_id, name, error, true));
                 }
                 Ok(events)
             }
@@ -862,19 +840,16 @@ impl SessionState {
                 let Some(sa) = self.sub_agent_calls.get(&session_id) else {
                     return Ok(vec![]);
                 };
-                let pending = ToolResult {
-                    tool_call_id: sa.tool_call_id.clone(),
-                    name: sa.agent_id.clone(),
-                    content: json_to_string(&data),
-                    is_error: false,
-                };
+                let tool_call_id = sa.tool_call_id.clone();
+                let name = sa.agent_id.clone();
+                let result = json_to_string(&data);
                 let mut events = vec![EventPayload::SubAgentTurnCompleted(SubAgentTurnCompleted {
                     session_id,
                     cost,
                     token_usage,
                     data,
                 })];
-                events.extend(self.record_results(vec![pending]));
+                events.push(self.emit_tool_result(tool_call_id, name, result, false));
                 Ok(events)
             }
 
@@ -930,6 +905,7 @@ impl SessionState {
 
             CommandPayload::SubmitWorkerDecision {
                 decision_id,
+                transcript,
                 actions,
                 state,
             } => {
@@ -945,6 +921,9 @@ impl SessionState {
                 let mut events: Vec<EventPayload> = vec![EventPayload::WorkerDecisionCompleted(
                     WorkerDecisionCompleted { decision_id, state },
                 )];
+                // The engine's only tree write: reconcile the worker's returned
+                // transcript before acting on its requests.
+                events.extend(self.reconcile_transcript(transcript));
                 let system = Caller::System {
                     tenant_id: self
                         .owner
@@ -1204,12 +1183,12 @@ impl SessionState {
                     retryable: true,
                 })];
                 if tc.tracking.retry_policy.exhausted(&tc.tracking.retry, true) {
-                    events.extend(self.record_results(vec![ToolResult {
-                        tool_call_id: tc.tool_call_id.clone(),
-                        name: tc.name.clone(),
-                        content: "deadline exceeded".to_string(),
-                        is_error: true,
-                    }]));
+                    events.push(self.emit_tool_result(
+                        tc.tool_call_id.clone(),
+                        tc.name.clone(),
+                        "deadline exceeded".to_string(),
+                        true,
+                    ));
                 }
                 return Ok(events);
             }
@@ -1220,12 +1199,7 @@ impl SessionState {
             if call.tracking.status == EffectStatus::RetryScheduled {
                 if let Some(next_at) = call.tracking.retry.next_at {
                     if next_at <= now {
-                        let messages = call
-                            .prompt_leaf
-                            .as_deref()
-                            .map(|leaf| self.message_tree().path_to(leaf))
-                            .unwrap_or_default();
-                        let request = call.spec.to_request(messages);
+                        let request = call.spec.to_request(call.prompt.clone());
                         let mut events = vec![EventPayload::LlmCallRequested(LlmCallRequested {
                             call_id: call.call_id.clone(),
                             attempt: call.tracking.retry.attempts,
@@ -1287,12 +1261,12 @@ impl SessionState {
                     retryable: true,
                 })];
                 if sa.tracking.retry_policy.exhausted(&sa.tracking.retry, true) {
-                    events.extend(self.record_results(vec![ToolResult {
-                        tool_call_id: sa.tool_call_id.clone(),
-                        name: sa.agent_id.clone(),
-                        content: "deadline exceeded".to_string(),
-                        is_error: true,
-                    }]));
+                    events.push(self.emit_tool_result(
+                        sa.tool_call_id.clone(),
+                        sa.agent_id.clone(),
+                        "deadline exceeded".to_string(),
+                        true,
+                    ));
                 }
                 return Ok(events);
             }
@@ -1345,7 +1319,7 @@ impl SessionState {
             }
         }
 
-        // Lost `tool.results` are recovered by work-queue redelivery, not by re-firing here.
+        // Lost `tool.result`s are recovered by work-queue redelivery, not by re-firing here.
         if let Some(wd) = self.next_queued_decision() {
             return Ok(vec![EventPayload::WorkerDecisionRequested(
                 WorkerDecisionRequested {
@@ -1384,9 +1358,7 @@ mod tests {
     use crate::runtime::llm::{LlmRequest, LlmResponse};
     use crate::runtime::owner::SessionOwner;
     use crate::runtime::retry::RetryPolicy;
-    use crate::runtime::session::decision::{
-        ClientPayload, CompletedToolCall, DecisionTrigger, WorkerAction,
-    };
+    use crate::runtime::session::decision::{ClientPayload, DecisionTrigger, WorkerAction};
     use crate::runtime::session::events::{EventPayload, LlmHandler, ToolHandler};
     use crate::runtime::session::message::{Content, Message, Role};
     use crate::runtime::session::state::{EffectStatus, SessionState, SessionStatus};
@@ -1478,12 +1450,12 @@ mod tests {
                 events.as_slice(),
                 [
                     EventPayload::ToolCallCompleted(_),
-                    EventPayload::NewMessage(_),
                     EventPayload::WorkerDecisionRequested(_),
                 ]
             ),
-            "expected [ToolCallCompleted, NewMessage, WorkerDecisionRequested]; got {events:?}"
+            "expected [ToolCallCompleted, WorkerDecisionRequested]; got {events:?}"
         );
+        assert_eq!(fired_tool_result(&events), vec!["tc-1".to_string()]);
 
         let tc = agg.state.tool_calls.get("tc-1").expect("tool call present");
         assert_eq!(tc.tracking.status, EffectStatus::Completed);
@@ -1676,6 +1648,7 @@ mod tests {
             &mut agg,
             CommandPayload::SubmitWorkerDecision {
                 decision_id: d1,
+                transcript: vec![],
                 actions: vec![],
                 state: vec![].into(),
             },
@@ -1699,12 +1672,12 @@ mod tests {
                 events.as_slice(),
                 [
                     EventPayload::ToolCallCompleted(_),
-                    EventPayload::NewMessage(_),
                     EventPayload::WorkerDecisionRequested(_),
                 ]
             ),
-            "expected [ToolCallCompleted, NewMessage, WorkerDecisionRequested]; got {events:?}"
+            "expected [ToolCallCompleted, WorkerDecisionRequested]; got {events:?}"
         );
+        assert_eq!(fired_tool_result(&events), vec!["tc-1".to_string()]);
 
         let tc = agg.state.tool_calls.get("tc-1").expect("tool call present");
         assert_eq!(tc.tracking.status, EffectStatus::Completed);
@@ -1748,12 +1721,12 @@ mod tests {
                 events.as_slice(),
                 [
                     EventPayload::ToolCallCompleted(_),
-                    EventPayload::NewMessage(_),
                     EventPayload::DecisionRequestQueued(_),
                 ]
             ),
-            "expected [ToolCallCompleted, NewMessage, DecisionRequestQueued]; got {events:?}"
+            "expected [ToolCallCompleted, DecisionRequestQueued]; got {events:?}"
         );
+        assert_eq!(fired_tool_result(&events), vec!["tc-1".to_string()]);
 
         let tc = agg.state.tool_calls.get("tc-1").expect("tool call present");
         assert_eq!(tc.tracking.status, EffectStatus::Completed);
@@ -1886,6 +1859,7 @@ mod tests {
             .handle(
                 CommandPayload::SubmitWorkerDecision {
                     decision_id,
+                    transcript: vec![],
                     actions: vec![WorkerAction::CallTool {
                         tool_call_id: "tc-1".to_string(),
                         name: "my_tool".to_string(),
@@ -1954,6 +1928,7 @@ mod tests {
             &mut agg,
             CommandPayload::SubmitWorkerDecision {
                 decision_id: decision_id.clone(),
+                transcript: vec![],
                 actions: vec![],
                 state: vec![].into(),
             },
@@ -1966,6 +1941,7 @@ mod tests {
             .handle(
                 CommandPayload::SubmitWorkerDecision {
                     decision_id,
+                    transcript: vec![],
                     actions: vec![WorkerAction::CallTool {
                         tool_call_id: "tc-1".to_string(),
                         name: "my_tool".to_string(),
@@ -2209,8 +2185,42 @@ mod tests {
         }
     }
 
+    /// Drive a worker `Append` action onto the tree (the worker is the sole
+    /// tree author). A user message opens a decision the worker answers with
+    /// the nodes.
+    fn append_via_worker(agg: &mut Aggregate<SessionState>, nodes: Vec<NewMessage>) {
+        let setup = dispatch(
+            agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Message {
+                    message: node_msg("seed", Role::User, "seed"),
+                    stream: false,
+                },
+                turn_id: None,
+            },
+            &system(),
+        );
+        let decision_id = setup
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(p) => Some(p.decision_id.clone()),
+                _ => None,
+            })
+            .expect("user message requests a worker decision");
+        dispatch(
+            agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id,
+                transcript: nodes.into_iter().map(|n| n.message).collect(),
+                actions: vec![],
+                state: vec![].into(),
+            },
+            &machine(),
+        );
+    }
+
     #[test]
-    fn request_llm_call_mints_prompt_nodes() {
+    fn request_llm_call_stores_prompt_without_minting_nodes() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
         let events = dispatch(
             &mut agg,
@@ -2229,68 +2239,21 @@ mod tests {
             },
         );
 
-        let minted: Vec<&NewMessage> = events
-            .iter()
-            .filter_map(|e| match e {
-                EventPayload::NewMessage(m) => Some(m),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(minted.len(), 2);
-        assert_eq!(minted[0].message.id, "sys");
-        assert_eq!(minted[0].parent_id, None);
-        assert_eq!(minted[1].message.id, "u1");
-        assert_eq!(minted[1].parent_id.as_deref(), Some("sys"));
-        assert_eq!(agg.state.head_id.as_deref(), Some("u1"));
-    }
-
-    #[test]
-    fn merge_reconciles_echo_edit_and_switch() {
-        let mut agg = create_session("sess-1", "tenant-a", "user-1");
-        dispatch(
-            &mut agg,
-            CommandPayload::RequestLlmCall {
-                call_id: "llm-1".to_string(),
-                request: request_with(vec![
-                    node_msg("sys", Role::System, "s"),
-                    node_msg("u1", Role::User, "hi"),
-                ]),
-                stream: false,
-                retry: RetryPolicy::no_retry(),
-                handler: LlmHandler::Server,
-            },
-            &Caller::System {
-                tenant_id: "tenant-a".to_string(),
-            },
-        );
-        let echo = agg.state.merge_messages(&[
-            node_msg("sys", Role::System, "s"),
-            node_msg("u1", Role::User, "hi"),
-        ]);
-        assert!(echo.is_empty(), "echo is a no-op: {echo:?}");
-
-        let edit = agg.state.merge_messages(&[
-            node_msg("sys", Role::System, "s"),
-            node_msg("u1b", Role::User, "hey"),
-        ]);
+        // The worker is the sole tree author; the call records the verbatim
+        // prompt the worker sent but mints no tree nodes itself.
         assert!(
-            matches!(edit.as_slice(), [EventPayload::NewMessage(m)]
-                if m.message.id == "u1b" && m.parent_id.as_deref() == Some("sys")),
-            "edit forks under the shared parent: {edit:?}"
+            !events
+                .iter()
+                .any(|e| matches!(e, EventPayload::NewMessage(_))),
+            "request mints no tree nodes; got {events:?}"
         );
-
-        let echo_only = agg
-            .state
-            .merge_messages(&[node_msg("sys", Role::System, "s")]);
-        assert!(
-            echo_only.is_empty(),
-            "echoing an existing node mints nothing: {echo_only:?}"
-        );
-
-        let fresh = agg.state.merge_messages(&[node_msg("", Role::User, "x")]);
-        assert!(
-            matches!(fresh.as_slice(), [EventPayload::NewMessage(m)] if !m.message.id.is_empty()),
-            "an id-less message mints a fresh node: {fresh:?}"
+        let call = agg.state.llm_calls.get("llm-1").expect("llm call present");
+        assert_eq!(
+            call.prompt
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sys", "u1"]
         );
     }
 
@@ -2327,16 +2290,13 @@ mod tests {
             })
             .expect("a decision request");
         match trigger {
-            DecisionTrigger::UserMessage {
-                messages, anchor, ..
-            } => {
-                assert_eq!(*anchor, Anchor::Replace);
+            DecisionTrigger::UserTranscript { messages } => {
                 assert_eq!(
                     messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
                     vec!["c1", "a1", "c2"]
                 );
             }
-            t => panic!("expected a UserMessage trigger; got {t:?}"),
+            t => panic!("expected a UserTranscript trigger; got {t:?}"),
         }
     }
 
@@ -2378,14 +2338,7 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, EventPayload::ToolCallCompleted(_))));
-        let nodes = result_nodes_in(&events);
-        assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].message.tool_call_id.as_deref(), Some("tc-1"));
-        assert_eq!(node_text(&nodes[0]), "the answer");
-        assert_eq!(
-            fired_tool_result(&events).map(|c| c.into_iter().map(|c| c.tool_call_id).collect()),
-            Some(vec!["tc-1".to_string()])
-        );
+        assert_eq!(fired_tool_result(&events), vec!["tc-1".to_string()]);
         assert!(
             decision_with(&events, |t| matches!(
                 t,
@@ -2407,57 +2360,56 @@ mod tests {
         request_client_tool(&mut agg, "b");
 
         let first = submit_messages(&mut agg, vec![tool_msg("a", "RA")]);
-        assert_eq!(
-            fired_tool_result(&first).map(|c| c.into_iter().map(|c| c.tool_call_id).collect()),
-            Some(vec!["a".to_string()])
-        );
+        assert_eq!(fired_tool_result(&first), vec!["a".to_string()]);
         assert_eq!(
             agg.state.tool_calls.get("a").unwrap().result.as_deref(),
             Some("RA")
         );
 
         let second = submit_messages(&mut agg, vec![tool_msg("b", "RB")]);
+        assert_eq!(fired_tool_result(&second), vec!["b".to_string()]);
         assert_eq!(
-            fired_tool_result(&second).map(|c| c.into_iter().map(|c| c.tool_call_id).collect()),
-            Some(vec!["b".to_string()])
+            agg.state.tool_calls.get("b").unwrap().result.as_deref(),
+            Some("RB")
         );
-        assert_eq!(tree_tool_ids(&agg), vec!["a", "b"]);
     }
 
     #[test]
-    fn submit_messages_resolving_several_client_tools_fires_one_tool_result() {
+    fn submit_messages_resolving_several_client_tools_fires_a_tool_result_each() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
         request_client_tool(&mut agg, "a");
         request_client_tool(&mut agg, "b");
 
         let events = submit_messages(&mut agg, vec![tool_msg("a", "RA"), tool_msg("b", "RB")]);
-        assert_eq!(result_nodes_in(&events).len(), 2);
-        let decisions: Vec<_> = events
+        // Each completion is immediately followed by its decision, so the live
+        // decision's snapshot is taken while the next sibling is still in flight
+        // (counted in `pending`) — the worker won't prompt before it lands.
+        let sequence: Vec<&str> = events
             .iter()
-            .filter(|e| {
-                matches!(
-                    e,
-                    EventPayload::WorkerDecisionRequested(p)
-                        if matches!(p.trigger, DecisionTrigger::ToolResults { .. })
-                ) || matches!(
-                    e,
-                    EventPayload::DecisionRequestQueued(p)
-                        if matches!(p.trigger, DecisionTrigger::ToolResults { .. })
-                )
+            .filter_map(|e| match e {
+                EventPayload::ToolCallCompleted(_) => Some("complete"),
+                EventPayload::WorkerDecisionRequested(p)
+                    if matches!(p.trigger, DecisionTrigger::ToolResult { .. }) =>
+                {
+                    Some("live")
+                }
+                EventPayload::DecisionRequestQueued(p)
+                    if matches!(p.trigger, DecisionTrigger::ToolResult { .. }) =>
+                {
+                    Some("queued")
+                }
+                _ => None,
             })
             .collect();
+        assert_eq!(sequence, vec!["complete", "live", "complete", "queued"]);
         assert_eq!(
-            decisions.len(),
-            1,
-            "exactly one tool.result; got {events:?}"
+            agg.state.tool_calls.get("a").unwrap().result.as_deref(),
+            Some("RA")
         );
-        let ids: Vec<String> = fired_tool_result(&events)
-            .unwrap()
-            .into_iter()
-            .map(|c| c.tool_call_id)
-            .collect();
-        assert_eq!(ids, vec!["a", "b"]);
-        assert_eq!(tree_tool_ids(&agg), vec!["a", "b"]);
+        assert_eq!(
+            agg.state.tool_calls.get("b").unwrap().result.as_deref(),
+            Some("RB")
+        );
     }
 
     #[test]
@@ -2529,74 +2481,21 @@ mod tests {
                 events.as_slice(),
                 [
                     EventPayload::LlmCallCompleted(_),
-                    EventPayload::NewMessage(_),
                     EventPayload::WorkerDecisionRequested(_),
                 ]
             ),
-            "expected [LlmCallCompleted, NewMessage, WorkerDecisionRequested]; got {events:?}"
+            "expected [LlmCallCompleted, WorkerDecisionRequested]; got {events:?}"
+        );
+        assert!(
+            decision_with(&events, |t| matches!(
+                t,
+                DecisionTrigger::LlmResponse { call_id, .. } if call_id == "llm-1"
+            ))
+            .is_some(),
+            "completion fires an llm.response trigger; got {events:?}"
         );
         let call = agg.state.llm_calls.get("llm-1").expect("llm call present");
         assert_eq!(call.tracking.status, EffectStatus::Completed);
-    }
-
-    #[test]
-    fn response_parents_under_the_prompt_leaf_on_regenerate() {
-        let mut agg = create_session("sess-1", "tenant-a", "user-1");
-        let sys = Caller::System {
-            tenant_id: "tenant-a".to_string(),
-        };
-        let request = |agg: &mut Aggregate<SessionState>, call: &str, messages: Vec<Message>| {
-            dispatch(
-                agg,
-                CommandPayload::RequestLlmCall {
-                    call_id: call.to_string(),
-                    request: request_with(messages),
-                    stream: false,
-                    retry: RetryPolicy::no_retry(),
-                    handler: LlmHandler::Server,
-                },
-                &sys,
-            );
-        };
-        let complete =
-            |agg: &mut Aggregate<SessionState>, call: &str| -> (String, Option<String>) {
-                let events = dispatch(
-                    agg,
-                    CommandPayload::CompleteLlmCall {
-                        call_id: call.to_string(),
-                        attempt: 0,
-                        response: LlmResponse {
-                            model: "test-model".to_string(),
-                            content: Some("reply".to_string()),
-                            tool_calls: vec![],
-                            finish_reason: Some("stop".to_string()),
-                            usage: None,
-                            cost: None,
-                            images: vec![],
-                        },
-                    },
-                    &sys,
-                );
-                events
-                    .iter()
-                    .find_map(|e| match e {
-                        EventPayload::NewMessage(n) => {
-                            Some((n.message.id.clone(), n.parent_id.clone()))
-                        }
-                        _ => None,
-                    })
-                    .expect("a recorded response")
-            };
-
-        request(&mut agg, "c1", vec![node_msg("u1", Role::User, "hi")]);
-        let (a1, a1_parent) = complete(&mut agg, "c1");
-        assert_eq!(a1_parent.as_deref(), Some("u1"));
-        assert_eq!(agg.state.head_id.as_deref(), Some(a1.as_str()));
-
-        request(&mut agg, "c2", vec![node_msg("u1", Role::User, "hi")]);
-        let (a1b, a1b_parent) = complete(&mut agg, "c2");
-        assert_ne!(a1b, a1);
-        assert_eq!(a1b_parent.as_deref(), Some("u1"));
     }
 
     #[test]
@@ -2655,7 +2554,7 @@ mod tests {
     }
 
     #[test]
-    fn llm_retry_rebuilds_the_prompt_from_the_tree() {
+    fn llm_retry_reuses_the_stored_prompt() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
         let retry = RetryPolicy {
             timeout_secs: None,
@@ -2663,6 +2562,21 @@ mod tests {
             backoff_base_secs: 1,
             backoff_max_secs: 1,
         };
+        // The call stores its prompt verbatim; the retry re-issues that stored
+        // prompt rather than rebuilding it from the tree.
+        append_via_worker(
+            &mut agg,
+            vec![
+                NewMessage {
+                    parent_id: None,
+                    message: node_msg("sys", Role::System, "sys prompt"),
+                },
+                NewMessage {
+                    parent_id: Some("sys".to_string()),
+                    message: node_msg("u1", Role::User, "hi"),
+                },
+            ],
+        );
         dispatch(
             &mut agg,
             CommandPayload::RequestLlmCall {
@@ -2679,7 +2593,13 @@ mod tests {
         );
 
         let call = agg.state.llm_calls.get("llm-1").expect("call present");
-        assert_eq!(call.prompt_leaf.as_deref(), Some("u1"));
+        assert_eq!(
+            call.prompt
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sys", "u1"]
+        );
 
         dispatch(
             &mut agg,
@@ -2830,6 +2750,7 @@ mod tests {
             &mut agg,
             CommandPayload::SubmitWorkerDecision {
                 decision_id,
+                transcript: vec![],
                 actions: vec![WorkerAction::ReturnLlmResult {
                     call_id: "llm-1".to_string(),
                     response: LlmResponse {
@@ -2855,10 +2776,12 @@ mod tests {
             "expected an LlmCallCompleted event; got {events:?}"
         );
         assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, EventPayload::NewMessage(_))),
-            "expected a NewMessage event; got {events:?}"
+            decision_with(&events, |t| matches!(
+                t,
+                DecisionTrigger::LlmResponse { call_id, .. } if call_id == "llm-1"
+            ))
+            .is_some(),
+            "completion fires an llm.response trigger; got {events:?}"
         );
         let call = agg.state.llm_calls.get("llm-1").expect("llm call present");
         assert_eq!(call.tracking.status, EffectStatus::Completed);
@@ -2899,6 +2822,7 @@ mod tests {
             &mut agg,
             CommandPayload::SubmitWorkerDecision {
                 decision_id: d1,
+                transcript: vec![],
                 actions: vec![],
                 state: vec![].into(),
             },
@@ -2922,16 +2846,27 @@ mod tests {
                 events.as_slice(),
                 [
                     EventPayload::ToolCallErrored(_),
-                    EventPayload::NewMessage(_),
                     EventPayload::WorkerDecisionRequested(_),
                 ]
             ),
-            "expected [ToolCallErrored, NewMessage, WorkerDecisionRequested]; got {events:?}"
+            "expected [ToolCallErrored, WorkerDecisionRequested]; got {events:?}"
         );
-        let completed = fired_tool_result(&events).expect("a tool.result decision");
-        assert_eq!(completed.len(), 1);
-        assert_eq!(completed[0].tool_call_id, "tc-1");
-        assert!(completed[0].is_error);
+        let trigger = events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(p) => Some(&p.trigger),
+                EventPayload::DecisionRequestQueued(p) => Some(&p.trigger),
+                _ => None,
+            })
+            .expect("a tool.result decision");
+        assert!(
+            matches!(
+                trigger,
+                DecisionTrigger::ToolResult { tool_call_id, is_error: true, .. }
+                    if tool_call_id == "tc-1"
+            ),
+            "expected an errored tool.result for tc-1; got {trigger:?}"
+        );
         let tc = agg.state.tool_calls.get("tc-1").expect("tool call present");
         assert_eq!(tc.tracking.status, EffectStatus::Failed);
         assert!(tc.is_error);
@@ -3032,12 +2967,12 @@ mod tests {
                 events.as_slice(),
                 [
                     EventPayload::SubAgentErrored(_),
-                    EventPayload::NewMessage(_),
                     EventPayload::WorkerDecisionRequested(_),
                 ]
             ),
-            "expected [SubAgentErrored, NewMessage, WorkerDecisionRequested]; got {events:?}"
+            "expected [SubAgentErrored, WorkerDecisionRequested]; got {events:?}"
         );
+        assert_eq!(fired_tool_result(&events), vec!["call-sa".to_string()]);
         let sa = agg
             .state
             .sub_agent_calls
@@ -3084,12 +3019,12 @@ mod tests {
                 events.as_slice(),
                 [
                     EventPayload::SubAgentTurnCompleted(_),
-                    EventPayload::NewMessage(_),
                     EventPayload::WorkerDecisionRequested(_),
                 ]
             ),
-            "expected [SubAgentTurnCompleted, NewMessage, WorkerDecisionRequested]; got {events:?}"
+            "expected [SubAgentTurnCompleted, WorkerDecisionRequested]; got {events:?}"
         );
+        assert_eq!(fired_tool_result(&events), vec!["call-sa".to_string()]);
         let sa = agg
             .state
             .sub_agent_calls
@@ -3149,48 +3084,30 @@ mod tests {
         dispatch(agg, CommandPayload::Wake { now: Utc::now() }, &system())
     }
 
-    fn fired_tool_result(events: &[EventPayload]) -> Option<Vec<CompletedToolCall>> {
-        events.iter().find_map(|e| {
-            let trigger = match e {
-                EventPayload::WorkerDecisionRequested(p) => &p.trigger,
-                EventPayload::DecisionRequestQueued(p) => &p.trigger,
-                _ => return None,
-            };
-            match trigger {
-                DecisionTrigger::ToolResults { completed } => Some(completed.clone()),
-                _ => None,
-            }
-        })
-    }
-
-    fn result_nodes_in(events: &[EventPayload]) -> Vec<NewMessage> {
+    /// The `tool_call_id`s of every `tool.result` trigger in the events, in
+    /// order. A queued decision that is promoted in the same commit surfaces as
+    /// both `DecisionRequestQueued` and `WorkerDecisionRequested`; dedup by
+    /// `decision_id` so each tool.result counts once.
+    fn fired_tool_result(events: &[EventPayload]) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
         events
             .iter()
-            .filter_map(|e| match e {
-                EventPayload::NewMessage(m) if m.message.role == Role::Tool => Some(m.clone()),
-                _ => None,
+            .filter_map(|e| {
+                let (decision_id, trigger) = match e {
+                    EventPayload::WorkerDecisionRequested(p) => (&p.decision_id, &p.trigger),
+                    EventPayload::DecisionRequestQueued(p) => (&p.decision_id, &p.trigger),
+                    _ => return None,
+                };
+                match trigger {
+                    DecisionTrigger::ToolResult { tool_call_id, .. }
+                        if seen.insert(decision_id.clone()) =>
+                    {
+                        Some(tool_call_id.clone())
+                    }
+                    _ => None,
+                }
             })
             .collect()
-    }
-
-    fn tree_tool_ids(agg: &Aggregate<SessionState>) -> Vec<String> {
-        let tree = agg.state.message_tree();
-        match &tree.head_id {
-            Some(head) => tree
-                .path_to(head)
-                .into_iter()
-                .filter(|m| m.role == Role::Tool)
-                .filter_map(|m| m.tool_call_id)
-                .collect(),
-            None => Vec::new(),
-        }
-    }
-
-    fn node_text(node: &NewMessage) -> &str {
-        match &node.message.content {
-            Some(Content::Text(t)) => t.as_str(),
-            _ => "",
-        }
     }
 
     fn decision_with(
@@ -3208,31 +3125,24 @@ mod tests {
     }
 
     #[test]
-    fn each_completion_appends_its_node_and_fires_a_tool_result() {
+    fn each_completion_fires_a_tool_result() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
         request_client_tool(&mut agg, "a");
         request_client_tool(&mut agg, "b");
 
         let first = complete_tool(&mut agg, "a", "RA");
-        let a = result_nodes_in(&first);
-        assert_eq!(a.len(), 1);
-        assert_eq!(a[0].message.tool_call_id.as_deref(), Some("a"));
-        assert_eq!(node_text(&a[0]), "RA");
+        assert_eq!(fired_tool_result(&first), vec!["a".to_string()]);
         assert_eq!(
-            fired_tool_result(&first).map(|c| c.into_iter().map(|c| c.tool_call_id).collect()),
-            Some(vec!["a".to_string()])
+            agg.state.tool_calls.get("a").unwrap().result.as_deref(),
+            Some("RA")
         );
 
         let second = complete_tool(&mut agg, "b", "RB");
-        let b = result_nodes_in(&second);
-        assert_eq!(b.len(), 1);
-        assert_eq!(b[0].message.tool_call_id.as_deref(), Some("b"));
+        assert_eq!(fired_tool_result(&second), vec!["b".to_string()]);
         assert_eq!(
-            fired_tool_result(&second).map(|c| c.into_iter().map(|c| c.tool_call_id).collect()),
-            Some(vec!["b".to_string()])
+            agg.state.tool_calls.get("b").unwrap().result.as_deref(),
+            Some("RB")
         );
-
-        assert_eq!(tree_tool_ids(&agg), vec!["a", "b"]);
     }
 
     #[test]
@@ -3264,6 +3174,7 @@ mod tests {
             &mut agg,
             CommandPayload::SubmitWorkerDecision {
                 decision_id,
+                transcript: vec![],
                 actions: vec![WorkerAction::CallTool {
                     tool_call_id: "t1".to_string(),
                     name: "getWeather".to_string(),
@@ -3284,6 +3195,7 @@ mod tests {
             &mut agg,
             CommandPayload::SubmitWorkerDecision {
                 decision_id: exec,
+                transcript: vec![],
                 actions: vec![WorkerAction::ReturnToolResult {
                     tool_call_id: "t1".to_string(),
                     result: "RA".to_string(),
@@ -3293,14 +3205,17 @@ mod tests {
             },
             &machine(),
         );
-        assert_eq!(result_nodes_in(&completed).len(), 1);
         assert_eq!(
-            fired_tool_result(&completed).map(|c| c.len()),
-            Some(1),
+            fired_tool_result(&completed),
+            vec!["t1".to_string()],
             "tool.result fires in the completion commit; got {completed:?}"
         );
+        assert_eq!(
+            agg.state.tool_calls.get("t1").unwrap().result.as_deref(),
+            Some("RA")
+        );
         assert!(
-            fired_tool_result(&wake(&mut agg)).is_none(),
+            fired_tool_result(&wake(&mut agg)).is_empty(),
             "no wake needed"
         );
     }
@@ -3328,10 +3243,10 @@ mod tests {
         );
 
         let tool_done = complete_tool(&mut agg, "t1", "TOOL");
-        assert_eq!(result_nodes_in(&tool_done).len(), 1);
+        assert_eq!(fired_tool_result(&tool_done), vec!["t1".to_string()]);
         assert_eq!(
-            fired_tool_result(&tool_done).map(|c| c.into_iter().map(|c| c.tool_call_id).collect()),
-            Some(vec!["t1".to_string()])
+            agg.state.tool_calls.get("t1").unwrap().result.as_deref(),
+            Some("TOOL")
         );
 
         let sub_done = dispatch(
@@ -3347,17 +3262,15 @@ mod tests {
             &system(),
         );
 
-        let nodes = result_nodes_in(&sub_done);
-        assert_eq!(nodes.len(), 1);
-        let sub = &nodes[0];
-        assert_eq!(sub.message.tool_call_id.as_deref(), Some("s1"));
-        assert_eq!(sub.message.name.as_deref(), Some("researcher"));
-        assert_eq!(node_text(sub), "FINDINGS");
-        assert_eq!(
-            fired_tool_result(&sub_done).map(|c| c.into_iter().map(|c| c.tool_call_id).collect()),
-            Some(vec!["s1".to_string()])
-        );
-        assert_eq!(tree_tool_ids(&agg), vec!["t1", "s1"]);
+        assert_eq!(fired_tool_result(&sub_done), vec!["s1".to_string()]);
+        let sa = agg
+            .state
+            .sub_agent_calls
+            .get("child-1")
+            .expect("sub-agent present");
+        assert_eq!(sa.tool_call_id, "s1");
+        assert_eq!(sa.agent_id, "researcher");
+        assert_eq!(sa.result.as_deref(), Some("FINDINGS"));
     }
 
     #[test]
@@ -3393,6 +3306,7 @@ mod tests {
             &mut agg,
             CommandPayload::SubmitWorkerDecision {
                 decision_id,
+                transcript: vec![],
                 actions: vec![
                     WorkerAction::CallTool {
                         tool_call_id: "t1".to_string(),
@@ -3446,7 +3360,7 @@ mod tests {
             Some(&EffectStatus::Pending)
         );
         assert!(
-            fired_tool_result(&events).is_none(),
+            fired_tool_result(&events).is_empty(),
             "nothing has completed yet"
         );
     }
@@ -3479,15 +3393,13 @@ mod tests {
                 .any(|e| matches!(e, EventPayload::ToolCallErrored(_))),
             "deadline exceeded errors the tool; got {errored:?}"
         );
-        assert!(
-            fired_tool_result(&errored).is_some(),
+        assert_eq!(
+            fired_tool_result(&errored),
+            vec!["t1".to_string()],
             "the timed-out effect fires a tool.result"
         );
-        let nodes = result_nodes_in(&errored);
-        assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].message.tool_call_id.as_deref(), Some("t1"));
         assert!(
-            fired_tool_result(&wake(&mut agg)).is_none(),
+            fired_tool_result(&wake(&mut agg)).is_empty(),
             "the next wake does not re-fire"
         );
     }
@@ -3498,11 +3410,11 @@ mod tests {
         request_client_tool(&mut agg, "a");
 
         assert!(
-            fired_tool_result(&complete_tool(&mut agg, "a", "RA")).is_some(),
+            !fired_tool_result(&complete_tool(&mut agg, "a", "RA")).is_empty(),
             "fires on completion"
         );
         assert!(
-            fired_tool_result(&wake(&mut agg)).is_none(),
+            fired_tool_result(&wake(&mut agg)).is_empty(),
             "wake does not re-fire"
         );
     }
@@ -3912,6 +3824,7 @@ mod tests {
             &mut agg,
             CommandPayload::SubmitWorkerDecision {
                 decision_id,
+                transcript: vec![],
                 actions: vec![WorkerAction::Done {
                     data: serde_json::Value::Null,
                 }],
@@ -3976,6 +3889,7 @@ mod tests {
             &mut agg,
             CommandPayload::SubmitWorkerDecision {
                 decision_id,
+                transcript: vec![],
                 actions: vec![WorkerAction::Done {
                     data: serde_json::Value::Null,
                 }],
@@ -4050,6 +3964,7 @@ mod tests {
             &mut agg,
             CommandPayload::SubmitWorkerDecision {
                 decision_id,
+                transcript: vec![],
                 actions: vec![WorkerAction::CallTool {
                     tool_call_id: "tc-1".to_string(),
                     name: "crawl".to_string(),
@@ -4090,11 +4005,11 @@ mod tests {
                 .any(|e| matches!(e, EventPayload::ToolCallCompleted(_))),
             "tool result should be recorded; got {events:?}"
         );
-        // The result node is appended even while interrupted; only its continuation is deferred.
-        let recorded = result_nodes_in(&events);
-        assert_eq!(recorded.len(), 1);
-        assert_eq!(recorded[0].message.tool_call_id.as_deref(), Some("tc-1"));
-        assert_eq!(node_text(&recorded[0]), "done");
+        assert_eq!(
+            agg.state.tool_calls.get("tc-1").unwrap().result.as_deref(),
+            Some("done")
+        );
+        // The tool.result trigger is queued while interrupted; only its delivery is deferred.
         assert!(
             events
                 .iter()
@@ -4133,6 +4048,7 @@ mod tests {
             &mut agg,
             CommandPayload::SubmitWorkerDecision {
                 decision_id: resumed_decision_id,
+                transcript: vec![],
                 actions: vec![],
                 state: vec![].into(),
             },
@@ -4146,7 +4062,7 @@ mod tests {
             })
             .expect("queued decision should promote after the resumed decision completes");
         assert!(
-            matches!(trigger, DecisionTrigger::ToolResults { .. }),
+            matches!(trigger, DecisionTrigger::ToolResult { .. }),
             "expected ToolResult trigger; got {trigger:?}"
         );
     }
@@ -4186,6 +4102,7 @@ mod tests {
             &mut agg,
             CommandPayload::SubmitWorkerDecision {
                 decision_id,
+                transcript: vec![],
                 actions: vec![WorkerAction::Interrupt {
                     interrupt_id: "int-1".to_string(),
                     reason: "confirmation".to_string(),
@@ -4396,24 +4313,82 @@ mod tests {
         };
 
         let first = complete(&mut agg, "tc-b");
-        let b = result_nodes_in(&first);
-        assert_eq!(b.len(), 1);
-        assert_eq!(b[0].message.tool_call_id.as_deref(), Some("tc-b"));
+        assert_eq!(fired_tool_result(&first), vec!["tc-b".to_string()]);
         assert_eq!(
-            fired_tool_result(&first).map(|c| c.into_iter().map(|c| c.tool_call_id).collect()),
-            Some(vec!["tc-b".to_string()])
+            agg.state.tool_calls.get("tc-b").unwrap().result.as_deref(),
+            Some("result-tc-b")
         );
 
         let second = complete(&mut agg, "tc-a");
-        let a = result_nodes_in(&second);
-        assert_eq!(a.len(), 1);
-        assert_eq!(a[0].message.tool_call_id.as_deref(), Some("tc-a"));
+        assert_eq!(fired_tool_result(&second), vec!["tc-a".to_string()]);
         assert_eq!(
-            fired_tool_result(&second).map(|c| c.into_iter().map(|c| c.tool_call_id).collect()),
-            Some(vec!["tc-a".to_string()])
+            agg.state.tool_calls.get("tc-a").unwrap().result.as_deref(),
+            Some("result-tc-a")
         );
-        assert_eq!(a[0].parent_id.as_deref(), Some(b[0].message.id.as_str()));
+    }
 
-        assert_eq!(tree_tool_ids(&agg), vec!["tc-b", "tc-a"]);
+    #[test]
+    fn worker_append_action_writes_a_tree_node() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let setup = dispatch(
+            &mut agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Message {
+                    message: node_msg("", Role::User, "hi"),
+                    stream: false,
+                },
+                turn_id: Some("turn-1".to_string()),
+            },
+            &system(),
+        );
+        let decision_id =
+            decision_with(&setup, |t| matches!(t, DecisionTrigger::UserMessage { .. }))
+                .expect("user message decision");
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id,
+                transcript: vec![node_msg("u1", Role::User, "hi")],
+                actions: vec![],
+                state: vec![].into(),
+            },
+            &machine(),
+        );
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::NewMessage(m) if m.message.id == "u1")),
+            "append writes a NewMessage; got {events:?}"
+        );
+        assert_eq!(agg.state.head_id.as_deref(), Some("u1"));
+    }
+
+    #[test]
+    fn complete_tool_call_fires_tool_result_without_appending() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        request_client_tool(&mut agg, "tc-1");
+
+        let events = complete_tool(&mut agg, "tc-1", "ok");
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::ToolCallCompleted(_))),
+            "expected a ToolCallCompleted event; got {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, EventPayload::NewMessage(_))),
+            "the engine appends no node on completion; got {events:?}"
+        );
+        assert_eq!(fired_tool_result(&events), vec!["tc-1".to_string()]);
+
+        let tc = agg.state.tool_calls.get("tc-1").expect("tool call present");
+        assert_eq!(tc.tracking.status, EffectStatus::Completed);
+        assert_eq!(tc.result.as_deref(), Some("ok"));
+        assert!(!tc.is_error);
     }
 }

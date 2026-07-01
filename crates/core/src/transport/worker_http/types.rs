@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::runtime::session::decision::ClientPayload;
+use crate::runtime::session::message::Message;
 use crate::session::decision::WorkerAction;
 use crate::span::SpanContext;
 use crate::worker::WorkerState;
@@ -9,6 +10,8 @@ use crate::worker::WorkerState;
 pub struct SubmitRequest {
     pub session_id: String,
     pub decision_id: String,
+    #[serde(default)]
+    pub transcript: Vec<Message>,
     pub actions: Vec<WorkerAction>,
     pub state: WorkerState,
     #[serde(default)]

@@ -14,16 +14,6 @@ pub struct ClientAction {
     pub args: Option<serde_json::Value>,
 }
 
-/// How a submission attaches to the tree.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Anchor {
-    /// Extend the active path — the worker appends to it.
-    Continue,
-    /// The messages are the path — the worker prompts with them as-is.
-    Replace,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientPayload {
@@ -32,7 +22,7 @@ pub enum ClientPayload {
         #[serde(default)]
         stream: bool,
     },
-    /// A full transcript (e.g. an AG-UI client view), forwarded to the worker as a `replace` submission.
+    /// A full transcript (e.g. an AG-UI client view); the worker reconciles it into the tree.
     Messages {
         messages: Vec<Message>,
         #[serde(default)]
@@ -44,35 +34,16 @@ pub enum ClientPayload {
     },
 }
 
-/// Engine-internal; the worker reads the recorded tool node from the tree, not this.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolResult {
-    pub tool_call_id: String,
-    pub name: String,
-    pub content: String,
-    #[serde(default)]
-    pub is_error: bool,
-}
-
-/// Names a completed call on the `tool.results` trigger; result content lives in the tree, keyed by `tool_call_id`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompletedToolCall {
-    pub tool_call_id: String,
-    pub name: String,
-    #[serde(default)]
-    pub is_error: bool,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DecisionTrigger {
+    /// A user message arrived; the worker appends it (rooting the branch with its
+    /// system prompt on a fresh branch) and prompts.
     #[serde(rename = "user.message")]
-    UserMessage {
-        messages: Vec<Message>,
-        anchor: Anchor,
-        #[serde(default)]
-        stream: bool,
-    },
+    UserMessage { message: Message },
+    /// A full client transcript arrived; the worker reconciles it into the tree.
+    #[serde(rename = "user.transcript")]
+    UserTranscript { messages: Vec<Message> },
     #[serde(rename = "client.action")]
     ClientAction {
         name: String,
@@ -89,10 +60,6 @@ pub enum DecisionTrigger {
         usage: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cost: Option<Decimal>,
-        /// Node id of the assistant message (distinct from `call_id`).
-        id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        parent_id: Option<String>,
     },
     #[serde(rename = "llm.error")]
     LlmError {
@@ -118,9 +85,18 @@ pub enum DecisionTrigger {
         attempt: u32,
         deadline: Option<DateTime<Utc>>,
     },
-    /// A completed tool/sub-agent effect; its result node is in the tree. `completed` names what landed.
-    #[serde(rename = "tool.results")]
-    ToolResults { completed: Vec<CompletedToolCall> },
+    /// A tool or sub-agent call completed; fired as each one lands so the
+    /// worker folds its result message in and the tree fills incrementally.
+    /// The worker prompts once no result is pending — see `pending_effects` on
+    /// the decision request.
+    #[serde(rename = "tool.result")]
+    ToolResult {
+        tool_call_id: String,
+        name: String,
+        result: String,
+        #[serde(default)]
+        is_error: bool,
+    },
     #[serde(rename = "interrupt.resumed")]
     InterruptResumed {
         interrupt_id: String,
@@ -131,6 +107,12 @@ pub enum DecisionTrigger {
     Stall,
 }
 
+/// A `call.llm` that omits `handler` runs on the worker (it makes the provider
+/// call and returns `return.llm.result`); `server` is the explicit opt-in.
+fn default_call_llm_handler() -> LlmHandler {
+    LlmHandler::Worker
+}
+
 /// Actions a worker can request as part of a decision.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -138,9 +120,11 @@ pub enum WorkerAction {
     #[serde(rename = "call.llm")]
     CallLlm {
         request: LlmRequest,
-        stream: bool,
-        retry: RetryPolicy,
         #[serde(default)]
+        stream: bool,
+        #[serde(default = "RetryPolicy::no_retry")]
+        retry: RetryPolicy,
+        #[serde(default = "default_call_llm_handler")]
         handler: LlmHandler,
     },
     #[serde(rename = "call.tool")]
@@ -149,6 +133,7 @@ pub enum WorkerAction {
         name: String,
         arguments: String,
         handler: ToolHandler,
+        #[serde(default = "RetryPolicy::no_retry")]
         retry: RetryPolicy,
     },
     #[serde(rename = "return.tool.result")]
@@ -188,6 +173,7 @@ pub enum WorkerAction {
         /// The model tool-call id this delegation answers.
         #[serde(default)]
         tool_call_id: String,
+        #[serde(default = "RetryPolicy::no_retry")]
         retry: RetryPolicy,
     },
     #[serde(rename = "send.message")]

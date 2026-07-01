@@ -37,12 +37,9 @@ This walks through running an agent against [Substructure Cloud](https://app.sub
 **1. Define an agent and serve it as a worker.** Workers are plain HTTP handlers; deploy this anywhere with a public URL (Cloudflare, Vercel, Fly, your own infra). See [`examples/`](./examples) for full deployments.
 
 ```typescript
-import Substructure from "@substructure.ai/sdk";
+import { agent, server, tool, toolLoop, worker } from "@substructure.ai/sdk";
 
-const sub = new Substructure();
-const { agent } = sub;
-
-const getWeather = agent.tool({
+const getWeather = tool({
   name: "get_weather",
   description: "Get the current weather for a city.",
   parameters: {
@@ -50,23 +47,23 @@ const getWeather = agent.tool({
     properties: { city: { type: "string" } },
     required: ["city"],
   },
-  execute: (args: string) => {
+  execute: (args) => {
     const { city } = JSON.parse(args);
     return JSON.stringify({ city, temp_f: 62, condition: "sunny" });
   },
 });
 
-const weatherAgent = agent({ id: "weather-agent" })
-  .use(agent.tools([getWeather]))
-  .use(agent.llm({
-    generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }),
+const weatherAgent = agent({
+  name: "weather-agent",
+  decide: toolLoop({
+    model: server("anthropic/claude-sonnet-4-6"),
     instructions: "You are a helpful weather assistant.",
-  }));
-
-const worker = sub.worker({ agents: [weatherAgent] });
+    tools: [getWeather],
+  }),
+});
 
 export default {
-  fetch: worker.fetchHandler({ signingSecret: process.env.SIGNING_SECRET }),
+  fetch: worker([weatherAgent]).fetch({ signingSecret: process.env.SIGNING_SECRET }),
 };
 ```
 
@@ -119,25 +116,29 @@ Common patterns from [`examples/`](./examples). Each snippet shows the agent def
 A system prompt, history, and the LLM loop. History persists across turns.
 
 ```typescript
-const sub = new Substructure();
-const { agent } = sub;
+import { agent, server, toolLoop } from "@substructure.ai/sdk";
 
-const chatAgent = agent({ id: "chat" })
-  .use(agent.llm({
-    generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }),
+const chatAgent = agent({
+  name: "chat",
+  decide: toolLoop({
+    model: server("anthropic/claude-sonnet-4-6"),
     instructions: "You are a helpful assistant.",
-  }));
+  }),
+});
 ```
 
 ### Tools
 
-Tools are functions with a JSON-schema signature. A tool can opt into a typed state slice. Mutations persist across turns. See [`examples/node-embedded`](./examples/node-embedded).
+Tools are pure functions with a JSON-schema signature. There is no SDK-held tool state — a tool reaches whatever store it needs. Here the list lives in a module-level object that persists for the life of the process. See [`examples/node-embedded`](./examples/node-embedded).
 
 ```typescript
-type Todo = { id: string; title: string; done: boolean };
-const todos = agent.stateSlice<{ items: Todo[] }>({ items: [] });
+import { agent, server, tool, toolLoop } from "@substructure.ai/sdk";
+import { randomUUID } from "node:crypto";
 
-const addTodo = agent.tool({
+type Todo = { id: string; title: string; done: boolean };
+const todos: { items: Todo[] } = { items: [] };
+
+const addTodo = tool({
   name: "add_todo",
   description: "Add a todo item",
   parameters: {
@@ -145,159 +146,161 @@ const addTodo = agent.tool({
     properties: { title: { type: "string" } },
     required: ["title"],
   },
-  state: todos,
-  execute: (args, state) => {
+  execute: (args) => {
     const { title } = JSON.parse(args);
     const item: Todo = { id: randomUUID().slice(0, 8), title, done: false };
-    state.items.push(item);
+    todos.items.push(item);
     return JSON.stringify(item);
   },
 });
 
-const listTodos = agent.tool({
+const listTodos = tool({
   name: "list_todos",
   description: "List all todos",
   parameters: { type: "object", properties: {} },
-  state: todos,
-  execute: (_args, state) => JSON.stringify(state.items),
+  execute: () => JSON.stringify(todos.items),
 });
 
-const todoAgent = agent({ id: "todo" })
-  .use(agent.tools([addTodo, listTodos]))
-  .use(agent.llm({
-    generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }),
+const todoAgent = agent({
+  name: "todo",
+  decide: toolLoop({
+    model: server("anthropic/claude-sonnet-4-6"),
     instructions: "You are a concise todo assistant. Use tools to manage the list.",
-  }));
+    tools: [addTodo, listTodos],
+  }),
+});
 ```
 
-### State hydration
+### State in your own database
 
-State rides the wire as JSON by default. To back a slice with your own database, write a middleware that loads on the way in and saves on the way out. Tools use `state.todos` like in-memory data, but it lives in your DB. Swap `loadTodos`/`saveTodos` for Postgres, Redis, S3, or a Durable Object. See [`examples/hybrid-state`](./examples/hybrid-state).
+There is no SDK-held tool state. To persist data across sessions, a tool reaches your database directly through `ctx`, keyed by `ctx.request.identity.id`. The list lives in your store, follows the user across sessions, and never rides the wire. Swap `loadTodos`/`saveTodos` for Postgres, Redis, S3, or a Durable Object. See [`examples/hybrid-state`](./examples/hybrid-state).
 
 ```typescript
-const todoSlice = middleware<{ todos: TodoData }>({
-  state: { todos: { items: [] } },
-  handler: async (ctx, next) => {
-    const userId = ctx.request.identity.id;
-    ctx.state.todos = (await loadTodos(userId)) ?? { items: [] };
+import { agent, server, tool, toolLoop } from "@substructure.ai/sdk";
+import { randomUUID } from "node:crypto";
 
-    const res = await next(ctx);
-
-    await saveTodos(userId, ctx.state.todos);
-    ctx.state.todos = { items: [] }; // keep the wire small
-    return res;
-  },
-});
-
-const addTodo = agent.tool({
+const addTodo = tool({
   name: "add_todo",
   description: "Add a todo item",
   parameters: { type: "object", properties: { title: { type: "string" } }, required: ["title"] },
-  state: todoSlice,
-  execute: (args, state) => {
+  execute: async (args, ctx) => {
     const { title } = JSON.parse(args);
+    const userId = ctx.request.identity.id;
+    const data = await loadTodos(userId);
     const item = { id: randomUUID().slice(0, 8), title, done: false };
-    state.todos.items.push(item);
+    data.items.push(item);
+    await saveTodos(userId, data);
     return JSON.stringify(item);
   },
 });
 
-const todoAgent = agent({ id: "todo" })
-  .use(todoSlice)
-  .use(agent.tools([addTodo]))
-  .use(agent.llm({
-    generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }),
+const todoAgent = agent({
+  name: "todo",
+  decide: toolLoop({
+    model: server("anthropic/claude-sonnet-4-6"),
     instructions: "Concise todo assistant. Use tools to manage the list.",
-  }));
+    tools: [addTodo],
+  }),
+});
 ```
 
-### Mixed state: user and session
+### State on the wire
 
-Different data has different lifetimes. The wire state holds two ids. A hydration middleware loads each from its own store. History is keyed by session, so it tracks one conversation. Todos are keyed by user, so they follow a user across sessions. See [`examples/state-hydration`](./examples/state-hydration).
+Skip the database and let small state ride the decision envelope as `worker_state`, round-tripped every turn. There is no SDK-held tool state, so the agent is a custom `decide` that builds its tools per decision — each closing over the live state — hands them to `toolLoop`, and passes `state` into the loop. The loop runs the tools and echoes the state you gave it, so the mutations ride the wire with no manual plumbing. See [`examples/state-hydration`](./examples/state-hydration).
 
 ```typescript
-type Refs = { historyId: string; todosId: string };
-type Hydrated = Refs & { messages: Message[]; todos: Todo[] };
+import { agent, server, tool, toolLoop } from "@substructure.ai/sdk";
+import { randomUUID } from "node:crypto";
 
-const hydrate: MiddlewareFn<Refs, Hydrated> = async (ctx, next) => {
-  // First turn the refs are empty. Mint stable ids:
-  // history per session, todos per user.
-  const historyId = ctx.state.historyId || ctx.request.session_id;
-  const todosId = ctx.state.todosId || ctx.request.identity.id;
+type Todo = { id: string; title: string; done: boolean };
+type State = { todos: Todo[] };
 
-  const hydrated: Hydrated = {
-    historyId,
-    todosId,
-    messages: await load<Message[]>("history", historyId, []),
-    todos: await load<Todo[]>("todos", todosId, []),
-  };
+// Built fresh each decision so `execute` closes over the live list; `toolLoop`
+// runs them, and the mutations land in `state.todos`.
+function todoTools(state: State) {
+  return [
+    tool({
+      name: "add_todo",
+      description: "Add a todo item",
+      parameters: { type: "object", properties: { title: { type: "string" } }, required: ["title"] },
+      execute: (args) => {
+        const todo: Todo = { id: randomUUID().slice(0, 8), title: JSON.parse(args).title, done: false };
+        state.todos.push(todo);
+        return JSON.stringify(todo);
+      },
+    }),
+    tool({
+      name: "list_todos",
+      description: "List all todos",
+      parameters: { type: "object", properties: {} },
+      execute: () => JSON.stringify(state.todos),
+    }),
+  ];
+}
 
-  const res = await next({ ...ctx, state: hydrated });
-
-  // Persist the heavy data, hand the wire back only the references.
-  const final = res.state as Hydrated;
-  await save("history", historyId, final.messages);
-  await save("todos", todosId, final.todos);
-  return { ...res, state: { historyId, todosId } satisfies Refs };
-};
-
-const todoAgent = agent({ id: "todo" })
-  .use(agent.stateSlice<Refs>({ historyId: "", todosId: "" }))
-  .use(hydrate)
-  .use(agent.tools([addTodo, listTodos]))
-  .use(agent.llm({
-    generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }),
-    instructions: "Concise todo assistant. Use the tools to manage the list.",
-  }));
+const todoAgent = agent<State>({
+  name: "todo",
+  decide: async (req) => {
+    const state: State = { todos: req.state?.todos ?? [] };
+    const loop = toolLoop<State>({
+      model: server("anthropic/claude-sonnet-4-6"),
+      instructions: "Concise todo assistant. Use the tools to manage the list.",
+      tools: todoTools(state),
+    });
+    return loop({ ...req, state }); // pass state in → the loop persists it back out
+  },
+});
 ```
 
 ### Bring your own agent framework
 
 An existing agent built on another framework can run on Substructure through an adapter. The model, tools, and instructions stay as they are. Substructure handles durability, retries, and streaming around them.
 
-- **[Vercel AI SDK](https://sdk.vercel.ai):** `ToolLoopAgent` from `@substructure.ai/sdk/adapters/ai`. See [`examples/ai-sdk-example`](./examples/ai-sdk-example).
-- **[OpenAI Agents](https://github.com/openai/openai-agents-js):** `OpenAIAgent` from `@substructure.ai/sdk/adapters/openai`. See [`examples/openai-example`](./examples/openai-example).
-- **[Anthropic SDK](https://github.com/anthropics/anthropic-sdk-typescript):** `anthropicGenerate` from `@substructure.ai/sdk/adapters/anthropic` — a generator you plug into `llm` (the core SDK has no agent type to wrap). See [`examples/anthropic-example`](./examples/anthropic-example).
+- **[Vercel AI SDK](https://sdk.vercel.ai):** `aiSdkAgent` from `@substructure.ai/sdk/adapters/ai`. See [`examples/ai-sdk-example`](./examples/ai-sdk-example).
+- **[OpenAI Agents](https://github.com/openai/openai-agents-js):** `openaiAgent` from `@substructure.ai/sdk/adapters/openai`. See [`examples/openai-example`](./examples/openai-example).
+- **[Anthropic SDK](https://github.com/anthropics/anthropic-sdk-typescript):** `anthropicGenerate` from `@substructure.ai/sdk/adapters/anthropic` — a generator you pass as a `toolLoop`'s `model` (the core SDK has no agent type to wrap). See [`examples/anthropic-example`](./examples/anthropic-example).
 
-The agent adapters produce a middleware you `.use()` like any other:
+The agent adapters return a `decide` you wrap with `agent({ name, decide })` and pass to `worker([...])`:
 
 ```typescript
-import { ToolLoopAgent } from "@substructure.ai/sdk/adapters/ai";
+import { agent } from "@substructure.ai/sdk";
+import { aiSdkAgent } from "@substructure.ai/sdk/adapters/ai";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { tool } from "ai";
 import { z } from "zod";
 
 const openrouter = createOpenRouter({ apiKey: process.env.OPENROUTER_API_KEY });
 
-const assistant = new ToolLoopAgent({
-  model: openrouter("anthropic/claude-sonnet-4-6"),
-  instructions: "You are a concise assistant.",
-  tools: {
-    getWeather: tool({
-      description: "Get the current weather for a city.",
-      inputSchema: z.object({ city: z.string() }),
-      execute: async ({ city }) => `It is 22°C and sunny in ${city}.`,
-    }),
-  },
+const chatAgent = agent({
+  name: "ai-sdk-agent",
+  decide: aiSdkAgent({
+    model: openrouter("anthropic/claude-sonnet-4-6"),
+    instructions: "You are a concise assistant.",
+    tools: {
+      getWeather: tool({
+        description: "Get the current weather for a city.",
+        inputSchema: z.object({ city: z.string() }),
+        execute: async ({ city }) => `It is 22°C and sunny in ${city}.`,
+      }),
+    },
+  }),
 });
-
-const chatAgent = sub.agent({ id: "ai-sdk-agent" }).use(assistant);
 ```
 
-The Anthropic adapter is a generator rather than an agent: you plug it into `llm` and declare tools the usual way with `tools()`.
+The Anthropic adapter is a generator rather than an agent: you pass it as a `toolLoop`'s `model` and declare tools the usual way.
 
 ```typescript
+import { agent, toolLoop } from "@substructure.ai/sdk";
 import { anthropicGenerate } from "@substructure.ai/sdk/adapters/anthropic";
 
-const chatAgent = sub
-  .agent({ id: "anthropic-agent" })
-  .use(sub.agent.tools([getWeather]))
-  .use(
-    sub.agent.llm({
-      generator: anthropicGenerate({ model: "claude-haiku-4-5", max_tokens: 1024 }),
-      instructions: "You are a concise assistant.",
-    }),
-  );
+const chatAgent = agent({
+  name: "anthropic-agent",
+  decide: toolLoop({
+    model: anthropicGenerate({ model: "claude-haiku-4-5", max_tokens: 1024 }),
+    instructions: "You are a concise assistant.",
+    tools: [getWeather],
+  }),
+});
 ```
 
 ## Docs

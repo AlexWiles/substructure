@@ -13,11 +13,11 @@ import type {
     TurnResult,
 } from "./types";
 import { drainToTurnResult, isTokenDelta } from "./types";
-import type { FetchHandlerOptions, Handler, NativeRuntime } from "./worker";
+import type { Agents, FetchHandlerOptions, NativeRuntime } from "./worker";
 import { Worker } from "./worker";
 
 export interface EmbeddedOptions {
-    agents: Handler[];
+    agents: Agents;
     /** SQLite database path (default: ":memory:") */
     db?: string;
     /** OpenRouter API base URL (default: "https://openrouter.ai/api") */
@@ -64,7 +64,7 @@ export class SubstructureEmbedded {
         return new SubstructureEmbedded(runtime, options.agents, options.tenantId ?? "default");
     }
 
-    private constructor(runtime: NativeRuntime, agents: Handler[], tenantId: string) {
+    private constructor(runtime: NativeRuntime, agents: Agents, tenantId: string) {
         this.runtime = runtime;
         this.worker = new Worker(agents);
         this.tenantId = tenantId;

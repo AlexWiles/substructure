@@ -1,16 +1,14 @@
 // AI SDK adapter (`@substructure.ai/sdk/adapters/ai`). `aiGenerate` is an
-// `LlmGenerator` backed by `streamText`; `ToolLoopAgent` wires an AI SDK agent into
-// a handler chain. Substructure owns the loop; each `llm.request` runs one
+// `LlmGenerator` backed by `streamText`; `aiSdkAgent` builds a `toolLoop` from an
+// AI SDK toolset. Substructure owns the loop; each `llm.request` runs one
 // `streamText` step.
 
-import { asSchema, jsonSchema, streamText, tool } from "ai";
 import type { LanguageModel, ModelMessage, TextStreamPart, Tool, ToolChoice, ToolSet } from "ai";
-
-import { llm, stopWhen, tools } from "../middleware";
-import type { LlmGenerate, LlmGenerator, StopCondition, ToolDef, ToolExecutionContext } from "../middleware";
-import { contentText } from "../types";
+import { asSchema, jsonSchema, streamText, tool } from "ai";
+import { toolLoop } from "../agent";
+import type { Agent, LlmGenerate, LlmGenerator, StopCondition, ToolDef } from "../core";
 import type { LlmTool, Message, StreamPart, ToolCall } from "../types";
-import type { MiddlewareFn, MiddlewareSource, Next } from "../worker";
+import { contentText } from "../types";
 
 type StreamTextOptions = Parameters<typeof streamText>[0];
 type ToolResultOutput = Awaited<ReturnType<NonNullable<Tool["toModelOutput"]>>>;
@@ -75,10 +73,7 @@ function modelTools(toolList: LlmTool[] | undefined): ToolSet {
     return out;
 }
 
-export type SubstructureAgentSettings<TOOLS extends ToolSet = ToolSet> = Omit<
-    AIGenerateSettings,
-    "tools" | "toolChoice"
-> & {
+export type AiAgentSettings<TOOLS extends ToolSet = ToolSet> = Omit<AIGenerateSettings, "tools" | "toolChoice"> & {
     instructions?: string;
     tools?: TOOLS;
     toolChoice?: ToolChoice<TOOLS>;
@@ -86,40 +81,17 @@ export type SubstructureAgentSettings<TOOLS extends ToolSet = ToolSet> = Omit<
     stopWhen?: StopCondition;
 };
 
-// Mirrors the AI SDK `ToolLoopAgent`, but hands a middleware to the builder
-// instead of driving its own loop.
-export class ToolLoopAgent<TOOLS extends ToolSet = ToolSet> implements MiddlewareSource {
-    constructor(private readonly settings: SubstructureAgentSettings<TOOLS>) {}
-
-    get tools(): TOOLS {
-        return (this.settings.tools ?? ({} as TOOLS)) as TOOLS;
-    }
-
-    toMiddleware(): MiddlewareFn<unknown> {
-        return aiSdkAgent(this.settings);
-    }
-}
-
-// Composes `tools` + `stopWhen` + `llm`, behaving as if those were `.use()`d in order.
-export function aiSdkAgent<TOOLS extends ToolSet>(settings: SubstructureAgentSettings<TOOLS>): MiddlewareFn<unknown> {
-    const { instructions, tools: toolset, stopWhen: stop, ...generateSettings } = settings;
-    const generator = aiGenerate(generateSettings);
-
-    const chain: MiddlewareFn<any, any>[] = [
-        tools(toolset ? aiSdkTools(toolset, settings.experimental_context) : []),
-        ...(stop ? [stopWhen(stop)] : []),
-        llm({ generator, instructions }),
-    ];
-
-    return (ctx, next) => {
-        let fn: Next<unknown> = next;
-        for (let i = chain.length - 1; i >= 0; i--) {
-            const mw = chain[i];
-            const downstream = fn;
-            fn = (c) => mw(c, downstream);
-        }
-        return fn(ctx);
-    };
+/** The loop for running an AI SDK toolset on Substructure: `aiGenerate` as the
+ *  model, the toolset converted to worker-executed tools. Name and deploy it with
+ *  `worker([agent({ name, decide: aiSdkAgent(...) })])`. */
+export function aiSdkAgent<TOOLS extends ToolSet>(settings: AiAgentSettings<TOOLS>): Agent {
+    const { instructions, tools: toolset, stopWhen, ...generateSettings } = settings;
+    return toolLoop({
+        model: aiGenerate(generateSettings),
+        instructions,
+        tools: toolset ? aiSdkTools(toolset, settings.experimental_context) : [],
+        stopWhen,
+    });
 }
 
 // AI SDK tools as Substructure-executed `ToolDef`s.
@@ -154,10 +126,10 @@ export function aiSdkTools(toolset: ToolSet, experimentalContext?: unknown): Too
                 name,
                 description,
                 parameters,
-                execute: async (args: string, _state?: unknown, ctx?: ToolExecutionContext) => {
+                execute: async (args, ctx) => {
                     const input = args ? JSON.parse(args) : {};
                     const options = {
-                        toolCallId: ctx?.toolCallId ?? "",
+                        toolCallId: ctx.toolCallId,
                         messages: [] as ModelMessage[],
                         experimental_context: experimentalContext,
                     };

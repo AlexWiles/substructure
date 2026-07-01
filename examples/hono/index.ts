@@ -1,6 +1,6 @@
 // Mount the worker fetch handler inside a Hono app on Node.
 //
-// `worker.fetchHandler()` is just (Request) => Promise<Response>, so it
+// `worker([...]).fetch()` is just (Request) => Promise<Response>, so it
 // drops into any Web-fetch-compatible framework. Use this shape when you
 // already have a Node HTTP service and want the agent alongside your
 // existing routes rather than as a separate process.
@@ -9,13 +9,10 @@
 //   substructure start --dev --port 9000 --worker-url http://localhost:3000/agent
 
 import { serve } from "@hono/node-server";
-import Substructure from "@substructure.ai/sdk";
+import { agent, server, tool, toolLoop, worker } from "@substructure.ai/sdk";
 import { Hono } from "hono";
 
-const sub = new Substructure();
-const { agent } = sub;
-
-const getWeather = agent.tool({
+const getWeather = tool({
     name: "get_weather",
     description: "Get current weather for a city",
     parameters: {
@@ -29,17 +26,16 @@ const getWeather = agent.tool({
     },
 });
 
-const weatherAgent = agent({ id: "weather" })
-    .use(agent.tools([getWeather]))
-    .use(
-        agent.llm({
-            generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }),
-            instructions: "Weather assistant. Be concise.",
-        }),
-    );
+const weatherAgent = agent({
+    name: "weather",
+    decide: toolLoop({
+        model: server("anthropic/claude-sonnet-4-6"),
+        instructions: "Weather assistant. Be concise.",
+        tools: [getWeather],
+    }),
+});
 
-const worker = sub.worker({ agents: [weatherAgent] });
-const agentHandler = worker.fetchHandler({ signingSecret: process.env.SIGNING_SECRET });
+const agentHandler = worker([weatherAgent]).fetch({ signingSecret: process.env.SIGNING_SECRET });
 
 const app = new Hono();
 
