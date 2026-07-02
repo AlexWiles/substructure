@@ -9,12 +9,12 @@ A sub-agent is an agent another agent can delegate to as if calling a tool. The 
 Sub-agents are ordinary agents. There's nothing special about how they're built:
 
 ```ts
-import { agent, server, toolLoop } from "@substructure.ai/sdk";
+import { agent, toolLoop } from "@substructure.ai/sdk";
 
 const weatherAgent = agent({
   name: "weather",
   decide: toolLoop({
-    model: server("anthropic/claude-sonnet-4-5"),
+    llm: { model: "anthropic/claude-sonnet-4-5" },
     instructions: "Weather assistant. Look up the weather. Be concise.",
     tools: [getWeather],
   }),
@@ -31,7 +31,7 @@ The parent declares the children it can delegate to with `subAgents`, referencin
 const assistant = agent({
   name: "assistant",
   decide: toolLoop({
-    model: server("anthropic/claude-sonnet-4-5"),
+    llm: { model: "anthropic/claude-sonnet-4-5" },
     instructions: "Helpful assistant. Delegate weather questions to the weather agent.",
     subAgents: [weatherAgent],
   }),
@@ -101,7 +101,7 @@ const weatherAgent = agent({ name: "weather", /* ... */ });
 const assistant = agent({
   name: "assistant",
   decide: toolLoop({
-    model: server("anthropic/claude-sonnet-4-5"),
+    llm: { model: "anthropic/claude-sonnet-4-5" },
     instructions: "Helpful assistant. Delegate weather questions to the weather agent.",
     subAgents: [weatherAgent],
   }),

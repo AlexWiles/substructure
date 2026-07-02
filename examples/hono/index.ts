@@ -9,7 +9,7 @@
 //   substructure start --dev --port 9000 --worker-url http://localhost:3000/agent
 
 import { serve } from "@hono/node-server";
-import { agent, server, tool, toolLoop, worker } from "@substructure.ai/sdk";
+import { agent, tool, toolLoop, worker } from "@substructure.ai/sdk";
 import { Hono } from "hono";
 
 const getWeather = tool({
@@ -29,7 +29,7 @@ const getWeather = tool({
 const weatherAgent = agent({
     name: "weather",
     decide: toolLoop({
-        model: server("anthropic/claude-sonnet-4-6"),
+        llm: { model: "anthropic/claude-sonnet-4-6" },
         instructions: "Weather assistant. Be concise.",
         tools: [getWeather],
     }),

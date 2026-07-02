@@ -6,7 +6,7 @@
 // decision and returns. The backend keeps the session + event log, so
 // this function can scale to zero between turns.
 
-import { agent, server, tool, toolLoop, worker } from "@substructure.ai/sdk";
+import { agent, tool, toolLoop, worker } from "@substructure.ai/sdk";
 
 const getWeather = tool({
     name: "get_weather",
@@ -25,7 +25,7 @@ const getWeather = tool({
 const weatherAgent = agent({
     name: "weather",
     decide: toolLoop({
-        model: server("anthropic/claude-sonnet-4-6"),
+        llm: { model: "anthropic/claude-sonnet-4-6" },
         instructions: "Weather assistant. Be concise.",
         tools: [getWeather],
     }),

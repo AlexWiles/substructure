@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { toolLoop } from "../src/agent";
-import { activePath, serverGenerate } from "../src/core";
+import { activePath } from "../src/core";
 import type { Message, MessageTree, Node } from "../src/types";
 import { appendedMessages, callLlm, runAgent, userMessage } from "./harness";
 
@@ -43,7 +43,7 @@ describe("activePath", () => {
 });
 
 describe("agent prompt", () => {
-    const loop = toolLoop({ model: serverGenerate({ model: "test-model" }), instructions: "SYS" });
+    const loop = toolLoop({ llm: { model: "test-model" }, instructions: "SYS" });
     const promptOf = (result: Awaited<ReturnType<typeof runAgent>>) =>
         (callLlm(result)?.request.messages ?? []).map((m) => m.content);
 
@@ -81,7 +81,7 @@ describe("agent prompt", () => {
     });
 
     it("omits the system message when no instructions are given", async () => {
-        const bare = toolLoop({ model: serverGenerate({ model: "test-model" }) });
+        const bare = toolLoop({ llm: { model: "test-model" } });
         const tree: MessageTree = { nodes: [node("u1", undefined, "U1")], head_id: "u1" };
         const result = await runAgent(bare, { trigger: userMessage("U2"), messageTree: tree });
         expect(appendedMessages(result).map((m) => m.content)).toEqual(["U2"]);

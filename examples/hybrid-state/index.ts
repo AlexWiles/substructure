@@ -6,7 +6,7 @@
 // Swap loadTodos/saveTodos for a real client (Postgres, Durable Object, S3, ...)
 // without touching the agent or the tools.
 
-import { agent, server, tool, toolLoop } from "@substructure.ai/sdk";
+import { agent, tool, toolLoop } from "@substructure.ai/sdk";
 import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -66,7 +66,7 @@ const listTodos = tool({
 const todoAgent = agent({
     name: "todo",
     decide: toolLoop({
-        model: server("anthropic/claude-sonnet-4-6"),
+        llm: { model: "anthropic/claude-sonnet-4-6" },
         instructions: "Concise todo assistant. Use tools to manage the list.",
         tools: [addTodo, listTodos],
     }),

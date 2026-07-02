@@ -3,7 +3,7 @@
 // tools and state, and returns a single result. Failures isolate to the
 // child; token + cost usage rolls up to the parent.
 
-import { agent, server, tool, toolLoop } from "@substructure.ai/sdk";
+import { agent, tool, toolLoop } from "@substructure.ai/sdk";
 import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
 
 const getWeather = tool({
@@ -23,7 +23,7 @@ const getWeather = tool({
 const weatherAgent = agent({
     name: "weather",
     decide: toolLoop({
-        model: server("anthropic/claude-sonnet-4-6"),
+        llm: { model: "anthropic/claude-sonnet-4-6" },
         instructions: "Weather assistant. Look up the weather. Be concise.",
         tools: [getWeather],
     }),
@@ -32,7 +32,7 @@ const weatherAgent = agent({
 const assistant = agent({
     name: "assistant",
     decide: toolLoop({
-        model: server("anthropic/claude-sonnet-4-6"),
+        llm: { model: "anthropic/claude-sonnet-4-6" },
         instructions: "Helpful assistant. Delegate weather questions to the weather agent.",
         subAgents: [weatherAgent],
     }),

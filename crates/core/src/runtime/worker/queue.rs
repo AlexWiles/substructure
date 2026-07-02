@@ -9,7 +9,7 @@ use crate::runtime::session::decision::DecisionTrigger;
 use crate::runtime::session::decision::WorkerAction;
 use crate::runtime::session::events::MessageTree;
 use crate::runtime::session::message::Message;
-use crate::runtime::session::state::PendingEffects;
+use crate::runtime::session::state::Effect;
 use crate::runtime::span::SpanContext;
 
 /// Wire format sent to workers (via poll or push) when a decision is needed.
@@ -22,10 +22,12 @@ pub struct WorkerDecisionRequest {
     pub owner: SessionOwner,
     pub trigger: DecisionTrigger,
     pub worker_state: WorkerState,
-    /// In-flight effect counts; the worker branches on these (e.g. prompt once
-    /// no tool/sub-agent result is pending) without tracking rounds itself.
+    /// The in-flight effects as a flat, tagged list (each carries `kind`/`status`).
+    /// The worker derives what it needs — e.g. prompt once no tool/sub-agent effect
+    /// remains — rather than tracking steps itself. Open `kind` leaves room for new
+    /// effect kinds without a wire change.
     #[serde(default)]
-    pub pending: PendingEffects,
+    pub effects: Vec<Effect>,
     /// The active conversation as a flat list (the tree's `head_id`-to-root
     /// path). A worker only needs this; the tree is provided for clients that
     /// want branch structure.

@@ -1,19 +1,20 @@
 import { describe, expect, it } from "vitest";
 
 import { toolLoop } from "../src/agent";
-import { serverGenerate } from "../src/core";
 import type { Message } from "../src/types";
 import { appendedMessages, callLlm, linearTree, runAgent, userTranscript } from "./harness";
 
 // The AG-UI `/run` path: the client sends its full transcript (with the ids it
 // knows) and the worker reconciles the new/branched tail into the tree.
-const loop = toolLoop({ model: serverGenerate({ model: "test-model" }), instructions: "SYS" });
+const loop = toolLoop({ llm: { model: "test-model" }, instructions: "SYS" });
 
 const prompt = (r: Awaited<ReturnType<typeof runAgent>>) => (callLlm(r)?.request.messages ?? []).map((m) => m.content);
 
 describe("user.transcript (AG-UI reconcile)", () => {
     it("cold start roots [system, user] from an id-less transcript", async () => {
-        const result = await runAgent(loop, { trigger: userTranscript([{ role: "user", content: "hi" }]) });
+        const result = await runAgent(loop, {
+            trigger: userTranscript([{ role: "user", content: "hi" }]),
+        });
 
         expect(appendedMessages(result).map((m) => m.role)).toEqual(["system", "user"]);
         expect(prompt(result)).toEqual(["SYS", "hi"]);

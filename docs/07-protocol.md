@@ -30,7 +30,10 @@ decision.
   "identity":    { "tenant_id": "…", "id": "user-42" },  // the end user
   "trigger":     { "type": "…", … },   // what happened — see Triggers
   "worker_state": "eyJ…",      // arbitrary state string
-  "pending":     { "tool_calls": 0, "sub_agents": 0, "llm_calls": 0 },
+  "effects": [                 // effects still in flight — a flat, tagged list, see below
+    { "id": "…", "kind": "tool_call", "status": "pending", "attempt": 0,
+      "name": "get_weather", "arguments": "{…}", "handler": "worker" }
+  ],
   "transcript":  [ { "role": "user", "content": "hi", "id": "…" }, … ],
   "turn_id":     "…",
   "attempts":    0
@@ -41,9 +44,14 @@ decision.
 - **`transcript`** is the active conversation as a flat list, oldest first — all a
   tool loop needs. (`message_tree` carries the full branch structure for clients
   that need it; workers can ignore it.)
-- **`pending`** is the count of effects still in flight — LLM calls, tool calls,
-  and sub-agent turns the engine is still waiting on. Branch on these instead of
-  tracking rounds yourself: when they're all zero, the round is complete.
+- **`effects`** is a flat list of the effects still in flight. Each is a stable
+  envelope — `id`, `kind` (`"tool_call"` | `"sub_agent"` | `"llm_call"` | …),
+  `status` (`"pending"` | `"retry_scheduled"`), `attempt` — plus kind-specific fields
+  (a tool's `name`/`arguments`, a sub-agent's `agent_id`/`session_id`). Branch on
+  `kind` + `status` instead of tracking steps yourself: the step is complete when no
+  `tool_call`/`sub_agent` effect is still in flight. `kind` and `status` are **open**
+  — a worker ignores kinds it doesn't handle, so new effect kinds (timers, approvals)
+  and new statuses are additive, never a wire break.
 - **`worker_state`** is your state, opaque to the engine. Decode it on the way in,
   encode it on the way out. Empty when you keep state in your own database.
 
@@ -90,7 +98,7 @@ is just constructing the struct.
 
 | `type` | Fields | Effect |
 |---|---|---|
-| `call.llm` | `request`, `stream?`, `retry?`, `handler?` | Make an LLM call. `handler: "server"` (default) lets the engine call its provider; `handler: "worker"` hands the call back to you as an `llm.request` trigger. |
+| `call.llm` | `request`, `handler`, `stream?`, `retry?` | Make an LLM call. `handler` is required (like `call.tool`): `"server"` lets the engine call its provider; `"worker"` hands the call back to you as an `llm.request` trigger. |
 | `call.tool` | `tool_call_id`, `name`, `arguments`, `handler`, `retry?` | Schedule a tool call. `handler: "worker"` runs on your worker (you'll get a `tool.execute` trigger); `handler: "client"` routes it to the browser. |
 | `return.tool.result` | `tool_call_id`, `result`, `attempt` | A worker-run tool finished. |
 | `return.tool.error` | `tool_call_id`, `error`, `retryable`, `attempt` | A worker-run tool failed. |
@@ -148,7 +156,7 @@ def handle(request):
         "state":       encode(out.get("state", state)),   # echo state if unchanged
     }
 
-# ── Loop: a pure function of (trigger, transcript, pending) → decision. ──
+# ── Loop: a pure function of (trigger, transcript, pending_*) → decision. ──
 def decide(req, state):
     trigger    = req["trigger"]
     history    = req.get("transcript", [])
@@ -172,13 +180,15 @@ def decide(req, state):
             actions = [ call_tool(c["id"], c["function"]["name"], c["function"]["arguments"]) for c in calls ]
             return { "transcript": transcript, "actions": actions }
 
-        # A tool finished: record it; prompt again once the round is complete.
+        # A tool finished: record it; prompt again once the step is complete.
         case "tool.result":
             node       = { "role": "tool", "content": trigger["result"],
                            "tool_call_id": trigger["tool_call_id"], "name": trigger["name"], "id": new_id() }
             transcript = history + [ node ]
-            round_open = req["pending"]["tool_calls"] + req["pending"]["sub_agents"] > 0
-            if round_open:
+            step_open  = any(e["kind"] in ("tool_call", "sub_agent")
+                             and e["status"] in ("pending", "retry_scheduled")
+                             for e in req["effects"])
+            if step_open:
                 return { "transcript": transcript }                          # just record
             return { "transcript": transcript, "actions": [ call_llm(transcript, schemas) ] }
 
@@ -228,7 +238,7 @@ transport may hold the connection open so you can push token deltas as they
 arrive, then return the final `LlmResponse`. Server-handled models (`handler:
 "server"`) stream on the engine side and never produce an `llm.request`.
 
-**Stop conditions.** To cap the loop (e.g. stop after N assistant rounds), check
+**Stop conditions.** To cap the loop (e.g. stop after N assistant steps), check
 your condition in the `tool.result` case before prompting again and emit `done`
 instead of `call.llm`.
 

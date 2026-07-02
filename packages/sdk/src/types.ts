@@ -135,15 +135,20 @@ export interface LlmTool {
     function: LlmToolFunction;
 }
 
-export interface LlmRequest {
+/** Model id and per-call parameters — the reusable core of an LLM call, shared by
+ *  `LlmRequest` (the wire payload) and `Llm` (the loop's config). */
+export interface LlmParams {
     model: string;
-    messages: Message[];
-    tools?: LlmTool[];
     temperature?: number;
     max_completion_tokens?: number;
     /** Reasoning / thinking controls, passed through to providers that support
      *  it. `effort` and `max_tokens` are mutually exclusive. */
     reasoning?: ReasoningConfig;
+}
+
+export interface LlmRequest extends LlmParams {
+    messages: Message[];
+    tools?: LlmTool[];
 }
 
 /** Mirrors OpenRouter's unified `reasoning` parameter. */
@@ -264,7 +269,7 @@ export type WorkerAction =
           request: LlmRequest;
           stream?: boolean;
           retry?: RetryPolicy;
-          handler?: LlmHandler;
+          handler: LlmHandler;
       }
     | {
           type: "call.tool";
@@ -437,18 +442,6 @@ export interface LlmTokenDeltaInput {
     tool_calls?: ToolCallChunk[];
     finish_reason?: string;
 }
-
-export type StreamPart =
-    | { type: "text-start"; id?: string }
-    | { type: "text-delta"; id?: string; delta: string }
-    | { type: "text-end"; id?: string }
-    | { type: "reasoning-start"; id?: string }
-    | { type: "reasoning-delta"; id?: string; delta: string }
-    | { type: "reasoning-end"; id?: string }
-    | { type: "tool-input-start"; toolCallId: string; toolName: string }
-    | { type: "tool-input-delta"; toolCallId: string; inputTextDelta: string }
-    | { type: "tool-input-available"; toolCallId: string; toolName: string; input: unknown }
-    | { type: "finish"; finishReason?: string };
 
 export interface ToolCallRequested {
     type: "tool.call.requested";
@@ -782,11 +775,30 @@ export interface WorkerAuthOptions {
     bearerToken: string;
 }
 
-/** Counts of in-flight effects, surfaced on every decision request. */
-export interface PendingEffects {
-    tool_calls: number;
-    sub_agents: number;
-    llm_calls: number;
+// The in-flight effects surfaced on every worker decision as a flat, tagged list.
+// Each effect is a stable envelope (`id`, `kind`, `status`, `attempt`, `deadline`)
+// plus kind-specific fields. `kind` is open: a worker ignores kinds it doesn't
+// handle, so the engine can add new kinds (timers, approvals, …) without a breaking
+// change; likewise `status` (currently `"pending"`/`"retry_scheduled"`) can widen.
+// The step gate is "no tool/sub-agent effect left". Results live in the transcript.
+
+/** Effect kinds. Open — unknown kinds are surfaced but safely ignored by a worker
+ *  that doesn't handle them. */
+export type EffectKind = "tool_call" | "sub_agent" | "llm_call" | (string & {});
+
+export interface Effect {
+    id: string;
+    kind: EffectKind;
+    status: EffectStatus;
+    attempt: number;
+    deadline?: DateTime;
+    // Kind-specific fields, present according to `kind`:
+    name?: string; // tool_call
+    arguments?: string; // tool_call
+    agent_id?: string; // sub_agent
+    session_id?: Uuid; // sub_agent
+    handler?: ToolHandler | LlmHandler; // tool_call | llm_call
+    stream?: boolean; // llm_call
 }
 
 export interface WorkerDecisionRequestWire {
@@ -797,8 +809,9 @@ export interface WorkerDecisionRequestWire {
     identity: WorkerIdentity;
     trigger: DecisionTrigger;
     worker_state: string;
-    /** In-flight effect counts; branch on these instead of tracking rounds. */
-    pending?: PendingEffects;
+    /** The in-flight effects as a flat, tagged list; branch on `kind` instead of
+     *  tracking steps yourself — the step gate is "no tool/sub-agent effect left". */
+    effects: Effect[];
     /** The active conversation as a flat list; a worker only needs this. */
     transcript?: Message[];
     /** The full tree, for clients that need branch structure. */
@@ -819,7 +832,6 @@ export interface SubmitRequest {
     transcript: Message[];
     /** Base64-encoded opaque worker state */
     state: string;
-    span?: SpanContext;
 }
 
 export interface SubmitResponse {

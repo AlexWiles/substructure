@@ -31,11 +31,11 @@ same version.
 
 - **Breaking (SDK):** rebuilt around an agent that is a decision function; the
   middleware/builder API is gone. An agent is `agent({ name, decide })`, where
-  `decide(req: DecisionRequest) => Decision` is either `toolLoop({ model,
-  instructions, tools, subAgents, stopWhen, stream, retry })` — the default
-  tool/sub-agent loop — or your own function, built from pure action builders
-  (`callLlm`, `callTool`, `toolResult`, `toolError`, `done`) or plain action
-  objects. A `DecisionRequest` is the engine's wire envelope with
+  `decide(req: DecisionRequest) => Decision` is either `toolLoop({ llm,
+  instructions, tools, subAgents, retry })` — the default
+  tool/sub-agent loop — or your own function that returns plain action objects
+  (`{ type: "call.llm", … }`, `{ type: "call.tool", … }`, `{ type: "done", … }`, …);
+  there are no action builders. A `DecisionRequest` is the engine's wire envelope with
   `worker_state` decoded into `state` (read `req.trigger`/`req.transcript`/
   `req.pending`/`req.session_id`/… directly); a `Decision` is the result
   `{ actions?, transcript?, state? }`. `toolLoop` is the loop implementation, so a
@@ -47,31 +47,51 @@ same version.
   sub-agents are referenced by value (`subAgents: [child]`). `agent({...})`
   returns a `NamedAgent`, which is what deployment and `subAgents` require, so
   passing an unnamed decision function is a type error rather than a runtime one.
-  Models are
-  `server("provider/model")` or an adapter generator (`anthropicGenerate`,
-  `aiGenerate`, `openaiGenerate`). Exports `activePath(tree)`/`pathTo(tree, leaf)`;
-  removes `messageHistory`/`messageHistoryCurrentTurn`.
+  The LLM is `llm: { model: "provider/model", temperature?, reasoning?, stream? }`
+  (the Substructure server makes the call) or an adapter generator
+  (`anthropicGenerate`, `aiGenerate`, `openaiGenerate`) that runs it on your worker
+  — no `server()`/`serverGenerate()`/`Model` wrapper. `Llm` is a discriminated
+  union: a server LLM omits `run`, a worker LLM sets `handler: "worker"` and must
+  supply `run`, so `handler: "worker"` without a `run` is a compile error. Exports
+  `activePath(tree)`/`pathTo(tree, leaf)`; removes `messageHistory`/`messageHistoryCurrentTurn`.
 - **Breaking (SDK):** `tool({...})` executes are pure `(args, ctx) => result` —
   there is no SDK-held tool state. State lives in your own store reached through
   `ctx` (e.g. a database keyed by `ctx.sessionId`), or on the wire as
   `worker_state` in a raw handler that owns `tool.execute`.
+- **Breaking (SDK):** a worker-run model's `run(request, ctx)` streams via
+  `ctx.emitDelta` using the wire token-delta shape (`{ text?, reasoning?,
+  tool_calls?, finish_reason? }`) directly — the intermediate `StreamPart` type
+  and its flattening transform are gone, so there's one token-delta shape across
+  the SDK (named `EmitDelta`).
+- Worker submits no longer carry a `span`: the engine already mints the
+  equivalent span (`push_worker`) around the worker round-trip and ignored the
+  worker's, so `SubmitRequest.span` and the worker-side span minting
+  (`childSpan`/`randomHex`) are gone — the engine owns tracing. The
+  `DecisionRuntime` wrapper (a one-field `{ emitDelta? }`) is likewise removed;
+  the streaming callback is passed as a plain `EmitDelta`.
 - Effect completion now carries content to the worker, which folds it into the
   transcript. Each LLM/tool/sub-agent completion fires a content-bearing trigger
   (`llm.response`, `tool.result`) as it lands, so the tree fills incrementally.
-  Every decision also carries `pending` (counts of in-flight tool/sub-agent/LLM
-  effects), so the default loop prompts the LLM once no result is pending —
-  without tracking the round itself. Removes the `append` action and
-  `toolRoundComplete`; `toolResultNode` still resolves a landed result.
+  Every decision also carries the in-flight effects as a flat, tagged list under
+  `effects` — each a stable envelope (`id`, `kind`, `status`, `attempt`, `deadline`)
+  plus kind-specific fields — derived on read from the session's effect maps (no
+  stored ledger). The default loop prompts the LLM once no `tool_call`/`sub_agent`
+  effect is still in flight — knowing *which* calls are outstanding, not just how
+  many, and without tracking the step itself. `kind` and `status` are open, so new
+  effect kinds (e.g. timers, approvals) and new statuses are additive, never a wire
+  break. Removes the `append` action and `toolRoundComplete`; `toolResultNode` still
+  resolves a landed result.
 - `call.llm` keeps its full message list (the prompt), now read-only w.r.t. the
   tree — a per-call prompt the worker can shape (compaction, injected context)
   without changing the record.
 - A worker's effect actions default their engine-machinery fields, so a
   hand-written (no-SDK) worker can omit them: `call.llm`, `call.tool`, and
   `spawn.sub_agent` default `retry` to no retries when absent (retries are
-  opt-in, never a surprise), and `call.llm` defaults `stream` to false and
-  `handler` to `worker` — the worker makes the provider call and returns
-  `return.llm.result`; pass `handler: "server"` to have the engine's
-  configured provider make the call instead.
+  opt-in, never a surprise), and `call.llm` defaults `stream` to false.
+  `call.llm.handler` is **required** (like `call.tool.handler`) — `"server"`
+  has the engine's configured provider make the call; `"worker"` hands it back
+  as an `llm.request` trigger. No hidden default: the wire always states who
+  runs the call.
 - The AG-UI `/run` endpoint forwards the client's full transcript; the engine
   classifies it (a tool-message tail completes the matching client tool calls,
   everything else is a `user.transcript` whose returned transcript the engine

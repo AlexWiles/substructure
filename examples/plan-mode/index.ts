@@ -9,7 +9,7 @@
 // `execute` can mutate `state.plan` directly. State (mode + plan) rides the wire
 // as `worker_state`.
 
-import { agent, server, tool, toolLoop } from "@substructure.ai/sdk";
+import { agent, type Llm, tool, toolLoop } from "@substructure.ai/sdk";
 import type { DecisionTrigger } from "@substructure.ai/sdk";
 import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
 
@@ -110,7 +110,7 @@ const renderPlan = (plan: Plan) => {
 
 const profiles = {
     planning: {
-        model: server("anthropic/claude-opus-4-7"),
+        llm: { model: "anthropic/claude-opus-4-7" },
         instructions: [
             "You are in PLANNING MODE.",
             "Work with the user to break the goal down into concrete steps.",
@@ -119,7 +119,7 @@ const profiles = {
         ].join("\n"),
     },
     executing: {
-        model: server("anthropic/claude-sonnet-4-6"),
+        llm: { model: "anthropic/claude-sonnet-4-6" },
         instructions: [
             "You are in EXECUTING MODE.",
             "Work through every pending step in the plan above, in order. For each one,",
@@ -127,7 +127,7 @@ const profiles = {
             "Stop when every step is done.",
         ].join("\n"),
     },
-} satisfies Record<Mode, { model: ReturnType<typeof server>; instructions: string }>;
+} satisfies Record<Mode, { llm: Llm; instructions: string }>;
 
 // ── Agent ───────────────────────────────────────────────────────────────────
 
@@ -159,7 +159,7 @@ const planner = agent<State>({
         // mode. Passing `state` in is what the loop persists back out, so the tools'
         // edits to `state.plan` (and any mode change) ride the wire.
         const loop = toolLoop<State>({
-            model: profiles[state.mode].model,
+            llm: profiles[state.mode].llm,
             instructions: profiles[state.mode].instructions,
             tools: planTools(state),
         });

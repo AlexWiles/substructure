@@ -90,7 +90,7 @@ fn try_extract(raw: &Event) -> Option<WorkerDecisionRequest> {
         owner: owner.clone(),
         trigger: req.trigger.clone(),
         worker_state: derived.worker_state.clone(),
-        pending: derived.pending_effects.clone(),
+        effects: derived.effects.clone(),
         transcript: derived
             .message_tree
             .head_id

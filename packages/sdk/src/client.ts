@@ -1,19 +1,18 @@
-export type { AgentConfig, LoopConfig, Model } from "./agent";
-export { agent, callLlm, callTool, done, server, toolError, toolLoop, toolResult } from "./agent";
+export type { AgentConfig, LoopConfig } from "./agent";
+export { agent, toolLoop } from "./agent";
 export type {
     Agent,
     Decision,
     DecisionRequest,
+    EmitDelta,
+    Llm,
     LlmGenerate,
-    LlmGenerator,
     NamedAgent,
-    StopCondition,
-    StopInfo,
     ToolDef,
     ToolExecutionContext,
     ToolFn,
 } from "./core";
-export { activePath, stepCountIs, tool } from "./core";
+export { activePath, tool } from "./core";
 export { Substructure as default, Substructure } from "./substructure";
 export type {
     ClientAction,
@@ -27,6 +26,7 @@ export type {
     Event,
     EventPayload,
     LlmHandler,
+    LlmParams,
     LlmRequest,
     LlmResponse,
     LlmTokenDelta,
@@ -41,7 +41,6 @@ export type {
     SessionScope,
     SessionState,
     SessionStatus,
-    StreamPart,
     SubmitToolCallFailure,
     SubmitToolCallResultArgs,
     SubmitToolCallResultOutcome,
@@ -58,5 +57,5 @@ export type {
 } from "./types";
 export { contentText, isTokenDelta, persistedOnly } from "./types";
 export { verifyWebhookSignature, WebhookVerificationError } from "./webhook";
-export type { Agents, DecisionRuntime, FetchHandlerOptions } from "./worker";
+export type { Agents, FetchHandlerOptions } from "./worker";
 export { serve, Worker, worker } from "./worker";

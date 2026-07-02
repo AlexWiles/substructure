@@ -1,6 +1,6 @@
-import type { Agent, DecisionRequest, NamedAgent } from "./core";
+import type { Agent, DecisionRequest, EmitDelta, NamedAgent } from "./core";
 import { createSseStream, type SseStream } from "./sse";
-import type { LlmTokenDeltaInput, SpanContext, SubmitRequest, WorkerDecisionRequestWire } from "./types";
+import type { LlmTokenDeltaInput, SubmitRequest, WorkerDecisionRequestWire } from "./types";
 import { verifyWebhookSignature } from "./webhook";
 
 export interface NativeRuntime {
@@ -35,10 +35,6 @@ export interface NativeRuntime {
     shutdown(): Promise<void>;
 }
 
-export interface DecisionRuntime {
-    emitDelta?: (delta: LlmTokenDeltaInput) => Promise<void>;
-}
-
 export interface FetchHandlerOptions {
     signingSecret?: string;
     /** Timestamp validation tolerance in seconds (default: 300) */
@@ -66,13 +62,9 @@ function encodeState(value: unknown): string {
 async function runDecision(
     fn: Agent,
     request: WorkerDecisionRequestWire,
-    runtime?: DecisionRuntime,
+    emitDelta?: EmitDelta,
 ): Promise<SubmitRequest> {
-    const req: DecisionRequest = {
-        ...request,
-        state: decodeState(request.worker_state),
-        emitDelta: runtime?.emitDelta,
-    };
+    const req: DecisionRequest = { ...request, state: decodeState(request.worker_state), emitDelta };
     const out = await fn(req);
     return {
         session_id: request.session_id,
@@ -80,7 +72,6 @@ async function runDecision(
         actions: out.actions ?? [],
         transcript: out.transcript ?? request.transcript ?? [],
         state: encodeState(out.state !== undefined ? out.state : req.state),
-        span: childSpan(request.span, "worker_submit"),
     };
 }
 
@@ -99,7 +90,7 @@ export class Worker {
     async register(runtime: NativeRuntime, tenantId: string): Promise<void> {
         await runtime.registerWorker(tenantId, this.agentIds, async (decisionJson: string) => {
             const request: WorkerDecisionRequestWire = JSON.parse(decisionJson);
-            const submit = await this.handleDecision(request, embeddedDecisionRuntime(runtime, request));
+            const submit = await this.handleDecision(request, embeddedEmitDelta(runtime, request));
             return JSON.stringify(submit);
         });
     }
@@ -133,12 +124,12 @@ export class Worker {
         };
     }
 
-    async handleDecision(request: WorkerDecisionRequestWire, runtime?: DecisionRuntime): Promise<SubmitRequest> {
+    async handleDecision(request: WorkerDecisionRequestWire, emitDelta?: EmitDelta): Promise<SubmitRequest> {
         const fn = this.agents[request.agent_id];
         if (!fn) {
             throw new Error(`No agent registered for: ${request.agent_id}`);
         }
-        return runDecision(fn, request, runtime);
+        return runDecision(fn, request, emitDelta);
     }
 
     private handleDecisionStream(request: WorkerDecisionRequestWire): Response {
@@ -146,7 +137,7 @@ export class Worker {
 
         void (async () => {
             try {
-                const submit = await this.handleDecision(request, sseDecisionRuntime(sse));
+                const submit = await this.handleDecision(request, sseEmitDelta(sse));
                 await sse.writeSSE({ event: "decision.result", data: submit });
             } catch (err) {
                 const message = err instanceof Error ? err.message : String(err);
@@ -176,57 +167,33 @@ export function serve(agents: Agents, opts?: FetchHandlerOptions): (req: Request
     return new Worker(agents).fetch(opts);
 }
 
-function sseDecisionRuntime(sse: SseStream): DecisionRuntime {
-    return {
-        emitDelta: (delta) => sse.writeSSE({ event: "llm.token.delta", data: delta }),
-    };
+function sseEmitDelta(sse: SseStream): EmitDelta {
+    return (delta) => sse.writeSSE({ event: "llm.token.delta", data: delta });
 }
 
-function embeddedDecisionRuntime(
-    runtime: NativeRuntime,
-    request: WorkerDecisionRequestWire,
-): DecisionRuntime | undefined {
+function embeddedEmitDelta(runtime: NativeRuntime, request: WorkerDecisionRequestWire): EmitDelta | undefined {
     const { trigger } = request;
     if (trigger.type !== "llm.request" || !trigger.stream) return undefined;
 
     const rootSessionId = request.ancestry?.[0] ?? request.session_id;
     let seq = 0;
 
-    return {
-        emitDelta: async (delta: LlmTokenDeltaInput) => {
-            await runtime.emitTokenDelta(
-                JSON.stringify({
-                    tenant_id: request.tenant_id,
-                    root_session_id: rootSessionId,
-                    session_id: request.session_id,
-                    agent_id: request.agent_id,
-                    turn_id: request.turn_id,
-                    call_id: trigger.call_id,
-                    attempt: trigger.attempt,
-                    seq: seq++,
-                    text: delta.text,
-                    reasoning: delta.reasoning,
-                    tool_calls: delta.tool_calls,
-                    finish_reason: delta.finish_reason,
-                }),
-            );
-        },
-    };
-}
-
-function randomHex(bytes: number): string {
-    const buf = new Uint8Array(bytes);
-    crypto.getRandomValues(buf);
-    return Array.from(buf, (b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-function childSpan(parent: SpanContext, name: string): SpanContext {
-    return {
-        trace_id: parent.trace_id,
-        span_id: randomHex(8),
-        parent_span_id: parent.span_id,
-        trace_flags: parent.trace_flags,
-        trace_state: parent.trace_state,
-        name,
+    return async (delta: LlmTokenDeltaInput) => {
+        await runtime.emitTokenDelta(
+            JSON.stringify({
+                tenant_id: request.tenant_id,
+                root_session_id: rootSessionId,
+                session_id: request.session_id,
+                agent_id: request.agent_id,
+                turn_id: request.turn_id,
+                call_id: trigger.call_id,
+                attempt: trigger.attempt,
+                seq: seq++,
+                text: delta.text,
+                reasoning: delta.reasoning,
+                tool_calls: delta.tool_calls,
+                finish_reason: delta.finish_reason,
+            }),
+        );
     };
 }

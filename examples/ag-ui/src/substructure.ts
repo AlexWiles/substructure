@@ -1,6 +1,6 @@
 // Shared substructure setup. Server-only (never the client bundle).
 
-import Substructure, { agent, server, tool, toolLoop, worker } from "@substructure.ai/sdk";
+import Substructure, { agent, tool, toolLoop, worker } from "@substructure.ai/sdk";
 
 export const AGENT_ID = "todo-agent";
 
@@ -66,8 +66,7 @@ const listTodos = tool({
 const todoAgent = agent({
     name: AGENT_ID,
     decide: toolLoop({
-        model: server("minimax/minimax-m3"),
-        stream: true,
+        llm: { model: "minimax/minimax-m3", stream: true },
         instructions:
             "You are a concise, friendly to-do list assistant. The user has an on-screen to-do " +
             "list you drive with tools. Use add_todo to add a task (call it once per item when " +

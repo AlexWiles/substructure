@@ -1,7 +1,7 @@
 // The substructure worker webhook. The ENGINE posts decision requests here
 // (server-to-server); this returns the worker's actions. Point the engine at
 // it: `substructure start --worker-url https://<app>/api/agent`.
-import { agent, server, tool, toolLoop, worker } from "@substructure.ai/sdk";
+import { agent, tool, toolLoop, worker } from "@substructure.ai/sdk";
 import { createFileRoute } from "@tanstack/react-router";
 
 export const AGENT_ID = "todo-agent";
@@ -71,8 +71,7 @@ const listTodos = tool({
 const todoAgent = agent({
     name: AGENT_ID,
     decide: toolLoop({
-        model: server("minimax/minimax-m3"),
-        stream: true,
+        llm: { model: "minimax/minimax-m3", stream: true },
         instructions:
             "You are a concise, friendly to-do list assistant. The user has an on-screen to-do " +
             "list you drive with tools. Use add_todo to add a task (call it once per item when " +

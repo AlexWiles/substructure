@@ -87,8 +87,8 @@ pub enum DecisionTrigger {
     },
     /// A tool or sub-agent call completed; fired as each one lands so the
     /// worker folds its result message in and the tree fills incrementally.
-    /// The worker prompts once no result is pending — see `pending_effects` on
-    /// the decision request.
+    /// The worker prompts once no tool/sub-agent effect is in flight — a view
+    /// derived from `effects` on the decision request.
     #[serde(rename = "tool.result")]
     ToolResult {
         tool_call_id: String,
@@ -107,12 +107,6 @@ pub enum DecisionTrigger {
     Stall,
 }
 
-/// A `call.llm` that omits `handler` runs on the worker (it makes the provider
-/// call and returns `return.llm.result`); `server` is the explicit opt-in.
-fn default_call_llm_handler() -> LlmHandler {
-    LlmHandler::Worker
-}
-
 /// Actions a worker can request as part of a decision.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -124,7 +118,6 @@ pub enum WorkerAction {
         stream: bool,
         #[serde(default = "RetryPolicy::no_retry")]
         retry: RetryPolicy,
-        #[serde(default = "default_call_llm_handler")]
         handler: LlmHandler,
     },
     #[serde(rename = "call.tool")]

@@ -1,13 +1,11 @@
 import type {
-    LlmHandler,
+    LlmParams,
     LlmRequest,
     LlmResponse,
     LlmTokenDeltaInput,
     Message,
     MessageTree,
-    ReasoningConfig,
     RetryPolicy,
-    StreamPart,
     ToolHandler,
     WorkerAction,
     WorkerDecisionRequestWire,
@@ -16,13 +14,18 @@ import { nodeId } from "./types";
 
 // ── Agent, decision, return ──────────────────────────────────────────────────
 
+/** Push one streamed token delta to whoever is listening (SSE client, embedded
+ *  runtime). Present on a streaming `llm.request`; a worker-run model calls it. */
+export type EmitDelta = (delta: LlmTokenDeltaInput) => Promise<void>;
+
 /** What the engine sends the agent: the wire envelope with `worker_state` decoded
- *  into `state`. Everything else (`trigger`, `transcript`, `pending`, `session_id`,
- *  `identity`, …) is the envelope, read directly. */
+ *  into `state`. Everything else (`trigger`, `transcript`, `effects`, `session_id`,
+ *  `identity`, …) is the envelope, read directly. `effects` lists the in-flight
+ *  effects by kind — the step gate is "no tool/sub-agent effect left". */
 export type DecisionRequest<S = unknown> = WorkerDecisionRequestWire & {
     state: S;
     /** Stream token deltas — present on an `llm.request` trigger with streaming. */
-    emitDelta?: (delta: LlmTokenDeltaInput) => Promise<void>;
+    emitDelta?: EmitDelta;
 };
 
 /** What the agent decides: the actions to take, plus the transcript and state to
@@ -36,9 +39,7 @@ export interface Decision {
 
 /** An agent: takes a `DecisionRequest` and returns a `Decision`. Compose it by
  *  calling it; `agent({ name, decide })` names it into a `NamedAgent`. */
-export interface Agent<S = unknown> {
-    (req: DecisionRequest<S>): Decision | Promise<Decision>;
-}
+export type Agent<S = unknown> = (req: DecisionRequest<S>) => Decision | Promise<Decision>;
 
 /** A named agent — what `agent({ name, decide })` returns. `agentName` is the id
  *  the engine deploys and addresses it under, so only a `NamedAgent` can be served
@@ -108,38 +109,20 @@ export function tool(
     };
 }
 
-// ── Model ────────────────────────────────────────────────────────────────────
+// ── LLM ──────────────────────────────────────────────────────────────────────
 
-/** One worker-side LLM call (a generator's `run`); stream deltas via `ctx.emitDelta`. */
-export type LlmGenerate = (
-    request: LlmRequest,
-    ctx: { emitDelta?: (part: StreamPart) => Promise<void> },
-) => Promise<LlmResponse>;
+/** One worker-side LLM call (an `Llm`'s `run`); stream deltas via `ctx.emitDelta`. */
+export type LlmGenerate = (request: LlmRequest, ctx: { emitDelta?: EmitDelta }) => Promise<LlmResponse>;
 
-/** A bound LLM backend. A worker generator supplies `run` (the call runs on your
- *  worker); a server generator omits it (the Substructure server calls its
- *  configured provider). */
-export interface LlmGenerator {
-    request: Omit<LlmRequest, "messages" | "tools">;
-    handler: LlmHandler;
-    stream?: boolean;
-    run?: LlmGenerate;
-}
-
-/** `model` is the server's provider model id, e.g. "anthropic/claude-sonnet-4-6". */
-export function serverGenerate(settings: {
-    model: string;
-    temperature?: number;
-    maxTokens?: number;
-    reasoning?: ReasoningConfig;
-    stream?: boolean;
-}): LlmGenerator {
-    const request: Omit<LlmRequest, "messages" | "tools"> = { model: settings.model };
-    if (settings.temperature !== undefined) request.temperature = settings.temperature;
-    if (settings.maxTokens !== undefined) request.max_completion_tokens = settings.maxTokens;
-    if (settings.reasoning !== undefined) request.reasoning = settings.reasoning;
-    return { request, handler: "server", stream: settings.stream ?? false };
-}
+/** The LLM a loop calls: the model and per-call params (`LlmParams`) plus how the
+ *  call runs. A server LLM omits `run` — the Substructure server calls its
+ *  configured provider; a worker LLM sets `handler: "worker"` and supplies `run`
+ *  to make the call on your worker. The two are a union, so `handler: "worker"`
+ *  without a `run` is a compile error. */
+export type Llm = LlmParams & { stream?: boolean } & (
+        | { handler?: "server"; run?: never }
+        | { handler: "worker"; run: LlmGenerate }
+    );
 
 // ── Transcript helpers ───────────────────────────────────────────────────────
 
@@ -166,22 +149,3 @@ export function activePath(tree?: MessageTree): Message[] {
 export function stamp(message: Message): Message {
     return { ...message, id: crypto.randomUUID() };
 }
-
-// ── Stop conditions ──────────────────────────────────────────────────────────
-
-export interface StopInfo<S = unknown> {
-    /** Assistant rounds taken since the last user message. */
-    steps: number;
-    /** The assistant message whose tool calls just ran. */
-    lastResponse: Message | undefined;
-    /** The active transcript. */
-    history: Message[];
-    state: S;
-}
-
-export type StopCondition<S = unknown> = (info: StopInfo<S>) => boolean | Promise<boolean>;
-
-export const stepCountIs =
-    (n: number): StopCondition =>
-    (info) =>
-        info.steps >= n;

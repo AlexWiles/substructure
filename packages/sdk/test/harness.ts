@@ -8,11 +8,11 @@ import type { Agent, DecisionRequest } from "../src/core";
 import { activePath } from "../src/core";
 import type {
     DecisionTrigger,
+    Effect,
     LlmTokenDeltaInput,
     Message,
     MessageTree,
     Node,
-    PendingEffects,
     ToolCall,
     WorkerAction,
     WorkerDecisionRequestWire,
@@ -31,15 +31,15 @@ export interface RunOptions {
     trigger: DecisionTrigger;
     state?: Record<string, unknown>;
     messageTree?: MessageTree;
-    /** In-flight effect counts the engine would surface on the request. */
-    pending?: PendingEffects;
+    /** In-flight effects the engine would surface on the request (default none). */
+    effects?: Effect[];
     emitDelta?: (delta: LlmTokenDeltaInput) => Promise<void>;
 }
 
 export async function runAgent(agent: Agent, opts: RunOptions): Promise<RunResult> {
     const transcript = opts.messageTree ? activePath(opts.messageTree) : undefined;
     const req: DecisionRequest = {
-        ...makeRequest(opts.trigger, opts.messageTree, opts.pending, transcript),
+        ...makeRequest(opts, transcript),
         state: opts.state ?? {},
         emitDelta: opts.emitDelta,
     };
@@ -58,23 +58,18 @@ export async function runAgent(agent: Agent, opts: RunOptions): Promise<RunResul
     };
 }
 
-function makeRequest(
-    trigger: DecisionTrigger,
-    messageTree?: MessageTree,
-    pending?: PendingEffects,
-    transcript?: Message[],
-): WorkerDecisionRequestWire {
+function makeRequest(opts: RunOptions, transcript?: Message[]): WorkerDecisionRequestWire {
     return {
         session_id: "00000000-0000-0000-0000-000000000000",
         tenant_id: "test",
         decision_id: "decision-0",
         agent_id: "test-agent",
         identity: { tenant_id: "test", id: "tester" },
-        trigger,
+        trigger: opts.trigger,
         worker_state: "",
-        pending,
+        effects: opts.effects ?? [],
         transcript,
-        message_tree: messageTree,
+        message_tree: opts.messageTree,
         span: { trace_id: "0".repeat(32), span_id: "0".repeat(16), trace_flags: 1 },
         attempts: 0,
     };
@@ -113,7 +108,7 @@ export function toolCall(name: string, args: unknown, id = "tc-0"): ToolCall {
 }
 
 /** One tool/sub-agent completion; the worker records its result in the transcript.
- *  Whether it then prompts is driven by the request's `pending` counts. */
+ *  Whether it then prompts is driven by the `tool_call`/`sub_agent` effects still in flight. */
 export function toolResult(toolCallId: string, name: string, result: string, isError = false): DecisionTrigger {
     return {
         type: "tool.result",

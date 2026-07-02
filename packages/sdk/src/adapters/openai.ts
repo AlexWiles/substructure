@@ -1,5 +1,5 @@
 // OpenAI adapter (`@substructure.ai/sdk/adapters/openai`). `openaiGenerate` is an
-// `LlmGenerator` backed by the Responses API; `openaiAgent` builds a `toolLoop`
+// `Llm` backed by the Responses API; `openaiAgent` builds a `toolLoop`
 // from an `@openai/agents` Agent (or settings). Substructure owns the loop; each
 // `llm.request` runs one `responses.create` step.
 
@@ -7,8 +7,8 @@ import type { ModelSettings, ModelSettingsToolChoice, Tool } from "@openai/agent
 import { Agent, RunContext } from "@openai/agents";
 import OpenAI from "openai";
 import { toolLoop } from "../agent";
-import type { LlmGenerate, LlmGenerator, Agent as SdkAgent, StopCondition, ToolDef } from "../core";
-import type { LlmTool, Message, StreamPart, ToolCall } from "../types";
+import type { Llm, LlmGenerate, Agent as SdkAgent, ToolDef } from "../core";
+import type { LlmParams, LlmTokenDeltaInput, LlmTool, Message, ToolCall } from "../types";
 import { contentText } from "../types";
 
 type ResponseInputItem = OpenAI.Responses.ResponseInputItem;
@@ -27,11 +27,11 @@ export type OpenAIGenerateSettings = Omit<
     client?: OpenAI;
 };
 
-export function openaiGenerate(settings: OpenAIGenerateSettings): LlmGenerator {
+export function openaiGenerate(settings: OpenAIGenerateSettings): Llm {
     const client = settings.client ?? new OpenAI();
     const { client: _client, ...params } = settings;
 
-    const request: LlmGenerator["request"] = { model: String(settings.model) };
+    const request: LlmParams = { model: String(settings.model) };
     if (settings.temperature != null) request.temperature = settings.temperature;
     if (settings.max_output_tokens != null) request.max_completion_tokens = settings.max_output_tokens;
 
@@ -50,8 +50,8 @@ export function openaiGenerate(settings: OpenAIGenerateSettings): LlmGenerator {
         const callIdByItem = new Map<string, string>();
         let final: OpenAI.Responses.Response | undefined;
         for await (const event of stream) {
-            const part = toStreamPart(event, callIdByItem);
-            if (part) await ctx.emitDelta?.(part);
+            const delta = toDelta(event, callIdByItem);
+            if (delta) await ctx.emitDelta?.(delta);
             if (event.type === "response.completed") final = event.response;
         }
 
@@ -66,7 +66,7 @@ export function openaiGenerate(settings: OpenAIGenerateSettings): LlmGenerator {
                 }),
             );
         const content = outputText(output);
-        await ctx.emitDelta?.({ type: "finish", finishReason: toolCalls.length ? "tool_calls" : "stop" });
+        await ctx.emitDelta?.({ finish_reason: toolCalls.length ? "tool_calls" : "stop" });
         return {
             model: req.model,
             content: content || undefined,
@@ -76,7 +76,7 @@ export function openaiGenerate(settings: OpenAIGenerateSettings): LlmGenerator {
         };
     };
 
-    return { request, handler: "worker", stream: true, run };
+    return { ...request, handler: "worker", stream: true, run };
 }
 
 function modelTools(toolList: LlmTool[] | undefined): OpenAI.Responses.Tool[] {
@@ -100,8 +100,6 @@ export interface OpenAIAgentSettings {
     client?: OpenAI;
     /** Run context passed to each tool's `execute` (the Agents SDK `RunContext`). */
     context?: unknown;
-    /** Halt the loop when the condition holds (e.g. `stepCountIs(20)`). */
-    stopWhen?: StopCondition;
 }
 
 interface ResolvedSettings {
@@ -111,7 +109,6 @@ interface ResolvedSettings {
     tools: Tool[];
     modelSettings?: ModelSettings;
     context?: unknown;
-    stopWhen?: StopCondition;
 }
 
 /** The loop for running an `@openai/agents` Agent (or `OpenAIAgentSettings`) on
@@ -124,10 +121,9 @@ export function openaiAgent(
 ): SdkAgent {
     const settings = input instanceof Agent ? fromAgent(input, options) : resolveSettings(input);
     return toolLoop({
-        model: openaiGenerate(toGenerateSettings(settings)),
+        llm: openaiGenerate(toGenerateSettings(settings)),
         instructions: settings.instructions,
         tools: openAITools(settings.tools, settings.context),
-        stopWhen: settings.stopWhen,
     });
 }
 
@@ -139,7 +135,6 @@ function resolveSettings(settings: OpenAIAgentSettings): ResolvedSettings {
         tools: settings.tools ?? [],
         modelSettings: settings.modelSettings,
         context: settings.context,
-        stopWhen: settings.stopWhen,
     };
 }
 
@@ -201,24 +196,20 @@ export function openAITools(toolset: Tool[], context?: unknown): ToolDef[] {
     });
 }
 
-export function toStreamPart(event: ResponseStreamEvent, callIdByItem: Map<string, string>): StreamPart | null {
+export function toDelta(event: ResponseStreamEvent, callIdByItem: Map<string, string>): LlmTokenDeltaInput | null {
     switch (event.type) {
         case "response.output_text.delta":
-            return { type: "text-delta", delta: event.delta };
+            return { text: event.delta };
         case "response.reasoning_summary_text.delta":
-            return { type: "reasoning-delta", delta: event.delta };
+            return { reasoning: event.delta };
         case "response.output_item.added":
             if (event.item.type === "function_call") {
                 callIdByItem.set(event.item.id ?? event.item.call_id, event.item.call_id);
-                return { type: "tool-input-start", toolCallId: event.item.call_id, toolName: event.item.name };
+                return { tool_calls: [{ id: event.item.call_id, name: event.item.name }] };
             }
             return null;
         case "response.function_call_arguments.delta":
-            return {
-                type: "tool-input-delta",
-                toolCallId: callIdByItem.get(event.item_id) ?? event.item_id,
-                inputTextDelta: event.delta,
-            };
+            return { tool_calls: [{ id: callIdByItem.get(event.item_id) ?? event.item_id, arguments: event.delta }] };
         default:
             return null;
     }

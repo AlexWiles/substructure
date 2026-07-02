@@ -5,7 +5,7 @@
 // persists back out — `loop({ ...req, state })` — so the tools' edits ride the
 // wire with no manual plumbing.
 
-import { agent, server, tool, toolLoop } from "@substructure.ai/sdk";
+import { agent, tool, toolLoop } from "@substructure.ai/sdk";
 import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
 import { randomUUID } from "node:crypto";
 
@@ -46,7 +46,7 @@ const todoAgent = agent<State>({
     decide: async (req) => {
         const state: State = { todos: req.state?.todos ?? [] };
         const loop = toolLoop<State>({
-            model: server("anthropic/claude-sonnet-4-6"),
+            llm: { model: "anthropic/claude-sonnet-4-6" },
             instructions: "Concise todo assistant. Use the tools to manage the list.",
             tools: todoTools(state),
         });

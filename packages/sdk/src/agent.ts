@@ -1,105 +1,17 @@
-import type {
-    Agent,
-    DecisionRequest,
-    LlmGenerator,
-    NamedAgent,
-    StopCondition,
-    StopInfo,
-    ToolDef,
-    ToolExecutionContext,
-} from "./core";
-import { DEFERRED, serverGenerate, stamp } from "./core";
-import type {
-    DecisionTrigger,
-    LlmRequest,
-    LlmResponse,
-    LlmTokenDeltaInput,
-    LlmTool,
-    Message,
-    ReasoningConfig,
-    RetryPolicy,
-    StreamPart,
-    ToolHandler,
-    WorkerAction,
-} from "./types";
-
-// ── Model ────────────────────────────────────────────────────────────────────
-
-/** A bound LLM backend: where the call runs (`handler`) and the request shape it
- *  carries. `server(...)` runs on the Substructure server; adapters (e.g.
- *  `anthropicGenerate`) run on your worker and supply `run`. */
-export type Model = LlmGenerator;
-
-/** The server's configured provider makes the call. `model` is its provider id,
- *  e.g. "anthropic/claude-sonnet-4-6". */
-export function server(
-    model: string,
-    opts?: { temperature?: number; maxTokens?: number; reasoning?: ReasoningConfig; stream?: boolean },
-): Model {
-    return serverGenerate({ model, ...opts });
-}
-
-// ── Action builders (pure) ───────────────────────────────────────────────────
-
-export function callLlm(opts: {
-    model: Model;
-    messages: Message[];
-    tools?: LlmTool[];
-    stream?: boolean;
-    retry?: RetryPolicy;
-}): WorkerAction {
-    const request: LlmRequest = { ...opts.model.request, messages: opts.messages };
-    if (opts.tools && opts.tools.length > 0) request.tools = opts.tools;
-    return {
-        type: "call.llm",
-        request,
-        handler: opts.model.handler,
-        stream: opts.stream ?? opts.model.stream ?? false,
-        retry: opts.retry,
-    };
-}
-
-export function done(data?: unknown): WorkerAction {
-    return { type: "done", data: data ?? null };
-}
-
-export function callTool(opts: {
-    toolCallId: string;
-    name: string;
-    arguments: string;
-    handler?: ToolHandler;
-    retry?: RetryPolicy;
-}): WorkerAction {
-    return {
-        type: "call.tool",
-        tool_call_id: opts.toolCallId,
-        name: opts.name,
-        arguments: opts.arguments,
-        handler: opts.handler ?? "worker",
-        retry: opts.retry,
-    };
-}
-
-export function toolResult(toolCallId: string, result: string, attempt: number): WorkerAction {
-    return { type: "return.tool.result", tool_call_id: toolCallId, result, attempt };
-}
-
-export function toolError(toolCallId: string, error: string, attempt: number, retryable = false): WorkerAction {
-    return { type: "return.tool.error", tool_call_id: toolCallId, error, retryable, attempt };
-}
+import type { Agent, Llm, NamedAgent, ToolDef, ToolExecutionContext } from "./core";
+import { DEFERRED, stamp } from "./core";
+import type { LlmTool, Message, RetryPolicy, WorkerAction } from "./types";
 
 // ── agent(config): the default tool/sub-agent loop ───────────────────────────
 
 /** The default loop's configuration. */
-export interface LoopConfig<S = unknown> {
-    model: Model;
+export interface LoopConfig {
+    llm: Llm;
     instructions?: string | (() => string | Promise<string>);
     tools?: ToolDef[];
     /** Named agents the model can delegate to (reference them by value). */
     // biome-ignore lint/suspicious/noExplicitAny: sub-agents carry their own state type
     subAgents?: NamedAgent<any>[];
-    stopWhen?: StopCondition<S>;
-    stream?: boolean;
     retry?: RetryPolicy;
 }
 
@@ -131,37 +43,38 @@ function subAgentSchema(agentId: string): LlmTool {
     };
 }
 
-function stopInfo<S>(d: DecisionRequest<S>, history: Message[]): StopInfo<S> {
-    let steps = 0;
-    let lastResponse: Message | undefined;
-    for (let i = history.length - 1; i >= 0; i--) {
-        const m = history[i];
-        if (m.role === "user") break;
-        if (m.role === "assistant") {
-            steps++;
-            lastResponse ??= m;
-        }
-    }
-    return { steps, lastResponse, history, state: d.state };
-}
-
 /** The default tool/sub-agent loop, as a decision function. Plug it into an
  *  agent's `decide`, or call it from a custom `decide` to delegate. It echoes the
  *  decision's `state`, so a wrapping agent threads its own state through with
  *  `toolLoop(cfg)({ ...req, state })`. */
-export function toolLoop<S = unknown>(config: LoopConfig<S>): Agent<S> {
+export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
     const toolList = config.tools ?? [];
-    const toolMap: Record<string, ToolDef> = {};
-    for (const t of toolList) toolMap[t.name] = t;
+    const toolMap = toolList.reduce<Record<string, ToolDef>>((map, t) => {
+        map[t.name] = t;
+        return map;
+    }, {});
 
     const subIds = new Set((config.subAgents ?? []).map((sub) => sub.agentName));
-    const schemas: LlmTool[] = [...toolList.map(toolSchema), ...[...subIds].map(subAgentSchema)];
+
+    const toolSchemas: LlmTool[] = [...toolList.map(toolSchema), ...[...subIds].map(subAgentSchema)];
+
+    // A `call.llm` for the current messages. Request params (model, temperature, …)
+    // are fixed for the loop; split routing (handler/stream/run) off them once.
+    const { handler, run: _run, stream, ...llmParams } = config.llm;
+
+    const ask = (messages: Message[]): WorkerAction => {
+        return {
+            type: "call.llm",
+            request: { ...llmParams, messages, tools: toolSchemas },
+            handler: handler ?? "server",
+            stream: stream ?? false,
+            retry: config.retry,
+        };
+    };
 
     return async (d) => {
         const { trigger, state } = d;
         const history = d.transcript ?? [];
-        const ask = (messages: Message[]): WorkerAction =>
-            callLlm({ model: config.model, messages, tools: schemas, stream: config.stream, retry: config.retry });
 
         const instructions =
             typeof config.instructions === "function" ? await config.instructions() : config.instructions;
@@ -193,7 +106,8 @@ export function toolLoop<S = unknown>(config: LoopConfig<S>): Agent<S> {
                 const assistant = stamp(trigger.message);
                 const transcript = [...history, assistant];
                 const calls = assistant.tool_calls ?? [];
-                if (calls.length === 0) return { transcript, actions: [done(assistant.content)], state };
+                if (calls.length === 0)
+                    return { transcript, actions: [{ type: "done", data: assistant.content ?? null }], state };
 
                 const actions: WorkerAction[] = [];
                 for (const tc of calls) {
@@ -222,15 +136,14 @@ export function toolLoop<S = unknown>(config: LoopConfig<S>): Agent<S> {
                         );
                     } else if (toolMap[tc.function.name]) {
                         const def = toolMap[tc.function.name];
-                        actions.push(
-                            callTool({
-                                toolCallId: tc.id,
-                                name: tc.function.name,
-                                arguments: tc.function.arguments,
-                                handler: def.handler,
-                                retry: def.retry,
-                            }),
-                        );
+                        actions.push({
+                            type: "call.tool",
+                            tool_call_id: tc.id,
+                            name: tc.function.name,
+                            arguments: tc.function.arguments,
+                            handler: def.handler ?? "worker",
+                            retry: def.retry,
+                        });
                     }
                 }
                 return { transcript, actions, state };
@@ -239,7 +152,15 @@ export function toolLoop<S = unknown>(config: LoopConfig<S>): Agent<S> {
                 const def = toolMap[trigger.name];
                 if (!def)
                     return {
-                        actions: [toolError(trigger.tool_call_id, `Unknown tool: ${trigger.name}`, trigger.attempt)],
+                        actions: [
+                            {
+                                type: "return.tool.error",
+                                tool_call_id: trigger.tool_call_id,
+                                error: `Unknown tool: ${trigger.name}`,
+                                retryable: false,
+                                attempt: trigger.attempt,
+                            },
+                        ],
                         state,
                     };
                 const ctx: ToolExecutionContext = {
@@ -254,13 +175,29 @@ export function toolLoop<S = unknown>(config: LoopConfig<S>): Agent<S> {
                     if (out === DEFERRED) return { state };
                     return {
                         actions: [
-                            toolResult(trigger.tool_call_id, typeof out === "string" ? out : "", trigger.attempt),
+                            {
+                                type: "return.tool.result",
+                                tool_call_id: trigger.tool_call_id,
+                                result: typeof out === "string" ? out : "",
+                                attempt: trigger.attempt,
+                            },
                         ],
                         state,
                     };
                 } catch (error) {
                     const message = error instanceof Error ? error.message : String(error);
-                    return { actions: [toolError(trigger.tool_call_id, message, trigger.attempt)], state };
+                    return {
+                        actions: [
+                            {
+                                type: "return.tool.error",
+                                tool_call_id: trigger.tool_call_id,
+                                error: message,
+                                retryable: false,
+                                attempt: trigger.attempt,
+                            },
+                        ],
+                        state,
+                    };
                 }
             }
             case "tool.result": {
@@ -272,19 +209,32 @@ export function toolLoop<S = unknown>(config: LoopConfig<S>): Agent<S> {
                     name: trigger.name,
                 };
                 const transcript = [...history, node];
-                const roundComplete = (d.pending?.tool_calls ?? 0) + (d.pending?.sub_agents ?? 0) === 0;
-                if (!roundComplete) return { transcript, state };
-                if (config.stopWhen) {
-                    const info = stopInfo(d, history);
-                    if (await config.stopWhen(info)) {
-                        return { transcript, actions: [done(info.lastResponse?.content ?? "")], state };
-                    }
-                }
+                const stepComplete = !d.effects.some(
+                    (e) =>
+                        (e.kind === "tool_call" || e.kind === "sub_agent") &&
+                        (e.status === "pending" || e.status === "retry_scheduled"),
+                );
+                if (!stepComplete) return { transcript, state };
                 return { transcript, actions: [ask(transcript)], state };
             }
             case "llm.request": {
-                const action = await runWorkerLlm(trigger, config.model.run, d.emitDelta);
-                return { transcript: history, actions: [action], state };
+                const { call_id, request, attempt } = trigger;
+                try {
+                    // biome-ignore lint/style/noNonNullAssertion: the Llm union guarantees a worker LLM has `run`
+                    const response = await config.llm.run!(request, { emitDelta: d.emitDelta });
+                    const action: WorkerAction = { type: "return.llm.result", call_id, response, attempt };
+                    return { transcript: history, actions: [action], state };
+                } catch (error) {
+                    const message = error instanceof Error ? error.message : String(error);
+                    const action: WorkerAction = {
+                        type: "return.llm.error",
+                        call_id,
+                        error: message,
+                        retryable: false,
+                        attempt,
+                    };
+                    return { transcript: history, actions: [action], state };
+                }
             }
             default:
                 return { state };
@@ -296,59 +246,4 @@ export function toolLoop<S = unknown>(config: LoopConfig<S>): Agent<S> {
  *  sub-agent. `decide` is `toolLoop(...)` for the default loop, or your own. */
 export function agent<S = unknown>(config: AgentConfig<S>): NamedAgent<S> {
     return Object.assign(config.decide, { agentName: config.name });
-}
-
-// ── Worker-run LLM (handler: "worker") ───────────────────────────────────────
-
-function flattenDelta(part: StreamPart): LlmTokenDeltaInput | null {
-    switch (part.type) {
-        case "text-delta":
-            return { text: part.delta };
-        case "reasoning-delta":
-            return { reasoning: part.delta };
-        case "tool-input-start":
-            return { tool_calls: [{ id: part.toolCallId, name: part.toolName }] };
-        case "tool-input-delta":
-            return { tool_calls: [{ id: part.toolCallId, arguments: part.inputTextDelta }] };
-        case "finish":
-            return part.finishReason ? { finish_reason: part.finishReason } : null;
-        default:
-            return null;
-    }
-}
-
-async function runWorkerLlm(
-    trigger: Extract<DecisionTrigger, { type: "llm.request" }>,
-    run:
-        | ((request: LlmRequest, ctx: { emitDelta?: (part: StreamPart) => Promise<void> }) => Promise<LlmResponse>)
-        | undefined,
-    emitDelta?: (delta: LlmTokenDeltaInput) => Promise<void>,
-): Promise<WorkerAction> {
-    if (!run) {
-        return {
-            type: "return.llm.error",
-            call_id: trigger.call_id,
-            error: 'received an "llm.request" trigger but this model has no worker-side `run` (use server(...) to let the engine call its provider)',
-            retryable: false,
-            attempt: trigger.attempt,
-        };
-    }
-    const emitPart = emitDelta
-        ? async (part: StreamPart) => {
-              const flat = flattenDelta(part);
-              if (flat) await emitDelta(flat);
-          }
-        : undefined;
-    try {
-        const response = await run(trigger.request, { emitDelta: emitPart });
-        return { type: "return.llm.result", call_id: trigger.call_id, response, attempt: trigger.attempt };
-    } catch (error) {
-        return {
-            type: "return.llm.error",
-            call_id: trigger.call_id,
-            error: error instanceof Error ? error.message : String(error),
-            retryable: false,
-            attempt: trigger.attempt,
-        };
-    }
 }

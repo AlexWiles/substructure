@@ -30,7 +30,7 @@ const todoAgent = agent<State>({
     decide: async (req) => {
         const state: State = { todos: req.state?.todos ?? [] };
         const loop = toolLoop<State>({
-            model: server("anthropic/claude-sonnet-4-6"),
+            llm: { model: "anthropic/claude-sonnet-4-6" },
             instructions: "Concise todo assistant. Use the tools to manage the list.",
             tools: todoTools(state),
         });

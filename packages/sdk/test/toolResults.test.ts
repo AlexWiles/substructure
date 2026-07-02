@@ -1,11 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { toolLoop } from "../src/agent";
-import { serverGenerate } from "../src/core";
 import type { Message } from "../src/types";
 import { actionsOfType, appendedMessages, callLlm, linearTree, runAgent, toolResult } from "./harness";
 
-const loop = toolLoop({ model: serverGenerate({ model: "test-model" }), instructions: "SYS" });
+const loop = toolLoop({ llm: { model: "test-model" }, instructions: "SYS" });
 
 const assistant: Message = {
     role: "assistant",
@@ -28,7 +27,6 @@ describe("tool.result", () => {
         const result = await runAgent(loop, {
             trigger: toolResult("call_b", "researcher", "RB"),
             messageTree,
-            pending: { tool_calls: 0, sub_agents: 0, llm_calls: 0 },
         });
 
         expect(appendedMessages(result)).toMatchObject([
@@ -50,7 +48,16 @@ describe("tool.result", () => {
         const result = await runAgent(loop, {
             trigger: toolResult("call_a", "getWeather", "RA"),
             messageTree,
-            pending: { tool_calls: 0, sub_agents: 1, llm_calls: 0 },
+            effects: [
+                {
+                    id: "call_b",
+                    kind: "sub_agent",
+                    agent_id: "researcher",
+                    session_id: "s-1",
+                    status: "pending",
+                    attempt: 0,
+                },
+            ],
         });
 
         expect(appendedMessages(result)).toMatchObject([

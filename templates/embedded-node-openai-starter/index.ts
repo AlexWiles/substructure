@@ -18,7 +18,7 @@ const SYSTEM_PROMPT = "You are a concise assistant. Use tools when relevant.";
 const assistant = agent({
     name: "assistant",
     decide: toolLoop({
-        model: openaiGenerate({ model: "gpt-5-nano" }),
+        llm: openaiGenerate({ model: "gpt-5-nano" }),
         instructions: SYSTEM_PROMPT,
         tools: [getCurrentTime],
     }),

@@ -1,11 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { agent, toolLoop } from "../src/agent";
-import { serverGenerate } from "../src/core";
 import { actionsOfType, appendedMessages, callLlm, llmResponse, runAgent, toolCall, userMessage } from "./harness";
 
-const researcher = agent({ name: "researcher", decide: toolLoop({ model: serverGenerate({ model: "test-model" }) }) });
-const assistant = toolLoop({ model: serverGenerate({ model: "test-model" }), subAgents: [researcher] });
+const researcher = agent({ name: "researcher", decide: toolLoop({ llm: { model: "test-model" } }) });
+const assistant = toolLoop({ llm: { model: "test-model" }, subAgents: [researcher] });
 
 const delegation = (toolCallId = "call_sub") =>
     llmResponse({

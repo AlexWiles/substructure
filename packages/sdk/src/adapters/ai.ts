@@ -1,13 +1,13 @@
 // AI SDK adapter (`@substructure.ai/sdk/adapters/ai`). `aiGenerate` is an
-// `LlmGenerator` backed by `streamText`; `aiSdkAgent` builds a `toolLoop` from an
+// `Llm` backed by `streamText`; `aiSdkAgent` builds a `toolLoop` from an
 // AI SDK toolset. Substructure owns the loop; each `llm.request` runs one
 // `streamText` step.
 
 import type { LanguageModel, ModelMessage, TextStreamPart, Tool, ToolChoice, ToolSet } from "ai";
 import { asSchema, jsonSchema, streamText, tool } from "ai";
 import { toolLoop } from "../agent";
-import type { Agent, LlmGenerate, LlmGenerator, StopCondition, ToolDef } from "../core";
-import type { LlmTool, Message, StreamPart, ToolCall } from "../types";
+import type { Agent, Llm, LlmGenerate, ToolDef } from "../core";
+import type { LlmParams, LlmTokenDeltaInput, LlmTool, Message, ToolCall } from "../types";
 import { contentText } from "../types";
 
 type StreamTextOptions = Parameters<typeof streamText>[0];
@@ -17,8 +17,8 @@ type ToolResultOutput = Awaited<ReturnType<NonNullable<Tool["toModelOutput"]>>>;
 // `system` come from the transcript, and tools are declared in `tools()`.
 export type AIGenerateSettings = Omit<StreamTextOptions, "messages" | "prompt" | "system" | "tools">;
 
-export function aiGenerate(settings: AIGenerateSettings): LlmGenerator {
-    const request: LlmGenerator["request"] = { model: modelId(settings.model) };
+export function aiGenerate(settings: AIGenerateSettings): Llm {
+    const request: LlmParams = { model: modelId(settings.model) };
     if (settings.temperature !== undefined) request.temperature = settings.temperature;
     if (settings.maxOutputTokens !== undefined) request.max_completion_tokens = settings.maxOutputTokens;
 
@@ -35,8 +35,8 @@ export function aiGenerate(settings: AIGenerateSettings): LlmGenerator {
         });
 
         for await (const part of result.fullStream) {
-            const mapped = toStreamPart(part);
-            if (mapped) await ctx.emitDelta?.(mapped);
+            const delta = toDelta(part);
+            if (delta) await ctx.emitDelta?.(delta);
         }
 
         const toolCalls = (await result.toolCalls).filter(
@@ -57,7 +57,7 @@ export function aiGenerate(settings: AIGenerateSettings): LlmGenerator {
         };
     };
 
-    return { request, handler: "worker", stream: true, run };
+    return { ...request, handler: "worker", stream: true, run };
 }
 
 // Model-facing tools from `request.tools` — schema only, no `execute`, so the SDK
@@ -77,20 +77,17 @@ export type AiAgentSettings<TOOLS extends ToolSet = ToolSet> = Omit<AIGenerateSe
     instructions?: string;
     tools?: TOOLS;
     toolChoice?: ToolChoice<TOOLS>;
-    /** Halt the loop when the condition holds (e.g. `stepCountIs(20)`). */
-    stopWhen?: StopCondition;
 };
 
 /** The loop for running an AI SDK toolset on Substructure: `aiGenerate` as the
  *  model, the toolset converted to worker-executed tools. Name and deploy it with
  *  `worker([agent({ name, decide: aiSdkAgent(...) })])`. */
 export function aiSdkAgent<TOOLS extends ToolSet>(settings: AiAgentSettings<TOOLS>): Agent {
-    const { instructions, tools: toolset, stopWhen, ...generateSettings } = settings;
+    const { instructions, tools: toolset, ...generateSettings } = settings;
     return toolLoop({
-        model: aiGenerate(generateSettings),
+        llm: aiGenerate(generateSettings),
         instructions,
         tools: toolset ? aiSdkTools(toolset, settings.experimental_context) : [],
-        stopWhen,
     });
 }
 
@@ -146,18 +143,18 @@ export function aiSdkTools(toolset: ToolSet, experimentalContext?: unknown): Too
     });
 }
 
-export function toStreamPart<T extends ToolSet>(part: TextStreamPart<T>): StreamPart | null {
+export function toDelta<T extends ToolSet>(part: TextStreamPart<T>): LlmTokenDeltaInput | null {
     switch (part.type) {
         case "text-delta":
-            return { type: "text-delta", delta: part.text };
+            return { text: part.text };
         case "reasoning-delta":
-            return { type: "reasoning-delta", delta: part.text };
+            return { reasoning: part.text };
         case "tool-input-start":
-            return { type: "tool-input-start", toolCallId: part.id, toolName: part.toolName };
+            return { tool_calls: [{ id: part.id, name: part.toolName }] };
         case "tool-input-delta":
-            return { type: "tool-input-delta", toolCallId: part.id, inputTextDelta: part.delta };
+            return { tool_calls: [{ id: part.id, arguments: part.delta }] };
         case "finish":
-            return { type: "finish", finishReason: part.finishReason };
+            return part.finishReason ? { finish_reason: part.finishReason } : null;
         default:
             return null;
     }

@@ -7,7 +7,7 @@
 // This is the pattern for tools that kick off real async work (webhooks,
 // long jobs, human approvals) where the result arrives out-of-band.
 
-import { agent, server, tool, toolLoop } from "@substructure.ai/sdk";
+import { agent, tool, toolLoop } from "@substructure.ai/sdk";
 import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
 
 let embedded: SubstructureEmbedded;
@@ -42,7 +42,7 @@ const wait = tool({
 const waitAgent = agent({
     name: "waiter",
     decide: toolLoop({
-        model: server("anthropic/claude-sonnet-4-6"),
+        llm: { model: "anthropic/claude-sonnet-4-6" },
         instructions: "You wait for the requested number of seconds, then tell the user you're done.",
         tools: [wait],
     }),

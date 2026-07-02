@@ -15,7 +15,7 @@
 
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
-import Substructure, { agent, server, tool, toolLoop, worker } from "@substructure.ai/sdk";
+import Substructure, { agent, tool, toolLoop, worker } from "@substructure.ai/sdk";
 import { Hono } from "hono";
 
 const sub = new Substructure();
@@ -51,8 +51,7 @@ const setTheme = tool({
 const browserAgent = agent({
     name: "browser-assistant",
     decide: toolLoop({
-        model: server("anthropic/claude-sonnet-4-6"),
-        stream: true,
+        llm: { model: "anthropic/claude-sonnet-4-6", stream: true },
         instructions:
             "You are a friendly assistant embedded in a web page. Two tools run in the user's browser: " +
             "`get_user_location` reads the device's GPS (the user is prompted to allow it), and `set_theme` " +

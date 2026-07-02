@@ -19,7 +19,7 @@ const getWeather = tool({
 const chatAgent = agent({
     name: "anthropic-agent",
     decide: toolLoop({
-        model: anthropicGenerate({ model: "claude-haiku-4-5", max_tokens: 1024 }),
+        llm: anthropicGenerate({ model: "claude-haiku-4-5", max_tokens: 1024 }),
         instructions: "You are a concise assistant.",
         tools: [getWeather],
     }),

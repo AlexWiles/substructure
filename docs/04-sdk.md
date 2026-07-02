@@ -16,7 +16,7 @@ npm i @substructure.ai/sdk
 
 ## The model: an agent is a decision function
 
-The engine is the runtime. It owns the durable session, the conversation tree, scheduling, and retries. An agent is `agent({ name, decide })`: `name` is the id the engine routes to, and `decide` is the function it calls once per **decision**. The engine sends a **`DecisionRequest`** — a trigger (a user message, an LLM response, a tool result) plus the active transcript, state, and pending counts — and `decide` returns a **`Decision`**: the **actions** to take (call the LLM, call a tool, finish the turn), plus the transcript and state as they should now read.
+The engine is the runtime. It owns the durable session, the conversation tree, scheduling, and retries. An agent is `agent({ name, decide })`: `name` is the id the engine routes to, and `decide` is the function it calls once per **decision**. The engine sends a **`DecisionRequest`** — a trigger (a user message, an LLM response, a tool result) plus the active transcript, state, and pending effects — and `decide` returns a **`Decision`**: the **actions** to take (call the LLM, call a tool, finish the turn), plus the transcript and state as they should now read.
 
 You write `decide` one of two ways:
 
@@ -30,7 +30,7 @@ You write `decide` one of two ways:
 The common case. An agent is `agent({ name, decide })`; for the default loop, `decide` is `toolLoop(...)` — instructions + model + tools is a working agent:
 
 ```ts
-import { agent, tool, server, toolLoop } from "@substructure.ai/sdk";
+import { agent, tool, toolLoop } from "@substructure.ai/sdk";
 
 const getWeather = tool({
   name: "get_weather",
@@ -49,7 +49,7 @@ const getWeather = tool({
 const weatherAgent = agent({
   name: "weather-agent",
   decide: toolLoop({
-    model: server("anthropic/claude-sonnet-4-6"),
+    llm: { model: "anthropic/claude-sonnet-4-6" },
     instructions: "You are a helpful weather assistant.",
     tools: [getWeather],
   }),
@@ -60,12 +60,10 @@ The `agent` config is `{ name, decide }`: `name` is the id clients target and th
 
 | Field | What it does |
 | --- | --- |
-| `model` | Where LLM calls run — `server("provider/model")` or an adapter generator. |
+| `llm` | The LLM to call — `{ model: "provider/model" }` (the Substructure server makes the call) or an adapter generator that runs it on your worker. Add `stream: true` here to stream tokens; add `temperature`/`reasoning`/etc. alongside `model`. |
 | `instructions` | The system prompt. A string, or a function resolved per call. |
 | `tools` | Worker- and client-handled tools (see below). |
 | `subAgents` | Child agents the model can delegate to as tools, referenced by value. See [Sub-agents](./05-sub-agents.md). |
-| `stopWhen` | Halt the loop when a condition holds, e.g. `stopWhen: stepCountIs(20)`. |
-| `stream` | Stream LLM tokens (so clients can render progressively). |
 
 `agent(...)` returns an `Agent` — pass it straight to `worker([...])` or `SubstructureEmbedded.create({ agents })`.
 
@@ -204,7 +202,7 @@ Swap `db` for Postgres, Redis, S3, or a Durable Object — the agent doesn't cha
 If you want small state round-tripped for you instead of standing up a store, keep it in `worker_state` with a custom `decide`. The engine ships the decoded state in as `req.state`. Build the tools **inside `decide`** so each `execute` closes over the live `state`, hand them to `toolLoop`, and pass `state` into the loop — the loop runs the tools, and echoes the `state` you gave it so the agent persists it:
 
 ```ts
-import { agent, server, tool, toolLoop } from "@substructure.ai/sdk";
+import { agent, tool, toolLoop } from "@substructure.ai/sdk";
 
 type State = { todos: Todo[] };
 
@@ -230,7 +228,7 @@ const todoAgent = agent<State>({
   decide: async (req) => {
     const state: State = { todos: req.state?.todos ?? [] };
     const loop = toolLoop<State>({
-      model: server("anthropic/claude-sonnet-4-6"),
+      llm: { model: "anthropic/claude-sonnet-4-6" },
       instructions: "Concise todo assistant.",
       tools: todoTools(state),
     });
@@ -246,18 +244,24 @@ const todoAgent = agent<State>({
 When the default loop isn't the shape you want — an approval gate, a modal agent, custom routing, compaction — write `decide` directly. The engine hands you a `DecisionRequest` and you return a `Decision`:
 
 ```ts
-import { agent, callLlm, done, server } from "@substructure.ai/sdk";
-
-const model = server("anthropic/claude-sonnet-4-6");
+import { agent } from "@substructure.ai/sdk";
 
 const echo = agent({
   name: "echo",
   decide: (req) => {
     switch (req.trigger.type) {
       case "user.message":
-        return { actions: [callLlm({ model, messages: [...(req.transcript ?? []), req.trigger.message] })] };
+        return {
+          actions: [
+            {
+              type: "call.llm",
+              request: { model: "anthropic/claude-sonnet-4-6", messages: [...(req.transcript ?? []), req.trigger.message] },
+              handler: "server",
+            },
+          ],
+        };
       case "llm.response":
-        return { actions: [done(req.trigger.message.content)] };
+        return { actions: [{ type: "done", data: req.trigger.message.content ?? null }] };
       default:
         return {};
     }
@@ -270,20 +274,20 @@ The `DecisionRequest` (conventionally `req`) is the engine's wire envelope with 
 - `req.trigger` — what happened: `user.message`, `user.transcript`, `client.action`, `llm.response`, `llm.request`, `tool.execute`, `tool.result`, ...
 - `req.transcript` — the active transcript (the head-to-root path); may be empty.
 - `req.state` — the decoded `worker_state` (return a new value to persist it).
-- `req.pending` — in-flight effect counts (`tool_calls`, `sub_agents`, `llm_calls`); branch on these to know when a tool round is complete.
+- `req.effects` — the in-flight effects as a flat, tagged list (each with `id`, `kind`, `status`, `attempt`, plus kind-specific fields like a tool's `name`/`arguments`); branch on `kind` + `status` to know when a tool step is complete (no `tool_call`/`sub_agent` effect left in flight). `kind`/`status` are open, so new effect kinds are additive.
 - `req.session_id`, `req.identity`, `req.turn_id`, ... — the rest of the envelope, read directly.
 
 Return a `Decision` — `{ actions?, transcript?, state? }`. `actions` defaults to none; `transcript` echoes `req.transcript`; `state` echoes `req.state`.
 
-The action builders are pure functions:
+Actions are plain objects — you return them directly:
 
-| Builder | Action |
+| Action | Shape |
 | --- | --- |
-| `callLlm({ model, messages, tools?, stream?, retry? })` | Ask the model. |
-| `callTool({ toolCallId, name, arguments, handler?, retry? })` | Run a tool. |
-| `toolResult(toolCallId, result, attempt)` / `toolError(...)` | Return a `tool.execute` result. |
-| `spawn({ sessionId, agentId, toolCallId })` / `sendMessage(sessionId, message)` | Delegate to a sub-agent. |
-| `done(data?)` | Finish the turn. |
+| Ask the model | `{ type: "call.llm", request: { model, messages, tools? }, handler }` |
+| Run a tool | `{ type: "call.tool", tool_call_id, name, arguments, handler }` |
+| Return a tool result / error | `{ type: "return.tool.result", tool_call_id, result, attempt }` / `{ type: "return.tool.error", tool_call_id, error, retryable, attempt }` |
+| Delegate to a sub-agent | `{ type: "spawn.sub_agent", session_id, agent_id, tool_call_id }` + `{ type: "send.message", session_id, message }` |
+| Finish the turn | `{ type: "done", data }` |
 
 A `client.action` trigger is how a custom `decide` reacts to the client — approvals, mode switches, replays. The [`tool-approval`](https://github.com/substructureai/substructure/tree/main/examples/tool-approval) example parks a tool call on `llm.response` and re-emits it on a `client.action approve_command`; [`plan-mode`](https://github.com/substructureai/substructure/tree/main/examples/plan-mode) reads its mode from state and forks a fresh branch when it switches to executing.
 
@@ -478,15 +482,15 @@ await embedded.shutdown();
 
 The embedded instance exposes the same `startTurn` / `stream` / `turnResult` surface as the backend client, plus a `fetch` handler if you want to put an HTTP face on it. Use `db: ":memory:"` for a transient instance in tests.
 
-## Models
+## The LLM
 
-A model is where LLM calls run. For the Substructure server to make the call, use `server`:
+`llm` is the LLM the loop calls. In the common case it's just `{ model: "provider/model" }` — the Substructure server makes the call against its configured provider:
 
 ```ts
-agent({ name, decide: toolLoop({ model: server("anthropic/claude-sonnet-4-6"), /* ... */ }) });
+agent({ name, decide: toolLoop({ llm: { model: "anthropic/claude-sonnet-4-6" }, /* ... */ }) });
 ```
 
-Server models are identified by `provider/model` strings. When running embedded or locally, provider credentials are read from the environment; with cloud, they're configured for your org in the dashboard. To make the call from your own worker instead (so your provider key never leaves your infrastructure), pass a provider generator (`anthropicGenerate`, `openaiGenerate`, `aiGenerate`) from `@substructure.ai/sdk/adapters/*` as the `model`. The AI and OpenAI adapters also ship `aiSdkAgent(settings)` and `openaiAgent(input)`, which return a `decide` — the default loop over an AI SDK toolset or an `@openai/agents` `Agent` — that you wrap with `agent({ name, decide: aiSdkAgent(...) })`.
+Add `temperature`, `reasoning`, or `stream: true` alongside `model`. Server models are identified by `provider/model` strings; when running embedded or locally, provider credentials are read from the environment; with cloud, they're configured for your org in the dashboard. To make the call from your own worker instead (so your provider key never leaves your infrastructure), pass a provider generator (`anthropicGenerate`, `openaiGenerate`, `aiGenerate`) from `@substructure.ai/sdk/adapters/*` as `llm`. The AI and OpenAI adapters also ship `aiSdkAgent(settings)` and `openaiAgent(input)`, which return a `decide` — the default loop over an AI SDK toolset or an `@openai/agents` `Agent` — that you wrap with `agent({ name, decide: aiSdkAgent(...) })`.
 
 ## Examples
 

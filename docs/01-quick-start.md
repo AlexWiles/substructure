@@ -47,7 +47,7 @@ substructure link
 `src/index.ts`:
 
 ```ts
-import { agent, server, tool, toolLoop, worker } from "@substructure.ai/sdk";
+import { agent, tool, toolLoop, worker } from "@substructure.ai/sdk";
 import { DurableObject } from "cloudflare:workers";
 
 type Todo = { title: string };
@@ -114,7 +114,7 @@ export default {
     const todoAgent = agent({
       name: "todo",
       decide: toolLoop({
-        model: server("anthropic/claude-sonnet-4-6"),
+        llm: { model: "anthropic/claude-sonnet-4-6" },
         instructions: "Concise todo assistant. Use tools to manage the list.",
         tools: todoTools(env.AGENT_STATE),
       }),

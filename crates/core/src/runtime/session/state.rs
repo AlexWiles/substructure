@@ -190,14 +190,45 @@ pub struct WorkerDecisionState {
     pub source_event_sequence: u64,
 }
 
-/// Counts of in-flight effects, surfaced on every worker decision so the worker
-/// can branch on what's still outstanding (e.g. prompt once no tool/sub-agent
-/// result is pending) without tracking the round itself.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct PendingEffects {
-    pub tool_calls: u32,
-    pub sub_agents: u32,
-    pub llm_calls: u32,
+// The in-flight effects surfaced on every worker decision as a flat, tagged list.
+// Each `Effect` is a stable envelope (`id`, `status`, `attempt`, `deadline`) plus a
+// kind-tagged detail; `kind` is an open discriminator, so a new effect kind adds a
+// variant without reshaping anything, and unknown kinds a worker doesn't handle are
+// simply ignored. Derived on read by filtering the session's effect maps to what's
+// still outstanding (Pending or RetryScheduled) — no stored ledger, no extra
+// aggregate state. The worker derives the step gate from it: prompt once no
+// tool/sub-agent effect remains. `turn_id`/`seq` are intentionally absent — they'd
+// require per-effect provenance (new state) and are only needed once effects span
+// turns; adding them later is additive.
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Effect {
+    pub id: String,
+    pub status: EffectStatus,
+    pub attempt: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<DateTime<Utc>>,
+    #[serde(flatten)]
+    pub detail: EffectDetail,
+}
+
+/// Kind-specific fields, tagged by `kind` on the wire. A new kind is a new variant.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EffectDetail {
+    ToolCall {
+        name: String,
+        arguments: String,
+        handler: ToolHandler,
+    },
+    SubAgent {
+        agent_id: String,
+        session_id: String,
+    },
+    LlmCall {
+        handler: LlmHandler,
+        stream: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -205,7 +236,7 @@ pub struct DerivedState {
     pub status: SessionStatus,
     pub wake_at: Option<DateTime<Utc>>,
     #[serde(default)]
-    pub pending_effects: PendingEffects,
+    pub effects: Vec<Effect>,
     pub owner: Option<SessionOwner>,
     pub agent_id: Option<String>,
     #[serde(default)]
@@ -682,37 +713,76 @@ impl SessionState {
         }
     }
 
-    /// Effects still in flight (Pending or RetryScheduled) — results the worker
-    /// is still waiting on. Each completion fires its own decision right after
-    /// its completion event, so a not-yet-folded sibling is still counted here
-    /// (it hasn't completed at that decision's snapshot).
-    pub fn pending_effects(&self) -> PendingEffects {
+    /// The effects still in flight (Pending or RetryScheduled) as a flat, tagged
+    /// list — derived by filtering the effect maps, so nothing extra is stored. New
+    /// kinds are new `EffectDetail` variants; more statuses are new `status` values.
+    pub fn effects(&self) -> Vec<Effect> {
         let in_flight =
             |s: &EffectStatus| matches!(s, EffectStatus::Pending | EffectStatus::RetryScheduled);
-        PendingEffects {
-            tool_calls: self
-                .tool_calls
-                .values()
-                .filter(|c| in_flight(&c.tracking.status))
-                .count() as u32,
-            sub_agents: self
-                .sub_agent_calls
-                .values()
-                .filter(|c| in_flight(&c.tracking.status))
-                .count() as u32,
-            llm_calls: self
-                .llm_calls
-                .values()
-                .filter(|c| in_flight(&c.tracking.status))
-                .count() as u32,
+
+        let mut effects: Vec<Effect> = Vec::new();
+
+        for c in self
+            .tool_calls
+            .values()
+            .filter(|c| in_flight(&c.tracking.status))
+        {
+            effects.push(Effect {
+                id: c.tool_call_id.clone(),
+                status: c.tracking.status.clone(),
+                attempt: c.tracking.retry.attempts,
+                deadline: c.tracking.deadline,
+                detail: EffectDetail::ToolCall {
+                    name: c.name.clone(),
+                    arguments: c.arguments.clone(),
+                    handler: c.handler.clone(),
+                },
+            });
         }
+
+        for c in self
+            .sub_agent_calls
+            .values()
+            .filter(|c| in_flight(&c.tracking.status))
+        {
+            effects.push(Effect {
+                id: c.tool_call_id.clone(),
+                status: c.tracking.status.clone(),
+                attempt: c.tracking.retry.attempts,
+                deadline: c.tracking.deadline,
+                detail: EffectDetail::SubAgent {
+                    agent_id: c.agent_id.clone(),
+                    session_id: c.session_id.clone(),
+                },
+            });
+        }
+
+        for c in self
+            .llm_calls
+            .values()
+            .filter(|c| in_flight(&c.tracking.status))
+        {
+            effects.push(Effect {
+                id: c.call_id.clone(),
+                status: c.tracking.status.clone(),
+                attempt: c.tracking.retry.attempts,
+                deadline: c.tracking.deadline,
+                detail: EffectDetail::LlmCall {
+                    handler: c.handler.clone(),
+                    stream: c.stream,
+                },
+            });
+        }
+
+        effects.sort_by(|a, b| a.id.cmp(&b.id));
+        effects
     }
 
     pub fn derived_state(&self) -> DerivedState {
         DerivedState {
             status: self.status.clone(),
             wake_at: self.wake_at(),
-            pending_effects: self.pending_effects(),
+            effects: self.effects(),
             owner: self.owner.clone(),
             agent_id: self.agent_id.clone(),
             worker_state: self.worker_state.clone(),
@@ -752,5 +822,34 @@ impl SessionState {
                 *self.turn_token_usage.entry(k.clone()).or_insert(0) += n;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod effect_tests {
+    use super::*;
+
+    #[test]
+    fn effect_serializes_flat_tagged_and_round_trips() {
+        let e = Effect {
+            id: "call_1".to_string(),
+            status: EffectStatus::Pending,
+            attempt: 0,
+            deadline: None,
+            detail: EffectDetail::ToolCall {
+                name: "get_weather".to_string(),
+                arguments: "{}".to_string(),
+                handler: ToolHandler::Worker,
+            },
+        };
+        let json = serde_json::to_value(&e).unwrap();
+        // Envelope, tag, and detail all flattened onto one object.
+        assert_eq!(json["id"], "call_1");
+        assert_eq!(json["status"], "pending");
+        assert_eq!(json["kind"], "tool_call");
+        assert_eq!(json["name"], "get_weather");
+        // flatten + internally-tagged enum must deserialize back to the original.
+        let back: Effect = serde_json::from_value(json).unwrap();
+        assert_eq!(back, e);
     }
 }

@@ -15,7 +15,7 @@
 // WARNING: this example runs real shell commands. Approve carefully.
 
 import { spawnSync } from "node:child_process";
-import { agent, callTool, done, type Message, server, tool, toolLoop } from "@substructure.ai/sdk";
+import { agent, type Message, tool, toolLoop } from "@substructure.ai/sdk";
 import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
 
 // ── State (rides the wire) ───────────────────────────────────────────────────
@@ -78,7 +78,7 @@ const assistant = agent<State>({
             approvalDecision: req.state?.approvalDecision ?? null,
         };
         const loop = toolLoop<State>({
-            model: server("anthropic/claude-sonnet-4-6"),
+            llm: { model: "anthropic/claude-sonnet-4-6" },
             instructions,
             tools: [commandTool(state)],
         });
@@ -91,7 +91,7 @@ const assistant = agent<State>({
                 state.pendingCommand = { toolCallId: call.id, cmd: JSON.parse(call.function.arguments).cmd };
                 return {
                     transcript: [...(req.transcript ?? []), assistantMsg],
-                    actions: [done({ pendingCommand: state.pendingCommand })],
+                    actions: [{ type: "done", data: { pendingCommand: state.pendingCommand } }],
                     state,
                 };
             }
@@ -100,17 +100,19 @@ const assistant = agent<State>({
         // The user approved or denied: re-emit the parked call so the loop runs it.
         if (req.trigger.type === "client.action" && req.trigger.name === "approve_command") {
             const pending = state.pendingCommand;
-            if (!pending) return { actions: [done("no pending command to approve")], state };
+            if (!pending) return { actions: [{ type: "done", data: "no pending command to approve" }], state };
             const args = (req.trigger.args ?? {}) as { approved: boolean; reason?: string };
             state.approvalDecision = { approved: args.approved, reason: args.reason };
             state.pendingCommand = null;
             return {
                 actions: [
-                    callTool({
-                        toolCallId: pending.toolCallId,
+                    {
+                        type: "call.tool",
+                        tool_call_id: pending.toolCallId,
                         name: "run_command",
                         arguments: JSON.stringify({ cmd: pending.cmd }),
-                    }),
+                        handler: "worker",
+                    },
                 ],
                 state,
             };

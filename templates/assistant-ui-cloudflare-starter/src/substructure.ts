@@ -2,7 +2,7 @@
 // engine calls (server-to-server), and the browser-token minter. Never imported
 // into the client bundle.
 
-import Substructure, { agent, server, tool, toolLoop, worker } from "@substructure.ai/sdk";
+import Substructure, { agent, tool, toolLoop, worker } from "@substructure.ai/sdk";
 
 export const AGENT_ID = "assistant";
 
@@ -39,8 +39,7 @@ const browserAlert = tool({
 const assistant = agent({
     name: AGENT_ID,
     decide: toolLoop({
-        model: server("anthropic/claude-sonnet-4-6"),
-        stream: true,
+        llm: { model: "anthropic/claude-sonnet-4-6", stream: true },
         instructions:
             "You are a concise, friendly assistant. Use get_current_time when asked about the " +
             "current date or time, and browser_alert to pop a native alert in the user's browser.",

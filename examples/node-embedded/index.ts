@@ -1,7 +1,7 @@
 // Embedded runtime: no separate server, the agent runs in-process.
 // State and event log persist to a local SQLite file (`agent.db`).
 
-import { agent, server, tool, toolLoop } from "@substructure.ai/sdk";
+import { agent, tool, toolLoop } from "@substructure.ai/sdk";
 import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
 import { randomUUID } from "node:crypto";
 
@@ -34,7 +34,7 @@ const listTodos = tool({
 const todoAgent = agent({
     name: "todo",
     decide: toolLoop({
-        model: server("anthropic/claude-sonnet-4-6"),
+        llm: { model: "anthropic/claude-sonnet-4-6" },
         instructions: "You are a concise todo assistant. Use tools to manage the list.",
         tools: [addTodo, listTodos],
     }),

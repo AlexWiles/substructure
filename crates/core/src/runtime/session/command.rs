@@ -295,7 +295,7 @@ impl SessionState {
     }
 
     /// A completed effect fires a `tool.result` decision as it lands. The worker
-    /// decides when to prompt from `pending_effects` on the request.
+    /// decides when to prompt from `effects` on the request.
     fn emit_tool_result(
         &self,
         tool_call_id: String,
