@@ -59,6 +59,7 @@ export async function runAgent(agent: Agent, opts: RunOptions): Promise<RunResul
 }
 
 function makeRequest(opts: RunOptions, transcript?: Message[]): WorkerDecisionRequestWire {
+    const effects = opts.effects ?? [];
     return {
         session_id: "00000000-0000-0000-0000-000000000000",
         tenant_id: "test",
@@ -67,7 +68,12 @@ function makeRequest(opts: RunOptions, transcript?: Message[]): WorkerDecisionRe
         identity: { tenant_id: "test", id: "tester" },
         trigger: opts.trigger,
         worker_state: "",
-        effects: opts.effects ?? [],
+        effects,
+        pending_effects: effects.filter(
+            (e) =>
+                (e.kind === "tool_call" || e.kind === "sub_agent") &&
+                (e.status === "pending" || e.status === "retry_scheduled"),
+        ).length,
         transcript,
         message_tree: opts.messageTree,
         span: { trace_id: "0".repeat(32), span_id: "0".repeat(16), trace_flags: 1 },

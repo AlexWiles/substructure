@@ -29,6 +29,12 @@ pub struct WorkerDecisionRequest {
     /// effect kinds without a wire change.
     #[serde(default)]
     pub effects: Vec<Effect>,
+    /// How many `tool_call`/`sub_agent` effects are still in flight — the step
+    /// gate as a number, so a worker can prompt when it hits zero (and report
+    /// progress) without re-deriving it from `effects`. Counts the same subset
+    /// of `effects`; `llm_call` effects don't count, they don't block the prompt.
+    #[serde(default)]
+    pub pending_effects: usize,
     /// The active conversation as a flat list (the tree's `head_id`-to-root
     /// path). A worker only needs this; the tree is provided for clients that
     /// want branch structure.

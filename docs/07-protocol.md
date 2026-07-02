@@ -34,6 +34,8 @@ decision.
     { "id": "…", "kind": "tool_call", "status": "pending", "attempt": 0,
       "name": "get_weather", "arguments": "{…}", "handler": "worker" }
   ],
+  "pending_effects": 1,        // tool_call/sub_agent effects still in flight — the step gate
+
   "transcript":  [ { "role": "user", "content": "hi", "id": "…" }, … ],
   "turn_id":     "…",
   "attempts":    0
@@ -44,14 +46,18 @@ decision.
 - **`transcript`** is the active conversation as a flat list, oldest first — all a
   tool loop needs. (`message_tree` carries the full branch structure for clients
   that need it; workers can ignore it.)
-- **`effects`** is a flat list of the effects still in flight. Each is a stable
-  envelope — `id`, `kind` (`"tool_call"` | `"sub_agent"` | `"llm_call"` | …),
-  `status` (`"pending"` | `"retry_scheduled"`), `attempt` — plus kind-specific fields
-  (a tool's `name`/`arguments`, a sub-agent's `agent_id`/`session_id`). Branch on
-  `kind` + `status` instead of tracking steps yourself: the step is complete when no
-  `tool_call`/`sub_agent` effect is still in flight. `kind` and `status` are **open**
-  — a worker ignores kinds it doesn't handle, so new effect kinds (timers, approvals)
-  and new statuses are additive, never a wire break.
+- **`pending_effects`** is the step gate as a number: how many
+  `tool_call`/`sub_agent` effects are still in flight. On an `effect.settled`
+  trigger, prompt the model again once `pending_effects === 0`; a non-zero value
+  is also the count of steps still running, if you want to report progress.
+  `llm_call` effects don't count toward it — they don't block the next prompt.
+- **`effects`** is the same in-flight effects as a flat, tagged list, for workers
+  that need more than the count. Each is a stable envelope — `id`, `kind`
+  (`"tool_call"` | `"sub_agent"` | `"llm_call"` | …), `status` (`"pending"` |
+  `"retry_scheduled"`), `attempt` — plus kind-specific fields (a tool's
+  `name`/`arguments`, a sub-agent's `agent_id`/`session_id`). `kind` and `status`
+  are **open** — a worker ignores kinds it doesn't handle, so new effect kinds
+  (timers, approvals) and new statuses are additive, never a wire break.
 - **`worker_state`** is your state, opaque to the engine. Decode it on the way in,
   encode it on the way out. Empty when you keep state in your own database.
 
@@ -202,11 +208,8 @@ def decide(req, state):
             node       = { "role": "tool", "content": trigger["result"],
                            "tool_call_id": call_id, "name": name, "id": new_id() }
             transcript = history + [ node ]
-            step_open  = any(e["kind"] in ("tool_call", "sub_agent")
-                             and e["status"] in ("pending", "retry_scheduled")
-                             for e in req["effects"])
-            if step_open:
-                return { "transcript": transcript }                          # just record
+            if req["pending_effects"] > 0:
+                return { "transcript": transcript }                          # step still open — just record
             return { "transcript": transcript, "actions": [ call_llm(transcript, schemas) ] }
 
         # The engine wants YOU to run the effect's work (here: a tool).

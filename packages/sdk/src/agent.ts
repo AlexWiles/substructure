@@ -248,12 +248,7 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
                               name: trigger.name,
                           };
                 const transcript = [...history, node];
-                const stepComplete = !d.effects.some(
-                    (e) =>
-                        (e.kind === "tool_call" || e.kind === "sub_agent") &&
-                        (e.status === "pending" || e.status === "retry_scheduled"),
-                );
-                if (!stepComplete) return { transcript, state };
+                if (d.pending_effects > 0) return { transcript, state };
                 return { transcript, actions: [ask(transcript)], state };
             }
             default:

@@ -851,6 +851,10 @@ export interface WorkerDecisionRequestWire {
     /** The in-flight effects as a flat, tagged list; branch on `kind` instead of
      *  tracking steps yourself — the step gate is "no tool/sub-agent effect left". */
     effects: Effect[];
+    /** How many `tool_call`/`sub_agent` effects are still in flight — the step
+     *  gate as a number. Prompt when it reaches 0; a non-zero value is also the
+     *  count of steps still running, for progress reporting. */
+    pending_effects: number;
     /** The active conversation as a flat list; a worker only needs this. */
     transcript?: Message[];
     /** The full tree, for clients that need branch structure. */

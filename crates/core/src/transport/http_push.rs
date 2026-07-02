@@ -323,6 +323,7 @@ mod tests {
             },
             worker_state: vec![].into(),
             effects: Default::default(),
+            pending_effects: 0,
             transcript: vec![],
             message_tree: Default::default(),
             ancestry: vec![],

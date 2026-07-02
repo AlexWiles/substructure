@@ -38,6 +38,11 @@ same version.
 
 ### Added
 
+- The worker decision request carries `pending_effects`, the count of
+  `tool_call`/`sub_agent` effects still in flight — the step gate as a number.
+  Prompt once it reaches `0` (a non-zero value doubles as a "steps still
+  running" count); the default SDK loop now gates on it instead of re-scanning
+  `effects`. `effects` stays for workers that need the full list.
 - `docs/07-protocol.md`: the language-neutral decision protocol — the
   request/decision exchange, the trigger and action tables, the message shapes,
   and a ~40-line reference tool loop — so a worker (and the tool loop) can be

@@ -9,7 +9,7 @@ use crate::runtime::processor::{
     ProcessorError,
 };
 use crate::runtime::session::events::EventPayload;
-use crate::runtime::session::state::SessionState;
+use crate::runtime::session::state::{EffectDetail, EffectStatus, SessionState};
 
 use super::{WorkerDecisionRequest, WorkerQueue};
 
@@ -82,6 +82,20 @@ fn try_extract(raw: &Event) -> Option<WorkerDecisionRequest> {
     let owner = derived.owner.as_ref()?;
     let wd = derived.worker_decisions.get(&req.decision_id)?;
 
+    let pending_effects = derived
+        .effects
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.detail,
+                EffectDetail::ToolCall { .. } | EffectDetail::SubAgent { .. }
+            ) && matches!(
+                e.status,
+                EffectStatus::Pending | EffectStatus::RetryScheduled
+            )
+        })
+        .count();
+
     Some(WorkerDecisionRequest {
         session_id: event.aggregate_id.clone(),
         tenant_id: event.tenant_id.clone(),
@@ -91,6 +105,7 @@ fn try_extract(raw: &Event) -> Option<WorkerDecisionRequest> {
         trigger: req.trigger.clone(),
         worker_state: derived.worker_state.clone(),
         effects: derived.effects.clone(),
+        pending_effects,
         transcript: derived
             .message_tree
             .head_id

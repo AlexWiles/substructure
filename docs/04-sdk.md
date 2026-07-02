@@ -275,7 +275,8 @@ The `DecisionRequest` (conventionally `req`) is the engine's wire envelope with 
 - `req.trigger` — what happened: `user.message`, `user.transcript`, `client.action`, `effect.execute`, `effect.settled`, ...
 - `req.transcript` — the active transcript (the head-to-root path); may be empty.
 - `req.state` — the decoded `worker_state` (return a new value to persist it).
-- `req.effects` — the in-flight effects as a flat, tagged list (each with `id`, `kind`, `status`, `attempt`, plus kind-specific fields like a tool's `name`/`arguments`); branch on `kind` + `status` to know when a tool step is complete (no `tool_call`/`sub_agent` effect left in flight). `kind`/`status` are open, so new effect kinds are additive.
+- `req.pending_effects` — how many `tool_call`/`sub_agent` effects are still in flight; the step gate. On an `effect.settled` trigger, prompt again once it hits `0` (a non-zero value doubles as a "steps still running" count).
+- `req.effects` — the same in-flight effects as a flat, tagged list, when you need more than the count (each with `id`, `kind`, `status`, `attempt`, plus kind-specific fields like a tool's `name`/`arguments`). `kind`/`status` are open, so new effect kinds are additive.
 - `req.session_id`, `req.identity`, `req.turn_id`, ... — the rest of the envelope, read directly.
 
 Return a `Decision` — `{ actions?, transcript?, state? }`. `actions` defaults to none; `transcript` echoes `req.transcript`; `state` echoes `req.state`.
