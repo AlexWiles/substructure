@@ -10,6 +10,14 @@ same version.
 
 ## [Unreleased]
 
+### Removed
+
+- **Breaking (SDK):** dropped deferred tool execution from the default tool
+  loop. Worker tools no longer return `ctx.defer()` / `DEFERRED` to complete
+  out-of-band; `execute` must return a result string. The `DEFERRED` sentinel,
+  `Deferred` type, and `ToolExecutionContext.defer` are gone. Out-of-band
+  completion via `submitToolCallResult` remains for client-handled tools.
+
 ### Changed
 
 - **Breaking (wire):** the decision protocol now speaks the `Effect` envelope

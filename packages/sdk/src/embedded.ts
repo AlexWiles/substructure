@@ -113,7 +113,7 @@ export class SubstructureEmbedded {
         return drainToTurnResult(this.stream(scope));
     }
 
-    /** Complete (or fail) a tool call out-of-band, after a tool returns `DEFERRED`. */
+    /** Complete (or fail) a client-handled tool call out-of-band. */
     async submitToolCallResult(args: SubmitToolCallResultArgs): Promise<void> {
         if (args.result !== undefined) {
             await this.runtime.submitToolCallResult(

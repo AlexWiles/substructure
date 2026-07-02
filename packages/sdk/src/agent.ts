@@ -1,5 +1,5 @@
 import type { Agent, Llm, NamedAgent, ToolDef, ToolExecutionContext } from "./core";
-import { DEFERRED, stamp } from "./core";
+import { stamp } from "./core";
 import type { LlmTool, Message, RetryPolicy, WorkerAction } from "./types";
 
 // ── agent(config): the default tool/sub-agent loop ───────────────────────────
@@ -149,18 +149,16 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
                     toolCallId: id,
                     attempt,
                     request: d,
-                    defer: () => DEFERRED,
                 };
                 try {
                     const out = await def.execute(trigger.arguments, ctx);
-                    if (out === DEFERRED) return { state };
                     return {
                         actions: [
                             {
                                 type: "effect.result",
                                 kind: "tool_call",
                                 id,
-                                result: typeof out === "string" ? out : "",
+                                result: out,
                                 attempt,
                             },
                         ],

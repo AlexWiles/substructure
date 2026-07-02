@@ -364,8 +364,8 @@ export interface SubmitToolCallFailure {
 }
 
 /**
- * Outcome of a deferred tool call: either a successful result or a
- * failure. The `never`-typed alternates make this a discriminated union,
+ * Outcome of an out-of-band tool call completion: either a successful result
+ * or a failure. The `never`-typed alternates make this a discriminated union,
  * so passing both — or neither — is a compile error.
  */
 export type SubmitToolCallResultOutcome = SubmitToolCallSuccess | SubmitToolCallFailure;

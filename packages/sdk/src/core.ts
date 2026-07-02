@@ -51,24 +51,15 @@ export interface NamedAgent<S = unknown> extends Agent<S> {
 
 // ── Tools ────────────────────────────────────────────────────────────────────
 
-/**
- * Sentinel from `ctx.defer()`: the worker emits no result for this `effect.execute`,
- * and the engine leaves the call pending until `submitToolCallResult` is called.
- */
-export const DEFERRED: unique symbol = Symbol.for("substructure.tool.deferred");
-export type Deferred = typeof DEFERRED;
-
 export interface ToolExecutionContext {
     sessionId: string;
     toolCallId: string;
     attempt: number;
     /** The decision request — read `request.identity.id`, etc. */
     request: DecisionRequest;
-    /** Signal out-of-band completion: `return ctx.defer();`. */
-    defer: () => Deferred;
 }
 
-export type ToolResult = string | Deferred | Promise<string | Deferred>;
+export type ToolResult = string | Promise<string>;
 export type ToolFn = (args: string, ctx: ToolExecutionContext) => ToolResult;
 
 export interface ToolDef {
@@ -84,10 +75,10 @@ export interface ToolDef {
 }
 
 // A tool returns its result string (call `JSON.stringify` yourself for structured
-// data) or `ctx.defer()` to complete out-of-band. State, if any, lives in your own
-// store — reach it through `ctx` (e.g. keyed by `ctx.sessionId`). `handler`
-// discriminates: "worker" (default) runs `execute`; "client" completes in the
-// browser, so `execute` is optional and never runs on the worker.
+// data). State, if any, lives in your own store — reach it through `ctx` (e.g.
+// keyed by `ctx.sessionId`). `handler` discriminates: "worker" (default) runs
+// `execute`; "client" completes in the browser, so `execute` is optional and
+// never runs on the worker.
 export function tool(
     config: {
         name: string;
