@@ -25,10 +25,10 @@ approval decision itself is read inside the tool's `execute`.
 its `execute` reads `state.approvalDecision`. On a denial it returns
 `{ exit_code: 1, stderr: "User denied this command. Reason: ..." }` as
 its result; otherwise it runs the command via `spawnSync`. Because the
-tool closes over `state`, the loop runs it normally on `tool.execute` —
+tool closes over `state`, the loop runs it normally on `effect.execute` —
 the host shell actually executes here, so approve carefully.
 
-**On `llm.response`:** if the model called `run_command`, the `decide`
+**On the model's reply (`effect.settled`, `kind: "llm_call"`):** if the model called `run_command`, the `decide`
 records the assistant turn, parks `{ toolCallId, cmd }` in
 `state.pendingCommand`, and ends the turn with `done({ pendingCommand })`
 instead of letting the loop run the call. The session is now waiting for
@@ -74,13 +74,13 @@ result, the LLM reads it, and adapts on the next call.
 
 ## Adapt
 
-- **Gate more tools**: broaden the check in the `llm.response` case
+- **Gate more tools**: broaden the check in the model-reply case
   (it currently looks for a `run_command` tool call) to match whichever
   tool names need approval. Generalize to a list or a predicate.
 - **Different approval shapes**: pass extra fields in
   `approve_command.args` (timeout overrides, modified arguments, an
   approver id) and propagate them through `state.approvalDecision`.
-- **Auto-approve trusted commands**: in the `llm.response` case, check
+- **Auto-approve trusted commands**: in the model-reply case, check
   the command against an allowlist before parking; re-emit the
   `callTool` directly if it matches.
 - **Multiple pending approvals**: replace `pendingCommand` with a

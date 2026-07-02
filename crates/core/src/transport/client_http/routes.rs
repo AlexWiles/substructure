@@ -69,21 +69,19 @@ pub async fn submit_tool_call_result(
 ) -> Response {
     let (tool_call_id, attempt, result) = match req {
         SubmitToolCallResultRequest::Result {
-            tool_call_id,
+            kind: _,
+            id,
             result,
             attempt,
-        } => (
-            tool_call_id,
-            attempt,
-            SubmitToolCallResult::Result { result },
-        ),
+        } => (id, attempt, SubmitToolCallResult::Result { result }),
         SubmitToolCallResultRequest::Error {
-            tool_call_id,
+            kind: _,
+            id,
             error,
             retryable,
             attempt,
         } => (
-            tool_call_id,
+            id,
             attempt,
             SubmitToolCallResult::Error { error, retryable },
         ),

@@ -49,10 +49,8 @@ Each trigger carries the new content and the current transcript; the worker fold
 | `user.message` | A client sent a chat message. The worker adds it to the transcript (rooting a fresh branch with its system prompt on cold start) and prompts. |
 | `user.transcript` | A client sent a full transcript (e.g. an AG-UI client view, an edit, or a regenerate). The worker returns it; the engine reconciles it into the tree. |
 | `client.action` | A client called `startTurn` with a typed action instead of a message. |
-| `llm.response` | An LLM call completed. Carries the assistant message; the worker folds it into the transcript, then calls tools or finishes. |
-| `llm.error` | An LLM call failed permanently (after retries). |
-| `tool.execute` | The engine is asking your worker to run a tool. `toolLoop` handles this and dispatches to the matching tool's `execute`; a custom `decide` reacts to it directly. |
-| `tool.result` | A tool or sub-agent call finished; carries the result. Fires as each one lands, so the transcript fills incrementally. The decision's `pending` counts say what's still in flight, so the worker prompts once no result is pending — without tracking the round itself. |
+| `effect.execute` | The engine is delegating effect work to your worker — run a tool (`kind: "tool_call"`) or make an LLM call (`kind: "llm_call"`). `toolLoop` handles this and dispatches to the matching tool's `execute` or the worker-run model; a custom `decide` reacts to it directly. |
+| `effect.settled` | An effect landed: the model replied (`kind: "llm_call"`), or a tool/sub-agent call finished (`kind: "tool_call"` / `"sub_agent"`). Fires as each one lands, so the transcript fills incrementally. The request's `effects` list says what's still in flight, so the worker prompts once no tool/sub-agent effect is pending — without tracking the round itself. `ok` says whether the effect succeeded. |
 | `interrupt.resumed` | A paused session was resumed by an external signal. |
 | `stall` | Nothing has happened for a while; the worker has a chance to break the deadlock or finish. |
 
@@ -64,11 +62,11 @@ A decision returns a flat `transcript` (the conversation as it should now be) pl
 
 | Action | Effect |
 | --- | --- |
-| `call.llm` | Make an LLM request with a prompt message list. Produces an `llm.response` or `llm.error` trigger when it completes. The prompt is separate from the transcript, so it can be shaped per call (compaction, injected context) without changing the record. |
-| `call.tool` | Have the engine schedule a tool call. Produces a `tool.execute` trigger back at the worker. |
-| `return.tool.result` | Return a result for a tool call the worker executed itself. |
-| `return.tool.error` | Return an error for a tool call the worker executed itself. |
-| `spawn.sub_agent` | Start a child session under a different agent. Its output (or error) comes back as a `tool.result` trigger when the child's turn completes. |
+| `call.llm` | Make an LLM request with a prompt message list. Produces an `effect.settled` trigger when it completes. The prompt is separate from the transcript, so it can be shaped per call (compaction, injected context) without changing the record. |
+| `call.tool` | Have the engine schedule a tool call, named by `id`. Produces an `effect.execute` trigger back at the worker. |
+| `effect.result` | Answer an `effect.execute` with a success — a tool's `result` or a worker-run model's `response`. |
+| `effect.error` | Answer an `effect.execute` with a failure; uniform across kinds. |
+| `spawn.sub_agent` | Start a child session under a different agent. Its output (or error) comes back as an `effect.settled` trigger when the child's turn completes. |
 | `send.message` | Push a message into another session (handy for fan-out or notifying a parent). |
 | `done` | Finish the turn. The `data` payload becomes the turn's result, returned from `client.turnResult(scope)`. |
 

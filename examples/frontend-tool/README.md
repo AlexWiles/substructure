@@ -7,7 +7,7 @@ has two tools:
 - `set_theme(background, accent)` — mutates the page's CSS variables
 
 Both are impossible from a backend worker. The tools are declared with
-`handler: "client"` so the engine never dispatches `tool.execute` to the
+`handler: "client"` so the engine never dispatches `effect.execute` to the
 worker — it just emits `tool.call.requested` on the session stream. The
 browser sees that event, executes the tool locally, and posts the result
 via `submitToolCallResult`. The agent resumes as if the tool had returned

@@ -19,7 +19,8 @@ pub struct WorkerDecisionRequest {
     pub tenant_id: String,
     pub decision_id: String,
     pub agent_id: String,
-    pub owner: SessionOwner,
+    /// The session owner, surfaced to workers as `identity`.
+    pub identity: SessionOwner,
     pub trigger: DecisionTrigger,
     pub worker_state: WorkerState,
     /// The in-flight effects as a flat, tagged list (each carries `kind`/`status`).

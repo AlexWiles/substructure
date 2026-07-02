@@ -1,7 +1,7 @@
 // Deferred (async) tool call: the tool returns `DEFERRED` to tell the
 // worker not to emit any result action right now. A `setTimeout` later
 // calls `embedded.submitToolCallResult(...)`, which the engine routes
-// back into the session as a `tool.result` trigger — and the agent
+// back into the session as an `effect.settled` trigger — and the agent
 // resumes.
 //
 // This is the pattern for tools that kick off real async work (webhooks,

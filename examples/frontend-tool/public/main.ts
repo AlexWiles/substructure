@@ -10,7 +10,7 @@
 //          returned synchronously from the worker.
 //        - on `message.new` (assistant), render the message.
 //
-// The worker also gets the tool.execute trigger; its `execute` returns
+// The worker also gets the effect.execute trigger; its `execute` returns
 // ctx.defer() so no result action is emitted server-side and the engine
 // waits for the browser to deliver one.
 

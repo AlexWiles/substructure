@@ -173,7 +173,7 @@ function sseEmitDelta(sse: SseStream): EmitDelta {
 
 function embeddedEmitDelta(runtime: NativeRuntime, request: WorkerDecisionRequestWire): EmitDelta | undefined {
     const { trigger } = request;
-    if (trigger.type !== "llm.request" || !trigger.stream) return undefined;
+    if (trigger.type !== "effect.execute" || trigger.kind !== "llm_call" || !trigger.stream) return undefined;
 
     const rootSessionId = request.ancestry?.[0] ?? request.session_id;
     let seq = 0;
@@ -186,7 +186,7 @@ function embeddedEmitDelta(runtime: NativeRuntime, request: WorkerDecisionReques
                 session_id: request.session_id,
                 agent_id: request.agent_id,
                 turn_id: request.turn_id,
-                call_id: trigger.call_id,
+                call_id: trigger.id,
                 attempt: trigger.attempt,
                 seq: seq++,
                 text: delta.text,

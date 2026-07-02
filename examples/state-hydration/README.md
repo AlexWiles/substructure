@@ -58,7 +58,7 @@ function todoTools(state: State) {
 ```
 
 `toolLoop` turns them into the model's tool schemas and runs them on
-`tool.execute`. Their edits land in `state.todos` — the same object the loop
+`effect.execute`. Their edits land in `state.todos` — the same object the loop
 echoes back out — so the todo list rides the wire with no manual plumbing.
 
 ## Run

@@ -18,18 +18,30 @@ pub struct SubmitClientPayloadResponse {
     pub turn_id: String,
 }
 
+/// This endpoint settles tool calls only; typing `kind` as a unit enum makes
+/// serde reject any other effect kind.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallKind {
+    ToolCall,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 pub enum SubmitToolCallResultRequest {
-    #[serde(rename = "return.tool.result")]
+    #[serde(rename = "effect.result")]
     Result {
-        tool_call_id: String,
+        #[allow(dead_code)]
+        kind: ToolCallKind,
+        id: String,
         result: String,
         attempt: u32,
     },
-    #[serde(rename = "return.tool.error")]
+    #[serde(rename = "effect.error")]
     Error {
-        tool_call_id: String,
+        #[allow(dead_code)]
+        kind: ToolCallKind,
+        id: String,
         error: String,
         retryable: bool,
         attempt: u32,

@@ -100,22 +100,42 @@ export function userTranscript(messages: Message[]): DecisionTrigger {
 }
 
 export function llmResponse(message: Message, callId = "call-0"): DecisionTrigger {
-    return { type: "llm.response", call_id: callId, message, truncated: false };
+    return { type: "effect.settled", id: callId, ok: true, kind: "llm_call", message, truncated: false };
 }
 
 export function toolCall(name: string, args: unknown, id = "tc-0"): ToolCall {
     return { id, type: "function", function: { name, arguments: JSON.stringify(args) } };
 }
 
-/** One tool/sub-agent completion; the worker records its result in the transcript.
+/** One tool completion; the worker records its result in the transcript.
  *  Whether it then prompts is driven by the `tool_call`/`sub_agent` effects still in flight. */
 export function toolResult(toolCallId: string, name: string, result: string, isError = false): DecisionTrigger {
     return {
-        type: "tool.result",
-        tool_call_id: toolCallId,
+        type: "effect.settled",
+        id: toolCallId,
+        ok: !isError,
+        kind: "tool_call",
         name,
         result,
-        is_error: isError,
+    };
+}
+
+/** One sub-agent completion; `id` is the child session, `tool_call_id` the model call it answers. */
+export function subAgentResult(
+    sessionId: string,
+    toolCallId: string,
+    agentId: string,
+    result: string,
+    isError = false,
+): DecisionTrigger {
+    return {
+        type: "effect.settled",
+        id: sessionId,
+        ok: !isError,
+        kind: "sub_agent",
+        tool_call_id: toolCallId,
+        agent_id: agentId,
+        result,
     };
 }
 

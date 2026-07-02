@@ -6,8 +6,8 @@ real work (webhook, long job, human approval) inside `execute`, return
 `ctx.defer()`, and submit the result when it's ready.
 
 When `execute` returns `ctx.defer()`, the `tools` middleware emits no
-`return.tool.result` for that call. The worker submits zero actions for
-that `tool.execute` trigger, and the engine leaves the tool call pending
+`effect.result` for that call. The worker submits zero actions for
+that `effect.execute` trigger, and the engine leaves the tool call pending
 until the result lands.
 
 This example runs the runtime in-process (`SubstructureEmbedded.create`), so a single

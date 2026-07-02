@@ -54,7 +54,7 @@ When the parent's LLM emits a tool call for a sub-agent name, `toolLoop` does th
 2. Emits a `spawn.sub_agent` action carrying the child's session id, the agent id, and the originating `tool_call_id`.
 3. Emits a `send.message` action that delivers the LLM's `message` argument to the child as a user message.
 
-The engine creates the child session and runs it to completion. The child's result — its `done` output, or its error if it failed past retries — returns to the parent in the batched `tool.results` trigger, as a tool message on that `tool_call_id`, alongside any sibling tool results from the same turn. The loop keeps no correlation state; the engine threads the `tool_call_id` through the child's lifetime.
+The engine creates the child session and runs it to completion. The child's result — its `done` output, or its error if it failed past retries — returns to the parent as an `effect.settled` trigger with `kind: "sub_agent"`, folded in as a tool message on that `tool_call_id`, alongside any sibling tool results from the same turn. The loop keeps no correlation state; the engine threads the `tool_call_id` through the child's lifetime.
 
 From the parent LLM's perspective, the whole thing looks like a tool call that took a while and returned a string. It doesn't see the child's intermediate steps, tool calls, or LLM responses.
 
@@ -126,7 +126,7 @@ You can stream events from the parent session to watch the whole tree. The inter
 | --- | --- |
 | `sub_agent.requested` | Parent asked the engine to spawn the child. |
 | `sub_agent.started` | Child session was created. |
-| `sub_agent.turn_completed` | Child finished a turn; the result will land back at the parent as a `tool.result` trigger. |
+| `sub_agent.turn_completed` | Child finished a turn; the result will land back at the parent as an `effect.settled` trigger. |
 | `sub_agent.errored` | Child failed past retries. |
 
 The child has its own session id, so if you want to drill into what it actually did, stream that session directly with `client.stream({ sessionId: childSessionId })`. The `ancestry` field on the child session lets you walk back up the tree.

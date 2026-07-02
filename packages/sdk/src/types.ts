@@ -229,39 +229,51 @@ export interface ClientAction {
 
 export type ClientPayload =
     | { type: "message"; message: Message; stream?: boolean }
+    | { type: "messages"; messages: Message[]; stream?: boolean }
     | ({ type: "action" } & ClientAction);
+
+/** The work an `effect.execute` trigger delegates to the worker, tagged by
+ *  `kind` — the same discriminator the `effects` list uses. */
+export type EffectWork =
+    | { kind: "tool_call"; name: string; arguments: string }
+    | { kind: "llm_call"; request: LlmRequest; stream: boolean };
+
+/** How a settled `llm_call` landed: the response fields when the trigger's
+ *  `ok` is true, the error fields when it is false. */
+export type LlmSettled =
+    | {
+          message: Message;
+          truncated: boolean;
+          usage?: Record<string, unknown>;
+          cost?: Decimal;
+          error?: never;
+      }
+    | { error: string; code?: string; detail?: unknown; message?: never };
+
+/** How a settled effect landed, tagged by `kind`. For `tool_call` and
+ *  `sub_agent` the error text rides in `result` when `ok` is false — it folds
+ *  into the transcript as the tool message either way. A `sub_agent`'s trigger
+ *  `id` is its session id (matching the `effects` list); `tool_call_id` is the
+ *  model tool call it answers. */
+export type EffectOutcome =
+    | { kind: "tool_call"; name: string; result: string }
+    | { kind: "sub_agent"; tool_call_id: string; agent_id: string; result: string }
+    | ({ kind: "llm_call" } & LlmSettled);
 
 export type DecisionTrigger =
     | { type: "user.message"; message: Message }
     | { type: "user.transcript"; messages: Message[] }
     | ({ type: "client.action" } & ClientAction)
-    | {
-          type: "llm.response";
-          call_id: string;
-          message: Message;
-          truncated: boolean;
-          usage?: Record<string, unknown>;
-          cost?: Decimal;
-      }
-    | { type: "llm.error"; call_id: string; error: string; code?: string; detail?: unknown }
-    | { type: "llm.request"; call_id: string; request: LlmRequest; stream: boolean; attempt: number }
-    | {
-          type: "tool.execute";
-          tool_call_id: string;
-          name: string;
-          arguments: string;
-          attempt: number;
-          deadline?: DateTime;
-      }
-    | {
-          type: "tool.result";
-          tool_call_id: string;
-          name: string;
-          result: string;
-          is_error?: boolean;
-      }
+    | ({ type: "effect.execute"; id: string; attempt: number; deadline?: DateTime } & EffectWork)
+    | ({ type: "effect.settled"; id: string; ok: boolean } & EffectOutcome)
     | { type: "interrupt.resumed"; interrupt_id: string; payload?: unknown }
     | { type: "stall" };
+
+/** The effect kinds a worker can answer `effect.execute` for. */
+export type WorkKind = "tool_call" | "llm_call";
+
+/** A successful effect result, tagged by `kind`. */
+export type EffectResultPayload = { kind: "tool_call"; result: string } | { kind: "llm_call"; response: LlmResponse };
 
 export type WorkerAction =
     | {
@@ -272,37 +284,41 @@ export type WorkerAction =
           handler: LlmHandler;
       }
     | {
+          /** `id` names the effect (the model's tool call id); its outcome
+           *  comes back as an `effect.settled` trigger with the same id. */
           type: "call.tool";
-          tool_call_id: string;
+          id: string;
           name: string;
           arguments: string;
           handler: ToolHandler;
           retry?: RetryPolicy;
       }
-    | { type: "return.tool.result"; tool_call_id: string; result: string; attempt: number }
+    | ({ type: "effect.result"; id: string; attempt: number } & EffectResultPayload)
     | {
-          type: "return.tool.error";
-          tool_call_id: string;
-          error: string;
-          retryable: boolean;
+          type: "effect.error";
+          kind: WorkKind;
+          id: string;
           attempt: number;
-      }
-    | { type: "return.llm.result"; call_id: string; response: LlmResponse; attempt: number }
-    | {
-          type: "return.llm.error";
-          call_id: string;
           error: string;
           retryable: boolean;
           code?: string;
           detail?: unknown;
-          attempt: number;
       }
     | { type: "spawn.sub_agent"; session_id: Uuid; agent_id: string; tool_call_id: string; retry?: RetryPolicy }
     | { type: "send.message"; session_id: Uuid; message: Message }
     | { type: "interrupt"; interrupt_id?: string; reason: string; payload?: unknown }
     | { type: "done"; data: unknown };
 
-export type SubmitToolCallResultRequest = Extract<WorkerAction, { type: "return.tool.result" | "return.tool.error" }>;
+export type SubmitToolCallResultRequest =
+    | { type: "effect.result"; kind: "tool_call"; id: string; result: string; attempt: number }
+    | {
+          type: "effect.error";
+          kind: "tool_call";
+          id: string;
+          error: string;
+          retryable: boolean;
+          attempt: number;
+      };
 
 export interface SubmitToolCallResultResponse {
     ok: boolean;
@@ -359,15 +375,17 @@ export type SubmitToolCallResultArgs = SubmitToolCallResultTarget & SubmitToolCa
 export function toSubmitToolCallResultRequest(args: SubmitToolCallResultArgs): SubmitToolCallResultRequest {
     if (args.result !== undefined) {
         return {
-            type: "return.tool.result",
-            tool_call_id: args.toolCallId,
+            type: "effect.result",
+            kind: "tool_call",
+            id: args.toolCallId,
             result: args.result,
             attempt: args.attempt,
         };
     }
     return {
-        type: "return.tool.error",
-        tool_call_id: args.toolCallId,
+        type: "effect.error",
+        kind: "tool_call",
+        id: args.toolCallId,
         error: args.error,
         retryable: args.retryable ?? false,
         attempt: args.attempt,
@@ -782,24 +800,45 @@ export interface WorkerAuthOptions {
 // change; likewise `status` (currently `"pending"`/`"retry_scheduled"`) can widen.
 // The step gate is "no tool/sub-agent effect left". Results live in the transcript.
 
-/** Effect kinds. Open — unknown kinds are surfaced but safely ignored by a worker
- *  that doesn't handle them. */
-export type EffectKind = "tool_call" | "sub_agent" | "llm_call" | (string & {});
-
-export interface Effect {
+export interface EffectBase {
     id: string;
-    kind: EffectKind;
     status: EffectStatus;
     attempt: number;
     deadline?: DateTime;
-    // Kind-specific fields, present according to `kind`:
-    name?: string; // tool_call
-    arguments?: string; // tool_call
-    agent_id?: string; // sub_agent
-    session_id?: Uuid; // sub_agent
-    handler?: ToolHandler | LlmHandler; // tool_call | llm_call
-    stream?: boolean; // llm_call
 }
+
+export interface ToolCallEffect extends EffectBase {
+    kind: "tool_call";
+    name: string;
+    arguments: string;
+    handler: ToolHandler;
+}
+
+export interface SubAgentEffect extends EffectBase {
+    kind: "sub_agent";
+    agent_id: string;
+    session_id: Uuid;
+}
+
+export interface LlmCallEffect extends EffectBase {
+    kind: "llm_call";
+    handler: LlmHandler;
+    stream: boolean;
+}
+
+/** An effect kind this SDK doesn't know; ignore it. The `never` fields keep
+ *  narrowing on `kind` usable for the known variants. */
+export interface UnknownEffect extends EffectBase {
+    kind: string & {};
+    name?: never;
+    arguments?: never;
+    agent_id?: never;
+    session_id?: never;
+    handler?: never;
+    stream?: never;
+}
+
+export type Effect = ToolCallEffect | SubAgentEffect | LlmCallEffect | UnknownEffect;
 
 export interface WorkerDecisionRequestWire {
     session_id: Uuid;

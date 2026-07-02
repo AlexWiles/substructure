@@ -24,7 +24,7 @@ const initialPlan = (): Plan => ({ goal: "", steps: [], nextId: 1 });
 
 // ── Tools, per mode ───────────────────────────────────────────────────────────
 // Built fresh each decision so `execute` closes over the live plan. `toolLoop`
-// turns these into the model's tool schemas and runs `execute` on `tool.execute`.
+// turns these into the model's tool schemas and runs `execute` on `effect.execute`.
 
 function planTools(state: State) {
     const plan = state.plan;

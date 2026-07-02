@@ -42,7 +42,7 @@ function runShell(cmd: string): string {
 
 // The tool reads the decision the gate recorded: run the command, or return the
 // denial as its result so the model can adapt. Built per decision, closing over
-// `state`, so `toolLoop` can run it on `tool.execute`.
+// `state`, so `toolLoop` can run it on `effect.execute`.
 function commandTool(state: State) {
     return tool({
         name: "run_command",
@@ -84,10 +84,11 @@ const assistant = agent<State>({
         });
 
         // The model asked to run a command: record the turn, park the call, end it.
-        if (req.trigger.type === "llm.response") {
-            const call = (req.trigger.message.tool_calls ?? []).find((tc) => tc.function.name === "run_command");
+        if (req.trigger.type === "effect.settled" && req.trigger.kind === "llm_call" && req.trigger.message) {
+            const message = req.trigger.message;
+            const call = (message.tool_calls ?? []).find((tc) => tc.function.name === "run_command");
             if (call) {
-                const assistantMsg: Message = { ...req.trigger.message, id: crypto.randomUUID() };
+                const assistantMsg: Message = { ...message, id: crypto.randomUUID() };
                 state.pendingCommand = { toolCallId: call.id, cmd: JSON.parse(call.function.arguments).cmd };
                 return {
                     transcript: [...(req.transcript ?? []), assistantMsg],
@@ -108,7 +109,7 @@ const assistant = agent<State>({
                 actions: [
                     {
                         type: "call.tool",
-                        tool_call_id: pending.toolCallId,
+                        id: pending.toolCallId,
                         name: "run_command",
                         arguments: JSON.stringify({ cmd: pending.cmd }),
                         handler: "worker",

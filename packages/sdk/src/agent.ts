@@ -102,71 +102,52 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
                 const base = withSystem(history);
                 return { transcript: base, actions: [ask(base)], state };
             }
-            case "llm.response": {
-                const assistant = stamp(trigger.message);
-                const transcript = [...history, assistant];
-                const calls = assistant.tool_calls ?? [];
-                if (calls.length === 0)
-                    return { transcript, actions: [{ type: "done", data: assistant.content ?? null }], state };
-
-                const actions: WorkerAction[] = [];
-                for (const tc of calls) {
-                    if (subIds.has(tc.function.name)) {
-                        const childId = crypto.randomUUID();
-                        let message = tc.function.arguments;
-                        try {
-                            const args = JSON.parse(tc.function.arguments);
-                            if (typeof args?.message === "string") message = args.message;
-                        } catch {
-                            // leave raw arguments as the message
-                        }
-                        actions.push(
-                            {
-                                type: "spawn.sub_agent",
-                                session_id: childId,
-                                agent_id: tc.function.name,
-                                tool_call_id: tc.id,
-                                retry: config.retry,
-                            },
-                            {
-                                type: "send.message",
-                                session_id: childId,
-                                message: { role: "user", content: message },
-                            },
-                        );
-                    } else if (toolMap[tc.function.name]) {
-                        const def = toolMap[tc.function.name];
-                        actions.push({
-                            type: "call.tool",
-                            tool_call_id: tc.id,
-                            name: tc.function.name,
-                            arguments: tc.function.arguments,
-                            handler: def.handler ?? "worker",
-                            retry: def.retry,
-                        });
+            case "effect.execute": {
+                const { id, attempt } = trigger;
+                if (trigger.kind === "llm_call") {
+                    try {
+                        // biome-ignore lint/style/noNonNullAssertion: the Llm union guarantees a worker LLM has `run`
+                        const response = await config.llm.run!(trigger.request, { emitDelta: d.emitDelta });
+                        const action: WorkerAction = {
+                            type: "effect.result",
+                            kind: "llm_call",
+                            id,
+                            response,
+                            attempt,
+                        };
+                        return { transcript: history, actions: [action], state };
+                    } catch (error) {
+                        const message = error instanceof Error ? error.message : String(error);
+                        const action: WorkerAction = {
+                            type: "effect.error",
+                            kind: "llm_call",
+                            id,
+                            error: message,
+                            retryable: false,
+                            attempt,
+                        };
+                        return { transcript: history, actions: [action], state };
                     }
                 }
-                return { transcript, actions, state };
-            }
-            case "tool.execute": {
                 const def = toolMap[trigger.name];
                 if (!def)
                     return {
                         actions: [
                             {
-                                type: "return.tool.error",
-                                tool_call_id: trigger.tool_call_id,
+                                type: "effect.error",
+                                kind: "tool_call",
+                                id,
                                 error: `Unknown tool: ${trigger.name}`,
                                 retryable: false,
-                                attempt: trigger.attempt,
+                                attempt,
                             },
                         ],
                         state,
                     };
                 const ctx: ToolExecutionContext = {
                     sessionId: d.session_id,
-                    toolCallId: trigger.tool_call_id,
-                    attempt: trigger.attempt,
+                    toolCallId: id,
+                    attempt,
                     request: d,
                     defer: () => DEFERRED,
                 };
@@ -176,10 +157,11 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
                     return {
                         actions: [
                             {
-                                type: "return.tool.result",
-                                tool_call_id: trigger.tool_call_id,
+                                type: "effect.result",
+                                kind: "tool_call",
+                                id,
                                 result: typeof out === "string" ? out : "",
-                                attempt: trigger.attempt,
+                                attempt,
                             },
                         ],
                         state,
@@ -189,25 +171,82 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
                     return {
                         actions: [
                             {
-                                type: "return.tool.error",
-                                tool_call_id: trigger.tool_call_id,
+                                type: "effect.error",
+                                kind: "tool_call",
+                                id,
                                 error: message,
                                 retryable: false,
-                                attempt: trigger.attempt,
+                                attempt,
                             },
                         ],
                         state,
                     };
                 }
             }
-            case "tool.result": {
-                const node: Message = {
-                    id: crypto.randomUUID(),
-                    role: "tool",
-                    content: trigger.result,
-                    tool_call_id: trigger.tool_call_id,
-                    name: trigger.name,
-                };
+            case "effect.settled": {
+                if (trigger.kind === "llm_call") {
+                    if (!trigger.ok || trigger.message === undefined) return { state };
+                    const assistant = stamp(trigger.message);
+                    const transcript = [...history, assistant];
+                    const calls = assistant.tool_calls ?? [];
+                    if (calls.length === 0)
+                        return { transcript, actions: [{ type: "done", data: assistant.content ?? null }], state };
+
+                    const actions: WorkerAction[] = [];
+                    for (const tc of calls) {
+                        if (subIds.has(tc.function.name)) {
+                            const childId = crypto.randomUUID();
+                            let message = tc.function.arguments;
+                            try {
+                                const args = JSON.parse(tc.function.arguments);
+                                if (typeof args?.message === "string") message = args.message;
+                            } catch {
+                                // leave raw arguments as the message
+                            }
+                            actions.push(
+                                {
+                                    type: "spawn.sub_agent",
+                                    session_id: childId,
+                                    agent_id: tc.function.name,
+                                    tool_call_id: tc.id,
+                                    retry: config.retry,
+                                },
+                                {
+                                    type: "send.message",
+                                    session_id: childId,
+                                    message: { role: "user", content: message },
+                                },
+                            );
+                        } else if (toolMap[tc.function.name]) {
+                            const def = toolMap[tc.function.name];
+                            actions.push({
+                                type: "call.tool",
+                                id: tc.id,
+                                name: tc.function.name,
+                                arguments: tc.function.arguments,
+                                handler: def.handler ?? "worker",
+                                retry: def.retry,
+                            });
+                        }
+                    }
+                    return { transcript, actions, state };
+                }
+                const node: Message =
+                    trigger.kind === "sub_agent"
+                        ? {
+                              id: crypto.randomUUID(),
+                              role: "tool",
+                              content: trigger.result,
+                              tool_call_id: trigger.tool_call_id,
+                              name: trigger.agent_id,
+                          }
+                        : {
+                              id: crypto.randomUUID(),
+                              role: "tool",
+                              content: trigger.result,
+                              tool_call_id: trigger.id,
+                              name: trigger.name,
+                          };
                 const transcript = [...history, node];
                 const stepComplete = !d.effects.some(
                     (e) =>
@@ -216,25 +255,6 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
                 );
                 if (!stepComplete) return { transcript, state };
                 return { transcript, actions: [ask(transcript)], state };
-            }
-            case "llm.request": {
-                const { call_id, request, attempt } = trigger;
-                try {
-                    // biome-ignore lint/style/noNonNullAssertion: the Llm union guarantees a worker LLM has `run`
-                    const response = await config.llm.run!(request, { emitDelta: d.emitDelta });
-                    const action: WorkerAction = { type: "return.llm.result", call_id, response, attempt };
-                    return { transcript: history, actions: [action], state };
-                } catch (error) {
-                    const message = error instanceof Error ? error.message : String(error);
-                    const action: WorkerAction = {
-                        type: "return.llm.error",
-                        call_id,
-                        error: message,
-                        retryable: false,
-                        attempt,
-                    };
-                    return { transcript: history, actions: [action], state };
-                }
             }
             default:
                 return { state };

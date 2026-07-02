@@ -10,6 +10,32 @@ same version.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking (wire):** the decision protocol now speaks the `Effect` envelope
+  everywhere — every message about an effect carries the same `(kind, id)` pair
+  the `effects` list uses. Triggers: `tool.execute` + `llm.request` collapse
+  into `effect.execute { kind, id, attempt, deadline?, …work }`;
+  `tool.result` + `llm.response` + `llm.error` collapse into
+  `effect.settled { kind, id, ok, …outcome }`. Sub-agent completions now settle
+  honestly as `kind: "sub_agent"` (with the child `session_id` as the effect
+  `id` and the answering `tool_call_id` in the outcome) instead of masquerading
+  as tool results. Actions: the four `return.*` actions collapse into
+  `effect.result { kind, id, attempt, result | response }` and a kind-uniform
+  `effect.error { kind, id, attempt, error, retryable, code?, detail? }`;
+  `call.tool` names its effect with `id` (was `tool_call_id`). The out-of-band
+  tool-result endpoints accept the same `effect.result`/`effect.error` shapes
+  (`kind` must be `"tool_call"`). `truncated` and the LLM usage/cost
+  passthrough are unchanged inside the llm outcome. No backwards compatibility:
+  workers must speak the new protocol.
+- **Breaking (wire):** the worker decision request's session owner field is now
+  `identity` (previously serialized as `owner`, contradicting the SDK types and
+  docs which always said `identity`).
+- SDK: `ClientPayload` gains the `messages` variant (full-transcript
+  submission) that the engine already accepted; `Effect` is now a discriminated
+  union (`ToolCallEffect | SubAgentEffect | LlmCallEffect | UnknownEffect`), so
+  narrowing on `kind` types the kind-specific fields.
+
 ### Added
 
 - `docs/07-protocol.md`: the language-neutral decision protocol — the

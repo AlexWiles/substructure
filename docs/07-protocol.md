@@ -83,13 +83,30 @@ ignores the rest.
 | `user.message` | `message` | A new user turn. Prompt the model. |
 | `user.transcript` | `messages` | A full client-supplied transcript (e.g. AG-UI). Reconcile it and prompt. |
 | `client.action` | `name`, `args?` | A non-message signal from the client (mode switch, approval). |
-| `llm.response` | `call_id`, `message`, `truncated`, `usage?`, `cost?` | The model replied. Record it; call tools or finish. |
-| `llm.error` | `call_id`, `error`, `code?`, `detail?` | An LLM call failed after retries. |
-| `llm.request` | `call_id`, `request`, `stream`, `attempt` | Run this LLM call yourself (worker-handled model). |
-| `tool.execute` | `tool_call_id`, `name`, `arguments`, `attempt`, `deadline?` | Run this tool yourself and return the result. |
-| `tool.result` | `tool_call_id`, `name`, `result`, `is_error?` | A tool or sub-agent completed. |
+| `effect.execute` | `kind`, `id`, `attempt`, `deadline?`, + work | Run this effect's work yourself and answer with `effect.result`/`effect.error`. |
+| `effect.settled` | `kind`, `id`, `ok`, + outcome | An effect landed (successfully or not). Fold it in. |
 | `interrupt.resumed` | `interrupt_id`, `payload?` | A paused session resumed. |
 | `stall` | — | Nothing is pending; a nudge to make progress. |
+
+The two effect triggers use the same `kind` discriminator as the `effects` list,
+so one correlation model covers the whole protocol: an effect is named by `id`,
+described by `kind`, and every message about it — in flight, delegated to you,
+settled — carries that same pair.
+
+**`effect.execute` work**, by `kind`:
+
+| `kind` | Fields | Work |
+|---|---|---|
+| `tool_call` | `name`, `arguments` | Run the tool. |
+| `llm_call` | `request`, `stream` | Make the LLM call (worker-handled model). |
+
+**`effect.settled` outcome**, by `kind`. `ok` says whether it succeeded:
+
+| `kind` | Fields | Outcome |
+|---|---|---|
+| `tool_call` | `name`, `result` | A tool completed; `result` is the error text when `ok` is false — it folds into the transcript either way. |
+| `sub_agent` | `tool_call_id`, `agent_id`, `result` | A sub-agent's turn completed. `id` is its session; `tool_call_id` is the model call it answers. |
+| `llm_call` | `message`, `truncated`, `usage?`, `cost?` — or `error`, `code?`, `detail?` when `ok` is false | The model replied (or the call failed after retries). |
 
 ## Actions
 
@@ -98,12 +115,10 @@ is just constructing the struct.
 
 | `type` | Fields | Effect |
 |---|---|---|
-| `call.llm` | `request`, `handler`, `stream?`, `retry?` | Make an LLM call. `handler` is required (like `call.tool`): `"server"` lets the engine call its provider; `"worker"` hands the call back to you as an `llm.request` trigger. |
-| `call.tool` | `tool_call_id`, `name`, `arguments`, `handler`, `retry?` | Schedule a tool call. `handler: "worker"` runs on your worker (you'll get a `tool.execute` trigger); `handler: "client"` routes it to the browser. |
-| `return.tool.result` | `tool_call_id`, `result`, `attempt` | A worker-run tool finished. |
-| `return.tool.error` | `tool_call_id`, `error`, `retryable`, `attempt` | A worker-run tool failed. |
-| `return.llm.result` | `call_id`, `response`, `attempt` | A worker-run LLM call finished. |
-| `return.llm.error` | `call_id`, `error`, `retryable`, `code?`, `detail?`, `attempt` | A worker-run LLM call failed. |
+| `call.llm` | `request`, `handler`, `stream?`, `retry?` | Make an LLM call. `handler` is required (like `call.tool`): `"server"` lets the engine call its provider; `"worker"` hands the call back to you as an `effect.execute` trigger. |
+| `call.tool` | `id`, `name`, `arguments`, `handler`, `retry?` | Schedule a tool call named by `id` (the model's tool call id). `handler: "worker"` runs on your worker (you'll get an `effect.execute` trigger); `handler: "client"` routes it to the browser. |
+| `effect.result` | `kind`, `id`, `attempt`, + result | Answer an `effect.execute`: a `tool_call` carries `result`, an `llm_call` carries `response`. |
+| `effect.error` | `kind`, `id`, `attempt`, `error`, `retryable`, `code?`, `detail?` | Answer an `effect.execute` with a failure — uniform across kinds. |
 | `spawn.sub_agent` | `session_id`, `agent_id`, `tool_call_id`, `retry?` | Start a child agent in a new session, linked to the tool call that requested it. |
 | `send.message` | `session_id`, `message` | Deliver a message to a session — used to seed a spawned sub-agent. |
 | `interrupt` | `interrupt_id?`, `reason`, `payload?` | Pause the session. |
@@ -133,7 +148,7 @@ The types the triggers and actions carry. All snake_case on the wire.
 // LlmTool — a tool as the model sees it.
 { "function": { "name": "getWeather", "description": "…", "parameters": { /* JSON Schema */ } } }
 
-// LlmResponse — what a worker-run model returns (see llm.request).
+// LlmResponse — what a worker-run model returns (see effect.execute / llm_call).
 { "model": "…", "content": "…", "tool_calls": [ ToolCall ], "finish_reason": "…" }
 ```
 
@@ -170,20 +185,22 @@ def decide(req, state):
             transcript = ensure_system(history) + [ trigger["message"] ]
             return { "transcript": transcript, "actions": [ call_llm(transcript, schemas) ] }
 
-        # The model replied: finish, or run the tools it asked for.
-        case "llm.response":
-            assistant  = trigger["message"]
-            transcript = history + [ assistant ]
-            calls      = assistant.get("tool_calls", [])
-            if not calls:
-                return { "transcript": transcript, "actions": [ done(assistant.get("content")) ] }
-            actions = [ call_tool(c["id"], c["function"]["name"], c["function"]["arguments"]) for c in calls ]
-            return { "transcript": transcript, "actions": actions }
+        # An effect landed. The model replied → finish or run its tools;
+        # a tool/sub-agent finished → record it, prompt once the step is done.
+        case "effect.settled":
+            if trigger["kind"] == "llm_call":
+                assistant  = trigger["message"]
+                transcript = history + [ assistant ]
+                calls      = assistant.get("tool_calls", [])
+                if not calls:
+                    return { "transcript": transcript, "actions": [ done(assistant.get("content")) ] }
+                actions = [ call_tool(c["id"], c["function"]["name"], c["function"]["arguments"]) for c in calls ]
+                return { "transcript": transcript, "actions": actions }
 
-        # A tool finished: record it; prompt again once the step is complete.
-        case "tool.result":
+            call_id    = trigger["tool_call_id"] if trigger["kind"] == "sub_agent" else trigger["id"]
+            name       = trigger["agent_id"]     if trigger["kind"] == "sub_agent" else trigger["name"]
             node       = { "role": "tool", "content": trigger["result"],
-                           "tool_call_id": trigger["tool_call_id"], "name": trigger["name"], "id": new_id() }
+                           "tool_call_id": call_id, "name": name, "id": new_id() }
             transcript = history + [ node ]
             step_open  = any(e["kind"] in ("tool_call", "sub_agent")
                              and e["status"] in ("pending", "retry_scheduled")
@@ -192,32 +209,32 @@ def decide(req, state):
                 return { "transcript": transcript }                          # just record
             return { "transcript": transcript, "actions": [ call_llm(transcript, schemas) ] }
 
-        # The engine wants YOU to run the tool.
-        case "tool.execute":
+        # The engine wants YOU to run the effect's work (here: a tool).
+        case "effect.execute":
             try:
                 result = tools[ trigger["name"] ].run( trigger["arguments"] )
-                return { "actions": [ return_tool_result(trigger["tool_call_id"], result) ] }
+                return { "actions": [ effect_result(trigger["id"], result) ] }
             except Exception as e:
-                return { "actions": [ return_tool_error(trigger["tool_call_id"], str(e)) ] }
+                return { "actions": [ effect_error(trigger["id"], str(e)) ] }
 
         case _:
             return {}
 
 # Actions are plain data — the "builders" just construct the tagged struct.
-def call_llm(messages, tools):        return { "type": "call.llm", "request": { "model": MODEL, "messages": messages, "tools": tools }, "handler": "server" }
-def call_tool(id, name, args):        return { "type": "call.tool", "tool_call_id": id, "name": name, "arguments": args, "handler": "worker" }
-def return_tool_result(id, result):   return { "type": "return.tool.result", "tool_call_id": id, "result": result, "attempt": 0 }
-def return_tool_error(id, error):     return { "type": "return.tool.error", "tool_call_id": id, "error": error, "retryable": False, "attempt": 0 }
-def done(data):                       return { "type": "done", "data": data }
+def call_llm(messages, tools):     return { "type": "call.llm", "request": { "model": MODEL, "messages": messages, "tools": tools }, "handler": "server" }
+def call_tool(id, name, args):     return { "type": "call.tool", "id": id, "name": name, "arguments": args, "handler": "worker" }
+def effect_result(id, result):     return { "type": "effect.result", "kind": "tool_call", "id": id, "result": result, "attempt": 0 }
+def effect_error(id, error):       return { "type": "effect.error", "kind": "tool_call", "id": id, "error": error, "retryable": False, "attempt": 0 }
+def done(data):                    return { "type": "done", "data": data }
 
 # ensure_system(history): if history doesn't start with a system message, prepend
 # one carrying your instructions (with a fresh id). Otherwise return it unchanged.
 ```
 
-That's the entire loop: four cases. `user.message` prompts, `llm.response`
-dispatches tools or finishes, `tool.execute` runs a tool, `tool.result` prompts
-again once nothing is pending. Everything below is an optional extension on the
-same four-case skeleton.
+That's the entire loop: three cases. `user.message` prompts, `effect.settled`
+folds outcomes in — dispatching tools when the model replies, prompting again
+once nothing is pending — and `effect.execute` runs delegated work. Everything
+below is an optional extension on the same skeleton.
 
 ## Extensions
 
@@ -227,20 +244,20 @@ whose `parameters` is `{ message: string }`). When the model calls one, instead 
 child's `agent_id`, and the originating `tool_call_id`) and `send.message` (that
 same `session_id`, a user message with the unwrapped `message` argument). The
 child's turn runs in its own session; when it finishes, the engine sends the
-parent a `tool.result` — the same trigger a tool produces — so the loop above
-handles the result with no extra case.
+parent an `effect.settled` with `kind: "sub_agent"` — the same trigger a tool
+produces — so the loop above handles the result with no extra case.
 
 **Worker-run models.** If you call the LLM provider yourself rather than letting
 the engine do it, set `handler: "worker"` on your `call.llm`. The engine then
-sends you an `llm.request` trigger; run the call and reply with `return.llm.result`
-(or `return.llm.error`). This is also where token streaming lives: the request's
-transport may hold the connection open so you can push token deltas as they
-arrive, then return the final `LlmResponse`. Server-handled models (`handler:
-"server"`) stream on the engine side and never produce an `llm.request`.
+sends you an `effect.execute` with `kind: "llm_call"`; run the call and reply with
+`effect.result` (or `effect.error`). This is also where token streaming lives:
+the request's transport may hold the connection open so you can push token deltas
+as they arrive, then return the final `LlmResponse`. Server-handled models
+(`handler: "server"`) stream on the engine side and never delegate the call.
 
 **Stop conditions.** To cap the loop (e.g. stop after N assistant steps), check
-your condition in the `tool.result` case before prompting again and emit `done`
-instead of `call.llm`.
+your condition in the tool branch of `effect.settled` before prompting again and
+emit `done` instead of `call.llm`.
 
 **Client actions & modes.** Handle `client.action` to react to non-message signals
 — a mode switch, an approval, a cancel — without them appearing in the transcript.

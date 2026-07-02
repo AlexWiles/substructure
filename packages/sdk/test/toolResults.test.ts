@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { toolLoop } from "../src/agent";
 import type { Message } from "../src/types";
-import { actionsOfType, appendedMessages, callLlm, linearTree, runAgent, toolResult } from "./harness";
+import { actionsOfType, appendedMessages, callLlm, linearTree, runAgent, subAgentResult, toolResult } from "./harness";
 
 const loop = toolLoop({ llm: { model: "test-model" }, instructions: "SYS" });
 
@@ -15,9 +15,9 @@ const assistant: Message = {
     ],
 };
 
-describe("tool.result", () => {
+describe("effect.settled", () => {
     it("records the result and continues when nothing is left pending", async () => {
-        // call_a already landed; call_b just completed and no effect is pending.
+        // call_a already landed; call_b (a sub-agent) just completed and no effect is pending.
         const messageTree = linearTree({ role: "user", content: "go" }, assistant, {
             role: "tool",
             content: "RA",
@@ -25,7 +25,7 @@ describe("tool.result", () => {
             name: "getWeather",
         });
         const result = await runAgent(loop, {
-            trigger: toolResult("call_b", "researcher", "RB"),
+            trigger: subAgentResult("s-1", "call_b", "researcher", "RB"),
             messageTree,
         });
 

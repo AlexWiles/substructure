@@ -17,7 +17,7 @@ type State = { todos: Todo[] };
 const formatTodo = (todo: Todo): string => `[${todo.done ? "x" : " "}] ${todo.title} (${todo.id})`;
 
 // Built fresh each decision so `execute` closes over the live list; `toolLoop`
-// runs them on `tool.execute`, and the mutations land in `state.todos`.
+// runs them on `effect.execute`, and the mutations land in `state.todos`.
 function todoTools(state: State) {
     return [
         tool({

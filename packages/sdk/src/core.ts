@@ -15,7 +15,8 @@ import { nodeId } from "./types";
 // ── Agent, decision, return ──────────────────────────────────────────────────
 
 /** Push one streamed token delta to whoever is listening (SSE client, embedded
- *  runtime). Present on a streaming `llm.request`; a worker-run model calls it. */
+ *  runtime). Present on a streaming llm `effect.execute`; a worker-run model
+ *  calls it. */
 export type EmitDelta = (delta: LlmTokenDeltaInput) => Promise<void>;
 
 /** What the engine sends the agent: the wire envelope with `worker_state` decoded
@@ -24,7 +25,7 @@ export type EmitDelta = (delta: LlmTokenDeltaInput) => Promise<void>;
  *  effects by kind — the step gate is "no tool/sub-agent effect left". */
 export type DecisionRequest<S = unknown> = WorkerDecisionRequestWire & {
     state: S;
-    /** Stream token deltas — present on an `llm.request` trigger with streaming. */
+    /** Stream token deltas — present on a streaming llm `effect.execute` trigger. */
     emitDelta?: EmitDelta;
 };
 
@@ -51,7 +52,7 @@ export interface NamedAgent<S = unknown> extends Agent<S> {
 // ── Tools ────────────────────────────────────────────────────────────────────
 
 /**
- * Sentinel from `ctx.defer()`: the worker emits no result for this `tool.execute`,
+ * Sentinel from `ctx.defer()`: the worker emits no result for this `effect.execute`,
  * and the engine leaves the call pending until `submitToolCallResult` is called.
  */
 export const DEFERRED: unique symbol = Symbol.for("substructure.tool.deferred");
