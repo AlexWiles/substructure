@@ -1,9 +1,6 @@
 // State on the wire: the todo list rides the decision envelope as `worker_state`,
-// round-tripped every turn. There is no built-in tool state, so the tools are
-// built per decision, closing over the live list. `toolLoop` turns them into the
-// model's tool schemas and runs them; passing `state` into the loop is what it
-// persists back out — `loop({ ...req, state })` — so the tools' edits ride the
-// wire with no manual plumbing.
+// round-tripped every turn. Tools are built per decision closing over the live
+// list; passing `state` into the loop is what persists their edits back out.
 
 import { agent, tool, toolLoop } from "@substructure.ai/sdk";
 import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
@@ -16,8 +13,7 @@ type State = { todos: Todo[] };
 
 const formatTodo = (todo: Todo): string => `[${todo.done ? "x" : " "}] ${todo.title} (${todo.id})`;
 
-// Built fresh each decision so `execute` closes over the live list; `toolLoop`
-// runs them on `effect.execute`, and the mutations land in `state.todos`.
+// Built fresh each decision so `execute` closes over the live list.
 function todoTools(state: State) {
     return [
         tool({

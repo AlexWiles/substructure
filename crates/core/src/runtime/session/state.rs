@@ -101,8 +101,7 @@ impl EffectTracking {
 pub struct LlmCallState {
     pub call_id: String,
     pub tracking: EffectTracking,
-    /// The verbatim prompt the worker sent, stored for retries. Disposable
-    /// w.r.t. the tree — it is never reconstructed from the conversation.
+    /// The verbatim prompt the worker sent, stored for retries.
     #[serde(default)]
     pub prompt: Vec<Message>,
     pub spec: LlmCallSpec,
@@ -190,17 +189,8 @@ pub struct WorkerDecisionState {
     pub source_event_sequence: u64,
 }
 
-// The in-flight effects surfaced on every worker decision as a flat, tagged list.
-// Each `Effect` is a stable envelope (`id`, `status`, `attempt`, `deadline`) plus a
-// kind-tagged detail; `kind` is an open discriminator, so a new effect kind adds a
-// variant without reshaping anything, and unknown kinds a worker doesn't handle are
-// simply ignored. Derived on read by filtering the session's effect maps to what's
-// still outstanding (Pending or RetryScheduled) — no stored ledger, no extra
-// aggregate state. The worker derives the step gate from it: prompt once no
-// tool/sub-agent effect remains. `turn_id`/`seq` are intentionally absent — they'd
-// require per-effect provenance (new state) and are only needed once effects span
-// turns; adding them later is additive.
-
+// In-flight effects surfaced on each worker decision — derived on read by filtering
+// the effect maps to what's still outstanding (Pending or RetryScheduled).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Effect {
     pub id: String,
@@ -212,7 +202,7 @@ pub struct Effect {
     pub detail: EffectDetail,
 }
 
-/// Kind-specific fields, tagged by `kind` on the wire. A new kind is a new variant.
+/// Kind-specific fields, tagged by `kind` on the wire.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EffectDetail {
@@ -713,9 +703,7 @@ impl SessionState {
         }
     }
 
-    /// The effects still in flight (Pending or RetryScheduled) as a flat, tagged
-    /// list — derived by filtering the effect maps, so nothing extra is stored. New
-    /// kinds are new `EffectDetail` variants; more statuses are new `status` values.
+    /// The effects still in flight (Pending or RetryScheduled), derived by filtering the effect maps.
     pub fn effects(&self) -> Vec<Effect> {
         let in_flight =
             |s: &EffectStatus| matches!(s, EffectStatus::Pending | EffectStatus::RetryScheduled);

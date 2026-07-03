@@ -1,7 +1,5 @@
-// OpenAI adapter (`@substructure.ai/sdk/adapters/openai`). `openaiGenerate` is an
-// `Llm` backed by the Responses API; `openaiAgent` builds a `toolLoop`
-// from an `@openai/agents` Agent (or settings). Substructure owns the loop; each
-// `llm.request` runs one `responses.create` step.
+// OpenAI adapter: `openaiGenerate` is an `Llm` backed by the Responses API;
+// `openaiAgent` builds a `toolLoop` from an `@openai/agents` Agent.
 
 import type { ModelSettings, ModelSettingsToolChoice, Tool } from "@openai/agents";
 import { Agent, RunContext } from "@openai/agents";
@@ -111,10 +109,8 @@ interface ResolvedSettings {
     context?: unknown;
 }
 
-/** The loop for running an `@openai/agents` Agent (or `OpenAIAgentSettings`) on
- *  Substructure: `openaiGenerate` as the model, the Agent's function tools
- *  executed by the worker. Name and deploy it with
- *  `worker([agent({ name, decide: openaiAgent(...) })])`. */
+/** Build a `toolLoop` from an `@openai/agents` Agent (or `OpenAIAgentSettings`),
+ *  using `openaiGenerate` as the model and the Agent's tools run by the worker. */
 export function openaiAgent(
     input: OpenAIAgentSettings | Agent,
     options?: { client?: OpenAI; context?: unknown },

@@ -24,24 +24,15 @@ pub struct WorkerDecisionRequest {
     pub trigger: DecisionTrigger,
     pub worker_state: WorkerState,
     /// The in-flight effects as a flat, tagged list (each carries `kind`/`status`).
-    /// The worker derives what it needs — e.g. prompt once no tool/sub-agent effect
-    /// remains — rather than tracking steps itself. Open `kind` leaves room for new
-    /// effect kinds without a wire change.
     #[serde(default)]
     pub effects: Vec<Effect>,
-    /// How many `tool_call`/`sub_agent` effects are still in flight — the step
-    /// gate as a number, so a worker can prompt when it hits zero (and report
-    /// progress) without re-deriving it from `effects`. Counts the same subset
-    /// of `effects`; `llm_call` effects don't count, they don't block the prompt.
+    /// How many `tool_call`/`sub_agent` effects are still in flight — the step gate as a number.
     #[serde(default)]
     pub pending_effects: usize,
-    /// The active conversation as a flat list (the tree's `head_id`-to-root
-    /// path). A worker only needs this; the tree is provided for clients that
-    /// want branch structure.
+    /// The active conversation as a flat list (the tree's `head_id`-to-root path).
     #[serde(default)]
     pub transcript: Vec<Message>,
-    /// The conversation tree as of this decision, for clients that need the
-    /// full branch structure (e.g. the AG-UI snapshot).
+    /// The conversation tree, for clients that need the full branch structure.
     #[serde(default)]
     pub message_tree: MessageTree,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

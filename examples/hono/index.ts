@@ -1,9 +1,5 @@
-// Mount the worker fetch handler inside a Hono app on Node.
-//
-// `worker([...]).fetch()` is just (Request) => Promise<Response>, so it
-// drops into any Web-fetch-compatible framework. Use this shape when you
-// already have a Node HTTP service and want the agent alongside your
-// existing routes rather than as a separate process.
+// Mount the worker fetch handler in a Hono app: `worker([...]).fetch()` is just
+// (Request) => Promise<Response>, so it drops into any Web-fetch framework.
 //
 // Point a Substructure server at this URL:
 //   substructure start --dev --port 9000 --worker-url http://localhost:3000/agent

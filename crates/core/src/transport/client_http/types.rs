@@ -18,9 +18,7 @@ pub struct SubmitClientPayloadResponse {
     pub turn_id: String,
 }
 
-/// The client settle body — an `effect.result` or `effect.error` action. Clients
-/// answer client tools, never model calls, so `kind` is a unit enum that only
-/// deserializes `tool_call`; any other effect kind is rejected at the serde layer.
+/// Clients answer client tools only, so `kind` only deserializes `tool_call`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolCallKind {

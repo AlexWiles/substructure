@@ -1,13 +1,6 @@
 // Plan mode: build a plan over several turns, then flip a switch to execute it.
 // Entering execution branches a fresh thread so the executor sees only the plan.
-//
-// A modal agent is just a decision function that reads its mode from state and
-// picks the model, prompt, and tools for that mode. The tool loop itself is the
-// SDK default — `toolLoop` builds the tool schemas and dispatches calls — so all
-// this handler writes is (a) the per-mode tools and (b) the mode switch. The
-// tools are built per decision, closing over the live `state`, so their
-// `execute` can mutate `state.plan` directly. State (mode + plan) rides the wire
-// as `worker_state`.
+// The agent reads its mode from state and picks the model, prompt, and tools per mode.
 
 import { agent, type Llm, tool, toolLoop } from "@substructure.ai/sdk";
 import type { DecisionTrigger } from "@substructure.ai/sdk";
@@ -23,8 +16,7 @@ type State = { mode: Mode; plan: Plan };
 const initialPlan = (): Plan => ({ goal: "", steps: [], nextId: 1 });
 
 // ── Tools, per mode ───────────────────────────────────────────────────────────
-// Built fresh each decision so `execute` closes over the live plan. `toolLoop`
-// turns these into the model's tool schemas and runs `execute` on `effect.execute`.
+// Built fresh each decision so `execute` closes over the live plan.
 
 function planTools(state: State) {
     const plan = state.plan;
@@ -139,9 +131,7 @@ const planner = agent<State>({
             plan: req.state?.plan ?? initialPlan(),
         };
 
-        // A `set_mode` action switches modes; entering execution forks a fresh
-        // thread seeded with only the plan — an empty transcript plus a synthetic
-        // user message, which the executing loop roots with its own system prompt.
+        // A `set_mode` action switches modes; entering execution forks a fresh thread seeded with only the plan.
         let trigger: DecisionTrigger = req.trigger;
         let transcript = req.transcript;
         if (req.trigger.type === "client.action" && req.trigger.name === "set_mode") {
@@ -155,9 +145,7 @@ const planner = agent<State>({
             }
         }
 
-        // Everything else is the SDK's default loop, parameterized by the current
-        // mode. Passing `state` in is what the loop persists back out, so the tools'
-        // edits to `state.plan` (and any mode change) ride the wire.
+        // Everything else is the SDK's default loop, parameterized by the current mode.
         const loop = toolLoop<State>({
             llm: profiles[state.mode].llm,
             instructions: profiles[state.mode].instructions,
@@ -173,9 +161,7 @@ const planner = agent<State>({
 //   pnpm tsx index.ts <session-id> "<message>"
 //   pnpm tsx index.ts <session-id> /mode planning
 //   pnpm tsx index.ts <session-id> /mode executing
-//
-// Generate a fresh id with `uuidgen` (macOS/linux) or any UUID generator
-// and reuse it across calls. Sessions are persisted in agent.db.
+// Reuse one session id across calls; sessions persist in agent.db.
 
 const [, , sessionId, ...rest] = process.argv;
 const input = rest.join(" ");

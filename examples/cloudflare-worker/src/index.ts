@@ -1,9 +1,5 @@
-// Cloudflare Worker that serves the agent over HTTP, with per-session
-// agent state stored in a Durable Object. Point a Substructure backend
-// at this Worker's URL.
-//
-// State is worker-managed: there is no SDK-held tool state. Each tool reaches
-// its own store (the Durable Object, keyed by `request.session_id`) directly.
+// Cloudflare Worker serving the agent over HTTP, with per-session state in a Durable Object.
+// State is worker-managed: each tool reaches its own store (keyed by `request.session_id`) directly.
 
 import { agent, tool, toolLoop, worker } from "@substructure.ai/sdk";
 import { DurableObject } from "cloudflare:workers";

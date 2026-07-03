@@ -229,8 +229,7 @@ pub enum LlmHandler {
     /// Server-side executor resolves the provider and makes the call.
     #[default]
     Server,
-    /// Dispatched to the worker via an llm `effect.execute` decision trigger;
-    /// the worker performs the call and replies with `effect.result`/`effect.error`.
+    /// The worker performs the call and replies with `effect.result`/`effect.error`.
     Worker,
 }
 

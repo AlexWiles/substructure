@@ -22,7 +22,6 @@ pub enum ClientPayload {
         #[serde(default)]
         stream: bool,
     },
-    /// A full transcript (e.g. an AG-UI client view); the worker reconciles it into the tree.
     Messages {
         messages: Vec<Message>,
         #[serde(default)]
@@ -34,8 +33,6 @@ pub enum ClientPayload {
     },
 }
 
-/// The work an `effect.execute` trigger delegates to the worker, tagged by
-/// `kind` — the same discriminator the `effects` list uses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EffectWork {
@@ -43,11 +40,6 @@ pub enum EffectWork {
     LlmCall { request: LlmRequest, stream: bool },
 }
 
-/// How a settled effect landed, tagged by `kind`. For `tool_call` and
-/// `sub_agent` the error text rides in `result` when the trigger's `ok` is
-/// false — it folds into the transcript as the tool message either way. An
-/// `llm_call` carries `message`/`truncated`/`usage`/`cost` on success and
-/// `error`/`code`/`detail` on failure.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EffectOutcome {
@@ -55,8 +47,6 @@ pub enum EffectOutcome {
         name: String,
         result: String,
     },
-    /// `id` on the trigger is the sub-agent's session id (matching the
-    /// `effects` list); `tool_call_id` is the model tool call it answers.
     SubAgent {
         tool_call_id: String,
         agent_id: String,
@@ -119,11 +109,8 @@ impl EffectOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DecisionTrigger {
-    /// A user message arrived; the worker appends it (rooting the branch with its
-    /// system prompt on a fresh branch) and prompts.
     #[serde(rename = "user.message")]
     UserMessage { message: Message },
-    /// A full client transcript arrived; the worker reconciles it into the tree.
     #[serde(rename = "user.transcript")]
     UserTranscript { messages: Vec<Message> },
     #[serde(rename = "client.action")]
@@ -132,8 +119,6 @@ pub enum DecisionTrigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         args: Option<serde_json::Value>,
     },
-    /// The engine delegates effect work to the worker: run the `kind`-specific
-    /// work for effect `id` and answer with `effect.result` or `effect.error`.
     #[serde(rename = "effect.execute")]
     EffectExecute {
         id: String,
@@ -143,10 +128,6 @@ pub enum DecisionTrigger {
         #[serde(flatten)]
         work: EffectWork,
     },
-    /// An effect settled; fired as each one lands so the worker folds its
-    /// outcome in and the tree fills incrementally. The worker prompts once no
-    /// tool/sub-agent effect is in flight — a view derived from `effects` on
-    /// the decision request.
     #[serde(rename = "effect.settled")]
     EffectSettled {
         id: String,
@@ -164,7 +145,6 @@ pub enum DecisionTrigger {
     Stall,
 }
 
-/// The effect kinds a worker can answer `effect.execute` for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkKind {
@@ -172,7 +152,6 @@ pub enum WorkKind {
     LlmCall,
 }
 
-/// A successful effect result, tagged by `kind`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EffectResultPayload {
@@ -180,13 +159,9 @@ pub enum EffectResultPayload {
     LlmCall { response: LlmResponse },
 }
 
-/// Actions a worker can request as part of a decision.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WorkerAction {
-    /// `id` names the effect; its outcome returns as an `effect.settled`
-    /// trigger with the same id. Reusing a `Pending`/`Completed` id is an
-    /// idempotent no-op, so each logical call must supply a fresh one.
     #[serde(rename = "call.llm")]
     CallLlm {
         id: String,
@@ -197,8 +172,6 @@ pub enum WorkerAction {
         retry: RetryPolicy,
         handler: LlmHandler,
     },
-    /// `id` names the effect (the model's tool call id); its outcome comes
-    /// back as an `effect.settled` trigger with the same id.
     #[serde(rename = "call.tool")]
     CallTool {
         id: String,
@@ -208,7 +181,6 @@ pub enum WorkerAction {
         #[serde(default = "RetryPolicy::no_retry")]
         retry: RetryPolicy,
     },
-    /// Successful answer to an `effect.execute` trigger.
     #[serde(rename = "effect.result")]
     EffectResult {
         id: String,
@@ -216,7 +188,6 @@ pub enum WorkerAction {
         #[serde(flatten)]
         result: EffectResultPayload,
     },
-    /// Failed answer to an `effect.execute` trigger; uniform across kinds.
     #[serde(rename = "effect.error")]
     EffectError {
         kind: WorkKind,

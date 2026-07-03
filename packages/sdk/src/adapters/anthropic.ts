@@ -1,5 +1,4 @@
-// Anthropic Messages API generator for `llm`. Each `llm.request` runs one
-// `messages.stream` call.
+// Anthropic Messages API generator for `llm`.
 
 import Anthropic from "@anthropic-ai/sdk";
 

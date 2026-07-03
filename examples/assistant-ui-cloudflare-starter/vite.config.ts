@@ -5,14 +5,11 @@ import viteReact from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 import tsconfigPaths from "vite-tsconfig-paths";
 
-// `pnpm build:cf` / `pnpm deploy` set this to bundle for the Workers runtime.
-// Plain `vite dev` / `vite build` run the Node target for local development.
+// `pnpm build:cf` / `pnpm deploy` bundle for the Workers runtime; plain `vite` runs the Node target.
 const isCloudflareBuild = process.env.DEPLOY_TARGET === "cloudflare";
 
 export default defineConfig({
-    // strictPort so a busy port fails loudly instead of silently moving — then
-    // the browser would hit whatever else owns the port (and 404). 3030 dodges
-    // the common 3000/3001 dev collisions.
+    // strictPort so a busy port fails loudly instead of silently moving; 3030 dodges common 3000/3001 collisions.
     server: { port: 3030, strictPort: true },
     plugins: [
         ...(isCloudflareBuild ? [cloudflare({ viteEnvironment: { name: "ssr" } })] : []),

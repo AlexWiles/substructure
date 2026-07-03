@@ -43,10 +43,8 @@ function subAgentSchema(agentId: string): LlmTool {
     };
 }
 
-/** The default tool/sub-agent loop, as a decision function. Plug it into an
- *  agent's `decide`, or call it from a custom `decide` to delegate. It echoes the
- *  decision's `state`, so a wrapping agent threads its own state through with
- *  `toolLoop(cfg)({ ...req, state })`. */
+/** The default tool/sub-agent loop, as a decision function. It echoes the decision's
+ *  `state`, so a wrapping agent can thread its own via `toolLoop(cfg)({ ...req, state })`. */
 export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
     const toolList = config.tools ?? [];
     const toolMap = toolList.reduce<Record<string, ToolDef>>((map, t) => {
@@ -58,8 +56,7 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
 
     const toolSchemas: LlmTool[] = [...toolList.map(toolSchema), ...[...subIds].map(subAgentSchema)];
 
-    // A `call.llm` for the current messages. Request params (model, temperature, …)
-    // are fixed for the loop; split routing (handler/stream/run) off them once.
+    // Split loop-fixed request params from routing (handler/stream/run).
     const { handler, run: _run, stream, ...llmParams } = config.llm;
 
     const ask = (messages: Message[]): WorkerAction => {
@@ -147,9 +144,7 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
                             };
                         try {
                             const out = await def.execute(d.trigger.arguments, d);
-                            // A deferred tool's execute only starts the work: emit no
-                            // result action, the call stays pending, and the result
-                            // arrives out-of-band via settleEffect.
+                            // A deferred tool's execute only starts the work; the result arrives via settleEffect.
                             if (def.deferred) return { state: d.state };
                             return {
                                 actions: [

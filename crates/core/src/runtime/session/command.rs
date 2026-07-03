@@ -110,7 +110,6 @@ pub enum CommandPayload {
     },
     SubmitWorkerDecision {
         decision_id: String,
-        /// The worker's flat transcript; the engine reconciles it into the tree.
         transcript: Vec<Message>,
         actions: Vec<WorkerAction>,
         state: WorkerState,
@@ -232,11 +231,6 @@ impl SessionState {
         Ok(())
     }
 
-    /// Who may settle an llm call out-of-band. The tenant is already checked in
-    /// `handle_active`. System (executor, internal dispatch) always passes. A
-    /// Machine caller may settle only worker-handled calls — an engine-handled
-    /// call is the executor's to settle, so an external completion would race
-    /// it. Frontends never settle model calls.
     fn check_llm_call_caller(
         &self,
         call: Option<&super::state::LlmCallState>,
@@ -291,9 +285,6 @@ impl SessionState {
         }
     }
 
-    /// Reconcile a worker's returned transcript into the tree: known ids are the
-    /// path it continues, unknown/id-less messages append (chaining under the
-    /// previous), forking automatically when the parent already has a child.
     fn reconcile_transcript(&self, transcript: Vec<Message>) -> Vec<EventPayload> {
         if transcript.is_empty() {
             return vec![];
@@ -318,8 +309,6 @@ impl SessionState {
         events
     }
 
-    /// A completed effect fires an `effect.settled` decision as it lands. The
-    /// worker decides when to prompt from `effects` on the request.
     fn emit_tool_result(
         &self,
         tool_call_id: String,
@@ -373,9 +362,6 @@ impl SessionState {
 
     fn emit_decision_request(&self, trigger: DecisionTrigger) -> EventPayload {
         let decision_id = new_call_id();
-        // Queue while another decision is in flight, or while interrupted —
-        // an interrupted session records what happened (e.g. a late tool
-        // result) but defers acting on it until resume promotes the queue.
         if self.has_pending_worker_decision()
             || matches!(self.status, SessionStatus::Interrupted { .. })
         {
@@ -448,10 +434,7 @@ impl SessionState {
                                 .iter()
                                 .filter_map(|m| self.pending_client_result(m))
                                 .collect();
-                            // Pair each completion with its decision. The live
-                            // decision's snapshot is then taken before later
-                            // siblings complete, so they still count as in-flight
-                            // `pending` and it won't prompt before they land.
+                            // First completion prompts; the rest queue behind it.
                             let mut live = self.has_pending_worker_decision()
                                 || matches!(self.status, SessionStatus::Interrupted { .. });
                             for (tool_call_id, name, content) in completions {
@@ -516,7 +499,6 @@ impl SessionState {
                 parent_id: _,
             } => {
                 Self::ensure_internal(caller)?;
-                // Idempotency guard: reject if this turn_id was already seen
                 if let Some(ref tid) = turn_id {
                     if self.completed_turn_ids.contains(tid) {
                         return Err(SessionError::TurnAlreadyCompleted {
@@ -558,9 +540,7 @@ impl SessionState {
             } => {
                 Self::ensure_internal(caller)?;
 
-                // The id is the idempotency key: a Pending/Completed id no-ops
-                // (redelivery-safe), while Failed/RetryScheduled re-issues.
-                // Multiple calls may be in flight — there is no single-pending gate.
+                // Idempotent by id: (re-)issue only for a new/Failed/RetryScheduled call.
                 let issue = matches!(
                     self.llm_calls.get(&call_id).map(|c| &c.tracking.status),
                     None | Some(&EffectStatus::Failed) | Some(&EffectStatus::RetryScheduled)
@@ -571,8 +551,6 @@ impl SessionState {
                         messages: request.messages.into_iter().map(assign_id).collect(),
                         ..request
                     };
-                    // The prompt is the worker's disposable message list, stored verbatim
-                    // for retries; it is never reconstructed from the tree.
                     let mut events = vec![EventPayload::LlmCallRequested(LlmCallRequested {
                         call_id: call_id.clone(),
                         attempt: 0,
@@ -639,9 +617,7 @@ impl SessionState {
                             }
                             Some(Content::Parts(parts))
                         };
-                        // The worker folds this assistant into its transcript; the
-                        // engine reconciles it (id-less → a fresh node), so no parent
-                        // pointer is needed here.
+                        // id-less so the engine mints a fresh node on reconcile.
                         let message = Message {
                             id: String::new(),
                             role: Role::Assistant,
@@ -663,10 +639,7 @@ impl SessionState {
                             }),
                         ])
                     }
-                    // Late/duplicate/stale settlements: silent for the executor
-                    // (System) to keep completions idempotent; explicit errors for
-                    // an out-of-band Machine caller with no other way to learn its
-                    // settlement was dropped.
+                    // Late/stale settle: silent for the executor (idempotent), an error for an out-of-band caller.
                     _ if is_system => Ok(vec![]),
                     None => Err(SessionError::EffectNotFound),
                     Some(c) if c.tracking.status != EffectStatus::Pending => {
@@ -911,7 +884,6 @@ impl SessionState {
                 ..
             } => {
                 Self::ensure_internal(caller)?;
-                // Only fire if we know about this sub-agent.
                 let Some(sa) = self.sub_agent_calls.get(&session_id) else {
                     return Ok(vec![]);
                 };
@@ -961,11 +933,8 @@ impl SessionState {
                         if Self::caller_interrupt_origin(caller).privilege() < origin.privilege() {
                             return Err(SessionError::SessionAccessDenied);
                         }
-                        // Emitted directly rather than via emit_decision_request:
-                        // pre-event state is still Interrupted (which would queue
-                        // it), and nothing can be pending — interrupt voided any
-                        // in-flight decision. Decisions queued during the pause
-                        // promote after this one completes.
+                        // Emitted directly, not via emit_decision_request: state is still
+                        // Interrupted (which would queue) but nothing is pending.
                         Ok(vec![
                             EventPayload::InterruptResumed(InterruptResumed {
                                 interrupt_id: interrupt_id.clone(),
@@ -1002,8 +971,6 @@ impl SessionState {
                 let mut events: Vec<EventPayload> = vec![EventPayload::WorkerDecisionCompleted(
                     WorkerDecisionCompleted { decision_id, state },
                 )];
-                // The engine's only tree write: reconcile the worker's returned
-                // transcript before acting on its requests.
                 events.extend(self.reconcile_transcript(transcript));
                 let system = Caller::System {
                     tenant_id: self
@@ -1149,10 +1116,7 @@ impl SessionState {
                     }
                 }
 
-                // Promote the next queued decision inline so it dispatches
-                // in the same commit rather than waiting for a wake cycle —
-                // unless an action in this batch interrupted the session, in
-                // which case the queue waits for resume.
+                // Promote the next queued decision inline, unless this batch interrupted the session.
                 let interrupted_in_batch = events
                     .iter()
                     .any(|e| matches!(e, EventPayload::SessionInterrupted(_)));
@@ -1455,13 +1419,7 @@ mod tests {
     use crate::runtime::session::state::{EffectStatus, SessionState, SessionStatus};
     use crate::runtime::span::SpanContext;
 
-    /// Run a command through the handler and commit the resulting events.
-    /// Mirrors what `execute()` does in production (minus the store
-    /// round-trip), so test setup exercises the real command + commit
-    /// paths including stream version, sequence numbers, and derived
-    /// state tracking. Returns the emitted event payloads so tests can
-    /// pluck out generated ids (decision_id, etc.) without peeking into
-    /// state.
+    /// Run a command through the handler and commit the resulting events, like production `execute`.
     fn dispatch(
         agg: &mut Aggregate<SessionState>,
         cmd: CommandPayload,
@@ -1476,9 +1434,7 @@ mod tests {
         events
     }
 
-    /// Build an empty `Aggregate<SessionState>` for the given session and
-    /// run `CreateSession` against it. Returns the aggregate ready for
-    /// further `dispatch(...)` calls.
+    /// Build an empty aggregate and run `CreateSession` against it.
     fn create_session(session_id: &str, tenant_id: &str, user_id: &str) -> Aggregate<SessionState> {
         let mut agg = Aggregate::new(
             session_id.to_string(),
@@ -1702,11 +1658,7 @@ mod tests {
 
     #[test]
     fn machine_completes_worker_handled_tool_call_after_worker_releases_decision() {
-        // Realistic async-tool flow: worker sees the effect.execute decision,
-        // acknowledges it with no actions ("I've handed off"), then the
-        // machine that's actually running the work completes the tool
-        // call out-of-band. Result emerges cleanly with a fresh follow-up
-        // worker decision.
+        // Async-tool flow: worker acks the effect.execute with no actions, then the tool settles out-of-band.
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
         let request_events = dispatch(
             &mut agg,
@@ -2276,9 +2228,7 @@ mod tests {
         }
     }
 
-    /// Drive a worker `Append` action onto the tree (the worker is the sole
-    /// tree author). A user message opens a decision the worker answers with
-    /// the nodes.
+    /// Drive a worker `Append` action onto the tree via a user-message decision.
     fn append_via_worker(agg: &mut Aggregate<SessionState>, nodes: Vec<NewMessage>) {
         let setup = dispatch(
             agg,
@@ -2330,8 +2280,7 @@ mod tests {
             },
         );
 
-        // The worker is the sole tree author; the call records the verbatim
-        // prompt the worker sent but mints no tree nodes itself.
+        // The call records the worker's prompt but mints no tree nodes.
         assert!(
             !events
                 .iter()
@@ -2472,9 +2421,7 @@ mod tests {
         request_client_tool(&mut agg, "b");
 
         let events = submit_messages(&mut agg, vec![tool_msg("a", "RA"), tool_msg("b", "RB")]);
-        // Each completion is immediately followed by its decision, so the live
-        // decision's snapshot is taken while the next sibling is still in flight
-        // (counted in `pending`) — the worker won't prompt before it lands.
+        // Each completion is followed by its decision, so later siblings stay counted as pending.
         let sequence: Vec<&str> = events
             .iter()
             .filter_map(|e| match e {
@@ -2644,8 +2591,7 @@ mod tests {
             },
         );
 
-        // Retry policy exhausted (no_retry + retryable=false) so the handler
-        // fires a follow-up worker decision with the error.
+        // Retry exhausted, so the handler fires a follow-up worker decision with the error.
         assert!(
             matches!(
                 events.as_slice(),
@@ -2669,8 +2615,7 @@ mod tests {
             backoff_base_secs: 1,
             backoff_max_secs: 1,
         };
-        // The call stores its prompt verbatim; the retry re-issues that stored
-        // prompt rather than rebuilding it from the tree.
+        // The retry re-issues the stored prompt.
         append_via_worker(
             &mut agg,
             vec![
@@ -2936,8 +2881,7 @@ mod tests {
             key_id: "prod-key-1".to_string(),
         };
 
-        // Worker releases its decision so the failure cleanly emits a fresh
-        // follow-up rather than queueing behind a phantom pending decision.
+        // Worker releases its decision so the failure emits a fresh follow-up.
         dispatch(
             &mut agg,
             CommandPayload::SubmitWorkerDecision {
@@ -3207,11 +3151,7 @@ mod tests {
         dispatch(agg, CommandPayload::Wake { now: Utc::now() }, &system())
     }
 
-    /// The `tool_call_id`s of every tool/sub-agent `effect.settled` trigger in
-    /// the events, in order. A queued decision that is promoted in the same
-    /// commit surfaces as both `DecisionRequestQueued` and
-    /// `WorkerDecisionRequested`; dedup by `decision_id` so each settle counts
-    /// once.
+    /// The `tool_call_id`s of every tool/sub-agent `effect.settled` trigger, in order (deduped by decision id).
     fn fired_tool_result(events: &[EventPayload]) -> Vec<String> {
         let mut seen = std::collections::HashSet::new();
         events
@@ -4048,8 +3988,7 @@ mod tests {
             "stale submission should no-op; got {stale:?}"
         );
 
-        // Resume requests a fresh decision immediately rather than queueing
-        // it behind the voided one.
+        // Resume requests a fresh decision immediately.
         let events = dispatch(
             &mut agg,
             CommandPayload::ResumeInterrupt {
@@ -4131,8 +4070,7 @@ mod tests {
             &system,
         );
 
-        // The late tool result is recorded but the decision it drains into
-        // is queued, not delivered.
+        // The late tool result is recorded but its decision is queued, not delivered.
         let events = dispatch(
             &mut agg,
             CommandPayload::CompleteToolCall {
@@ -4636,8 +4574,7 @@ mod tests {
         )
     }
 
-    /// The effect ids of every llm `effect.execute` trigger, deduped by
-    /// decision id (a promoted queue entry surfaces as both queued + requested).
+    /// The effect ids of every llm `effect.execute` trigger, deduped by decision id.
     fn fired_llm_execute(events: &[EventPayload]) -> Vec<String> {
         let mut seen = std::collections::HashSet::new();
         events
@@ -4758,8 +4695,7 @@ mod tests {
     #[test]
     fn wake_suppresses_stall_while_an_llm_call_is_pending() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
-        // A resolved tool would otherwise trigger stall recovery; a still-pending
-        // llm call must suppress it.
+        // A still-pending llm call must suppress stall recovery even though tools are resolved.
         dispatch(
             &mut agg,
             CommandPayload::RequestToolCall {

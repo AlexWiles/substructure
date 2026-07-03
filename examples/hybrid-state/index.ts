@@ -1,10 +1,6 @@
-// Hybrid state: the todo list lives in its own database, keyed by user id, not
-// in SDK-held state. There is no built-in tool state — each tool reaches the
-// store itself (here a directory of JSON files keyed by `request.identity.id`),
-// so todos persist across all of a user's sessions and never ride the wire.
-//
-// Swap loadTodos/saveTodos for a real client (Postgres, Durable Object, S3, ...)
-// without touching the agent or the tools.
+// Hybrid state: the todo list lives in its own database keyed by user id, not in
+// SDK-held state — each tool reaches the store itself (here JSON files keyed by
+// `request.identity.id`), so todos persist across sessions and never ride the wire.
 
 import { agent, tool, toolLoop } from "@substructure.ai/sdk";
 import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";

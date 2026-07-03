@@ -1,25 +1,6 @@
-// Parallel LLM calls layered over the stock `toolLoop`: a thin wrapper owns the
-// fan-out, and every trigger it doesn't recognize delegates straight to the loop.
-//
-// On the user's message the wrapper fans out one `call.llm` per lens — each named
-// by its own `id`, all in flight at once, each settling independently as its own
-// `effect.settled { kind: "llm_call" }` (serialized on the decision stream, in
-// completion order). Once every lens has landed, the wrapper hands the enriched
-// question to the wrapped `toolLoop`, which runs the normal loop to synthesize
-// the final answer.
-//
-// Two flavors:
-//   - `fanout`          — engine-handled lenses (handler: "server"). The engine
-//                         calls its provider for each; no async machinery in the
-//                         worker. Note the engine executes a session's calls one
-//                         at a time, so this decouples your loop rather than
-//                         shrinking wall-clock time.
-//   - `deferred-fanout` — worker-handled lenses (handler: "worker"). Each comes
-//                         back as an `effect.execute`; the worker starts it in
-//                         the background, returns the decision immediately, and
-//                         settles each out-of-band with `settleEffect` as it
-//                         finishes — true wall-clock overlap. Fully stubbed, so
-//                         it runs without an API key.
+// Fan out one `call.llm` per lens on the user's message, then hand the combined
+// answers to a stock `toolLoop` to synthesize. Two flavors: `fanout` (engine-run)
+// and `deferred-fanout` (worker-run, settled out-of-band via `settleEffect`).
 
 import { agent, contentText, toolLoop } from "@substructure.ai/sdk";
 import type { Agent, LlmRequest, LlmResponse, WorkerAction } from "@substructure.ai/sdk";
@@ -37,10 +18,6 @@ const LENSES = [
 ];
 const isLens = (id: string) => LENSES.some((l) => l.id === id);
 
-// `pending` is the set of lens ids still in flight. `d.effects` (frozen on each
-// decision at commit time, delivered in completion order) empties exactly on the
-// last settle, so branching on it is equally correct for a single fan-out;
-// tracking issued ids also stays correct if you spread a fan-out across turns.
 interface FanoutState {
     question: string;
     pending: string[];
@@ -49,8 +26,7 @@ interface FanoutState {
 
 let embedded: SubstructureEmbedded;
 
-// Stands in for your real provider call in the deferred flavor. In production
-// this is where you'd hit the model (and stream via `d.emitDelta`).
+// Stands in for your real provider call in the deferred flavor.
 async function runModel(request: LlmRequest): Promise<LlmResponse> {
     const last = request.messages.at(-1);
     await new Promise((r) => setTimeout(r, 150));
@@ -64,8 +40,7 @@ async function runModel(request: LlmRequest): Promise<LlmResponse> {
 
 const INSTRUCTIONS = "Combine the lens analyses into one short answer for the user.";
 
-/** Wrap a `toolLoop` with a lens fan-out pre-pass. The wrapper owns the `lens-*`
- *  effect ids; everything else falls through to the loop untouched. */
+/** Wrap a `toolLoop` with a lens fan-out pre-pass; non-lens triggers fall through. */
 function withLenses(loop: Agent<FanoutState>, handler: "server" | "worker"): Agent<FanoutState> {
     return async (d) => {
         // The user's message: fan out the lenses instead of starting the loop.
@@ -84,10 +59,8 @@ function withLenses(loop: Agent<FanoutState>, handler: "server" | "worker"): Age
             };
         }
 
-        // (deferred flavor) a lens `effect.execute`: start the call in the
-        // background and return the decision *now* with no actions — the next
-        // execute promotes immediately, so the calls overlap. Settle each
-        // out-of-band whenever it finishes.
+        // (deferred flavor) start the lens call in the background and return now with no
+        // actions so the calls overlap; settle each out-of-band whenever it finishes.
         if (d.trigger.type === "effect.execute" && d.trigger.kind === "llm_call" && isLens(d.trigger.id)) {
             const { id, attempt, request } = d.trigger;
             const sessionId = d.session_id;
@@ -106,8 +79,7 @@ function withLenses(loop: Agent<FanoutState>, handler: "server" | "worker"): Age
             return { state: d.state };
         }
 
-        // A lens settling: fold it in; once the last one lands, hand the enriched
-        // question to the wrapped loop as a fresh user message.
+        // A lens settling: fold it in; once the last lands, hand the enriched question to the loop.
         if (d.trigger.type === "effect.settled" && d.trigger.kind === "llm_call" && isLens(d.trigger.id)) {
             const settledId = d.trigger.id;
             const prev = d.state ?? { question: "", pending: [], results: {} };
@@ -144,8 +116,7 @@ const fanoutAgent = agent({
     decide: withLenses(toolLoop({ llm: { model: MODEL }, instructions: INSTRUCTIONS }), "server"),
 });
 
-// The deferred flavor keeps the loop's own synthesis call on the worker too
-// (`handler: "worker"` + `run`), so the whole demo runs offline.
+// The deferred flavor keeps the loop's synthesis call on the worker too, so the demo runs offline.
 const deferredAgent = agent({
     name: "deferred-fanout",
     decide: withLenses(

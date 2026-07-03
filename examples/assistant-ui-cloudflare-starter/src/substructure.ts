@@ -1,6 +1,4 @@
-// Server-only Substructure setup: the agent definition, the worker webhook the
-// engine calls (server-to-server), and the browser-token minter. Never imported
-// into the client bundle.
+// Server-only Substructure setup (agent, worker webhook, token minter). Never in the client bundle.
 
 import Substructure, { agent, tool, toolLoop, worker } from "@substructure.ai/sdk";
 
@@ -8,8 +6,7 @@ export const AGENT_ID = "assistant";
 
 const sub = new Substructure();
 
-// A server-side tool: the engine runs `execute` and feeds the result back to
-// the model.
+// Server-side tool: the engine runs `execute` and feeds the result back to the model.
 const getCurrentTime = tool({
     name: "get_current_time",
     description: "Get the current date and time.",
@@ -17,12 +14,8 @@ const getCurrentTime = tool({
     execute: () => new Date().toString(),
 });
 
-// A client-side (frontend) tool. `handler: "client"` routes execution to the
-// browser: the engine advertises the tool to the model, emits the call, and
-// waits for the browser to post the result — so no server-side `execute` is
-// needed. The browser executor lives in the chat client (src/routes/index.tsx).
-// The engine ignores AG-UI's client-declared `tools`, so the tool is declared
-// here for the model to see.
+// Client-handled tool: `handler: "client"` routes execution to the browser — the engine
+// emits the call and waits for the browser to post the result, so no server-side `execute`.
 const browserAlert = tool({
     name: "browser_alert",
     description: "Display a native browser alert dialog to the user. Runs in the user's browser.",
@@ -49,8 +42,7 @@ const assistant = agent({
 
 export const substructureHandler = worker([assistant]).fetch({ signingSecret: process.env.SIGNING_SECRET });
 
-// Mint a short-lived, identity-locked client token for the browser. In a real
-// app, authenticate the user first and bind `identity.id` to them.
+// Mint a short-lived, identity-locked client token for the browser. In a real app, authenticate first and bind `identity.id` to the user.
 export async function mintBrowserToken(): Promise<{ token: string; substructureUrl: string; agentId: string }> {
     const backend = sub.backend.client({
         url: process.env.SUBSTRUCTURE_URL ?? "http://localhost:9000",

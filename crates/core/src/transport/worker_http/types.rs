@@ -26,12 +26,8 @@ pub struct SubmitResponse {
     pub error: Option<String>,
 }
 
-/// The worker settle body — an `effect.result` or `effect.error` action,
-/// verbatim. It settles both `tool_call` and `llm_call` effects (worker-handled
-/// calls only), reusing the decision vocabulary so there is no parallel type
-/// family: `Result` flattens `EffectResultPayload` (kind-tagged, carrying
-/// `result` for tools and `response` for llm), `Error` mirrors
-/// `WorkerAction::EffectError`.
+/// The worker settle body — an `effect.result` or `effect.error`, settling
+/// worker-handled `tool_call` and `llm_call` effects.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 pub enum SettleEffectRequest {

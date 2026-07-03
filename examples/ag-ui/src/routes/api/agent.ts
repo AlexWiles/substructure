@@ -1,14 +1,12 @@
-// The substructure worker webhook. The ENGINE posts decision requests here
-// (server-to-server); this returns the worker's actions. Point the engine at
-// it: `substructure start --worker-url https://<app>/api/agent`.
+// The Substructure worker webhook: the engine posts decision requests here.
+// Point the engine at it: `substructure start --worker-url https://<app>/api/agent`.
 import { agent, tool, toolLoop, worker } from "@substructure.ai/sdk";
 import { createFileRoute } from "@tanstack/react-router";
 
 export const AGENT_ID = "todo-agent";
 
-// Every tool is a frontend (client-handled) tool: `handler: "client"` with no
-// `execute` — the engine suspends the turn and the browser runs it against the
-// shared to-do store. The matching executors live in each chat client.
+// Every tool is a client-handled tool: `handler: "client"`, no `execute` — the engine suspends
+// the turn and the browser runs it. Executors live in each chat client.
 const addTodo = tool({
     name: "add_todo",
     description: "Add a task to the user's on-screen to-do list. Runs in the user's browser.",

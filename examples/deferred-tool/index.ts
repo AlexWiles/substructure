@@ -1,11 +1,6 @@
-// Deferred (async) tool call: `deferred: true` makes `execute` a kick-off — it
-// runs to start the work, but the loop emits no result action, so the engine
-// leaves the tool call pending. A `setTimeout` later calls
-// `embedded.settleEffect(...)`, which the engine routes back into the session
-// as an `effect.settled` trigger — and the agent resumes.
-//
-// This is the pattern for tools that kick off real async work (webhooks,
-// long jobs, human approvals) where the result arrives out-of-band.
+// Deferred tool: `deferred: true` makes `execute` a kick-off with no result action, so the
+// engine leaves the call pending until `settleEffect` routes the out-of-band result back as
+// an `effect.settled` trigger — the pattern for webhooks, long jobs, or human approvals.
 
 import { agent, tool, toolLoop } from "@substructure.ai/sdk";
 import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";

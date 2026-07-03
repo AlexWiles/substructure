@@ -305,13 +305,9 @@ impl EmbeddedRuntime {
         })
     }
 
-    /// Settle an effect out-of-band. Mirrors the HTTP
-    /// `POST /api/machine/sessions/{id}/effects/settle` endpoint and is the
-    /// embedded counterpart to `BackendClient.settleEffect`. `kind` is
-    /// `"tool_call"` or `"llm_call"` and dictates the success payload: a
-    /// `tool_call` result is `resultJson` (a tool result string), an `llm_call`
-    /// result is `responseJson` (a JSON `LlmResponse`); either kind fails with
-    /// `errorMessage`. Supply exactly the one that matches.
+    /// Settle an effect out-of-band (the embedded counterpart to `BackendClient.settleEffect`).
+    /// `kind` is `"tool_call"` (result in `resultJson`) or `"llm_call"` (result in `responseJson`);
+    /// either fails with `errorMessage`.
     #[napi(
         js_name = "settleEffect",
         ts_args_type = "sessionId: string, tenantId: string, kind: string, id: string, attempt: number, resultJson: string | undefined, responseJson: string | undefined, errorMessage: string | undefined, retryable: boolean | undefined"

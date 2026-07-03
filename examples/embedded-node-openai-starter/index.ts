@@ -1,6 +1,5 @@
-// A minimal agent. The Substructure runtime runs in-process and persists the
-// session + event log to a SQLite file (`agent.db`); the OpenAI generator drives
-// each step and Substructure runs the tool loop. Add tools and turns from here.
+// Minimal in-process agent: OpenAI drives each step, Substructure runs the tool loop and
+// persists the session to a SQLite file (`agent.db`).
 
 import { agent, tool, toolLoop } from "@substructure.ai/sdk";
 import { openaiGenerate } from "@substructure.ai/sdk/adapters/openai";

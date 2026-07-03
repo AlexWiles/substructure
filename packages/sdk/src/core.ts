@@ -14,15 +14,10 @@ import { nodeId } from "./types";
 
 // ── Agent, decision, return ──────────────────────────────────────────────────
 
-/** Push one streamed token delta to whoever is listening (SSE client, embedded
- *  runtime). Present on a streaming llm `effect.execute`; a worker-run model
- *  calls it. */
+/** Push one streamed token delta to whoever is listening (SSE client, embedded runtime). */
 export type EmitDelta = (delta: LlmTokenDeltaInput) => Promise<void>;
 
-/** What the engine sends the agent: the wire envelope with `worker_state` decoded
- *  into `state`. Everything else (`trigger`, `transcript`, `effects`, `session_id`,
- *  `identity`, …) is the envelope, read directly. `effects` lists the in-flight
- *  effects by kind — the step gate is "no tool/sub-agent effect left". */
+/** What the engine sends the agent: the wire envelope with `worker_state` decoded into `state`. */
 export type DecisionRequest<S = unknown> = WorkerDecisionRequestWire & {
     state: S;
     /** Stream token deltas — present on a streaming llm `effect.execute` trigger. */
@@ -77,12 +72,6 @@ export interface ToolDef {
     deferred?: boolean;
 }
 
-// A tool returns its result string (call `JSON.stringify` yourself for structured
-// data). State, if any, lives in your own store — reach it through `request` (e.g.
-// keyed by `request.session_id`). `handler` discriminates: "worker" (default) runs
-// `execute`; "client" completes in the browser, so `execute` is optional and
-// never runs on the worker. `deferred: true` makes `execute` a kick-off: it runs,
-// its return value is ignored, and the call settles later via `settleEffect`.
 export function tool(
     config: {
         name: string;
@@ -115,11 +104,8 @@ export function tool(
 /** One worker-side LLM call (an `Llm`'s `run`); stream deltas via `ctx.emitDelta`. */
 export type LlmGenerate = (request: LlmRequest, ctx: { emitDelta?: EmitDelta }) => Promise<LlmResponse>;
 
-/** The LLM a loop calls: the model and per-call params (`LlmParams`) plus how the
- *  call runs. A server LLM omits `run` — the Substructure server calls its
- *  configured provider; a worker LLM sets `handler: "worker"` and supplies `run`
- *  to make the call on your worker. The two are a union, so `handler: "worker"`
- *  without a `run` is a compile error. */
+/** The LLM a loop calls. A server LLM omits `run` (the server calls its provider);
+ *  a worker LLM sets `handler: "worker"` and supplies `run` to make the call on your worker. */
 export type Llm = LlmParams & { stream?: boolean } & (
         | { handler?: "server"; run?: never }
         | { handler: "worker"; run: LlmGenerate }

@@ -1,17 +1,5 @@
-// Frontend tools example: a browser chat UI where the agent's tools run
-// in the *browser*, not the worker. The page asks navigator.geolocation
-// for the user's location and mutates document.documentElement for the
-// theme — neither possible from a backend tool.
-//
-// Architecture:
-//   browser ──(SSE)──> substructure (:9000) ──(http)──> this worker (:3333)
-//
-// The worker registers two tools with `handler: "client"` and no
-// `execute`. The engine never asks the worker to run them — it emits
-// `tool.call.requested` events, which the browser sees via the frontend
-// client's SSE stream; it executes the tool locally and posts the result
-// back with `settleEffect`. The agent resumes as if the tool had returned
-// synchronously.
+// Frontend tools example: the agent's tools run in the browser (geolocation, theme), not the worker.
+// Registered with `handler: "client"` and no `execute`; the browser runs each call and returns it via `settleEffect`.
 
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
@@ -20,10 +8,7 @@ import { Hono } from "hono";
 
 const sub = new Substructure();
 
-// `handler: "client"` tells the engine this tool is completed by the
-// browser. The worker is never asked to execute it; the SDK's
-// `settleEffect` call from the frontend client delivers the
-// result, so a client tool needs no `execute` at all.
+// `handler: "client"`: the browser completes this tool via `settleEffect`, so no `execute` is needed.
 const getUserLocation = tool({
     name: "get_user_location",
     description:
@@ -71,8 +56,7 @@ const app = new Hono();
 
 app.post("/agent", (c) => agentHandler(c.req.raw));
 
-// Mint a short-lived per-user token for the browser. In a real app you'd
-// authenticate the request first and bind `identity.id` to the logged-in user.
+// Mint a short-lived per-user token. In a real app, authenticate first and bind `identity.id` to the user.
 app.post("/token", async (c) => {
     const { token, expiresAt } = await backend.mintClientToken({
         identity: { id: "demo-user" },

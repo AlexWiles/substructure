@@ -1,16 +1,6 @@
-// Tool-call approval against real shell access: the agent has `run_command`, a
-// tool that actually executes commands on the host via `child_process.spawnSync`.
-//
-// This is a raw `handler` — the agent IS a function of the decision, so the
-// approval gate is just control flow you write. When the model calls
-// `run_command`, the handler parks the command in its state and ends the turn
-// instead of running it. The client approves or denies via a
-// `client.action approve_command`; on approval the handler re-emits the original
-// `call.tool` so the model sees a single matched pair (to it, just a slow tool
-// call). A denial surfaces to the model as the tool result, so it can adapt.
-//
-// State (the parked command and the latest decision) rides the wire as
-// `worker_state`, round-tripped every decision.
+// Tool-call approval gate over real shell access: when the model calls
+// `run_command` the handler parks it and ends the turn; the client approves or
+// denies, and on approval the call is re-emitted so the model sees one matched pair.
 //
 // WARNING: this example runs real shell commands. Approve carefully.
 
@@ -40,9 +30,7 @@ function runShell(cmd: string): string {
     });
 }
 
-// The tool reads the decision the gate recorded: run the command, or return the
-// denial as its result so the model can adapt. Built per decision, closing over
-// `state`, so `toolLoop` can run it on `effect.execute`.
+// Reads the decision the gate recorded: run the command, or return the denial so the model can adapt.
 function commandTool(state: State) {
     return tool({
         name: "run_command",
@@ -67,8 +55,7 @@ function commandTool(state: State) {
 }
 
 // ── Agent ───────────────────────────────────────────────────────────────────
-// The default loop drives the conversation; the handler overrides only the two
-// gate triggers — parking a requested command, and resuming it on approval.
+// The default loop drives the conversation; the handler overrides only the two gate triggers.
 
 const assistant = agent<State>({
     name: "assistant",
@@ -129,9 +116,7 @@ const assistant = agent<State>({
 //   pnpm tsx index.ts <session-id> "<message>"
 //   pnpm tsx index.ts <session-id> /approve
 //   pnpm tsx index.ts <session-id> /deny [reason]
-//
-// Generate a fresh id with `uuidgen` (macOS/linux) or any UUID generator
-// and reuse it across calls. Sessions are persisted in agent.db.
+// Reuse one session id across calls; sessions persist in agent.db.
 
 const [, , sessionId, ...rest] = process.argv;
 const input = rest.join(" ");

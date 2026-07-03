@@ -6,9 +6,8 @@ export const AGENT_ID = "todo-agent";
 
 const sub = new Substructure();
 
-// Every tool here is a frontend (client-handled) tool: `handler: "client"` with
-// no `execute` — the engine suspends the turn and the browser executes it against
-// the shared to-do store. The matching executors live in each chat client.
+// Every tool is a client-handled tool: `handler: "client"`, no `execute` — the engine suspends
+// the turn and the browser runs it. Executors live in each chat client.
 const addTodo = tool({
     name: "add_todo",
     description: "Add a task to the user's on-screen to-do list. Runs in the user's browser.",
@@ -85,8 +84,7 @@ export function handleAgentRequest(request: Request): Promise<Response> {
     return substructureHandler(request);
 }
 
-/** Mint a short-lived, identity-locked client token for the browser. In a real
- *  app, authenticate first and bind identity.id to that user. */
+/** Mint a short-lived client token for the browser. In a real app, authenticate first and bind identity.id to that user. */
 export async function mintBrowserToken(): Promise<{ token: string; substructureUrl: string; agentId: string }> {
     const backend = sub.backend.client({
         url: process.env.SUBSTRUCTURE_URL ?? "http://localhost:9000",

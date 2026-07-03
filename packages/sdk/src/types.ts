@@ -232,8 +232,7 @@ export type ClientPayload =
     | { type: "messages"; messages: Message[]; stream?: boolean }
     | ({ type: "action" } & ClientAction);
 
-/** The work an `effect.execute` trigger delegates to the worker, tagged by
- *  `kind` — the same discriminator the `effects` list uses. */
+/** The work an `effect.execute` trigger delegates to the worker, tagged by `kind`. */
 export type EffectWork =
     | { kind: "tool_call"; name: string; arguments: string }
     | { kind: "llm_call"; request: LlmRequest; stream: boolean };
@@ -250,11 +249,8 @@ export type LlmSettled =
       }
     | { error: string; code?: string; detail?: unknown; message?: never };
 
-/** How a settled effect landed, tagged by `kind`. For `tool_call` and
- *  `sub_agent` the error text rides in `result` when `ok` is false — it folds
- *  into the transcript as the tool message either way. A `sub_agent`'s trigger
- *  `id` is its session id (matching the `effects` list); `tool_call_id` is the
- *  model tool call it answers. */
+/** How a settled effect landed, tagged by `kind`. A `sub_agent`'s trigger `id`
+ *  is its session id; `tool_call_id` is the model tool call it answers. */
 export type EffectOutcome =
     | { kind: "tool_call"; name: string; result: string }
     | { kind: "sub_agent"; tool_call_id: string; agent_id: string; result: string }
@@ -277,9 +273,8 @@ export type EffectResultPayload = { kind: "tool_call"; result: string } | { kind
 
 export type WorkerAction =
     | {
-          /** `id` names the effect; its outcome comes back as an `effect.settled`
-           *  trigger with the same id. Reusing a pending/completed id is an
-           *  idempotent no-op, so each logical call must supply a fresh one. */
+          /** `id` names the effect; its outcome returns as an `effect.settled` trigger
+           *  with the same id. Reuse of a pending/completed id is an idempotent no-op. */
           type: "call.llm";
           id: string;
           request: LlmRequest;
@@ -313,9 +308,8 @@ export type WorkerAction =
     | { type: "interrupt"; interrupt_id?: string; reason: string; payload?: unknown }
     | { type: "done"; data: unknown };
 
-/** The settle body — an `effect.result` or `effect.error` action, verbatim. The
- *  worker surface accepts both kinds (worker-handled llm calls included); the
- *  client surface only ever sends `kind: "tool_call"`. */
+/** The settle body — an `effect.result` or `effect.error`. The worker surface
+ *  accepts both kinds; the client surface only sends `kind: "tool_call"`. */
 export type SettleEffectRequest =
     | { type: "effect.result"; kind: "tool_call"; id: string; result: string; attempt: number }
     | { type: "effect.result"; kind: "llm_call"; id: string; response: LlmResponse; attempt: number }
@@ -834,12 +828,8 @@ export interface WorkerAuthOptions {
     bearerToken: string;
 }
 
-// The in-flight effects surfaced on every worker decision as a flat, tagged list.
-// Each effect is a stable envelope (`id`, `kind`, `status`, `attempt`, `deadline`)
-// plus kind-specific fields. `kind` is open: a worker ignores kinds it doesn't
-// handle, so the engine can add new kinds (timers, approvals, …) without a breaking
-// change; likewise `status` (currently `"pending"`/`"retry_scheduled"`) can widen.
-// The step gate is "no tool/sub-agent effect left". Results live in the transcript.
+// In-flight effects surfaced on each worker decision — a flat, tagged list. `kind`
+// is open, so a worker ignores kinds it doesn't handle.
 
 export interface EffectBase {
     id: string;
@@ -892,9 +882,7 @@ export interface WorkerDecisionRequestWire {
     /** The in-flight effects as a flat, tagged list; branch on `kind` instead of
      *  tracking steps yourself — the step gate is "no tool/sub-agent effect left". */
     effects: Effect[];
-    /** How many `tool_call`/`sub_agent` effects are still in flight — the step
-     *  gate as a number. Prompt when it reaches 0; a non-zero value is also the
-     *  count of steps still running, for progress reporting. */
+    /** How many `tool_call`/`sub_agent` effects are still in flight — the step gate as a number (prompt at 0). */
     pending_effects: number;
     /** The active conversation as a flat list; a worker only needs this. */
     transcript?: Message[];

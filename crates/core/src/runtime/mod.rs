@@ -88,9 +88,8 @@ pub struct SubmitClientPayloadOutput {
     pub turn_id: String,
 }
 
-/// How an effect settled out-of-band. `Result` carries a tool result string or
-/// an llm response (tagged by kind via `EffectResultPayload`); `Error` is
-/// uniform across kinds, with `code`/`detail` used only for llm calls.
+/// How an effect settled out-of-band. `Result` carries a tool result or llm
+/// response; `Error` is uniform across kinds.
 pub enum EffectSettlement {
     Result(EffectResultPayload),
     Error {

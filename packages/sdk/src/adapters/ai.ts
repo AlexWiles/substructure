@@ -1,7 +1,5 @@
-// AI SDK adapter (`@substructure.ai/sdk/adapters/ai`). `aiGenerate` is an
-// `Llm` backed by `streamText`; `aiSdkAgent` builds a `toolLoop` from an
-// AI SDK toolset. Substructure owns the loop; each `llm.request` runs one
-// `streamText` step.
+// AI SDK adapter: `aiGenerate` is an `Llm` backed by `streamText`;
+// `aiSdkAgent` builds a `toolLoop` from an AI SDK toolset.
 
 import type { LanguageModel, ModelMessage, TextStreamPart, Tool, ToolChoice, ToolSet } from "ai";
 import { asSchema, jsonSchema, streamText, tool } from "ai";
@@ -79,9 +77,8 @@ export type AiAgentSettings<TOOLS extends ToolSet = ToolSet> = Omit<AIGenerateSe
     toolChoice?: ToolChoice<TOOLS>;
 };
 
-/** The loop for running an AI SDK toolset on Substructure: `aiGenerate` as the
- *  model, the toolset converted to worker-executed tools. Name and deploy it with
- *  `worker([agent({ name, decide: aiSdkAgent(...) })])`. */
+/** Build a `toolLoop` from an AI SDK toolset, using `aiGenerate` as the model
+ *  and the toolset run by the worker. */
 export function aiSdkAgent<TOOLS extends ToolSet>(settings: AiAgentSettings<TOOLS>): Agent {
     const { instructions, tools: toolset, ...generateSettings } = settings;
     return toolLoop({
@@ -100,8 +97,7 @@ export function aiSdkTools(toolset: ToolSet, experimentalContext?: unknown): Too
         const parameters = asSchema(t.inputSchema).jsonSchema;
         const execute = t.execute;
 
-        // No `execute` means a client tool: the worker never runs it (the frontend
-        // completes it via `settleEffect`), so this only satisfies the type.
+        // No `execute` → client tool: the worker never runs it (the frontend settles it).
         if (!execute) {
             return [
                 {
