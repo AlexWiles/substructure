@@ -18,8 +18,9 @@ pub struct SubmitClientPayloadResponse {
     pub turn_id: String,
 }
 
-/// This endpoint settles tool calls only; typing `kind` as a unit enum makes
-/// serde reject any other effect kind.
+/// The client settle body — an `effect.result` or `effect.error` action. Clients
+/// answer client tools, never model calls, so `kind` is a unit enum that only
+/// deserializes `tool_call`; any other effect kind is rejected at the serde layer.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolCallKind {
@@ -28,7 +29,7 @@ pub enum ToolCallKind {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
-pub enum SubmitToolCallResultRequest {
+pub enum SettleEffectRequest {
     #[serde(rename = "effect.result")]
     Result {
         #[allow(dead_code)]
@@ -49,7 +50,7 @@ pub enum SubmitToolCallResultRequest {
 }
 
 #[derive(Debug, Serialize)]
-pub struct SubmitToolCallResultResponse {
+pub struct SettleEffectResponse {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -89,4 +90,26 @@ pub struct StreamSessionEventsParams {
     pub turn_id: Option<String>,
     #[serde(default)]
     pub sequence_after: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_surface_accepts_tool_call() {
+        let body =
+            r#"{"type":"effect.result","kind":"tool_call","id":"tc-1","attempt":0,"result":"x"}"#;
+        assert!(serde_json::from_str::<SettleEffectRequest>(body).is_ok());
+    }
+
+    #[test]
+    fn client_surface_rejects_llm_call_kind() {
+        let body =
+            r#"{"type":"effect.result","kind":"llm_call","id":"llm-1","attempt":0,"result":"x"}"#;
+        assert!(
+            serde_json::from_str::<SettleEffectRequest>(body).is_err(),
+            "the client surface answers client tools only — llm_call must not deserialize"
+        );
+    }
 }

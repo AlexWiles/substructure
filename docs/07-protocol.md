@@ -121,7 +121,7 @@ is just constructing the struct.
 
 | `type` | Fields | Effect |
 |---|---|---|
-| `call.llm` | `request`, `handler`, `stream?`, `retry?` | Make an LLM call. `handler` is required (like `call.tool`): `"server"` lets the engine call its provider; `"worker"` hands the call back to you as an `effect.execute` trigger. |
+| `call.llm` | `id`, `request`, `handler`, `stream?`, `retry?` | Make an LLM call named by `id` (like `call.tool`). `handler` is required: `"server"` lets the engine call its provider; `"worker"` hands the call back to you as an `effect.execute` trigger. You may emit several in one decision — each settles independently as its own `effect.settled`. |
 | `call.tool` | `id`, `name`, `arguments`, `handler`, `retry?` | Schedule a tool call named by `id` (the model's tool call id). `handler: "worker"` runs on your worker (you'll get an `effect.execute` trigger); `handler: "client"` routes it to the browser. |
 | `effect.result` | `kind`, `id`, `attempt`, + result | Answer an `effect.execute`: a `tool_call` carries `result`, an `llm_call` carries `response`. |
 | `effect.error` | `kind`, `id`, `attempt`, `error`, `retryable`, `code?`, `detail?` | Answer an `effect.execute` with a failure — uniform across kinds. |
@@ -224,7 +224,7 @@ def decide(req, state):
             return {}
 
 # Actions are plain data — the "builders" just construct the tagged struct.
-def call_llm(messages, tools):     return { "type": "call.llm", "request": { "model": MODEL, "messages": messages, "tools": tools }, "handler": "server" }
+def call_llm(messages, tools):     return { "type": "call.llm", "id": fresh_id(), "request": { "model": MODEL, "messages": messages, "tools": tools }, "handler": "server" }
 def call_tool(id, name, args):     return { "type": "call.tool", "id": id, "name": name, "arguments": args, "handler": "worker" }
 def effect_result(id, result):     return { "type": "effect.result", "kind": "tool_call", "id": id, "result": result, "attempt": 0 }
 def effect_error(id, error):       return { "type": "effect.error", "kind": "tool_call", "id": id, "error": error, "retryable": False, "attempt": 0 }
@@ -257,6 +257,38 @@ sends you an `effect.execute` with `kind: "llm_call"`; run the call and reply wi
 the request's transport may hold the connection open so you can push token deltas
 as they arrive, then return the final `LlmResponse`. Server-handled models
 (`handler: "server"`) stream on the engine side and never delegate the call.
+
+**Parallel LLM calls.** A worker may fan out several `call.llm` actions in one
+decision — each with its own `id` — and they are all in flight at once, each
+settling independently. Rules:
+
+- **Concurrency lives in effects, never in decisions.** You never receive two
+  decisions at once; the resulting `effect.settled` triggers arrive serialized in
+  *completion* order (not request order), one decision at a time. Fold each in and
+  branch on the `effects` list — `pending_effects` counts only `tool_call`/
+  `sub_agent` effects, so llm settles never gate the loop; drive your own logic
+  off `effects` when you fan out model calls.
+- **Ids MUST be fresh per logical call.** Reusing a pending/completed id is an
+  idempotent no-op (deliberate — it makes decision redelivery and retry-after-
+  interrupt safe). An accidentally reused id silently loses the call.
+- **Engine-handled fan-out:** emit N `call.llm { handler: "server" }`; each
+  returns as its own `effect.settled`, no async machinery in your worker. The
+  engine *executes* a session's calls one at a time (a deliberate bound on
+  per-session provider pressure), so this decouples your loop but doesn't shrink
+  wall-clock time. Note that a call's retry `timeout_secs` clock starts when the
+  call is requested, and keeps ticking while it waits behind its siblings — give
+  fanned-out engine-handled calls generous deadlines.
+- **Worker-handled fan-out (deferred):** on each `effect.execute { kind: "llm_call" }`,
+  start the provider call in the background and return the decision immediately
+  with no actions (the next `effect.execute` promotes at once). Settle each call
+  whenever it finishes by POSTing an `effect.result`/`effect.error` to
+  `/api/machine/sessions/{id}/effects/settle`. This is the path to true wall-clock
+  overlap — your worker owns the provider connection and its concurrency. Echo the
+  `attempt` from each call's own trigger. Engine-handled (`handler: "server"`)
+  calls are never externally settleable.
+- **`done` with llm calls still in flight** is allowed; a late settle simply fires
+  a new decision after the turn ends. Don't fan out `stream: true` behind an AG-UI
+  front-end — concurrent token streams interleave on a single message channel.
 
 **Stop conditions.** To cap the loop (e.g. stop after N assistant steps), check
 your condition in the tool branch of `effect.settled` before prompting again and

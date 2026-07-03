@@ -145,14 +145,14 @@ pub enum SessionError {
     MissingSubject,
     #[error("session access denied")]
     SessionAccessDenied,
-    #[error("tool call not found")]
-    ToolCallNotFound,
-    #[error("tool call is not pending")]
-    ToolCallNotPending,
-    #[error("tool call attempt mismatch")]
-    ToolCallAttemptMismatch,
-    #[error("client may only complete client-handled tool calls")]
-    ToolCallWrongHandler,
+    #[error("effect not found")]
+    EffectNotFound,
+    #[error("effect is not pending")]
+    EffectNotPending,
+    #[error("effect attempt mismatch")]
+    EffectAttemptMismatch,
+    #[error("caller may not settle this effect")]
+    EffectWrongHandler,
 }
 
 fn assign_id(mut message: Message) -> Message {
@@ -227,9 +227,30 @@ impl SessionState {
     ) -> Result<(), SessionError> {
         self.ensure_owns_session(caller)?;
         if matches!(caller, Caller::Frontend { .. }) && tc.handler != ToolHandler::Client {
-            return Err(SessionError::ToolCallWrongHandler);
+            return Err(SessionError::EffectWrongHandler);
         }
         Ok(())
+    }
+
+    /// Who may settle an llm call out-of-band. The tenant is already checked in
+    /// `handle_active`. System (executor, internal dispatch) always passes. A
+    /// Machine caller may settle only worker-handled calls — an engine-handled
+    /// call is the executor's to settle, so an external completion would race
+    /// it. Frontends never settle model calls.
+    fn check_llm_call_caller(
+        &self,
+        call: Option<&super::state::LlmCallState>,
+        caller: &Caller,
+    ) -> Result<(), SessionError> {
+        match caller {
+            Caller::System { .. } => Ok(()),
+            Caller::Frontend { .. } => Err(SessionError::EffectWrongHandler),
+            Caller::Machine { .. } => match call {
+                Some(c) if c.handler == LlmHandler::Worker => Ok(()),
+                Some(_) => Err(SessionError::EffectWrongHandler),
+                None => Err(SessionError::EffectNotFound),
+            },
+        }
     }
 
     pub fn handle(
@@ -537,10 +558,9 @@ impl SessionState {
             } => {
                 Self::ensure_internal(caller)?;
 
-                if self.has_pending_llm() {
-                    return Ok(vec![]);
-                }
-
+                // The id is the idempotency key: a Pending/Completed id no-ops
+                // (redelivery-safe), while Failed/RetryScheduled re-issues.
+                // Multiple calls may be in flight — there is no single-pending gate.
                 let issue = matches!(
                     self.llm_calls.get(&call_id).map(|c| &c.tracking.status),
                     None | Some(&EffectStatus::Failed) | Some(&EffectStatus::RetryScheduled)
@@ -558,7 +578,7 @@ impl SessionState {
                         attempt: 0,
                         request: request.clone(),
                         stream,
-                        retry,
+                        retry: retry.clone(),
                         handler: handler.clone(),
                     })];
 
@@ -566,13 +586,17 @@ impl SessionState {
                         events.push(self.emit_decision_request(DecisionTrigger::EffectExecute {
                             id: call_id,
                             attempt: 0,
-                            deadline: None,
+                            deadline: retry.deadline(chrono::Utc::now()),
                             work: EffectWork::LlmCall { request, stream },
                         }));
                     }
 
                     Ok(events)
                 } else {
+                    tracing::debug!(
+                        %call_id,
+                        "llm call id already issued; request no-ops (idempotent)"
+                    );
                     Ok(vec![])
                 }
             }
@@ -582,10 +606,15 @@ impl SessionState {
                 attempt,
                 response,
             } => {
-                Self::ensure_internal(caller)?;
+                let is_system = matches!(caller, Caller::System { .. });
+                let call = self.llm_calls.get(&call_id);
+                self.check_llm_call_caller(call, caller)?;
 
-                match self.llm_calls.get(&call_id).map(|c| &c.tracking.status) {
-                    Some(&EffectStatus::Pending) => {
+                match call {
+                    Some(c)
+                        if c.tracking.status == EffectStatus::Pending
+                            && c.tracking.retry.attempts == attempt =>
+                    {
                         let truncated = response.finish_reason.as_deref() == Some("length");
                         let usage = response.usage.clone();
                         let cost = response.cost;
@@ -634,7 +663,16 @@ impl SessionState {
                             }),
                         ])
                     }
-                    _ => Ok(vec![]),
+                    // Late/duplicate/stale settlements: silent for the executor
+                    // (System) to keep completions idempotent; explicit errors for
+                    // an out-of-band Machine caller with no other way to learn its
+                    // settlement was dropped.
+                    _ if is_system => Ok(vec![]),
+                    None => Err(SessionError::EffectNotFound),
+                    Some(c) if c.tracking.status != EffectStatus::Pending => {
+                        Err(SessionError::EffectNotPending)
+                    }
+                    Some(_) => Err(SessionError::EffectAttemptMismatch),
                 }
             }
 
@@ -646,13 +684,23 @@ impl SessionState {
                 code,
                 detail,
             } => {
-                Self::ensure_internal(caller)?;
-                let Some(call) = self.llm_calls.get(&call_id) else {
-                    return Ok(vec![]);
+                let is_system = matches!(caller, Caller::System { .. });
+                let call = self.llm_calls.get(&call_id);
+                self.check_llm_call_caller(call, caller)?;
+                let call = match call {
+                    Some(c)
+                        if c.tracking.status == EffectStatus::Pending
+                            && c.tracking.retry.attempts == attempt =>
+                    {
+                        c
+                    }
+                    _ if is_system => return Ok(vec![]),
+                    None => return Err(SessionError::EffectNotFound),
+                    Some(c) if c.tracking.status != EffectStatus::Pending => {
+                        return Err(SessionError::EffectNotPending)
+                    }
+                    Some(_) => return Err(SessionError::EffectAttemptMismatch),
                 };
-                if call.tracking.status != EffectStatus::Pending {
-                    return Ok(vec![]);
-                }
                 let mut events = vec![EventPayload::LlmCallErrored(LlmCallErrored {
                     call_id: call_id.clone(),
                     attempt,
@@ -718,14 +766,14 @@ impl SessionState {
                 let tc = self
                     .tool_calls
                     .get(&tool_call_id)
-                    .ok_or(SessionError::ToolCallNotFound)?;
+                    .ok_or(SessionError::EffectNotFound)?;
 
                 if tc.tracking.status != EffectStatus::Pending {
-                    return Err(SessionError::ToolCallNotPending);
+                    return Err(SessionError::EffectNotPending);
                 }
 
                 if tc.tracking.retry.attempts != attempt {
-                    return Err(SessionError::ToolCallAttemptMismatch);
+                    return Err(SessionError::EffectAttemptMismatch);
                 }
 
                 self.check_tool_call_caller(tc, caller)?;
@@ -756,12 +804,12 @@ impl SessionState {
                 let tc = self
                     .tool_calls
                     .get(&tool_call_id)
-                    .ok_or(SessionError::ToolCallNotFound)?;
+                    .ok_or(SessionError::EffectNotFound)?;
                 if tc.tracking.status != EffectStatus::Pending {
-                    return Err(SessionError::ToolCallNotPending);
+                    return Err(SessionError::EffectNotPending);
                 }
                 if tc.tracking.retry.attempts != attempt {
-                    return Err(SessionError::ToolCallAttemptMismatch);
+                    return Err(SessionError::EffectAttemptMismatch);
                 }
                 self.check_tool_call_caller(tc, caller)?;
                 let name = tc.name.clone();
@@ -967,13 +1015,14 @@ impl SessionState {
                 for action in actions {
                     let sub_events = match action {
                         WorkerAction::CallLlm {
+                            id,
                             request,
                             stream,
                             retry,
                             handler,
                         } => self.handle(
                             CommandPayload::RequestLlmCall {
-                                call_id: new_call_id(),
+                                call_id: id,
                                 request,
                                 stream,
                                 retry,
@@ -1242,7 +1291,7 @@ impl SessionState {
                                 DecisionTrigger::EffectExecute {
                                     id: call.call_id.clone(),
                                     attempt: call.tracking.retry.attempts,
-                                    deadline: None,
+                                    deadline: call.tracking.retry_policy.deadline(now),
                                     work: EffectWork::LlmCall {
                                         request,
                                         stream: call.stream,
@@ -1584,8 +1633,8 @@ mod tests {
             .expect_err("frontend should not complete worker-handled tool calls");
 
         assert!(
-            matches!(err, SessionError::ToolCallWrongHandler),
-            "expected ToolCallWrongHandler; got {err:?}"
+            matches!(err, SessionError::EffectWrongHandler),
+            "expected EffectWrongHandler; got {err:?}"
         );
     }
 
@@ -1810,8 +1859,8 @@ mod tests {
             .expect_err("wrong attempt should be rejected");
 
         assert!(
-            matches!(err, SessionError::ToolCallAttemptMismatch),
-            "expected ToolCallAttemptMismatch; got {err:?}"
+            matches!(err, SessionError::EffectAttemptMismatch),
+            "expected EffectAttemptMismatch; got {err:?}"
         );
     }
 
@@ -2072,8 +2121,8 @@ mod tests {
             .expect_err("unknown tool call should be rejected");
 
         assert!(
-            matches!(err, SessionError::ToolCallNotFound),
-            "expected ToolCallNotFound; got {err:?}"
+            matches!(err, SessionError::EffectNotFound),
+            "expected EffectNotFound; got {err:?}"
         );
     }
 
@@ -4491,5 +4540,444 @@ mod tests {
         assert_eq!(tc.tracking.status, EffectStatus::Completed);
         assert_eq!(tc.result.as_deref(), Some("ok"));
         assert!(!tc.is_error);
+    }
+
+    // ── Concurrent LLM calls (fan-out) ───────────────────────────────────
+
+    fn call_llm_action(id: &str, handler: LlmHandler) -> WorkerAction {
+        WorkerAction::CallLlm {
+            id: id.to_string(),
+            request: request_with(vec![]),
+            stream: false,
+            retry: RetryPolicy::no_retry(),
+            handler,
+        }
+    }
+
+    fn llm_response(content: &str) -> LlmResponse {
+        LlmResponse {
+            model: "test-model".to_string(),
+            content: Some(content.to_string()),
+            tool_calls: vec![],
+            finish_reason: Some("stop".to_string()),
+            usage: None,
+            cost: None,
+            images: vec![],
+        }
+    }
+
+    fn request_llm(
+        agg: &mut Aggregate<SessionState>,
+        id: &str,
+        handler: LlmHandler,
+    ) -> Vec<EventPayload> {
+        dispatch(
+            agg,
+            CommandPayload::RequestLlmCall {
+                call_id: id.to_string(),
+                request: request_with(vec![]),
+                stream: false,
+                retry: RetryPolicy::no_retry(),
+                handler,
+            },
+            &system(),
+        )
+    }
+
+    fn complete_llm(
+        agg: &mut Aggregate<SessionState>,
+        id: &str,
+        attempt: u32,
+        caller: &Caller,
+    ) -> Vec<EventPayload> {
+        dispatch(
+            agg,
+            CommandPayload::CompleteLlmCall {
+                call_id: id.to_string(),
+                attempt,
+                response: llm_response("ok"),
+            },
+            caller,
+        )
+    }
+
+    /// Open a worker decision (via a user message) and answer it with `actions`.
+    fn submit_decision_with(
+        agg: &mut Aggregate<SessionState>,
+        actions: Vec<WorkerAction>,
+    ) -> Vec<EventPayload> {
+        let setup = dispatch(
+            agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Message {
+                    message: node_msg("seed", Role::User, "seed"),
+                    stream: false,
+                },
+                turn_id: None,
+            },
+            &system(),
+        );
+        let decision_id = setup
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(p) => Some(p.decision_id.clone()),
+                _ => None,
+            })
+            .expect("user message opens a decision");
+        dispatch(
+            agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id,
+                transcript: vec![],
+                actions,
+                state: vec![].into(),
+            },
+            &machine(),
+        )
+    }
+
+    /// The effect ids of every llm `effect.execute` trigger, deduped by
+    /// decision id (a promoted queue entry surfaces as both queued + requested).
+    fn fired_llm_execute(events: &[EventPayload]) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        events
+            .iter()
+            .filter_map(|e| {
+                let (decision_id, trigger) = match e {
+                    EventPayload::WorkerDecisionRequested(p) => (&p.decision_id, &p.trigger),
+                    EventPayload::DecisionRequestQueued(p) => (&p.decision_id, &p.trigger),
+                    _ => return None,
+                };
+                match trigger {
+                    DecisionTrigger::EffectExecute {
+                        id,
+                        work: EffectWork::LlmCall { .. },
+                        ..
+                    } if seen.insert(decision_id.clone()) => Some(id.clone()),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    /// The effect ids of every llm `effect.settled` trigger, deduped by decision id.
+    fn settled_llm_ids(events: &[EventPayload]) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        events
+            .iter()
+            .filter_map(|e| {
+                let (decision_id, trigger) = match e {
+                    EventPayload::WorkerDecisionRequested(p) => (&p.decision_id, &p.trigger),
+                    EventPayload::DecisionRequestQueued(p) => (&p.decision_id, &p.trigger),
+                    _ => return None,
+                };
+                match trigger {
+                    DecisionTrigger::EffectSettled {
+                        id,
+                        outcome: EffectOutcome::LlmCall { .. },
+                        ..
+                    } if seen.insert(decision_id.clone()) => Some(id.clone()),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn two_server_llm_calls_in_one_decision_both_issue() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let events = submit_decision_with(
+            &mut agg,
+            vec![
+                call_llm_action("llm-1", LlmHandler::Server),
+                call_llm_action("llm-2", LlmHandler::Server),
+            ],
+        );
+        let requested: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                EventPayload::LlmCallRequested(r) => Some(r.call_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            requested,
+            vec!["llm-1".to_string(), "llm-2".to_string()],
+            "both calls issue — the single-pending gate is gone; got {events:?}"
+        );
+        assert_eq!(agg.state.llm_calls.len(), 2);
+        assert!(agg
+            .state
+            .llm_calls
+            .values()
+            .all(|c| c.tracking.status == EffectStatus::Pending));
+        assert_eq!(agg.state.effects().len(), 2, "both in flight");
+    }
+
+    #[test]
+    fn worker_handled_llm_fanout_delegates_both_executes() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let events = submit_decision_with(
+            &mut agg,
+            vec![
+                call_llm_action("llm-1", LlmHandler::Worker),
+                call_llm_action("llm-2", LlmHandler::Worker),
+            ],
+        );
+        let mut execs = fired_llm_execute(&events);
+        execs.sort();
+        assert_eq!(
+            execs,
+            vec!["llm-1".to_string(), "llm-2".to_string()],
+            "each worker-handled call delegates an effect.execute; got {events:?}"
+        );
+        assert_eq!(agg.state.effects().len(), 2);
+    }
+
+    #[test]
+    fn reverse_order_llm_completion_settles_independently() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        request_llm(&mut agg, "llm-1", LlmHandler::Server);
+        request_llm(&mut agg, "llm-2", LlmHandler::Server);
+        assert_eq!(agg.state.effects().len(), 2);
+
+        let e2 = complete_llm(&mut agg, "llm-2", 0, &system());
+        assert!(settled_llm_ids(&e2).contains(&"llm-2".to_string()));
+        let remaining: Vec<String> = agg.state.effects().iter().map(|e| e.id.clone()).collect();
+        assert_eq!(
+            remaining,
+            vec!["llm-1".to_string()],
+            "only the unsettled call remains in flight"
+        );
+
+        let e1 = complete_llm(&mut agg, "llm-1", 0, &system());
+        assert!(settled_llm_ids(&e1).contains(&"llm-1".to_string()));
+        assert!(agg.state.effects().is_empty());
+    }
+
+    #[test]
+    fn wake_suppresses_stall_while_an_llm_call_is_pending() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        // A resolved tool would otherwise trigger stall recovery; a still-pending
+        // llm call must suppress it.
+        dispatch(
+            &mut agg,
+            CommandPayload::RequestToolCall {
+                tool_call_id: "tc-1".to_string(),
+                name: "t".to_string(),
+                arguments: "{}".to_string(),
+                handler: ToolHandler::Worker,
+                retry: RetryPolicy::no_retry(),
+            },
+            &system(),
+        );
+        complete_tool(&mut agg, "tc-1", "done");
+        request_llm(&mut agg, "llm-1", LlmHandler::Server);
+
+        let woken = wake(&mut agg);
+        assert!(
+            !woken
+                .iter()
+                .any(|e| matches!(e, EventPayload::WorkerDecisionRequested(p)
+                    if matches!(p.trigger, DecisionTrigger::Stall))),
+            "a pending llm call suppresses the stall trigger; got {woken:?}"
+        );
+    }
+
+    #[test]
+    fn re_requesting_a_completed_llm_id_noops() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        request_llm(&mut agg, "llm-1", LlmHandler::Server);
+        complete_llm(&mut agg, "llm-1", 0, &system());
+        let again = request_llm(&mut agg, "llm-1", LlmHandler::Server);
+        assert!(
+            again.is_empty(),
+            "re-request of a Completed id is an idempotent no-op; got {again:?}"
+        );
+    }
+
+    #[test]
+    fn llm_and_tool_with_the_same_id_coexist() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        request_client_tool(&mut agg, "shared");
+        request_llm(&mut agg, "shared", LlmHandler::Server);
+        assert!(agg.state.tool_calls.contains_key("shared"));
+        assert!(agg.state.llm_calls.contains_key("shared"));
+        assert_eq!(
+            agg.state.effects().len(),
+            2,
+            "distinct maps keep a tool and an llm call with the same id apart"
+        );
+    }
+
+    #[test]
+    fn reissue_llm_after_interrupt_with_the_same_id() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        request_llm(&mut agg, "llm-1", LlmHandler::Server);
+        dispatch(
+            &mut agg,
+            CommandPayload::Interrupt {
+                interrupt_id: "int-1".to_string(),
+                reason: String::new(),
+                payload: serde_json::Value::Null,
+            },
+            &system(),
+        );
+        assert_eq!(
+            agg.state.llm_calls.get("llm-1").unwrap().tracking.status,
+            EffectStatus::Failed,
+            "interrupt voids the pending call"
+        );
+        dispatch(
+            &mut agg,
+            CommandPayload::ResumeInterrupt {
+                interrupt_id: "int-1".to_string(),
+                payload: serde_json::Value::Null,
+            },
+            &system(),
+        );
+        let events = request_llm(&mut agg, "llm-1", LlmHandler::Server);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::LlmCallRequested(_))),
+            "a Failed id re-issues on the same key; got {events:?}"
+        );
+        assert_eq!(
+            agg.state.llm_calls.get("llm-1").unwrap().tracking.status,
+            EffectStatus::Pending
+        );
+    }
+
+    #[test]
+    fn machine_settles_worker_handled_llm_call() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        request_llm(&mut agg, "llm-1", LlmHandler::Worker);
+        let events = complete_llm(&mut agg, "llm-1", 0, &machine());
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, EventPayload::LlmCallCompleted(_))));
+        assert!(settled_llm_ids(&events).contains(&"llm-1".to_string()));
+        assert_eq!(
+            agg.state.llm_calls.get("llm-1").unwrap().tracking.status,
+            EffectStatus::Completed
+        );
+    }
+
+    #[test]
+    fn machine_fails_worker_handled_llm_call() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        request_llm(&mut agg, "llm-1", LlmHandler::Worker);
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::FailLlmCall {
+                call_id: "llm-1".to_string(),
+                attempt: 0,
+                error: "boom".to_string(),
+                retryable: false,
+                code: None,
+                detail: None,
+            },
+            &machine(),
+        );
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, EventPayload::LlmCallErrored(_))));
+        assert!(
+            settled_llm_ids(&events).contains(&"llm-1".to_string()),
+            "no-retry failure settles the call; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn machine_cannot_settle_engine_handled_llm_call() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        request_llm(&mut agg, "llm-1", LlmHandler::Server);
+        let err = agg
+            .state
+            .handle(
+                CommandPayload::CompleteLlmCall {
+                    call_id: "llm-1".to_string(),
+                    attempt: 0,
+                    response: llm_response("hi"),
+                },
+                &machine(),
+            )
+            .expect_err("an engine-handled call is not the machine's to settle");
+        assert!(
+            matches!(err, SessionError::EffectWrongHandler),
+            "expected EffectWrongHandler; got {err:?}"
+        );
+    }
+
+    #[test]
+    fn machine_wrong_attempt_on_worker_llm_is_mismatch() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        request_llm(&mut agg, "llm-1", LlmHandler::Worker);
+        let err = agg
+            .state
+            .handle(
+                CommandPayload::CompleteLlmCall {
+                    call_id: "llm-1".to_string(),
+                    attempt: 7,
+                    response: llm_response("hi"),
+                },
+                &machine(),
+            )
+            .expect_err("a stale attempt is a mismatch");
+        assert!(
+            matches!(err, SessionError::EffectAttemptMismatch),
+            "expected EffectAttemptMismatch; got {err:?}"
+        );
+    }
+
+    #[test]
+    fn machine_settle_of_unknown_llm_is_not_found() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let err = agg
+            .state
+            .handle(
+                CommandPayload::CompleteLlmCall {
+                    call_id: "nope".to_string(),
+                    attempt: 0,
+                    response: llm_response("hi"),
+                },
+                &machine(),
+            )
+            .expect_err("unknown effect");
+        assert!(
+            matches!(err, SessionError::EffectNotFound),
+            "expected EffectNotFound; got {err:?}"
+        );
+    }
+
+    #[test]
+    fn system_duplicate_llm_completion_is_silent_noop() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        request_llm(&mut agg, "llm-1", LlmHandler::Server);
+        complete_llm(&mut agg, "llm-1", 0, &system());
+        let again = complete_llm(&mut agg, "llm-1", 0, &system());
+        assert!(
+            again.is_empty(),
+            "a duplicate executor completion stays a silent no-op; got {again:?}"
+        );
+    }
+
+    #[test]
+    fn done_then_late_llm_completion_still_settles() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        request_llm(&mut agg, "llm-1", LlmHandler::Server);
+        dispatch(
+            &mut agg,
+            CommandPayload::MarkDone {
+                data: serde_json::Value::Null,
+            },
+            &system(),
+        );
+        let events = complete_llm(&mut agg, "llm-1", 0, &system());
+        assert!(
+            settled_llm_ids(&events).contains(&"llm-1".to_string()),
+            "a late settle after done still fires a decision; got {events:?}"
+        );
     }
 }

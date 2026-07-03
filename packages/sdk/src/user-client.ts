@@ -5,11 +5,11 @@ import type {
     InterruptSessionResponse,
     ResumeInterruptRequest,
     ResumeInterruptResponse,
+    SettleEffectRequest,
+    SettleEffectResponse,
     StreamSessionEventsParams,
     SubmitClientPayloadResponse,
     SubmitPayloadRequest,
-    SubmitToolCallResultRequest,
-    SubmitToolCallResultResponse,
 } from "./types";
 
 export class UserClient extends BaseClient {
@@ -17,11 +17,8 @@ export class UserClient extends BaseClient {
         return this.post("/api/client/sessions/submit", request);
     }
 
-    async submitToolCallResult(
-        sessionId: string,
-        request: SubmitToolCallResultRequest,
-    ): Promise<SubmitToolCallResultResponse> {
-        return this.post(`/api/client/sessions/${sessionId}/tool-call-results`, request);
+    async settleEffect(sessionId: string, request: SettleEffectRequest): Promise<SettleEffectResponse> {
+        return this.post(`/api/client/sessions/${sessionId}/effects/settle`, request);
     }
 
     async interruptSession(

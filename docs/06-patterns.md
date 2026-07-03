@@ -6,7 +6,7 @@ Things you can build out of tools, custom decision functions, and client actions
 
 ## Cross-session data
 
-A session's state lives only for that session. To persist data across sessions (a user's todo list, customer preferences, a counter), store it in your own database keyed by user id. Tools are pure functions that reach the store directly through `ctx` — keyed by `ctx.request.identity.id` — so the data follows the user across every session, and never rides the wire.
+A session's state lives only for that session. To persist data across sessions (a user's todo list, customer preferences, a counter), store it in your own database keyed by user id. Tools are pure functions that reach the store directly through the decision request — keyed by `request.identity.id` — so the data follows the user across every session, and never rides the wire.
 
 Example: [`examples/hybrid-state`](https://github.com/substructureai/substructure/tree/main/examples/hybrid-state). Walkthrough: [SDK / State](./04-sdk.md#state).
 

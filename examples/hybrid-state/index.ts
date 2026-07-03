@@ -1,6 +1,6 @@
 // Hybrid state: the todo list lives in its own database, keyed by user id, not
 // in SDK-held state. There is no built-in tool state — each tool reaches the
-// store itself (here a directory of JSON files keyed by `ctx.request.identity.id`),
+// store itself (here a directory of JSON files keyed by `request.identity.id`),
 // so todos persist across all of a user's sessions and never ride the wire.
 //
 // Swap loadTodos/saveTodos for a real client (Postgres, Durable Object, S3, ...)
@@ -43,9 +43,9 @@ const addTodo = tool({
         properties: { title: { type: "string" } },
         required: ["title"],
     },
-    execute: async (args, ctx) => {
+    execute: async (args, request) => {
         const { title } = JSON.parse(args);
-        const userId = ctx.request.identity.id;
+        const userId = request.identity.id;
         const data = await loadTodos(userId);
         const item: Todo = { id: randomUUID().slice(0, 8), title, done: false };
         data.items.push(item);
@@ -58,7 +58,7 @@ const listTodos = tool({
     name: "list_todos",
     description: "List all todos",
     parameters: { type: "object", properties: {} },
-    execute: async (_args, ctx) => JSON.stringify((await loadTodos(ctx.request.identity.id)).items),
+    execute: async (_args, request) => JSON.stringify((await loadTodos(request.identity.id)).items),
 });
 
 // ── Agent ───────────────────────────────────────────────────────────────────

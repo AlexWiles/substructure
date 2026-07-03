@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import { toolLoop } from "../src/agent";
-import type { Message } from "../src/types";
+import { tool } from "../src/core";
+import type { DecisionTrigger, Message } from "../src/types";
 import { actionsOfType, appendedMessages, callLlm, linearTree, runAgent, subAgentResult, toolResult } from "./harness";
 
 const loop = toolLoop({ llm: { model: "test-model" }, instructions: "SYS" });
@@ -64,5 +65,54 @@ describe("effect.settled", () => {
             { role: "tool", content: "RA", tool_call_id: "call_a", name: "getWeather" },
         ]);
         expect(actionsOfType(result, "call.llm")).toHaveLength(0);
+    });
+});
+
+describe("deferred tools", () => {
+    const executeTrigger: DecisionTrigger = {
+        type: "effect.execute",
+        kind: "tool_call",
+        id: "tc-1",
+        name: "wait",
+        arguments: "{}",
+        attempt: 0,
+    };
+
+    it("runs the kick-off but emits no result action, leaving the call pending", async () => {
+        let kickedOff = false;
+        const wait = tool({
+            name: "wait",
+            description: "settled out-of-band",
+            parameters: { type: "object", properties: {} },
+            deferred: true,
+            execute: () => {
+                kickedOff = true;
+            },
+        });
+        const result = await runAgent(toolLoop({ llm: { model: "test-model" }, tools: [wait] }), {
+            trigger: executeTrigger,
+        });
+
+        expect(kickedOff).toBe(true);
+        expect(result.actions).toHaveLength(0);
+    });
+
+    it("a throwing kick-off still reports effect.error", async () => {
+        const wait = tool({
+            name: "wait",
+            description: "settled out-of-band",
+            parameters: { type: "object", properties: {} },
+            deferred: true,
+            execute: () => {
+                throw new Error("enqueue failed");
+            },
+        });
+        const result = await runAgent(toolLoop({ llm: { model: "test-model" }, tools: [wait] }), {
+            trigger: executeTrigger,
+        });
+
+        expect(actionsOfType(result, "effect.error")).toMatchObject([
+            { kind: "tool_call", id: "tc-1", error: "enqueue failed" },
+        ]);
     });
 });

@@ -80,7 +80,7 @@ const getWeather = tool({
     properties: { city: { type: "string" } },
     required: ["city"],
   },
-  execute: (args, ctx) => {
+  execute: (args, request) => {
     const { city } = JSON.parse(args);
     return JSON.stringify({ city, temp_f: 62, condition: "sunny" });
   },
@@ -91,15 +91,15 @@ A few notes:
 
 - `parameters` is a plain JSON Schema object. The LLM uses it to format calls.
 - `execute` receives the raw stringified JSON args. Parse it yourself.
-- Return a string — the tool result fed back to the LLM. For structured data, `JSON.stringify` it yourself. (Or return `ctx.defer()` to complete the call out-of-band.)
+- Return a string — the tool result fed back to the LLM. For structured data, `JSON.stringify` it yourself. (To complete a call out-of-band instead, see [Deferred tool calls](#deferred-async-tool-calls).)
 - Tools can be async. Substructure waits for the promise.
-- `execute(args, ctx)` takes only its arguments and a `ToolExecutionContext`. **There is no SDK-held tool state** — see [State](#state) for where state lives.
+- `execute(args, request)` takes only its arguments and the `DecisionRequest` it runs under. **There is no SDK-held tool state** — see [State](#state) for where state lives.
 
 ### Deferred (async) tool calls
 
 By default, the value `execute` returns *is* the tool result: it ships back to the LLM as soon as the worker finishes the decision. That works when the answer is in hand by the time `execute` returns (a database lookup, an HTTP call you `await`, a computation).
 
-It does not work for tools that hand work off to something the worker can't await — a webhook callback, a queued job, a human approval. For those, `execute` calls `ctx.defer()`, kicks off the work, and the result arrives later via `submitToolCallResult`.
+It does not work for tools that hand work off to something the worker can't await — a webhook callback, a queued job, a human approval. For those, declare the tool with `deferred: true`. Its `execute` becomes a **kick-off**: it runs to start the work, its return value is ignored, and the loop emits no result action — the engine leaves the call pending until the result arrives via `settleEffect`.
 
 ```ts
 const wait = tool({
@@ -110,46 +110,45 @@ const wait = tool({
     properties: { seconds: { type: "number" } },
     required: ["seconds"],
   },
-  execute: (args, ctx) => {
+  deferred: true,
+  execute: (args, request) => {
     const { seconds } = JSON.parse(args);
+    if (request.trigger.type !== "effect.execute") throw new Error("not a tool call");
+    const { id, attempt } = request.trigger;
 
     setTimeout(() => {
-      client.submitToolCallResult({
-        sessionId: ctx.sessionId,
-        toolCallId: ctx.toolCallId,
-        attempt: ctx.attempt,
+      client.settleEffect({
+        sessionId: request.session_id,
+        id,
+        attempt,
         result: JSON.stringify({ waited_seconds: seconds }),
       });
     }, seconds * 1000);
-
-    return ctx.defer();
   },
 });
 ```
 
-`client` here is a backend client minted with your API key (see [Submitting turns from a client](#submitting-turns-from-a-client)). The `ToolExecutionContext` gives you:
+`client` here is a backend client minted with your API key (see [Submitting turns from a client](#submitting-turns-from-a-client)). The `request` (the decision envelope) gives you everything the settlement needs:
 
-- `ctx.sessionId` — the session this call belongs to.
-- `ctx.toolCallId` — the LLM-assigned id you must pass back.
-- `ctx.attempt` — the current retry attempt; pass it back unchanged.
-- `ctx.request` — the full decision envelope (`request.identity`, `request.turn_id`, ...).
-- `ctx.defer()` — returns the sentinel value to `return`.
+- `request.session_id` — the session this call belongs to.
+- `request.trigger.id` — the effect id (the LLM-assigned tool call id) you must pass back.
+- `request.trigger.attempt` — the current retry attempt; pass it back unchanged.
 
-Capture the ids *before* you return, since the worker decision ends as soon as `execute` returns.
+Capture the ids *before* `execute` returns, since the worker decision ends as soon as it does. If the kick-off itself throws, the loop reports it as an `effect.error` like any other tool failure — a broken enqueue fails fast instead of hanging until the deadline.
 
 What happens on the wire:
 
 1. The LLM emits a tool call. The engine records it as pending and dispatches an `effect.execute` trigger to your worker.
-2. Your `execute` returns `ctx.defer()`. The worker emits no `effect.result`, so the engine leaves the tool call pending.
-3. Later — minutes, hours, however long — the external work completes. You call `submitToolCallResult({...})`. The engine treats it exactly like a synchronous tool return: fires an `effect.settled` trigger, and the loop issues the next `call.llm` once every pending result is in.
+2. Your `execute` starts the work; because the tool is `deferred`, the worker emits no `effect.result`, so the engine leaves the tool call pending.
+3. Later — minutes, hours, however long — the external work completes. You call `settleEffect({...})`. The engine treats it exactly like a synchronous tool return: fires an `effect.settled` trigger, and the loop issues the next `call.llm` once every pending result is in.
 
-`submitToolCallResult` is available on every flavor of client, so the callback can come from wherever finishes the work. To report a failure instead, pass `error` (and optional `retryable`) in place of `result`. If you never call it, the tool stays pending forever — set a `retry` policy (with a `timeout_secs`) on the tool so the engine eventually fails the call and the loop sees an `effect.settled` with `ok: false`.
+`settleEffect` is available on every flavor of client, so the callback can come from wherever finishes the work. To report a failure instead, pass `error` (and optional `retryable`) in place of `result`. If you never call it, the tool stays pending forever — set a `retry` policy (with a `timeout_secs`) on the tool so the engine eventually fails the call and the loop sees an `effect.settled` with `ok: false`.
 
 Full runnable version: [`examples/deferred-tool`](https://github.com/substructureai/substructure/tree/main/examples/deferred-tool).
 
 ### Client (frontend) tools
 
-A tool with `handler: "client"` runs in the browser, not the worker. The engine routes the call to the frontend, which completes it via `submitToolCallResult`. The worker never runs `execute`, so it's optional:
+A tool with `handler: "client"` runs in the browser, not the worker. The engine routes the call to the frontend, which completes it via `settleEffect`. The worker never runs `execute`, so it's optional:
 
 ```ts
 const setTheme = tool({
@@ -172,7 +171,7 @@ There is no SDK-held tool state. State lives in one of two places, and you choos
 
 ### In your own store
 
-Tools reach their store directly through `ctx`. Key it by `ctx.sessionId` (per conversation) or `ctx.request.identity.id` (per user) — whichever scope you want. This keeps large or sensitive state entirely in your infrastructure; only the conversation tree (owned by the engine) and whatever you put on the wire ever leave it.
+Tools reach their store directly through the decision request. Key it by `request.session_id` (per conversation) or `request.identity.id` (per user) — whichever scope you want. This keeps large or sensitive state entirely in your infrastructure; only the conversation tree (owned by the engine) and whatever you put on the wire ever leave it.
 
 ```ts
 const addTodo = tool({
@@ -183,9 +182,9 @@ const addTodo = tool({
     properties: { title: { type: "string" } },
     required: ["title"],
   },
-  execute: async (args, ctx) => {
+  execute: async (args, request) => {
     const { title } = JSON.parse(args);
-    const userId = ctx.request.identity.id;
+    const userId = request.identity.id;
     const data = await db.loadTodos(userId);
     const item = { id: crypto.randomUUID(), title, done: false };
     data.items.push(item);
@@ -195,7 +194,7 @@ const addTodo = tool({
 });
 ```
 
-Swap `db` for Postgres, Redis, S3, or a Durable Object — the agent doesn't change. The [`cloudflare-worker`](https://github.com/substructureai/substructure/tree/main/examples/cloudflare-worker) example keys a Durable Object by `ctx.sessionId`; [`hybrid-state`](https://github.com/substructureai/substructure/tree/main/examples/hybrid-state) keys a file store by user id so a todo list follows the user across sessions.
+Swap `db` for Postgres, Redis, S3, or a Durable Object — the agent doesn't change. The [`cloudflare-worker`](https://github.com/substructureai/substructure/tree/main/examples/cloudflare-worker) example keys a Durable Object by `request.session_id`; [`hybrid-state`](https://github.com/substructureai/substructure/tree/main/examples/hybrid-state) keys a file store by user id so a todo list follows the user across sessions.
 
 ### On the wire (custom `decide`)
 
@@ -366,7 +365,7 @@ The client also exposes admin APIs: `listSessions`, `getSession`, and `sessionEv
 
 ### Frontend client
 
-`sub.frontend.client({ token })` is the browser-side counterpart. The shape mirrors the backend client (`startTurn`, `stream`, `turnResult`, `submitToolCallResult`), but it authenticates with a short-lived user token instead of an API key, so it's safe to use in code shipped to a browser, a mobile app, or any other untrusted environment. **Never ship an API key to a client.**
+`sub.frontend.client({ token })` is the browser-side counterpart. The shape mirrors the backend client (`startTurn`, `stream`, `turnResult`, `settleEffect`), but it authenticates with a short-lived user token instead of an API key, so it's safe to use in code shipped to a browser, a mobile app, or any other untrusted environment. **Never ship an API key to a client.**
 
 Reach for the frontend client when:
 
@@ -507,5 +506,5 @@ See [`examples/`](https://github.com/substructureai/substructure/tree/main/examp
 - `state-hydration` — state on the wire: a custom `decide` that runs a `toolLoop` against `worker_state`.
 - `tool-approval` — a custom `decide` that gates real shell commands behind a `client.action` approval.
 - `plan-mode` — a modal agent: a custom `decide` that switches model/prompt/tools by mode and forks a branch to execute.
-- `deferred-tool` — async tool call: `execute` returns `ctx.defer()`, the result is posted later via `submitToolCallResult`.
+- `deferred-tool` — async tool call: `deferred: true` makes `execute` a kick-off; the result is posted later via `settleEffect`.
 - `frontend-tool` — chat UI where tools run in the browser (geolocation, theme). Also demonstrates `stream: true` — the assistant message renders token-by-token from `llm.token.delta` events.

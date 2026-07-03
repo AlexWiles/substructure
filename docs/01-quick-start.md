@@ -87,9 +87,9 @@ function todoTools(namespace: DurableObjectNamespace<AgentState>) {
       properties: { title: { type: "string" } },
       required: ["title"],
     },
-    execute: async (args, ctx) => {
+    execute: async (args, request) => {
       const { title } = JSON.parse(args);
-      const stub = namespace.getByName(ctx.sessionId);
+      const stub = namespace.getByName(request.session_id);
       const state = await stub.getState();
       await stub.setState({ items: [...state.items, { title }] });
       return JSON.stringify({ added: title });
@@ -100,8 +100,8 @@ function todoTools(namespace: DurableObjectNamespace<AgentState>) {
     name: "list_todos",
     description: "List all todos",
     parameters: { type: "object", properties: {} },
-    execute: async (_args, ctx) => {
-      const stub = namespace.getByName(ctx.sessionId);
+    execute: async (_args, request) => {
+      const stub = namespace.getByName(request.session_id);
       return JSON.stringify((await stub.getState()).items);
     },
   });
@@ -125,7 +125,7 @@ export default {
 };
 ```
 
-Each tool is a pure function; it reaches its store (the Durable Object, keyed by `ctx.sessionId`) directly through `ctx`. There is no SDK-held tool state.
+Each tool is a pure function; it reaches its store (the Durable Object, keyed by `request.session_id`) directly through the decision request. There is no SDK-held tool state.
 
 ## 5. Configure Wrangler
 

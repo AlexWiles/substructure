@@ -10,15 +10,17 @@ same version.
 
 ## [Unreleased]
 
-### Removed
-
-- **Breaking (SDK):** dropped deferred tool execution from the default tool
-  loop. Worker tools no longer return `ctx.defer()` / `DEFERRED` to complete
-  out-of-band; `execute` must return a result string. The `DEFERRED` sentinel,
-  `Deferred` type, and `ToolExecutionContext.defer` are gone. Out-of-band
-  completion via `submitToolCallResult` remains for client-handled tools.
-
 ### Changed
+
+- **Breaking (SDK):** `ToolExecutionContext` is gone — a tool's
+  `execute(args, request)` now receives the `DecisionRequest` it runs under
+  (`request.session_id`, `request.identity`, and the `effect.execute` trigger's
+  `id`/`attempt` replace `ctx.sessionId`/`ctx.toolCallId`/`ctx.attempt`). The
+  `ctx.defer()` / `DEFERRED` sentinel is replaced by `deferred: true` on the
+  tool: `execute` becomes a kick-off — it runs to start the work, its return
+  value is ignored, the loop emits no result action, and the call settles
+  out-of-band via `settleEffect` (a throwing kick-off still reports
+  `effect.error`). Client-handled tools may omit `execute` entirely.
 
 - **Breaking (wire):** the decision protocol now speaks the `Effect` envelope
   everywhere — every message about an effect carries the same `(kind, id)` pair
@@ -31,11 +33,32 @@ same version.
   as tool results. Actions: the four `return.*` actions collapse into
   `effect.result { kind, id, attempt, result | response }` and a kind-uniform
   `effect.error { kind, id, attempt, error, retryable, code?, detail? }`;
-  `call.tool` names its effect with `id` (was `tool_call_id`). The out-of-band
-  tool-result endpoints accept the same `effect.result`/`effect.error` shapes
-  (`kind` must be `"tool_call"`). `truncated` and the LLM usage/cost
-  passthrough are unchanged inside the llm outcome. No backwards compatibility:
-  workers must speak the new protocol.
+  `call.tool` names its effect with `id` (was `tool_call_id`), and so does
+  `call.llm` (see the parallel-LLM entry below). The out-of-band settle
+  endpoints accept the same `effect.result`/`effect.error` shapes. `truncated`
+  and the LLM usage/cost passthrough are unchanged inside the llm outcome. No
+  backwards compatibility: workers must speak the new protocol.
+- **Breaking (wire/SDK):** `call.llm` requires an `id` (the effect id you name,
+  like `call.tool`), and the single-in-flight-LLM restriction is gone. A worker
+  may fan out N `call.llm` actions in one decision; each settles independently as
+  its own `effect.settled { kind: "llm_call" }`, in completion order. Reusing a
+  pending/completed id is an idempotent no-op (redelivery-safe), so each logical
+  call must supply a fresh id. The SDK default loop's `ask()` mints one for you.
+  The engine still executes a session's `handler: "server"` calls one at a time
+  (a deliberate bound on per-session provider pressure); worker-handled calls
+  settled out-of-band are the path to wall-clock overlap.
+- **Breaking (wire):** the out-of-band settle endpoint is renamed
+  `POST /api/{machine,client}/sessions/{id}/tool-call-results` →
+  `POST /api/{machine,client}/sessions/{id}/effects/settle`. The worker
+  (machine) surface now also settles worker-handled `kind: "llm_call"` effects —
+  the sanctioned path to parallel worker-handled execution; engine-handled calls
+  are never externally settleable. The client surface stays `tool_call`-only.
+- **Breaking (API):** `Runtime::submit_tool_call_result` →
+  `Runtime::settle_effect` (`SubmitToolCallResultInput` → `SettleEffectInput`,
+  `SubmitToolCallResult` → `EffectSettlement`); the napi method and every SDK
+  client method `submitToolCallResult` → `settleEffect` (args gain `kind`,
+  `toolCallId` → `id`); `SessionError::ToolCall{NotFound,NotPending,
+  AttemptMismatch,WrongHandler}` → `Effect*`.
 - **Breaking (wire):** the worker decision request's session owner field is now
   `identity` (previously serialized as `owner`, contradicting the SDK types and
   docs which always said `identity`).

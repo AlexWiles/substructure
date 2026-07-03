@@ -5,11 +5,11 @@ import type {
     MintClientTokenRequest,
     MintClientTokenResponse,
     StreamSessionEventsParams,
+    SettleEffectRequest,
+    SettleEffectResponse,
     SubmitClientPayloadResponse,
     SubmitRequest,
     SubmitResponse,
-    SubmitToolCallResultRequest,
-    SubmitToolCallResultResponse,
     WorkerAuthOptions,
 } from "./types";
 
@@ -31,12 +31,12 @@ export class WorkerClient extends BaseClient {
         });
     }
 
-    async submitToolCallResult(
+    async settleEffect(
         sessionId: string,
-        request: SubmitToolCallResultRequest,
+        request: SettleEffectRequest,
         auth?: WorkerAuthOptions,
-    ): Promise<SubmitToolCallResultResponse> {
-        return this.post(`/api/machine/sessions/${sessionId}/tool-call-results`, request, {
+    ): Promise<SettleEffectResponse> {
+        return this.post(`/api/machine/sessions/${sessionId}/effects/settle`, request, {
             headers: buildWorkerAuthHeaders(auth),
         });
     }

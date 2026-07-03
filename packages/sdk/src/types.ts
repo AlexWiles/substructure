@@ -277,7 +277,11 @@ export type EffectResultPayload = { kind: "tool_call"; result: string } | { kind
 
 export type WorkerAction =
     | {
+          /** `id` names the effect; its outcome comes back as an `effect.settled`
+           *  trigger with the same id. Reusing a pending/completed id is an
+           *  idempotent no-op, so each logical call must supply a fresh one. */
           type: "call.llm";
+          id: string;
           request: LlmRequest;
           stream?: boolean;
           retry?: RetryPolicy;
@@ -309,18 +313,24 @@ export type WorkerAction =
     | { type: "interrupt"; interrupt_id?: string; reason: string; payload?: unknown }
     | { type: "done"; data: unknown };
 
-export type SubmitToolCallResultRequest =
+/** The settle body — an `effect.result` or `effect.error` action, verbatim. The
+ *  worker surface accepts both kinds (worker-handled llm calls included); the
+ *  client surface only ever sends `kind: "tool_call"`. */
+export type SettleEffectRequest =
     | { type: "effect.result"; kind: "tool_call"; id: string; result: string; attempt: number }
+    | { type: "effect.result"; kind: "llm_call"; id: string; response: LlmResponse; attempt: number }
     | {
           type: "effect.error";
-          kind: "tool_call";
+          kind: WorkKind;
           id: string;
           error: string;
           retryable: boolean;
           attempt: number;
+          code?: string;
+          detail?: unknown;
       };
 
-export interface SubmitToolCallResultResponse {
+export interface SettleEffectResponse {
     ok: boolean;
     error?: string;
 }
@@ -345,47 +355,78 @@ export interface ResumeInterruptResponse {
     ok: boolean;
 }
 
-export interface SubmitToolCallResultTarget {
+/** Which effect to settle, on which session, at which attempt. `id` is the
+ *  effect id (a tool call id or an llm call id). */
+export interface SettleEffectTarget {
     sessionId: string;
-    toolCallId: string;
+    id: string;
     attempt: number;
 }
 
-export interface SubmitToolCallSuccess {
+/** Settle a `tool_call` with its result string. */
+export interface SettleToolResult {
+    kind?: "tool_call";
     result: string;
+    response?: never;
     error?: never;
     retryable?: never;
 }
 
-export interface SubmitToolCallFailure {
+/** Settle an `llm_call` with its response. */
+export interface SettleLlmResult {
+    kind: "llm_call";
+    response: LlmResponse;
+    result?: never;
+    error?: never;
+    retryable?: never;
+}
+
+/** Fail an effect of either kind. */
+export interface SettleEffectFailure {
+    kind?: WorkKind;
     error: string;
     retryable?: boolean;
     result?: never;
+    response?: never;
 }
 
 /**
- * Outcome of an out-of-band tool call completion: either a successful result
- * or a failure. The `never`-typed alternates make this a discriminated union,
- * so passing both — or neither — is a compile error.
+ * Outcome of an out-of-band settlement: a tool result, an llm response, or a
+ * failure. The `never`-typed alternates make this a discriminated union, so
+ * mixing fields from more than one shape is a compile error.
  */
-export type SubmitToolCallResultOutcome = SubmitToolCallSuccess | SubmitToolCallFailure;
+export type SettleEffectOutcome = SettleToolResult | SettleLlmResult | SettleEffectFailure;
 
-export type SubmitToolCallResultArgs = SubmitToolCallResultTarget & SubmitToolCallResultOutcome;
+export type SettleEffectArgs = SettleEffectTarget & SettleEffectOutcome;
 
-export function toSubmitToolCallResultRequest(args: SubmitToolCallResultArgs): SubmitToolCallResultRequest {
+/** The tool-call-only outcome the frontend/user surface accepts — clients
+ *  answer client tools, never model calls, so `kind: "llm_call"` is unexpressible. */
+export type SettleToolCallOutcome = SettleToolResult | (SettleEffectFailure & { kind?: "tool_call" });
+export type SettleToolCallArgs = SettleEffectTarget & SettleToolCallOutcome;
+
+export function toSettleEffectRequest(args: SettleEffectArgs): SettleEffectRequest {
     if (args.result !== undefined) {
         return {
             type: "effect.result",
             kind: "tool_call",
-            id: args.toolCallId,
+            id: args.id,
             result: args.result,
+            attempt: args.attempt,
+        };
+    }
+    if (args.response !== undefined) {
+        return {
+            type: "effect.result",
+            kind: "llm_call",
+            id: args.id,
+            response: args.response,
             attempt: args.attempt,
         };
     }
     return {
         type: "effect.error",
-        kind: "tool_call",
-        id: args.toolCallId,
+        kind: args.kind ?? "tool_call",
+        id: args.id,
         error: args.error,
         retryable: args.retryable ?? false,
         attempt: args.attempt,

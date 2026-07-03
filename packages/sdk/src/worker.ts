@@ -16,12 +16,14 @@ export interface NativeRuntime {
         identityJson: string,
         turnId?: string,
     ): Promise<{ sessionId: string; turnId: string }>;
-    submitToolCallResult(
+    settleEffect(
         sessionId: string,
         tenantId: string,
-        toolCallId: string,
+        kind: string,
+        id: string,
         attempt: number,
         resultJson: string | undefined,
+        responseJson: string | undefined,
         errorMessage: string | undefined,
         retryable: boolean | undefined,
     ): Promise<void>;

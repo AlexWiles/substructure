@@ -6,9 +6,9 @@ export const AGENT_ID = "todo-agent";
 
 const sub = new Substructure();
 
-// Every tool here is a frontend (client-handled) tool: `handler: "client"` +
-// `ctx.defer()` suspends the turn so the browser executes it against the shared
-// to-do store. The matching executors live in each chat client.
+// Every tool here is a frontend (client-handled) tool: `handler: "client"` with
+// no `execute` — the engine suspends the turn and the browser executes it against
+// the shared to-do store. The matching executors live in each chat client.
 const addTodo = tool({
     name: "add_todo",
     description: "Add a task to the user's on-screen to-do list. Runs in the user's browser.",

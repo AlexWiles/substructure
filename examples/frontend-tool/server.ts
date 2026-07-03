@@ -6,11 +6,11 @@
 // Architecture:
 //   browser ──(SSE)──> substructure (:9000) ──(http)──> this worker (:3333)
 //
-// The worker registers two tools, but their `execute` returns
-// `ctx.defer()`. The engine still emits `tool.call.requested` events,
-// which the browser sees via the frontend client's SSE stream; it
-// executes the tool locally and posts the result back with
-// `submitToolCallResult`. The agent resumes as if the tool had returned
+// The worker registers two tools with `handler: "client"` and no
+// `execute`. The engine never asks the worker to run them — it emits
+// `tool.call.requested` events, which the browser sees via the frontend
+// client's SSE stream; it executes the tool locally and posts the result
+// back with `settleEffect`. The agent resumes as if the tool had returned
 // synchronously.
 
 import { serve } from "@hono/node-server";
@@ -22,15 +22,14 @@ const sub = new Substructure();
 
 // `handler: "client"` tells the engine this tool is completed by the
 // browser. The worker is never asked to execute it; the SDK's
-// `submitToolCallResult` call from the frontend client delivers the
-// result. `execute` is required by the type but never runs.
+// `settleEffect` call from the frontend client delivers the
+// result, so a client tool needs no `execute` at all.
 const getUserLocation = tool({
     name: "get_user_location",
     description:
         "Get the user's current latitude and longitude from their browser via geolocation. Requires user permission.",
     parameters: { type: "object", properties: {}, required: [] },
     handler: "client",
-    execute: (_args, ctx) => ctx.defer(),
 });
 
 const setTheme = tool({
@@ -45,7 +44,6 @@ const setTheme = tool({
         required: ["background", "accent"],
     },
     handler: "client",
-    execute: (_args, ctx) => ctx.defer(),
 });
 
 const browserAgent = agent({

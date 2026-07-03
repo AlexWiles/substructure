@@ -1,8 +1,8 @@
-// Deferred (async) tool call: the tool returns `DEFERRED` to tell the
-// worker not to emit any result action right now. A `setTimeout` later
-// calls `embedded.submitToolCallResult(...)`, which the engine routes
-// back into the session as an `effect.settled` trigger — and the agent
-// resumes.
+// Deferred (async) tool call: `deferred: true` makes `execute` a kick-off — it
+// runs to start the work, but the loop emits no result action, so the engine
+// leaves the tool call pending. A `setTimeout` later calls
+// `embedded.settleEffect(...)`, which the engine routes back into the session
+// as an `effect.settled` trigger — and the agent resumes.
 //
 // This is the pattern for tools that kick off real async work (webhooks,
 // long jobs, human approvals) where the result arrives out-of-band.
@@ -20,22 +20,23 @@ const wait = tool({
         properties: { seconds: { type: "number" } },
         required: ["seconds"],
     },
-    execute: (args, ctx) => {
+    deferred: true,
+    execute: (args, request) => {
         const { seconds } = JSON.parse(args) as { seconds: number };
-        const ms = Math.max(0, seconds) * 1000;
+        if (request.trigger.type !== "effect.execute") throw new Error("wait ran outside a tool call");
+        const { id, attempt } = request.trigger;
+        const sessionId = request.session_id;
 
         setTimeout(() => {
             embedded
-                .submitToolCallResult({
-                    sessionId: ctx.sessionId,
-                    toolCallId: ctx.toolCallId,
-                    attempt: ctx.attempt,
+                .settleEffect({
+                    sessionId,
+                    id,
+                    attempt,
                     result: JSON.stringify({ waited_seconds: seconds }),
                 })
-                .catch((err) => console.error("submitToolCallResult failed:", err));
-        }, ms);
-
-        return ctx.defer();
+                .catch((err) => console.error("settleEffect failed:", err));
+        }, Math.max(0, seconds) * 1000);
     },
 });
 

@@ -10,6 +10,7 @@ use uuid::Uuid;
 use crate::owner::SessionOwner;
 use crate::session::command::SessionError;
 use crate::session::decision::ClientPayload;
+use crate::session::decision::{EffectResultPayload, WorkKind};
 use crate::session::events::MessageTree;
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use crate::transport::ag_ui::snapshot::snapshot_events;
@@ -17,14 +18,14 @@ use crate::transport::ag_ui::translator::run_ag_ui_translation;
 use crate::transport::ag_ui::types::RunAgentInput;
 use crate::transport::session_sse::merge_session_stream;
 use crate::{
-    Caller, InterruptSessionInput, ResumeInterruptInput, RuntimeError, SubmitClientPayload,
-    SubmitToolCallResult, SubmitToolCallResultInput,
+    Caller, EffectSettlement, InterruptSessionInput, ResumeInterruptInput, RuntimeError,
+    SettleEffectInput, SubmitClientPayload,
 };
 
 use super::types::{
     InterruptSessionRequest, InterruptSessionResponse, ResumeInterruptRequest,
-    ResumeInterruptResponse, StreamSessionEventsParams, SubmitClientPayloadRequest,
-    SubmitClientPayloadResponse, SubmitToolCallResultRequest, SubmitToolCallResultResponse,
+    ResumeInterruptResponse, SettleEffectRequest, SettleEffectResponse, StreamSessionEventsParams,
+    SubmitClientPayloadRequest, SubmitClientPayloadResponse,
 };
 use super::ClientHttpState;
 
@@ -61,20 +62,25 @@ pub async fn submit_client_payload(
     }
 }
 
-pub async fn submit_tool_call_result(
+pub async fn settle_effect(
     State(state): State<ClientHttpState>,
     Extension(caller): Extension<Caller>,
     Path(session_id): Path<String>,
-    Json(req): Json<SubmitToolCallResultRequest>,
+    Json(req): Json<SettleEffectRequest>,
 ) -> Response {
-    let (tool_call_id, attempt, result) = match req {
-        SubmitToolCallResultRequest::Result {
+    // The client surface settles client tools only; `kind` is always `tool_call`.
+    let (id, attempt, settlement) = match req {
+        SettleEffectRequest::Result {
             kind: _,
             id,
             result,
             attempt,
-        } => (id, attempt, SubmitToolCallResult::Result { result }),
-        SubmitToolCallResultRequest::Error {
+        } => (
+            id,
+            attempt,
+            EffectSettlement::Result(EffectResultPayload::ToolCall { result }),
+        ),
+        SettleEffectRequest::Error {
             kind: _,
             id,
             error,
@@ -83,24 +89,30 @@ pub async fn submit_tool_call_result(
         } => (
             id,
             attempt,
-            SubmitToolCallResult::Error { error, retryable },
+            EffectSettlement::Error {
+                error,
+                retryable,
+                code: None,
+                detail: None,
+            },
         ),
     };
 
     let result = state
         .runtime
-        .submit_tool_call_result(SubmitToolCallResultInput {
+        .settle_effect(SettleEffectInput {
             session_id,
-            tool_call_id,
+            kind: WorkKind::ToolCall,
+            id,
             attempt,
-            result,
+            settlement,
             caller,
-            span: crate::span::SpanContext::root().child("client_tool_call_result"),
+            span: crate::span::SpanContext::root().child("client_effect_settle"),
         })
         .await;
 
     match result {
-        Ok(()) => Json(SubmitToolCallResultResponse {
+        Ok(()) => Json(SettleEffectResponse {
             ok: true,
             error: None,
         })
@@ -109,7 +121,7 @@ pub async fn submit_tool_call_result(
             let (status, message) = runtime_error_status(&e);
             (
                 status,
-                Json(SubmitToolCallResultResponse {
+                Json(SettleEffectResponse {
                     ok: false,
                     error: Some(message),
                 }),
@@ -180,14 +192,14 @@ pub(crate) fn runtime_error_status(err: &RuntimeError) -> (StatusCode, String) {
         RuntimeError::Session(
             SessionError::MissingSubject
             | SessionError::SessionAccessDenied
-            | SessionError::ToolCallWrongHandler,
+            | SessionError::EffectWrongHandler,
         ) => StatusCode::FORBIDDEN,
-        RuntimeError::Session(SessionError::ToolCallNotFound | SessionError::SessionNotCreated) => {
+        RuntimeError::Session(SessionError::EffectNotFound | SessionError::SessionNotCreated) => {
             StatusCode::NOT_FOUND
         }
         RuntimeError::Session(
-            SessionError::ToolCallNotPending
-            | SessionError::ToolCallAttemptMismatch
+            SessionError::EffectNotPending
+            | SessionError::EffectAttemptMismatch
             | SessionError::SessionInterrupted
             | SessionError::TurnAlreadyActive { .. }
             | SessionError::TurnAlreadyCompleted { .. },
@@ -364,4 +376,33 @@ pub async fn ag_ui_connect(
     Sse::new(futures_util::stream::iter(frames))
         .keep_alive(KeepAlive::default())
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status_of(err: SessionError) -> StatusCode {
+        runtime_error_status(&RuntimeError::Session(err)).0
+    }
+
+    #[test]
+    fn effect_settle_errors_map_to_expected_statuses() {
+        assert_eq!(
+            status_of(SessionError::EffectNotFound),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            status_of(SessionError::EffectWrongHandler),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status_of(SessionError::EffectNotPending),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            status_of(SessionError::EffectAttemptMismatch),
+            StatusCode::CONFLICT
+        );
+    }
 }

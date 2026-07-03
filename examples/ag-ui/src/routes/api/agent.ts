@@ -6,9 +6,9 @@ import { createFileRoute } from "@tanstack/react-router";
 
 export const AGENT_ID = "todo-agent";
 
-// Every tool is a frontend (client-handled) tool: `handler: "client"` +
-// `ctx.defer()` suspends the turn so the browser runs it against the shared
-// to-do store. The matching executors live in each chat client.
+// Every tool is a frontend (client-handled) tool: `handler: "client"` with no
+// `execute` — the engine suspends the turn and the browser runs it against the
+// shared to-do store. The matching executors live in each chat client.
 const addTodo = tool({
     name: "add_todo",
     description: "Add a task to the user's on-screen to-do list. Runs in the user's browser.",
@@ -18,7 +18,6 @@ const addTodo = tool({
         required: ["title"],
     },
     handler: "client",
-    execute: (_args: string, ctx) => ctx.defer(),
 });
 
 const toggleTodo = tool({
@@ -35,7 +34,6 @@ const toggleTodo = tool({
         required: ["id"],
     },
     handler: "client",
-    execute: (_args: string, ctx) => ctx.defer(),
 });
 
 const removeTodo = tool({
@@ -47,7 +45,6 @@ const removeTodo = tool({
         required: ["id"],
     },
     handler: "client",
-    execute: (_args: string, ctx) => ctx.defer(),
 });
 
 const clearCompleted = tool({
@@ -55,7 +52,6 @@ const clearCompleted = tool({
     description: "Remove every completed task from the list. Runs in the user's browser.",
     parameters: { type: "object", properties: {} },
     handler: "client",
-    execute: (_args: string, ctx) => ctx.defer(),
 });
 
 const listTodos = tool({
@@ -65,7 +61,6 @@ const listTodos = tool({
         "Runs in the user's browser.",
     parameters: { type: "object", properties: {} },
     handler: "client",
-    execute: (_args: string, ctx) => ctx.defer(),
 });
 
 const todoAgent = agent({

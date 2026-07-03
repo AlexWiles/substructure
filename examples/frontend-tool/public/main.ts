@@ -6,13 +6,13 @@
 //   3. for-await over client.stream(scope):
 //        - on `tool.call.requested` for a tool we know how to run, execute
 //          it in the browser and POST the result back via
-//          submitToolCallResult — the agent resumes as if the tool had
+//          settleEffect — the agent resumes as if the tool had
 //          returned synchronously from the worker.
 //        - on `message.new` (assistant), render the message.
 //
-// The worker also gets the effect.execute trigger; its `execute` returns
-// ctx.defer() so no result action is emitted server-side and the engine
-// waits for the browser to deliver one.
+// The worker never runs these tools (`handler: "client"`, no `execute`);
+// the engine leaves each call pending and waits for the browser to
+// deliver the result.
 
 import Substructure, { isTokenDelta } from "@substructure.ai/sdk";
 
@@ -150,18 +150,18 @@ async function sendMessage(content: string) {
                 try {
                     const result = await tools[name](args);
                     append("tool", `← ${JSON.stringify(result)}`);
-                    await client.submitToolCallResult({
+                    await client.settleEffect({
                         sessionId: scope.sessionId,
-                        toolCallId: tool_call_id,
+                        id: tool_call_id,
                         attempt,
                         result: JSON.stringify(result),
                     });
                 } catch (err: any) {
                     const message = err?.message ?? String(err);
                     append("tool", `✗ ${message}`);
-                    await client.submitToolCallResult({
+                    await client.settleEffect({
                         sessionId: scope.sessionId,
-                        toolCallId: tool_call_id,
+                        id: tool_call_id,
                         attempt,
                         error: message,
                         retryable: false,

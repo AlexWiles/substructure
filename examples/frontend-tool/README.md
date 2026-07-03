@@ -10,7 +10,7 @@ Both are impossible from a backend worker. The tools are declared with
 `handler: "client"` so the engine never dispatches `effect.execute` to the
 worker — it just emits `tool.call.requested` on the session stream. The
 browser sees that event, executes the tool locally, and posts the result
-via `submitToolCallResult`. The agent resumes as if the tool had returned
+via `settleEffect`. The agent resumes as if the tool had returned
 synchronously.
 
 Auth is the standard browser pattern: the Hono server mints a

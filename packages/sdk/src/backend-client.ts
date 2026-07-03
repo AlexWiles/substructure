@@ -6,13 +6,13 @@ import type {
     Event,
     PersistedEvent,
     SessionScope,
+    SettleEffectArgs,
+    SettleEffectResponse,
     SubmitRequest,
     SubmitResponse,
-    SubmitToolCallResultArgs,
-    SubmitToolCallResultResponse,
     TurnResult,
 } from "./types";
-import { drainToTurnResult, persistedOnly, toSubmitToolCallResultRequest } from "./types";
+import { drainToTurnResult, persistedOnly, toSettleEffectRequest } from "./types";
 import { WorkerClient } from "./worker-client";
 
 export type {
@@ -88,8 +88,8 @@ export class BackendClient {
         return this.worker.submit(request);
     }
 
-    async submitToolCallResult(args: SubmitToolCallResultArgs): Promise<SubmitToolCallResultResponse> {
-        return this.worker.submitToolCallResult(args.sessionId, toSubmitToolCallResultRequest(args));
+    async settleEffect(args: SettleEffectArgs): Promise<SettleEffectResponse> {
+        return this.worker.settleEffect(args.sessionId, toSettleEffectRequest(args));
     }
 
     /** Fire-and-forget: enqueue a turn, return as soon as it's accepted. */

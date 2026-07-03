@@ -9,6 +9,7 @@ use tokio::task::JoinHandle;
 use tracing_subscriber::EnvFilter;
 
 use base64::Engine;
+use substructure_core::llm::LlmResponse;
 use substructure_core::owner::SessionOwner;
 use substructure_core::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use substructure_core::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
@@ -16,12 +17,11 @@ use substructure_core::providers::sqlite::{
     SqliteCheckpointStore, SqliteDb, SqliteEventStore, SqliteSessionIndexStore, SqliteWakeStore,
 };
 use substructure_core::providers::worker_queue::InMemoryWorkerQueue;
-use substructure_core::session::decision::ClientPayload;
+use substructure_core::session::decision::{ClientPayload, EffectResultPayload, WorkKind};
 use substructure_core::span::SpanContext as CoreSpanContext;
 use substructure_core::worker::{DequeueFilter, FailDecision, SubmitDecision};
 use substructure_core::{
-    Caller, Runtime, RuntimeConfig, SubmitClientPayload, SubmitToolCallResult,
-    SubmitToolCallResultInput,
+    Caller, EffectSettlement, Runtime, RuntimeConfig, SettleEffectInput, SubmitClientPayload,
 };
 
 /// Result returned by `submitPayload`.
@@ -305,49 +305,80 @@ impl EmbeddedRuntime {
         })
     }
 
-    /// Complete (or fail) a tool call out-of-band. Mirrors the HTTP
-    /// `POST /api/machine/sessions/{id}/tool-call-results` endpoint and
-    /// is the embedded counterpart to `BackendClient.submitToolCallResult`.
+    /// Settle an effect out-of-band. Mirrors the HTTP
+    /// `POST /api/machine/sessions/{id}/effects/settle` endpoint and is the
+    /// embedded counterpart to `BackendClient.settleEffect`. `kind` is
+    /// `"tool_call"` or `"llm_call"` and dictates the success payload: a
+    /// `tool_call` result is `resultJson` (a tool result string), an `llm_call`
+    /// result is `responseJson` (a JSON `LlmResponse`); either kind fails with
+    /// `errorMessage`. Supply exactly the one that matches.
     #[napi(
-        js_name = "submitToolCallResult",
-        ts_args_type = "sessionId: string, tenantId: string, toolCallId: string, attempt: number, resultJson: string | undefined, errorMessage: string | undefined, retryable: boolean | undefined"
+        js_name = "settleEffect",
+        ts_args_type = "sessionId: string, tenantId: string, kind: string, id: string, attempt: number, resultJson: string | undefined, responseJson: string | undefined, errorMessage: string | undefined, retryable: boolean | undefined"
     )]
-    pub async fn submit_tool_call_result(
+    pub async fn settle_effect(
         &self,
         session_id: String,
         tenant_id: String,
-        tool_call_id: String,
+        kind: String,
+        id: String,
         attempt: u32,
         result_json: Option<String>,
+        response_json: Option<String>,
         error_message: Option<String>,
         retryable: Option<bool>,
     ) -> Result<()> {
-        let result = match (result_json, error_message) {
-            (Some(result), None) => SubmitToolCallResult::Result { result },
-            (None, Some(error)) => SubmitToolCallResult::Error {
+        let kind = match kind.as_str() {
+            "tool_call" => WorkKind::ToolCall,
+            "llm_call" => WorkKind::LlmCall,
+            other => {
+                return Err(Error::from_reason(format!(
+                    "settleEffect: unknown kind {other:?}"
+                )));
+            }
+        };
+        let settlement = match (kind, result_json, response_json, error_message) {
+            (WorkKind::ToolCall, Some(result), None, None) => {
+                EffectSettlement::Result(EffectResultPayload::ToolCall { result })
+            }
+            (WorkKind::LlmCall, None, Some(response), None) => {
+                let response: LlmResponse = serde_json::from_str(&response).map_err(|e| {
+                    Error::from_reason(format!("settleEffect: invalid responseJson: {e}"))
+                })?;
+                EffectSettlement::Result(EffectResultPayload::LlmCall { response })
+            }
+            (_, None, None, Some(error)) => EffectSettlement::Error {
                 error,
                 retryable: retryable.unwrap_or(false),
+                code: None,
+                detail: None,
             },
-            (Some(_), Some(_)) => {
+            (WorkKind::ToolCall, _, Some(_), _) => {
                 return Err(Error::from_reason(
-                    "submitToolCallResult: provide either resultJson or errorMessage, not both",
+                    "settleEffect: a tool_call result is resultJson, not responseJson",
                 ));
             }
-            (None, None) => {
+            (WorkKind::LlmCall, Some(_), _, _) => {
                 return Err(Error::from_reason(
-                    "submitToolCallResult: provide resultJson or errorMessage",
+                    "settleEffect: an llm_call result is responseJson, not resultJson",
+                ));
+            }
+            _ => {
+                return Err(Error::from_reason(
+                    "settleEffect: provide exactly one of resultJson, responseJson, or errorMessage",
                 ));
             }
         };
 
         self.inner
-            .submit_tool_call_result(SubmitToolCallResultInput {
+            .settle_effect(SettleEffectInput {
                 session_id,
-                tool_call_id,
+                kind,
+                id,
                 attempt,
-                result,
+                settlement,
                 caller: Caller::System { tenant_id },
-                span: CoreSpanContext::root().child("napi_tool_call_result"),
+                span: CoreSpanContext::root().child("napi_effect_settle"),
             })
             .await
             .map_err(|e| Error::from_reason(e.to_string()))?;

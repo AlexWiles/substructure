@@ -54,9 +54,9 @@ export class EmbeddedRuntime {
     return this._native.submitPayload(sessionId, agentId, payloadJson, identityJson, turnId);
   }
 
-  submitToolCallResult(sessionId, tenantId, toolCallId, attempt, resultJson, errorMessage, retryable) {
-    return this._native.submitToolCallResult(
-      sessionId, tenantId, toolCallId, attempt, resultJson, errorMessage, retryable,
+  settleEffect(sessionId, tenantId, kind, id, attempt, resultJson, responseJson, errorMessage, retryable) {
+    return this._native.settleEffect(
+      sessionId, tenantId, kind, id, attempt, resultJson, responseJson, errorMessage, retryable,
     );
   }
 

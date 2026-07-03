@@ -184,8 +184,12 @@ pub enum EffectResultPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WorkerAction {
+    /// `id` names the effect; its outcome returns as an `effect.settled`
+    /// trigger with the same id. Reusing a `Pending`/`Completed` id is an
+    /// idempotent no-op, so each logical call must supply a fresh one.
     #[serde(rename = "call.llm")]
     CallLlm {
+        id: String,
         request: LlmRequest,
         #[serde(default)]
         stream: bool,

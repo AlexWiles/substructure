@@ -51,41 +51,49 @@ export interface NamedAgent<S = unknown> extends Agent<S> {
 
 // ── Tools ────────────────────────────────────────────────────────────────────
 
-export interface ToolExecutionContext {
-    sessionId: string;
-    toolCallId: string;
-    attempt: number;
-    /** The decision request — read `request.identity.id`, etc. */
-    request: DecisionRequest;
-}
-
 export type ToolResult = string | Promise<string>;
-export type ToolFn = (args: string, ctx: ToolExecutionContext) => ToolResult;
+/** `request` is the decision request the tool runs under — read `request.session_id`,
+ *  `request.identity.id`, or the `effect.execute` trigger (`request.trigger.id`,
+ *  `request.trigger.attempt`) it was dispatched from. */
+export type ToolFn = (args: string, request: DecisionRequest) => ToolResult;
+/** A deferred tool's `execute` only *starts* the work (enqueue a job, fire a
+ *  webhook); its return value is ignored. The call stays pending until
+ *  `settleEffect` delivers the result out-of-band. */
+export type DeferredToolFn = (args: string, request: DecisionRequest) => void | Promise<void>;
 
 export interface ToolDef {
     name: string;
     description: string;
     parameters: unknown;
-    execute: ToolFn;
+    execute: ToolFn | DeferredToolFn;
     retry?: RetryPolicy;
     /** "worker" (default) runs `execute` on the worker; "client" routes the call
-     *  to the frontend, which completes it via `submitToolCallResult` — the worker
+     *  to the frontend, which completes it via `settleEffect` — the worker
      *  never runs `execute` for a client tool. */
     handler?: ToolHandler;
+    /** A deferred tool's `execute` kicks off out-of-band work: the loop emits no
+     *  result action, the call stays pending, and the result arrives later via
+     *  `settleEffect`. Worker-handled only. */
+    deferred?: boolean;
 }
 
 // A tool returns its result string (call `JSON.stringify` yourself for structured
-// data). State, if any, lives in your own store — reach it through `ctx` (e.g.
-// keyed by `ctx.sessionId`). `handler` discriminates: "worker" (default) runs
+// data). State, if any, lives in your own store — reach it through `request` (e.g.
+// keyed by `request.session_id`). `handler` discriminates: "worker" (default) runs
 // `execute`; "client" completes in the browser, so `execute` is optional and
-// never runs on the worker.
+// never runs on the worker. `deferred: true` makes `execute` a kick-off: it runs,
+// its return value is ignored, and the call settles later via `settleEffect`.
 export function tool(
     config: {
         name: string;
         description: string;
         parameters: unknown;
         retry?: RetryPolicy;
-    } & ({ handler?: "worker"; execute: ToolFn } | { handler: "client"; execute?: ToolFn }),
+    } & (
+        | { handler?: "worker"; deferred?: false; execute: ToolFn }
+        | { handler?: "worker"; deferred: true; execute: DeferredToolFn }
+        | { handler: "client"; deferred?: never; execute?: ToolFn }
+    ),
 ): ToolDef {
     return {
         name: config.name,
@@ -98,6 +106,7 @@ export function tool(
             }),
         retry: config.retry,
         handler: config.handler,
+        deferred: config.deferred || undefined,
     };
 }
 

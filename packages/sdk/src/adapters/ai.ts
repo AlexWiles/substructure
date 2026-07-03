@@ -101,7 +101,7 @@ export function aiSdkTools(toolset: ToolSet, experimentalContext?: unknown): Too
         const execute = t.execute;
 
         // No `execute` means a client tool: the worker never runs it (the frontend
-        // completes it via `submitToolCallResult`), so this only satisfies the type.
+        // completes it via `settleEffect`), so this only satisfies the type.
         if (!execute) {
             return [
                 {
@@ -123,10 +123,10 @@ export function aiSdkTools(toolset: ToolSet, experimentalContext?: unknown): Too
                 name,
                 description,
                 parameters,
-                execute: async (args, ctx) => {
+                execute: async (args, request) => {
                     const input = args ? JSON.parse(args) : {};
                     const options = {
-                        toolCallId: ctx.toolCallId,
+                        toolCallId: request.trigger.type === "effect.execute" ? request.trigger.id : "",
                         messages: [] as ModelMessage[],
                         experimental_context: experimentalContext,
                     };

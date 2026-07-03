@@ -76,7 +76,7 @@ A single decision can return multiple actions: for example, several `call.tool` 
 
 Across decisions in a session, two things persist: the **transcript** (the conversation tree, owned by the engine) and any **worker state** you choose to keep. There is no SDK-held tool state — where your own state lives is a choice you make per agent:
 
-- **Your own store.** Tools are pure functions that reach a store directly through `ctx`, keyed by `ctx.sessionId` (per conversation) or `ctx.request.identity.id` (per user). Best for large state, sensitive data, or anything you want to query directly — it never leaves your infrastructure. See [State](./04-sdk.md#state) in the SDK docs.
+- **Your own store.** Tools are pure functions that reach a store directly through the decision request, keyed by `request.session_id` (per conversation) or `request.identity.id` (per user). Best for large state, sensitive data, or anything you want to query directly — it never leaves your infrastructure. See [State](./04-sdk.md#state) in the SDK docs.
 - **On the wire.** Keep small state in `worker_state` with a custom `decide`: the engine ships the decoded state in as `req.state` on every decision and persists whatever you return. Simple, no infrastructure required. See [State](./04-sdk.md#state).
 
 State is logically per-session. Two sessions for the same user are independent unless you explicitly link them.
@@ -91,7 +91,7 @@ You can think of a session as the event log plus the derived state from replayin
 
 ## Identity
 
-Every turn is submitted on behalf of an **identity**, an object with an `id` (your user id) and optional `metadata`. Identity is how the engine knows who a session belongs to. It flows through to your worker (`ctx.request.identity.id`) so your tools and handlers can scope behavior per user without trusting client-supplied data.
+Every turn is submitted on behalf of an **identity**, an object with an `id` (your user id) and optional `metadata`. Identity is how the engine knows who a session belongs to. It flows through to your worker (`request.identity.id`) so your tools and handlers can scope behavior per user without trusting client-supplied data.
 
 For browser clients, identity is baked into the short-lived token your backend mints; the browser can't change it.
 

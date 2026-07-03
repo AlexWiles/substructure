@@ -3,11 +3,11 @@ import type {
     Event,
     PersistedEvent,
     SessionScope,
-    SubmitToolCallResultArgs,
-    SubmitToolCallResultResponse,
+    SettleEffectResponse,
+    SettleToolCallArgs,
     TurnResult,
 } from "./types";
-import { drainToTurnResult, persistedOnly, toSubmitToolCallResultRequest } from "./types";
+import { drainToTurnResult, persistedOnly, toSettleEffectRequest } from "./types";
 import { UserClient } from "./user-client";
 
 export type { SessionScope, TurnResult } from "./types";
@@ -55,8 +55,9 @@ export class FrontendClient {
         return { sessionId: response.session_id, turnId: response.turn_id };
     }
 
-    async submitToolCallResult(args: SubmitToolCallResultArgs): Promise<SubmitToolCallResultResponse> {
-        return this.user.submitToolCallResult(args.sessionId, toSubmitToolCallResultRequest(args));
+    /** Settle a client-handled tool call out-of-band (result or failure). */
+    async settleEffect(args: SettleToolCallArgs): Promise<SettleEffectResponse> {
+        return this.user.settleEffect(args.sessionId, toSettleEffectRequest(args));
     }
 
     /** Pause a running session. The agent stops between decisions and the

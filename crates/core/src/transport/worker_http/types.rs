@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+use crate::llm::ErrorCode;
 use crate::runtime::session::decision::ClientPayload;
 use crate::runtime::session::message::Message;
-use crate::session::decision::WorkerAction;
+use crate::session::decision::{EffectResultPayload, WorkKind, WorkerAction};
 use crate::span::SpanContext;
 use crate::worker::WorkerState;
 
@@ -25,33 +26,33 @@ pub struct SubmitResponse {
     pub error: Option<String>,
 }
 
-/// This endpoint settles tool calls only; typing `kind` as a unit enum makes
-/// serde reject any other effect kind.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolCallKind {
-    ToolCall,
-}
-
+/// The worker settle body — an `effect.result` or `effect.error` action,
+/// verbatim. It settles both `tool_call` and `llm_call` effects (worker-handled
+/// calls only), reusing the decision vocabulary so there is no parallel type
+/// family: `Result` flattens `EffectResultPayload` (kind-tagged, carrying
+/// `result` for tools and `response` for llm), `Error` mirrors
+/// `WorkerAction::EffectError`.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
-pub enum SubmitToolCallResultRequest {
+pub enum SettleEffectRequest {
     #[serde(rename = "effect.result")]
     Result {
-        #[allow(dead_code)]
-        kind: ToolCallKind,
         id: String,
-        result: String,
         attempt: u32,
+        #[serde(flatten)]
+        result: EffectResultPayload,
     },
     #[serde(rename = "effect.error")]
     Error {
-        #[allow(dead_code)]
-        kind: ToolCallKind,
+        kind: WorkKind,
         id: String,
         error: String,
         retryable: bool,
         attempt: u32,
+        #[serde(default)]
+        code: Option<ErrorCode>,
+        #[serde(default)]
+        detail: Option<serde_json::Value>,
     },
 }
 
@@ -105,4 +106,38 @@ pub struct StreamSessionEventsParams {
     pub turn_id: Option<String>,
     #[serde(default)]
     pub sequence_after: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_surface_settles_an_llm_result() {
+        let body = r#"{"type":"effect.result","kind":"llm_call","id":"llm-1","attempt":0,"response":{"model":"m"}}"#;
+        let req: SettleEffectRequest =
+            serde_json::from_str(body).expect("llm_call result deserializes");
+        match req {
+            SettleEffectRequest::Result {
+                id,
+                result: EffectResultPayload::LlmCall { .. },
+                ..
+            } => assert_eq!(id, "llm-1"),
+            other => panic!("expected an llm_call result; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn worker_surface_settles_a_tool_error() {
+        let body = r#"{"type":"effect.error","kind":"tool_call","id":"tc-1","attempt":1,"error":"boom","retryable":true}"#;
+        let req: SettleEffectRequest =
+            serde_json::from_str(body).expect("tool_call error deserializes");
+        assert!(matches!(
+            req,
+            SettleEffectRequest::Error {
+                kind: WorkKind::ToolCall,
+                ..
+            }
+        ));
+    }
 }

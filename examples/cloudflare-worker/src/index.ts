@@ -3,7 +3,7 @@
 // at this Worker's URL.
 //
 // State is worker-managed: there is no SDK-held tool state. Each tool reaches
-// its own store (the Durable Object, keyed by `ctx.sessionId`) directly.
+// its own store (the Durable Object, keyed by `request.session_id`) directly.
 
 import { agent, tool, toolLoop, worker } from "@substructure.ai/sdk";
 import { DurableObject } from "cloudflare:workers";
@@ -52,9 +52,9 @@ function todoTools(namespace: DurableObjectNamespace<AgentState>) {
             properties: { title: { type: "string" } },
             required: ["title"],
         },
-        execute: async (args, ctx) => {
+        execute: async (args, request) => {
             const { title } = JSON.parse(args);
-            const stub = namespace.getByName(ctx.sessionId);
+            const stub = namespace.getByName(request.session_id);
             const state = await stub.getState();
             const item: Todo = { id: crypto.randomUUID().slice(0, 8), title, done: false };
             await stub.setState({ items: [...state.items, item] });
@@ -66,8 +66,8 @@ function todoTools(namespace: DurableObjectNamespace<AgentState>) {
         name: "list_todos",
         description: "List all todos",
         parameters: { type: "object", properties: {} },
-        execute: async (_args, ctx) => {
-            const stub = namespace.getByName(ctx.sessionId);
+        execute: async (_args, request) => {
+            const stub = namespace.getByName(request.session_id);
             const state = await stub.getState();
             return JSON.stringify(state.items);
         },

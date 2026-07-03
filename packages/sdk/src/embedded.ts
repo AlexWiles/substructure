@@ -9,7 +9,7 @@ import type {
     Event,
     PersistedEvent,
     SessionScope,
-    SubmitToolCallResultArgs,
+    SettleEffectArgs,
     TurnResult,
 } from "./types";
 import { drainToTurnResult, isTokenDelta } from "./types";
@@ -113,24 +113,41 @@ export class SubstructureEmbedded {
         return drainToTurnResult(this.stream(scope));
     }
 
-    /** Complete (or fail) a client-handled tool call out-of-band. */
-    async submitToolCallResult(args: SubmitToolCallResultArgs): Promise<void> {
+    /** Settle an effect out-of-band: a client-handled tool call, or a
+     *  worker-handled llm call run in the background (the deferred fan-out pattern). */
+    async settleEffect(args: SettleEffectArgs): Promise<void> {
         if (args.result !== undefined) {
-            await this.runtime.submitToolCallResult(
+            await this.runtime.settleEffect(
                 args.sessionId,
                 this.tenantId,
-                args.toolCallId,
+                "tool_call",
+                args.id,
                 args.attempt,
                 args.result,
                 undefined,
                 undefined,
+                undefined,
             );
-        } else {
-            await this.runtime.submitToolCallResult(
+        } else if (args.response !== undefined) {
+            await this.runtime.settleEffect(
                 args.sessionId,
                 this.tenantId,
-                args.toolCallId,
+                "llm_call",
+                args.id,
                 args.attempt,
+                undefined,
+                JSON.stringify(args.response),
+                undefined,
+                undefined,
+            );
+        } else {
+            await this.runtime.settleEffect(
+                args.sessionId,
+                this.tenantId,
+                args.kind ?? "tool_call",
+                args.id,
+                args.attempt,
+                undefined,
                 undefined,
                 args.error,
                 args.retryable,
