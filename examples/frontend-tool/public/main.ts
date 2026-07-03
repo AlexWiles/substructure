@@ -1,18 +1,5 @@
-// Runs in the browser. Bundled to public/main.js by esbuild.
-//
-// Flow per turn:
-//   1. POST /token  -> ask the backend to mint a short-lived JWT.
-//   2. sub.frontend.client({ token }).startTurn(...)
-//   3. for-await over client.stream(scope):
-//        - on `tool.call.requested` for a tool we know how to run, execute
-//          it in the browser and POST the result back via
-//          submitToolCallResult — the agent resumes as if the tool had
-//          returned synchronously from the worker.
-//        - on `message.new` (assistant), render the message.
-//
-// The worker also gets the tool.execute trigger; its `execute` returns
-// ctx.defer() so no result action is emitted server-side and the engine
-// waits for the browser to deliver one.
+// Runs in the browser (bundled to public/main.js by esbuild). On `tool.call.requested`, it runs the
+// client tool locally and posts the result via `settleEffect`; the worker never runs these tools.
 
 import Substructure, { isTokenDelta } from "@substructure.ai/sdk";
 
@@ -95,8 +82,7 @@ async function sendMessage(content: string) {
     input.disabled = true;
 
     let typing: HTMLDivElement | null = showTyping();
-    // Per-call partial bubble. Chunks may arrive out of order, so buffer
-    // by seq and flush contiguous prefix.
+    // Chunks may arrive out of order, so buffer by seq and flush the contiguous prefix.
     type Partial = { node: HTMLDivElement; chunks: Map<number, string>; nextSeq: number };
     const partials = new Map<string, Partial>();
 
@@ -150,18 +136,18 @@ async function sendMessage(content: string) {
                 try {
                     const result = await tools[name](args);
                     append("tool", `← ${JSON.stringify(result)}`);
-                    await client.submitToolCallResult({
+                    await client.settleEffect({
                         sessionId: scope.sessionId,
-                        toolCallId: tool_call_id,
+                        id: tool_call_id,
                         attempt,
                         result: JSON.stringify(result),
                     });
                 } catch (err: any) {
                     const message = err?.message ?? String(err);
                     append("tool", `✗ ${message}`);
-                    await client.submitToolCallResult({
+                    await client.settleEffect({
                         sessionId: scope.sessionId,
-                        toolCallId: tool_call_id,
+                        id: tool_call_id,
                         attempt,
                         error: message,
                         retryable: false,

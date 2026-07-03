@@ -6,12 +6,9 @@
 // decision and returns. The backend keeps the session + event log, so
 // this function can scale to zero between turns.
 
-import Substructure from "@substructure.ai/sdk";
+import { agent, tool, toolLoop, worker } from "@substructure.ai/sdk";
 
-const sub = new Substructure();
-const { agent } = sub;
-
-const getWeather = agent.tool({
+const getWeather = tool({
     name: "get_weather",
     description: "Get current weather for a city",
     parameters: {
@@ -25,13 +22,15 @@ const getWeather = agent.tool({
     },
 });
 
-const weatherAgent = agent({ id: "weather" })
-    .use(agent.messageHistory("Weather assistant. Be concise."))
-    .use(agent.tools([getWeather]))
-    .use(agent.llmToolLoop({ generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }) }));
-
-const worker = sub.worker({ agents: [weatherAgent] });
+const weatherAgent = agent({
+    name: "weather",
+    decide: toolLoop({
+        llm: { model: "anthropic/claude-sonnet-4-6" },
+        instructions: "Weather assistant. Be concise.",
+        tools: [getWeather],
+    }),
+});
 
 export default {
-    fetch: worker.fetchHandler({ signingSecret: process.env.SIGNING_SECRET }),
+    fetch: worker([weatherAgent]).fetch({ signingSecret: process.env.SIGNING_SECRET }),
 };

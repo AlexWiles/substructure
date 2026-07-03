@@ -1,40 +1,23 @@
-// Frontend tools example: a browser chat UI where the agent's tools run
-// in the *browser*, not the worker. The page asks navigator.geolocation
-// for the user's location and mutates document.documentElement for the
-// theme — neither possible from a backend tool.
-//
-// Architecture:
-//   browser ──(SSE)──> substructure (:9000) ──(http)──> this worker (:3333)
-//
-// The worker registers two tools, but their `execute` returns
-// `ctx.defer()`. The engine still emits `tool.call.requested` events,
-// which the browser sees via the frontend client's SSE stream; it
-// executes the tool locally and posts the result back with
-// `submitToolCallResult`. The agent resumes as if the tool had returned
-// synchronously.
+// Frontend tools example: the agent's tools run in the browser (geolocation, theme), not the worker.
+// Registered with `handler: "client"` and no `execute`; the browser runs each call and returns it via `settleEffect`.
 
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
-import Substructure from "@substructure.ai/sdk";
+import Substructure, { agent, tool, toolLoop, worker } from "@substructure.ai/sdk";
 import { Hono } from "hono";
 
 const sub = new Substructure();
-const { agent } = sub;
 
-// `handler: "client"` tells the engine this tool is completed by the
-// browser. The worker is never asked to execute it; the SDK's
-// `submitToolCallResult` call from the frontend client delivers the
-// result. `execute` is required by the type but never runs.
-const getUserLocation = agent.tool({
+// `handler: "client"`: the browser completes this tool via `settleEffect`, so no `execute` is needed.
+const getUserLocation = tool({
     name: "get_user_location",
     description:
         "Get the user's current latitude and longitude from their browser via geolocation. Requires user permission.",
     parameters: { type: "object", properties: {}, required: [] },
     handler: "client",
-    execute: (_args, ctx) => ctx.defer(),
 });
 
-const setTheme = agent.tool({
+const setTheme = tool({
     name: "set_theme",
     description: "Set the page's background and accent colors. Use valid CSS colors (hex, rgb, hsl, or named).",
     parameters: {
@@ -46,25 +29,22 @@ const setTheme = agent.tool({
         required: ["background", "accent"],
     },
     handler: "client",
-    execute: (_args, ctx) => ctx.defer(),
 });
 
-const browserAgent = agent({ id: "browser-assistant" })
-    .use(
-        agent.messageHistory(
+const browserAgent = agent({
+    name: "browser-assistant",
+    decide: toolLoop({
+        llm: { model: "anthropic/claude-sonnet-4-6", stream: true },
+        instructions:
             "You are a friendly assistant embedded in a web page. Two tools run in the user's browser: " +
-                "`get_user_location` reads the device's GPS (the user is prompted to allow it), and `set_theme` " +
-                "repaints the page. Use them when the user asks about where they are or how the page looks. " +
-                "Keep replies short and conversational.",
-        ),
-    )
-    .use(agent.tools([getUserLocation, setTheme]))
-    .use(
-        agent.llmToolLoop({ generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }), stream: true }),
-    );
+            "`get_user_location` reads the device's GPS (the user is prompted to allow it), and `set_theme` " +
+            "repaints the page. Use them when the user asks about where they are or how the page looks. " +
+            "Keep replies short and conversational.",
+        tools: [getUserLocation, setTheme],
+    }),
+});
 
-const worker = sub.worker({ agents: [browserAgent] });
-const agentHandler = worker.fetchHandler({ signingSecret: process.env.SIGNING_SECRET });
+const agentHandler = worker([browserAgent]).fetch({ signingSecret: process.env.SIGNING_SECRET });
 
 const substructureUrl = process.env.SUBSTRUCTURE_URL ?? "http://localhost:9000";
 const backend = sub.backend.client({
@@ -76,8 +56,7 @@ const app = new Hono();
 
 app.post("/agent", (c) => agentHandler(c.req.raw));
 
-// Mint a short-lived per-user token for the browser. In a real app you'd
-// authenticate the request first and bind `identity.id` to the logged-in user.
+// Mint a short-lived per-user token. In a real app, authenticate first and bind `identity.id` to the user.
 app.post("/token", async (c) => {
     const { token, expiresAt } = await backend.mintClientToken({
         identity: { id: "demo-user" },

@@ -1,24 +1,13 @@
-// Hybrid state: most state rides the wire as JSON, but the todo list lives
-// in its own database, keyed by user id. The
-// todoSlice middleware loads `todos` from the DB on the way in and saves
-// on the way out, then empties the field so it doesn't ride the wire.
-// Tools that opt into the slice see `state.todos` as if it were ordinary
-// in-memory data, and todos persist across all of a user's sessions.
-//
-// The "database" here is a directory of JSON files keyed by user id, so
-// the example has no infra to set up. Swap loadTodos/saveTodos for a real
-// client (Postgres, Durable Object, S3, ...) without touching the
-// middleware or the tools.
+// Hybrid state: the todo list lives in its own database keyed by user id, not in
+// SDK-held state; each tool reaches the store itself (here JSON files keyed by
+// `request.identity.id`), so todos persist across sessions and never ride the wire.
 
-import Substructure, { middleware } from "@substructure.ai/sdk";
+import { agent, tool, toolLoop } from "@substructure.ai/sdk";
 import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-
-const sub = new Substructure();
-const { agent } = sub;
 
 // ── Domain ──────────────────────────────────────────────────────────────────
 
@@ -29,9 +18,9 @@ type TodoData = { items: Todo[] };
 
 const DB_DIR = "./todo-db";
 
-async function loadTodos(userId: string): Promise<TodoData | null> {
+async function loadTodos(userId: string): Promise<TodoData> {
     const path = join(DB_DIR, `${userId}.json`);
-    if (!existsSync(path)) return null;
+    if (!existsSync(path)) return { items: [] };
     return JSON.parse(await readFile(path, "utf8")) as TodoData;
 }
 
@@ -40,30 +29,9 @@ async function saveTodos(userId: string, data: TodoData): Promise<void> {
     await writeFile(join(DB_DIR, `${userId}.json`), JSON.stringify(data, null, 2));
 }
 
-// ── Slice with built-in hydration ───────────────────────────────────────────
-// One middleware that both contributes the typed `todos` slice and persists
-// it to the database keyed by user id. On the way in we load; on the way
-// out we save, then empty the field so the wire stays small. The DB is the
-// source of truth and the key is fresh from identity on every decision, so
-// no bookkeeping has to live in state.
+// ── Tools (read and write the store directly, keyed by user) ────────────────
 
-const todoSlice = middleware<{ todos: TodoData }>({
-    state: { todos: { items: [] } },
-    handler: async (ctx, next) => {
-        const userId = ctx.request.identity.id;
-        ctx.state.todos = (await loadTodos(userId)) ?? { items: [] };
-
-        const res = await next(ctx);
-
-        await saveTodos(userId, ctx.state.todos);
-        ctx.state.todos = { items: [] };
-        return res;
-    },
-});
-
-// ── Tools (operate on the slice as if it lived in memory) ───────────────────
-
-const addTodo = agent.tool({
+const addTodo = tool({
     name: "add_todo",
     description: "Add a todo item",
     parameters: {
@@ -71,30 +39,34 @@ const addTodo = agent.tool({
         properties: { title: { type: "string" } },
         required: ["title"],
     },
-    state: todoSlice,
-    execute: (args, state, ctx) => {
+    execute: async (args, request) => {
         const { title } = JSON.parse(args);
+        const userId = request.identity.id;
+        const data = await loadTodos(userId);
         const item: Todo = { id: randomUUID().slice(0, 8), title, done: false };
-        state.todos.items.push(item);
+        data.items.push(item);
+        await saveTodos(userId, data);
         return JSON.stringify(item);
     },
 });
 
-const listTodos = agent.tool({
+const listTodos = tool({
     name: "list_todos",
     description: "List all todos",
     parameters: { type: "object", properties: {} },
-    state: todoSlice,
-    execute: (_args, state) => JSON.stringify(state.todos.items),
+    execute: async (_args, request) => JSON.stringify((await loadTodos(request.identity.id)).items),
 });
 
 // ── Agent ───────────────────────────────────────────────────────────────────
 
-const todoAgent = agent({ id: "todo" })
-    .use(todoSlice)
-    .use(agent.messageHistory("Concise todo assistant. Use tools to manage the list."))
-    .use(agent.tools([addTodo, listTodos]))
-    .use(agent.llmToolLoop({ generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }) }));
+const todoAgent = agent({
+    name: "todo",
+    decide: toolLoop({
+        llm: { model: "anthropic/claude-sonnet-4-6" },
+        instructions: "Concise todo assistant. Use tools to manage the list.",
+        tools: [addTodo, listTodos],
+    }),
+});
 
 // ── Run ─────────────────────────────────────────────────────────────────────
 
@@ -105,7 +77,7 @@ const embedded = await SubstructureEmbedded.create({
 });
 
 const scope = await embedded.startTurn({
-    agentId: todoAgent.agentId,
+    agentId: "todo",
     payload: {
         type: "message",
         message: {

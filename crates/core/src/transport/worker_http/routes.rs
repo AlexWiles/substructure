@@ -10,18 +10,17 @@ use uuid::Uuid;
 
 use crate::owner::SessionOwner;
 use crate::session::command::SessionError;
+use crate::session::decision::{EffectResultPayload, WorkKind};
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use crate::span::SpanContext;
 use crate::transport::session_sse::merge_session_stream;
 use crate::worker::SubmitDecision;
-use crate::{
-    Caller, RuntimeError, SubmitClientPayload, SubmitToolCallResult, SubmitToolCallResultInput,
-};
+use crate::{Caller, EffectSettlement, RuntimeError, SettleEffectInput, SubmitClientPayload};
 
 use super::types::{
-    MintClientTokenRequest, MintClientTokenResponse, StreamSessionEventsParams,
-    SubmitClientPayloadRequest, SubmitClientPayloadResponse, SubmitRequest, SubmitResponse,
-    SubmitToolCallResultRequest,
+    MintClientTokenRequest, MintClientTokenResponse, SettleEffectRequest,
+    StreamSessionEventsParams, SubmitClientPayloadRequest, SubmitClientPayloadResponse,
+    SubmitRequest, SubmitResponse,
 };
 use super::WorkerHttpState;
 
@@ -41,6 +40,7 @@ pub async fn submit(
             session_id: req.session_id,
             caller,
             decision_id: req.decision_id,
+            transcript: req.transcript,
             actions: req.actions,
             state: req.state,
             span,
@@ -106,43 +106,55 @@ pub async fn mint_client_token(
     }
 }
 
-pub async fn submit_tool_call_result(
+pub async fn settle_effect(
     State(state): State<WorkerHttpState>,
     Extension(caller): Extension<Caller>,
     Path(session_id): Path<String>,
-    Json(req): Json<SubmitToolCallResultRequest>,
+    Json(req): Json<SettleEffectRequest>,
 ) -> Response {
-    let (tool_call_id, attempt, result) = match req {
-        SubmitToolCallResultRequest::Result {
-            tool_call_id,
+    let (kind, id, attempt, settlement) = match req {
+        SettleEffectRequest::Result {
+            id,
+            attempt,
             result,
-            attempt,
-        } => (
-            tool_call_id,
-            attempt,
-            SubmitToolCallResult::Result { result },
-        ),
-        SubmitToolCallResultRequest::Error {
-            tool_call_id,
+        } => {
+            let kind = match &result {
+                EffectResultPayload::ToolCall { .. } => WorkKind::ToolCall,
+                EffectResultPayload::LlmCall { .. } => WorkKind::LlmCall,
+            };
+            (kind, id, attempt, EffectSettlement::Result(result))
+        }
+        SettleEffectRequest::Error {
+            kind,
+            id,
             error,
             retryable,
             attempt,
+            code,
+            detail,
         } => (
-            tool_call_id,
+            kind,
+            id,
             attempt,
-            SubmitToolCallResult::Error { error, retryable },
+            EffectSettlement::Error {
+                error,
+                retryable,
+                code,
+                detail,
+            },
         ),
     };
 
     let result = state
         .runtime
-        .submit_tool_call_result(SubmitToolCallResultInput {
+        .settle_effect(SettleEffectInput {
             session_id,
-            tool_call_id,
+            kind,
+            id,
             attempt,
-            result,
+            settlement,
             caller,
-            span: SpanContext::root().child("machine_tool_call_result"),
+            span: SpanContext::root().child("machine_effect_settle"),
         })
         .await;
 
@@ -172,14 +184,14 @@ pub(crate) fn runtime_error_status(err: &RuntimeError) -> (StatusCode, String) {
         RuntimeError::Session(
             SessionError::MissingSubject
             | SessionError::SessionAccessDenied
-            | SessionError::ToolCallWrongHandler,
+            | SessionError::EffectWrongHandler,
         ) => StatusCode::FORBIDDEN,
-        RuntimeError::Session(SessionError::ToolCallNotFound | SessionError::SessionNotCreated) => {
+        RuntimeError::Session(SessionError::EffectNotFound | SessionError::SessionNotCreated) => {
             StatusCode::NOT_FOUND
         }
         RuntimeError::Session(
-            SessionError::ToolCallNotPending
-            | SessionError::ToolCallAttemptMismatch
+            SessionError::EffectNotPending
+            | SessionError::EffectAttemptMismatch
             | SessionError::SessionInterrupted
             | SessionError::TurnAlreadyActive { .. }
             | SessionError::TurnAlreadyCompleted { .. },
@@ -297,6 +309,26 @@ mod tests {
         assert_eq!(
             status_of(SessionError::SessionAccessDenied),
             StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
+    fn effect_settle_errors_map_to_expected_statuses() {
+        assert_eq!(
+            status_of(SessionError::EffectNotFound),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            status_of(SessionError::EffectWrongHandler),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status_of(SessionError::EffectNotPending),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            status_of(SessionError::EffectAttemptMismatch),
+            StatusCode::CONFLICT
         );
     }
 }

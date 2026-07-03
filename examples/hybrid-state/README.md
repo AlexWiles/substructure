@@ -20,8 +20,8 @@ client to use Postgres, a Durable Object, S3, or anything else.
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
-pnpm install
-pnpm start
+npm install
+npm start
 ```
 
 Inspect what ended up where:

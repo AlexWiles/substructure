@@ -1,14 +1,12 @@
 # deferred-tool
 
-A tool that calls `ctx.defer()` and completes its result out-of-band via
-`submitToolCallResult`. This is the pattern for async tool calls: kick off
-real work (webhook, long job, human approval) inside `execute`, return
-`ctx.defer()`, and submit the result when it's ready.
-
-When `execute` returns `ctx.defer()`, the `tools` middleware emits no
-`return.tool.result` for that call. The worker submits zero actions for
-that `tool.execute` trigger, and the engine leaves the tool call pending
-until the result lands.
+A tool whose result arrives out-of-band via `settleEffect`. Declaring it with
+`deferred: true` makes `execute` a **kick-off**: it runs to start the real work
+(webhook, long job, human approval), its return value is ignored, and the loop
+emits **no result action** — so the engine leaves the tool call pending. When
+the work finishes, `settleEffect` delivers the result and the loop resumes as
+if the tool had returned synchronously. If the kick-off itself throws, the
+loop reports it as an `effect.error` like any other tool failure.
 
 This example runs the runtime in-process (`SubstructureEmbedded.create`), so a single
 file drives the whole demo.
@@ -17,8 +15,8 @@ file drives the whole demo.
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
-pnpm install
-pnpm start
+npm install
+npm start
 ```
 
 You'll see `tool.call.requested` fire immediately, a 3-second pause, then

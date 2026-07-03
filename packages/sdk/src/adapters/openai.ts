@@ -1,17 +1,13 @@
-// OpenAI adapter (`@substructure.ai/sdk/adapters/openai`). `openaiGenerate` is an
-// `LlmGenerator` backed by the Responses API; `OpenAIAgent` adapts an
-// `@openai/agents` Agent into a handler chain. Substructure owns the loop; each
-// `llm.request` runs one `responses.create` step.
+// OpenAI adapter: `openaiGenerate` is an `Llm` backed by the Responses API;
+// `openaiAgent` builds a `toolLoop` from an `@openai/agents` Agent.
 
-import { Agent, RunContext } from "@openai/agents";
 import type { ModelSettings, ModelSettingsToolChoice, Tool } from "@openai/agents";
+import { Agent, RunContext } from "@openai/agents";
 import OpenAI from "openai";
-
-import { llmToolLoop, messageHistory, tools } from "../middleware";
-import type { LlmGenerate, LlmGenerator, ToolDef, ToolExecutionContext } from "../middleware";
+import { toolLoop } from "../agent";
+import type { Llm, LlmGenerate, Agent as SdkAgent, ToolDef } from "../core";
+import type { LlmParams, LlmTokenDeltaInput, LlmTool, Message, ToolCall } from "../types";
 import { contentText } from "../types";
-import type { LlmTool, Message, StreamPart, ToolCall } from "../types";
-import type { MiddlewareFn, MiddlewareSource, Next } from "../worker";
 
 type ResponseInputItem = OpenAI.Responses.ResponseInputItem;
 type ResponseStreamEvent = OpenAI.Responses.ResponseStreamEvent;
@@ -29,11 +25,11 @@ export type OpenAIGenerateSettings = Omit<
     client?: OpenAI;
 };
 
-export function openaiGenerate(settings: OpenAIGenerateSettings): LlmGenerator {
+export function openaiGenerate(settings: OpenAIGenerateSettings): Llm {
     const client = settings.client ?? new OpenAI();
     const { client: _client, ...params } = settings;
 
-    const request: LlmGenerator["request"] = { model: String(settings.model) };
+    const request: LlmParams = { model: String(settings.model) };
     if (settings.temperature != null) request.temperature = settings.temperature;
     if (settings.max_output_tokens != null) request.max_completion_tokens = settings.max_output_tokens;
 
@@ -52,8 +48,8 @@ export function openaiGenerate(settings: OpenAIGenerateSettings): LlmGenerator {
         const callIdByItem = new Map<string, string>();
         let final: OpenAI.Responses.Response | undefined;
         for await (const event of stream) {
-            const part = toStreamPart(event, callIdByItem);
-            if (part) await ctx.emitDelta?.(part);
+            const delta = toDelta(event, callIdByItem);
+            if (delta) await ctx.emitDelta?.(delta);
             if (event.type === "response.completed") final = event.response;
         }
 
@@ -68,7 +64,7 @@ export function openaiGenerate(settings: OpenAIGenerateSettings): LlmGenerator {
                 }),
             );
         const content = outputText(output);
-        await ctx.emitDelta?.({ type: "finish", finishReason: toolCalls.length ? "tool_calls" : "stop" });
+        await ctx.emitDelta?.({ finish_reason: toolCalls.length ? "tool_calls" : "stop" });
         return {
             model: req.model,
             content: content || undefined,
@@ -78,7 +74,7 @@ export function openaiGenerate(settings: OpenAIGenerateSettings): LlmGenerator {
         };
     };
 
-    return { request, handler: "worker", stream: true, run };
+    return { ...request, handler: "worker", stream: true, run };
 }
 
 function modelTools(toolList: LlmTool[] | undefined): OpenAI.Responses.Tool[] {
@@ -113,30 +109,18 @@ interface ResolvedSettings {
     context?: unknown;
 }
 
-// Adapts an `@openai/agents` Agent (or `OpenAIAgentSettings`) into a handler chain.
-export class OpenAIAgent implements MiddlewareSource {
-    private readonly settings: ResolvedSettings;
-
-    constructor(input: OpenAIAgentSettings | Agent, options?: { client?: OpenAI; context?: unknown }) {
-        this.settings = input instanceof Agent ? fromAgent(input, options) : resolveSettings(input);
-    }
-
-    get tools(): Tool[] {
-        return this.settings.tools;
-    }
-
-    toMiddleware(): MiddlewareFn<unknown> {
-        return openAIAgent(this.settings);
-    }
-}
-
-// Factory for `OpenAIAgent` so an `@openai/agents` Agent can be converted without
-// a second `new`: `openaiAgent(new Agent({ ... }))`.
+/** Build a `toolLoop` from an `@openai/agents` Agent (or `OpenAIAgentSettings`),
+ *  using `openaiGenerate` as the model and the Agent's tools run by the worker. */
 export function openaiAgent(
     input: OpenAIAgentSettings | Agent,
     options?: { client?: OpenAI; context?: unknown },
-): OpenAIAgent {
-    return new OpenAIAgent(input, options);
+): SdkAgent {
+    const settings = input instanceof Agent ? fromAgent(input, options) : resolveSettings(input);
+    return toolLoop({
+        llm: openaiGenerate(toGenerateSettings(settings)),
+        instructions: settings.instructions,
+        tools: openAITools(settings.tools, settings.context),
+    });
 }
 
 function resolveSettings(settings: OpenAIAgentSettings): ResolvedSettings {
@@ -150,48 +134,28 @@ function resolveSettings(settings: OpenAIAgentSettings): ResolvedSettings {
     };
 }
 
-function fromAgent(agent: Agent, options?: { client?: OpenAI; context?: unknown }): ResolvedSettings {
-    if (typeof agent.model !== "string") {
+function fromAgent(oaiAgent: Agent, options?: { client?: OpenAI; context?: unknown }): ResolvedSettings {
+    if (typeof oaiAgent.model !== "string") {
         throw new Error(
-            "OpenAIAgent executes via the OpenAI Responses API and needs a model id string. Pass `model` as a string on the Agent, or use `new OpenAIAgent({ model, ... })`.",
+            "openaiAgent executes via the OpenAI Responses API and needs a model id string. Pass `model` as a string on the Agent, or use `openaiAgent({ model, ... })`.",
         );
     }
     const context = options?.context;
     const instructions =
-        typeof agent.instructions === "function"
+        typeof oaiAgent.instructions === "function"
             ? () =>
-                  (agent.instructions as (rc: RunContext, a: Agent) => string | Promise<string>)(
+                  (oaiAgent.instructions as (rc: RunContext, a: Agent) => string | Promise<string>)(
                       new RunContext(context),
-                      agent,
+                      oaiAgent,
                   )
-            : agent.instructions;
+            : oaiAgent.instructions;
     return {
         client: options?.client ?? new OpenAI(),
-        model: agent.model,
+        model: oaiAgent.model,
         instructions,
-        tools: agent.tools,
-        modelSettings: agent.modelSettings,
+        tools: oaiAgent.tools,
+        modelSettings: oaiAgent.modelSettings,
         context,
-    };
-}
-
-export function openAIAgent(settings: ResolvedSettings): MiddlewareFn<unknown> {
-    const generator = openaiGenerate(toGenerateSettings(settings));
-
-    const chain: MiddlewareFn<any, any>[] = [
-        messageHistory(settings.instructions),
-        tools(openAITools(settings.tools, settings.context)),
-        llmToolLoop({ generator }),
-    ];
-
-    return (ctx, next) => {
-        let fn: Next<unknown> = next;
-        for (let i = chain.length - 1; i >= 0; i--) {
-            const mw = chain[i];
-            const downstream = fn;
-            fn = (c) => mw(c, downstream);
-        }
-        return fn(ctx);
     };
 }
 
@@ -219,7 +183,7 @@ export function openAITools(toolset: Tool[], context?: unknown): ToolDef[] {
                 name: t.name,
                 description: t.description ?? "",
                 parameters: t.parameters,
-                execute: async (args: string, _state?: unknown, _ctx?: ToolExecutionContext) => {
+                execute: async (args) => {
                     const result = await t.invoke(new RunContext(context), args || "{}");
                     return typeof result === "string" ? result : JSON.stringify(result);
                 },
@@ -228,24 +192,20 @@ export function openAITools(toolset: Tool[], context?: unknown): ToolDef[] {
     });
 }
 
-export function toStreamPart(event: ResponseStreamEvent, callIdByItem: Map<string, string>): StreamPart | null {
+export function toDelta(event: ResponseStreamEvent, callIdByItem: Map<string, string>): LlmTokenDeltaInput | null {
     switch (event.type) {
         case "response.output_text.delta":
-            return { type: "text-delta", delta: event.delta };
+            return { text: event.delta };
         case "response.reasoning_summary_text.delta":
-            return { type: "reasoning-delta", delta: event.delta };
+            return { reasoning: event.delta };
         case "response.output_item.added":
             if (event.item.type === "function_call") {
                 callIdByItem.set(event.item.id ?? event.item.call_id, event.item.call_id);
-                return { type: "tool-input-start", toolCallId: event.item.call_id, toolName: event.item.name };
+                return { tool_calls: [{ id: event.item.call_id, name: event.item.name }] };
             }
             return null;
         case "response.function_call_arguments.delta":
-            return {
-                type: "tool-input-delta",
-                toolCallId: callIdByItem.get(event.item_id) ?? event.item_id,
-                inputTextDelta: event.delta,
-            };
+            return { tool_calls: [{ id: callIdByItem.get(event.item_id) ?? event.item_id, arguments: event.delta }] };
         default:
             return null;
     }

@@ -1,21 +1,13 @@
-// Deferred (async) tool call: the tool returns `DEFERRED` to tell the
-// worker not to emit any result action right now. A `setTimeout` later
-// calls `embedded.submitToolCallResult(...)`, which the engine routes
-// back into the session as a `tool.result` trigger — and the agent
-// resumes.
-//
-// This is the pattern for tools that kick off real async work (webhooks,
-// long jobs, human approvals) where the result arrives out-of-band.
+// Deferred tool: `deferred: true` makes `execute` a kick-off with no result action, so the
+// engine leaves the call pending until `settleEffect` routes the out-of-band result back as
+// an `effect.settled` trigger, the pattern for webhooks, long jobs, or human approvals.
 
-import Substructure from "@substructure.ai/sdk";
+import { agent, tool, toolLoop } from "@substructure.ai/sdk";
 import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
-
-const sub = new Substructure();
-const { agent } = sub;
 
 let embedded: SubstructureEmbedded;
 
-const wait = agent.tool({
+const wait = tool({
     name: "wait",
     description: "Wait for the given number of seconds, then return.",
     parameters: {
@@ -23,29 +15,34 @@ const wait = agent.tool({
         properties: { seconds: { type: "number" } },
         required: ["seconds"],
     },
-    execute: (args, ctx) => {
+    deferred: true,
+    execute: (args, request) => {
         const { seconds } = JSON.parse(args) as { seconds: number };
-        const ms = Math.max(0, seconds) * 1000;
+        if (request.trigger.type !== "effect.execute") throw new Error("wait ran outside a tool call");
+        const { id, attempt } = request.trigger;
+        const sessionId = request.session_id;
 
         setTimeout(() => {
             embedded
-                .submitToolCallResult({
-                    sessionId: ctx.sessionId,
-                    toolCallId: ctx.toolCallId,
-                    attempt: ctx.attempt,
+                .settleEffect({
+                    sessionId,
+                    id,
+                    attempt,
                     result: JSON.stringify({ waited_seconds: seconds }),
                 })
-                .catch((err) => console.error("submitToolCallResult failed:", err));
-        }, ms);
-
-        return ctx.defer();
+                .catch((err) => console.error("settleEffect failed:", err));
+        }, Math.max(0, seconds) * 1000);
     },
 });
 
-const waitAgent = agent({ id: "waiter" })
-    .use(agent.messageHistory("You wait for the requested number of seconds, then tell the user you're done."))
-    .use(agent.tools([wait]))
-    .use(agent.llmToolLoop({ generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }) }));
+const waitAgent = agent({
+    name: "waiter",
+    decide: toolLoop({
+        llm: { model: "anthropic/claude-sonnet-4-6" },
+        instructions: "You wait for the requested number of seconds, then tell the user you're done.",
+        tools: [wait],
+    }),
+});
 
 embedded = await SubstructureEmbedded.create({
     agents: [waitAgent],
@@ -53,7 +50,7 @@ embedded = await SubstructureEmbedded.create({
 });
 
 const scope = await embedded.startTurn({
-    agentId: waitAgent.agentId,
+    agentId: "waiter",
     payload: { type: "message", message: { role: "user", content: "Wait 3 seconds." } },
     identity: { tenant_id: "default", id: "demo" },
 });

@@ -1,21 +1,20 @@
-import { WorkerClient } from "./worker-client";
-import { AdminClient } from "./admin-client";
 import type { ListSessionsParams, SessionDetail, SessionEventsParams, SessionListResponse } from "./admin-client";
-import { drainToTurnResult, persistedOnly, toSubmitToolCallResultRequest } from "./types";
+import { AdminClient } from "./admin-client";
+import type { RequestOptions } from "./base";
 import type {
     ClientPayload,
     Event,
     PersistedEvent,
     SessionScope,
+    SettleEffectArgs,
+    SettleEffectResponse,
     SubmitRequest,
     SubmitResponse,
-    SubmitToolCallResultArgs,
-    SubmitToolCallResultResponse,
     TurnResult,
 } from "./types";
-import type { RequestOptions } from "./base";
+import { drainToTurnResult, persistedOnly, toSettleEffectRequest } from "./types";
+import { WorkerClient } from "./worker-client";
 
-export type { SessionScope, TurnResult } from "./types";
 export type {
     AggregateSort,
     AggregateSummary,
@@ -25,6 +24,7 @@ export type {
     SessionListItem,
     SessionListResponse,
 } from "./admin-client";
+export type { SessionScope, TurnResult } from "./types";
 
 export interface BackendClientOptions {
     apiKey: string;
@@ -61,7 +61,7 @@ export interface StreamOptions {
     sequenceAfter?: number;
     /** Include transient `llm.token.delta` events. Off by default, so `stream()`
      *  yields only persisted events. Deltas only arrive when streaming is enabled
-     *  on the agent's `llmToolLoop`. */
+     *  on the agent's `llm`. */
     tokens?: boolean;
 }
 
@@ -88,8 +88,8 @@ export class BackendClient {
         return this.worker.submit(request);
     }
 
-    async submitToolCallResult(args: SubmitToolCallResultArgs): Promise<SubmitToolCallResultResponse> {
-        return this.worker.submitToolCallResult(args.sessionId, toSubmitToolCallResultRequest(args));
+    async settleEffect(args: SettleEffectArgs): Promise<SettleEffectResponse> {
+        return this.worker.settleEffect(args.sessionId, toSettleEffectRequest(args));
     }
 
     /** Fire-and-forget: enqueue a turn, return as soon as it's accepted. */

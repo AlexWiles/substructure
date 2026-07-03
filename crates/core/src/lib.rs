@@ -8,7 +8,6 @@ pub mod transport;
 pub use runtime::aggregate::Caller;
 pub use runtime::{
     aggregate, event_store, llm, owner, processor, retry, session, span, start, sub_agent, wake,
-    worker, InterruptSessionInput, ResumeInterruptInput, Runtime, RuntimeConfig, RuntimeError,
-    SubmitClientPayload, SubmitClientPayloadOutput, SubmitToolCallResult,
-    SubmitToolCallResultInput,
+    worker, EffectSettlement, InterruptSessionInput, ResumeInterruptInput, Runtime, RuntimeConfig,
+    RuntimeError, SettleEffectInput, SubmitClientPayload, SubmitClientPayloadOutput,
 };

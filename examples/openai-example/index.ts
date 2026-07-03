@@ -1,12 +1,12 @@
-import Substructure from "@substructure.ai/sdk";
-import { OpenAIAgent } from "@substructure.ai/sdk/adapters/openai";
+import { agent, worker } from "@substructure.ai/sdk";
+import { openaiAgent } from "@substructure.ai/sdk/adapters/openai";
 import { serve } from "@hono/node-server";
-import { Agent, tool } from "@openai/agents";
+import { tool } from "@openai/agents";
 import { z } from "zod";
 
-const assistant = new OpenAIAgent(
-    new Agent({
-        name: "Assistant",
+const assistant = agent({
+    name: "openai-agent",
+    decide: openaiAgent({
         model: "gpt-5-nano",
         instructions: "You are a concise assistant.",
         tools: [
@@ -18,15 +18,9 @@ const assistant = new OpenAIAgent(
             }),
         ],
     }),
-);
+});
 
-const sub = new Substructure();
-
-const chatAgent = sub.agent({ id: "openai-agent" }).use(assistant);
-
-const worker = sub.worker({ agents: [chatAgent] });
-
-const handler = worker.fetchHandler({ signingSecret: process.env.SIGNING_SECRET });
+const handler = worker([assistant]).fetch({ signingSecret: process.env.SIGNING_SECRET });
 
 const port = Number(process.env.PORT ?? 3030);
 serve({ fetch: handler, port });

@@ -1,33 +1,42 @@
 # openai-example
 
-Runs an existing OpenAI Agents SDK agent on Substructure: wrap a `new Agent({...})`
-(or pass `OpenAIAgent` settings directly) and drop it into a handler chain.
+Runs an existing OpenAI Agents SDK agent on Substructure: pass `openaiAgent`
+settings directly (or wrap a `new Agent({...})`), wrap the result in
+`agent({ name, decide })`, and hand that to `worker([...])`.
 
 ```ts
-import { OpenAIAgent } from "@substructure.ai/sdk/adapters/openai";
-import { Agent, tool } from "@openai/agents";
+import { agent, worker } from "@substructure.ai/sdk";
+import { openaiAgent } from "@substructure.ai/sdk/adapters/openai";
 
-const assistant = new OpenAIAgent(
-    new Agent({
-        name: "Assistant",
+const assistant = agent({
+    name: "openai-agent",
+    decide: openaiAgent({
         model: "gpt-5-nano",
         instructions: "You are a concise assistant.",
         tools, // your existing @openai/agents tools (zod parameters, execute, …)
     }),
-);
+});
 
-const chatAgent = agent({ id: "openai-agent" }).use(assistant);
-const worker = sub.worker({ agents: [chatAgent] });
+const handler = worker([assistant]).fetch({ signingSecret: process.env.SIGNING_SECRET });
 ```
 
-You can also skip the Agents SDK `Agent` and pass settings directly:
+You can also pass an Agents SDK `Agent` instead of settings, then wrap it in
+`agent({ name, decide })`:
 
 ```ts
-const assistant = new OpenAIAgent({ model: "gpt-5-nano", instructions, tools });
+import { Agent } from "@openai/agents";
+
+const assistant = agent({
+    name: "openai-agent",
+    decide: openaiAgent(
+        new Agent({ name: "openai-agent", model: "gpt-5-nano", instructions, tools }),
+    ),
+});
 ```
 
-Passing the agent to `.use()` composes `messageHistory` + `tools` + `llmToolLoop`
-under the hood. The chain is a normal Substructure worker agent: it answers
+`openaiAgent` returns a Substructure `decide` function (the loop) — wrap it in
+`agent({ name, decide })` and pass that to `worker([...])`.
+It's a normal Substructure worker agent: it answers
 decisions and is agnostic to whether an embedded or remote engine drives it.
 Substructure always owns the loop. Each LLM step runs one `responses.create`
 call (your tools are passed to the model as definitions only, so the model
@@ -48,12 +57,12 @@ In another terminal, start the worker:
 
 ```sh
 export OPENAI_API_KEY=sk-...
-pnpm install
-pnpm start
+npm install
+npm start
 ```
 
 In a third terminal, submit a turn and watch token deltas stream:
 
 ```sh
-pnpm client
+npm run client
 ```

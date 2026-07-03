@@ -48,8 +48,8 @@ substructure start --dev --port 9000 --worker-url http://localhost:3030/api/agen
 In another, the TanStack Start app (Node dev server):
 
 ```sh
-pnpm install
-pnpm dev          # http://localhost:3030
+npm install
+npm run dev          # http://localhost:3030
 ```
 
 Open <http://localhost:3030>. On the right is a **to-do list**; on the left, a
@@ -65,7 +65,7 @@ shared store the panel renders, not on the server. The set is `add_todo`,
 `toggle_todo`, `remove_todo`, `clear_completed`, and `list_todos` — the AI drives
 the list and reads it back, and you drive the same store from the UI.
 
-- The worker only *declares* each tool — `handler: "client"` + `ctx.defer()`
+- The worker only *declares* each tool — `handler: "client"`, no `execute`
   (`substructure.ts` and `routes/api/agent.ts`). The engine suspends the turn and
   waits for the browser.
 - The matching executors live in each chat client and mutate the shared store
@@ -73,8 +73,8 @@ the list and reads it back, and you drive the same store from the UI.
   (`assistant-ui-chat.tsx`); CopilotKit passes `frontendTools` to its provider
   (`copilotkit-chat.tsx`). `TodoPanel` reads the store via `useSyncExternalStore`.
 - The AG-UI endpoint streams the call as `TOOL_CALL_START/ARGS/END` → `RUN_FINISHED`,
-  then on the continuation run maps the tool-result message to
-  `submit_tool_call_result`, resuming the turn → `TOOL_CALL_RESULT` → reply.
+  then on the continuation run maps the tool-result message to an effect
+  settlement, resuming the turn → `TOOL_CALL_RESULT` → reply.
 
 The tool **name** must match on both sides (e.g. `add_todo`). The browser never
 sees the substructure API key; only the short-lived client token. Mutations
@@ -88,7 +88,7 @@ UI stays in sync whichever drives it.
 wrangler secret put SUBSTRUCTURE_API_KEY
 wrangler secret put SIGNING_SECRET        # only if the engine signs webhooks
 
-pnpm deploy                                # build:cf + wrangler deploy
+npm run deploy                                # build:cf + wrangler deploy
 ```
 
 Point your engine's webhook at `https://<your-worker>/api/agent`. The build

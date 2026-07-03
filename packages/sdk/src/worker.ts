@@ -1,6 +1,8 @@
-import type { WorkerDecisionRequestWire, WorkerAction, SubmitRequest, SpanContext, LlmTokenDeltaInput } from "./types";
-import { jsonState } from "./middleware";
+import type { Agent, DecisionRequest, EmitDelta, NamedAgent } from "./core";
 import { createSseStream, type SseStream } from "./sse";
+import type { LlmTokenDeltaInput, SubmitRequest, WorkerDecisionRequestWire } from "./types";
+import { verifyWebhookSignature } from "./webhook";
+
 export interface NativeRuntime {
     registerWorker(
         tenantId: string,
@@ -14,12 +16,14 @@ export interface NativeRuntime {
         identityJson: string,
         turnId?: string,
     ): Promise<{ sessionId: string; turnId: string }>;
-    submitToolCallResult(
+    settleEffect(
         sessionId: string,
         tenantId: string,
-        toolCallId: string,
+        kind: string,
+        id: string,
         attempt: number,
         resultJson: string | undefined,
+        responseJson: string | undefined,
         errorMessage: string | undefined,
         retryable: boolean | undefined,
     ): Promise<void>;
@@ -32,117 +36,6 @@ export interface NativeRuntime {
     emitTokenDelta(deltaJson: string): Promise<void>;
     shutdown(): Promise<void>;
 }
-import { verifyWebhookSignature } from "./webhook";
-
-export interface DecisionResult {
-    actions: WorkerAction[];
-    state: string;
-}
-
-export interface DecisionRuntime {
-    emitDelta?: (delta: LlmTokenDeltaInput) => Promise<void>;
-}
-
-export type DecisionHandler = (
-    request: WorkerDecisionRequestWire,
-    runtime?: DecisionRuntime,
-) => Promise<DecisionResult>;
-
-export interface AgentContext<S = unknown> {
-    state: S;
-    /** Raw decision envelope off the wire (snake_case). */
-    request: WorkerDecisionRequestWire;
-    emitDelta?: (delta: LlmTokenDeltaInput) => Promise<void>;
-}
-
-export interface AgentResponse {
-    actions: WorkerAction[];
-    state: unknown;
-    workerState?: string;
-}
-
-export type Next<S = unknown> = (ctx: AgentContext<S>) => Promise<AgentResponse> | AgentResponse;
-
-/** The `Out` type parameter is the state type downstream middleware sees:
- *  passthrough middleware leaves it unchanged, state providers transform it. */
-export interface MiddlewareFn<In = unknown, Out = In> {
-    (ctx: AgentContext<In>, next: Next<Out>): Promise<AgentResponse> | AgentResponse;
-    /** Type brand carrying the output state type — never set at runtime. */
-    readonly _out?: Out;
-}
-
-export interface Handler {
-    readonly agentId: string;
-    toDecisionHandler(): DecisionHandler;
-}
-
-/** The `_contributes` brand tells the builder to intersect `A` onto the
- *  current state type. */
-export type StateContributor<A> = MiddlewareFn<any, any> & { readonly _contributes: A };
-
-/** Lets a constructed agent be passed straight to `.use()` without the builder
- *  knowing how its middleware is built. */
-export interface MiddlewareSource {
-    toMiddleware(): MiddlewareFn<any, any>;
-}
-
-type UnknownMiddleware = MiddlewareFn<unknown, unknown>;
-type UnknownNext = Next<unknown>;
-
-const DEFAULT_FALLBACK: UnknownNext = (ctx) => ({ actions: [], state: ctx.state });
-
-export class HandlerBuilder<S> implements Handler {
-    readonly agentId: string;
-    private middlewares: UnknownMiddleware[] = [];
-
-    constructor(agentId: string) {
-        this.agentId = agentId;
-    }
-
-    /** State contributor: intersects new keys onto current state. */
-    use<A>(mw: StateContributor<A>): HandlerBuilder<S & A>;
-    /** State transformer: replaces state type (e.g. withState). */
-    use<Out>(mw: MiddlewareFn<S, Out>): HandlerBuilder<Out>;
-    /** Constructed agent or other middleware source (e.g. `new ToolLoopAgent(...)`). */
-    use(mw: MiddlewareSource): HandlerBuilder<unknown>;
-    use<Out>(mw: MiddlewareFn<S, Out> | MiddlewareSource): HandlerBuilder<Out> {
-        const fn = typeof mw === "function" ? mw : mw.toMiddleware();
-        this.middlewares.push(fn as UnknownMiddleware);
-        return this as unknown as HandlerBuilder<Out>;
-    }
-
-    toDecisionHandler(): DecisionHandler {
-        // `jsonState` is applied by default as the outermost middleware: it
-        // decodes `worker_state` into `ctx.state` on the way in and re-encodes
-        // it on the way out. Applying it again explicitly is idempotent, so
-        // chains that still `.use(agent.jsonState())` keep working.
-        const middlewares = [jsonState() as UnknownMiddleware, ...this.middlewares];
-        const chain = composeChain(middlewares, DEFAULT_FALLBACK);
-
-        return async (request: WorkerDecisionRequestWire, runtime?: DecisionRuntime) => {
-            const ctx: AgentContext<unknown> = {
-                state: undefined,
-                request,
-                emitDelta: runtime?.emitDelta,
-            };
-            const result = await chain(ctx);
-            return {
-                actions: result.actions,
-                state: result.workerState ?? request.worker_state,
-            };
-        };
-    }
-}
-
-function composeChain(middlewares: UnknownMiddleware[], handle: UnknownNext): UnknownNext {
-    let fn: UnknownNext = handle;
-    for (let i = middlewares.length - 1; i >= 0; i--) {
-        const mw = middlewares[i];
-        const next = fn;
-        fn = (ctx) => mw(ctx, next);
-    }
-    return fn;
-}
 
 export interface FetchHandlerOptions {
     signingSecret?: string;
@@ -150,25 +43,63 @@ export interface FetchHandlerOptions {
     tolerance?: number;
 }
 
+/** The agents to serve: each a `NamedAgent` from `agent({ name, ... })`. They
+ *  carry independent state types, so the collection is `NamedAgent<any>`. */
+// biome-ignore lint/suspicious/noExplicitAny: heterogeneous state types across agents
+export type Agents = NamedAgent<any>[];
+
+// ── State codec (base64 JSON, the worker boundary) ───────────────────────────
+
+function decodeState(raw: string): unknown {
+    if (!raw) return {};
+    return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(raw), (c) => c.charCodeAt(0))));
+}
+
+function encodeState(value: unknown): string {
+    return btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(value))));
+}
+
+/** The one transform: decode `worker_state` into the decision, run the agent,
+ *  encode the returned state back out. Everything else is the wire envelope. */
+async function runDecision(
+    fn: Agent,
+    request: WorkerDecisionRequestWire,
+    emitDelta?: EmitDelta,
+): Promise<SubmitRequest> {
+    const req: DecisionRequest = { ...request, state: decodeState(request.worker_state), emitDelta };
+    const out = await fn(req);
+    return {
+        session_id: request.session_id,
+        decision_id: request.decision_id,
+        actions: out.actions ?? [],
+        transcript: out.transcript ?? request.transcript ?? [],
+        state: encodeState(out.state !== undefined ? out.state : req.state),
+    };
+}
+
 export class Worker {
     readonly agentIds: string[];
-    private handlers: Map<string, DecisionHandler>;
+    private agents: Record<string, Agent>;
 
-    constructor(agents: Handler[]) {
-        this.handlers = new Map();
-        for (const handler of agents) {
-            this.handlers.set(handler.agentId, handler.toDecisionHandler());
+    constructor(agents: Agents) {
+        this.agents = {};
+        for (const a of agents) {
+            this.agents[a.agentName] = a;
         }
-        this.agentIds = [...this.handlers.keys()];
+        this.agentIds = Object.keys(this.agents);
     }
 
     async register(runtime: NativeRuntime, tenantId: string): Promise<void> {
-        const self = this;
         await runtime.registerWorker(tenantId, this.agentIds, async (decisionJson: string) => {
             const request: WorkerDecisionRequestWire = JSON.parse(decisionJson);
-            const submit = await self.handleDecision(request, embeddedDecisionRuntime(runtime, request));
+            const submit = await this.handleDecision(request, embeddedEmitDelta(runtime, request));
             return JSON.stringify(submit);
         });
+    }
+
+    /** `worker({...}).fetch(opts)`, alias for `fetchHandler`. */
+    fetch(options?: FetchHandlerOptions): (req: Request) => Promise<Response> {
+        return this.fetchHandler(options);
     }
 
     /** When `options.signingSecret` is provided, incoming requests are verified
@@ -195,19 +126,12 @@ export class Worker {
         };
     }
 
-    async handleDecision(request: WorkerDecisionRequestWire, runtime?: DecisionRuntime): Promise<SubmitRequest> {
-        const handler = this.handlers.get(request.agent_id);
-        if (!handler) {
-            throw new Error(`No handler registered for agent: ${request.agent_id}`);
+    async handleDecision(request: WorkerDecisionRequestWire, emitDelta?: EmitDelta): Promise<SubmitRequest> {
+        const fn = this.agents[request.agent_id];
+        if (!fn) {
+            throw new Error(`No agent registered for: ${request.agent_id}`);
         }
-        const result = await handler(request, runtime);
-        return {
-            session_id: request.session_id,
-            decision_id: request.decision_id,
-            actions: result.actions,
-            state: result.state,
-            span: childSpan(request.span, "worker_submit"),
-        };
+        return runDecision(fn, request, emitDelta);
     }
 
     private handleDecisionStream(request: WorkerDecisionRequestWire): Response {
@@ -215,7 +139,7 @@ export class Worker {
 
         void (async () => {
             try {
-                const submit = await this.handleDecision(request, sseDecisionRuntime(sse));
+                const submit = await this.handleDecision(request, sseEmitDelta(sse));
                 await sse.writeSSE({ event: "decision.result", data: submit });
             } catch (err) {
                 const message = err instanceof Error ? err.message : String(err);
@@ -234,57 +158,44 @@ export class Worker {
     }
 }
 
-function sseDecisionRuntime(sse: SseStream): DecisionRuntime {
-    return {
-        emitDelta: (delta) => sse.writeSSE({ event: "llm.token.delta", data: delta }),
-    };
+/** Build the HTTP worker for these (named) agents. `worker([agent]).fetch(opts)`
+ *  is a `(Request) => Response` handler; each agent is routed by its name. */
+export function worker(agents: Agents): Worker {
+    return new Worker(agents);
 }
 
-function embeddedDecisionRuntime(
-    runtime: NativeRuntime,
-    request: WorkerDecisionRequestWire,
-): DecisionRuntime | undefined {
+/** One-liner: the fetch handler for these agents. */
+export function serve(agents: Agents, opts?: FetchHandlerOptions): (req: Request) => Promise<Response> {
+    return new Worker(agents).fetch(opts);
+}
+
+function sseEmitDelta(sse: SseStream): EmitDelta {
+    return (delta) => sse.writeSSE({ event: "llm.token.delta", data: delta });
+}
+
+function embeddedEmitDelta(runtime: NativeRuntime, request: WorkerDecisionRequestWire): EmitDelta | undefined {
     const { trigger } = request;
-    if (trigger.type !== "llm.request" || !trigger.stream) return undefined;
+    if (trigger.type !== "effect.execute" || trigger.kind !== "llm_call" || !trigger.stream) return undefined;
 
     const rootSessionId = request.ancestry?.[0] ?? request.session_id;
     let seq = 0;
 
-    return {
-        emitDelta: async (delta: LlmTokenDeltaInput) => {
-            await runtime.emitTokenDelta(
-                JSON.stringify({
-                    tenant_id: request.tenant_id,
-                    root_session_id: rootSessionId,
-                    session_id: request.session_id,
-                    agent_id: request.agent_id,
-                    turn_id: request.turn_id,
-                    call_id: trigger.call_id,
-                    attempt: trigger.attempt,
-                    seq: seq++,
-                    text: delta.text,
-                    reasoning: delta.reasoning,
-                    tool_calls: delta.tool_calls,
-                    finish_reason: delta.finish_reason,
-                }),
-            );
-        },
-    };
-}
-
-function randomHex(bytes: number): string {
-    const buf = new Uint8Array(bytes);
-    crypto.getRandomValues(buf);
-    return Array.from(buf, (b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-function childSpan(parent: SpanContext, name: string): SpanContext {
-    return {
-        trace_id: parent.trace_id,
-        span_id: randomHex(8),
-        parent_span_id: parent.span_id,
-        trace_flags: parent.trace_flags,
-        trace_state: parent.trace_state,
-        name,
+    return async (delta: LlmTokenDeltaInput) => {
+        await runtime.emitTokenDelta(
+            JSON.stringify({
+                tenant_id: request.tenant_id,
+                root_session_id: rootSessionId,
+                session_id: request.session_id,
+                agent_id: request.agent_id,
+                turn_id: request.turn_id,
+                call_id: trigger.id,
+                attempt: trigger.attempt,
+                seq: seq++,
+                text: delta.text,
+                reasoning: delta.reasoning,
+                tool_calls: delta.tool_calls,
+                finish_reason: delta.finish_reason,
+            }),
+        );
     };
 }

@@ -4,13 +4,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::decision::{DecisionTrigger, ToolResult};
+use super::decision::DecisionTrigger;
 use super::events::*;
-use super::message::Role;
+use super::message::{Message, Role};
 use rust_decimal::Decimal;
 
 use crate::runtime::aggregate::ApplyContext;
-use crate::runtime::llm::LlmRequest;
+use crate::runtime::llm::{LlmRequest, LlmTool, ReasoningConfig};
 use crate::runtime::owner::SessionOwner;
 use crate::runtime::retry::{RetryPolicy, RetryState};
 use crate::runtime::worker::WorkerState;
@@ -101,11 +101,52 @@ impl EffectTracking {
 pub struct LlmCallState {
     pub call_id: String,
     pub tracking: EffectTracking,
-    /// Original request, stored for retries and crash recovery.
-    pub request: LlmRequest,
+    /// The verbatim prompt the worker sent, stored for retries.
+    #[serde(default)]
+    pub prompt: Vec<Message>,
+    pub spec: LlmCallSpec,
     pub stream: bool,
     #[serde(default)]
     pub handler: LlmHandler,
+}
+
+/// An `LlmRequest` without its message list; the prompt is stored alongside.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmCallSpec {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<LlmTool>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ReasoningConfig>,
+}
+
+impl LlmCallSpec {
+    pub fn to_request(&self, messages: Vec<Message>) -> LlmRequest {
+        LlmRequest {
+            model: self.model.clone(),
+            messages,
+            tools: self.tools.clone(),
+            temperature: self.temperature,
+            max_completion_tokens: self.max_completion_tokens,
+            reasoning: self.reasoning.clone(),
+        }
+    }
+}
+
+impl From<&LlmRequest> for LlmCallSpec {
+    fn from(r: &LlmRequest) -> Self {
+        Self {
+            model: r.model.clone(),
+            tools: r.tools.clone(),
+            temperature: r.temperature,
+            max_completion_tokens: r.max_completion_tokens,
+            reasoning: r.reasoning.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,23 +163,6 @@ pub struct ToolCallState {
     pub result: Option<String>,
     #[serde(default)]
     pub is_error: bool,
-    /// Source event sequence, for stable result ordering.
-    #[serde(default)]
-    pub order: u64,
-    /// Result already emitted to the worker in an effects.complete batch.
-    #[serde(default)]
-    pub result_delivered: bool,
-}
-
-impl ToolCallState {
-    fn to_result(&self) -> ToolResult {
-        ToolResult {
-            tool_call_id: self.tool_call_id.clone(),
-            name: self.name.clone(),
-            content: self.result.clone().unwrap_or_default(),
-            is_error: self.is_error,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,22 +178,6 @@ pub struct SubAgentCallState {
     pub result: Option<String>,
     #[serde(default)]
     pub is_error: bool,
-    #[serde(default)]
-    pub order: u64,
-    /// Result already emitted to the worker in an effects.complete batch.
-    #[serde(default)]
-    pub result_delivered: bool,
-}
-
-impl SubAgentCallState {
-    fn to_result(&self) -> ToolResult {
-        ToolResult {
-            tool_call_id: self.tool_call_id.clone(),
-            name: self.agent_id.clone(),
-            content: self.result.clone().unwrap_or_default(),
-            is_error: self.is_error,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,14 +189,50 @@ pub struct WorkerDecisionState {
     pub source_event_sequence: u64,
 }
 
+// In-flight effects surfaced on each worker decision, derived on read by filtering
+// the effect maps to what's still outstanding (Pending or RetryScheduled).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Effect {
+    pub id: String,
+    pub status: EffectStatus,
+    pub attempt: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<DateTime<Utc>>,
+    #[serde(flatten)]
+    pub detail: EffectDetail,
+}
+
+/// Kind-specific fields, tagged by `kind` on the wire.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EffectDetail {
+    ToolCall {
+        name: String,
+        arguments: String,
+        handler: ToolHandler,
+    },
+    SubAgent {
+        agent_id: String,
+        session_id: String,
+    },
+    LlmCall {
+        handler: LlmHandler,
+        stream: bool,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DerivedState {
     pub status: SessionStatus,
     pub wake_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub effects: Vec<Effect>,
     pub owner: Option<SessionOwner>,
     pub agent_id: Option<String>,
     #[serde(default)]
     pub worker_state: WorkerState,
+    #[serde(default)]
+    pub message_tree: MessageTree,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ancestry: Vec<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -211,6 +255,10 @@ pub struct DerivedState {
 }
 
 pub(super) fn new_call_id() -> String {
+    Uuid::now_v7().to_string()
+}
+
+pub(super) fn new_message_id() -> String {
     Uuid::now_v7().to_string()
 }
 
@@ -273,6 +321,13 @@ pub struct SessionState {
     /// Turn IDs that have completed, used for idempotency checks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub completed_turn_ids: Vec<String>,
+
+    /// The active branch's leaf; advances to each appended message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_id: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<Node>,
 }
 
 impl SessionState {
@@ -298,6 +353,8 @@ impl SessionState {
             worker_decisions: HashMap::new(),
             turn_id: None,
             completed_turn_ids: Vec::new(),
+            head_id: None,
+            nodes: Vec::new(),
         }
     }
 
@@ -315,12 +372,25 @@ impl SessionState {
                 if payload.message.role == Role::User {
                     self.status = SessionStatus::Idle;
                 }
+                if !payload.message.id.is_empty() {
+                    self.head_id = Some(payload.message.id.clone());
+                }
+                self.nodes.push(Node::Message(payload.clone()));
+            }
+            EventPayload::NewControl(payload) => {
+                if !payload.control.id.is_empty() {
+                    self.head_id = Some(payload.control.id.clone());
+                }
+                self.nodes.push(Node::Control(payload.clone()));
             }
             EventPayload::LlmCallRequested(payload) => {
                 self.status = SessionStatus::Idle;
+                let prompt = payload.request.messages.clone();
+                let spec = LlmCallSpec::from(&payload.request);
                 if let Some(existing) = self.llm_calls.get_mut(&payload.call_id) {
                     existing.tracking.reset_pending(now);
-                    existing.request = payload.request.clone();
+                    existing.prompt = prompt;
+                    existing.spec = spec;
                     existing.stream = payload.stream;
                     existing.handler = payload.handler.clone();
                 } else {
@@ -329,7 +399,8 @@ impl SessionState {
                         LlmCallState {
                             call_id: payload.call_id.clone(),
                             tracking: EffectTracking::new(payload.retry.clone(), now),
-                            request: payload.request.clone(),
+                            prompt,
+                            spec,
                             stream: payload.stream,
                             handler: payload.handler.clone(),
                         },
@@ -369,8 +440,6 @@ impl SessionState {
                             arguments: payload.arguments.clone(),
                             result: None,
                             is_error: false,
-                            order: ctx.sequence,
-                            result_delivered: false,
                         },
                     );
                 }
@@ -406,8 +475,6 @@ impl SessionState {
                             tool_call_id: payload.tool_call_id.clone(),
                             result: None,
                             is_error: false,
-                            order: ctx.sequence,
-                            result_delivered: false,
                         },
                     );
                 }
@@ -466,10 +533,6 @@ impl SessionState {
                         },
                     );
                 }
-                if let DecisionTrigger::EffectsComplete { results } = &p.trigger {
-                    let ids: Vec<String> = results.iter().map(|r| r.tool_call_id.clone()).collect();
-                    self.mark_results_delivered(&ids);
-                }
                 self.status = SessionStatus::Idle;
             }
             EventPayload::WorkerDecisionCompleted(p) => {
@@ -495,10 +558,6 @@ impl SessionState {
                         source_event_sequence: ctx.sequence,
                     },
                 );
-                if let DecisionTrigger::EffectsComplete { results } = &p.trigger {
-                    let ids: Vec<String> = results.iter().map(|r| r.tool_call_id.clone()).collect();
-                    self.mark_results_delivered(&ids);
-                }
             }
             EventPayload::WorkerStateUpdated(p) => {
                 self.worker_state = p.state.clone();
@@ -575,101 +634,6 @@ impl SessionState {
         }
     }
 
-    /// Ordered results for the undelivered effects once every one is terminal;
-    /// `None` while any is still pending or there are none.
-    pub fn drainable_batch(&self) -> Option<Vec<ToolResult>> {
-        let any = self.tool_calls.values().any(|t| !t.result_delivered)
-            || self.sub_agent_calls.values().any(|s| !s.result_delivered);
-
-        if !any {
-            return None;
-        }
-
-        let all_terminal = self
-            .tool_calls
-            .values()
-            .filter(|t| !t.result_delivered)
-            .all(|t| t.result.is_some())
-            && self
-                .sub_agent_calls
-                .values()
-                .filter(|s| !s.result_delivered)
-                .all(|s| s.result.is_some());
-
-        if !all_terminal {
-            return None;
-        }
-
-        Some(self.collect_undelivered(None))
-    }
-
-    /// `drainable_batch` for the moment a result arrives: `pending` stands in
-    /// for the effect being completed, whose result is not yet in state. Drains
-    /// once every *other* undelivered effect is terminal.
-    pub fn drainable_with(&self, pending: ToolResult) -> Option<Vec<ToolResult>> {
-        let others_terminal = self
-            .tool_calls
-            .values()
-            .filter(|t| !t.result_delivered && t.tool_call_id != pending.tool_call_id)
-            .all(|t| t.result.is_some())
-            && self
-                .sub_agent_calls
-                .values()
-                .filter(|s| !s.result_delivered && s.tool_call_id != pending.tool_call_id)
-                .all(|s| s.result.is_some());
-
-        if !others_terminal {
-            return None;
-        }
-
-        Some(self.collect_undelivered(Some(&pending)))
-    }
-
-    fn collect_undelivered(&self, overlay: Option<&ToolResult>) -> Vec<ToolResult> {
-        let tools = self
-            .tool_calls
-            .values()
-            .filter(|t| !t.result_delivered)
-            .map(|t| (t.order, t.to_result()));
-
-        let subs = self
-            .sub_agent_calls
-            .values()
-            .filter(|s| !s.result_delivered)
-            .map(|s| (s.order, s.to_result()));
-
-        let mut ordered: Vec<(u64, ToolResult)> = tools.chain(subs).collect();
-
-        ordered.sort_by_key(|(order, _)| *order);
-
-        ordered
-            .into_iter()
-            .map(|(_, result)| match overlay {
-                // The in-flight result isn't in state yet; substitute it in.
-                Some(o) if o.tool_call_id == result.tool_call_id => o.clone(),
-                _ => result,
-            })
-            .collect()
-    }
-
-    pub fn has_undelivered_effects(&self) -> bool {
-        self.tool_calls.values().any(|t| !t.result_delivered)
-            || self.sub_agent_calls.values().any(|s| !s.result_delivered)
-    }
-
-    fn mark_results_delivered(&mut self, tool_call_ids: &[String]) {
-        for id in tool_call_ids {
-            if let Some(t) = self.tool_calls.get_mut(id) {
-                t.result_delivered = true;
-            }
-            for s in self.sub_agent_calls.values_mut() {
-                if &s.tool_call_id == id {
-                    s.result_delivered = true;
-                }
-            }
-        }
-    }
-
     pub fn all_tools_resolved(&self) -> bool {
         !self.tool_calls.is_empty()
             && self.tool_calls.values().all(|tc| {
@@ -711,9 +675,6 @@ impl SessionState {
         if self.has_queued_worker_decision() && !self.has_pending_worker_decision() {
             return Some(Utc::now());
         }
-        if !self.has_pending_worker_decision() && self.drainable_batch().is_some() {
-            return Some(Utc::now());
-        }
         self.llm_calls
             .values()
             .filter_map(|c| c.tracking.earliest_wake())
@@ -735,13 +696,85 @@ impl SessionState {
             .min()
     }
 
+    pub fn message_tree(&self) -> MessageTree {
+        MessageTree {
+            nodes: self.nodes.clone(),
+            head_id: self.head_id.clone(),
+        }
+    }
+
+    /// The effects still in flight (Pending or RetryScheduled), derived by filtering the effect maps.
+    pub fn effects(&self) -> Vec<Effect> {
+        let in_flight =
+            |s: &EffectStatus| matches!(s, EffectStatus::Pending | EffectStatus::RetryScheduled);
+
+        let mut effects: Vec<Effect> = Vec::new();
+
+        for c in self
+            .tool_calls
+            .values()
+            .filter(|c| in_flight(&c.tracking.status))
+        {
+            effects.push(Effect {
+                id: c.tool_call_id.clone(),
+                status: c.tracking.status.clone(),
+                attempt: c.tracking.retry.attempts,
+                deadline: c.tracking.deadline,
+                detail: EffectDetail::ToolCall {
+                    name: c.name.clone(),
+                    arguments: c.arguments.clone(),
+                    handler: c.handler.clone(),
+                },
+            });
+        }
+
+        for c in self
+            .sub_agent_calls
+            .values()
+            .filter(|c| in_flight(&c.tracking.status))
+        {
+            effects.push(Effect {
+                id: c.tool_call_id.clone(),
+                status: c.tracking.status.clone(),
+                attempt: c.tracking.retry.attempts,
+                deadline: c.tracking.deadline,
+                detail: EffectDetail::SubAgent {
+                    agent_id: c.agent_id.clone(),
+                    session_id: c.session_id.clone(),
+                },
+            });
+        }
+
+        for c in self
+            .llm_calls
+            .values()
+            .filter(|c| in_flight(&c.tracking.status))
+        {
+            effects.push(Effect {
+                id: c.call_id.clone(),
+                status: c.tracking.status.clone(),
+                attempt: c.tracking.retry.attempts,
+                deadline: c.tracking.deadline,
+                detail: EffectDetail::LlmCall {
+                    handler: c.handler.clone(),
+                    stream: c.stream,
+                },
+            });
+        }
+
+        effects.sort_by(|a, b| a.id.cmp(&b.id));
+        effects
+    }
+
     pub fn derived_state(&self) -> DerivedState {
         DerivedState {
             status: self.status.clone(),
             wake_at: self.wake_at(),
+            effects: self.effects(),
             owner: self.owner.clone(),
             agent_id: self.agent_id.clone(),
             worker_state: self.worker_state.clone(),
+            message_tree: self.message_tree(),
             ancestry: self.ancestry.clone(),
             sub_agent_calls: self.sub_agent_calls.clone(),
             worker_decisions: self.worker_decisions.clone(),
@@ -777,5 +810,34 @@ impl SessionState {
                 *self.turn_token_usage.entry(k.clone()).or_insert(0) += n;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod effect_tests {
+    use super::*;
+
+    #[test]
+    fn effect_serializes_flat_tagged_and_round_trips() {
+        let e = Effect {
+            id: "call_1".to_string(),
+            status: EffectStatus::Pending,
+            attempt: 0,
+            deadline: None,
+            detail: EffectDetail::ToolCall {
+                name: "get_weather".to_string(),
+                arguments: "{}".to_string(),
+                handler: ToolHandler::Worker,
+            },
+        };
+        let json = serde_json::to_value(&e).unwrap();
+        // Envelope, tag, and detail all flattened onto one object.
+        assert_eq!(json["id"], "call_1");
+        assert_eq!(json["status"], "pending");
+        assert_eq!(json["kind"], "tool_call");
+        assert_eq!(json["name"], "get_weather");
+        // flatten + internally-tagged enum must deserialize back to the original.
+        let back: Effect = serde_json::from_value(json).unwrap();
+        assert_eq!(back, e);
     }
 }

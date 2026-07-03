@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,8 @@ pub enum EventPayload {
     SessionCreated(Box<SessionCreated>),
     #[serde(rename = "message.new")]
     NewMessage(NewMessage),
+    #[serde(rename = "control.new")]
+    NewControl(NewControl),
     #[serde(rename = "llm.call.requested")]
     LlmCallRequested(LlmCallRequested),
     #[serde(rename = "llm.call.completed")]
@@ -79,6 +81,101 @@ pub struct SessionDone {}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewMessage {
     pub message: Message,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewControl {
+    pub control: Control,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+}
+
+/// A non-conversational tree marker (interrupt/resume); filtered out of LLM prompts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Control {
+    pub id: String,
+    pub interrupt_id: String,
+    pub kind: ControlKind,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub payload: serde_json::Value,
+    pub origin: InterruptOrigin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlKind {
+    Interrupt,
+    Resume,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Node {
+    Message(NewMessage),
+    Control(NewControl),
+}
+
+impl Node {
+    pub fn id(&self) -> &str {
+        match self {
+            Node::Message(n) => &n.message.id,
+            Node::Control(n) => &n.control.id,
+        }
+    }
+
+    pub fn parent_id(&self) -> Option<&str> {
+        match self {
+            Node::Message(n) => n.parent_id.as_deref(),
+            Node::Control(n) => n.parent_id.as_deref(),
+        }
+    }
+
+    pub fn message(&self) -> Option<&Message> {
+        match self {
+            Node::Message(n) => Some(&n.message),
+            Node::Control(_) => None,
+        }
+    }
+
+    pub fn control(&self) -> Option<&Control> {
+        match self {
+            Node::Control(n) => Some(&n.control),
+            Node::Message(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MessageTree {
+    #[serde(default)]
+    pub nodes: Vec<Node>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_id: Option<String>,
+}
+
+impl MessageTree {
+    /// Root-to-`leaf` messages with control nodes filtered out; empty if `leaf` is unknown.
+    pub fn path_to(&self, leaf: &str) -> Vec<Message> {
+        let mut by_id: HashMap<&str, &Node> = self.nodes.iter().map(|n| (n.id(), n)).collect();
+        let mut path = Vec::new();
+        let mut cursor = Some(leaf.to_string());
+        // `remove` so a malformed parent cycle can't loop forever.
+        while let Some(id) = cursor.take() {
+            let Some(node) = by_id.remove(id.as_str()) else {
+                break;
+            };
+            if let Some(message) = node.message() {
+                path.push(message.clone());
+            }
+            cursor = node.parent_id().map(str::to_string);
+        }
+        path.reverse();
+        path
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,8 +229,7 @@ pub enum LlmHandler {
     /// Server-side executor resolves the provider and makes the call.
     #[default]
     Server,
-    /// Dispatched to the worker via an `llm.request` decision trigger; the
-    /// worker performs the call and replies with `return.llm.result`/`error`.
+    /// The worker performs the call and replies with `effect.result`/`effect.error`.
     Worker,
 }
 

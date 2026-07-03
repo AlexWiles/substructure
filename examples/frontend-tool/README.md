@@ -7,10 +7,10 @@ has two tools:
 - `set_theme(background, accent)` — mutates the page's CSS variables
 
 Both are impossible from a backend worker. The tools are declared with
-`handler: "client"` so the engine never dispatches `tool.execute` to the
+`handler: "client"` so the engine never dispatches `effect.execute` to the
 worker — it just emits `tool.call.requested` on the session stream. The
 browser sees that event, executes the tool locally, and posts the result
-via `submitToolCallResult`. The agent resumes as if the tool had returned
+via `settleEffect`. The agent resumes as if the tool had returned
 synchronously.
 
 Auth is the standard browser pattern: the Hono server mints a
@@ -30,8 +30,8 @@ substructure start --dev --port 9000 --worker-url http://localhost:3333/agent
 In another terminal, start the Hono worker + static server:
 
 ```sh
-pnpm install
-pnpm start
+npm install
+npm start
 ```
 
 Open <http://localhost:3333> and try:

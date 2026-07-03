@@ -40,8 +40,8 @@ pub fn router(state: ClientHttpState) -> Router {
             post(routes::submit_client_payload),
         )
         .route(
-            "/api/client/sessions/{session_id}/tool-call-results",
-            post(routes::submit_tool_call_result),
+            "/api/client/sessions/{session_id}/effects/settle",
+            post(routes::settle_effect),
         )
         .route(
             "/api/client/sessions/{session_id}/events/stream",

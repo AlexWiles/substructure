@@ -10,20 +10,22 @@ use uuid::Uuid;
 use crate::owner::SessionOwner;
 use crate::session::command::SessionError;
 use crate::session::decision::ClientPayload;
+use crate::session::decision::{EffectResultPayload, WorkKind};
+use crate::session::events::MessageTree;
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use crate::transport::ag_ui::snapshot::snapshot_events;
 use crate::transport::ag_ui::translator::run_ag_ui_translation;
-use crate::transport::ag_ui::types::{AgUiInput, RunAgentInput};
+use crate::transport::ag_ui::types::RunAgentInput;
 use crate::transport::session_sse::merge_session_stream;
 use crate::{
-    Caller, InterruptSessionInput, ResumeInterruptInput, RuntimeError, SubmitClientPayload,
-    SubmitToolCallResult, SubmitToolCallResultInput,
+    Caller, EffectSettlement, InterruptSessionInput, ResumeInterruptInput, RuntimeError,
+    SettleEffectInput, SubmitClientPayload,
 };
 
 use super::types::{
     InterruptSessionRequest, InterruptSessionResponse, ResumeInterruptRequest,
-    ResumeInterruptResponse, StreamSessionEventsParams, SubmitClientPayloadRequest,
-    SubmitClientPayloadResponse, SubmitToolCallResultRequest, SubmitToolCallResultResponse,
+    ResumeInterruptResponse, SettleEffectRequest, SettleEffectResponse, StreamSessionEventsParams,
+    SubmitClientPayloadRequest, SubmitClientPayloadResponse,
 };
 use super::ClientHttpState;
 
@@ -60,48 +62,57 @@ pub async fn submit_client_payload(
     }
 }
 
-pub async fn submit_tool_call_result(
+pub async fn settle_effect(
     State(state): State<ClientHttpState>,
     Extension(caller): Extension<Caller>,
     Path(session_id): Path<String>,
-    Json(req): Json<SubmitToolCallResultRequest>,
+    Json(req): Json<SettleEffectRequest>,
 ) -> Response {
-    let (tool_call_id, attempt, result) = match req {
-        SubmitToolCallResultRequest::Result {
-            tool_call_id,
+    // The client surface settles client tools only; `kind` is always `tool_call`.
+    let (id, attempt, settlement) = match req {
+        SettleEffectRequest::Result {
+            kind: _,
+            id,
             result,
             attempt,
         } => (
-            tool_call_id,
+            id,
             attempt,
-            SubmitToolCallResult::Result { result },
+            EffectSettlement::Result(EffectResultPayload::ToolCall { result }),
         ),
-        SubmitToolCallResultRequest::Error {
-            tool_call_id,
+        SettleEffectRequest::Error {
+            kind: _,
+            id,
             error,
             retryable,
             attempt,
         } => (
-            tool_call_id,
+            id,
             attempt,
-            SubmitToolCallResult::Error { error, retryable },
+            EffectSettlement::Error {
+                error,
+                retryable,
+                code: None,
+                detail: None,
+            },
         ),
     };
 
     let result = state
         .runtime
-        .submit_tool_call_result(SubmitToolCallResultInput {
+        .settle_effect(SettleEffectInput {
             session_id,
-            tool_call_id,
+            kind: WorkKind::ToolCall,
+            id,
             attempt,
-            result,
+            settlement,
             caller,
-            span: crate::span::SpanContext::root().child("client_tool_call_result"),
+            span: crate::span::SpanContext::root().child("client_effect_settle"),
         })
         .await;
 
     match result {
-        Ok(()) => Json(SubmitToolCallResultResponse {
+        Ok(()) => Json(SettleEffectResponse {
             ok: true,
             error: None,
         })
@@ -110,7 +121,7 @@ pub async fn submit_tool_call_result(
             let (status, message) = runtime_error_status(&e);
             (
                 status,
-                Json(SubmitToolCallResultResponse {
+                Json(SettleEffectResponse {
                     ok: false,
                     error: Some(message),
                 }),
@@ -181,14 +192,14 @@ pub(crate) fn runtime_error_status(err: &RuntimeError) -> (StatusCode, String) {
         RuntimeError::Session(
             SessionError::MissingSubject
             | SessionError::SessionAccessDenied
-            | SessionError::ToolCallWrongHandler,
+            | SessionError::EffectWrongHandler,
         ) => StatusCode::FORBIDDEN,
-        RuntimeError::Session(SessionError::ToolCallNotFound | SessionError::SessionNotCreated) => {
+        RuntimeError::Session(SessionError::EffectNotFound | SessionError::SessionNotCreated) => {
             StatusCode::NOT_FOUND
         }
         RuntimeError::Session(
-            SessionError::ToolCallNotPending
-            | SessionError::ToolCallAttemptMismatch
+            SessionError::EffectNotPending
+            | SessionError::EffectAttemptMismatch
             | SessionError::SessionInterrupted
             | SessionError::TurnAlreadyActive { .. }
             | SessionError::TurnAlreadyCompleted { .. },
@@ -246,12 +257,13 @@ pub async fn ag_ui_run(
     Path(agent_id): Path<String>,
     Json(input): Json<RunAgentInput>,
 ) -> Response {
-    let Some(action) = input.classify() else {
-        let body = serde_json::json!({"error": "no user message or tool result in RunAgentInput"});
-        return (StatusCode::BAD_REQUEST, Json(body)).into_response();
-    };
-
     let session_id = input.thread_id.clone();
+
+    // Pure passthrough: the aggregate classifies the submission against effect state (new turn vs. client tool results).
+    if input.resume.is_empty() && input.to_messages().is_empty() {
+        let body = serde_json::json!({"error": "no messages or resume in RunAgentInput"});
+        return (StatusCode::BAD_REQUEST, Json(body)).into_response();
+    }
 
     let spec = SessionSubscriptionSpec {
         scope: SubscriptionScope::All,
@@ -267,92 +279,47 @@ pub async fn ag_ui_run(
         .subscribe_token_deltas(&caller, &session_id)
         .await;
 
-    let submit = match action {
-        AgUiInput::UserTurn(message) => state
+    let submit = if !input.resume.is_empty() {
+        // Stale interrupt ids no-op in the core, keeping resumes idempotent.
+        let mut outcome: Result<(), RuntimeError> = Ok(());
+        for entry in input.resume.clone() {
+            let payload = serde_json::json!({
+                "status": entry.status.as_str(),
+                "payload": entry.payload.unwrap_or(serde_json::Value::Null),
+            });
+            let r = state
+                .runtime
+                .resume_interrupt(ResumeInterruptInput {
+                    session_id: session_id.clone(),
+                    interrupt_id: entry.interrupt_id,
+                    payload,
+                    caller: caller.clone(),
+                    span: crate::span::SpanContext::root().child("ag_ui_resume"),
+                })
+                .await;
+            if let Err(e) = r {
+                outcome = Err(e);
+                break;
+            }
+        }
+        outcome
+    } else {
+        state
             .runtime
             .submit_client_payload(SubmitClientPayload {
                 session_id: session_id.clone(),
                 caller,
                 owner,
                 agent_id,
-                payload: ClientPayload::Message {
-                    message,
+                // Full client view so edits/branches reconcile into the tree.
+                payload: ClientPayload::Messages {
+                    messages: input.to_messages(),
                     stream: true,
                 },
                 turn_id: Some(input.run_id.clone()),
             })
             .await
-            .map(|_| ()),
-        AgUiInput::ToolResults(results) => {
-            // A client echoes its whole result history on resume, including
-            // already-resolved worker tools and prior submissions. Submit every
-            // result; tolerate the benign "not pending" errors those produce
-            // (skipping them keeps the genuinely-pending client result moving).
-            let mut outcome: Result<(), RuntimeError> = Ok(());
-            for item in results {
-                let tool_call_id = item.tool_call_id.clone();
-                let r = state
-                    .runtime
-                    .submit_tool_call_result(SubmitToolCallResultInput {
-                        session_id: session_id.clone(),
-                        tool_call_id: item.tool_call_id,
-                        attempt: 0,
-                        result: SubmitToolCallResult::Result {
-                            result: item.content,
-                        },
-                        caller: caller.clone(),
-                        span: crate::span::SpanContext::root().child("ag_ui_tool_result"),
-                    })
-                    .await;
-                match r {
-                    Ok(()) => {}
-                    Err(RuntimeError::Session(
-                        SessionError::ToolCallNotPending
-                        | SessionError::ToolCallNotFound
-                        | SessionError::ToolCallAttemptMismatch
-                        | SessionError::ToolCallWrongHandler,
-                    )) => {
-                        tracing::debug!(
-                            %tool_call_id,
-                            "ag_ui_run: skipping non-pending tool result on resume"
-                        );
-                    }
-                    Err(e) => {
-                        outcome = Err(e);
-                        break;
-                    }
-                }
-            }
-            outcome
-        }
-        AgUiInput::Resume(entries) => {
-            // AG-UI resume entries answer the session's pending interrupt. The
-            // worker receives `{status, payload}` as the `interrupt.resumed`
-            // trigger payload. Stale interrupt ids no-op in the core, which
-            // keeps resumes idempotent as the spec requires.
-            let mut outcome: Result<(), RuntimeError> = Ok(());
-            for entry in entries {
-                let payload = serde_json::json!({
-                    "status": entry.status.as_str(),
-                    "payload": entry.payload.unwrap_or(serde_json::Value::Null),
-                });
-                let r = state
-                    .runtime
-                    .resume_interrupt(ResumeInterruptInput {
-                        session_id: session_id.clone(),
-                        interrupt_id: entry.interrupt_id,
-                        payload,
-                        caller: caller.clone(),
-                        span: crate::span::SpanContext::root().child("ag_ui_resume"),
-                    })
-                    .await;
-                if let Err(e) = r {
-                    outcome = Err(e);
-                    break;
-                }
-            }
-            outcome
-        }
+            .map(|_| ())
     };
     if let Err(e) = submit {
         return runtime_error_response(e);
@@ -377,6 +344,7 @@ pub async fn ag_ui_connect(
     Path(_agent_id): Path<String>,
     Json(input): Json<RunAgentInput>,
 ) -> Response {
+    // Reads events to authorize and to carry the active interrupt (payload lives only in the event log).
     let events = match state
         .runtime
         .read_session_events(&caller, &input.thread_id, None, None)
@@ -386,7 +354,21 @@ pub async fn ag_ui_connect(
         Err(e) => return runtime_error_response(e),
     };
 
-    let frames = snapshot_events(input.thread_id, input.run_id, &events)
+    // No events ⇒ session not yet created (fresh thread); empty tree.
+    let tree = if events.is_empty() {
+        MessageTree::default()
+    } else {
+        match state
+            .runtime
+            .get_session(caller.tenant_id(), &input.thread_id)
+            .await
+        {
+            Ok((_, session)) => session.message_tree(),
+            Err(e) => return runtime_error_response(e),
+        }
+    };
+
+    let frames = snapshot_events(input.thread_id, input.run_id, &tree, &events)
         .into_iter()
         .map(|ev| Ok::<_, std::convert::Infallible>(ev.to_sse()))
         .collect::<Vec<_>>();
@@ -394,4 +376,33 @@ pub async fn ag_ui_connect(
     Sse::new(futures_util::stream::iter(frames))
         .keep_alive(KeepAlive::default())
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status_of(err: SessionError) -> StatusCode {
+        runtime_error_status(&RuntimeError::Session(err)).0
+    }
+
+    #[test]
+    fn effect_settle_errors_map_to_expected_statuses() {
+        assert_eq!(
+            status_of(SessionError::EffectNotFound),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            status_of(SessionError::EffectWrongHandler),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status_of(SessionError::EffectNotPending),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            status_of(SessionError::EffectAttemptMismatch),
+            StatusCode::CONFLICT
+        );
+    }
 }

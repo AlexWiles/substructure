@@ -7,6 +7,9 @@ use crate::runtime::aggregate::Caller;
 use crate::runtime::owner::SessionOwner;
 use crate::runtime::session::decision::DecisionTrigger;
 use crate::runtime::session::decision::WorkerAction;
+use crate::runtime::session::events::MessageTree;
+use crate::runtime::session::message::Message;
+use crate::runtime::session::state::Effect;
 use crate::runtime::span::SpanContext;
 
 /// Wire format sent to workers (via poll or push) when a decision is needed.
@@ -16,9 +19,22 @@ pub struct WorkerDecisionRequest {
     pub tenant_id: String,
     pub decision_id: String,
     pub agent_id: String,
-    pub owner: SessionOwner,
+    /// The session owner, surfaced to workers as `identity`.
+    pub identity: SessionOwner,
     pub trigger: DecisionTrigger,
     pub worker_state: WorkerState,
+    /// The in-flight effects as a flat, tagged list (each carries `kind`/`status`).
+    #[serde(default)]
+    pub effects: Vec<Effect>,
+    /// How many `tool_call`/`sub_agent` effects are still in flight: the step gate as a number.
+    #[serde(default)]
+    pub pending_effects: usize,
+    /// The active conversation as a flat list (the tree's `head_id`-to-root path).
+    #[serde(default)]
+    pub transcript: Vec<Message>,
+    /// The conversation tree, for clients that need the full branch structure.
+    #[serde(default)]
+    pub message_tree: MessageTree,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ancestry: Vec<String>,
     pub span: SpanContext,
@@ -37,6 +53,7 @@ pub struct SubmitDecision {
     pub session_id: String,
     pub caller: Caller,
     pub decision_id: String,
+    pub transcript: Vec<Message>,
     pub actions: Vec<WorkerAction>,
     pub state: WorkerState,
     pub span: SpanContext,

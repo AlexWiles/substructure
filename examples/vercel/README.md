@@ -11,8 +11,8 @@ pulling in Next.js.
 ## Deploy
 
 ```sh
-pnpm install
-pnpm deploy
+npm install
+npm run deploy
 ```
 
 Set the signing secret on the deployment, then point a Substructure
@@ -29,5 +29,5 @@ vercel env add SIGNING_SECRET
 ```sh
 export SUBSTRUCTURE_URL=https://api.substructure.ai
 export SUBSTRUCTURE_API_KEY=...
-pnpm client
+npm run client
 ```

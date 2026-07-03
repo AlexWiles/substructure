@@ -127,6 +127,9 @@ impl From<&str> for Content {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
+    /// Node id; empty until recorded as a tree node.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
     pub role: Role,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<Content>,

@@ -2,7 +2,6 @@ pub mod auth;
 pub mod cloud;
 pub mod env;
 pub mod local;
-pub mod scaffold;
 
 use clap::Subcommand;
 
@@ -77,9 +76,6 @@ pub enum Command {
     /// Link the current directory to an org (and app) by writing a
     /// `substructure.toml`, so commands run from this tree pick them up automatically.
     Link(cloud::link::LinkCommand),
-    /// Scaffold a new project from a starter template (interactive picker when
-    /// no template is named).
-    New(scaffold::NewCommand),
 }
 
 pub async fn run(command: Command) -> anyhow::Result<()> {
@@ -108,7 +104,6 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
             scope,
         } => cloud::open::run(app_id, no_browser, scope).await,
         Command::Link(cmd) => cloud::link::run(cmd).await,
-        Command::New(cmd) => scaffold::run(cmd).await,
     }
 }
 
@@ -125,7 +120,6 @@ fn command_path(cmd: &Command) -> &'static str {
         Command::Whoami { .. } => "whoami",
         Command::Open { .. } => "open",
         Command::Link(_) => "link",
-        Command::New(_) => "new",
         Command::Orgs { command } => match command {
             OrgsCommand::List { .. } => "orgs list",
         },

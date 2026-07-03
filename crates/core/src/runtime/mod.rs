@@ -10,14 +10,14 @@ use crate::providers::memory_queue::TaskQueue;
 use aggregate::{execute, Caller, ConflictRetry, ExecuteError, ExecuteInput};
 use event_store::{Event, EventFilter, EventStore, Snapshot, StoreError};
 use llm::{
-    spawn_llm_dispatch_processor, spawn_llm_task_executor, LlmProviderTrait, LlmTask, TokenDelta,
-    TokenDeltaTransport,
+    spawn_llm_dispatch_processor, spawn_llm_task_executor, ErrorCode, LlmProviderTrait, LlmTask,
+    TokenDelta, TokenDeltaTransport,
 };
 use owner::SessionOwner;
 use processor::ProcessorCheckpointStore;
 use retry::{NoRetryResolver, WorkerRetryResolver};
 use session::command::{CommandPayload, SessionError};
-use session::decision::ClientPayload;
+use session::decision::{ClientPayload, EffectResultPayload, WorkKind};
 use session::index::{
     spawn_session_index_processor, SessionFilter, SessionIndexStore, SessionPage,
 };
@@ -88,16 +88,24 @@ pub struct SubmitClientPayloadOutput {
     pub turn_id: String,
 }
 
-pub enum SubmitToolCallResult {
-    Result { result: String },
-    Error { error: String, retryable: bool },
+/// How an effect settled out-of-band. `Result` carries a tool result or llm
+/// response; `Error` is uniform across kinds.
+pub enum EffectSettlement {
+    Result(EffectResultPayload),
+    Error {
+        error: String,
+        retryable: bool,
+        code: Option<ErrorCode>,
+        detail: Option<serde_json::Value>,
+    },
 }
 
-pub struct SubmitToolCallResultInput {
+pub struct SettleEffectInput {
     pub session_id: String,
-    pub tool_call_id: String,
+    pub kind: WorkKind,
+    pub id: String,
     pub attempt: u32,
-    pub result: SubmitToolCallResult,
+    pub settlement: EffectSettlement,
     pub caller: Caller,
     pub span: SpanContext,
 }
@@ -360,6 +368,7 @@ impl Runtime {
                 caller: input.caller,
                 command: CommandPayload::SubmitWorkerDecision {
                     decision_id: input.decision_id,
+                    transcript: input.transcript,
                     actions: input.actions,
                     state: input.state,
                 },
@@ -372,23 +381,44 @@ impl Runtime {
         .map_err(RuntimeError::from)
     }
 
-    pub async fn submit_tool_call_result(
-        &self,
-        input: SubmitToolCallResultInput,
-    ) -> Result<(), RuntimeError> {
-        let command = match input.result {
-            SubmitToolCallResult::Result { result } => CommandPayload::CompleteToolCall {
-                tool_call_id: input.tool_call_id,
-                attempt: input.attempt,
-                result,
-                worker_state: None,
-            },
-            SubmitToolCallResult::Error { error, retryable } => CommandPayload::FailToolCall {
-                tool_call_id: input.tool_call_id,
-                attempt: input.attempt,
+    pub async fn settle_effect(&self, input: SettleEffectInput) -> Result<(), RuntimeError> {
+        let command = match input.settlement {
+            EffectSettlement::Result(EffectResultPayload::ToolCall { result }) => {
+                CommandPayload::CompleteToolCall {
+                    tool_call_id: input.id,
+                    attempt: input.attempt,
+                    result,
+                    worker_state: None,
+                }
+            }
+            EffectSettlement::Result(EffectResultPayload::LlmCall { response }) => {
+                CommandPayload::CompleteLlmCall {
+                    call_id: input.id,
+                    attempt: input.attempt,
+                    response,
+                }
+            }
+            EffectSettlement::Error {
                 error,
                 retryable,
-                worker_state: None,
+                code,
+                detail,
+            } => match input.kind {
+                WorkKind::ToolCall => CommandPayload::FailToolCall {
+                    tool_call_id: input.id,
+                    attempt: input.attempt,
+                    error,
+                    retryable,
+                    worker_state: None,
+                },
+                WorkKind::LlmCall => CommandPayload::FailLlmCall {
+                    call_id: input.id,
+                    attempt: input.attempt,
+                    error,
+                    retryable,
+                    code,
+                    detail,
+                },
             },
         };
 

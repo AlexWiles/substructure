@@ -9,7 +9,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.102.0",
     "@hono/node-server": "2.0.4",
-    "@substructure.ai/sdk": "link:../../packages/sdk"
+    "@substructure.ai/sdk": "file:../../packages/sdk"
   },
   "devDependencies": {
     "@types/node": "24.12.2",

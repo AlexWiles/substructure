@@ -127,6 +127,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
                         message,
                         stream: false,
                         turn_id: Some(Uuid::now_v7().to_string()),
+                        parent_id: None,
                     },
                     span: span.child("send_session_message"),
                 },

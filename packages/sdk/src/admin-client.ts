@@ -1,5 +1,5 @@
 import { BaseClient, type RequestOptions } from "./base";
-import type { Uuid, DateTime, Decimal, Event, SessionState, SessionStatus } from "./types";
+import type { DateTime, Decimal, Event, SessionState, SessionStatus, Uuid } from "./types";
 
 export interface AggregateSummary {
     aggregate_id: Uuid;

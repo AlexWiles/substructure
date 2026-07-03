@@ -47,48 +47,85 @@ substructure link
 `src/index.ts`:
 
 ```ts
-import Substructure from "@substructure.ai/sdk";
+import { agent, tool, toolLoop, worker } from "@substructure.ai/sdk";
+import { DurableObject } from "cloudflare:workers";
 
-const sub = new Substructure();
-const { agent } = sub;
+type Todo = { title: string };
+type State = { items: Todo[] };
 
-const todos = agent.stateSlice<{ items: { title: string }[] }>({ items: [] });
+export class AgentState extends DurableObject {
+  private state: State = { items: [] };
 
-const addTodo = agent.tool({
-  name: "add_todo",
-  description: "Add a todo item",
-  parameters: {
-    type: "object",
-    properties: { title: { type: "string" } },
-    required: ["title"],
-  },
-  state: todos,
-  execute: (args, state) => {
-    const { title } = JSON.parse(args);
-    state.items.push({ title });
-    return JSON.stringify({ added: title });
-  },
-});
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    ctx.blockConcurrencyWhile(async () => {
+      this.state = (await ctx.storage.get<State>("state")) ?? { items: [] };
+    });
+  }
 
-const listTodos = agent.tool({
-  name: "list_todos",
-  description: "List all todos",
-  parameters: { type: "object", properties: {} },
-  state: todos,
-  execute: (_args, state) => JSON.stringify(state.items),
-});
+  async getState(): Promise<State> {
+    return this.state;
+  }
 
-const todoAgent = agent({ id: "todo" })
-  .use(agent.messageHistory("Concise todo assistant. Use tools to manage the list."))
-  .use(agent.tools([addTodo, listTodos]))
-  .use(agent.llmToolLoop({ generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }) }));
+  async setState(state: State): Promise<void> {
+    this.state = state;
+    await this.ctx.storage.put("state", state);
+  }
+}
+
+interface WorkerEnv extends Env {
+  AGENT_STATE: DurableObjectNamespace<AgentState>;
+  SIGNING_SECRET?: string;
+}
+
+function todoTools(namespace: DurableObjectNamespace<AgentState>) {
+  const addTodo = tool({
+    name: "add_todo",
+    description: "Add a todo item",
+    parameters: {
+      type: "object",
+      properties: { title: { type: "string" } },
+      required: ["title"],
+    },
+    execute: async (args, request) => {
+      const { title } = JSON.parse(args);
+      const stub = namespace.getByName(request.session_id);
+      const state = await stub.getState();
+      await stub.setState({ items: [...state.items, { title }] });
+      return JSON.stringify({ added: title });
+    },
+  });
+
+  const listTodos = tool({
+    name: "list_todos",
+    description: "List all todos",
+    parameters: { type: "object", properties: {} },
+    execute: async (_args, request) => {
+      const stub = namespace.getByName(request.session_id);
+      return JSON.stringify((await stub.getState()).items);
+    },
+  });
+
+  return [addTodo, listTodos];
+}
 
 export default {
-  fetch: sub.worker({ agents: [todoAgent] }).fetchHandler({
-    signingSecret: process.env.SIGNING_SECRET,
-  }),
+  fetch(request: Request, env: WorkerEnv): Promise<Response> {
+    const todoAgent = agent({
+      name: "todo",
+      decide: toolLoop({
+        llm: { model: "anthropic/claude-sonnet-4-6" },
+        instructions: "Concise todo assistant. Use tools to manage the list.",
+        tools: todoTools(env.AGENT_STATE),
+      }),
+    });
+
+    return worker([todoAgent]).fetch({ signingSecret: env.SIGNING_SECRET })(request);
+  },
 };
 ```
+
+Each tool is a pure function; it reaches its store (the Durable Object, keyed by `request.session_id`) directly through the decision request. There is no SDK-held tool state.
 
 ## 5. Configure Wrangler
 
@@ -99,7 +136,11 @@ export default {
   "name": "example-agent",
   "main": "src/index.ts",
   "compatibility_date": "2026-05-14",
-  "compatibility_flags": ["nodejs_compat"]
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [{ "name": "AGENT_STATE", "class_name": "AgentState" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["AgentState"] }]
 }
 ```
 
@@ -199,6 +240,6 @@ substructure open
 ## Next
 
 - [Concepts](./02-concepts.md) — sessions, turns, the decision loop.
-- [SDK](./04-sdk.md) — tools, state, middleware, clients.
+- [SDK](./04-sdk.md) — tools, state, custom decision functions, clients.
 - [CLI](./03-cli.md) — full command reference and local server.
 - [Patterns](./06-patterns.md) — approvals, plan mode, cross-session data.

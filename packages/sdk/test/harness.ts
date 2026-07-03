@@ -1,85 +1,156 @@
-// Pure-function harness for middleware composition tests.
+// Pure-function harness for agent tests.
 //
-// A middleware chain is just `(trigger, state) -> { actions, state }` with no
-// I/O. `runChain` composes raw middlewares (the same fold as the worker's
-// `composeChain`) and runs a single trigger against a plain-object state — no
-// base64, no `jsonState`, no engine. Deterministic and synchronous.
+// An agent is `(DecisionRequest) -> Decision`. `runAgent` builds a request from a
+// trigger (+ optional tree/pending/state) and runs the agent against it,
+// mirroring the worker boundary minus the base64 state codec. Deterministic.
 
+import type { Agent, DecisionRequest } from "../src/core";
+import { activePath } from "../src/core";
 import type {
     DecisionTrigger,
+    Effect,
     LlmTokenDeltaInput,
     Message,
+    MessageTree,
+    Node,
     ToolCall,
-    ToolResult,
     WorkerAction,
     WorkerDecisionRequestWire,
 } from "../src/types";
-import type { AgentContext, MiddlewareFn, Next } from "../src/worker";
-
-const FALLBACK: Next<unknown> = (ctx) => ({ actions: [], state: ctx.state });
+import { nodeId } from "../src/types";
 
 export interface RunResult {
     actions: WorkerAction[];
     state: unknown;
+    transcript: Message[];
+    /** Node ids present in the input tree, so helpers can isolate the new tail. */
+    inputIds: Set<string>;
 }
 
 export interface RunOptions {
     trigger: DecisionTrigger;
     state?: Record<string, unknown>;
+    messageTree?: MessageTree;
+    /** In-flight effects the engine would surface on the request (default none). */
+    effects?: Effect[];
     emitDelta?: (delta: LlmTokenDeltaInput) => Promise<void>;
 }
 
-export async function runChain(middlewares: MiddlewareFn<any, any>[], opts: RunOptions): Promise<RunResult> {
-    let fn: Next<unknown> = FALLBACK;
-    for (let i = middlewares.length - 1; i >= 0; i--) {
-        const mw = middlewares[i];
-        const next = fn;
-        fn = (ctx) => mw(ctx, next);
-    }
-    const ctx: AgentContext<unknown> = {
-        state: structuredClone(opts.state ?? {}),
+export async function runAgent(agent: Agent, opts: RunOptions): Promise<RunResult> {
+    const transcript = opts.messageTree ? activePath(opts.messageTree) : undefined;
+    const req: DecisionRequest = {
+        ...makeRequest(opts, transcript),
+        state: opts.state ?? {},
         emitDelta: opts.emitDelta,
-        request: makeRequest(opts.trigger),
     };
-    const result = await fn(ctx);
-    return { actions: result.actions, state: result.state };
+    const out = await agent(req);
+
+    const inputIds = new Set<string>();
+    for (const node of opts.messageTree?.nodes ?? []) {
+        const id = nodeId(node);
+        if (id) inputIds.add(id);
+    }
+    return {
+        actions: out.actions ?? [],
+        state: out.state !== undefined ? out.state : req.state,
+        transcript: out.transcript ?? req.transcript ?? [],
+        inputIds,
+    };
 }
 
-function makeRequest(trigger: DecisionTrigger): WorkerDecisionRequestWire {
+function makeRequest(opts: RunOptions, transcript?: Message[]): WorkerDecisionRequestWire {
+    const effects = opts.effects ?? [];
     return {
         session_id: "00000000-0000-0000-0000-000000000000",
         tenant_id: "test",
         decision_id: "decision-0",
         agent_id: "test-agent",
         identity: { tenant_id: "test", id: "tester" },
-        trigger,
+        trigger: opts.trigger,
         worker_state: "",
+        effects,
+        pending_effects: effects.filter(
+            (e) =>
+                (e.kind === "tool_call" || e.kind === "sub_agent") &&
+                (e.status === "pending" || e.status === "retry_scheduled"),
+        ).length,
+        transcript,
+        message_tree: opts.messageTree,
         span: { trace_id: "0".repeat(32), span_id: "0".repeat(16), trace_flags: 1 },
         attempts: 0,
     };
 }
 
+export function linearTree(...messages: Message[]): MessageTree {
+    const nodes: Node[] = messages.map((message, i) => ({
+        kind: "message",
+        parent_id: i === 0 ? undefined : `n${i - 1}`,
+        message: { ...message, id: `n${i}` },
+    }));
+    return { nodes, head_id: nodes.at(-1) ? `n${messages.length - 1}` : undefined };
+}
+
 // ── Trigger builders ─────────────────────────────────────────────────────────
 
-export function userMessage(content: string, stream = false): DecisionTrigger {
-    return { type: "user.message", stream, message: { role: "user", content } };
+let nodeCounter = 0;
+function nextNodeId(): string {
+    return `node-${nodeCounter++}`;
+}
+
+export function userMessage(content: string): DecisionTrigger {
+    return { type: "user.message", message: { id: nextNodeId(), role: "user", content } };
+}
+
+export function userTranscript(messages: Message[]): DecisionTrigger {
+    return { type: "user.transcript", messages };
 }
 
 export function llmResponse(message: Message, callId = "call-0"): DecisionTrigger {
-    return { type: "llm.response", call_id: callId, message, truncated: false };
+    return { type: "effect.settled", id: callId, ok: true, kind: "llm_call", message, truncated: false };
 }
 
 export function toolCall(name: string, args: unknown, id = "tc-0"): ToolCall {
     return { id, type: "function", function: { name, arguments: JSON.stringify(args) } };
 }
 
-export function toolResult(toolCallId: string, content: string, name = "", isError = false): ToolResult {
-    return { tool_call_id: toolCallId, name, content, is_error: isError };
+/** One tool completion; the worker records its result in the transcript.
+ *  Whether it then prompts is driven by the `tool_call`/`sub_agent` effects still in flight. */
+export function toolResult(toolCallId: string, name: string, result: string, isError = false): DecisionTrigger {
+    return {
+        type: "effect.settled",
+        id: toolCallId,
+        ok: !isError,
+        kind: "tool_call",
+        name,
+        result,
+    };
 }
 
-/** The engine's batched delivery of all of a turn's tool + sub-agent results. */
-export function effectsComplete(results: ToolResult[]): DecisionTrigger {
-    return { type: "effects.complete", results };
+/** One sub-agent completion; `id` is the child session, `tool_call_id` the model call it answers. */
+export function subAgentResult(
+    sessionId: string,
+    toolCallId: string,
+    agentId: string,
+    result: string,
+    isError = false,
+): DecisionTrigger {
+    return {
+        type: "effect.settled",
+        id: sessionId,
+        ok: !isError,
+        kind: "sub_agent",
+        tool_call_id: toolCallId,
+        agent_id: agentId,
+        result,
+    };
+}
+
+// ── Transcript helpers ───────────────────────────────────────────────────────
+
+/** The new tail of `result.transcript`: messages absent from the input tree
+ *  (id-less messages count as new), in order; the engine appends exactly these. */
+export function appendedMessages(result: RunResult): Message[] {
+    return result.transcript.filter((m) => m.id == null || !result.inputIds.has(m.id));
 }
 
 // ── Assertion helpers ────────────────────────────────────────────────────────
@@ -97,10 +168,4 @@ export function callLlm(result: RunResult): Extract<WorkerAction, { type: "call.
 
 export function toolMessages(result: RunResult, toolCallId: string): Message[] {
     return (callLlm(result)?.request.messages ?? []).filter((m) => m.role === "tool" && m.tool_call_id === toolCallId);
-}
-
-/** The conversation history retained in the returned worker state. */
-export function historyMessages(result: RunResult, key = "messages"): Message[] {
-    const state = result.state as Record<string, Message[] | undefined>;
-    return state[key] ?? [];
 }

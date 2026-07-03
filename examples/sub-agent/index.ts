@@ -3,13 +3,10 @@
 // tools and state, and returns a single result. Failures isolate to the
 // child; token + cost usage rolls up to the parent.
 
-import Substructure from "@substructure.ai/sdk";
+import { agent, tool, toolLoop } from "@substructure.ai/sdk";
 import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
 
-const sub = new Substructure();
-const { agent } = sub;
-
-const getWeather = agent.tool({
+const getWeather = tool({
     name: "get_weather",
     description: "Get current weather for a city",
     parameters: {
@@ -23,15 +20,23 @@ const getWeather = agent.tool({
     },
 });
 
-const weatherAgent = agent({ id: "weather" })
-    .use(agent.messageHistory("Weather assistant. Look up the weather. Be concise."))
-    .use(agent.tools([getWeather]))
-    .use(agent.llmToolLoop({ generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }) }));
+const weatherAgent = agent({
+    name: "weather",
+    decide: toolLoop({
+        llm: { model: "anthropic/claude-sonnet-4-6" },
+        instructions: "Weather assistant. Look up the weather. Be concise.",
+        tools: [getWeather],
+    }),
+});
 
-const assistant = agent({ id: "assistant" })
-    .use(agent.messageHistory("Helpful assistant. Delegate weather questions to the weather agent."))
-    .use(agent.subAgents({ agents: [weatherAgent] }))
-    .use(agent.llmToolLoop({ generator: agent.serverGenerate({ model: "anthropic/claude-sonnet-4-6" }) }));
+const assistant = agent({
+    name: "assistant",
+    decide: toolLoop({
+        llm: { model: "anthropic/claude-sonnet-4-6" },
+        instructions: "Helpful assistant. Delegate weather questions to the weather agent.",
+        subAgents: [weatherAgent],
+    }),
+});
 
 const embedded = await SubstructureEmbedded.create({
     agents: [assistant, weatherAgent],
@@ -40,7 +45,7 @@ const embedded = await SubstructureEmbedded.create({
 });
 
 const scope = await embedded.startTurn({
-    agentId: assistant.agentId,
+    agentId: "assistant",
     payload: {
         type: "message",
         message: { role: "user", content: "What's the weather in San Francisco?" },

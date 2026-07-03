@@ -1,67 +1,77 @@
 # state-hydration
 
-The persisted (wire) state holds only compact **references** — a history id and
-a todos id. A hydration middleware loads the referenced data into rich objects
-the agent works with, then on the way out saves them back and restores the
-references, so only the ids ever ride the wire.
+The agent's state — a todo list — rides the decision envelope as `worker_state`,
+round-tripped every turn. The engine persists it between decisions and hands it
+back next time; the agent reads `req.state`, the tools mutate it, and the loop
+returns the new value.
+
+There's no built-in tool state, so the tools are built per decision, each closing
+over the live list. The agent is a plain custom `decide` function that builds a
+`toolLoop` over those tools and hands it the state — `loop({ ...req, state })` —
+which the loop echoes back out so the engine persists it.
 
 ```
-wire / persisted:   { historyId, todosId }                    ← tiny
-       ↓ hydrate (load from DB)
-runtime / agent:    { historyId, todosId, messages, todos }   ← what tools & middleware see
-       ↑ dehydrate (save to DB, drop the heavy fields)
-wire / persisted:   { historyId, todosId }
+wire / worker_state:  { todos: Todo[] }          ← engine persists & round-trips it
+       ↓ req.state
+decide:               builds tools over state, loop runs them, todos mutate
+       ↑ returns { ..., state }
+wire / worker_state:  { todos: Todo[] }           ← updated, handed back next turn
 ```
 
-## Transform, not contribution
+## The default loop, over state that rides the wire
 
-A state slice **adds** keys to the state type (`S -> S & A`). This is different:
-the hydration middleware **swaps the whole shape** (`Refs -> Hydrated`) for
-everything downstream. It's a plain `MiddlewareFn<In, Out>`:
+`toolLoop(config)` returns the exact decision function the engine runs — prompt
+assembly, `call.llm`, the tool round-trip, round gating. Nothing here is
+overridden: the `decide` reads `req.state`, builds the loop, and calls it.
 
 ```ts
-const hydrate: MiddlewareFn<Refs, Hydrated> = async (ctx, next) => {
-    const hydrated = { ...load from DB... };
-    const res = await next({ ...ctx, state: hydrated });   // downstream now sees Hydrated
-    ...save to DB...
-    return { ...res, state: refsOnly };                    // wire keeps only the ids
-};
+const todoAgent = agent<State>({
+    name: "todo",
+    decide: async (req) => {
+        const state: State = { todos: req.state?.todos ?? [] };
+        const loop = toolLoop<State>({
+            llm: { model: "anthropic/claude-sonnet-4-6" },
+            instructions: "Concise todo assistant. Use the tools to manage the list.",
+            tools: todoTools(state),
+        });
+        return loop({ ...req, state });
+    },
+});
 ```
 
-`.use(hydrate)` uses the builder's transform overload
-(`use<Out>(mw: MiddlewareFn<S, Out>): HandlerBuilder<Out>`), which **replaces**
-the state type with `Out`. So every middleware and tool below `hydrate` sees the
-fully-typed `Hydrated` shape — `state.messages: Message[]`, `state.todos: Todo[]`.
+The `state` you pass into `loop({ ...req, state })` is echoed straight back out in
+the decision the loop returns, so the engine persists it as `worker_state` and
+hands it back as `req.state` on the next decision.
 
-## Two things the types won't enforce
+## Tools close over the state
 
-- **`dehydrate` is mandatory.** Whatever state you return is serialized onto the
-  wire. If you don't restore the references, the hydrated objects get serialized
-  and balloon every turn. Here the way-out half saves to the DB and returns
-  just `{ historyId, todosId }`.
-- **Ordering matters.** `hydrate` must sit after the slice that establishes
-  `Refs` and before anything meant to see `Hydrated`.
+There's no SDK-held tool state, so `todoTools(state)` builds the `tool()` defs
+fresh each decision, with each `execute` closing over the live `state.todos`:
 
-## Ids as keys
+```ts
+function todoTools(state: State) {
+    return [
+        tool({ name: "add_todo",   /* … */ execute: (args) => { state.todos.push(/* … */); /* … */ } }),
+        tool({ name: "list_todos", /* … */ execute: () => state.todos.map(formatTodo).join("\n") }),
+    ];
+}
+```
 
-`todosId` defaults to the user id (todos persist across all of a user's
-sessions) and `historyId` to the session id (conversation is per session). The
-ids live in state, so you can repoint either one without touching anything else.
+`toolLoop` turns them into the model's tool schemas and runs them on
+`effect.execute`. Their edits land in `state.todos` — the same object the loop
+echoes back out — so the todo list rides the wire with no manual plumbing.
 
 ## Run
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
-pnpm install
-pnpm start
+npm install
+npm start
 ```
 
-Inspect what ended up where:
-
-```sh
-cat hydration-db/todos-*.json     # the actual todo items, per user
-cat hydration-db/history-*.json   # the conversation, per session
-```
-
-The agent's wire-state blob (inside the engine's `agent.db`) only ever contains
-`{ historyId, todosId }`. The messages and todos never go through Substructure.
+The example runs a single turn against an in-memory engine (`db: ":memory:"`):
+the user asks to add two todos and list them, and the stream prints each
+user/assistant message, tool call, and tool result. Because the state rides the
+wire as `worker_state`, the same todo list would be handed straight back on the
+next turn of a persisted session — the todos never live anywhere but the state
+the agent returns.

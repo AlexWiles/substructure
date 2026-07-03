@@ -11,6 +11,6 @@ Use this shape when you want a single Node binary with no infrastructure.
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
-pnpm install
-pnpm start
+npm install
+npm start
 ```

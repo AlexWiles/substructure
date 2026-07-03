@@ -11,7 +11,7 @@ use serde::Deserialize;
 use sha2::Sha256;
 
 use crate::runtime::llm::{StreamDelta, TokenDelta, TokenDeltaTransport};
-use crate::runtime::session::decision::DecisionTrigger;
+use crate::runtime::session::decision::{DecisionTrigger, EffectWork};
 use crate::transport::worker_http::types::SubmitRequest;
 use crate::worker::push::{PushError, PushResponse, PushTransport, TransportConstructor};
 use crate::worker::WorkerDecisionRequest;
@@ -111,6 +111,7 @@ impl PushTransport for HttpPushTransport {
         }
 
         Ok(PushResponse {
+            transcript: submit.transcript,
             actions: submit.actions,
             state: submit.state,
         })
@@ -223,22 +224,22 @@ async fn publish_worker_delta(
     token_delta_transport: &Arc<dyn TokenDeltaTransport>,
     seq: &mut u32,
 ) -> Result<(), PushError> {
-    let DecisionTrigger::LlmRequest {
-        call_id,
-        stream,
+    let DecisionTrigger::EffectExecute {
+        id: call_id,
         attempt,
+        work: EffectWork::LlmCall { stream, .. },
         ..
     } = &decision.trigger
     else {
         return Err(PushError {
-            message: "llm.token.delta is only valid for llm.request decisions".to_string(),
+            message: "llm.token.delta is only valid for llm effect.execute decisions".to_string(),
             retryable: false,
         });
     };
 
     if !stream {
         return Err(PushError {
-            message: "llm.token.delta received for non-streaming llm.request".to_string(),
+            message: "llm.token.delta received for a non-streaming llm call".to_string(),
             retryable: false,
         });
     }
@@ -299,25 +300,32 @@ mod tests {
             tenant_id: "tenant-a".to_string(),
             decision_id: "dec-1".to_string(),
             agent_id: "agent-1".to_string(),
-            owner: SessionOwner {
+            identity: SessionOwner {
                 tenant_id: "tenant-a".to_string(),
                 id: Some("user-1".to_string()),
                 metadata: Default::default(),
             },
-            trigger: DecisionTrigger::LlmRequest {
-                call_id: "llm-1".to_string(),
-                request: LlmRequest {
-                    model: "test-model".to_string(),
-                    messages: vec![],
-                    tools: None,
-                    temperature: None,
-                    max_completion_tokens: None,
-                    reasoning: None,
-                },
-                stream: true,
+            trigger: DecisionTrigger::EffectExecute {
+                id: "llm-1".to_string(),
                 attempt: 0,
+                deadline: None,
+                work: EffectWork::LlmCall {
+                    request: LlmRequest {
+                        model: "test-model".to_string(),
+                        messages: vec![],
+                        tools: None,
+                        temperature: None,
+                        max_completion_tokens: None,
+                        reasoning: None,
+                    },
+                    stream: true,
+                },
             },
             worker_state: vec![].into(),
+            effects: Default::default(),
+            pending_effects: 0,
+            transcript: vec![],
+            message_tree: Default::default(),
             ancestry: vec![],
             span: SpanContext::root(),
             attempts: 0,

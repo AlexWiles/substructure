@@ -1,14 +1,13 @@
-// Anthropic Messages API generator for `llmToolLoop`. Each `llm.request` runs one
-// `messages.stream` call.
+// Anthropic Messages API generator for `llm`.
 
 import Anthropic from "@anthropic-ai/sdk";
 
-import type { LlmGenerate, LlmGenerator } from "../middleware";
+import type { Llm, LlmGenerate } from "../core";
+import type { LlmParams, LlmTokenDeltaInput, LlmTool, Message, ToolCall } from "../types";
 import { contentText } from "../types";
-import type { LlmTool, Message, StreamPart, ToolCall } from "../types";
 
 // `MessageCreateParams` minus what the loop supplies: `messages`/`system` and
-// `tools` come from the request; `stream` is set on `llmToolLoop`.
+// `tools` come from the request; `stream` is set on `llm`.
 export type AnthropicGenerateSettings = Omit<
     Anthropic.MessageCreateParamsNonStreaming,
     "messages" | "system" | "tools" | "stream"
@@ -17,11 +16,11 @@ export type AnthropicGenerateSettings = Omit<
     client?: Anthropic;
 };
 
-export function anthropicGenerate(settings: AnthropicGenerateSettings): LlmGenerator {
+export function anthropicGenerate(settings: AnthropicGenerateSettings): Llm {
     const client = settings.client ?? new Anthropic();
     const { client: _client, ...params } = settings;
 
-    const requestDefaults: LlmGenerator["request"] = {
+    const requestDefaults: LlmParams = {
         model: settings.model,
         max_completion_tokens: settings.max_tokens,
     };
@@ -41,10 +40,10 @@ export function anthropicGenerate(settings: AnthropicGenerateSettings): LlmGener
             tools: modelToolList.length ? modelToolList : undefined,
         });
 
-        const blocks = new Map<number, BlockInfo>();
+        const blocks = new Map<number, string>();
         for await (const event of stream) {
-            const part = toStreamPart(event, blocks);
-            if (part) await ctx.emitDelta?.(part);
+            const delta = toDelta(event, blocks);
+            if (delta) await ctx.emitDelta?.(delta);
         }
 
         const final = await stream.finalMessage();
@@ -60,7 +59,7 @@ export function anthropicGenerate(settings: AnthropicGenerateSettings): LlmGener
         const content = textOf(final.content);
         const finishReason = toFinishReason(final.stop_reason, toolCalls.length > 0);
 
-        await ctx.emitDelta?.({ type: "finish", finishReason });
+        if (finishReason) await ctx.emitDelta?.({ finish_reason: finishReason });
         return {
             model: final.model,
             content: content || undefined,
@@ -70,7 +69,7 @@ export function anthropicGenerate(settings: AnthropicGenerateSettings): LlmGener
         };
     };
 
-    return { request: requestDefaults, handler: "worker", stream: true, run };
+    return { ...requestDefaults, handler: "worker", stream: true, run };
 }
 
 function modelTools(tools: LlmTool[] | undefined): Anthropic.Tool[] {
@@ -81,51 +80,27 @@ function modelTools(tools: LlmTool[] | undefined): Anthropic.Tool[] {
     }));
 }
 
-type BlockKind = "text" | "thinking" | "tool";
-interface BlockInfo {
-    kind: BlockKind;
-    id?: string;
-}
-
-export function toStreamPart(
+export function toDelta(
     event: Anthropic.RawMessageStreamEvent,
-    blocks: Map<number, BlockInfo>,
-): StreamPart | null {
+    blocks: Map<number, string>,
+): LlmTokenDeltaInput | null {
     switch (event.type) {
         case "content_block_start": {
             const block = event.content_block;
-            if (block.type === "text") {
-                blocks.set(event.index, { kind: "text" });
-                return { type: "text-start" };
-            }
-            if (block.type === "thinking" || block.type === "redacted_thinking") {
-                blocks.set(event.index, { kind: "thinking" });
-                return { type: "reasoning-start" };
-            }
             if (block.type === "tool_use") {
-                blocks.set(event.index, { kind: "tool", id: block.id });
-                return { type: "tool-input-start", toolCallId: block.id, toolName: block.name };
+                blocks.set(event.index, block.id);
+                return { tool_calls: [{ id: block.id, name: block.name }] };
             }
             return null;
         }
         case "content_block_delta": {
             const delta = event.delta;
-            if (delta.type === "text_delta") return { type: "text-delta", delta: delta.text };
-            if (delta.type === "thinking_delta") return { type: "reasoning-delta", delta: delta.thinking };
+            if (delta.type === "text_delta") return { text: delta.text };
+            if (delta.type === "thinking_delta") return { reasoning: delta.thinking };
             if (delta.type === "input_json_delta") {
-                const info = blocks.get(event.index);
-                return {
-                    type: "tool-input-delta",
-                    toolCallId: info?.id ?? String(event.index),
-                    inputTextDelta: delta.partial_json,
-                };
+                const id = blocks.get(event.index) ?? String(event.index);
+                return { tool_calls: [{ id, arguments: delta.partial_json }] };
             }
-            return null;
-        }
-        case "content_block_stop": {
-            const info = blocks.get(event.index);
-            if (info?.kind === "text") return { type: "text-end" };
-            if (info?.kind === "thinking") return { type: "reasoning-end" };
             return null;
         }
         default:

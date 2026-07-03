@@ -12,14 +12,52 @@ same version.
 
 ### Added
 
-- `assistant-ui-cloudflare-starter` template: an assistant-ui chat on a
-  Cloudflare Worker (TanStack Start) that streams from the AG-UI endpoint.
+- **Message-tree conversation history.** History now lives in a tree the engine
+  owns and sends on each worker decision, not in worker state. The worker returns
+  the transcript as it should look and the engine reconciles it, forking a branch
+  where it diverges. This enables edits, regenerations, plan/execute, and prompt
+  compaction.
+- The worker decision includes a count of effects still running, so a worker knows
+  when a step is done without scanning the list.
+- A language-neutral protocol reference (`docs/07-protocol.md`), so workers can be
+  written in any language.
+- New `assistant-ui-cloudflare-starter` example: an assistant-ui chat on a
+  Cloudflare Worker, streaming from AG-UI.
 
 ### Changed
 
-- `agent.tool` no longer requires `execute` for client tools
-  (`handler: "client"`) — the call is completed in the browser, so `execute` is
-  optional for them. Worker tools still require it.
+- **Breaking (SDK): the agent API is rebuilt.** An agent is now a single decision
+  function (the built-in tool/sub-agent loop, or your own returning plain action
+  objects), replacing the middleware/builder API. Models are configured inline for
+  the server to run, or supplied as an adapter your worker runs.
+- **Breaking (wire): one unified effect protocol.** Tool, model, and sub-agent
+  calls share a single request/settle vocabulary instead of a message type per
+  kind, and sub-agent results are reported as themselves, not as tool results. The
+  settle endpoint and its SDK/runtime methods were renamed to match.
+- **Breaking (wire/SDK): parallel model calls.** A worker can issue several model
+  calls from one decision that settle independently; the one-at-a-time restriction
+  is gone. The engine still paces server-run calls; run them on the worker for real
+  overlap.
+- **Breaking (SDK): tools.** A tool's execute receives the decision it runs under,
+  not a separate context; async tools are flagged with an option, not a sentinel;
+  tool state lives in your own store; and client tools may omit execute.
+- **Breaking (SDK): streaming.** A worker-run model streams tokens through one
+  delta shape; the intermediate stream-part type and its wrapper are gone.
+- **Breaking (wire):** the decision request's end-user field is renamed from
+  `owner` to `identity`, matching the SDK and docs.
+- Workers no longer send a span with submissions; the engine owns tracing.
+- Model-call actions default their retry and streaming options, and must state who
+  runs the call.
+- The AG-UI `/run` endpoint forwards the client's full transcript, which the engine
+  reconciles into the tree.
+
+### Removed
+
+- **Breaking (SDK):** the middleware system and the `Substructure.agent` factory;
+  the AI and OpenAI adapter classes become function equivalents.
+- The `substructure new` command and the `templates/` directory (starters moved
+  into `examples/`).
+- The `examples/` pnpm workspace; each example is now a standalone npm project.
 
 ## [0.1.19] - 2026-06-12
 

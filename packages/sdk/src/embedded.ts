@@ -9,15 +9,15 @@ import type {
     Event,
     PersistedEvent,
     SessionScope,
-    SubmitToolCallResultArgs,
+    SettleEffectArgs,
     TurnResult,
 } from "./types";
 import { drainToTurnResult, isTokenDelta } from "./types";
-import type { FetchHandlerOptions, Handler, NativeRuntime } from "./worker";
+import type { Agents, FetchHandlerOptions, NativeRuntime } from "./worker";
 import { Worker } from "./worker";
 
 export interface EmbeddedOptions {
-    agents: Handler[];
+    agents: Agents;
     /** SQLite database path (default: ":memory:") */
     db?: string;
     /** OpenRouter API base URL (default: "https://openrouter.ai/api") */
@@ -41,7 +41,7 @@ export interface StreamOptions {
     sequenceAfter?: number;
     /** Include transient `llm.token.delta` events. Off by default, so
      *  `stream()` yields only persisted events. Deltas only arrive when
-     *  streaming is enabled on the agent's `llmToolLoop`. */
+     *  streaming is enabled on the agent's `llm`. */
     tokens?: boolean;
 }
 
@@ -64,7 +64,7 @@ export class SubstructureEmbedded {
         return new SubstructureEmbedded(runtime, options.agents, options.tenantId ?? "default");
     }
 
-    private constructor(runtime: NativeRuntime, agents: Handler[], tenantId: string) {
+    private constructor(runtime: NativeRuntime, agents: Agents, tenantId: string) {
         this.runtime = runtime;
         this.worker = new Worker(agents);
         this.tenantId = tenantId;
@@ -113,24 +113,41 @@ export class SubstructureEmbedded {
         return drainToTurnResult(this.stream(scope));
     }
 
-    /** Complete (or fail) a tool call out-of-band, after a tool returns `DEFERRED`. */
-    async submitToolCallResult(args: SubmitToolCallResultArgs): Promise<void> {
+    /** Settle an effect out-of-band: a client-handled tool call, or a
+     *  worker-handled llm call run in the background (the deferred fan-out pattern). */
+    async settleEffect(args: SettleEffectArgs): Promise<void> {
         if (args.result !== undefined) {
-            await this.runtime.submitToolCallResult(
+            await this.runtime.settleEffect(
                 args.sessionId,
                 this.tenantId,
-                args.toolCallId,
+                "tool_call",
+                args.id,
                 args.attempt,
                 args.result,
                 undefined,
                 undefined,
+                undefined,
             );
-        } else {
-            await this.runtime.submitToolCallResult(
+        } else if (args.response !== undefined) {
+            await this.runtime.settleEffect(
                 args.sessionId,
                 this.tenantId,
-                args.toolCallId,
+                "llm_call",
+                args.id,
                 args.attempt,
+                undefined,
+                JSON.stringify(args.response),
+                undefined,
+                undefined,
+            );
+        } else {
+            await this.runtime.settleEffect(
+                args.sessionId,
+                this.tenantId,
+                args.kind ?? "tool_call",
+                args.id,
+                args.attempt,
+                undefined,
                 undefined,
                 args.error,
                 args.retryable,

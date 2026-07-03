@@ -18,18 +18,29 @@ pub struct SubmitClientPayloadResponse {
     pub turn_id: String,
 }
 
+/// Clients answer client tools only, so `kind` only deserializes `tool_call`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallKind {
+    ToolCall,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
-pub enum SubmitToolCallResultRequest {
-    #[serde(rename = "return.tool.result")]
+pub enum SettleEffectRequest {
+    #[serde(rename = "effect.result")]
     Result {
-        tool_call_id: String,
+        #[allow(dead_code)]
+        kind: ToolCallKind,
+        id: String,
         result: String,
         attempt: u32,
     },
-    #[serde(rename = "return.tool.error")]
+    #[serde(rename = "effect.error")]
     Error {
-        tool_call_id: String,
+        #[allow(dead_code)]
+        kind: ToolCallKind,
+        id: String,
         error: String,
         retryable: bool,
         attempt: u32,
@@ -37,7 +48,7 @@ pub enum SubmitToolCallResultRequest {
 }
 
 #[derive(Debug, Serialize)]
-pub struct SubmitToolCallResultResponse {
+pub struct SettleEffectResponse {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -77,4 +88,26 @@ pub struct StreamSessionEventsParams {
     pub turn_id: Option<String>,
     #[serde(default)]
     pub sequence_after: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_surface_accepts_tool_call() {
+        let body =
+            r#"{"type":"effect.result","kind":"tool_call","id":"tc-1","attempt":0,"result":"x"}"#;
+        assert!(serde_json::from_str::<SettleEffectRequest>(body).is_ok());
+    }
+
+    #[test]
+    fn client_surface_rejects_llm_call_kind() {
+        let body =
+            r#"{"type":"effect.result","kind":"llm_call","id":"llm-1","attempt":0,"result":"x"}"#;
+        assert!(
+            serde_json::from_str::<SettleEffectRequest>(body).is_err(),
+            "the client surface answers client tools only — llm_call must not deserialize"
+        );
+    }
 }

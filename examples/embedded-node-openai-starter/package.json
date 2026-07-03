@@ -1,0 +1,18 @@
+{
+  "name": "@substructure.ai/example-embedded-node-openai-starter",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx index.ts"
+  },
+  "dependencies": {
+    "@substructure.ai/runtime": "file:../../packages/runtime",
+    "@substructure.ai/sdk": "file:../../packages/sdk",
+    "openai": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.2",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3"
+  }
+}

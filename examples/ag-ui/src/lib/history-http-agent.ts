@@ -33,7 +33,7 @@ export class HistoryHttpAgent extends HttpAgent {
         const probeConfig = {
             url: this.connectUrl,
             headers: this.connectHeaders,
-            // Bound fetch — HttpAgent calls `this.fetch(...)`, which throws
+            // Bound fetch: HttpAgent calls `this.fetch(...)`, which throws
             // "Illegal invocation" in Firefox with an unbound reference. (`fetch`
             // is a runtime option not surfaced on the v2 config type, hence the cast.)
             fetch: (url: RequestInfo | URL, init?: RequestInit) => fetch(url, init),
