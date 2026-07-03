@@ -18,7 +18,7 @@ Verify the install:
 substructure --help
 ```
 
-The commands are flat. `serve` runs a Substructure server on your machine; everything else — `login`, `link`, `orgs`, `apps`, `keys`, `webhook`, `sessions`, `open` — manages a server you talk to over HTTP.
+The commands are flat. `serve` runs a Substructure server on your machine; everything else (`login`, `link`, `orgs`, `apps`, `keys`, `webhook`, `sessions`, `open`) manages a server you talk to over HTTP.
 
 Those management commands aren't cloud-only: they work against [Substructure Cloud](https://app.substructure.ai) or a local server, depending on which one you point them at. By default they target the cloud; pass `--url` (or set `$SUBS_API_URL`) to target something else. See [Targeting a server](#targeting-a-server).
 
@@ -50,7 +50,7 @@ substructure logout
 
 ### 2. Pick an org and app
 
-Against the cloud, each command runs against an org and (usually) an app. You can either pass them explicitly each time with `--org` and `--app`, or pin them to your project directory once (a local server supplies them automatically — see [Targeting a server](#targeting-a-server)):
+Against the cloud, each command runs against an org and (usually) an app. You can either pass them explicitly each time with `--org` and `--app`, or pin them to your project directory once (a local server supplies them automatically; see [Targeting a server](#targeting-a-server)):
 
 ```sh
 substructure link
@@ -184,7 +184,7 @@ Other useful flags:
 
 ## Targeting a server
 
-A local server speaks the same API as the cloud, so the management commands work against it too — you just point them somewhere other than the default. The target URL resolves in this order: the `--url` flag, then `$SUBS_API_URL`, then a `url` pinned in `substructure.toml`, then the cloud default (`https://api.substructure.ai`).
+A local server speaks the same API as the cloud, so the management commands work against it too. You just point them somewhere other than the default. The target URL resolves in this order: the `--url` flag, then `$SUBS_API_URL`, then a `url` pinned in `substructure.toml`, then the cloud default (`https://api.substructure.ai`).
 
 ```sh
 substructure sessions list --url http://localhost:8080
@@ -197,7 +197,7 @@ substructure webhook set https://your-worker.example.com --url http://localhost:
 SUBS_API_TOKEN=… substructure sessions list --url https://subs.internal
 ```
 
-`login` is URL-aware — the token it saves is scoped to the server you logged into — so you can stay logged in to several servers at once (e.g. cloud and a staging deploy) and each command only ever sends the token for its target.
+`login` is URL-aware: the token it saves is scoped to the server you logged into, so you can stay logged in to several servers at once (e.g. cloud and a staging deploy) and each command only ever sends the token for its target.
 
 **Orgs and apps.** A local server is single-tenant: it has one org and one app, so `--org`/`--app` are optional against it and you're never prompted. Commands that only make sense for the multi-tenant cloud (`apps create`, `keys`, …) return an error against a local server.
 

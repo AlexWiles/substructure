@@ -54,7 +54,7 @@ When the parent's LLM emits a tool call for a sub-agent name, `toolLoop` does th
 2. Emits a `spawn.sub_agent` action carrying the child's session id, the agent id, and the originating `tool_call_id`.
 3. Emits a `send.message` action that delivers the LLM's `message` argument to the child as a user message.
 
-The engine creates the child session and runs it to completion. The child's result — its `done` output, or its error if it failed past retries — returns to the parent as an `effect.settled` trigger with `kind: "sub_agent"`, folded in as a tool message on that `tool_call_id`, alongside any sibling tool results from the same turn. The loop keeps no correlation state; the engine threads the `tool_call_id` through the child's lifetime.
+The engine creates the child session and runs it to completion. The child's result (its `done` output, or its error if it failed past retries) returns to the parent as an `effect.settled` trigger with `kind: "sub_agent"`, folded in as a tool message on that `tool_call_id`, alongside any sibling tool results from the same turn. The loop keeps no correlation state; the engine threads the `tool_call_id` through the child's lifetime.
 
 From the parent LLM's perspective, the whole thing looks like a tool call that took a while and returned a string. It doesn't see the child's intermediate steps, tool calls, or LLM responses.
 

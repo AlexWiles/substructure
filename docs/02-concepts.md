@@ -16,7 +16,7 @@ The key idea is that **the engine and the worker are separate processes**. The e
 
 ## Agents
 
-An **agent** is a named entity that the engine routes decisions to, identified by a string `agentId` (`"weather-agent"`, `"todo"`, etc.). On the SDK side an agent is `agent({ name, decide })`: `decide` is `toolLoop({ model, instructions, tools, subAgents })` for the common tool/sub-agent loop, or your own function for full control over each decision. On the engine side it's just a name that maps to a worker.
+An **agent** is a named entity that the engine routes decisions to, identified by a string `agentId` (`"weather-agent"`, `"todo"`, etc.). On the SDK side an agent is `agent({ name, decide })`: `decide` is `toolLoop({ llm, instructions, tools, subAgents })` for the common tool/sub-agent loop, or your own function for full control over each decision. On the engine side it's just a name that maps to a worker.
 
 A single worker can host many agents. Clients pick one by `agentId` when they start a turn.
 
@@ -49,8 +49,8 @@ Each trigger carries the new content and the current transcript; the worker fold
 | `user.message` | A client sent a chat message. The worker adds it to the transcript (rooting a fresh branch with its system prompt on cold start) and prompts. |
 | `user.transcript` | A client sent a full transcript (e.g. an AG-UI client view, an edit, or a regenerate). The worker returns it; the engine reconciles it into the tree. |
 | `client.action` | A client called `startTurn` with a typed action instead of a message. |
-| `effect.execute` | The engine is delegating effect work to your worker — run a tool (`kind: "tool_call"`) or make an LLM call (`kind: "llm_call"`). `toolLoop` handles this and dispatches to the matching tool's `execute` or the worker-run model; a custom `decide` reacts to it directly. |
-| `effect.settled` | An effect landed: the model replied (`kind: "llm_call"`), or a tool/sub-agent call finished (`kind: "tool_call"` / `"sub_agent"`). Fires as each one lands, so the transcript fills incrementally. The request's `effects` list says what's still in flight, so the worker prompts once no tool/sub-agent effect is pending — without tracking the round itself. `ok` says whether the effect succeeded. |
+| `effect.execute` | The engine is delegating effect work to your worker: run a tool (`kind: "tool_call"`) or make an LLM call (`kind: "llm_call"`). `toolLoop` handles this and dispatches to the matching tool's `execute` or the worker-run model; a custom `decide` reacts to it directly. |
+| `effect.settled` | An effect landed: the model replied (`kind: "llm_call"`), or a tool/sub-agent call finished (`kind: "tool_call"` / `"sub_agent"`). Fires as each one lands, so the transcript fills incrementally. The request's `effects` list says what's still in flight, so the worker prompts once no tool/sub-agent effect is pending, without tracking the round itself. `ok` says whether the effect succeeded. |
 | `interrupt.resumed` | A paused session was resumed by an external signal. |
 | `stall` | Nothing has happened for a while; the worker has a chance to break the deadlock or finish. |
 
@@ -58,13 +58,13 @@ For most agents, `toolLoop` handles every trigger you'd see in practice. You onl
 
 ### Actions
 
-A decision returns a flat `transcript` (the conversation as it should now be) plus a list of actions. The engine reconciles the transcript into the tree — the one place the tree is written — and carries out the actions:
+A decision returns a flat `transcript` (the conversation as it should now be) plus a list of actions. The engine reconciles the transcript into the tree (the one place the tree is written) and carries out the actions:
 
 | Action | Effect |
 | --- | --- |
 | `call.llm` | Make an LLM request with a prompt message list. Produces an `effect.settled` trigger when it completes. The prompt is separate from the transcript, so it can be shaped per call (compaction, injected context) without changing the record. |
 | `call.tool` | Have the engine schedule a tool call, named by `id`. Produces an `effect.execute` trigger back at the worker. |
-| `effect.result` | Answer an `effect.execute` with a success — a tool's `result` or a worker-run model's `response`. |
+| `effect.result` | Answer an `effect.execute` with a success: a tool's `result` or a worker-run model's `response`. |
 | `effect.error` | Answer an `effect.execute` with a failure; uniform across kinds. |
 | `spawn.sub_agent` | Start a child session under a different agent. Its output (or error) comes back as an `effect.settled` trigger when the child's turn completes. |
 | `send.message` | Push a message into another session (handy for fan-out or notifying a parent). |
@@ -74,9 +74,9 @@ A single decision can return multiple actions: for example, several `call.tool` 
 
 ## State
 
-Across decisions in a session, two things persist: the **transcript** (the conversation tree, owned by the engine) and any **worker state** you choose to keep. There is no SDK-held tool state — where your own state lives is a choice you make per agent:
+Across decisions in a session, two things persist: the **transcript** (the conversation tree, owned by the engine) and any **worker state** you choose to keep. There is no SDK-held tool state. Where your own state lives is a choice you make per agent:
 
-- **Your own store.** Tools are pure functions that reach a store directly through the decision request, keyed by `request.session_id` (per conversation) or `request.identity.id` (per user). Best for large state, sensitive data, or anything you want to query directly — it never leaves your infrastructure. See [State](./04-sdk.md#state) in the SDK docs.
+- **Your own store.** Tools are pure functions that reach a store directly through the decision request, keyed by `request.session_id` (per conversation) or `request.identity.id` (per user). Best for large state, sensitive data, or anything you want to query directly; it never leaves your infrastructure. See [State](./04-sdk.md#state) in the SDK docs.
 - **On the wire.** Keep small state in `worker_state` with a custom `decide`: the engine ships the decoded state in as `req.state` on every decision and persists whatever you return. Simple, no infrastructure required. See [State](./04-sdk.md#state).
 
 State is logically per-session. Two sessions for the same user are independent unless you explicitly link them.
@@ -87,7 +87,7 @@ Every interesting thing that happens during a session is recorded as an **event*
 
 You can think of a session as the event log plus the derived state from replaying it.
 
-`client.stream(scope, { tokens: true })` also interleaves transient `llm.token.delta` events when streaming is enabled on the agent's `llm` (they're off by default, so a plain `client.stream(scope)` yields only persisted events). Deltas are *not* persisted — they're a live side channel for progressive UI rendering. The canonical assistant text always arrives via the persisted `llm.call.completed` and `message.new` events that follow.
+`client.stream(scope, { tokens: true })` also interleaves transient `llm.token.delta` events when streaming is enabled on the agent's `llm` (they're off by default, so a plain `client.stream(scope)` yields only persisted events). Deltas are *not* persisted; they're a live side channel for progressive UI rendering. The canonical assistant text always arrives via the persisted `llm.call.completed` and `message.new` events that follow.
 
 ## Identity
 

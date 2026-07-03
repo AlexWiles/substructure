@@ -4,9 +4,9 @@ title: TypeScript SDK
 
 The `@substructure.ai/sdk` package is how you build agents and connect to Substructure from TypeScript. It gives you three things:
 
-- An **agent** — `agent({ name, decide })`, where `decide` is `toolLoop(...)` for the common tool/sub-agent loop, or your own function for full control over each decision.
-- A **worker** — `worker([...]).fetch(...)`, which exposes those agents as an HTTP endpoint the engine calls into.
-- **Clients** — for submitting turns from your backend or browser.
+- An **agent**: `agent({ name, decide })`, where `decide` is `toolLoop(...)` for the common tool/sub-agent loop, or your own function for full control over each decision.
+- A **worker**: `worker([...]).fetch(...)`, which exposes those agents as an HTTP endpoint the engine calls into.
+- **Clients** for submitting turns from your backend or browser.
 
 ## Install
 
@@ -16,18 +16,18 @@ npm i @substructure.ai/sdk
 
 ## The model: an agent is a decision function
 
-The engine is the runtime. It owns the durable session, the conversation tree, scheduling, and retries. An agent is `agent({ name, decide })`: `name` is the id the engine routes to, and `decide` is the function it calls once per **decision**. The engine sends a **`DecisionRequest`** — a trigger (a user message, an LLM response, a tool result) plus the active transcript, state, and pending effects — and `decide` returns a **`Decision`**: the **actions** to take (call the LLM, call a tool, finish the turn), plus the transcript and state as they should now read.
+The engine is the runtime. It owns the durable session, the conversation tree, scheduling, and retries. An agent is `agent({ name, decide })`: `name` is the id the engine routes to, and `decide` is the function it calls once per **decision**. The engine sends a **`DecisionRequest`** (a trigger such as a user message, an LLM response, or a tool result, plus the active transcript, state, and pending effects), and `decide` returns a **`Decision`**: the **actions** to take (call the LLM, call a tool, finish the turn), plus the transcript and state as they should now read.
 
 You write `decide` one of two ways:
 
-- `toolLoop({...})` — the batteries-included loop. Give it a model, instructions, and tools, and it handles the whole user → LLM → tools → LLM cycle for you.
-- `async (req) => {...}` — your own decision function. You get the `DecisionRequest` and return the `Decision` yourself. Nothing is hidden: branching, approval gates, mode switches, and compaction are all just code that returns actions.
+- `toolLoop({...})`: the batteries-included loop. Give it a model, instructions, and tools, and it handles the whole user → LLM → tools → LLM cycle for you.
+- `async (req) => {...}`: your own decision function. You get the `DecisionRequest` and return the `Decision` yourself. Nothing is hidden: branching, approval gates, mode switches, and compaction are all just code that returns actions.
 
-`toolLoop(config)` returns a decision function, so a custom `decide` can start from the default loop and override a single case — call `toolLoop(config)(req)` to delegate to it.
+`toolLoop(config)` returns a decision function, so a custom `decide` can start from the default loop and override a single case. Call `toolLoop(config)(req)` to delegate to it.
 
 ## `agent` and `toolLoop`
 
-The common case. An agent is `agent({ name, decide })`; for the default loop, `decide` is `toolLoop(...)` — instructions + model + tools is a working agent:
+The common case. An agent is `agent({ name, decide })`; for the default loop, `decide` is `toolLoop(...)`, where instructions + model + tools is a working agent:
 
 ```ts
 import { agent, tool, toolLoop } from "@substructure.ai/sdk";
@@ -60,12 +60,12 @@ The `agent` config is `{ name, decide }`: `name` is the id clients target and th
 
 | Field | What it does |
 | --- | --- |
-| `llm` | The LLM to call — `{ model: "provider/model" }` (the Substructure server makes the call) or an adapter generator that runs it on your worker. Add `stream: true` here to stream tokens; add `temperature`/`reasoning`/etc. alongside `model`. |
+| `llm` | The LLM to call: `{ model: "provider/model" }` (the Substructure server makes the call) or an adapter generator that runs it on your worker. Add `stream: true` here to stream tokens; add `temperature`/`reasoning`/etc. alongside `model`. |
 | `instructions` | The system prompt. A string, or a function resolved per call. |
 | `tools` | Worker- and client-handled tools (see below). |
 | `subAgents` | Child agents the model can delegate to as tools, referenced by value. See [Sub-agents](./05-sub-agents.md). |
 
-`agent(...)` returns an `Agent` — pass it straight to `worker([...])` or `SubstructureEmbedded.create({ agents })`.
+`agent(...)` returns a `NamedAgent`: pass it straight to `worker([...])` or `SubstructureEmbedded.create({ agents })`.
 
 ## Defining tools
 
@@ -91,15 +91,15 @@ A few notes:
 
 - `parameters` is a plain JSON Schema object. The LLM uses it to format calls.
 - `execute` receives the raw stringified JSON args. Parse it yourself.
-- Return a string — the tool result fed back to the LLM. For structured data, `JSON.stringify` it yourself. (To complete a call out-of-band instead, see [Deferred tool calls](#deferred-async-tool-calls).)
+- Return a string: the tool result fed back to the LLM. For structured data, `JSON.stringify` it yourself. (To complete a call out-of-band instead, see [Deferred tool calls](#deferred-async-tool-calls).)
 - Tools can be async. Substructure waits for the promise.
-- `execute(args, request)` takes only its arguments and the `DecisionRequest` it runs under. **There is no SDK-held tool state** — see [State](#state) for where state lives.
+- `execute(args, request)` takes only its arguments and the `DecisionRequest` it runs under. **There is no SDK-held tool state.** See [State](#state) for where state lives.
 
 ### Deferred (async) tool calls
 
 By default, the value `execute` returns *is* the tool result: it ships back to the LLM as soon as the worker finishes the decision. That works when the answer is in hand by the time `execute` returns (a database lookup, an HTTP call you `await`, a computation).
 
-It does not work for tools that hand work off to something the worker can't await — a webhook callback, a queued job, a human approval. For those, declare the tool with `deferred: true`. Its `execute` becomes a **kick-off**: it runs to start the work, its return value is ignored, and the loop emits no result action — the engine leaves the call pending until the result arrives via `settleEffect`.
+It does not work for tools that hand work off to something the worker can't await: a webhook callback, a queued job, a human approval. For those, declare the tool with `deferred: true`. Its `execute` becomes a **kick-off**: it runs to start the work, its return value is ignored, and the loop emits no result action, so the engine leaves the call pending until the result arrives via `settleEffect`.
 
 ```ts
 const wait = tool({
@@ -130,19 +130,19 @@ const wait = tool({
 
 `client` here is a backend client minted with your API key (see [Submitting turns from a client](#submitting-turns-from-a-client)). The `request` (the decision envelope) gives you everything the settlement needs:
 
-- `request.session_id` — the session this call belongs to.
-- `request.trigger.id` — the effect id (the LLM-assigned tool call id) you must pass back.
-- `request.trigger.attempt` — the current retry attempt; pass it back unchanged.
+- `request.session_id`: the session this call belongs to.
+- `request.trigger.id`: the effect id (the LLM-assigned tool call id) you must pass back.
+- `request.trigger.attempt`: the current retry attempt; pass it back unchanged.
 
-Capture the ids *before* `execute` returns, since the worker decision ends as soon as it does. If the kick-off itself throws, the loop reports it as an `effect.error` like any other tool failure — a broken enqueue fails fast instead of hanging until the deadline.
+Capture the ids *before* `execute` returns, since the worker decision ends as soon as it does. If the kick-off itself throws, the loop reports it as an `effect.error` like any other tool failure, so a broken enqueue fails fast instead of hanging until the deadline.
 
 What happens on the wire:
 
 1. The LLM emits a tool call. The engine records it as pending and dispatches an `effect.execute` trigger to your worker.
 2. Your `execute` starts the work; because the tool is `deferred`, the worker emits no `effect.result`, so the engine leaves the tool call pending.
-3. Later — minutes, hours, however long — the external work completes. You call `settleEffect({...})`. The engine treats it exactly like a synchronous tool return: fires an `effect.settled` trigger, and the loop issues the next `call.llm` once every pending result is in.
+3. Later, whether minutes or hours, the external work completes. You call `settleEffect({...})`. The engine treats it exactly like a synchronous tool return: fires an `effect.settled` trigger, and the loop issues the next `call.llm` once every pending result is in.
 
-`settleEffect` is available on every flavor of client, so the callback can come from wherever finishes the work. To report a failure instead, pass `error` (and optional `retryable`) in place of `result`. If you never call it, the tool stays pending forever — set a `retry` policy (with a `timeout_secs`) on the tool so the engine eventually fails the call and the loop sees an `effect.settled` with `ok: false`.
+`settleEffect` is available on every flavor of client, so the callback can come from wherever finishes the work. To report a failure instead, pass `error` (and optional `retryable`) in place of `result`. If you never call it, the tool stays pending forever, so set a `retry` policy (with a `timeout_secs`) on the tool so the engine eventually fails the call and the loop sees an `effect.settled` with `ok: false`.
 
 Full runnable version: [`examples/deferred-tool`](https://github.com/substructureai/substructure/tree/main/examples/deferred-tool).
 
@@ -171,7 +171,7 @@ There is no SDK-held tool state. State lives in one of two places, and you choos
 
 ### In your own store
 
-Tools reach their store directly through the decision request. Key it by `request.session_id` (per conversation) or `request.identity.id` (per user) — whichever scope you want. This keeps large or sensitive state entirely in your infrastructure; only the conversation tree (owned by the engine) and whatever you put on the wire ever leave it.
+Tools reach their store directly through the decision request. Key it by `request.session_id` (per conversation) or `request.identity.id` (per user), whichever scope you want. This keeps large or sensitive state entirely in your infrastructure; only the conversation tree (owned by the engine) and whatever you put on the wire ever leave it.
 
 ```ts
 const addTodo = tool({
@@ -194,11 +194,11 @@ const addTodo = tool({
 });
 ```
 
-Swap `db` for Postgres, Redis, S3, or a Durable Object — the agent doesn't change. The [`cloudflare-worker`](https://github.com/substructureai/substructure/tree/main/examples/cloudflare-worker) example keys a Durable Object by `request.session_id`; [`hybrid-state`](https://github.com/substructureai/substructure/tree/main/examples/hybrid-state) keys a file store by user id so a todo list follows the user across sessions.
+Swap `db` for Postgres, Redis, S3, or a Durable Object; the agent doesn't change. The [`cloudflare-worker`](https://github.com/substructureai/substructure/tree/main/examples/cloudflare-worker) example keys a Durable Object by `request.session_id`; [`hybrid-state`](https://github.com/substructureai/substructure/tree/main/examples/hybrid-state) keys a file store by user id so a todo list follows the user across sessions.
 
 ### On the wire (custom `decide`)
 
-If you want small state round-tripped for you instead of standing up a store, keep it in `worker_state` with a custom `decide`. The engine ships the decoded state in as `req.state`. Build the tools **inside `decide`** so each `execute` closes over the live `state`, hand them to `toolLoop`, and pass `state` into the loop — the loop runs the tools, and echoes the `state` you gave it so the agent persists it:
+If you want small state round-tripped for you instead of standing up a store, keep it in `worker_state` with a custom `decide`. The engine ships the decoded state in as `req.state`. Build the tools **inside `decide`** so each `execute` closes over the live `state`, hand them to `toolLoop`, and pass `state` into the loop: the loop runs the tools, and echoes the `state` you gave it so the agent persists it:
 
 ```ts
 import { agent, tool, toolLoop } from "@substructure.ai/sdk";
@@ -240,7 +240,7 @@ const todoAgent = agent<State>({
 
 ## Custom decision functions
 
-When the default loop isn't the shape you want — an approval gate, a modal agent, custom routing, compaction — write `decide` directly. The engine hands you a `DecisionRequest` and you return a `Decision`:
+When the default loop isn't the shape you want (an approval gate, a modal agent, custom routing, compaction), write `decide` directly. The engine hands you a `DecisionRequest` and you return a `Decision`:
 
 ```ts
 import { agent } from "@substructure.ai/sdk";
@@ -254,6 +254,7 @@ const echo = agent({
           actions: [
             {
               type: "call.llm",
+              id: crypto.randomUUID(),
               request: { model: "anthropic/claude-sonnet-4-6", messages: [...(req.transcript ?? []), req.trigger.message] },
               handler: "server",
             },
@@ -271,26 +272,26 @@ const echo = agent({
 
 The `DecisionRequest` (conventionally `req`) is the engine's wire envelope with `worker_state` decoded into `state`. Read off it:
 
-- `req.trigger` — what happened: `user.message`, `user.transcript`, `client.action`, `effect.execute`, `effect.settled`, ...
-- `req.transcript` — the active transcript (the head-to-root path); may be empty.
-- `req.state` — the decoded `worker_state` (return a new value to persist it).
-- `req.pending_effects` — how many `tool_call`/`sub_agent` effects are still in flight; the step gate. On an `effect.settled` trigger, prompt again once it hits `0` (a non-zero value doubles as a "steps still running" count).
-- `req.effects` — the same in-flight effects as a flat, tagged list, when you need more than the count (each with `id`, `kind`, `status`, `attempt`, plus kind-specific fields like a tool's `name`/`arguments`). `kind`/`status` are open, so new effect kinds are additive.
-- `req.session_id`, `req.identity`, `req.turn_id`, ... — the rest of the envelope, read directly.
+- `req.trigger`: what happened, one of `user.message`, `user.transcript`, `client.action`, `effect.execute`, `effect.settled`, and so on.
+- `req.transcript`: the active transcript (the head-to-root path); may be empty.
+- `req.state`: the decoded `worker_state` (return a new value to persist it).
+- `req.pending_effects`: how many `tool_call`/`sub_agent` effects are still in flight; the step gate. On an `effect.settled` trigger, prompt again once it hits `0` (a non-zero value doubles as a "steps still running" count).
+- `req.effects`: the same in-flight effects as a flat, tagged list, when you need more than the count (each with `id`, `kind`, `status`, `attempt`, plus kind-specific fields like a tool's `name`/`arguments`). `kind`/`status` are open, so new effect kinds are additive.
+- `req.session_id`, `req.identity`, `req.turn_id`, and the rest of the envelope, read directly.
 
-Return a `Decision` — `{ actions?, transcript?, state? }`. `actions` defaults to none; `transcript` echoes `req.transcript`; `state` echoes `req.state`.
+Return a `Decision`, `{ actions?, transcript?, state? }`. `actions` defaults to none; `transcript` echoes `req.transcript`; `state` echoes `req.state`.
 
-Actions are plain objects — you return them directly:
+Actions are plain objects that you return directly:
 
 | Action | Shape |
 | --- | --- |
-| Ask the model | `{ type: "call.llm", request: { model, messages, tools? }, handler }` |
+| Ask the model | `{ type: "call.llm", id, request: { model, messages, tools? }, handler }` |
 | Run a tool | `{ type: "call.tool", id, name, arguments, handler }` |
 | Return an effect result / error | `{ type: "effect.result", kind, id, result \| response, attempt }` / `{ type: "effect.error", kind, id, error, retryable, attempt }` |
 | Delegate to a sub-agent | `{ type: "spawn.sub_agent", session_id, agent_id, tool_call_id }` + `{ type: "send.message", session_id, message }` |
 | Finish the turn | `{ type: "done", data }` |
 
-A `client.action` trigger is how a custom `decide` reacts to the client — approvals, mode switches, replays. The [`tool-approval`](https://github.com/substructureai/substructure/tree/main/examples/tool-approval) example parks a tool call when the model replies (`effect.settled`, `kind: "llm_call"`) and re-emits it on a `client.action approve_command`; [`plan-mode`](https://github.com/substructureai/substructure/tree/main/examples/plan-mode) reads its mode from state and forks a fresh branch when it switches to executing.
+A `client.action` trigger is how a custom `decide` reacts to the client: approvals, mode switches, replays. The [`tool-approval`](https://github.com/substructureai/substructure/tree/main/examples/tool-approval) example parks a tool call when the model replies (`effect.settled`, `kind: "llm_call"`) and re-emits it on a `client.action approve_command`; [`plan-mode`](https://github.com/substructureai/substructure/tree/main/examples/plan-mode) reads its mode from state and forks a fresh branch when it switches to executing.
 
 ## Serving as a worker
 
@@ -307,7 +308,7 @@ export default {
 `worker([...]).fetch(...)` returns a plain `(Request) => Promise<Response>`, so it works in any fetch-compatible runtime (`serve([weatherAgent], opts)` is a one-liner shorthand for the same thing):
 
 - **Cloudflare Workers / Vercel / Deno / Bun**: export it directly as the default `fetch`.
-- **Hono**: assign the returned fetch function to a const and call it in the route — `app.post("/agent", (c) => agentFetch(c.req.raw))`.
+- **Hono**: assign the returned fetch function to a const and call it in the route: `app.post("/agent", (c) => agentFetch(c.req.raw))`.
 - **Node + Express / Fastify**: adapt the request/response using a fetch shim.
 
 The worker is stateless. Each request is one decision; the engine holds the durable state. Scale to zero, deploy to any serverless platform.
@@ -320,8 +321,8 @@ The worker is stateless. Each request is one decision; the engine holds the dura
 
 There are two clients for talking to a deployed worker, picked by where the code runs:
 
-- `sub.backend.client({ apiKey })` — for code that runs on **your servers**. Authenticates with a long-lived API key. Can act as any identity and exposes admin APIs (`listSessions`, `getSession`, `sessionEvents`).
-- `sub.frontend.client({ token })` — for code that runs in **the browser** (or any untrusted environment). Authenticates with a short-lived per-user token your backend mints. Scoped to a single identity; no admin APIs.
+- `sub.backend.client({ apiKey })`: for code that runs on **your servers**. Authenticates with a long-lived API key. Can act as any identity and exposes admin APIs (`listSessions`, `getSession`, `sessionEvents`).
+- `sub.frontend.client({ token })`: for code that runs in **the browser** (or any untrusted environment). Authenticates with a short-lived per-user token your backend mints. Scoped to a single identity; no admin APIs.
 
 Both come from a `Substructure` instance:
 
@@ -359,7 +360,7 @@ console.log(data);
 `startTurn` returns a `SessionScope` containing `sessionId` and `turnId`. From there you have two choices:
 
 - `await client.turnResult(scope)` waits for the turn to finish and returns `{ data, cost, tokenUsage }`.
-- `for await (const event of client.stream(scope))` streams individual events as they arrive: LLM responses, tool calls, sub-agent updates, and so on. Use `sequenceAfter` to resume from a known event. By default the stream yields only persisted events, so you can `switch` on `event.payload.type` directly. Pass `{ tokens: true }` to also receive transient `llm.token.delta` items for progressive rendering (only emitted when the agent has `stream: true`) — they arrive as bare payloads (no envelope, no `sequence`), are not replayed on reconnect, and are discriminated with the exported `isTokenDelta(event)` guard.
+- `for await (const event of client.stream(scope))` streams individual events as they arrive: LLM responses, tool calls, sub-agent updates, and so on. Use `sequenceAfter` to resume from a known event. By default the stream yields only persisted events, so you can `switch` on `event.payload.type` directly. Pass `{ tokens: true }` to also receive transient `llm.token.delta` items for progressive rendering (only emitted when the agent has `stream: true`). They arrive as bare payloads (no envelope, no `sequence`), are not replayed on reconnect, and are discriminated with the exported `isTokenDelta(event)` guard.
 
 The client also exposes admin APIs: `listSessions`, `getSession`, and `sessionEvents` for tooling and dashboards.
 
@@ -430,7 +431,7 @@ for await (const event of client.stream(scope, { tokens: true })) {
   if (isTokenDelta(event)) {
     // Transient live chunk. Order within a call by `seq` and append to the
     // in-progress assistant bubble. Drop the partial when the matching
-    // llm.call.completed arrives — the persisted message.new that follows
+    // llm.call.completed arrives; the persisted message.new that follows
     // carries the canonical content.
     appendDelta(event);
   } else if (event.payload.type === "message.new") {
@@ -439,7 +440,7 @@ for await (const event of client.stream(scope, { tokens: true })) {
 }
 ```
 
-Token deltas only flow when the agent was defined with `stream: true`. They're transient: the engine does not persist them, and a client reconnecting mid-call will not see deltas already emitted — only the final `message.new` once the call completes.
+Token deltas only flow when the agent was defined with `stream: true`. They're transient: the engine does not persist them, and a client reconnecting mid-call will not see deltas already emitted, only the final `message.new` once the call completes.
 
 Note that the browser does not pass `identity`: it's already baked into the token. Mint a fresh token when the current one nears `expiresAt`, or on every page load if your TTL is short.
 
@@ -472,7 +473,7 @@ const scope = await embedded.startTurn({
     type: "message",
     message: { role: "user", content: "Add 'buy groceries' and list my todos" },
   },
-  identity: { id: "demo" },
+  identity: { tenant_id: "default", id: "demo" },
 });
 
 const { data } = await embedded.turnResult(scope);
@@ -481,30 +482,30 @@ console.log(data);
 await embedded.shutdown();
 ```
 
-The embedded instance exposes the same `startTurn` / `stream` / `turnResult` surface as the backend client, plus a `fetch` handler if you want to put an HTTP face on it. Use `db: ":memory:"` for a transient instance in tests.
+The embedded instance exposes the same `startTurn` / `stream` / `turnResult` surface as the backend client, plus `settleEffect`, `shutdown`, and a `fetchHandler` if you want to put an HTTP face on it. Use `db: ":memory:"` for a transient instance in tests.
 
 ## The LLM
 
-`llm` is the LLM the loop calls. In the common case it's just `{ model: "provider/model" }` — the Substructure server makes the call against its configured provider:
+`llm` is the LLM the loop calls. In the common case it's just `{ model: "provider/model" }`, where the Substructure server makes the call against its configured provider:
 
 ```ts
 agent({ name, decide: toolLoop({ llm: { model: "anthropic/claude-sonnet-4-6" }, /* ... */ }) });
 ```
 
-Add `temperature`, `reasoning`, or `stream: true` alongside `model`. Server models are identified by `provider/model` strings; when running embedded or locally, provider credentials are read from the environment; with cloud, they're configured for your org in the dashboard. To make the call from your own worker instead (so your provider key never leaves your infrastructure), pass a provider generator (`anthropicGenerate`, `openaiGenerate`, `aiGenerate`) from `@substructure.ai/sdk/adapters/*` as `llm`. The AI and OpenAI adapters also ship `aiSdkAgent(settings)` and `openaiAgent(input)`, which return a `decide` — the default loop over an AI SDK toolset or an `@openai/agents` `Agent` — that you wrap with `agent({ name, decide: aiSdkAgent(...) })`.
+Add `temperature`, `reasoning`, or `stream: true` alongside `model`. Server models are identified by `provider/model` strings; when running embedded or locally, provider credentials are read from the environment; with cloud, they're configured for your org in the dashboard. To make the call from your own worker instead (so your provider key never leaves your infrastructure), pass a provider generator (`anthropicGenerate`, `openaiGenerate`, `aiGenerate`) from `@substructure.ai/sdk/adapters/*` as `llm`. The AI and OpenAI adapters also ship `aiSdkAgent(settings)` and `openaiAgent(input)`, which return a `decide` (the default loop over an AI SDK toolset or an `@openai/agents` `Agent`) that you wrap with `agent({ name, decide: aiSdkAgent(...) })`.
 
 ## Examples
 
 See [`examples/`](https://github.com/substructureai/substructure/tree/main/examples) for full deployments:
 
-- `node-embedded` — in-process agent with persistent SQLite state.
-- `cloudflare-worker` — worker deployed to Cloudflare; tools keep state in a Durable Object keyed by session.
-- `hono` — fetch handler mounted on a Hono route in Node.
-- `vercel` — serverless worker on Vercel.
-- `sub-agent` — a parent agent delegating to a child via `subAgents`.
-- `hybrid-state` — tool state in a per-user database, reached through `ctx`.
-- `state-hydration` — state on the wire: a custom `decide` that runs a `toolLoop` against `worker_state`.
-- `tool-approval` — a custom `decide` that gates real shell commands behind a `client.action` approval.
-- `plan-mode` — a modal agent: a custom `decide` that switches model/prompt/tools by mode and forks a branch to execute.
-- `deferred-tool` — async tool call: `deferred: true` makes `execute` a kick-off; the result is posted later via `settleEffect`.
-- `frontend-tool` — chat UI where tools run in the browser (geolocation, theme). Also demonstrates `stream: true` — the assistant message renders token-by-token from `llm.token.delta` events.
+- `node-embedded`: in-process agent with persistent SQLite state.
+- `cloudflare-worker`: worker deployed to Cloudflare; tools keep state in a Durable Object keyed by session.
+- `hono`: fetch handler mounted on a Hono route in Node.
+- `vercel`: serverless worker on Vercel.
+- `sub-agent`: a parent agent delegating to a child via `subAgents`.
+- `hybrid-state`: tool state in a per-user database, reached through the decision request (`request.identity.id`).
+- `state-hydration`: state on the wire, a custom `decide` that runs a `toolLoop` against `worker_state`.
+- `tool-approval`: a custom `decide` that gates real shell commands behind a `client.action` approval.
+- `plan-mode`: a modal agent, a custom `decide` that switches model/prompt/tools by mode and forks a branch to execute.
+- `deferred-tool`: async tool call: `deferred: true` makes `execute` a kick-off; the result is posted later via `settleEffect`.
+- `frontend-tool`: chat UI where tools run in the browser (geolocation, theme). Also demonstrates `stream: true`, where the assistant message renders token-by-token from `llm.token.delta` events.

@@ -239,7 +239,7 @@ substructure open
 
 ## Next
 
-- [Concepts](./02-concepts.md) — sessions, turns, the decision loop.
-- [SDK](./04-sdk.md) — tools, state, custom decision functions, clients.
-- [CLI](./03-cli.md) — full command reference and local server.
-- [Patterns](./06-patterns.md) — approvals, plan mode, cross-session data.
+- [Concepts](./02-concepts.md): sessions, turns, the decision loop.
+- [SDK](./04-sdk.md): tools, state, custom decision functions, clients.
+- [CLI](./03-cli.md): full command reference and local server.
+- [Patterns](./06-patterns.md): approvals, plan mode, cross-session data.
