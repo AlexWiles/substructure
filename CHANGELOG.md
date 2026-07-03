@@ -10,6 +10,8 @@ same version.
 
 ## [Unreleased]
 
+## [0.1.20] - 2026-07-03
+
 ### Added
 
 - **Message-tree conversation history.** History now lives in a tree the engine
@@ -172,7 +174,8 @@ same version.
 
 - SDK typing and developer-experience improvements.
 
-[Unreleased]: https://github.com/substructureai/substructure/compare/v0.1.19...HEAD
+[Unreleased]: https://github.com/substructureai/substructure/compare/v0.1.20...HEAD
+[0.1.20]: https://github.com/substructureai/substructure/compare/v0.1.19...v0.1.20
 [0.1.19]: https://github.com/substructureai/substructure/compare/v0.1.18...v0.1.19
 [0.1.18]: https://github.com/substructureai/substructure/compare/v0.1.17...v0.1.18
 [0.1.17]: https://github.com/substructureai/substructure/compare/v0.1.16...v0.1.17
