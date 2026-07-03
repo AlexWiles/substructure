@@ -48,8 +48,8 @@ substructure start --dev --port 9000 --worker-url http://localhost:3030/api/agen
 In another, the TanStack Start app (Node dev server):
 
 ```sh
-pnpm install
-pnpm dev          # http://localhost:3030
+npm install
+npm run dev          # http://localhost:3030
 ```
 
 Open <http://localhost:3030>. On the right is a **to-do list**; on the left, a
@@ -88,7 +88,7 @@ UI stays in sync whichever drives it.
 wrangler secret put SUBSTRUCTURE_API_KEY
 wrangler secret put SIGNING_SECRET        # only if the engine signs webhooks
 
-pnpm deploy                                # build:cf + wrangler deploy
+npm run deploy                                # build:cf + wrangler deploy
 ```
 
 Point your engine's webhook at `https://<your-worker>/api/agent`. The build

@@ -12,6 +12,6 @@ and cost usage rolls up to the parent.
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
-pnpm install
-pnpm start
+npm install
+npm start
 ```

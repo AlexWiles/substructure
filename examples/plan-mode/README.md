@@ -71,17 +71,17 @@ that with whatever real work your agent actually does.
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
-pnpm install
+npm install
 
 # Generate a session id, then reuse it across calls.
 SESSION=$(uuidgen)
 
-pnpm tsx index.ts $SESSION "Plan a weekend trip to Lisbon."
-pnpm tsx index.ts $SESSION "Add a step for booking a city tour."
-pnpm tsx index.ts $SESSION "Combine the food steps into one."
+npx tsx index.ts $SESSION "Plan a weekend trip to Lisbon."
+npx tsx index.ts $SESSION "Add a step for booking a city tour."
+npx tsx index.ts $SESSION "Combine the food steps into one."
 
 # Flip mode. This action also kicks off execution; the model walks the list.
-pnpm tsx index.ts $SESSION "/mode executing"
+npx tsx index.ts $SESSION "/mode executing"
 ```
 
 Each invocation streams events to stdout as they happen: LLM call

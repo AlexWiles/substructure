@@ -6,8 +6,8 @@
     "start": "tsx index.ts"
   },
   "dependencies": {
-    "@substructure.ai/runtime": "link:../../packages/runtime",
-    "@substructure.ai/sdk": "link:../../packages/sdk",
+    "@substructure.ai/runtime": "file:../../packages/runtime",
+    "@substructure.ai/sdk": "file:../../packages/sdk",
     "openai": "^6.0.0"
   },
   "devDependencies": {

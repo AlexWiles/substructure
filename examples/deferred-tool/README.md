@@ -15,8 +15,8 @@ file drives the whole demo.
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
-pnpm install
-pnpm start
+npm install
+npm start
 ```
 
 You'll see `tool.call.requested` fire immediately, a 3-second pause, then

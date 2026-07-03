@@ -65,8 +65,8 @@ echoes back out — so the todo list rides the wire with no manual plumbing.
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
-pnpm install
-pnpm start
+npm install
+npm start
 ```
 
 The example runs a single turn against an in-memory engine (`db: ":memory:"`):

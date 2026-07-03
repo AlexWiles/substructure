@@ -19,12 +19,12 @@ substructure start --dev --port 9000 --worker-url http://localhost:3000/agent
 In another terminal, start the Hono worker:
 
 ```sh
-pnpm install
-pnpm start
+npm install
+npm start
 ```
 
 In a third terminal, submit a turn via the local backend:
 
 ```sh
-pnpm client
+npm run client
 ```

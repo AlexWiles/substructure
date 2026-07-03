@@ -44,12 +44,12 @@ single file drives the whole demo.
 ## Run
 
 ```sh
-pnpm install
+npm install
 
 # engine-handled fan-out (calls the real provider)
 export OPENROUTER_API_KEY=sk-or-...
-pnpm start
+npm start
 
 # worker-handled deferred fan-out (settles via settleEffect; fully stubbed, no key)
-pnpm start deferred
+npm start deferred
 ```

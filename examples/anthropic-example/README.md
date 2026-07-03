@@ -65,12 +65,12 @@ In another terminal, start the worker:
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
-pnpm install
-pnpm start
+npm install
+npm start
 ```
 
 In a third terminal, submit a turn and watch token deltas stream:
 
 ```sh
-pnpm client
+npm run client
 ```

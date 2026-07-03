@@ -30,8 +30,8 @@ substructure start --dev --port 9000 --worker-url http://localhost:3333/agent
 In another terminal, start the Hono worker + static server:
 
 ```sh
-pnpm install
-pnpm start
+npm install
+npm start
 ```
 
 Open <http://localhost:3333> and try:

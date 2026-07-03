@@ -176,9 +176,10 @@ same version.
 - The `templates/` directory. Its two starters moved into `examples/`
   (`assistant-ui-cloudflare-starter`, `embedded-node-openai-starter`) and the
   now-unused `index.toml` template registry is gone.
-- The `examples/` pnpm workspace. Each example is now a standalone project with
-  its own lockfile and `link:` dependencies on the local packages, so the tree
-  can also hold examples written in other languages.
+- The `examples/` pnpm workspace. Each example is now a standalone npm project
+  with its own `package-lock.json` and `file:` dependencies on the local
+  packages, so `npm install` works in any example directory and the tree can
+  also hold examples written in other languages.
 
 ## [0.1.19] - 2026-06-12
 

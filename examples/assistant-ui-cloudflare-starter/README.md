@@ -18,8 +18,8 @@ substructure start --dev --port 9000 --worker-url http://localhost:3030/api/agen
 In another, the app:
 
 ```sh
-pnpm install
-pnpm dev          # http://localhost:3030
+npm install
+npm run dev          # http://localhost:3030
 ```
 
 Open <http://localhost:3030> and chat. Ask *"what time is it?"* to run the
@@ -28,7 +28,7 @@ server-side tool, or *"show me a browser alert"* to run the client-side one.
 ## Deploy to Cloudflare Workers
 
 ```sh
-pnpm deploy       # build:cf + wrangler deploy
+npm run deploy       # build:cf + wrangler deploy
 ```
 
 Set the engine URLs in `wrangler.jsonc` and the `SUBSTRUCTURE_API_KEY` /

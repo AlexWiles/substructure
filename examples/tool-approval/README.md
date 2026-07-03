@@ -53,20 +53,20 @@ just a slow tool call, and the conversation transcript stays well-formed.
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
-pnpm install
+npm install
 
 # Generate a session id, then reuse it across calls.
 SESSION=$(uuidgen)
 
-pnpm tsx index.ts $SESSION "List the files in this repo using shell."
+npx tsx index.ts $SESSION "List the files in this repo using shell."
 
 # When a command is pending the CLI prints:
 #   ⏸ awaiting approval for: ls -la
 #      /approve  or  /deny [reason]  to continue
 
-pnpm tsx index.ts $SESSION "/approve"
+npx tsx index.ts $SESSION "/approve"
 # or:
-pnpm tsx index.ts $SESSION "/deny use a less verbose command"
+npx tsx index.ts $SESSION "/deny use a less verbose command"
 ```
 
 The denial reason ("use a less verbose command") rides into the tool

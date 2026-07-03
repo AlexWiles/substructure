@@ -9,8 +9,8 @@
     "client": "tsx client.ts"
   },
   "dependencies": {
-    "@substructure.ai/cli": "link:../../packages/cli",
-    "@substructure.ai/sdk": "link:../../packages/sdk"
+    "@substructure.ai/cli": "file:../../packages/cli",
+    "@substructure.ai/sdk": "file:../../packages/sdk"
   },
   "devDependencies": {
     "@types/node": "24.12.2",
