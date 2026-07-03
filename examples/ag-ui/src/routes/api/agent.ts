@@ -5,7 +5,7 @@ import { createFileRoute } from "@tanstack/react-router";
 
 export const AGENT_ID = "todo-agent";
 
-// Every tool is a client-handled tool: `handler: "client"`, no `execute` — the engine suspends
+// Every tool is a client-handled tool: `handler: "client"`, no `execute`; the engine suspends
 // the turn and the browser runs it. Executors live in each chat client.
 const addTodo = tool({
     name: "add_todo",

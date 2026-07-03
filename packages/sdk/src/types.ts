@@ -135,7 +135,7 @@ export interface LlmTool {
     function: LlmToolFunction;
 }
 
-/** Model id and per-call parameters — the reusable core of an LLM call, shared by
+/** Model id and per-call parameters: the reusable core of an LLM call, shared by
  *  `LlmRequest` (the wire payload) and `Llm` (the loop's config). */
 export interface LlmParams {
     model: string;
@@ -308,7 +308,7 @@ export type WorkerAction =
     | { type: "interrupt"; interrupt_id?: string; reason: string; payload?: unknown }
     | { type: "done"; data: unknown };
 
-/** The settle body — an `effect.result` or `effect.error`. The worker surface
+/** The settle body: an `effect.result` or `effect.error`. The worker surface
  *  accepts both kinds; the client surface only sends `kind: "tool_call"`. */
 export type SettleEffectRequest =
     | { type: "effect.result"; kind: "tool_call"; id: string; result: string; attempt: number }
@@ -393,7 +393,7 @@ export type SettleEffectOutcome = SettleToolResult | SettleLlmResult | SettleEff
 
 export type SettleEffectArgs = SettleEffectTarget & SettleEffectOutcome;
 
-/** The tool-call-only outcome the frontend/user surface accepts — clients
+/** The tool-call-only outcome the frontend/user surface accepts: clients
  *  answer client tools, never model calls, so `kind: "llm_call"` is unexpressible. */
 export type SettleToolCallOutcome = SettleToolResult | (SettleEffectFailure & { kind?: "tool_call" });
 export type SettleToolCallArgs = SettleEffectTarget & SettleToolCallOutcome;
@@ -828,7 +828,7 @@ export interface WorkerAuthOptions {
     bearerToken: string;
 }
 
-// In-flight effects surfaced on each worker decision — a flat, tagged list. `kind`
+// In-flight effects surfaced on each worker decision as a flat, tagged list. `kind`
 // is open, so a worker ignores kinds it doesn't handle.
 
 export interface EffectBase {
@@ -880,9 +880,9 @@ export interface WorkerDecisionRequestWire {
     trigger: DecisionTrigger;
     worker_state: string;
     /** The in-flight effects as a flat, tagged list; branch on `kind` instead of
-     *  tracking steps yourself — the step gate is "no tool/sub-agent effect left". */
+     *  tracking steps yourself; the step gate is "no tool/sub-agent effect left". */
     effects: Effect[];
-    /** How many `tool_call`/`sub_agent` effects are still in flight — the step gate as a number (prompt at 0). */
+    /** How many `tool_call`/`sub_agent` effects are still in flight: the step gate as a number (prompt at 0). */
     pending_effects: number;
     /** The active conversation as a flat list; a worker only needs this. */
     transcript?: Message[];

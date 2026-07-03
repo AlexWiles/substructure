@@ -148,7 +148,7 @@ export function subAgentResult(
 // ── Transcript helpers ───────────────────────────────────────────────────────
 
 /** The new tail of `result.transcript`: messages absent from the input tree
- *  (id-less messages count as new), in order — the engine appends exactly these. */
+ *  (id-less messages count as new), in order; the engine appends exactly these. */
 export function appendedMessages(result: RunResult): Message[] {
     return result.transcript.filter((m) => m.id == null || !result.inputIds.has(m.id));
 }

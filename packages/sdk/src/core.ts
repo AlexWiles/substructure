@@ -20,7 +20,7 @@ export type EmitDelta = (delta: LlmTokenDeltaInput) => Promise<void>;
 /** What the engine sends the agent: the wire envelope with `worker_state` decoded into `state`. */
 export type DecisionRequest<S = unknown> = WorkerDecisionRequestWire & {
     state: S;
-    /** Stream token deltas — present on a streaming llm `effect.execute` trigger. */
+    /** Stream token deltas, present on a streaming llm `effect.execute` trigger. */
     emitDelta?: EmitDelta;
 };
 
@@ -37,7 +37,7 @@ export interface Decision {
  *  calling it; `agent({ name, decide })` names it into a `NamedAgent`. */
 export type Agent<S = unknown> = (req: DecisionRequest<S>) => Decision | Promise<Decision>;
 
-/** A named agent — what `agent({ name, decide })` returns. `agentName` is the id
+/** A named agent: what `agent({ name, decide })` returns. `agentName` is the id
  *  the engine deploys and addresses it under, so only a `NamedAgent` can be served
  *  by `worker([...])` or delegated to as a sub-agent. */
 export interface NamedAgent<S = unknown> extends Agent<S> {
@@ -47,7 +47,7 @@ export interface NamedAgent<S = unknown> extends Agent<S> {
 // ── Tools ────────────────────────────────────────────────────────────────────
 
 export type ToolResult = string | Promise<string>;
-/** `request` is the decision request the tool runs under — read `request.session_id`,
+/** `request` is the decision request the tool runs under; read `request.session_id`,
  *  `request.identity.id`, or the `effect.execute` trigger (`request.trigger.id`,
  *  `request.trigger.attempt`) it was dispatched from. */
 export type ToolFn = (args: string, request: DecisionRequest) => ToolResult;
@@ -63,7 +63,7 @@ export interface ToolDef {
     execute: ToolFn | DeferredToolFn;
     retry?: RetryPolicy;
     /** "worker" (default) runs `execute` on the worker; "client" routes the call
-     *  to the frontend, which completes it via `settleEffect` — the worker
+     *  to the frontend, which completes it via `settleEffect`; the worker
      *  never runs `execute` for a client tool. */
     handler?: ToolHandler;
     /** A deferred tool's `execute` kicks off out-of-band work: the loop emits no

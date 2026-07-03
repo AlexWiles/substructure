@@ -14,7 +14,7 @@ const getCurrentTime = tool({
     execute: () => new Date().toString(),
 });
 
-// Client-handled tool: `handler: "client"` routes execution to the browser — the engine
+// Client-handled tool: `handler: "client"` routes execution to the browser; the engine
 // emits the call and waits for the browser to post the result, so no server-side `execute`.
 const browserAlert = tool({
     name: "browser_alert",

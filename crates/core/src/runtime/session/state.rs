@@ -189,7 +189,7 @@ pub struct WorkerDecisionState {
     pub source_event_sequence: u64,
 }
 
-// In-flight effects surfaced on each worker decision — derived on read by filtering
+// In-flight effects surfaced on each worker decision, derived on read by filtering
 // the effect maps to what's still outstanding (Pending or RetryScheduled).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Effect {

@@ -8,7 +8,7 @@ import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
 
 const MODEL = "anthropic/claude-sonnet-4-6";
 
-// Two independent questions about the same input — a natural fan-out.
+// Two independent questions about the same input, a natural fan-out.
 const LENSES = [
     { id: "lens-summary", prompt: (t: string) => `Summarize in one sentence: ${t}` },
     {
@@ -106,7 +106,7 @@ function withLenses(loop: Agent<FanoutState>, handler: "server" | "worker"): Age
             });
         }
 
-        // Everything else — the loop's own llm settles, tools, done — is the loop's.
+        // Everything else (the loop's own llm settles, tools, done) is the loop's.
         return loop(d);
     };
 }

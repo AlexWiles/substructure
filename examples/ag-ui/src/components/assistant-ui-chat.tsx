@@ -148,7 +148,7 @@ function AssistantUiThread({ session, sessionId }: { session: BrowserSession; se
                 url: `${substructureUrl}/api/client/ag-ui/agents/${agentId}/run`,
                 headers: { Authorization: `Bearer ${token}` },
                 threadId: sessionId,
-                // Bound fetch — HttpAgent calls `this.fetch(...)`, which throws
+                // Bound fetch: HttpAgent calls `this.fetch(...)`, which throws
                 // "Illegal invocation" in Firefox with an unbound reference.
                 fetch: (url, init) => fetch(url, init),
             }),

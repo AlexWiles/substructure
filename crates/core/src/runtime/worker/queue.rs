@@ -26,7 +26,7 @@ pub struct WorkerDecisionRequest {
     /// The in-flight effects as a flat, tagged list (each carries `kind`/`status`).
     #[serde(default)]
     pub effects: Vec<Effect>,
-    /// How many `tool_call`/`sub_agent` effects are still in flight — the step gate as a number.
+    /// How many `tool_call`/`sub_agent` effects are still in flight: the step gate as a number.
     #[serde(default)]
     pub pending_effects: usize,
     /// The active conversation as a flat list (the tree's `head_id`-to-root path).

@@ -34,7 +34,7 @@ export function MyRuntimeProvider({ session, children }: { session: BrowserSessi
                 url: `${substructureUrl}/api/client/ag-ui/agents/${agentId}/run`,
                 headers: { Authorization: `Bearer ${token}` },
                 threadId: currentThreadId,
-                // Bound fetch — HttpAgent calls `this.fetch(...)`, which throws
+                // Bound fetch: HttpAgent calls `this.fetch(...)`, which throws
                 // "Illegal invocation" in Firefox with an unbound reference.
                 fetch: (url, init) => fetch(url, init),
             }),

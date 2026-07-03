@@ -43,7 +43,7 @@ export interface FetchHandlerOptions {
     tolerance?: number;
 }
 
-/** The agents to serve — each a `NamedAgent` from `agent({ name, ... })`. They
+/** The agents to serve: each a `NamedAgent` from `agent({ name, ... })`. They
  *  carry independent state types, so the collection is `NamedAgent<any>`. */
 // biome-ignore lint/suspicious/noExplicitAny: heterogeneous state types across agents
 export type Agents = NamedAgent<any>[];
@@ -97,7 +97,7 @@ export class Worker {
         });
     }
 
-    /** `worker({...}).fetch(opts)` — alias for `fetchHandler`. */
+    /** `worker({...}).fetch(opts)`, alias for `fetchHandler`. */
     fetch(options?: FetchHandlerOptions): (req: Request) => Promise<Response> {
         return this.fetchHandler(options);
     }

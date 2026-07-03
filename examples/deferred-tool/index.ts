@@ -1,6 +1,6 @@
 // Deferred tool: `deferred: true` makes `execute` a kick-off with no result action, so the
 // engine leaves the call pending until `settleEffect` routes the out-of-band result back as
-// an `effect.settled` trigger — the pattern for webhooks, long jobs, or human approvals.
+// an `effect.settled` trigger, the pattern for webhooks, long jobs, or human approvals.
 
 import { agent, tool, toolLoop } from "@substructure.ai/sdk";
 import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
