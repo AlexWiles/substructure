@@ -1,5 +1,5 @@
 {
-  "name": "assistant-ui-cloudflare-starter",
+  "name": "@substructure.ai/example-assistant-ui-cloudflare-starter",
   "private": true,
   "type": "module",
   "scripts": {
@@ -14,7 +14,7 @@
     "@assistant-ui/react": "0.14.23",
     "@assistant-ui/react-ag-ui": "0.0.42",
     "@assistant-ui/react-markdown": "0.14.4",
-    "@substructure.ai/sdk": "^0.1.19",
+    "@substructure.ai/sdk": "link:../../packages/sdk",
     "@tanstack/react-router": "1.168.10",
     "@tanstack/react-start": "1.167.16",
     "class-variance-authority": "0.7.1",

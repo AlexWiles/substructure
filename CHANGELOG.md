@@ -173,6 +173,12 @@ same version.
   (both now take an `id`).
 - The `substructure new` command that scaffolded a project from a starter
   template.
+- The `templates/` directory. Its two starters moved into `examples/`
+  (`assistant-ui-cloudflare-starter`, `embedded-node-openai-starter`) and the
+  now-unused `index.toml` template registry is gone.
+- The `examples/` pnpm workspace. Each example is now a standalone project with
+  its own lockfile and `link:` dependencies on the local packages, so the tree
+  can also hold examples written in other languages.
 
 ## [0.1.19] - 2026-06-12
 

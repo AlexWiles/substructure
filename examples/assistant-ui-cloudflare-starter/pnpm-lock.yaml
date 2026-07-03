@@ -21,8 +21,8 @@ importers:
         specifier: 0.14.4
         version: 0.14.4(@assistant-ui/react@0.14.23(@types/react-dom@19.2.3(@types/react@19.2.16))(@types/react@19.2.16)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(use-sync-external-store@1.6.0(react@19.2.7)))(@types/react-dom@19.2.3(@types/react@19.2.16))(@types/react@19.2.16)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       '@substructure.ai/sdk':
-        specifier: ^0.1.19
-        version: 0.1.19
+        specifier: link:../../packages/sdk
+        version: link:../../packages/sdk
       '@tanstack/react-router':
         specifier: 1.168.10
         version: 1.168.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -1680,26 +1680,6 @@ packages:
 
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
-
-  '@substructure.ai/sdk@0.1.19':
-    resolution: {integrity: sha512-rSQl8ZHyyBffxV8xr1RSjg/MSrIemqVyvQWLQqR77Ba5eX5RiWwFjWcRVFPvp9+97XAKX6hGCVq6rSG/VTRM/g==}
-    peerDependencies:
-      '@anthropic-ai/sdk': ^0.102.0
-      '@openai/agents': ^0.11.0
-      '@substructure.ai/runtime': 0.1.19
-      ai: ^6.0.0
-      openai: ^6.0.0
-    peerDependenciesMeta:
-      '@anthropic-ai/sdk':
-        optional: true
-      '@openai/agents':
-        optional: true
-      '@substructure.ai/runtime':
-        optional: true
-      ai:
-        optional: true
-      openai:
-        optional: true
 
   '@tailwindcss/node@4.3.1':
     resolution: {integrity: sha512-6NDaqRoAMSXD1mr/RXu0HBvNE9a2n5tHPsxu9XHLws8o4Twes5rBM2205SUUiJ9goAtadrN6xTGX0UDEwp/N4A==}
@@ -4529,8 +4509,6 @@ snapshots:
   '@speed-highlight/core@1.2.17': {}
 
   '@standard-schema/spec@1.1.0': {}
-
-  '@substructure.ai/sdk@0.1.19': {}
 
   '@tailwindcss/node@4.3.1':
     dependencies:
