@@ -10,6 +10,12 @@ same version.
 
 ## [Unreleased]
 
+### Removed
+
+- The `stall` decision trigger. The engine no longer nudges an idle session on a
+  timer; a decision that returns no actions parks the session until the next client
+  message or settling effect, and a turn ends with a `done` action.
+
 ### Changed
 
 - The engine now stamps the assistant message id when an `llm_call` settles, so the

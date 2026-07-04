@@ -52,7 +52,6 @@ Each trigger carries the new content and the current transcript; the worker fold
 | `effect.execute` | The engine is delegating effect work to your worker: run a tool (`kind: "tool_call"`) or make an LLM call (`kind: "llm_call"`). `toolLoop` handles this and dispatches to the matching tool's `execute` or the worker-run model; a custom `decide` reacts to it directly. |
 | `effect.settled` | An effect landed: the model replied (`kind: "llm_call"`), or a tool/sub-agent call finished (`kind: "tool_call"` / `"sub_agent"`). Fires as each one lands, so the transcript fills incrementally. The request's `effects` list says what's still in flight, so the worker prompts once no tool/sub-agent effect is pending, without tracking the round itself. `ok` says whether the effect succeeded. |
 | `interrupt.resumed` | A paused session was resumed by an external signal. |
-| `stall` | Nothing has happened for a while; the worker has a chance to break the deadlock or finish. |
 
 For most agents, `toolLoop` handles every trigger you'd see in practice. You only need to think about them when writing a custom `decide`.
 

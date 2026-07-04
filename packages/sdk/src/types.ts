@@ -269,8 +269,7 @@ export type DecisionTrigger =
     | ({ type: "client.action" } & ClientAction)
     | ({ type: "effect.execute"; id: string; attempt: number; deadline?: DateTime } & EffectWork)
     | ({ type: "effect.settled"; id: string; ok: boolean } & EffectOutcome)
-    | { type: "interrupt.resumed"; interrupt_id: string; payload?: unknown }
-    | { type: "stall" };
+    | { type: "interrupt.resumed"; interrupt_id: string; payload?: unknown };
 
 /** The effect kinds a worker can answer `effect.execute` for. */
 export type WorkKind = "tool_call" | "llm_call";

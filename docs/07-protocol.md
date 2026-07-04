@@ -77,6 +77,13 @@ unknown messages are appended, forking automatically), records everything, and
 calls back with the next decision when there's something to react to. That loop,
 request, decide, act, request again, is the agent loop.
 
+**Empty actions end the exchange.** The engine only calls back when something
+happens — a client message, or an effect you scheduled settling. A decision with
+no actions (and nothing left in flight) parks the session: the engine records the
+transcript and state and waits, it does not poll or nudge you to make more
+progress. So finish a turn deliberately with a `done` action; returning no actions
+just means "nothing to do right now," not "the turn is over."
+
 ## Triggers
 
 What the engine sends in `trigger`. A worker handles the ones it cares about and
@@ -90,7 +97,6 @@ ignores the rest.
 | `effect.execute` | `kind`, `id`, `attempt`, `deadline?`, + work | Run this effect's work yourself and answer with `effect.result`/`effect.error`. |
 | `effect.settled` | `kind`, `id`, `ok`, + outcome | An effect landed (successfully or not). Fold it in. |
 | `interrupt.resumed` | `interrupt_id`, `payload?` | A paused session resumed. |
-| `stall` | none | Nothing is pending; a nudge to make progress. |
 
 The two effect triggers use the same `kind` discriminator as the `effects` list,
 so one correlation model covers the whole protocol: an effect is named by `id`,

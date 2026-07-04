@@ -1382,20 +1382,6 @@ impl SessionState {
             )]);
         }
 
-        // Nothing left in flight → stall recovery.
-        if self.all_tools_resolved()
-            && !self.has_pending_llm()
-            && !self.has_queued_worker_decision()
-            && !self.has_pending_worker_decision()
-        {
-            return Ok(vec![EventPayload::WorkerDecisionRequested(
-                WorkerDecisionRequested {
-                    decision_id: new_call_id(),
-                    trigger: DecisionTrigger::Stall,
-                },
-            )]);
-        }
-
         Ok(vec![])
     }
 }
@@ -4691,34 +4677,6 @@ mod tests {
         let e1 = complete_llm(&mut agg, "llm-1", 0, &system());
         assert!(settled_llm_ids(&e1).contains(&"llm-1".to_string()));
         assert!(agg.state.effects().is_empty());
-    }
-
-    #[test]
-    fn wake_suppresses_stall_while_an_llm_call_is_pending() {
-        let mut agg = create_session("sess-1", "tenant-a", "user-1");
-        // A still-pending llm call must suppress stall recovery even though tools are resolved.
-        dispatch(
-            &mut agg,
-            CommandPayload::RequestToolCall {
-                tool_call_id: "tc-1".to_string(),
-                name: "t".to_string(),
-                arguments: "{}".to_string(),
-                handler: ToolHandler::Worker,
-                retry: RetryPolicy::no_retry(),
-            },
-            &system(),
-        );
-        complete_tool(&mut agg, "tc-1", "done");
-        request_llm(&mut agg, "llm-1", LlmHandler::Server);
-
-        let woken = wake(&mut agg);
-        assert!(
-            !woken
-                .iter()
-                .any(|e| matches!(e, EventPayload::WorkerDecisionRequested(p)
-                    if matches!(p.trigger, DecisionTrigger::Stall))),
-            "a pending llm call suppresses the stall trigger; got {woken:?}"
-        );
     }
 
     #[test]

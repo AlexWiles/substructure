@@ -141,8 +141,6 @@ pub enum DecisionTrigger {
         #[serde(default)]
         payload: serde_json::Value,
     },
-    #[serde(rename = "stall")]
-    Stall,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

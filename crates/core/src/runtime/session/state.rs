@@ -634,14 +634,6 @@ impl SessionState {
         }
     }
 
-    pub fn all_tools_resolved(&self) -> bool {
-        !self.tool_calls.is_empty()
-            && self.tool_calls.values().all(|tc| {
-                tc.tracking.status == EffectStatus::Completed
-                    || tc.tracking.status == EffectStatus::Failed
-            })
-    }
-
     pub fn has_pending_llm(&self) -> bool {
         self.llm_calls
             .values()
