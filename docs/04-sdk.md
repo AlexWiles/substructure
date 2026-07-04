@@ -198,7 +198,7 @@ Swap `db` for Postgres, Redis, S3, or a Durable Object; the agent doesn't change
 
 ### On the wire (custom `decide`)
 
-If you want small state round-tripped for you instead of standing up a store, keep it in `worker_state` with a custom `decide`. The engine ships the decoded state in as `req.state`. Build the tools **inside `decide`** so each `execute` closes over the live `state`, hand them to `toolLoop`, and pass `state` into the loop: the loop runs the tools, and echoes the `state` you gave it so the agent persists it:
+If you want small state round-tripped for you instead of standing up a store, keep it in `worker_state` with a custom `decide`. The engine ships the state in as `req.state` (raw JSON, round-tripped untouched). Build the tools **inside `decide`** so each `execute` closes over the live `state`, hand them to `toolLoop`, and pass `state` into the loop: the loop runs the tools, and echoes the `state` you gave it so the agent persists it:
 
 ```ts
 import { agent, tool, toolLoop } from "@substructure.ai/sdk";
@@ -270,11 +270,11 @@ const echo = agent({
 });
 ```
 
-The `DecisionRequest` (conventionally `req`) is the engine's wire envelope with `worker_state` decoded into `state`. Read off it:
+The `DecisionRequest` (conventionally `req`) is the engine's wire envelope with `worker_state` surfaced as `state`. Read off it:
 
 - `req.trigger`: what happened, one of `user.message`, `user.transcript`, `client.action`, `effect.execute`, `effect.settled`, and so on.
 - `req.transcript`: the active transcript (the head-to-root path); may be empty.
-- `req.state`: the decoded `worker_state` (return a new value to persist it).
+- `req.state`: the `worker_state`, surfaced as raw JSON (return a new value to persist it).
 - `req.pending_effects`: how many `tool_call`/`sub_agent` effects are still in flight; the step gate. On an `effect.settled` trigger, prompt again once it hits `0` (a non-zero value doubles as a "steps still running" count).
 - `req.effects`: the same in-flight effects as a flat, tagged list, when you need more than the count (each with `id`, `kind`, `status`, `attempt`, plus kind-specific fields like a tool's `name`/`arguments`). `kind`/`status` are open, so new effect kinds are additive.
 - `req.session_id`, `req.identity`, `req.turn_id`, and the rest of the envelope, read directly.

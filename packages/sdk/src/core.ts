@@ -18,7 +18,7 @@ import { nodeId } from "./types";
 /** Push one streamed token delta to whoever is listening (SSE client, embedded runtime). */
 export type EmitDelta = (delta: LlmTokenDeltaInput) => Promise<void>;
 
-/** What the engine sends the agent: the wire envelope with `worker_state` decoded into `state`. */
+/** What the engine sends the agent: the wire envelope with `worker_state` surfaced as `state`. */
 export type DecisionRequest<S = unknown> = WorkerDecisionRequestWire & {
     state: S;
     /** Stream token deltas, present on a streaming llm `effect.execute` trigger. */

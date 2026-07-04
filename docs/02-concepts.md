@@ -34,7 +34,7 @@ Inside one turn, many things can happen: the LLM is called, tools execute, sub-a
 
 ## Decisions
 
-A **decision** is one HTTP call from the engine to your worker. Every decision carries a **trigger** (what just happened), the current **transcript** (the active conversation), and the current **state** (either inline as a base64-encoded JSON blob, or empty if your worker loads state from its own database). Your worker responds with the updated **transcript** and a list of **actions** (what to do next).
+A **decision** is one HTTP call from the engine to your worker. Every decision carries a **trigger** (what just happened), the current **transcript** (the active conversation), and the current **state** (either inline as raw JSON, or empty if your worker loads state from its own database). Your worker responds with the updated **transcript** and a list of **actions** (what to do next).
 
 The engine reconciles the returned transcript into the conversation tree, carries out the actions, records what happened to the event log, and calls back with a new decision when there's something else for the worker to react to. This loop is the agent loop. The engine drives it; your worker decides what to do at each step.
 
@@ -76,7 +76,7 @@ A single decision can return multiple actions: for example, several `call.tool` 
 Across decisions in a session, two things persist: the **transcript** (the conversation tree, owned by the engine) and any **worker state** you choose to keep. There is no SDK-held tool state. Where your own state lives is a choice you make per agent:
 
 - **Your own store.** Tools are pure functions that reach a store directly through the decision request, keyed by `request.session_id` (per conversation) or `request.identity.id` (per user). Best for large state, sensitive data, or anything you want to query directly; it never leaves your infrastructure. See [State](./04-sdk.md#state) in the SDK docs.
-- **On the wire.** Keep small state in `worker_state` with a custom `decide`: the engine ships the decoded state in as `req.state` on every decision and persists whatever you return. Simple, no infrastructure required. See [State](./04-sdk.md#state).
+- **On the wire.** Keep small state in `worker_state` with a custom `decide`: the engine ships the state in as `req.state` (raw JSON) on every decision and persists whatever you return. Simple, no infrastructure required. See [State](./04-sdk.md#state).
 
 State is logically per-session. Two sessions for the same user are independent unless you explicitly link them.
 

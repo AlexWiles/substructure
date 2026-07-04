@@ -1680,7 +1680,7 @@ mod tests {
                 decision_id: d1,
                 transcript: vec![],
                 actions: vec![],
-                state: vec![].into(),
+                state: Default::default(),
             },
             &machine,
         );
@@ -1897,7 +1897,7 @@ mod tests {
                         handler: ToolHandler::Worker,
                         retry: RetryPolicy::no_retry(),
                     }],
-                    state: vec![].into(),
+                    state: Default::default(),
                 },
                 &machine,
             )
@@ -1960,7 +1960,7 @@ mod tests {
                 decision_id: decision_id.clone(),
                 transcript: vec![],
                 actions: vec![],
-                state: vec![].into(),
+                state: Default::default(),
             },
             &machine,
         );
@@ -1979,7 +1979,7 @@ mod tests {
                         handler: ToolHandler::Worker,
                         retry: RetryPolicy::no_retry(),
                     }],
-                    state: vec![].into(),
+                    state: Default::default(),
                 },
                 &machine,
             )
@@ -2241,7 +2241,7 @@ mod tests {
                 decision_id,
                 transcript: nodes.into_iter().map(|n| n.message).collect(),
                 actions: vec![],
-                state: vec![].into(),
+                state: Default::default(),
             },
             &machine(),
         );
@@ -2812,7 +2812,7 @@ mod tests {
                         },
                     },
                 }],
-                state: vec![].into(),
+                state: Default::default(),
             },
             &machine,
         );
@@ -2875,7 +2875,7 @@ mod tests {
                 decision_id: d1,
                 transcript: vec![],
                 actions: vec![],
-                state: vec![].into(),
+                state: Default::default(),
             },
             &machine,
         );
@@ -3239,7 +3239,7 @@ mod tests {
                     handler: ToolHandler::Worker,
                     retry: RetryPolicy::no_retry(),
                 }],
-                state: vec![].into(),
+                state: Default::default(),
             },
             &machine(),
         );
@@ -3266,7 +3266,7 @@ mod tests {
                         result: "RA".to_string(),
                     },
                 }],
-                state: vec![].into(),
+                state: Default::default(),
             },
             &machine(),
         );
@@ -3387,7 +3387,7 @@ mod tests {
                         retry: RetryPolicy::no_retry(),
                     },
                 ],
-                state: vec![].into(),
+                state: Default::default(),
             },
             &machine(),
         );
@@ -3899,7 +3899,7 @@ mod tests {
                 actions: vec![WorkerAction::Done {
                     data: serde_json::Value::Null,
                 }],
-                state: vec![].into(),
+                state: Default::default(),
             },
             &Caller::System {
                 tenant_id: "tenant-a".to_string(),
@@ -3964,7 +3964,7 @@ mod tests {
                 actions: vec![WorkerAction::Done {
                     data: serde_json::Value::Null,
                 }],
-                state: vec![].into(),
+                state: Default::default(),
             },
             &Caller::System {
                 tenant_id: "tenant-a".to_string(),
@@ -4042,7 +4042,7 @@ mod tests {
                     handler: ToolHandler::Worker,
                     retry: RetryPolicy::no_retry(),
                 }],
-                state: vec![].into(),
+                state: Default::default(),
             },
             &system,
         );
@@ -4119,7 +4119,7 @@ mod tests {
                 decision_id: resumed_decision_id,
                 transcript: vec![],
                 actions: vec![],
-                state: vec![].into(),
+                state: Default::default(),
             },
             &system,
         );
@@ -4183,7 +4183,7 @@ mod tests {
                     reason: "confirmation".to_string(),
                     payload: serde_json::json!({"message": "Send the email?"}),
                 }],
-                state: vec![].into(),
+                state: Default::default(),
             },
             &Caller::System {
                 tenant_id: "tenant-a".to_string(),
@@ -4426,7 +4426,7 @@ mod tests {
                 decision_id,
                 transcript: vec![node_msg("u1", Role::User, "hi")],
                 actions: vec![],
-                state: vec![].into(),
+                state: Default::default(),
             },
             &machine(),
         );
@@ -4555,7 +4555,7 @@ mod tests {
                 decision_id,
                 transcript: vec![],
                 actions,
-                state: vec![].into(),
+                state: Default::default(),
             },
             &machine(),
         )

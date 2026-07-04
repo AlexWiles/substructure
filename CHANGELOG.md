@@ -18,6 +18,11 @@ same version.
 
 ### Changed
 
+- `worker_state` now rides the wire as raw JSON instead of a base64-encoded string,
+  end to end: the engine stores and round-trips the value untouched, and the SDK
+  surfaces it as `req.state` with no encode/decode step. States persisted in the old
+  base64 form deserialize as a JSON string and pass through untouched, so no
+  migration is needed.
 - The engine now stamps the assistant message id when an `llm_call` settles, so the
   message arrives on the worker's `effect.settled` trigger already carrying its node
   id. Workers no longer generate one. Removed the `stamp` helper from the SDK.

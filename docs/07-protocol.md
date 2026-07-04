@@ -30,7 +30,7 @@ decision.
   "tenant_id":   "…",
   "identity":    { "tenant_id": "…", "id": "user-42" },  // the end user
   "trigger":     { "type": "…", … },   // what happened; see Triggers
-  "worker_state": "eyJ…",      // arbitrary state string
+  "worker_state": { … },       // your state as raw JSON (any JSON value)
   "effects": [                 // effects still in flight, a flat tagged list, see below
     { "id": "…", "kind": "tool_call", "status": "pending", "attempt": 0,
       "name": "get_weather", "arguments": "{…}", "handler": "worker" }
@@ -56,8 +56,9 @@ decision.
   `name`/`arguments`, a sub-agent's `agent_id`/`session_id`). `kind` and `status`
   are **open**: a worker ignores kinds it doesn't handle, so new effect kinds
   (timers, approvals) and new statuses are additive, never a wire break.
-- **`worker_state`** is your state, opaque to the engine. Decode it on the way in,
-  encode it on the way out. Empty when you keep state in your own database.
+- **`worker_state`** is your state as raw JSON, opaque to the engine: it round-trips
+  it untouched. Read it on the way in, return the next value on the way out. Empty
+  (`null`) when you keep state in your own database.
 
 ### Decision (worker → engine)
 
@@ -67,7 +68,7 @@ decision.
   "decision_id": "…",          // from the request
   "actions":     [ … ],        // what to do next; see Actions
   "transcript":  [ … ],        // the conversation as it should now read
-  "state":       "eyJ…"        // base64(JSON) of your state
+  "state":       { … }         // your state as raw JSON (any JSON value)
 }
 ```
 
@@ -164,21 +165,21 @@ The types the triggers and actions carry. All snake_case on the wire.
 
 ## The tool loop, minimally
 
-The reference implementation, as pseudocode. Two layers: the **boundary** (decode
-state, run the loop, encode state) and the **loop** itself (a switch on the
+The reference implementation, as pseudocode. Two layers: the **boundary** (read
+state, run the loop, return state) and the **loop** itself (a switch on the
 trigger). Both together are ~40 lines; this is what you port.
 
 ```python
-# ── Boundary: the HTTP handler. Decode state in, encode state out. ──
+# ── Boundary: the HTTP handler. State is raw JSON, in and out. ──
 def handle(request):
-    state = decode(request["worker_state"])          # base64(JSON) → your object
+    state = request.get("worker_state") or {}        # already JSON, nothing to decode
     out   = decide(request, state)                   # run the loop
     return {
         "session_id":  request["session_id"],
         "decision_id": request["decision_id"],
         "actions":     out.get("actions", []),
         "transcript":  out.get("transcript", request.get("transcript", [])),
-        "state":       encode(out.get("state", state)),   # echo state if unchanged
+        "state":       out.get("state", state),           # echo state if unchanged
     }
 
 # ── Loop: a pure function of (trigger, transcript, pending_*) → decision. ──
@@ -305,8 +306,8 @@ This is how human-in-the-loop approval and modal (plan → execute) agents work;
 
 ## State
 
-`worker_state` is a base64-encoded JSON blob the engine round-trips untouched. The
-boundary decodes it into the request and re-encodes whatever the decision returns,
-so state persists across decisions without the engine ever reading it. If you'd
-rather keep state in your own database, leave it empty and load/save around the
-loop, keyed by `identity.id` or `session_id`. See [SDK / State](./04-sdk.md#state).
+`worker_state` is a raw JSON value the engine round-trips untouched. The boundary
+surfaces it on the request and stores whatever the decision returns, so state
+persists across decisions without the engine ever reading it. If you'd rather keep
+state in your own database, leave it empty and load/save around the loop, keyed by
+`identity.id` or `session_id`. See [SDK / State](./04-sdk.md#state).

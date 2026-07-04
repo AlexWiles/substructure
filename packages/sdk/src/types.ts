@@ -580,8 +580,8 @@ export interface WorkerDecisionRequested {
 export interface WorkerDecisionCompleted {
     type: "worker.decision.completed";
     decision_id: string;
-    /** Base64-encoded opaque worker state */
-    state: string;
+    /** Opaque worker state as raw JSON; the engine stores it without interpreting it. */
+    state: unknown;
 }
 
 export interface WorkerDecisionErrored {
@@ -599,8 +599,8 @@ export interface SessionMessageRequested {
 
 export interface WorkerStateUpdated {
     type: "worker.state.updated";
-    /** Base64-encoded opaque worker state */
-    state: string;
+    /** Opaque worker state as raw JSON; the engine stores it without interpreting it. */
+    state: unknown;
 }
 
 export interface TurnStarted {
@@ -775,8 +775,7 @@ export interface SessionState {
     turn_cost: Decimal;
     turn_token_usage?: Record<string, number>;
     sub_agent_token_usage?: Record<string, number>;
-    /** Base64-encoded opaque worker state */
-    worker_state: string;
+    worker_state: unknown;
     ancestry?: Uuid[];
     data?: unknown;
     worker_retry?: RetryPolicy;
@@ -884,13 +883,11 @@ export interface WorkerDecisionRequestWire {
     agent_id: string;
     identity: WorkerIdentity;
     trigger: DecisionTrigger;
-    worker_state: string;
-    /** The in-flight effects as a flat, tagged list; branch on `kind` instead of
-     *  tracking steps yourself; the step gate is "no tool/sub-agent effect left". */
+    worker_state: unknown;
     effects: Effect[];
     /** How many `tool_call`/`sub_agent` effects are still in flight: the step gate as a number (prompt at 0). */
     pending_effects: number;
-    /** The active conversation as a flat list; a worker only needs this. */
+    /** The active conversation as a flat list*/
     transcript?: Message[];
     /** The full tree, for clients that need branch structure. */
     message_tree?: MessageTree;
@@ -908,8 +905,8 @@ export interface SubmitRequest {
     /** Flat conversation the engine reconciles into the message tree: known ids
      *  continue, id-less/unknown messages are appended (forking automatically). */
     transcript: MessageInput[];
-    /** Base64-encoded opaque worker state */
-    state: string;
+    /** Opaque worker state as raw JSON; the engine stores it without interpreting it. */
+    state: unknown;
 }
 
 export interface SubmitResponse {

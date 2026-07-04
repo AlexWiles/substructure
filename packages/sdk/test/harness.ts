@@ -2,7 +2,7 @@
 //
 // An agent is `(DecisionRequest) -> Decision`. `runAgent` builds a request from a
 // trigger (+ optional tree/pending/state) and runs the agent against it,
-// mirroring the worker boundary minus the base64 state codec. Deterministic.
+// mirroring the worker boundary, passing `state` straight through. Deterministic.
 
 import type { Agent, DecisionRequest } from "../src/core";
 import { activePath } from "../src/core";
@@ -67,7 +67,7 @@ function makeRequest(opts: RunOptions, transcript?: Message[]): WorkerDecisionRe
         agent_id: "test-agent",
         identity: { tenant_id: "test", id: "tester" },
         trigger: opts.trigger,
-        worker_state: "",
+        worker_state: {},
         effects,
         pending_effects: effects.filter(
             (e) =>

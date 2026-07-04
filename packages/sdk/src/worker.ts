@@ -48,32 +48,29 @@ export interface FetchHandlerOptions {
 // biome-ignore lint/suspicious/noExplicitAny: heterogeneous state types across agents
 export type Agents = NamedAgent<any>[];
 
-// ── State codec (base64 JSON, the worker boundary) ───────────────────────────
+// ── State on the wire ────────────────────────────────────────────────────────
+// `worker_state` rides as raw JSON, so there's nothing to decode; an absent or
+// empty state reads as `{}`.
 
-function decodeState(raw: string): unknown {
-    if (!raw) return {};
-    return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(raw), (c) => c.charCodeAt(0))));
+function readState(raw: unknown): unknown {
+    return raw ?? {};
 }
 
-function encodeState(value: unknown): string {
-    return btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(value))));
-}
-
-/** The one transform: decode `worker_state` into the decision, run the agent,
- *  encode the returned state back out. Everything else is the wire envelope. */
+/** The one transform: surface `worker_state` as the decision's `state`, run the
+ *  agent, hand the returned state back. Everything else is the wire envelope. */
 async function runDecision(
     fn: Agent,
     request: WorkerDecisionRequestWire,
     emitDelta?: EmitDelta,
 ): Promise<SubmitRequest> {
-    const req: DecisionRequest = { ...request, state: decodeState(request.worker_state), emitDelta };
+    const req: DecisionRequest = { ...request, state: readState(request.worker_state), emitDelta };
     const out = await fn(req);
     return {
         session_id: request.session_id,
         decision_id: request.decision_id,
         actions: out.actions ?? [],
         transcript: out.transcript ?? request.transcript ?? [],
-        state: encodeState(out.state !== undefined ? out.state : req.state),
+        state: out.state !== undefined ? out.state : req.state,
     };
 }
 
