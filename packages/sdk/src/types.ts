@@ -107,14 +107,21 @@ export type ContentPart = TextPart | ImageUrlPart | FilePart | InputAudioPart | 
 export type Content = string | ContentPart[];
 
 export interface Message {
-    /** Node id; absent until the message is recorded as a tree node. */
-    id?: string;
+    /** Node id. The engine stamps one on every message it records and hands back,
+     *  so messages you read — transcript, triggers, tree — always carry it. */
+    id: string;
     role: Role;
     content?: Content;
     tool_calls?: ToolCall[];
     tool_call_id?: string;
     name?: string;
 }
+
+/** A message you construct — to submit, prompt, or seed a session. The engine
+ *  assigns the node id when it records it, so `id` is optional here; omit it on
+ *  messages you create and the engine fills it in. A read `Message` is also a
+ *  valid `MessageInput`. */
+export type MessageInput = Omit<Message, "id"> & { id?: string };
 
 export function contentText(content: Content | undefined): string {
     if (content === undefined) return "";
@@ -147,7 +154,7 @@ export interface LlmParams {
 }
 
 export interface LlmRequest extends LlmParams {
-    messages: Message[];
+    messages: MessageInput[];
     tools?: LlmTool[];
 }
 
@@ -228,8 +235,8 @@ export interface ClientAction {
 }
 
 export type ClientPayload =
-    | { type: "message"; message: Message; stream?: boolean }
-    | { type: "messages"; messages: Message[]; stream?: boolean }
+    | { type: "message"; message: MessageInput; stream?: boolean }
+    | { type: "messages"; messages: MessageInput[]; stream?: boolean }
     | ({ type: "action" } & ClientAction);
 
 /** The work an `effect.execute` trigger delegates to the worker, tagged by `kind`. */
@@ -304,7 +311,7 @@ export type WorkerAction =
           detail?: unknown;
       }
     | { type: "spawn.sub_agent"; session_id: Uuid; agent_id: string; tool_call_id: string; retry?: RetryPolicy }
-    | { type: "send.message"; session_id: Uuid; message: Message }
+    | { type: "send.message"; session_id: Uuid; message: MessageInput }
     | { type: "interrupt"; interrupt_id?: string; reason: string; payload?: unknown }
     | { type: "done"; data: unknown };
 
@@ -588,7 +595,7 @@ export interface WorkerDecisionErrored {
 export interface SessionMessageRequested {
     type: "session.message_requested";
     target_session_id: Uuid;
-    message: Message;
+    message: MessageInput;
 }
 
 export interface WorkerStateUpdated {
@@ -901,7 +908,7 @@ export interface SubmitRequest {
     actions: WorkerAction[];
     /** Flat conversation the engine reconciles into the message tree: known ids
      *  continue, id-less/unknown messages are appended (forking automatically). */
-    transcript: Message[];
+    transcript: MessageInput[];
     /** Base64-encoded opaque worker state */
     state: string;
 }

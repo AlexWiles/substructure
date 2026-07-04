@@ -1,5 +1,4 @@
 import type { Agent, Llm, NamedAgent, ToolDef } from "./core";
-import { stamp } from "./core";
 import type { LlmTool, Message, RetryPolicy, WorkerAction } from "./types";
 
 // ── agent(config): the default tool/sub-agent loop ───────────────────────────
@@ -183,7 +182,7 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
                 switch (d.trigger.kind) {
                     case "llm_call": {
                         if (!d.trigger.ok || d.trigger.message === undefined) return { state: d.state };
-                        const assistant = stamp(d.trigger.message);
+                        const assistant = d.trigger.message;
                         const transcript = [...history, assistant];
                         const calls = assistant.tool_calls ?? [];
                         if (calls.length === 0)

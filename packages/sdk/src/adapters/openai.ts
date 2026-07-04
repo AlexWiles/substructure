@@ -6,7 +6,7 @@ import { Agent, RunContext } from "@openai/agents";
 import OpenAI from "openai";
 import { toolLoop } from "../agent";
 import type { Llm, LlmGenerate, Agent as SdkAgent, ToolDef } from "../core";
-import type { LlmParams, LlmTokenDeltaInput, LlmTool, Message, ToolCall } from "../types";
+import type { LlmParams, LlmTokenDeltaInput, LlmTool, MessageInput, ToolCall } from "../types";
 import { contentText } from "../types";
 
 type ResponseInputItem = OpenAI.Responses.ResponseInputItem;
@@ -211,7 +211,7 @@ export function toDelta(event: ResponseStreamEvent, callIdByItem: Map<string, st
     }
 }
 
-export function toResponsesInput(messages: Message[]): ResponseInputItem[] {
+export function toResponsesInput(messages: MessageInput[]): ResponseInputItem[] {
     const out: ResponseInputItem[] = [];
     for (const m of messages) {
         switch (m.role) {

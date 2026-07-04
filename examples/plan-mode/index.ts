@@ -2,8 +2,8 @@
 // Entering execution branches a fresh thread so the executor sees only the plan.
 // The agent reads its mode from state and picks the model, prompt, and tools per mode.
 
-import { agent, type Llm, tool, toolLoop } from "@substructure.ai/sdk";
 import type { DecisionTrigger } from "@substructure.ai/sdk";
+import { agent, type Llm, tool, toolLoop } from "@substructure.ai/sdk";
 import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
 
 // ── Domain ──────────────────────────────────────────────────────────────────
@@ -141,7 +141,10 @@ const planner = agent<State>({
             state.mode = requested;
             if (entering && requested === "executing") {
                 transcript = [];
-                trigger = { type: "user.message", message: { role: "user", content: renderPlan(state.plan) } };
+                trigger = {
+                    type: "user.message",
+                    message: { id: crypto.randomUUID(), role: "user", content: renderPlan(state.plan) },
+                };
             }
         }
 

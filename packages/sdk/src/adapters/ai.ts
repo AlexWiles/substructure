@@ -5,7 +5,7 @@ import type { LanguageModel, ModelMessage, TextStreamPart, Tool, ToolChoice, Too
 import { asSchema, jsonSchema, streamText, tool } from "ai";
 import { toolLoop } from "../agent";
 import type { Agent, Llm, LlmGenerate, ToolDef } from "../core";
-import type { LlmParams, LlmTokenDeltaInput, LlmTool, Message, ToolCall } from "../types";
+import type { LlmParams, LlmTokenDeltaInput, LlmTool, MessageInput, ToolCall } from "../types";
 import { contentText } from "../types";
 
 type StreamTextOptions = Parameters<typeof streamText>[0];
@@ -156,7 +156,7 @@ export function toDelta<T extends ToolSet>(part: TextStreamPart<T>): LlmTokenDel
     }
 }
 
-export function toModelMessages(messages: Message[]): ModelMessage[] {
+export function toModelMessages(messages: MessageInput[]): ModelMessage[] {
     const out: ModelMessage[] = [];
     for (const m of messages) {
         switch (m.role) {

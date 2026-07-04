@@ -2,8 +2,8 @@
 // answers to a stock `toolLoop` to synthesize. Two flavors: `fanout` (engine-run)
 // and `deferred-fanout` (worker-run, settled out-of-band via `settleEffect`).
 
-import { agent, contentText, toolLoop } from "@substructure.ai/sdk";
 import type { Agent, LlmRequest, LlmResponse, WorkerAction } from "@substructure.ai/sdk";
+import { agent, contentText, toolLoop } from "@substructure.ai/sdk";
 import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
 
 const MODEL = "anthropic/claude-sonnet-4-6";
@@ -102,7 +102,10 @@ function withLenses(loop: Agent<FanoutState>, handler: "server" | "worker"): Age
             return loop({
                 ...d,
                 state,
-                trigger: { type: "user.message", message: { role: "user", content: briefing } },
+                trigger: {
+                    type: "user.message",
+                    message: { id: crypto.randomUUID(), role: "user", content: briefing },
+                },
             });
         }
 

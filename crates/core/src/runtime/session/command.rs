@@ -617,9 +617,10 @@ impl SessionState {
                             }
                             Some(Content::Parts(parts))
                         };
-                        // id-less so the engine mints a fresh node on reconcile.
+                        // Stamp the id engine-side so the worker returns it verbatim
+                        // and reconcile records it as a fresh node.
                         let message = Message {
-                            id: String::new(),
+                            id: new_message_id(),
                             role: Role::Assistant,
                             content,
                             tool_calls,

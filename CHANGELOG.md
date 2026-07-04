@@ -10,6 +10,16 @@ same version.
 
 ## [Unreleased]
 
+### Changed
+
+- The engine now stamps the assistant message id when an `llm_call` settles, so the
+  message arrives on the worker's `effect.settled` trigger already carrying its node
+  id. Workers no longer generate one. Removed the `stamp` helper from the SDK.
+- SDK message types now split read from write: `Message` (what you read from a
+  transcript, trigger, or tree) has a required `id`; the new `MessageInput` (what you
+  submit, prompt, or seed) has an optional one. The engine assigns the id when it
+  records the message, so you construct messages without one.
+
 ## [0.1.20] - 2026-07-03
 
 ### Added

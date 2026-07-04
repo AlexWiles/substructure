@@ -4,6 +4,7 @@ import type {
     LlmResponse,
     LlmTokenDeltaInput,
     Message,
+    MessageInput,
     MessageTree,
     RetryPolicy,
     ToolHandler,
@@ -29,7 +30,7 @@ export type DecisionRequest<S = unknown> = WorkerDecisionRequestWire & {
  *  the request's. */
 export interface Decision {
     actions?: WorkerAction[];
-    transcript?: Message[];
+    transcript?: MessageInput[];
     state?: unknown;
 }
 
@@ -130,9 +131,4 @@ export function pathTo(tree: MessageTree | undefined, leaf: string | undefined):
 /** The active transcript: the `head_id`-to-root path. */
 export function activePath(tree?: MessageTree): Message[] {
     return pathTo(tree, tree?.head_id);
-}
-
-/** Stamp a fresh node id onto a message so the engine records it as a new node. */
-export function stamp(message: Message): Message {
-    return { ...message, id: crypto.randomUUID() };
 }
