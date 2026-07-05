@@ -38,6 +38,12 @@ pub enum SubAgentTask {
         token_usage: std::collections::BTreeMap<String, u64>,
         span: SpanContext,
     },
+    CancelSubAgent {
+        source_event_id: Uuid,
+        tenant_id: String,
+        child_session_id: String,
+        span: SpanContext,
+    },
 }
 
 impl SubAgentTask {
@@ -65,6 +71,11 @@ impl SubAgentTask {
             } => format!(
                 "subagent:complete_turn:{parent_session_id}:{child_session_id}:{turn_id}:{source_event_id}"
             ),
+            SubAgentTask::CancelSubAgent {
+                source_event_id,
+                child_session_id,
+                ..
+            } => format!("subagent:cancel:{child_session_id}:{source_event_id}"),
         }
     }
 }

@@ -524,15 +524,10 @@ impl SessionState {
                     origin: payload.origin,
                     reason: payload.reason.clone(),
                 };
-                for call in self.llm_calls.values_mut() {
-                    if call.tracking.status == EffectStatus::Pending {
-                        call.tracking.status = EffectStatus::Failed;
-                    }
-                }
-                // Pending worker decisions are voided like pending LLM calls:
-                // late submissions no-op via the pending check, and the
-                // decision request emitted on resume isn't queued behind a
-                // decision that will never complete.
+                // Pending worker decisions are voided (effects void via the
+                // batch's EffectVoided events): late submissions no-op via the
+                // pending check, and the decision request emitted on resume
+                // isn't queued behind a decision that will never complete.
                 for wd in self.worker_decisions.values_mut() {
                     if wd.tracking.status == EffectStatus::Pending {
                         wd.tracking.status = EffectStatus::Failed;
@@ -588,6 +583,18 @@ impl SessionState {
                     wd.tracking.status = EffectStatus::Failed;
                 }
             }
+            EventPayload::EffectVoided(p) => {
+                let tracking = match p.kind {
+                    EffectKind::ToolCall => self.tool_calls.get_mut(&p.id).map(|c| &mut c.tracking),
+                    EffectKind::LlmCall => self.llm_calls.get_mut(&p.id).map(|c| &mut c.tracking),
+                    EffectKind::SubAgent => {
+                        self.sub_agent_calls.get_mut(&p.id).map(|c| &mut c.tracking)
+                    }
+                };
+                if let Some(tracking) = tracking {
+                    tracking.status = EffectStatus::Failed;
+                }
+            }
             EventPayload::WorkerStateUpdated(p) => {
                 // A superseded same-anchor version can never win resolution.
                 self.state_versions.retain(|v| v.anchor != p.anchor);
@@ -598,27 +605,12 @@ impl SessionState {
             }
             EventPayload::SessionCancelled => {
                 self.status = SessionStatus::Done;
-                // Cancellation is terminal: void every pending effect so late
-                // results and submissions no-op instead of landing in a
-                // cancelled session.
-                for call in self.llm_calls.values_mut() {
-                    if call.tracking.status == EffectStatus::Pending {
-                        call.tracking.status = EffectStatus::Failed;
-                    }
-                }
+                // Cancellation is terminal: void pending decisions so late
+                // submissions no-op. Effects void via the batch's EffectVoided
+                // events.
                 for wd in self.worker_decisions.values_mut() {
                     if wd.tracking.status == EffectStatus::Pending {
                         wd.tracking.status = EffectStatus::Failed;
-                    }
-                }
-                for tc in self.tool_calls.values_mut() {
-                    if tc.tracking.status == EffectStatus::Pending {
-                        tc.tracking.status = EffectStatus::Failed;
-                    }
-                }
-                for sa in self.sub_agent_calls.values_mut() {
-                    if sa.tracking.status == EffectStatus::Pending {
-                        sa.tracking.status = EffectStatus::Failed;
                     }
                 }
             }

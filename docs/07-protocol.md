@@ -304,12 +304,13 @@ settling independently. Rules:
   front-end, because concurrent token streams interleave on a single message channel.
 
 **Forks and in-flight effects.** Every effect records an `anchor`: the tree node
-that was the active head when it was requested. If the transcript forks while an
-effect is in flight, the effect keeps running, but its result is recorded on the
-session log and **never delivered as a decision**: a settle for a forked-away
-branch would arrive against a transcript missing its requesting call. Workers
-need no staleness checks — every `effect.settled` you receive has its requesting
-call on the delivered transcript.
+that was the active head when it was requested. A fork abandons the branch it
+leaves, and outstanding work anchored below the fork point dies with it: the
+engine voids those effects (`effect.voided` on the session log) and rejects any
+late settle for them. Work anchored on the still-shared prefix is untouched.
+A voided sub-agent delegation cancels the child session, recursively through
+its sub-tree. Workers need no staleness checks — every `effect.settled` you
+receive has its requesting call on the delivered transcript.
 
 **Stop conditions.** To cap the loop (e.g. stop after N assistant steps), check
 your condition in the tool branch of `effect.settled` before prompting again and

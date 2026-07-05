@@ -57,6 +57,8 @@ pub enum EventPayload {
     DecisionRequestQueued(DecisionRequestQueued),
     #[serde(rename = "decision_request.dropped")]
     DecisionRequestDropped(DecisionRequestDropped),
+    #[serde(rename = "effect.voided")]
+    EffectVoided(EffectVoided),
     #[serde(rename = "session.cancelled")]
     SessionCancelled,
     #[serde(rename = "session.done")]
@@ -378,6 +380,22 @@ pub struct DecisionRequestQueued {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionRequestDropped {
     pub decision_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectKind {
+    ToolCall,
+    LlmCall,
+    SubAgent,
+}
+
+/// Outstanding work abandoned because its branch was forked away.
+/// `id` is the effect's map key (the child session id for a sub-agent).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EffectVoided {
+    pub kind: EffectKind,
+    pub id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

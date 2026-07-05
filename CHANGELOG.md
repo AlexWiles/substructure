@@ -15,10 +15,15 @@ same version.
 - **Branch-scoped worker state.** State writes are versions anchored to the
   message tree, and a decision carries the state resolved from its branch — a
   fork sees state as of the fork point. Unchanged submissions write nothing.
-- **Settles for forked-away branches are not delivered.** Effects record the
-  tree node they were requested at; a result whose branch was forked away is
-  logged but raises no decision (a stale queued settle drops via a new
-  `decision_request.dropped` event), so workers need no staleness checks.
+- **Forking cancels the branch's outstanding work.** Effects record the tree
+  node they were requested at; a fork voids in-flight effects anchored below
+  the fork point (new `effect.voided` event), drops their undelivered
+  decisions (new `decision_request.dropped` event), and rejects late settles.
+  Workers need no staleness checks.
+- **Voided work is explicit and cascades.** Interrupt and cancel emit the same
+  `effect.voided` events instead of voiding silently, and a voided sub-agent
+  delegation cancels its child session, recursively through its sub-tree.
+  Cancelling an already-done session is a no-op.
 
 ### Removed
 

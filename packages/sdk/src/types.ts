@@ -609,6 +609,14 @@ export interface WorkerStateUpdated {
     anchor?: string;
 }
 
+/** Outstanding work abandoned because its branch was forked away. */
+export interface EffectVoided {
+    type: "effect.voided";
+    kind: "tool_call" | "llm_call" | "sub_agent";
+    /** The effect's id (the child session id for a sub-agent). */
+    id: string;
+}
+
 export interface TurnStarted {
     type: "turn.started";
     turn_id: string;
@@ -642,6 +650,7 @@ export type EventPayload =
     | WorkerDecisionErrored
     | SessionMessageRequested
     | WorkerStateUpdated
+    | EffectVoided
     | SessionCancelled
     | SessionDone
     | TurnStarted
@@ -854,9 +863,8 @@ export interface EffectBase {
     status: EffectStatus;
     attempt: number;
     deadline?: DateTime;
-    /** The tree node the effect was requested at. If it leaves the active path
-     *  (the branch was forked away), the effect's settle is recorded on the
-     *  session log but never delivered as a decision. */
+    /** The tree node the effect was requested at. A fork that leaves it off
+     *  the active path voids the effect (`effect.voided`). */
     anchor?: string;
 }
 
