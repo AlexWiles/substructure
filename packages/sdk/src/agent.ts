@@ -42,8 +42,11 @@ function subAgentSchema(agentId: string): LlmTool {
     };
 }
 
-/** The default tool/sub-agent loop, as a decision function. It echoes the decision's
- *  `state`, so a wrapping agent can thread its own via `toolLoop(cfg)({ ...req, state })`. */
+/** The default tool/sub-agent loop, as a decision function. It returns no `state`
+ *  opinion, so the engine keeps the session's current state. A wrapping agent that
+ *  manages state threads it in via `toolLoop(cfg)({ ...req, state })` and persists
+ *  it by returning it alongside the loop's decision:
+ *  `{ ...(await loop({ ...req, state })), state }`. */
 export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
     const toolList = config.tools ?? [];
     const toolMap = toolList.reduce<Record<string, ToolDef>>((map, t) => {
@@ -86,17 +89,17 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
         };
 
         switch (d.trigger.type) {
-            case "user.message": {
+            case "client.message": {
                 const transcript = [...withSystem(history), d.trigger.message];
-                return { transcript, actions: [ask(transcript)], state: d.state };
+                return { transcript, actions: [ask(transcript)] };
             }
-            case "user.transcript": {
+            case "client.transcript": {
                 const transcript = withSystem(d.trigger.messages.filter((m) => m.role !== "system"));
-                return { transcript, actions: [ask(transcript)], state: d.state };
+                return { transcript, actions: [ask(transcript)] };
             }
             case "client.action": {
                 const base = withSystem(history);
-                return { transcript: base, actions: [ask(base)], state: d.state };
+                return { transcript: base, actions: [ask(base)] };
             }
             case "effect.execute": {
                 switch (d.trigger.kind) {
@@ -111,7 +114,7 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
                                 response,
                                 attempt: d.trigger.attempt,
                             };
-                            return { transcript: history, actions: [action], state: d.state };
+                            return { transcript: history, actions: [action] };
                         } catch (error) {
                             const message = error instanceof Error ? error.message : String(error);
                             const action: WorkerAction = {
@@ -122,7 +125,7 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
                                 retryable: false,
                                 attempt: d.trigger.attempt,
                             };
-                            return { transcript: history, actions: [action], state: d.state };
+                            return { transcript: history, actions: [action] };
                         }
                     }
                     case "tool_call": {
@@ -139,12 +142,11 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
                                         attempt: d.trigger.attempt,
                                     },
                                 ],
-                                state: d.state,
                             };
                         try {
                             const out = await def.execute(d.trigger.arguments, d);
                             // A deferred tool's execute only starts the work; the result arrives via settleEffect.
-                            if (def.deferred) return { state: d.state };
+                            if (def.deferred) return {};
                             return {
                                 actions: [
                                     {
@@ -155,7 +157,6 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
                                         attempt: d.trigger.attempt,
                                     },
                                 ],
-                                state: d.state,
                             };
                         } catch (error) {
                             const message = error instanceof Error ? error.message : String(error);
@@ -170,18 +171,17 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
                                         attempt: d.trigger.attempt,
                                     },
                                 ],
-                                state: d.state,
                             };
                         }
                     }
                     default:
-                        return { state: d.state };
+                        return {};
                 }
             }
             case "effect.settled": {
                 switch (d.trigger.kind) {
                     case "llm_call": {
-                        if (!d.trigger.ok || d.trigger.message === undefined) return { state: d.state };
+                        if (!d.trigger.ok || d.trigger.message === undefined) return {};
                         const assistant = d.trigger.message;
                         const transcript = [...history, assistant];
                         const calls = assistant.tool_calls ?? [];
@@ -189,7 +189,6 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
                             return {
                                 transcript,
                                 actions: [{ type: "done", data: assistant.content ?? null }],
-                                state: d.state,
                             };
 
                         const actions: WorkerAction[] = [];
@@ -229,36 +228,27 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
                                 });
                             }
                         }
-                        return { transcript, actions, state: d.state };
+                        return { transcript, actions };
                     }
                     case "sub_agent":
                     case "tool_call": {
-                        const node: Message =
-                            d.trigger.kind === "sub_agent"
-                                ? {
-                                      id: crypto.randomUUID(),
-                                      role: "tool",
-                                      content: d.trigger.result,
-                                      tool_call_id: d.trigger.tool_call_id,
-                                      name: d.trigger.agent_id,
-                                  }
-                                : {
-                                      id: crypto.randomUUID(),
-                                      role: "tool",
-                                      content: d.trigger.result,
-                                      tool_call_id: d.trigger.id,
-                                      name: d.trigger.name,
-                                  };
+                        const node: Message = {
+                            id: crypto.randomUUID(),
+                            role: "tool",
+                            content: (d.trigger.ok ? d.trigger.result : d.trigger.error) ?? "",
+                            tool_call_id: d.trigger.id,
+                            name: d.trigger.kind === "sub_agent" ? d.trigger.agent_id : d.trigger.name,
+                        };
                         const transcript = [...history, node];
-                        if (d.pending_effects > 0) return { transcript, state: d.state };
-                        return { transcript, actions: [ask(transcript)], state: d.state };
+                        if (d.pending_effects > 0) return { transcript };
+                        return { transcript, actions: [ask(transcript)] };
                     }
                     default:
-                        return { state: d.state };
+                        return {};
                 }
             }
             default:
-                return { state: d.state };
+                return {};
         }
     };
 }

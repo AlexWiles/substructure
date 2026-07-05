@@ -63,12 +63,12 @@ pub fn spawn_llm_task_executor(
                         match result {
                             Ok(response) => CommandPayload::CompleteLlmCall {
                                 call_id: task.call_id.clone(),
-                                attempt: task.attempt,
+                                attempt: Some(task.attempt),
                                 response,
                             },
                             Err(err) => CommandPayload::FailLlmCall {
                                 call_id: task.call_id.clone(),
-                                attempt: task.attempt,
+                                attempt: Some(task.attempt),
                                 error: err.message,
                                 retryable: err.retryable,
                                 code: err.code,
@@ -78,7 +78,7 @@ pub fn spawn_llm_task_executor(
                     }
                     Err(err) => CommandPayload::FailLlmCall {
                         call_id: task.call_id.clone(),
-                        attempt: task.attempt,
+                        attempt: Some(task.attempt),
                         error: err,
                         retryable: false,
                         code: Some(ErrorCode::ProviderError),

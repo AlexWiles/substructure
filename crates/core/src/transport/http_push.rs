@@ -321,7 +321,7 @@ mod tests {
                     stream: true,
                 },
             },
-            worker_state: Default::default(),
+            state: Default::default(),
             effects: Default::default(),
             pending_effects: 0,
             transcript: vec![],

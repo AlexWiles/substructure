@@ -44,7 +44,7 @@ const INSTRUCTIONS = "Combine the lens analyses into one short answer for the us
 function withLenses(loop: Agent<FanoutState>, handler: "server" | "worker"): Agent<FanoutState> {
     return async (d) => {
         // The user's message: fan out the lenses instead of starting the loop.
-        if (d.trigger.type === "user.message") {
+        if (d.trigger.type === "client.message") {
             const question = contentText(d.trigger.message.content);
             return {
                 actions: LENSES.map(
@@ -99,14 +99,17 @@ function withLenses(loop: Agent<FanoutState>, handler: "server" | "worker"): Age
                 "Lens analyses (from parallel calls):",
                 ...LENSES.map((l) => `- ${l.id}: ${state.results[l.id]}`),
             ].join("\n");
-            return loop({
+            // toolLoop expresses no state opinion, so return the aggregated `state`
+            // alongside its decision to persist the fully-folded fan-out result.
+            const decision = await loop({
                 ...d,
                 state,
                 trigger: {
-                    type: "user.message",
+                    type: "client.message",
                     message: { id: crypto.randomUUID(), role: "user", content: briefing },
                 },
             });
+            return { ...decision, state };
         }
 
         // Everything else (the loop's own llm settles, tools, done) is the loop's.

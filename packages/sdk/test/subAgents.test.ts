@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { agent, toolLoop } from "../src/agent";
-import { actionsOfType, appendedMessages, callLlm, llmResponse, runAgent, toolCall, userMessage } from "./harness";
+import { actionsOfType, appendedMessages, callLlm, llmResponse, runAgent, toolCall, clientMessage } from "./harness";
 
 const researcher = agent({ name: "researcher", decide: toolLoop({ llm: { model: "test-model" } }) });
 const assistant = toolLoop({ llm: { model: "test-model" }, subAgents: [researcher] });
@@ -16,7 +16,7 @@ const delegation = (toolCallId = "call_sub") =>
 describe("subAgents", () => {
     describe("tool exposure", () => {
         it("presents each sub-agent to the model as a tool", async () => {
-            const result = await runAgent(assistant, { trigger: userMessage("hi") });
+            const result = await runAgent(assistant, { trigger: clientMessage("hi") });
             expect(callLlm(result)?.request.tools?.map((t) => t.function.name)).toEqual(["researcher"]);
         });
     });

@@ -198,7 +198,7 @@ Swap `db` for Postgres, Redis, S3, or a Durable Object; the agent doesn't change
 
 ### On the wire (custom `decide`)
 
-If you want small state round-tripped for you instead of standing up a store, keep it in `worker_state` with a custom `decide`. The engine ships the state in as `req.state` (raw JSON, round-tripped untouched). Build the tools **inside `decide`** so each `execute` closes over the live `state`, hand them to `toolLoop`, and pass `state` into the loop: the loop runs the tools, and echoes the `state` you gave it so the agent persists it:
+If you want small state round-tripped for you instead of standing up a store, keep it on the decision envelope's `state` with a custom `decide`. The engine ships the state in as `req.state` (raw JSON, untouched; `null` when the session has none). Build the tools **inside `decide`** so each `execute` closes over the live `state`, hand them to `toolLoop`, and return `state` alongside the loop's decision — `toolLoop` itself expresses no state opinion, so the party that owns the state persists it:
 
 ```ts
 import { agent, tool, toolLoop } from "@substructure.ai/sdk";
@@ -231,12 +231,13 @@ const todoAgent = agent<State>({
       instructions: "Concise todo assistant.",
       tools: todoTools(state),
     });
-    return loop({ ...req, state });   // pass state in → the loop persists it back out
+    const d = await loop({ ...req, state });   // pass state in for the tools…
+    return { ...d, state };                    // …return it to persist the edits
   },
 });
 ```
 
-`toolLoop` echoes the `state` it's given, so a custom `decide` that needs to intercept a trigger (a mode switch, an approval gate) can do that work, then `return loop({ ...req, state })` for everything else. See [`examples/state-hydration`](https://github.com/substructureai/substructure/tree/main/examples/state-hydration) and [`examples/plan-mode`](https://github.com/substructureai/substructure/tree/main/examples/plan-mode).
+`toolLoop` never returns `state`, so a custom `decide` that needs to intercept a trigger (a mode switch, an approval gate) can do that work, run `loop({ ...req, state })` for everything else, and decide per decision whether to persist: returning `state` writes it (echoes of the current value are free — the engine dedups); omitting it keeps whatever the session already has. The omission default is what makes forks safe: on a decision whose transcript forks the tree, the delivered `req.state` came from the old branch, and only a *returned* state carries it over — see [Concepts / State](./02-concepts.md#state-is-branch-scoped). See [`examples/state-hydration`](https://github.com/substructureai/substructure/tree/main/examples/state-hydration) and [`examples/plan-mode`](https://github.com/substructureai/substructure/tree/main/examples/plan-mode).
 
 ## Custom decision functions
 
@@ -249,7 +250,7 @@ const echo = agent({
   name: "echo",
   decide: (req) => {
     switch (req.trigger.type) {
-      case "user.message":
+      case "client.message":
         return {
           actions: [
             {
@@ -270,16 +271,16 @@ const echo = agent({
 });
 ```
 
-The `DecisionRequest` (conventionally `req`) is the engine's wire envelope with `worker_state` surfaced as `state`. Read off it:
+The `DecisionRequest` (conventionally `req`) is the engine's wire envelope, with an absent `state` normalized to `null`. Read off it:
 
-- `req.trigger`: what happened, one of `user.message`, `user.transcript`, `client.action`, `effect.execute`, `effect.settled`, and so on.
+- `req.trigger`: what happened, one of `client.message`, `client.transcript`, `client.action`, `effect.execute`, `effect.settled`, and so on.
 - `req.transcript`: the active transcript (the head-to-root path); may be empty.
-- `req.state`: the `worker_state`, surfaced as raw JSON (return a new value to persist it).
+- `req.state`: your state as raw JSON, `null` when the session has none (return a value to persist a new one).
 - `req.pending_effects`: how many `tool_call`/`sub_agent` effects are still in flight; the step gate. On an `effect.settled` trigger, prompt again once it hits `0` (a non-zero value doubles as a "steps still running" count).
 - `req.effects`: the same in-flight effects as a flat, tagged list, when you need more than the count (each with `id`, `kind`, `status`, `attempt`, plus kind-specific fields like a tool's `name`/`arguments`). `kind`/`status` are open, so new effect kinds are additive.
 - `req.session_id`, `req.identity`, `req.turn_id`, and the rest of the envelope, read directly.
 
-Return a `Decision`, `{ actions?, transcript?, state? }`. `actions` defaults to none; `transcript` echoes `req.transcript`; `state` echoes `req.state`.
+Return a `Decision`, `{ actions?, transcript?, state? }`. `actions` defaults to none; `transcript` echoes `req.transcript`; an omitted `state` keeps the current state at the engine (returning a value persists it; an echo of the current value is deduped engine-side and writes nothing).
 
 Actions are plain objects that you return directly:
 
@@ -504,7 +505,7 @@ See [`examples/`](https://github.com/substructureai/substructure/tree/main/examp
 - `vercel`: serverless worker on Vercel.
 - `sub-agent`: a parent agent delegating to a child via `subAgents`.
 - `hybrid-state`: tool state in a per-user database, reached through the decision request (`request.identity.id`).
-- `state-hydration`: state on the wire, a custom `decide` that runs a `toolLoop` against `worker_state`.
+- `state-hydration`: state on the wire, a custom `decide` that runs a `toolLoop` against the envelope's `state`.
 - `tool-approval`: a custom `decide` that gates real shell commands behind a `client.action` approval.
 - `plan-mode`: a modal agent, a custom `decide` that switches model/prompt/tools by mode and forks a branch to execute.
 - `deferred-tool`: async tool call: `deferred: true` makes `execute` a kick-off; the result is posted later via `settleEffect`.

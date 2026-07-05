@@ -1,8 +1,9 @@
 // Pure-function harness for agent tests.
 //
 // An agent is `(DecisionRequest) -> Decision`. `runAgent` builds a request from a
-// trigger (+ optional tree/pending/state) and runs the agent against it,
-// mirroring the worker boundary, passing `state` straight through. Deterministic.
+// trigger (+ optional tree/pending/state) and runs the agent against it.
+// `RunResult.state` models the engine's resolved state after the decision:
+// the returned value when the agent expressed one, else the kept request state.
 
 import type { Agent, DecisionRequest } from "../src/core";
 import { activePath } from "../src/core";
@@ -67,7 +68,7 @@ function makeRequest(opts: RunOptions, transcript?: Message[]): WorkerDecisionRe
         agent_id: "test-agent",
         identity: { tenant_id: "test", id: "tester" },
         trigger: opts.trigger,
-        worker_state: {},
+        state: {},
         effects,
         pending_effects: effects.filter(
             (e) =>
@@ -97,12 +98,12 @@ function nextNodeId(): string {
     return `node-${nodeCounter++}`;
 }
 
-export function userMessage(content: string): DecisionTrigger {
-    return { type: "user.message", message: { id: nextNodeId(), role: "user", content } };
+export function clientMessage(content: string): DecisionTrigger {
+    return { type: "client.message", message: { id: nextNodeId(), role: "user", content } };
 }
 
-export function userTranscript(messages: Message[]): DecisionTrigger {
-    return { type: "user.transcript", messages };
+export function clientTranscript(messages: Message[]): DecisionTrigger {
+    return { type: "client.transcript", messages };
 }
 
 export function llmResponse(message: Message, callId = "call-0"): DecisionTrigger {
@@ -122,11 +123,11 @@ export function toolResult(toolCallId: string, name: string, result: string, isE
         ok: !isError,
         kind: "tool_call",
         name,
-        result,
+        ...(isError ? { error: result } : { result }),
     };
 }
 
-/** One sub-agent completion; `id` is the child session, `tool_call_id` the model call it answers. */
+/** One sub-agent completion; `id` is the model call it answers, like a tool's. */
 export function subAgentResult(
     sessionId: string,
     toolCallId: string,
@@ -136,12 +137,12 @@ export function subAgentResult(
 ): DecisionTrigger {
     return {
         type: "effect.settled",
-        id: sessionId,
+        id: toolCallId,
         ok: !isError,
         kind: "sub_agent",
-        tool_call_id: toolCallId,
+        session_id: sessionId,
         agent_id: agentId,
-        result,
+        ...(isError ? { error: result } : { result }),
     };
 }
 

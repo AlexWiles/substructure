@@ -22,7 +22,8 @@ pub struct WorkerDecisionRequest {
     /// The session owner, surfaced to workers as `identity`.
     pub identity: SessionOwner,
     pub trigger: DecisionTrigger,
-    pub worker_state: WorkerState,
+    /// The session's current state, resolved from the active branch.
+    pub state: WorkerState,
     /// The in-flight effects as a flat, tagged list (each carries `kind`/`status`).
     #[serde(default)]
     pub effects: Vec<Effect>,
@@ -55,7 +56,8 @@ pub struct SubmitDecision {
     pub decision_id: String,
     pub transcript: Vec<Message>,
     pub actions: Vec<WorkerAction>,
-    pub state: WorkerState,
+    /// `None` = no opinion, keep the current state.
+    pub state: Option<WorkerState>,
     pub span: SpanContext,
 }
 

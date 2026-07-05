@@ -34,7 +34,8 @@ pub enum SettleEffectRequest {
         kind: ToolCallKind,
         id: String,
         result: String,
-        attempt: u32,
+        #[serde(default)]
+        attempt: Option<u32>,
     },
     #[serde(rename = "effect.error")]
     Error {
@@ -43,7 +44,8 @@ pub enum SettleEffectRequest {
         id: String,
         error: String,
         retryable: bool,
-        attempt: u32,
+        #[serde(default)]
+        attempt: Option<u32>,
     },
 }
 

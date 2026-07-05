@@ -10,6 +10,27 @@ same version.
 
 ## [Unreleased]
 
+### Added
+
+- **Branch-scoped worker state.** The engine no longer stores worker state as a
+  single mutable cell: every write is a version anchored to the tree node that was
+  the active head when it was written, and the state a decision carries is resolved
+  from the active branch (the newest version whose anchor lies on the root-to-head
+  path). When the transcript forks to an earlier point, the new branch resolves to
+  the state as of the fork point — memory, summaries, and instructions from the
+  abandoned branch don't leak in; a worker that wants to carry state across a fork
+  submits it on the forking decision. Echoed state is deduped by structural JSON
+  equality, so unchanged submissions write nothing.
+- **Effects are anchored to the tree; settles for forked-away branches are not
+  delivered.** Every tool/LLM/sub-agent call records the head node it was
+  requested at (the `anchor` on the `effects` list). When the conversation forks
+  away from that node while the effect is in flight, its outcome is recorded on
+  the session log but raises no worker
+  decision — a queued settle that goes stale before delivery is dropped the same
+  way, via a new `decision_request.dropped` event. Every `effect.settled` a
+  worker receives is guaranteed to have its requesting call on the delivered
+  transcript, so workers need no staleness checks in any language.
+
 ### Removed
 
 - The `stall` decision trigger. The engine no longer nudges an idle session on a
@@ -17,6 +38,50 @@ same version.
   message or settling effect, and a turn ends with a `done` action.
 
 ### Changed
+
+- **Breaking (wire): client triggers are named for their sender.** The
+  `user.message` and `user.transcript` triggers are renamed `client.message`
+  and `client.transcript`, matching `client.action` — all three arrive through
+  the same client API. No aliases for the old names.
+- **Breaking (wire): one correlation id per effect.** A sub-agent's
+  `effect.settled` trigger now carries the originating `tool_call_id` as its
+  `id` — the same id its `effects`-list entry and a tool's settle use — with the
+  child session demoted to a `session_id` field in the outcome. Workers fold any
+  settle under `trigger.id` with no per-kind cases.
+- **Breaking (wire): settle outcomes are uniform.** Every `effect.settled`
+  carries its payload when `ok` and an `error` field when not; a failed
+  tool/sub-agent no longer stuffs the error text into `result`.
+- **Breaking (wire): the decision request's state field is named `state`**,
+  matching the submit; it was `worker_state`. One value, one name, both
+  directions. The `session.created` event's end-user field is likewise renamed
+  `identity` (was `owner`), matching the decision request.
+- **`attempt` is now optional on `effect.result`/`effect.error`** (actions and
+  the settle endpoints). Omitted settles the current attempt; supplying it
+  fences out a stale executor after a retry, which is what echoing the
+  trigger's `attempt` always did.
+- **Breaking (wire): `state` on the worker submit is now optional.** An omitted
+  field (or a present `null`) means "keep the current state"; previously an omitted
+  field deserialized as `null` and silently cleared it. Clearing is expressible by
+  submitting a present, non-null empty value (e.g. `{}`) — `null` deserializes as
+  `None`, so it keeps rather than clears. The SDK worker passes an agent's returned
+  `state` through as-is: an agent that returns no state opinion now keeps state
+  instead of re-writing it.
+- **Breaking (wire): `worker.decision.completed` no longer carries `state`**; it is
+  purely a completion marker. `worker.state.updated` is the only state-carrying
+  event and gains an `anchor` field (the head node id at write time).
+- **Breaking (wire): the admin session read model** serializes `state_versions`
+  (anchored versions) instead of the removed `worker_state` field; the current
+  state is resolved, not stored.
+- **Breaking (SDK): `toolLoop` no longer returns a `state` opinion.** It used to
+  echo the state it was handed, which would silently carry the abandoned branch's
+  state across a fork (a cross-branch echo differs from the fork point's state, so
+  engine dedup can't drop it). A wrapping `decide` that manages state now persists
+  it by returning it alongside the loop's decision:
+  `const d = await loop({ ...req, state }); return { ...d, state }`.
+- **Breaking (SDK): `req.state` is delivered untouched.** The worker boundary no
+  longer coerces a `null`/absent `worker_state` to `{}`; `DecisionRequest.state`
+  is typed `S | null`. This removes a spurious first state write per session and
+  surfaces an empty session's state as `null` rather than `{}`.
 
 - `worker_state` now rides the wire as raw JSON instead of a base64-encoded string,
   end to end: the engine stores and round-trips the value untouched, and the SDK
@@ -30,6 +95,13 @@ same version.
   transcript, trigger, or tree) has a required `id`; the new `MessageInput` (what you
   submit, prompt, or seed) has an optional one. The engine assigns the id when it
   records the message, so you construct messages without one.
+
+### Fixed
+
+- A model or tool result settling after the client edited the conversation no
+  longer lands on the edited branch: the engine stops delivering it (see effects
+  anchoring above). Previously the settle arrived against the new branch's
+  transcript, and `toolLoop` folded the stale assistant reply into it.
 
 ## [0.1.20] - 2026-07-03
 

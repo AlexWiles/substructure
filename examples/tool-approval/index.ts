@@ -107,7 +107,9 @@ const assistant = agent<State>({
         }
 
         // Prompting, running the approved command, and continuing are the default loop.
-        return loop({ ...req, state });
+        // The tools mutate `state` while the loop runs, so return it to persist.
+        const d = await loop({ ...req, state });
+        return { ...d, state };
     },
 });
 

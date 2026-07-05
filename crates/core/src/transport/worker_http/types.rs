@@ -14,7 +14,9 @@ pub struct SubmitRequest {
     #[serde(default)]
     pub transcript: Vec<Message>,
     pub actions: Vec<WorkerAction>,
-    pub state: WorkerState,
+    /// Omitted or `null` keeps the current state; clear with a non-null empty value.
+    #[serde(default)]
+    pub state: Option<WorkerState>,
     #[serde(default)]
     pub span: Option<SpanContext>,
 }
@@ -34,7 +36,8 @@ pub enum SettleEffectRequest {
     #[serde(rename = "effect.result")]
     Result {
         id: String,
-        attempt: u32,
+        #[serde(default)]
+        attempt: Option<u32>,
         #[serde(flatten)]
         result: EffectResultPayload,
     },
@@ -44,7 +47,8 @@ pub enum SettleEffectRequest {
         id: String,
         error: String,
         retryable: bool,
-        attempt: u32,
+        #[serde(default)]
+        attempt: Option<u32>,
         #[serde(default)]
         code: Option<ErrorCode>,
         #[serde(default)]

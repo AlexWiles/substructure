@@ -1,6 +1,6 @@
 # state-hydration
 
-The agent's state — a todo list — rides the decision envelope as `worker_state`,
+The agent's state — a todo list — rides the decision envelope as `state`,
 round-tripped every turn. The engine persists it between decisions and hands it
 back next time; the agent reads `req.state`, the tools mutate it, and the loop
 returns the new value.
@@ -11,11 +11,11 @@ over the live list. The agent is a plain custom `decide` function that builds a
 which the loop echoes back out so the engine persists it.
 
 ```
-wire / worker_state:  { todos: Todo[] }          ← engine persists & round-trips it
+wire / state:         { todos: Todo[] }          ← engine persists & round-trips it
        ↓ req.state
 decide:               builds tools over state, loop runs them, todos mutate
        ↑ returns { ..., state }
-wire / worker_state:  { todos: Todo[] }           ← updated, handed back next turn
+wire / state:         { todos: Todo[] }           ← updated, handed back next turn
 ```
 
 ## The default loop, over state that rides the wire
@@ -40,7 +40,7 @@ const todoAgent = agent<State>({
 ```
 
 The `state` you pass into `loop({ ...req, state })` is echoed straight back out in
-the decision the loop returns, so the engine persists it as `worker_state` and
+the decision the loop returns, so the engine persists it on the envelope and
 hands it back as `req.state` on the next decision.
 
 ## Tools close over the state
@@ -72,6 +72,6 @@ npm start
 The example runs a single turn against an in-memory engine (`db: ":memory:"`):
 the user asks to add two todos and list them, and the stream prints each
 user/assistant message, tool call, and tool result. Because the state rides the
-wire as `worker_state`, the same todo list would be handed straight back on the
+wire, the same todo list would be handed straight back on the
 next turn of a persisted session — the todos never live anywhere but the state
 the agent returns.

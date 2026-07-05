@@ -40,17 +40,24 @@ pub enum EffectWork {
     LlmCall { request: LlmRequest, stream: bool },
 }
 
+/// Uniform across kinds: `result` (or `message`) when `ok`, `error` when not.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EffectOutcome {
     ToolCall {
         name: String,
-        result: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     SubAgent {
-        tool_call_id: String,
+        session_id: String,
         agent_id: String,
-        result: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     LlmCall {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -109,10 +116,10 @@ impl EffectOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DecisionTrigger {
-    #[serde(rename = "user.message")]
-    UserMessage { message: Message },
-    #[serde(rename = "user.transcript")]
-    UserTranscript { messages: Vec<Message> },
+    #[serde(rename = "client.message")]
+    ClientMessage { message: Message },
+    #[serde(rename = "client.transcript")]
+    ClientTranscript { messages: Vec<Message> },
     #[serde(rename = "client.action")]
     ClientAction {
         name: String,
@@ -182,7 +189,10 @@ pub enum WorkerAction {
     #[serde(rename = "effect.result")]
     EffectResult {
         id: String,
-        attempt: u32,
+        /// Omitted = settle the current attempt; echo the trigger's `attempt`
+        /// to fence out a stale executor instead.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt: Option<u32>,
         #[serde(flatten)]
         result: EffectResultPayload,
     },
@@ -190,7 +200,8 @@ pub enum WorkerAction {
     EffectError {
         kind: WorkKind,
         id: String,
-        attempt: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt: Option<u32>,
         error: String,
         retryable: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]

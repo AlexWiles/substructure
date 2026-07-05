@@ -256,19 +256,24 @@ export type LlmSettled =
       }
     | { error: string; code?: string; detail?: unknown; message?: never };
 
-/** How a settled effect landed, tagged by `kind`. A `sub_agent`'s trigger `id`
- *  is its session id; `tool_call_id` is the model tool call it answers. */
+/** How a settled effect landed, tagged by `kind`. Uniform across kinds:
+ *  `result` (or `message`) when `ok`, `error` when not. A `sub_agent`'s `id` is
+ *  the model tool call it answers, like a tool's; `session_id` is the child. */
 export type EffectOutcome =
-    | { kind: "tool_call"; name: string; result: string }
-    | { kind: "sub_agent"; tool_call_id: string; agent_id: string; result: string }
+    | { kind: "tool_call"; name: string; result?: string; error?: string }
+    | { kind: "sub_agent"; session_id: Uuid; agent_id: string; result?: string; error?: string }
     | ({ kind: "llm_call" } & LlmSettled);
 
 export type DecisionTrigger =
-    | { type: "user.message"; message: Message }
-    | { type: "user.transcript"; messages: Message[] }
+    | { type: "client.message"; message: Message }
+    | { type: "client.transcript"; messages: Message[] }
     | ({ type: "client.action" } & ClientAction)
     | ({ type: "effect.execute"; id: string; attempt: number; deadline?: DateTime } & EffectWork)
-    | ({ type: "effect.settled"; id: string; ok: boolean } & EffectOutcome)
+    | ({
+          type: "effect.settled";
+          id: string;
+          ok: boolean;
+      } & EffectOutcome)
     | { type: "interrupt.resumed"; interrupt_id: string; payload?: unknown };
 
 /** The effect kinds a worker can answer `effect.execute` for. */
@@ -298,12 +303,12 @@ export type WorkerAction =
           handler: ToolHandler;
           retry?: RetryPolicy;
       }
-    | ({ type: "effect.result"; id: string; attempt: number } & EffectResultPayload)
+    | ({ type: "effect.result"; id: string; attempt?: number } & EffectResultPayload)
     | {
           type: "effect.error";
           kind: WorkKind;
           id: string;
-          attempt: number;
+          attempt?: number;
           error: string;
           retryable: boolean;
           code?: string;
@@ -317,15 +322,15 @@ export type WorkerAction =
 /** The settle body: an `effect.result` or `effect.error`. The worker surface
  *  accepts both kinds; the client surface only sends `kind: "tool_call"`. */
 export type SettleEffectRequest =
-    | { type: "effect.result"; kind: "tool_call"; id: string; result: string; attempt: number }
-    | { type: "effect.result"; kind: "llm_call"; id: string; response: LlmResponse; attempt: number }
+    | { type: "effect.result"; kind: "tool_call"; id: string; result: string; attempt?: number }
+    | { type: "effect.result"; kind: "llm_call"; id: string; response: LlmResponse; attempt?: number }
     | {
           type: "effect.error";
           kind: WorkKind;
           id: string;
           error: string;
           retryable: boolean;
-          attempt: number;
+          attempt?: number;
           code?: string;
           detail?: unknown;
       };
@@ -355,12 +360,13 @@ export interface ResumeInterruptResponse {
     ok: boolean;
 }
 
-/** Which effect to settle, on which session, at which attempt. `id` is the
- *  effect id (a tool call id or an llm call id). */
+/** Which effect to settle, on which session. `id` is the effect id (a tool
+ *  call id or an llm call id). `attempt` is optional: omitted settles the
+ *  current attempt; echo the trigger's `attempt` to fence a stale executor. */
 export interface SettleEffectTarget {
     sessionId: string;
     id: string;
-    attempt: number;
+    attempt?: number;
 }
 
 /** Settle a `tool_call` with its result string. */
@@ -580,8 +586,6 @@ export interface WorkerDecisionRequested {
 export interface WorkerDecisionCompleted {
     type: "worker.decision.completed";
     decision_id: string;
-    /** Opaque worker state as raw JSON; the engine stores it without interpreting it. */
-    state: unknown;
 }
 
 export interface WorkerDecisionErrored {
@@ -601,6 +605,8 @@ export interface WorkerStateUpdated {
     type: "worker.state.updated";
     /** Opaque worker state as raw JSON; the engine stores it without interpreting it. */
     state: unknown;
+    /** The node id that was the active head when this version was written; absent if the tree was empty. */
+    anchor?: string;
 }
 
 export interface TurnStarted {
@@ -764,6 +770,13 @@ export interface WorkerDecisionState {
     trigger: DecisionTrigger;
 }
 
+/** A worker-state write anchored to the tree position it was made at. The current
+ *  state is the newest version whose anchor lies on the active path. */
+export interface StateVersion {
+    state: unknown;
+    anchor?: string;
+}
+
 export interface SessionState {
     session_id: Uuid;
     status: SessionStatus;
@@ -775,7 +788,7 @@ export interface SessionState {
     turn_cost: Decimal;
     turn_token_usage?: Record<string, number>;
     sub_agent_token_usage?: Record<string, number>;
-    worker_state: unknown;
+    state_versions: StateVersion[];
     ancestry?: Uuid[];
     data?: unknown;
     worker_retry?: RetryPolicy;
@@ -841,6 +854,10 @@ export interface EffectBase {
     status: EffectStatus;
     attempt: number;
     deadline?: DateTime;
+    /** The tree node the effect was requested at. If it leaves the active path
+     *  (the branch was forked away), the effect's settle is recorded on the
+     *  session log but never delivered as a decision. */
+    anchor?: string;
 }
 
 export interface ToolCallEffect extends EffectBase {
@@ -883,7 +900,8 @@ export interface WorkerDecisionRequestWire {
     agent_id: string;
     identity: WorkerIdentity;
     trigger: DecisionTrigger;
-    worker_state: unknown;
+    /** Your state as raw JSON, resolved from the active branch; `null` when the session has none. */
+    state: unknown;
     effects: Effect[];
     /** How many `tool_call`/`sub_agent` effects are still in flight: the step gate as a number (prompt at 0). */
     pending_effects: number;
@@ -905,8 +923,10 @@ export interface SubmitRequest {
     /** Flat conversation the engine reconciles into the message tree: known ids
      *  continue, id-less/unknown messages are appended (forking automatically). */
     transcript: MessageInput[];
-    /** Opaque worker state as raw JSON; the engine stores it without interpreting it. */
-    state: unknown;
+    /** Opaque worker state as raw JSON; the engine stores it without interpreting it.
+     *  Omitted (or `null`) = keep the current state; the engine can't tell a `null`
+     *  from an omitted field. Clear with a present non-null empty value (e.g. `{}`). */
+    state?: unknown;
 }
 
 export interface SubmitResponse {

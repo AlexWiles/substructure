@@ -46,8 +46,8 @@ Each trigger carries the new content and the current transcript; the worker fold
 
 | Trigger | When the engine sends it |
 | --- | --- |
-| `user.message` | A client sent a chat message. The worker adds it to the transcript (rooting a fresh branch with its system prompt on cold start) and prompts. |
-| `user.transcript` | A client sent a full transcript (e.g. an AG-UI client view, an edit, or a regenerate). The worker returns it; the engine reconciles it into the tree. |
+| `client.message` | A client sent a chat message. The worker adds it to the transcript (rooting a fresh branch with its system prompt on cold start) and prompts. |
+| `client.transcript` | A client sent a full transcript (e.g. an AG-UI client view, an edit, or a regenerate). The worker returns it; the engine reconciles it into the tree. |
 | `client.action` | A client called `startTurn` with a typed action instead of a message. |
 | `effect.execute` | The engine is delegating effect work to your worker: run a tool (`kind: "tool_call"`) or make an LLM call (`kind: "llm_call"`). `toolLoop` handles this and dispatches to the matching tool's `execute` or the worker-run model; a custom `decide` reacts to it directly. |
 | `effect.settled` | An effect landed: the model replied (`kind: "llm_call"`), or a tool/sub-agent call finished (`kind: "tool_call"` / `"sub_agent"`). Fires as each one lands, so the transcript fills incrementally. The request's `effects` list says what's still in flight, so the worker prompts once no tool/sub-agent effect is pending, without tracking the round itself. `ok` says whether the effect succeeded. |
@@ -76,9 +76,17 @@ A single decision can return multiple actions: for example, several `call.tool` 
 Across decisions in a session, two things persist: the **transcript** (the conversation tree, owned by the engine) and any **worker state** you choose to keep. There is no SDK-held tool state. Where your own state lives is a choice you make per agent:
 
 - **Your own store.** Tools are pure functions that reach a store directly through the decision request, keyed by `request.session_id` (per conversation) or `request.identity.id` (per user). Best for large state, sensitive data, or anything you want to query directly; it never leaves your infrastructure. See [State](./04-sdk.md#state) in the SDK docs.
-- **On the wire.** Keep small state in `worker_state` with a custom `decide`: the engine ships the state in as `req.state` (raw JSON) on every decision and persists whatever you return. Simple, no infrastructure required. See [State](./04-sdk.md#state).
+- **On the wire.** Keep small state on the decision envelope's `state` with a custom `decide`: the engine ships the state in as `req.state` (raw JSON) on every decision and persists whatever you return. Simple, no infrastructure required. See [State](./04-sdk.md#state).
 
 State is logically per-session. Two sessions for the same user are independent unless you explicitly link them.
+
+### State is branch-scoped
+
+The conversation is a tree, and worker state follows it. The engine never overwrites your state in place: each write is recorded as a **version** anchored to the tree node that was the active head when it was written. The state a decision sees is resolved from the active branch — the newest version whose anchor lies on the path from the root to the current head.
+
+On a linear conversation this is indistinguishable from a single mutable value. It matters when the tree forks (a client edits or regenerates an earlier message): versions written on the abandoned branch fall off the active path, so the new branch resolves to the state **as of the fork point** — memory, summaries, and instructions learned on the other branch don't leak in. A worker that *wants* to carry state across a fork simply submits it on the forking decision; the engine imposes neither semantic.
+
+The rule of thumb: **conversational truth lives in state and forks with the branch; physical truth (what actually ran — every LLM call, tool result, and state version) lives in the event log and never forks.**
 
 ## Events
 

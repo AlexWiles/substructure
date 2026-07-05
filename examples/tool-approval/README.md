@@ -6,7 +6,7 @@ whole exchange looks like a normal tool call that just took a while.
 
 ## How it works
 
-State rides the wire as `worker_state` and carries two fields:
+State rides the wire as `state` and carries two fields:
 
 ```ts
 type State = {

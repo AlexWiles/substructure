@@ -21,7 +21,7 @@ export interface NativeRuntime {
         tenantId: string,
         kind: string,
         id: string,
-        attempt: number,
+        attempt: number | undefined,
         resultJson: string | undefined,
         responseJson: string | undefined,
         errorMessage: string | undefined,
@@ -48,29 +48,20 @@ export interface FetchHandlerOptions {
 // biome-ignore lint/suspicious/noExplicitAny: heterogeneous state types across agents
 export type Agents = NamedAgent<any>[];
 
-// ── State on the wire ────────────────────────────────────────────────────────
-// `worker_state` rides as raw JSON, so there's nothing to decode; an absent or
-// empty state reads as `{}`.
-
-function readState(raw: unknown): unknown {
-    return raw ?? {};
-}
-
-/** The one transform: surface `worker_state` as the decision's `state`, run the
- *  agent, hand the returned state back. Everything else is the wire envelope. */
 async function runDecision(
     fn: Agent,
     request: WorkerDecisionRequestWire,
     emitDelta?: EmitDelta,
 ): Promise<SubmitRequest> {
-    const req: DecisionRequest = { ...request, state: readState(request.worker_state), emitDelta };
+    const req: DecisionRequest = { ...request, state: request.state ?? null, emitDelta };
     const out = await fn(req);
     return {
         session_id: request.session_id,
         decision_id: request.decision_id,
         actions: out.actions ?? [],
         transcript: out.transcript ?? request.transcript ?? [],
-        state: out.state !== undefined ? out.state : req.state,
+        // Undefined means "keep" at the engine; a returned state is deduped engine-side.
+        state: out.state,
     };
 }
 

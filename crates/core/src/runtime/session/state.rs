@@ -108,6 +108,9 @@ pub struct LlmCallState {
     pub stream: bool,
     #[serde(default)]
     pub handler: LlmHandler,
+    /// The active head when the effect was first requested; retries keep it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
 }
 
 /// An `LlmRequest` without its message list; the prompt is stored alongside.
@@ -163,6 +166,9 @@ pub struct ToolCallState {
     pub result: Option<String>,
     #[serde(default)]
     pub is_error: bool,
+    /// The active head when the effect was first requested; retries keep it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,6 +184,17 @@ pub struct SubAgentCallState {
     pub result: Option<String>,
     #[serde(default)]
     pub is_error: bool,
+    /// The active head when the effect was first requested; retries keep it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
+}
+
+/// A worker-state write anchored to the tree position it was made at; the
+/// current state is resolved, never stored (`resolve_state_for`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateVersion {
+    pub state: WorkerState,
+    pub anchor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -198,6 +215,9 @@ pub struct Effect {
     pub attempt: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline: Option<DateTime<Utc>>,
+    /// The tree node the effect was requested at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
     #[serde(flatten)]
     pub detail: EffectDetail,
 }
@@ -299,7 +319,7 @@ pub struct SessionState {
     pub sub_agent_token_usage: BTreeMap<String, u64>,
 
     #[serde(default)]
-    pub worker_state: WorkerState,
+    pub state_versions: Vec<StateVersion>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ancestry: Vec<String>,
@@ -343,7 +363,7 @@ impl SessionState {
             turn_cost: Decimal::ZERO,
             turn_token_usage: BTreeMap::new(),
             sub_agent_token_usage: BTreeMap::new(),
-            worker_state: WorkerState::default(),
+            state_versions: Vec::new(),
             ancestry: Vec::new(),
             data: serde_json::Value::Null,
             worker_retry: None,
@@ -364,7 +384,7 @@ impl SessionState {
             EventPayload::SessionCreated(payload) => {
                 self.status = SessionStatus::Idle;
                 self.agent_id = Some(payload.agent_id.clone());
-                self.owner = Some(payload.owner.clone());
+                self.owner = Some(payload.identity.clone());
                 self.ancestry = payload.ancestry.clone();
                 self.worker_retry = Some(payload.worker_retry.clone());
             }
@@ -394,6 +414,7 @@ impl SessionState {
                     existing.stream = payload.stream;
                     existing.handler = payload.handler.clone();
                 } else {
+                    // Applies after the same batch's NewMessage events: head_id is post-reconcile.
                     self.llm_calls.insert(
                         payload.call_id.clone(),
                         LlmCallState {
@@ -403,6 +424,7 @@ impl SessionState {
                             spec,
                             stream: payload.stream,
                             handler: payload.handler.clone(),
+                            anchor: self.head_id.clone(),
                         },
                     );
                 }
@@ -440,6 +462,7 @@ impl SessionState {
                             arguments: payload.arguments.clone(),
                             result: None,
                             is_error: false,
+                            anchor: self.head_id.clone(),
                         },
                     );
                 }
@@ -475,6 +498,7 @@ impl SessionState {
                             tool_call_id: payload.tool_call_id.clone(),
                             result: None,
                             is_error: false,
+                            anchor: self.head_id.clone(),
                         },
                     );
                 }
@@ -539,7 +563,6 @@ impl SessionState {
                 if let Some(wd) = self.worker_decisions.get_mut(&p.decision_id) {
                     wd.tracking.complete();
                 }
-                self.worker_state = p.state.clone();
             }
             EventPayload::WorkerDecisionErrored(p) => {
                 if let Some(wd) = self.worker_decisions.get_mut(&p.decision_id) {
@@ -559,8 +582,19 @@ impl SessionState {
                     },
                 );
             }
+            EventPayload::DecisionRequestDropped(p) => {
+                // Voided like an interrupted decision: out of the queue, never delivered.
+                if let Some(wd) = self.worker_decisions.get_mut(&p.decision_id) {
+                    wd.tracking.status = EffectStatus::Failed;
+                }
+            }
             EventPayload::WorkerStateUpdated(p) => {
-                self.worker_state = p.state.clone();
+                // A superseded same-anchor version can never win resolution.
+                self.state_versions.retain(|v| v.anchor != p.anchor);
+                self.state_versions.push(StateVersion {
+                    state: p.state.clone(),
+                    anchor: p.anchor.clone(),
+                });
             }
             EventPayload::SessionCancelled => {
                 self.status = SessionStatus::Done;
@@ -646,11 +680,15 @@ impl SessionState {
             .any(|wd| wd.tracking.status == EffectStatus::Pending)
     }
 
-    pub fn next_queued_decision(&self) -> Option<&WorkerDecisionState> {
-        self.worker_decisions
+    /// All queued decisions in arrival order.
+    pub fn queued_decisions(&self) -> Vec<&WorkerDecisionState> {
+        let mut queued: Vec<&WorkerDecisionState> = self
+            .worker_decisions
             .values()
             .filter(|wd| wd.tracking.status == EffectStatus::Queued)
-            .min_by_key(|wd| wd.source_event_sequence)
+            .collect();
+        queued.sort_by_key(|wd| wd.source_event_sequence);
+        queued
     }
 
     pub fn has_queued_worker_decision(&self) -> bool {
@@ -688,6 +726,44 @@ impl SessionState {
             .min()
     }
 
+    /// All node ids (messages and controls) on the root→`leaf` chain.
+    /// `MessageTree::path_to` returns only messages; anchors may be any node kind.
+    fn path_ids<'a>(&'a self, leaf: &'a str) -> std::collections::HashSet<&'a str> {
+        let by_id: HashMap<&str, &Node> = self.nodes.iter().map(|n| (n.id(), n)).collect();
+        let mut ids = std::collections::HashSet::new();
+        let mut cursor = Some(leaf);
+        while let Some(id) = cursor {
+            let Some(node) = by_id.get(id) else { break };
+            if !ids.insert(id) {
+                break; // malformed parent cycle guard, mirrors path_to
+            }
+            cursor = node.parent_id();
+        }
+        ids
+    }
+
+    /// Whether `anchor` lies on the root→`leaf` path. A `None` anchor matches any path.
+    pub fn anchor_on_path(&self, leaf: Option<&str>, anchor: Option<&str>) -> bool {
+        match anchor {
+            None => true,
+            Some(a) => leaf.is_some_and(|l| self.path_ids(l).contains(a)),
+        }
+    }
+
+    /// Newest version whose anchor is on the path to `leaf`; unanchored matches any path.
+    pub fn resolve_state_for(&self, leaf: Option<&str>) -> WorkerState {
+        let on_path = leaf.map(|l| self.path_ids(l)).unwrap_or_default();
+        self.state_versions
+            .iter()
+            .rev()
+            .find(|v| match v.anchor.as_deref() {
+                None => true,
+                Some(a) => on_path.contains(a),
+            })
+            .map(|v| v.state.clone())
+            .unwrap_or_default()
+    }
+
     pub fn message_tree(&self) -> MessageTree {
         MessageTree {
             nodes: self.nodes.clone(),
@@ -712,6 +788,7 @@ impl SessionState {
                 status: c.tracking.status.clone(),
                 attempt: c.tracking.retry.attempts,
                 deadline: c.tracking.deadline,
+                anchor: c.anchor.clone(),
                 detail: EffectDetail::ToolCall {
                     name: c.name.clone(),
                     arguments: c.arguments.clone(),
@@ -730,6 +807,7 @@ impl SessionState {
                 status: c.tracking.status.clone(),
                 attempt: c.tracking.retry.attempts,
                 deadline: c.tracking.deadline,
+                anchor: c.anchor.clone(),
                 detail: EffectDetail::SubAgent {
                     agent_id: c.agent_id.clone(),
                     session_id: c.session_id.clone(),
@@ -747,6 +825,7 @@ impl SessionState {
                 status: c.tracking.status.clone(),
                 attempt: c.tracking.retry.attempts,
                 deadline: c.tracking.deadline,
+                anchor: c.anchor.clone(),
                 detail: EffectDetail::LlmCall {
                     handler: c.handler.clone(),
                     stream: c.stream,
@@ -765,7 +844,7 @@ impl SessionState {
             effects: self.effects(),
             owner: self.owner.clone(),
             agent_id: self.agent_id.clone(),
-            worker_state: self.worker_state.clone(),
+            worker_state: self.resolve_state_for(self.head_id.as_deref()),
             message_tree: self.message_tree(),
             ancestry: self.ancestry.clone(),
             sub_agent_calls: self.sub_agent_calls.clone(),
@@ -806,6 +885,100 @@ impl SessionState {
 }
 
 #[cfg(test)]
+mod state_version_tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn message_node(id: &str, parent_id: Option<&str>) -> Node {
+        Node::Message(NewMessage {
+            message: Message {
+                id: id.to_string(),
+                role: Role::User,
+                content: None,
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            parent_id: parent_id.map(str::to_string),
+        })
+    }
+
+    /// A session with the tree  u1 → a1 → u2  and a fork leaf  u1 → x1.
+    fn forked_session() -> SessionState {
+        let mut s = SessionState::new("sess-1".to_string());
+        s.nodes.push(message_node("u1", None));
+        s.nodes.push(message_node("a1", Some("u1")));
+        s.nodes.push(message_node("u2", Some("a1")));
+        s.nodes.push(message_node("x1", Some("u1")));
+        s
+    }
+
+    fn version(state: serde_json::Value, anchor: Option<&str>) -> StateVersion {
+        StateVersion {
+            state: WorkerState(state),
+            anchor: anchor.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn empty_versions_resolve_to_default() {
+        let s = forked_session();
+        assert_eq!(s.resolve_state_for(Some("u2")), WorkerState::default());
+        assert_eq!(s.resolve_state_for(None), WorkerState::default());
+    }
+
+    #[test]
+    fn linear_resolution_latest_on_path_wins() {
+        let mut s = forked_session();
+        s.state_versions.push(version(json!({"v": 1}), Some("u1")));
+        s.state_versions.push(version(json!({"v": 2}), Some("u2")));
+        assert_eq!(s.resolve_state_for(Some("u2")).0, json!({"v": 2}));
+    }
+
+    #[test]
+    fn fork_resolves_as_of_the_fork_point() {
+        let mut s = forked_session();
+        s.state_versions.push(version(json!({"v": 1}), Some("u1")));
+        s.state_versions.push(version(json!({"v": 2}), Some("u2")));
+        // u2's version is off the u1→x1 path; the branch sees state as-of u1.
+        assert_eq!(s.resolve_state_for(Some("x1")).0, json!({"v": 1}));
+    }
+
+    #[test]
+    fn unanchored_version_matches_any_path() {
+        let mut s = forked_session();
+        s.state_versions.push(version(json!({"v": 0}), None));
+        s.state_versions.push(version(json!({"v": 2}), Some("u2")));
+        assert_eq!(s.resolve_state_for(Some("x1")).0, json!({"v": 0}));
+        assert_eq!(s.resolve_state_for(Some("u2")).0, json!({"v": 2}));
+        assert_eq!(s.resolve_state_for(None).0, json!({"v": 0}));
+    }
+
+    #[test]
+    fn same_anchor_versions_compact_to_the_newest() {
+        let mut s = forked_session();
+        s.head_id = Some("u2".to_string());
+        let ctx = ApplyContext {
+            occurred_at: Utc::now(),
+            sequence: 1,
+        };
+        for (i, anchor) in [(1, Some("u1")), (2, Some("u2")), (3, Some("u2"))] {
+            s.apply(
+                &EventPayload::WorkerStateUpdated(WorkerStateUpdated {
+                    state: WorkerState(json!({ "v": i })),
+                    anchor: anchor.map(str::to_string),
+                }),
+                &ctx,
+            );
+        }
+        assert_eq!(s.state_versions.len(), 2);
+        assert_eq!(s.resolve_state_for(s.head_id.as_deref()).0, json!({"v": 3}));
+        assert_eq!(s.resolve_state_for(Some("x1")).0, json!({"v": 1}));
+    }
+}
+
+#[cfg(test)]
 mod effect_tests {
     use super::*;
 
@@ -816,6 +989,7 @@ mod effect_tests {
             status: EffectStatus::Pending,
             attempt: 0,
             deadline: None,
+            anchor: Some("n1".to_string()),
             detail: EffectDetail::ToolCall {
                 name: "get_weather".to_string(),
                 arguments: "{}".to_string(),

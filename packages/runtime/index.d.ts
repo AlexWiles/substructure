@@ -36,7 +36,7 @@ export class EmbeddedRuntime {
         tenantId: string,
         kind: string,
         id: string,
-        attempt: number,
+        attempt: number | undefined,
         resultJson: string | undefined,
         responseJson: string | undefined,
         errorMessage: string | undefined,

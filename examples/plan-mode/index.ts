@@ -142,7 +142,7 @@ const planner = agent<State>({
             if (entering && requested === "executing") {
                 transcript = [];
                 trigger = {
-                    type: "user.message",
+                    type: "client.message",
                     message: { id: crypto.randomUUID(), role: "user", content: renderPlan(state.plan) },
                 };
             }
@@ -155,7 +155,8 @@ const planner = agent<State>({
             tools: planTools(state),
         });
 
-        return loop({ ...req, trigger, transcript, state });
+        const d = await loop({ ...req, trigger, transcript, state });
+        return { ...d, state };
     },
 });
 

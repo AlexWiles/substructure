@@ -1,6 +1,6 @@
-// State on the wire: the todo list rides the decision envelope as `worker_state`,
+// State on the wire: the todo list rides the decision envelope as `state`,
 // round-tripped every turn. Tools are built per decision closing over the live
-// list; passing `state` into the loop is what persists their edits back out.
+// list; returning `state` alongside the loop's decision persists their edits.
 
 import { agent, tool, toolLoop } from "@substructure.ai/sdk";
 import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
@@ -46,7 +46,8 @@ const todoAgent = agent<State>({
             instructions: "Concise todo assistant. Use the tools to manage the list.",
             tools: todoTools(state),
         });
-        return loop({ ...req, state });
+        const d = await loop({ ...req, state });
+        return { ...d, state };
     },
 });
 

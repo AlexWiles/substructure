@@ -4,12 +4,12 @@ import { toolLoop } from "../src/agent";
 import type { Agent } from "../src/core";
 import type { SettleEffectArgs, WorkerAction } from "../src/types";
 import { contentText, toSettleEffectRequest } from "../src/types";
-import { actionsOfType, callLlm, llmResponse, runAgent, userMessage } from "./harness";
+import { actionsOfType, callLlm, llmResponse, runAgent, clientMessage } from "./harness";
 
 describe("call.llm id", () => {
     it("ask() names each call.llm with a fresh id", async () => {
         const loop = toolLoop({ llm: { model: "test-model" }, instructions: "SYS" });
-        const result = await runAgent(loop, { trigger: userMessage("hi") });
+        const result = await runAgent(loop, { trigger: clientMessage("hi") });
         const call = callLlm(result);
         expect(typeof call?.id).toBe("string");
         expect(call?.id).toBeTruthy();
@@ -30,7 +30,7 @@ describe("concurrent llm fan-out", () => {
         request: { model: "m", messages: [] },
     });
     const fanout: Agent = (d) => {
-        if (d.trigger.type === "user.message") {
+        if (d.trigger.type === "client.message") {
             return { actions: [call("a"), call("b")], state: { pending: ["a", "b"], results: {} } };
         }
         if (d.trigger.type === "effect.settled" && d.trigger.kind === "llm_call") {
@@ -49,7 +49,7 @@ describe("concurrent llm fan-out", () => {
         ["b", "a"],
     ] as const) {
         it(`folds settles arriving in ${order.join(", ")} order and finishes once`, async () => {
-            const start = await runAgent(fanout, { trigger: userMessage("go") });
+            const start = await runAgent(fanout, { trigger: clientMessage("go") });
             expect(
                 actionsOfType(start, "call.llm")
                     .map((c) => c.id)

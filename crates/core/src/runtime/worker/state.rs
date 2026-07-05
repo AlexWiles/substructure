@@ -2,11 +2,8 @@ use std::ops::Deref;
 
 use serde::{Deserialize, Serialize};
 
-/// Opaque worker state: JSON the engine stores but never interprets — workers own
-/// its shape. It rides the wire as raw JSON (not a base64 wrapper), so the value a
-/// worker returns is the value it gets back. States persisted before this change
-/// were base64 strings; they deserialize as a JSON string value and pass through
-/// untouched, so no migration is needed.
+/// Opaque worker state: JSON the engine stores but never interprets — workers
+/// own its shape.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct WorkerState(pub serde_json::Value);

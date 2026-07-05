@@ -18,16 +18,20 @@ import { nodeId } from "./types";
 /** Push one streamed token delta to whoever is listening (SSE client, embedded runtime). */
 export type EmitDelta = (delta: LlmTokenDeltaInput) => Promise<void>;
 
-/** What the engine sends the agent: the wire envelope with `worker_state` surfaced as `state`. */
+/** What the engine sends the agent: the wire envelope, with an absent `state`
+ *  normalized to `null` (raw JSON otherwise, untouched). */
 export type DecisionRequest<S = unknown> = WorkerDecisionRequestWire & {
-    state: S;
+    state: S | null;
     /** Stream token deltas, present on a streaming llm `effect.execute` trigger. */
     emitDelta?: EmitDelta;
 };
 
 /** What the agent decides: the actions to take, plus the transcript and state to
- *  persist. `actions` defaults to none; `transcript`/`state` default to echoing
- *  the request's. */
+ *  persist. `actions` defaults to none; `transcript` defaults to echoing the
+ *  request's. An omitted (or `null`) `state` keeps the session's current state —
+ *  return a non-null value to write one (`{}` to clear). Echoes of the current
+ *  value are deduped engine-side, but a value returned on a forking decision
+ *  carries it onto the new branch. */
 export interface Decision {
     actions?: WorkerAction[];
     transcript?: MessageInput[];
