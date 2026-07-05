@@ -201,11 +201,18 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
             .await;
 
             if let Err(err) = result {
-                tracing::error!(
-                    child_session_id = %child_session_id,
-                    error = %err,
-                    "failed to cancel sub-agent session"
-                );
+                if matches!(err, ExecuteError::Command(SessionError::SessionNotCreated)) {
+                    tracing::debug!(
+                        child_session_id = %child_session_id,
+                        "cancel for a child session that was never created"
+                    );
+                } else {
+                    tracing::error!(
+                        child_session_id = %child_session_id,
+                        error = %err,
+                        "failed to cancel sub-agent session"
+                    );
+                }
             }
         }
     }

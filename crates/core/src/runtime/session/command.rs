@@ -460,6 +460,13 @@ impl SessionState {
             .collect()
     }
 
+    /// Whether `batch` voided the effect a settle action targets.
+    fn batch_voided(batch: &[EventPayload], kind: EffectKind, id: &str) -> bool {
+        batch
+            .iter()
+            .any(|e| matches!(e, EventPayload::EffectVoided(v) if v.kind == kind && v.id == id))
+    }
+
     /// A fork abandons the branch it left: void outstanding work anchored
     /// below the fork point and drop undelivered decisions that reference it.
     fn void_stranded_work(&self, leaf: Option<&str>) -> Vec<EventPayload> {
@@ -1172,13 +1179,6 @@ impl SessionState {
                 events.extend(reconcile);
 
                 let reap = self.void_stranded_work(prefix_leaf.as_deref());
-                let voided: std::collections::HashSet<String> = reap
-                    .iter()
-                    .filter_map(|e| match e {
-                        EventPayload::EffectVoided(v) => Some(v.id.clone()),
-                        _ => None,
-                    })
-                    .collect();
                 events.extend(reap);
 
                 if let Some(state) = state {
@@ -1199,10 +1199,13 @@ impl SessionState {
                 };
                 for action in actions {
                     let sub_events = match action {
-                        // A settle for work this submit just voided: the effect died with its branch.
-                        WorkerAction::EffectResult { ref id, .. }
-                        | WorkerAction::EffectError { ref id, .. }
-                            if voided.contains(id) =>
+                        // A settle for work this batch voided (by fork or
+                        // interrupt): the effect is dead, the result dropped.
+                        WorkerAction::EffectResult {
+                            ref id, ref result, ..
+                        } if Self::batch_voided(&events, result.kind().into(), id) => Ok(vec![]),
+                        WorkerAction::EffectError { kind, ref id, .. }
+                            if Self::batch_voided(&events, kind.into(), id) =>
                         {
                             Ok(vec![])
                         }
@@ -5806,6 +5809,108 @@ mod tests {
             "the settle dies with the branch; got {events:?}"
         );
         assert!(settle_decisions(&events).is_empty(), "got {events:?}");
+    }
+
+    #[test]
+    fn submit_settling_a_call_its_own_interrupt_voided_swallows_it() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d1 = open_decision(&mut agg, "hi");
+        request_llm(&mut agg, "llm-1", LlmHandler::Server);
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: d1,
+                transcript: vec![node_msg("u1", Role::User, "hi")],
+                actions: vec![
+                    WorkerAction::Interrupt {
+                        interrupt_id: "int-1".to_string(),
+                        reason: "hold".to_string(),
+                        payload: serde_json::Value::Null,
+                    },
+                    WorkerAction::EffectResult {
+                        id: "llm-1".to_string(),
+                        attempt: None,
+                        result: EffectResultPayload::LlmCall {
+                            response: llm_response("late"),
+                        },
+                    },
+                ],
+                state: None,
+            },
+            &machine(),
+        );
+        assert_eq!(voided_ids(&events), vec!["llm-1"], "got {events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, EventPayload::LlmCallCompleted(_))),
+            "the settle dies with the voided call; got {events:?}"
+        );
+        assert_eq!(
+            agg.state.llm_calls.get("llm-1").unwrap().tracking.status,
+            EffectStatus::Failed,
+        );
+    }
+
+    #[test]
+    fn void_guard_matches_kind_not_just_id() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d1 = open_decision(&mut agg, "hi");
+        submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
+        request_client_tool(&mut agg, "shared"); // anchored at u1
+
+        // A sub-agent with the same id, anchored one node deeper.
+        let d2 = open_decision(&mut agg, "more");
+        submit_state(
+            &mut agg,
+            d2,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("a1", Role::Assistant, "?"),
+            ],
+            None,
+        );
+        dispatch(
+            &mut agg,
+            CommandPayload::RequestSubAgent {
+                session_id: "shared".to_string(),
+                agent_id: "helper".to_string(),
+                tool_call_id: "call-1".to_string(),
+                retry: RetryPolicy::no_retry(),
+            },
+            &system(),
+        );
+
+        // Forking below u1 voids the sub-agent but not the tool; the tool's
+        // settle in the same submit must not be swallowed by the id collision.
+        let d3 = open_decision(&mut agg, "redo");
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: d3,
+                transcript: vec![
+                    node_msg("u1", Role::User, "hi"),
+                    node_msg("b1", Role::Assistant, "!"),
+                ],
+                actions: vec![WorkerAction::EffectResult {
+                    id: "shared".to_string(),
+                    attempt: None,
+                    result: EffectResultPayload::ToolCall {
+                        result: "ok".to_string(),
+                    },
+                }],
+                state: None,
+            },
+            &machine(),
+        );
+        assert_eq!(voided_ids(&events), vec!["shared"], "got {events:?}");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::ToolCallCompleted(_))),
+            "the tool settle lands despite the voided sub-agent sharing its id; got {events:?}"
+        );
     }
 
     #[test]

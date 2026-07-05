@@ -390,6 +390,15 @@ pub enum EffectKind {
     SubAgent,
 }
 
+impl From<super::decision::WorkKind> for EffectKind {
+    fn from(kind: super::decision::WorkKind) -> Self {
+        match kind {
+            super::decision::WorkKind::ToolCall => EffectKind::ToolCall,
+            super::decision::WorkKind::LlmCall => EffectKind::LlmCall,
+        }
+    }
+}
+
 /// Outstanding work abandoned because its branch was forked away.
 /// `id` is the effect's map key (the child session id for a sub-agent).
 #[derive(Debug, Clone, Serialize, Deserialize)]

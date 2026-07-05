@@ -164,6 +164,15 @@ pub enum EffectResultPayload {
     LlmCall { response: LlmResponse },
 }
 
+impl EffectResultPayload {
+    pub fn kind(&self) -> WorkKind {
+        match self {
+            EffectResultPayload::ToolCall { .. } => WorkKind::ToolCall,
+            EffectResultPayload::LlmCall { .. } => WorkKind::LlmCall,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WorkerAction {
