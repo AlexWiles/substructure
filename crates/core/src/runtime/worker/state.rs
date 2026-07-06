@@ -2,8 +2,7 @@ use std::ops::Deref;
 
 use serde::{Deserialize, Serialize};
 
-/// Opaque worker state: JSON the engine stores but never interprets — workers
-/// own its shape.
+/// Opaque worker state: JSON the engine stores but never interprets.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct WorkerState(pub serde_json::Value);

@@ -13,9 +13,8 @@ type ResponseInputItem = OpenAI.Responses.ResponseInputItem;
 type ResponseStreamEvent = OpenAI.Responses.ResponseStreamEvent;
 type ResponseOutputItem = OpenAI.Responses.ResponseOutputItem;
 
-// The Responses API's own create params minus what the loop supplies: `input` is
-// the transcript and `tools` are declared in `tools()`. `model` is re-required
-// (optional upstream); `stream` is always on.
+// Responses create params minus what the loop supplies (input/tools/stream);
+// `model` is re-required (optional upstream).
 export type OpenAIGenerateSettings = Omit<
     OpenAI.Responses.ResponseCreateParamsStreaming,
     "input" | "tools" | "stream" | "model"

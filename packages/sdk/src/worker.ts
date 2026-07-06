@@ -43,8 +43,7 @@ export interface FetchHandlerOptions {
     tolerance?: number;
 }
 
-/** The agents to serve: each a `NamedAgent` from `agent({ name, ... })`. They
- *  carry independent state types, so the collection is `NamedAgent<any>`. */
+/** The agents to serve, each a `NamedAgent` from `agent({ name, ... })`. */
 // biome-ignore lint/suspicious/noExplicitAny: heterogeneous state types across agents
 export type Agents = NamedAgent<any>[];
 
@@ -60,7 +59,7 @@ async function runDecision(
         decision_id: request.decision_id,
         actions: out.actions ?? [],
         transcript: out.transcript ?? request.transcript ?? [],
-        // Undefined means "keep" at the engine; a returned state is deduped engine-side.
+        // undefined keeps the current state; a returned value is deduped engine-side.
         state: out.state,
     };
 }
@@ -90,8 +89,7 @@ export class Worker {
         return this.fetchHandler(options);
     }
 
-    /** When `options.signingSecret` is provided, incoming requests are verified
-     *  against the HMAC-SHA256 signature in the `X-Substructure-Signature` header. */
+    /** With `options.signingSecret`, verifies the `X-Substructure-Signature` HMAC-SHA256 header. */
     fetchHandler(options?: FetchHandlerOptions): (req: Request) => Promise<Response> {
         return async (req: Request) => {
             let decision: WorkerDecisionRequestWire;
@@ -146,8 +144,8 @@ export class Worker {
     }
 }
 
-/** Build the HTTP worker for these (named) agents. `worker([agent]).fetch(opts)`
- *  is a `(Request) => Response` handler; each agent is routed by its name. */
+/** Build the HTTP worker for these agents; `worker([...]).fetch(opts)` is a
+ *  `(Request) => Response` handler routed by agent name. */
 export function worker(agents: Agents): Worker {
     return new Worker(agents);
 }

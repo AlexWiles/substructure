@@ -33,9 +33,7 @@ pub enum ClientPayload {
     },
 }
 
-/// What the engine sends in `trigger`: news that hasn't been written into the
-/// conversation yet. `*.finished` triggers are the final word on a call —
-/// uniform across subjects: the payload when `ok`, `error` when not.
+/// Engine-sent trigger; `*.finished` carries the payload when ok, else error.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DecisionTrigger {
@@ -49,7 +47,7 @@ pub enum DecisionTrigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         args: Option<serde_json::Value>,
     },
-    /// Run this tool on the worker; answer with `tool.result`/`tool.error`.
+    /// Answer with `tool.result`/`tool.error`.
     #[serde(rename = "tool.execute")]
     ToolExecute {
         id: String,
@@ -59,7 +57,7 @@ pub enum DecisionTrigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         deadline: Option<DateTime<Utc>>,
     },
-    /// Make this model call on the worker; answer with `llm.result`/`llm.error`.
+    /// Answer with `llm.result`/`llm.error`.
     #[serde(rename = "llm.execute")]
     LlmExecute {
         id: String,
@@ -80,8 +78,7 @@ pub enum DecisionTrigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
-    /// `id` is the model tool call the delegation answers; `session_id` is the
-    /// child session.
+    /// `id` is the model tool call the delegation answers; `session_id` the child session.
     #[serde(rename = "sub_agent.finished")]
     SubAgentFinished {
         id: String,
@@ -170,7 +167,7 @@ pub enum WorkKind {
     LlmCall,
 }
 
-/// Internal payload for the settle APIs; the wire speaks `tool.result`/`llm.result`.
+/// Internal payload for the settle APIs; not a wire discriminator.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EffectResultPayload {
@@ -178,9 +175,7 @@ pub enum EffectResultPayload {
     LlmCall { response: LlmResponse },
 }
 
-/// What the worker returns in `actions`. On `tool.result`/`llm.result`/
-/// `tool.error`/`llm.error`, an omitted `attempt` settles the current attempt;
-/// echo the trigger's `attempt` to fence out a stale executor instead.
+/// Omitting `attempt` on a result/error settles the current attempt; echo it to fence a stale executor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WorkerAction {
@@ -256,8 +251,7 @@ pub enum WorkerAction {
         session_id: String,
         message: Message,
     },
-    /// Pause the session awaiting external input. Recorded with
-    /// `InterruptOrigin::Frontend` so the session owner can resume it.
+    /// Pause the session awaiting external input.
     #[serde(rename = "interrupt")]
     Interrupt {
         #[serde(default)]

@@ -14,9 +14,7 @@ export interface LoopConfig {
     retry?: RetryPolicy;
 }
 
-/** An agent: a `name` plus a decision function. `decide` is `toolLoop(...)` for
- *  the default loop, or your own function. The `name` is the id the engine routes
- *  to (for `worker([...])` and sub-agent delegation). */
+/** An agent config: a `name` and a `decide` function (`toolLoop(...)` or your own). */
 export interface AgentConfig<S = unknown> {
     name: string;
     decide: Agent<S>;
@@ -42,11 +40,8 @@ function subAgentSchema(agentId: string): LlmTool {
     };
 }
 
-/** The default tool/sub-agent loop, as a decision function. It returns no `state`
- *  opinion, so the engine keeps the session's current state. A wrapping agent that
- *  manages state threads it in via `toolLoop(cfg)({ ...req, state })` and persists
- *  it by returning it alongside the loop's decision:
- *  `{ ...(await loop({ ...req, state })), state }`. */
+/** The default tool/sub-agent loop, as a decision function. Expresses no `state`;
+ *  wrap it (`toolLoop(cfg)({ ...req, state })`) to thread your own. */
 export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
     const toolList = config.tools ?? [];
     const toolMap = toolList.reduce<Record<string, ToolDef>>((map, t) => {
@@ -58,7 +53,6 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
 
     const toolSchemas: LlmTool[] = [...toolList.map(toolSchema), ...[...subIds].map(subAgentSchema)];
 
-    // Split loop-fixed request params from routing (handler/stream/run).
     const { handler, run: _run, stream, ...llmParams } = config.llm;
 
     const ask = (messages: Message[]): WorkerAction => {
@@ -77,8 +71,7 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
 
         const instructions =
             typeof config.instructions === "function" ? await config.instructions() : config.instructions;
-        // Guarantee the transcript starts with the system message, reusing the
-        // stored one (stable id) when the branch already has it.
+        // Lead with the system message, reusing the stored one (stable id) when present.
         const withSystem = (messages: Message[]): Message[] => {
             if (messages[0]?.role === "system") return messages;
             const existing = history[0]?.role === "system" ? history[0] : undefined;
@@ -140,7 +133,7 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
                     };
                 try {
                     const out = await def.execute(d.trigger.arguments, d);
-                    // A deferred tool's execute only starts the work; the result arrives via settleEffect.
+                    // Deferred: execute only starts the work; result arrives via settleEffect.
                     if (def.deferred) return {};
                     return {
                         actions: [
@@ -186,9 +179,7 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
                         try {
                             const args = JSON.parse(tc.function.arguments);
                             if (typeof args?.message === "string") message = args.message;
-                        } catch {
-                            // leave raw arguments as the message
-                        }
+                        } catch {}
                         actions.push(
                             {
                                 type: "sub_agent.spawn",
@@ -236,8 +227,7 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
     };
 }
 
-/** Name a decision function so it can be deployed (`worker([...])`) or used as a
- *  sub-agent. `decide` is `toolLoop(...)` for the default loop, or your own. */
+/** Name a decision function so it can be deployed (`worker([...])`) or delegated to as a sub-agent. */
 export function agent<S = unknown>(config: AgentConfig<S>): NamedAgent<S> {
     return Object.assign(config.decide, { agentName: config.name });
 }

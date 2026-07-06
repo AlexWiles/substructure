@@ -6,8 +6,7 @@ import type { Llm, LlmGenerate } from "../core";
 import type { LlmParams, LlmTokenDeltaInput, LlmTool, MessageInput, ToolCall } from "../types";
 import { contentText } from "../types";
 
-// `MessageCreateParams` minus what the loop supplies: `messages`/`system` and
-// `tools` come from the request; `stream` is set on `llm`.
+// MessageCreateParams minus what the loop supplies (messages/system/tools/stream).
 export type AnthropicGenerateSettings = Omit<
     Anthropic.MessageCreateParamsNonStreaming,
     "messages" | "system" | "tools" | "stream"

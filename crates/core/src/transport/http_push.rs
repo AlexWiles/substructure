@@ -155,10 +155,7 @@ fn retryable_default() -> bool {
     true
 }
 
-/// Reads a streaming worker response: interim `llm.token.delta` frames are
-/// republished onto the token-delta transport; the terminal `decision.result`
-/// frame carries the `SubmitRequest`. The actual SSE framing (UTF-8 across
-/// chunk boundaries, multi-line data, comments) is handled by `eventsource_stream`.
+/// Republishes streamed token deltas and returns the terminal `SubmitRequest`.
 async fn read_sse_response<S, B, E>(
     stream: S,
     decision: &WorkerDecisionRequest,
@@ -333,9 +330,7 @@ mod tests {
         }
     }
 
-    /// Feed `body` as many tiny chunks so multibyte chars and SSE frames are
-    /// split across chunk boundaries — the case the old hand-rolled parser got
-    /// wrong.
+    /// Split `body` into tiny chunks so multibyte chars and SSE frames straddle boundaries.
     fn chunked(body: &str) -> impl futures_util::Stream<Item = Result<Vec<u8>, std::io::Error>> {
         let chunks: Vec<_> = body.as_bytes().chunks(3).map(|c| Ok(c.to_vec())).collect();
         futures_util::stream::iter(chunks)
@@ -345,7 +340,7 @@ mod tests {
     async fn parses_deltas_then_terminal_result() {
         let transport = Arc::new(RecordingTransport::default());
         let decision = streaming_decision();
-        // Note the multibyte token text; chunked() splits it mid-codepoint.
+        // Multibyte token text; chunked() splits it mid-codepoint.
         let body = "event: llm.token.delta\ndata: {\"text\":\"héllo 🎉\"}\n\n\
                     event: llm.token.delta\ndata: {\"reasoning\":\"hmm\"}\n\n\
                     event: decision.result\ndata: {\"session_id\":\"sess-1\",\"decision_id\":\"dec-1\",\"actions\":[],\"state\":\"\"}\n\n";

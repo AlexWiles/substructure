@@ -107,8 +107,7 @@ export type ContentPart = TextPart | ImageUrlPart | FilePart | InputAudioPart | 
 export type Content = string | ContentPart[];
 
 export interface Message {
-    /** Node id. The engine stamps one on every message it records and hands back,
-     *  so messages you read — transcript, triggers, tree — always carry it. */
+    /** Node id; present on every message the engine hands you. */
     id: string;
     role: Role;
     content?: Content;
@@ -117,10 +116,7 @@ export interface Message {
     name?: string;
 }
 
-/** A message you construct — to submit, prompt, or seed a session. The engine
- *  assigns the node id when it records it, so `id` is optional here; omit it on
- *  messages you create and the engine fills it in. A read `Message` is also a
- *  valid `MessageInput`. */
+/** A message you construct; `id` is optional (the engine assigns it). */
 export type MessageInput = Omit<Message, "id"> & { id?: string };
 
 export function contentText(content: Content | undefined): string {
@@ -239,8 +235,7 @@ export type ClientPayload =
     | { type: "messages"; messages: MessageInput[]; stream?: boolean }
     | ({ type: "action" } & ClientAction);
 
-/** How a finished llm call landed: the response fields when the trigger's
- *  `ok` is true, the error fields when it is false. */
+/** Result of a finished llm call: response fields on success, error fields on failure. */
 export type LlmOutcome =
     | {
           message: Message;
@@ -251,11 +246,8 @@ export type LlmOutcome =
       }
     | { error: string; code?: string; detail?: unknown; message?: never };
 
-/** What the engine sends in `trigger`: news that hasn't been written into the
- *  conversation yet. `*.finished` triggers are the final word on a call —
- *  uniform across subjects: the payload when `ok`, `error` when not. A
- *  `sub_agent.finished`'s `id` is the model tool call the delegation answers,
- *  like a tool's; `session_id` is the child session. */
+/** What a decision's `trigger` carries. A `sub_agent.finished`'s `id` is the
+ *  tool call it answers; `session_id` is the child session. */
 export type DecisionTrigger =
     | { type: "client.message"; message: Message }
     | { type: "client.transcript"; messages: Message[] }
@@ -275,13 +267,12 @@ export type DecisionTrigger =
     | ({ type: "llm.finished"; id: string; ok: boolean } & LlmOutcome)
     | { type: "interrupt.resumed"; interrupt_id: string; payload?: unknown };
 
-/** The call kinds a worker can be delegated via `*.execute`. */
+/** Kinds of call a worker can execute. */
 export type WorkKind = "tool_call" | "llm_call";
 
 export type WorkerAction =
     | {
-          /** `id` names the call; its outcome returns as an `llm.finished` trigger
-           *  with the same id. Reuse of a pending/completed id is an idempotent no-op. */
+          /** `id` correlates the outcome (an `llm.finished` trigger). */
           type: "llm.call";
           id: string;
           request: LlmRequest;
@@ -290,8 +281,7 @@ export type WorkerAction =
           handler: LlmHandler;
       }
     | {
-          /** `id` names the call (the model's tool call id); its outcome
-           *  comes back as a `tool.finished` trigger with the same id. */
+          /** `id` is the model's tool call id; correlates the `tool.finished` outcome. */
           type: "tool.call";
           id: string;
           name: string;
@@ -324,8 +314,7 @@ export type WorkerAction =
     | { type: "interrupt"; interrupt_id?: string; reason: string; payload?: unknown }
     | { type: "done"; data: unknown };
 
-/** The settle body: a `tool.result`/`llm.result` or `tool.error`/`llm.error`.
- *  The worker surface accepts all four; the client surface only the `tool.*` pair. */
+/** Body settling a call: a result or an error. */
 export type SettleEffectRequest =
     | { type: "tool.result"; id: string; result: string; attempt?: number }
     | { type: "llm.result"; id: string; response: LlmResponse; attempt?: number }
@@ -373,9 +362,7 @@ export interface ResumeInterruptResponse {
     ok: boolean;
 }
 
-/** Which effect to settle, on which session. `id` is the effect id (a tool
- *  call id or an llm call id). `attempt` is optional: omitted settles the
- *  current attempt; echo the trigger's `attempt` to fence a stale executor. */
+/** Which effect to settle, on which session; optional `attempt` fences a stale executor. */
 export interface SettleEffectTarget {
     sessionId: string;
     id: string;
@@ -613,20 +600,19 @@ export interface SessionMessageRequested {
 
 export interface WorkerStateUpdated {
     type: "worker.state.updated";
-    /** Opaque worker state as raw JSON; the engine stores it without interpreting it. */
+    /** Opaque worker state as raw JSON. */
     state: unknown;
-    /** The node id that was the active head when this version was written; absent if the tree was empty. */
+    /** Node id this version was anchored to. */
     anchor?: string;
 }
 
-/** An outstanding call abandoned because its branch was forked away (or the
- *  session was interrupted or cancelled). */
+/** An outstanding call abandoned (branch forked away, or session interrupted/cancelled). */
 export interface CallVoided {
     type: "call.voided";
     kind: "tool_call" | "llm_call" | "sub_agent";
-    /** The call id — for a sub-agent, the model tool call the delegation answers. */
+    /** Call id; for a sub-agent, the tool call it answers. */
     id: string;
-    /** The child session, present on `sub_agent` voids; the cancellation cascades to it. */
+    /** Child session, present on `sub_agent` voids. */
     session_id?: Uuid;
 }
 
@@ -792,8 +778,7 @@ export interface WorkerDecisionState {
     trigger: DecisionTrigger;
 }
 
-/** A worker-state write anchored to the tree position it was made at. The current
- *  state is the newest version whose anchor lies on the active path. */
+/** A worker-state write anchored to its tree position. */
 export interface StateVersion {
     state: unknown;
     anchor?: string;
@@ -868,16 +853,14 @@ export interface WorkerAuthOptions {
     bearerToken: string;
 }
 
-// In-flight calls surfaced on each worker decision as a flat, tagged list. `kind`
-// is open, so a worker ignores kinds it doesn't handle.
+// In-flight calls surfaced on each decision; `kind` is open, ignore unknown kinds.
 
 export interface InFlightCallBase {
     id: string;
     status: EffectStatus;
     attempt: number;
     deadline?: DateTime;
-    /** The tree node the call was requested at. A fork that leaves it off
-     *  the active path voids the call (`call.voided`). */
+    /** Tree node the call was requested at. */
     anchor?: string;
 }
 
@@ -900,8 +883,7 @@ export interface InFlightLlmCall extends InFlightCallBase {
     stream: boolean;
 }
 
-/** A call kind this SDK doesn't know; ignore it. The `never` fields keep
- *  narrowing on `kind` usable for the known variants. */
+/** A call kind this SDK doesn't know; ignore it. `never` fields keep `kind` narrowing usable. */
 export interface UnknownInFlightCall extends InFlightCallBase {
     kind: string & {};
     name?: never;
@@ -920,12 +902,12 @@ export interface WorkerDecisionRequestWire {
     agent_id: string;
     identity: WorkerIdentity;
     trigger: DecisionTrigger;
-    /** Your state as raw JSON, resolved from the active branch; `null` when the session has none. */
+    /** Your state as raw JSON; `null` when the session has none. */
     state: unknown;
     calls: InFlightCall[];
-    /** How many `tool_call`/`sub_agent` calls are still in flight: the step gate as a number (prompt at 0). */
+    /** Count of `tool_call`/`sub_agent` calls still in flight (the step gate; prompt at 0). */
     pending_calls: number;
-    /** The active conversation as a flat list*/
+    /** The active conversation as a flat list. */
     transcript?: Message[];
     /** The full tree, for clients that need branch structure. */
     message_tree?: MessageTree;
@@ -942,9 +924,7 @@ export interface SubmitRequest {
     /** Flat conversation the engine reconciles into the message tree: known ids
      *  continue, id-less/unknown messages are appended (forking automatically). */
     transcript: MessageInput[];
-    /** Opaque worker state as raw JSON; the engine stores it without interpreting it.
-     *  Omitted (or `null`) = keep the current state; the engine can't tell a `null`
-     *  from an omitted field. Clear with a present non-null empty value (e.g. `{}`). */
+    /** Opaque worker state as raw JSON; omit or `null` keeps current, `{}` clears. */
     state?: unknown;
 }
 

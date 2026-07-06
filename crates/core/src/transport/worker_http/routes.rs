@@ -321,9 +321,7 @@ mod tests {
 
     #[test]
     fn missing_session_is_not_found_not_server_error() {
-        // A worker only ever holds a decision a session emitted, so a
-        // submission against a never-created session is a stale/garbage
-        // reference (client error), never a server fault.
+        // A never-created session is a stale client reference, not a server fault.
         assert_eq!(
             status_of(SessionError::SessionNotCreated),
             StatusCode::NOT_FOUND

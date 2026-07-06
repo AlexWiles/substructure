@@ -189,8 +189,7 @@ pub struct SubAgentCallState {
     pub anchor: Option<String>,
 }
 
-/// A worker-state write anchored to the tree position it was made at; the
-/// current state is resolved, never stored (`resolve_state_for`).
+/// Anchored worker-state write; current state is resolved, not stored.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateVersion {
     pub state: WorkerState,
@@ -206,8 +205,7 @@ pub struct WorkerDecisionState {
     pub source_event_sequence: u64,
 }
 
-// In-flight effects surfaced on each worker decision, derived on read by filtering
-// the effect maps to what's still outstanding (Pending or RetryScheduled).
+// In-flight effects (Pending or RetryScheduled) surfaced on each worker decision.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Effect {
     pub id: String,
@@ -524,10 +522,7 @@ impl SessionState {
                     origin: payload.origin,
                     reason: payload.reason.clone(),
                 };
-                // Pending worker decisions are voided (calls void via the
-                // batch's CallVoided events): late submissions no-op via the
-                // pending check, and the decision request emitted on resume
-                // isn't queued behind a decision that will never complete.
+                // Void pending decisions so late submissions no-op; calls void via CallVoided events.
                 for wd in self.worker_decisions.values_mut() {
                     if wd.tracking.status == EffectStatus::Pending {
                         wd.tracking.status = EffectStatus::Failed;
@@ -608,9 +603,7 @@ impl SessionState {
             }
             EventPayload::SessionCancelled => {
                 self.status = SessionStatus::Done;
-                // Cancellation is terminal: void pending decisions so late
-                // submissions no-op. Calls void via the batch's CallVoided
-                // events.
+                // Terminal: void pending decisions so late submissions no-op; calls void via CallVoided events.
                 for wd in self.worker_decisions.values_mut() {
                     if wd.tracking.status == EffectStatus::Pending {
                         wd.tracking.status = EffectStatus::Failed;
@@ -722,7 +715,6 @@ impl SessionState {
     }
 
     /// All node ids (messages and controls) on the root→`leaf` chain.
-    /// `MessageTree::path_to` returns only messages; anchors may be any node kind.
     fn path_ids<'a>(&'a self, leaf: &'a str) -> std::collections::HashSet<&'a str> {
         let by_id: HashMap<&str, &Node> = self.nodes.iter().map(|n| (n.id(), n)).collect();
         let mut ids = std::collections::HashSet::new();
@@ -730,7 +722,7 @@ impl SessionState {
         while let Some(id) = cursor {
             let Some(node) = by_id.get(id) else { break };
             if !ids.insert(id) {
-                break; // malformed parent cycle guard, mirrors path_to
+                break; // parent cycle guard
             }
             cursor = node.parent_id();
         }
@@ -766,7 +758,7 @@ impl SessionState {
         }
     }
 
-    /// The effects still in flight (Pending or RetryScheduled), derived by filtering the effect maps.
+    /// The effects still in flight (Pending or RetryScheduled).
     pub fn effects(&self) -> Vec<Effect> {
         let in_flight =
             |s: &EffectStatus| matches!(s, EffectStatus::Pending | EffectStatus::RetryScheduled);

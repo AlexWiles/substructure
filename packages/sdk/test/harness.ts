@@ -1,9 +1,5 @@
-// Pure-function harness for agent tests.
-//
-// An agent is `(DecisionRequest) -> Decision`. `runAgent` builds a request from a
+// Pure-function harness for agent tests. `runAgent` builds a request from a
 // trigger (+ optional tree/pending/state) and runs the agent against it.
-// `RunResult.state` models the engine's resolved state after the decision:
-// the returned value when the agent expressed one, else the kept request state.
 
 import type { Agent, DecisionRequest } from "../src/core";
 import { activePath } from "../src/core";
@@ -32,7 +28,7 @@ export interface RunOptions {
     trigger: DecisionTrigger;
     state?: Record<string, unknown>;
     messageTree?: MessageTree;
-    /** In-flight calls the engine would surface on the request (default none). */
+    /** In-flight calls on the request (default none). */
     calls?: InFlightCall[];
     emitDelta?: (delta: LlmTokenDeltaInput) => Promise<void>;
 }
@@ -112,8 +108,7 @@ export function toolCall(name: string, args: unknown, id = "tc-0"): ToolCall {
     return { id, type: "function", function: { name, arguments: JSON.stringify(args) } };
 }
 
-/** One tool completion; the worker records its result in the transcript.
- *  Whether it then prompts is driven by the `tool_call`/`sub_agent` calls still in flight. */
+/** One tool completion. */
 export function toolResult(toolCallId: string, name: string, result: string, isError = false): DecisionTrigger {
     return {
         type: "tool.finished",
@@ -124,7 +119,7 @@ export function toolResult(toolCallId: string, name: string, result: string, isE
     };
 }
 
-/** One sub-agent completion; `id` is the model call it answers, like a tool's. */
+/** One sub-agent completion; `id` is the model call it answers. */
 export function subAgentResult(
     sessionId: string,
     toolCallId: string,

@@ -84,8 +84,7 @@ impl EventProcessor for SubAgentDispatchProjection {
                 message: req.message.clone(),
                 span: event.span,
             }),
-            // A voided delegation cancels its child session; the child's own
-            // voids cascade the cancellation down its sub-tree.
+            // A voided sub-agent delegation cancels its child session.
             EventPayload::CallVoided(v) if v.kind == EffectKind::SubAgent => v
                 .session_id
                 .as_ref()

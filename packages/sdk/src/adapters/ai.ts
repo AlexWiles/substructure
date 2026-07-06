@@ -11,8 +11,7 @@ import { contentText } from "../types";
 type StreamTextOptions = Parameters<typeof streamText>[0];
 type ToolResultOutput = Awaited<ReturnType<NonNullable<Tool["toModelOutput"]>>>;
 
-// `streamText`'s own options minus what the loop supplies: `messages`/`prompt`/
-// `system` come from the transcript, and tools are declared in `tools()`.
+// streamText options minus what the loop supplies (messages/prompt/system/tools).
 export type AIGenerateSettings = Omit<StreamTextOptions, "messages" | "prompt" | "system" | "tools">;
 
 export function aiGenerate(settings: AIGenerateSettings): Llm {
@@ -58,8 +57,7 @@ export function aiGenerate(settings: AIGenerateSettings): Llm {
     return { ...request, handler: "worker", stream: true, run };
 }
 
-// Model-facing tools from `request.tools` — schema only, no `execute`, so the SDK
-// returns tool calls instead of running them (Substructure runs them).
+// Schema-only tools (no `execute`) so the SDK returns tool calls instead of running them.
 function modelTools(toolList: LlmTool[] | undefined): ToolSet {
     const out: ToolSet = {};
     for (const t of toolList ?? []) {
@@ -77,8 +75,7 @@ export type AiAgentSettings<TOOLS extends ToolSet = ToolSet> = Omit<AIGenerateSe
     toolChoice?: ToolChoice<TOOLS>;
 };
 
-/** Build a `toolLoop` from an AI SDK toolset, using `aiGenerate` as the model
- *  and the toolset run by the worker. */
+/** Build a `toolLoop` from an AI SDK toolset, using `aiGenerate` as the model. */
 export function aiSdkAgent<TOOLS extends ToolSet>(settings: AiAgentSettings<TOOLS>): Agent {
     const { instructions, tools: toolset, ...generateSettings } = settings;
     return toolLoop({

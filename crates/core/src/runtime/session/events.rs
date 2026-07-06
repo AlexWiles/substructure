@@ -349,7 +349,7 @@ pub struct SessionMessageRequested {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerStateUpdated {
     pub state: WorkerState,
-    /// The active head when this version was written; `None` if the tree was empty.
+    /// Active head when written; `None` if the tree was empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<String>,
 }
@@ -376,7 +376,7 @@ pub struct DecisionRequestQueued {
     pub trigger: DecisionTrigger,
 }
 
-/// An undelivered settle decision whose requesting branch was forked away.
+/// A settle decision dropped when its branch was forked away.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionRequestDropped {
     pub decision_id: String,
@@ -390,10 +390,8 @@ pub enum EffectKind {
     SubAgent,
 }
 
-/// An outstanding call abandoned because its branch was forked away (or the
-/// session was interrupted or cancelled). `id` is the call id — for a
-/// sub-agent, the model tool call the delegation answers; `session_id` then
-/// carries the child session so the cancellation can cascade.
+/// An abandoned in-flight call. For a sub-agent, `id` is the tool call and
+/// `session_id` the child session to cancel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallVoided {
     pub kind: EffectKind,

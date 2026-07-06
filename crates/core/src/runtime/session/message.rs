@@ -127,9 +127,7 @@ impl From<&str> for Content {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
-    /// Node id. Empty only on a message being created (a client submission or a
-    /// worker prompt); the engine assigns one when it records the message, so
-    /// every message it hands a worker — trigger, transcript, tree — carries it.
+    /// Node id; empty until recorded as a tree node.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub id: String,
     pub role: Role,

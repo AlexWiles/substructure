@@ -283,8 +283,7 @@ impl SessionState {
         }
     }
 
-    // Sole producer of NewMessage events: the settle gates and the prefix-leaf
-    // walk assume the tree never changes outside a decision submit.
+    // Sole producer of NewMessage; the tree changes only on decision submit.
     fn reconcile_transcript(&self, transcript: Vec<Message>) -> Vec<EventPayload> {
         if transcript.is_empty() {
             return vec![];
@@ -361,9 +360,7 @@ impl SessionState {
         )
     }
 
-    /// An undelivered decision whose effect's anchor is no longer on the path
-    /// to `leaf`. Settled entries persist in the effect maps, so the lookup
-    /// outlives the effect.
+    /// Whether the decision's effect is anchored off the path to `leaf`.
     fn stale_decision(&self, leaf: Option<&str>, trigger: &DecisionTrigger) -> bool {
         let anchor = match trigger {
             DecisionTrigger::ToolFinished { id, .. } | DecisionTrigger::ToolExecute { id, .. } => {
@@ -381,7 +378,7 @@ impl SessionState {
         !self.anchor_on_path(leaf, anchor)
     }
 
-    /// Void events for every effect matching `stranded`, across the three maps.
+    /// Void events for every effect matching `stranded`.
     fn void_effects(
         &self,
         stranded: impl Fn(&EffectTracking, Option<&str>) -> bool,
@@ -417,9 +414,7 @@ impl SessionState {
         events
     }
 
-    /// Voids for pending LLM calls, including calls requested earlier in
-    /// `batch` and skipping calls `batch` already voided. Interrupts spare
-    /// tools and sub-agents so they can settle and queue.
+    /// Voids pending LLM calls (including this `batch`'s), sparing tools and sub-agents.
     fn void_llm_calls_for_interrupt(&self, batch: &[EventPayload]) -> Vec<EventPayload> {
         let mut ids: Vec<String> = self
             .llm_calls
@@ -447,15 +442,14 @@ impl SessionState {
             .collect()
     }
 
-    /// Whether `batch` voided the call a settle action targets.
+    /// Whether `batch` already voided this call.
     fn batch_voided(batch: &[EventPayload], kind: EffectKind, id: &str) -> bool {
         batch
             .iter()
             .any(|e| matches!(e, EventPayload::CallVoided(v) if v.kind == kind && v.id == id))
     }
 
-    /// A fork abandons the branch it left: void outstanding work anchored
-    /// below the fork point and drop undelivered decisions that reference it.
+    /// Void work and drop undelivered decisions anchored off the retained path.
     fn void_stranded_work(&self, leaf: Option<&str>) -> Vec<EventPayload> {
         let mut events = self.void_effects(|tracking, anchor| {
             matches!(
@@ -764,8 +758,7 @@ impl SessionState {
                             }
                             Some(Content::Parts(parts))
                         };
-                        // Stamp the id engine-side so the worker returns it verbatim
-                        // and reconcile records it as a fresh node.
+                        // Fresh id so reconcile records a new node.
                         let message = Message {
                             id: new_message_id(),
                             role: Role::Assistant,
@@ -1082,8 +1075,7 @@ impl SessionState {
                         if Self::caller_interrupt_origin(caller).privilege() < origin.privilege() {
                             return Err(SessionError::SessionAccessDenied);
                         }
-                        // Emitted directly, not via emit_decision_request: state is still
-                        // Interrupted (which would queue) but nothing is pending.
+                        // Emitted directly: emit_decision_request would queue while Interrupted.
                         Ok(vec![
                             EventPayload::InterruptResumed(InterruptResumed {
                                 interrupt_id: interrupt_id.clone(),
@@ -1131,8 +1123,7 @@ impl SessionState {
                     })
                     .or_else(|| self.head_id.clone());
 
-                // New nodes carry no anchors, so anchor and state checks at post_head
-                // reduce to its deepest pre-existing ancestor.
+                // New nodes carry no anchor; walk to the deepest pre-existing ancestor.
                 let batch_parents: std::collections::HashMap<&str, Option<&str>> = reconcile
                     .iter()
                     .filter_map(|e| match e {
@@ -1178,8 +1169,7 @@ impl SessionState {
                 };
                 for action in actions {
                     let sub_events = match action {
-                        // A settle for work this batch voided (by fork or
-                        // interrupt): the call is dead, the result dropped.
+                        // Settle for work this batch voided: drop it.
                         WorkerAction::ToolResult { ref id, .. }
                         | WorkerAction::ToolError { ref id, .. }
                             if Self::batch_voided(&events, EffectKind::ToolCall, id) =>
@@ -1616,7 +1606,7 @@ impl SessionState {
             }
         }
 
-        // Lost `*.finished` decisions are recovered by work-queue redelivery, not by re-firing here.
+        // Lost decisions are recovered by work-queue redelivery, not re-fired here.
         if let Some(wd) = self.queued_decisions().first() {
             return Ok(vec![EventPayload::WorkerDecisionRequested(
                 WorkerDecisionRequested {
@@ -1911,7 +1901,6 @@ mod tests {
             key_id: "prod-key-1".to_string(),
         };
 
-        // Worker releases its decision with no actions.
         dispatch(
             &mut agg,
             CommandPayload::SubmitWorkerDecision {
@@ -1923,7 +1912,6 @@ mod tests {
             &machine,
         );
 
-        // Now the machine completes the tool call directly.
         let events = dispatch(
             &mut agg,
             CommandPayload::CompleteToolCall {
@@ -1952,8 +1940,7 @@ mod tests {
 
     #[test]
     fn machine_completes_worker_handled_tool_call_before_worker_releases_decision() {
-        // Tool result arrives before the worker has acknowledged its
-        // tool.execute decision.
+        // Tool result arrives before the worker acks its tool.execute decision.
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
         dispatch(
             &mut agg,
@@ -2188,7 +2175,6 @@ mod tests {
             key_id: "prod-key-1".to_string(),
         };
 
-        // First submission completes the decision.
         dispatch(
             &mut agg,
             CommandPayload::SubmitWorkerDecision {
@@ -4097,7 +4083,6 @@ mod tests {
         );
         assert!(!agg.state.has_pending_worker_decision());
 
-        // Cancellation is terminal and idempotent.
         let again = dispatch(
             &mut agg,
             CommandPayload::CancelSession,
@@ -5300,7 +5285,6 @@ mod tests {
     #[test]
     fn fork_anchors_new_state_and_resolves_as_of_the_prefix_without_one() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
-        // Turn 1: u1 with state v1 (anchored u1). Turn 2: a1, u2 with state v2.
         let d1 = open_decision(&mut agg, "hi");
         submit_state(
             &mut agg,
@@ -5324,7 +5308,6 @@ mod tests {
             json!({"v": 2})
         );
 
-        // Fork after u1 with an explicit carry: the version anchors to the new leaf.
         let d3 = open_decision(&mut agg, "redo");
         let events = submit_state(
             &mut agg,
@@ -5343,8 +5326,7 @@ mod tests {
             json!({"v": 3})
         );
 
-        // A second fork from the same prefix without a state opinion resolves
-        // as-of the fork point — versions from the other branches fall off.
+        // Fork with no state opinion resolves as-of the fork point.
         let d4 = open_decision(&mut agg, "retry");
         let events = submit_state(
             &mut agg,
@@ -5431,7 +5413,7 @@ mod tests {
             "an attempt-less settle lands on the current attempt; got {events:?}"
         );
 
-        // A supplied attempt still fences: a stale attempt is rejected.
+        // A supplied attempt still fences.
         request_client_tool(&mut agg, "tc-2");
         let err = agg
             .state
@@ -5464,7 +5446,6 @@ mod tests {
         submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
         request_client_tool(&mut agg, "tc-1"); // anchored at u1
 
-        // The user's edit forks away from u1 before the tool settles.
         let d2 = open_decision(&mut agg, "redo");
         let events = submit_state(&mut agg, d2, vec![node_msg("x1", Role::User, "redo")], None);
         assert!(
@@ -5498,8 +5479,7 @@ mod tests {
         submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
         request_client_tool(&mut agg, "tc-1"); // anchored at u1
 
-        // The head advances past the anchor, then forks below it: u1 stays
-        // on the new path, so the call survives.
+        // Head advances past the anchor then forks below it; u1 stays on-path.
         let d2 = open_decision(&mut agg, "more");
         submit_state(
             &mut agg,
@@ -5525,7 +5505,6 @@ mod tests {
             "work above the fork point is untouched; got {events:?}"
         );
 
-        // Its settle still delivers.
         let events = complete_tool(&mut agg, "tc-1", "ok");
         assert_eq!(fired_tool_result(&events), vec!["tc-1".to_string()]);
     }
@@ -5562,12 +5541,10 @@ mod tests {
             &machine(),
         );
 
-        // The edit forks away while the retry waits; the void covers it.
         let d2 = open_decision(&mut agg, "redo");
         let events = submit_state(&mut agg, d2, vec![node_msg("x1", Role::User, "redo")], None);
         assert_eq!(voided_ids(&events), vec!["tc-1"], "got {events:?}");
 
-        // The due retry has nothing left to re-issue.
         let events = dispatch(
             &mut agg,
             CommandPayload::Wake {
@@ -5585,8 +5562,7 @@ mod tests {
         submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
         request_client_tool(&mut agg, "tc-1"); // anchored at u1
 
-        // A pending edit decision makes the on-path settle queue behind it,
-        // and a second user message queues behind the settle.
+        // Settle queues behind the pending edit; a user message queues behind the settle.
         let d2 = open_decision(&mut agg, "redo");
         let events = dispatch(
             &mut agg,
@@ -5603,8 +5579,6 @@ mod tests {
         .expect("on-path settle queues behind the pending decision");
         open_decision(&mut agg, "also this");
 
-        // The pending decision's submit forks away from u1: promotion drops
-        // the now-stale settle and delivers the user message instead.
         let events = submit_state(&mut agg, d2, vec![node_msg("x1", Role::User, "redo")], None);
         let dropped: Vec<&str> = events
             .iter()
@@ -5639,7 +5613,6 @@ mod tests {
         submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
         request_llm(&mut agg, "llm-1", LlmHandler::Server); // anchored at u1
 
-        // The user's edit forks away from u1 while the model call is in flight.
         let d2 = open_decision(&mut agg, "redo");
         let events = submit_state(&mut agg, d2, vec![node_msg("x1", Role::User, "redo")], None);
         assert!(
@@ -5651,7 +5624,7 @@ mod tests {
             "the fork voids the in-flight call; got {events:?}"
         );
 
-        // The executor's late result no-ops instead of landing on the log.
+        // The executor's late result no-ops.
         let events = complete_llm(&mut agg, "llm-1", 0, &system());
         assert!(events.is_empty(), "got {events:?}");
     }
@@ -5689,8 +5662,6 @@ mod tests {
         )
         .expect("second execute queues");
 
-        // The worker answers t1's execute with an edit that forks away from
-        // u1: both calls void and t2's undelivered execute drops with them.
         let events = submit_state(
             &mut agg,
             exec_t1,
@@ -5795,7 +5766,7 @@ mod tests {
         submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
         request_client_tool(&mut agg, "shared"); // anchored at u1
 
-        // A sub-agent answering a call with the same id, anchored one node deeper.
+        // Sub-agent with the same id, anchored one node deeper.
         let d2 = open_decision(&mut agg, "more");
         submit_state(
             &mut agg,
@@ -5817,8 +5788,7 @@ mod tests {
             &system(),
         );
 
-        // Forking below u1 voids the sub-agent but not the tool; the tool's
-        // settle in the same submit must not be swallowed by the id collision.
+        // Forking voids the sub-agent, not the tool; the tool settle must survive the id collision.
         let d3 = open_decision(&mut agg, "redo");
         let events = dispatch(
             &mut agg,
@@ -5877,7 +5847,7 @@ mod tests {
         submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
         request_client_tool(&mut agg, "tc-1"); // anchored at u1
 
-        // The settle is delivered on-path, but the worker errors retryably.
+        // The on-path settle is delivered, then the worker errors retryably.
         let events = dispatch(
             &mut agg,
             CommandPayload::CompleteToolCall {
@@ -5901,8 +5871,6 @@ mod tests {
             &machine(),
         );
 
-        // While the retry waits, an edit forks away from u1: the fork drops
-        // the stale settle decision on the spot.
         let d2 = open_decision(&mut agg, "redo");
         let events = submit_state(&mut agg, d2, vec![node_msg("x1", Role::User, "redo")], None);
         let dropped: Vec<&str> = events
@@ -5918,7 +5886,6 @@ mod tests {
             "the stale settle is not re-delivered; got {events:?}"
         );
 
-        // The drop is terminal: the due retry has nothing left to re-issue.
         let events = dispatch(
             &mut agg,
             CommandPayload::Wake {

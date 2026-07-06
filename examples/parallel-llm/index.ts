@@ -99,8 +99,7 @@ function withLenses(loop: Agent<FanoutState>, handler: "server" | "worker"): Age
                 "Lens analyses (from parallel calls):",
                 ...LENSES.map((l) => `- ${l.id}: ${state.results[l.id]}`),
             ].join("\n");
-            // toolLoop expresses no state opinion, so return the aggregated `state`
-            // alongside its decision to persist the fully-folded fan-out result.
+            // toolLoop expresses no state opinion; return `state` to persist the fan-out result.
             const decision = await loop({
                 ...d,
                 state,

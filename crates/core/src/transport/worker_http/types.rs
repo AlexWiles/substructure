@@ -28,8 +28,7 @@ pub struct SubmitResponse {
     pub error: Option<String>,
 }
 
-/// The worker settle body: a `tool.result`/`llm.result` or
-/// `tool.error`/`llm.error`, settling worker-handled calls.
+/// Settles a worker-handled tool or llm call.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 pub enum SettleEffectRequest {

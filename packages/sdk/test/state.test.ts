@@ -1,9 +1,4 @@
 // State opinion semantics at the worker boundary and in toolLoop.
-//
-// The engine treats an omitted `state` as "keep the current state". The boundary
-// must therefore only send `state` when the agent expressed one, and toolLoop
-// must express none — otherwise every fork would silently carry the abandoned
-// branch's state (the engine's echo-dedup can't catch a cross-branch echo).
 
 import { describe, expect, it } from "vitest";
 import { toolLoop } from "../src/agent";
@@ -55,10 +50,7 @@ describe("state at the worker boundary", () => {
     });
 
     it("forwards the state the agent returned verbatim, null included", async () => {
-        // The boundary is faithful: a returned value is sent, a returned `null` is
-        // sent as `null`. But `null` is NOT a clear — the engine's `Option<WorkerState>`
-        // folds a wire `null` into "keep", indistinguishable from an omitted field.
-        // Only a present non-null empty value (e.g. `{}`) clears.
+        // `null` is forwarded, not treated as a clear; only `{}` clears.
         const w = serve(() => ({ state: { v: 2 } }));
         expect((await w.handleDecision(wireRequest())).state).toEqual({ v: 2 });
 
@@ -88,8 +80,7 @@ describe("toolLoop state opinion", () => {
             { id: "", role: "assistant", content: "two" },
             { id: "", role: "user", content: "three" },
         );
-        // The engine delivers the old branch's state on the forking decision;
-        // toolLoop must not hand it back.
+        // toolLoop must not hand back the abandoned branch's state.
         const w = serve(loop);
         const submit = await w.handleDecision(
             wireRequest({
