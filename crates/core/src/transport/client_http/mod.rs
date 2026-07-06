@@ -40,7 +40,7 @@ pub fn router(state: ClientHttpState) -> Router {
             post(routes::submit_client_payload),
         )
         .route(
-            "/api/client/sessions/{session_id}/effects/settle",
+            "/api/client/sessions/{session_id}/calls/settle",
             post(routes::settle_effect),
         )
         .route(

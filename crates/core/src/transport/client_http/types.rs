@@ -18,29 +18,19 @@ pub struct SubmitClientPayloadResponse {
     pub turn_id: String,
 }
 
-/// Clients answer client tools only, so `kind` only deserializes `tool_call`.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolCallKind {
-    ToolCall,
-}
-
+/// Clients answer client tools only, so only `tool.*` settles deserialize.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 pub enum SettleEffectRequest {
-    #[serde(rename = "effect.result")]
+    #[serde(rename = "tool.result")]
     Result {
-        #[allow(dead_code)]
-        kind: ToolCallKind,
         id: String,
         result: String,
         #[serde(default)]
         attempt: Option<u32>,
     },
-    #[serde(rename = "effect.error")]
+    #[serde(rename = "tool.error")]
     Error {
-        #[allow(dead_code)]
-        kind: ToolCallKind,
         id: String,
         error: String,
         retryable: bool,
@@ -97,19 +87,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn client_surface_accepts_tool_call() {
-        let body =
-            r#"{"type":"effect.result","kind":"tool_call","id":"tc-1","attempt":0,"result":"x"}"#;
+    fn client_surface_accepts_tool_result() {
+        let body = r#"{"type":"tool.result","id":"tc-1","attempt":0,"result":"x"}"#;
         assert!(serde_json::from_str::<SettleEffectRequest>(body).is_ok());
     }
 
     #[test]
-    fn client_surface_rejects_llm_call_kind() {
-        let body =
-            r#"{"type":"effect.result","kind":"llm_call","id":"llm-1","attempt":0,"result":"x"}"#;
+    fn client_surface_rejects_llm_result() {
+        let body = r#"{"type":"llm.result","id":"llm-1","attempt":0,"response":{"model":"m"}}"#;
         assert!(
             serde_json::from_str::<SettleEffectRequest>(body).is_err(),
-            "the client surface answers client tools only — llm_call must not deserialize"
+            "the client surface answers client tools only — llm.result must not deserialize"
         );
     }
 }

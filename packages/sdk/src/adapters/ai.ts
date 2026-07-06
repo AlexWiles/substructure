@@ -122,7 +122,7 @@ export function aiSdkTools(toolset: ToolSet, experimentalContext?: unknown): Too
                 execute: async (args, request) => {
                     const input = args ? JSON.parse(args) : {};
                     const options = {
-                        toolCallId: request.trigger.type === "effect.execute" ? request.trigger.id : "",
+                        toolCallId: request.trigger.type === "tool.execute" ? request.trigger.id : "",
                         messages: [] as ModelMessage[],
                         experimental_context: experimentalContext,
                     };

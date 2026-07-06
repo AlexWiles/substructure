@@ -18,7 +18,7 @@ export class UserClient extends BaseClient {
     }
 
     async settleEffect(sessionId: string, request: SettleEffectRequest): Promise<SettleEffectResponse> {
-        return this.post(`/api/client/sessions/${sessionId}/effects/settle`, request);
+        return this.post(`/api/client/sessions/${sessionId}/calls/settle`, request);
     }
 
     async interruptSession(

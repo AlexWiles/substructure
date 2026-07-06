@@ -4,10 +4,10 @@ import { toolLoop } from "../src/agent";
 import type { Agent } from "../src/core";
 import type { SettleEffectArgs, WorkerAction } from "../src/types";
 import { contentText, toSettleEffectRequest } from "../src/types";
-import { actionsOfType, callLlm, llmResponse, runAgent, clientMessage } from "./harness";
+import { actionsOfType, callLlm, clientMessage, llmResponse, runAgent } from "./harness";
 
-describe("call.llm id", () => {
-    it("ask() names each call.llm with a fresh id", async () => {
+describe("llm.call id", () => {
+    it("ask() names each llm.call with a fresh id", async () => {
         const loop = toolLoop({ llm: { model: "test-model" }, instructions: "SYS" });
         const result = await runAgent(loop, { trigger: clientMessage("hi") });
         const call = callLlm(result);
@@ -24,7 +24,7 @@ describe("concurrent llm fan-out", () => {
         results: Record<string, string>;
     }
     const call = (id: string): WorkerAction => ({
-        type: "call.llm",
+        type: "llm.call",
         id,
         handler: "server",
         request: { model: "m", messages: [] },
@@ -33,7 +33,7 @@ describe("concurrent llm fan-out", () => {
         if (d.trigger.type === "client.message") {
             return { actions: [call("a"), call("b")], state: { pending: ["a", "b"], results: {} } };
         }
-        if (d.trigger.type === "effect.settled" && d.trigger.kind === "llm_call") {
+        if (d.trigger.type === "llm.finished") {
             const prev = (d.state as St) ?? { pending: [], results: {} };
             const answer = d.trigger.ok && d.trigger.message ? contentText(d.trigger.message.content) : "(failed)";
             const results = { ...prev.results, [d.trigger.id]: answer };
@@ -51,7 +51,7 @@ describe("concurrent llm fan-out", () => {
         it(`folds settles arriving in ${order.join(", ")} order and finishes once`, async () => {
             const start = await runAgent(fanout, { trigger: clientMessage("go") });
             expect(
-                actionsOfType(start, "call.llm")
+                actionsOfType(start, "llm.call")
                     .map((c) => c.id)
                     .sort(),
             ).toEqual(["a", "b"]);
@@ -74,29 +74,27 @@ describe("concurrent llm fan-out", () => {
 });
 
 describe("toSettleEffectRequest", () => {
-    it("maps a tool result to an effect.result with kind tool_call", () => {
+    it("maps a tool result to a tool.result", () => {
         expect(toSettleEffectRequest({ sessionId: "s", id: "tc-1", attempt: 0, result: "ok" })).toEqual({
-            type: "effect.result",
-            kind: "tool_call",
+            type: "tool.result",
             id: "tc-1",
             result: "ok",
             attempt: 0,
         });
     });
 
-    it("maps an llm response to an effect.result with kind llm_call", () => {
+    it("maps an llm response to an llm.result", () => {
         const response = { model: "m", tool_calls: [] };
         const args: SettleEffectArgs = { sessionId: "s", id: "llm-1", attempt: 2, kind: "llm_call", response };
         expect(toSettleEffectRequest(args)).toEqual({
-            type: "effect.result",
-            kind: "llm_call",
+            type: "llm.result",
             id: "llm-1",
             response,
             attempt: 2,
         });
     });
 
-    it("maps a failure to an effect.error carrying its kind", () => {
+    it("maps a failure to the error type its kind selects", () => {
         expect(
             toSettleEffectRequest({
                 sessionId: "s",
@@ -107,8 +105,7 @@ describe("toSettleEffectRequest", () => {
                 retryable: true,
             }),
         ).toEqual({
-            type: "effect.error",
-            kind: "llm_call",
+            type: "llm.error",
             id: "llm-1",
             error: "boom",
             retryable: true,

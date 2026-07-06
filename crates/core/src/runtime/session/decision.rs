@@ -33,25 +33,59 @@ pub enum ClientPayload {
     },
 }
 
+/// What the engine sends in `trigger`: news that hasn't been written into the
+/// conversation yet. `*.finished` triggers are the final word on a call —
+/// uniform across subjects: the payload when `ok`, `error` when not.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum EffectWork {
-    ToolCall { name: String, arguments: String },
-    LlmCall { request: LlmRequest, stream: bool },
-}
-
-/// Uniform across kinds: `result` (or `message`) when `ok`, `error` when not.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum EffectOutcome {
-    ToolCall {
+#[serde(tag = "type")]
+pub enum DecisionTrigger {
+    #[serde(rename = "client.message")]
+    ClientMessage { message: Message },
+    #[serde(rename = "client.transcript")]
+    ClientTranscript { messages: Vec<Message> },
+    #[serde(rename = "client.action")]
+    ClientAction {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        args: Option<serde_json::Value>,
+    },
+    /// Run this tool on the worker; answer with `tool.result`/`tool.error`.
+    #[serde(rename = "tool.execute")]
+    ToolExecute {
+        id: String,
+        name: String,
+        arguments: String,
+        attempt: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deadline: Option<DateTime<Utc>>,
+    },
+    /// Make this model call on the worker; answer with `llm.result`/`llm.error`.
+    #[serde(rename = "llm.execute")]
+    LlmExecute {
+        id: String,
+        request: LlmRequest,
+        #[serde(default)]
+        stream: bool,
+        attempt: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deadline: Option<DateTime<Utc>>,
+    },
+    #[serde(rename = "tool.finished")]
+    ToolFinished {
+        id: String,
+        ok: bool,
         name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         result: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
-    SubAgent {
+    /// `id` is the model tool call the delegation answers; `session_id` is the
+    /// child session.
+    #[serde(rename = "sub_agent.finished")]
+    SubAgentFinished {
+        id: String,
+        ok: bool,
         session_id: String,
         agent_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -59,7 +93,10 @@ pub enum EffectOutcome {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
-    LlmCall {
+    #[serde(rename = "llm.finished")]
+    LlmFinished {
+        id: String,
+        ok: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<Message>,
         /// True when finish_reason was "length" (output truncated).
@@ -76,16 +113,25 @@ pub enum EffectOutcome {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<serde_json::Value>,
     },
+    #[serde(rename = "interrupt.resumed")]
+    InterruptResumed {
+        interrupt_id: String,
+        #[serde(default)]
+        payload: serde_json::Value,
+    },
 }
 
-impl EffectOutcome {
+impl DecisionTrigger {
     pub fn llm_ok(
+        id: String,
         message: Message,
         truncated: bool,
         usage: Option<serde_json::Value>,
         cost: Option<Decimal>,
     ) -> Self {
-        EffectOutcome::LlmCall {
+        DecisionTrigger::LlmFinished {
+            id,
+            ok: true,
             message: Some(message),
             truncated,
             usage,
@@ -97,11 +143,14 @@ impl EffectOutcome {
     }
 
     pub fn llm_err(
+        id: String,
         error: String,
         code: Option<ErrorCode>,
         detail: Option<serde_json::Value>,
     ) -> Self {
-        EffectOutcome::LlmCall {
+        DecisionTrigger::LlmFinished {
+            id,
+            ok: false,
             message: None,
             truncated: false,
             usage: None,
@@ -113,43 +162,7 @@ impl EffectOutcome {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum DecisionTrigger {
-    #[serde(rename = "client.message")]
-    ClientMessage { message: Message },
-    #[serde(rename = "client.transcript")]
-    ClientTranscript { messages: Vec<Message> },
-    #[serde(rename = "client.action")]
-    ClientAction {
-        name: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        args: Option<serde_json::Value>,
-    },
-    #[serde(rename = "effect.execute")]
-    EffectExecute {
-        id: String,
-        attempt: u32,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        deadline: Option<DateTime<Utc>>,
-        #[serde(flatten)]
-        work: EffectWork,
-    },
-    #[serde(rename = "effect.settled")]
-    EffectSettled {
-        id: String,
-        ok: bool,
-        #[serde(flatten)]
-        outcome: EffectOutcome,
-    },
-    #[serde(rename = "interrupt.resumed")]
-    InterruptResumed {
-        interrupt_id: String,
-        #[serde(default)]
-        payload: serde_json::Value,
-    },
-}
-
+/// Internal vocabulary for the settle APIs; not a wire discriminator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkKind {
@@ -157,6 +170,7 @@ pub enum WorkKind {
     LlmCall,
 }
 
+/// Internal payload for the settle APIs; the wire speaks `tool.result`/`llm.result`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EffectResultPayload {
@@ -164,19 +178,13 @@ pub enum EffectResultPayload {
     LlmCall { response: LlmResponse },
 }
 
-impl EffectResultPayload {
-    pub fn kind(&self) -> WorkKind {
-        match self {
-            EffectResultPayload::ToolCall { .. } => WorkKind::ToolCall,
-            EffectResultPayload::LlmCall { .. } => WorkKind::LlmCall,
-        }
-    }
-}
-
+/// What the worker returns in `actions`. On `tool.result`/`llm.result`/
+/// `tool.error`/`llm.error`, an omitted `attempt` settles the current attempt;
+/// echo the trigger's `attempt` to fence out a stale executor instead.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WorkerAction {
-    #[serde(rename = "call.llm")]
+    #[serde(rename = "llm.call")]
     CallLlm {
         id: String,
         request: LlmRequest,
@@ -186,7 +194,7 @@ pub enum WorkerAction {
         retry: RetryPolicy,
         handler: LlmHandler,
     },
-    #[serde(rename = "call.tool")]
+    #[serde(rename = "tool.call")]
     CallTool {
         id: String,
         name: String,
@@ -195,19 +203,22 @@ pub enum WorkerAction {
         #[serde(default = "RetryPolicy::no_retry")]
         retry: RetryPolicy,
     },
-    #[serde(rename = "effect.result")]
-    EffectResult {
+    #[serde(rename = "tool.result")]
+    ToolResult {
         id: String,
-        /// Omitted = settle the current attempt; echo the trigger's `attempt`
-        /// to fence out a stale executor instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attempt: Option<u32>,
-        #[serde(flatten)]
-        result: EffectResultPayload,
+        result: String,
     },
-    #[serde(rename = "effect.error")]
-    EffectError {
-        kind: WorkKind,
+    #[serde(rename = "llm.result")]
+    LlmResult {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt: Option<u32>,
+        response: LlmResponse,
+    },
+    #[serde(rename = "tool.error")]
+    ToolError {
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attempt: Option<u32>,
@@ -218,7 +229,19 @@ pub enum WorkerAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<serde_json::Value>,
     },
-    #[serde(rename = "spawn.sub_agent")]
+    #[serde(rename = "llm.error")]
+    LlmError {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt: Option<u32>,
+        error: String,
+        retryable: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<ErrorCode>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<serde_json::Value>,
+    },
+    #[serde(rename = "sub_agent.spawn")]
     SpawnSubAgent {
         session_id: String,
         agent_id: String,
@@ -228,7 +251,7 @@ pub enum WorkerAction {
         #[serde(default = "RetryPolicy::no_retry")]
         retry: RetryPolicy,
     },
-    #[serde(rename = "send.message")]
+    #[serde(rename = "message.send")]
     SendMessage {
         session_id: String,
         message: Message,

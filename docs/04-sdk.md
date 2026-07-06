@@ -113,7 +113,7 @@ const wait = tool({
   deferred: true,
   execute: (args, request) => {
     const { seconds } = JSON.parse(args);
-    if (request.trigger.type !== "effect.execute") throw new Error("not a tool call");
+    if (request.trigger.type !== "tool.execute") throw new Error("not a tool call");
     const { id, attempt } = request.trigger;
 
     setTimeout(() => {
@@ -134,15 +134,15 @@ const wait = tool({
 - `request.trigger.id`: the effect id (the LLM-assigned tool call id) you must pass back.
 - `request.trigger.attempt`: the current retry attempt; pass it back unchanged.
 
-Capture the ids *before* `execute` returns, since the worker decision ends as soon as it does. If the kick-off itself throws, the loop reports it as an `effect.error` like any other tool failure, so a broken enqueue fails fast instead of hanging until the deadline.
+Capture the ids *before* `execute` returns, since the worker decision ends as soon as it does. If the kick-off itself throws, the loop reports it as a `tool.error` like any other tool failure, so a broken enqueue fails fast instead of hanging until the deadline.
 
 What happens on the wire:
 
-1. The LLM emits a tool call. The engine records it as pending and dispatches an `effect.execute` trigger to your worker.
-2. Your `execute` starts the work; because the tool is `deferred`, the worker emits no `effect.result`, so the engine leaves the tool call pending.
-3. Later, whether minutes or hours, the external work completes. You call `settleEffect({...})`. The engine treats it exactly like a synchronous tool return: fires an `effect.settled` trigger, and the loop issues the next `call.llm` once every pending result is in.
+1. The LLM emits a tool call. The engine records it as pending and dispatches a `tool.execute` trigger to your worker.
+2. Your `execute` starts the work; because the tool is `deferred`, the worker emits no `tool.result`, so the engine leaves the tool call pending.
+3. Later, whether minutes or hours, the external work completes. You call `settleEffect({...})`. The engine treats it exactly like a synchronous tool return: fires a `tool.finished` trigger, and the loop issues the next `llm.call` once every pending result is in.
 
-`settleEffect` is available on every flavor of client, so the callback can come from wherever finishes the work. To report a failure instead, pass `error` (and optional `retryable`) in place of `result`. If you never call it, the tool stays pending forever, so set a `retry` policy (with a `timeout_secs`) on the tool so the engine eventually fails the call and the loop sees an `effect.settled` with `ok: false`.
+`settleEffect` is available on every flavor of client, so the callback can come from wherever finishes the work. To report a failure instead, pass `error` (and optional `retryable`) in place of `result`. If you never call it, the tool stays pending forever, so set a `retry` policy (with a `timeout_secs`) on the tool so the engine eventually fails the call and the loop sees a `tool.finished` with `ok: false`.
 
 Full runnable version: [`examples/deferred-tool`](https://github.com/substructureai/substructure/tree/main/examples/deferred-tool).
 
@@ -254,14 +254,14 @@ const echo = agent({
         return {
           actions: [
             {
-              type: "call.llm",
+              type: "llm.call",
               id: crypto.randomUUID(),
               request: { model: "anthropic/claude-sonnet-4-6", messages: [...(req.transcript ?? []), req.trigger.message] },
               handler: "server",
             },
           ],
         };
-      case "effect.settled":
+      case "llm.finished":
         if (req.trigger.kind !== "llm_call" || !req.trigger.message) return {};
         return { actions: [{ type: "done", data: req.trigger.message.content ?? null }] };
       default:
@@ -273,10 +273,10 @@ const echo = agent({
 
 The `DecisionRequest` (conventionally `req`) is the engine's wire envelope, with an absent `state` normalized to `null`. Read off it:
 
-- `req.trigger`: what happened, one of `client.message`, `client.transcript`, `client.action`, `effect.execute`, `effect.settled`, and so on.
+- `req.trigger`: what happened, one of `client.message`, `client.transcript`, `client.action`, `tool.execute`, `llm.execute`, `tool.finished`, `llm.finished`, `sub_agent.finished`, and so on.
 - `req.transcript`: the active transcript (the head-to-root path); may be empty.
 - `req.state`: your state as raw JSON, `null` when the session has none (return a value to persist a new one).
-- `req.pending_effects`: how many `tool_call`/`sub_agent` effects are still in flight; the step gate. On an `effect.settled` trigger, prompt again once it hits `0` (a non-zero value doubles as a "steps still running" count).
+- `req.pending_calls`: how many `tool_call`/`sub_agent` calls are still in flight; the step gate. On a `tool.finished`/`sub_agent.finished` trigger, prompt again once it hits `0` (a non-zero value doubles as a "steps still running" count).
 - `req.effects`: the same in-flight effects as a flat, tagged list, when you need more than the count (each with `id`, `kind`, `status`, `attempt`, plus kind-specific fields like a tool's `name`/`arguments`). `kind`/`status` are open, so new effect kinds are additive.
 - `req.session_id`, `req.identity`, `req.turn_id`, and the rest of the envelope, read directly.
 
@@ -286,13 +286,13 @@ Actions are plain objects that you return directly:
 
 | Action | Shape |
 | --- | --- |
-| Ask the model | `{ type: "call.llm", id, request: { model, messages, tools? }, handler }` |
-| Run a tool | `{ type: "call.tool", id, name, arguments, handler }` |
-| Return an effect result / error | `{ type: "effect.result", kind, id, result \| response, attempt }` / `{ type: "effect.error", kind, id, error, retryable, attempt }` |
-| Delegate to a sub-agent | `{ type: "spawn.sub_agent", session_id, agent_id, tool_call_id }` + `{ type: "send.message", session_id, message }` |
+| Ask the model | `{ type: "llm.call", id, request: { model, messages, tools? }, handler }` |
+| Run a tool | `{ type: "tool.call", id, name, arguments, handler }` |
+| Answer delegated work | `{ type: "tool.result", id, result, attempt }` / `{ type: "llm.result", id, response, attempt }` / `{ type: "tool.error" \| "llm.error", id, error, retryable, attempt }` |
+| Delegate to a sub-agent | `{ type: "sub_agent.spawn", session_id, agent_id, tool_call_id }` + `{ type: "message.send", session_id, message }` |
 | Finish the turn | `{ type: "done", data }` |
 
-A `client.action` trigger is how a custom `decide` reacts to the client: approvals, mode switches, replays. The [`tool-approval`](https://github.com/substructureai/substructure/tree/main/examples/tool-approval) example parks a tool call when the model replies (`effect.settled`, `kind: "llm_call"`) and re-emits it on a `client.action approve_command`; [`plan-mode`](https://github.com/substructureai/substructure/tree/main/examples/plan-mode) reads its mode from state and forks a fresh branch when it switches to executing.
+A `client.action` trigger is how a custom `decide` reacts to the client: approvals, mode switches, replays. The [`tool-approval`](https://github.com/substructureai/substructure/tree/main/examples/tool-approval) example parks a tool call when the model replies (`llm.finished`) and re-emits it on a `client.action approve_command`; [`plan-mode`](https://github.com/substructureai/substructure/tree/main/examples/plan-mode) reads its mode from state and forks a fresh branch when it switches to executing.
 
 ## Serving as a worker
 

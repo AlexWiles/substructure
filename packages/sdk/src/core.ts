@@ -22,7 +22,7 @@ export type EmitDelta = (delta: LlmTokenDeltaInput) => Promise<void>;
  *  normalized to `null` (raw JSON otherwise, untouched). */
 export type DecisionRequest<S = unknown> = WorkerDecisionRequestWire & {
     state: S | null;
-    /** Stream token deltas, present on a streaming llm `effect.execute` trigger. */
+    /** Stream token deltas, present on a streaming `llm.execute` trigger. */
     emitDelta?: EmitDelta;
 };
 
@@ -53,7 +53,7 @@ export interface NamedAgent<S = unknown> extends Agent<S> {
 
 export type ToolResult = string | Promise<string>;
 /** `request` is the decision request the tool runs under; read `request.session_id`,
- *  `request.identity.id`, or the `effect.execute` trigger (`request.trigger.id`,
+ *  `request.identity.id`, or the `tool.execute` trigger (`request.trigger.id`,
  *  `request.trigger.attempt`) it was dispatched from. */
 export type ToolFn = (args: string, request: DecisionRequest) => ToolResult;
 /** A deferred tool's `execute` only *starts* the work (enqueue a job, fire a

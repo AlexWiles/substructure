@@ -86,14 +86,15 @@ impl EventProcessor for SubAgentDispatchProjection {
             }),
             // A voided delegation cancels its child session; the child's own
             // voids cascade the cancellation down its sub-tree.
-            EventPayload::EffectVoided(v) if v.kind == EffectKind::SubAgent => {
-                Some(SubAgentTask::CancelSubAgent {
+            EventPayload::CallVoided(v) if v.kind == EffectKind::SubAgent => v
+                .session_id
+                .as_ref()
+                .map(|child_session_id| SubAgentTask::CancelSubAgent {
                     source_event_id: event.id,
-                    tenant_id: event.tenant_id,
-                    child_session_id: v.id.clone(),
+                    tenant_id: event.tenant_id.clone(),
+                    child_session_id: child_session_id.clone(),
                     span: event.span,
-                })
-            }
+                }),
             EventPayload::TurnCompleted(tc) => {
                 let derived = event
                     .derived

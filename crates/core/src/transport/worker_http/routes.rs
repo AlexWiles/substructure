@@ -113,19 +113,27 @@ pub async fn settle_effect(
     Json(req): Json<SettleEffectRequest>,
 ) -> Response {
     let (kind, id, attempt, settlement) = match req {
-        SettleEffectRequest::Result {
+        SettleEffectRequest::ToolResult {
             id,
             attempt,
             result,
-        } => {
-            let kind = match &result {
-                EffectResultPayload::ToolCall { .. } => WorkKind::ToolCall,
-                EffectResultPayload::LlmCall { .. } => WorkKind::LlmCall,
-            };
-            (kind, id, attempt, EffectSettlement::Result(result))
-        }
-        SettleEffectRequest::Error {
-            kind,
+        } => (
+            WorkKind::ToolCall,
+            id,
+            attempt,
+            EffectSettlement::Result(EffectResultPayload::ToolCall { result }),
+        ),
+        SettleEffectRequest::LlmResult {
+            id,
+            attempt,
+            response,
+        } => (
+            WorkKind::LlmCall,
+            id,
+            attempt,
+            EffectSettlement::Result(EffectResultPayload::LlmCall { response }),
+        ),
+        SettleEffectRequest::ToolError {
             id,
             error,
             retryable,
@@ -133,7 +141,25 @@ pub async fn settle_effect(
             code,
             detail,
         } => (
-            kind,
+            WorkKind::ToolCall,
+            id,
+            attempt,
+            EffectSettlement::Error {
+                error,
+                retryable,
+                code,
+                detail,
+            },
+        ),
+        SettleEffectRequest::LlmError {
+            id,
+            error,
+            retryable,
+            attempt,
+            code,
+            detail,
+        } => (
+            WorkKind::LlmCall,
             id,
             attempt,
             EffectSettlement::Error {

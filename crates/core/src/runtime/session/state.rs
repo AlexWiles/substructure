@@ -246,7 +246,7 @@ pub struct DerivedState {
     pub status: SessionStatus,
     pub wake_at: Option<DateTime<Utc>>,
     #[serde(default)]
-    pub effects: Vec<Effect>,
+    pub calls: Vec<Effect>,
     pub owner: Option<SessionOwner>,
     pub agent_id: Option<String>,
     #[serde(default)]
@@ -524,8 +524,8 @@ impl SessionState {
                     origin: payload.origin,
                     reason: payload.reason.clone(),
                 };
-                // Pending worker decisions are voided (effects void via the
-                // batch's EffectVoided events): late submissions no-op via the
+                // Pending worker decisions are voided (calls void via the
+                // batch's CallVoided events): late submissions no-op via the
                 // pending check, and the decision request emitted on resume
                 // isn't queued behind a decision that will never complete.
                 for wd in self.worker_decisions.values_mut() {
@@ -583,13 +583,16 @@ impl SessionState {
                     wd.tracking.status = EffectStatus::Failed;
                 }
             }
-            EventPayload::EffectVoided(p) => {
+            EventPayload::CallVoided(p) => {
                 let tracking = match p.kind {
                     EffectKind::ToolCall => self.tool_calls.get_mut(&p.id).map(|c| &mut c.tracking),
                     EffectKind::LlmCall => self.llm_calls.get_mut(&p.id).map(|c| &mut c.tracking),
-                    EffectKind::SubAgent => {
-                        self.sub_agent_calls.get_mut(&p.id).map(|c| &mut c.tracking)
-                    }
+                    // Sub-agent calls are keyed by child session, not call id.
+                    EffectKind::SubAgent => p
+                        .session_id
+                        .as_ref()
+                        .and_then(|sid| self.sub_agent_calls.get_mut(sid))
+                        .map(|c| &mut c.tracking),
                 };
                 if let Some(tracking) = tracking {
                     tracking.status = EffectStatus::Failed;
@@ -606,7 +609,7 @@ impl SessionState {
             EventPayload::SessionCancelled => {
                 self.status = SessionStatus::Done;
                 // Cancellation is terminal: void pending decisions so late
-                // submissions no-op. Effects void via the batch's EffectVoided
+                // submissions no-op. Calls void via the batch's CallVoided
                 // events.
                 for wd in self.worker_decisions.values_mut() {
                     if wd.tracking.status == EffectStatus::Pending {
@@ -833,7 +836,7 @@ impl SessionState {
         DerivedState {
             status: self.status.clone(),
             wake_at: self.wake_at(),
-            effects: self.effects(),
+            calls: self.effects(),
             owner: self.owner.clone(),
             agent_id: self.agent_id.clone(),
             worker_state: self.resolve_state_for(self.head_id.as_deref()),

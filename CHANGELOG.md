@@ -15,13 +15,13 @@ same version.
 - **Branch-scoped worker state.** State writes are versions anchored to the
   message tree, and a decision carries the state resolved from its branch — a
   fork sees state as of the fork point. Unchanged submissions write nothing.
-- **Forking cancels the branch's outstanding work.** Effects record the tree
-  node they were requested at; a fork voids in-flight effects anchored below
-  the fork point (new `effect.voided` event), drops their undelivered
+- **Forking cancels the branch's outstanding work.** Calls record the tree
+  node they were requested at; a fork voids in-flight calls anchored below
+  the fork point (new `call.voided` event), drops their undelivered
   decisions (new `decision_request.dropped` event), and rejects late settles.
   Workers need no staleness checks.
 - **Voided work is explicit and cascades.** Interrupt and cancel emit the same
-  `effect.voided` events instead of voiding silently, and a voided sub-agent
+  `call.voided` events instead of voiding silently, and a voided sub-agent
   delegation cancels its child session, recursively through its sub-tree.
   Cancelling an already-done session is a no-op.
 
@@ -31,13 +31,33 @@ same version.
 
 ### Changed
 
+- **Breaking (wire): flat trigger and action names.** The `kind` sub-dispatch is
+  gone — every wire name is `subject.verb` and `type` is the only discriminator.
+  Triggers: `effect.execute` becomes `tool.execute`/`llm.execute`,
+  `effect.settled` becomes `tool.finished`/`llm.finished`/`sub_agent.finished`
+  (finished means final: the payload when `ok`, `error` when not). Actions:
+  `call.llm`→`llm.call`, `call.tool`→`tool.call`, `effect.result`/`effect.error`
+  → `tool.result`/`llm.result`/`tool.error`/`llm.error`,
+  `spawn.sub_agent`→`sub_agent.spawn`, `send.message`→`message.send`. `kind`
+  survives only where a heterogeneous list needs a tag: the request's in-flight
+  list.
+- **Breaking (wire): "effect" becomes "call" on the wire.** The decision
+  request's `effects`/`pending_effects` are renamed `calls`/`pending_calls`, the
+  settle endpoints move from `/effects/settle` to `/calls/settle`, and the
+  `effect.voided` event is renamed `call.voided` — a voided sub-agent is now
+  named by the `tool_call_id` it answers (like its finish), with the child in
+  `session_id`.
+- **Breaking (wire): a slimmer decision request.** Top-level `tenant_id` is gone
+  (it lives in `identity`), and `span` left the body for a W3C `traceparent`
+  header.
 - **Breaking (wire):** the `user.message`/`user.transcript` triggers are renamed
   `client.message`/`client.transcript`, matching `client.action`.
-- **Breaking (wire):** a sub-agent settle's `id` is now the originating
-  `tool_call_id` (the child session moves to `session_id`), so every settle
+- **Breaking (wire):** a sub-agent finish's `id` is now the originating
+  `tool_call_id` (the child session moves to `session_id`), so every finish
   folds under `trigger.id`.
-- **Breaking (wire):** settle outcomes are uniform: the payload when `ok`,
-  `error` when not.
+- **Breaking (SDK):** types follow the wire: the in-flight `Effect` union is now
+  `InFlightCall` (`calls`/`pending_calls` on the request), and `LlmSettled` is
+  `LlmOutcome`.
 - **Breaking (wire):** the decision request's `worker_state` is renamed `state`;
   the `session.created` event's `owner` is renamed `identity`.
 - **Breaking (wire):** `state` on the worker submit is optional — omitted or
@@ -49,8 +69,9 @@ same version.
   its own state by returning it alongside the loop's decision.
 - **Breaking (SDK):** `req.state` is delivered untouched (`S | null`); absent
   state is `null`, not `{}`.
-- `attempt` is optional on `effect.result`/`effect.error` and the settle
-  endpoints; supply it only to fence out a stale executor.
+- `attempt` is optional on the settle actions (`tool.result`/`llm.result`/
+  `tool.error`/`llm.error`) and the settle endpoints; supply it only to fence
+  out a stale executor.
 - Worker state rides the wire as raw JSON (was a base64-encoded string).
 - The engine stamps the assistant message id when an `llm_call` settles; the
   SDK `stamp` helper is removed.

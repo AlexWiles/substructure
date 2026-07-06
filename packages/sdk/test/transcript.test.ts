@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { toolLoop } from "../src/agent";
 import type { Message } from "../src/types";
-import { appendedMessages, callLlm, linearTree, runAgent, clientTranscript } from "./harness";
+import { appendedMessages, callLlm, clientTranscript, linearTree, runAgent } from "./harness";
 
 // The AG-UI `/run` path: the client sends its full transcript (with the ids it
 // knows) and the worker reconciles the new/branched tail into the tree.

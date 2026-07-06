@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { agent, toolLoop } from "../src/agent";
-import { actionsOfType, appendedMessages, callLlm, llmResponse, runAgent, toolCall, clientMessage } from "./harness";
+import { actionsOfType, appendedMessages, callLlm, clientMessage, llmResponse, runAgent, toolCall } from "./harness";
 
 const researcher = agent({ name: "researcher", decide: toolLoop({ llm: { model: "test-model" } }) });
 const assistant = toolLoop({ llm: { model: "test-model" }, subAgents: [researcher] });
@@ -25,31 +25,31 @@ describe("subAgents", () => {
         it("appends the assistant turn and spawns the sub-agent when the model calls it", async () => {
             const result = await runAgent(assistant, { trigger: delegation() });
             expect(appendedMessages(result).map((m) => m.role)).toEqual(["assistant"]);
-            expect(actionsOfType(result, "spawn.sub_agent")).toMatchObject([{ agent_id: "researcher" }]);
+            expect(actionsOfType(result, "sub_agent.spawn")).toMatchObject([{ agent_id: "researcher" }]);
         });
 
         it("tags the spawn with the originating tool_call_id", async () => {
             const result = await runAgent(assistant, { trigger: delegation("call_42") });
-            expect(actionsOfType(result, "spawn.sub_agent")[0]?.tool_call_id).toBe("call_42");
+            expect(actionsOfType(result, "sub_agent.spawn")[0]?.tool_call_id).toBe("call_42");
         });
 
         it("forwards the model's message to the spawned sub-agent", async () => {
             const result = await runAgent(assistant, { trigger: delegation() });
-            const [spawn] = actionsOfType(result, "spawn.sub_agent");
-            const send = actionsOfType(result, "send.message").find((m) => m.session_id === spawn.session_id);
+            const [spawn] = actionsOfType(result, "sub_agent.spawn");
+            const send = actionsOfType(result, "message.send").find((m) => m.session_id === spawn.session_id);
             expect(send?.message).toEqual({ role: "user", content: "find X" });
         });
 
         it("does not emit a call.tool for a sub-agent", async () => {
             const result = await runAgent(assistant, { trigger: delegation() });
-            expect(actionsOfType(result, "call.tool")).toHaveLength(0);
+            expect(actionsOfType(result, "tool.call")).toHaveLength(0);
         });
 
         it("does not spawn for a tool call that is not a sub-agent", async () => {
             const result = await runAgent(assistant, {
                 trigger: llmResponse({ role: "assistant", content: "", tool_calls: [toolCall("getWeather", {})] }),
             });
-            expect(actionsOfType(result, "spawn.sub_agent")).toHaveLength(0);
+            expect(actionsOfType(result, "sub_agent.spawn")).toHaveLength(0);
         });
     });
 });

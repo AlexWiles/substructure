@@ -239,14 +239,9 @@ export type ClientPayload =
     | { type: "messages"; messages: MessageInput[]; stream?: boolean }
     | ({ type: "action" } & ClientAction);
 
-/** The work an `effect.execute` trigger delegates to the worker, tagged by `kind`. */
-export type EffectWork =
-    | { kind: "tool_call"; name: string; arguments: string }
-    | { kind: "llm_call"; request: LlmRequest; stream: boolean };
-
-/** How a settled `llm_call` landed: the response fields when the trigger's
+/** How a finished llm call landed: the response fields when the trigger's
  *  `ok` is true, the error fields when it is false. */
-export type LlmSettled =
+export type LlmOutcome =
     | {
           message: Message;
           truncated: boolean;
@@ -256,37 +251,38 @@ export type LlmSettled =
       }
     | { error: string; code?: string; detail?: unknown; message?: never };
 
-/** How a settled effect landed, tagged by `kind`. Uniform across kinds:
- *  `result` (or `message`) when `ok`, `error` when not. A `sub_agent`'s `id` is
- *  the model tool call it answers, like a tool's; `session_id` is the child. */
-export type EffectOutcome =
-    | { kind: "tool_call"; name: string; result?: string; error?: string }
-    | { kind: "sub_agent"; session_id: Uuid; agent_id: string; result?: string; error?: string }
-    | ({ kind: "llm_call" } & LlmSettled);
-
+/** What the engine sends in `trigger`: news that hasn't been written into the
+ *  conversation yet. `*.finished` triggers are the final word on a call —
+ *  uniform across subjects: the payload when `ok`, `error` when not. A
+ *  `sub_agent.finished`'s `id` is the model tool call the delegation answers,
+ *  like a tool's; `session_id` is the child session. */
 export type DecisionTrigger =
     | { type: "client.message"; message: Message }
     | { type: "client.transcript"; messages: Message[] }
     | ({ type: "client.action" } & ClientAction)
-    | ({ type: "effect.execute"; id: string; attempt: number; deadline?: DateTime } & EffectWork)
-    | ({
-          type: "effect.settled";
+    | { type: "tool.execute"; id: string; name: string; arguments: string; attempt: number; deadline?: DateTime }
+    | { type: "llm.execute"; id: string; request: LlmRequest; stream: boolean; attempt: number; deadline?: DateTime }
+    | { type: "tool.finished"; id: string; ok: boolean; name: string; result?: string; error?: string }
+    | {
+          type: "sub_agent.finished";
           id: string;
           ok: boolean;
-      } & EffectOutcome)
+          session_id: Uuid;
+          agent_id: string;
+          result?: string;
+          error?: string;
+      }
+    | ({ type: "llm.finished"; id: string; ok: boolean } & LlmOutcome)
     | { type: "interrupt.resumed"; interrupt_id: string; payload?: unknown };
 
-/** The effect kinds a worker can answer `effect.execute` for. */
+/** The call kinds a worker can be delegated via `*.execute`. */
 export type WorkKind = "tool_call" | "llm_call";
-
-/** A successful effect result, tagged by `kind`. */
-export type EffectResultPayload = { kind: "tool_call"; result: string } | { kind: "llm_call"; response: LlmResponse };
 
 export type WorkerAction =
     | {
-          /** `id` names the effect; its outcome returns as an `effect.settled` trigger
+          /** `id` names the call; its outcome returns as an `llm.finished` trigger
            *  with the same id. Reuse of a pending/completed id is an idempotent no-op. */
-          type: "call.llm";
+          type: "llm.call";
           id: string;
           request: LlmRequest;
           stream?: boolean;
@@ -294,39 +290,56 @@ export type WorkerAction =
           handler: LlmHandler;
       }
     | {
-          /** `id` names the effect (the model's tool call id); its outcome
-           *  comes back as an `effect.settled` trigger with the same id. */
-          type: "call.tool";
+          /** `id` names the call (the model's tool call id); its outcome
+           *  comes back as a `tool.finished` trigger with the same id. */
+          type: "tool.call";
           id: string;
           name: string;
           arguments: string;
           handler: ToolHandler;
           retry?: RetryPolicy;
       }
-    | ({ type: "effect.result"; id: string; attempt?: number } & EffectResultPayload)
+    | { type: "tool.result"; id: string; result: string; attempt?: number }
+    | { type: "llm.result"; id: string; response: LlmResponse; attempt?: number }
     | {
-          type: "effect.error";
-          kind: WorkKind;
+          type: "tool.error";
           id: string;
-          attempt?: number;
           error: string;
           retryable: boolean;
+          attempt?: number;
           code?: string;
           detail?: unknown;
       }
-    | { type: "spawn.sub_agent"; session_id: Uuid; agent_id: string; tool_call_id: string; retry?: RetryPolicy }
-    | { type: "send.message"; session_id: Uuid; message: MessageInput }
+    | {
+          type: "llm.error";
+          id: string;
+          error: string;
+          retryable: boolean;
+          attempt?: number;
+          code?: string;
+          detail?: unknown;
+      }
+    | { type: "sub_agent.spawn"; session_id: Uuid; agent_id: string; tool_call_id: string; retry?: RetryPolicy }
+    | { type: "message.send"; session_id: Uuid; message: MessageInput }
     | { type: "interrupt"; interrupt_id?: string; reason: string; payload?: unknown }
     | { type: "done"; data: unknown };
 
-/** The settle body: an `effect.result` or `effect.error`. The worker surface
- *  accepts both kinds; the client surface only sends `kind: "tool_call"`. */
+/** The settle body: a `tool.result`/`llm.result` or `tool.error`/`llm.error`.
+ *  The worker surface accepts all four; the client surface only the `tool.*` pair. */
 export type SettleEffectRequest =
-    | { type: "effect.result"; kind: "tool_call"; id: string; result: string; attempt?: number }
-    | { type: "effect.result"; kind: "llm_call"; id: string; response: LlmResponse; attempt?: number }
+    | { type: "tool.result"; id: string; result: string; attempt?: number }
+    | { type: "llm.result"; id: string; response: LlmResponse; attempt?: number }
     | {
-          type: "effect.error";
-          kind: WorkKind;
+          type: "tool.error";
+          id: string;
+          error: string;
+          retryable: boolean;
+          attempt?: number;
+          code?: string;
+          detail?: unknown;
+      }
+    | {
+          type: "llm.error";
           id: string;
           error: string;
           retryable: boolean;
@@ -413,8 +426,7 @@ export type SettleToolCallArgs = SettleEffectTarget & SettleToolCallOutcome;
 export function toSettleEffectRequest(args: SettleEffectArgs): SettleEffectRequest {
     if (args.result !== undefined) {
         return {
-            type: "effect.result",
-            kind: "tool_call",
+            type: "tool.result",
             id: args.id,
             result: args.result,
             attempt: args.attempt,
@@ -422,16 +434,14 @@ export function toSettleEffectRequest(args: SettleEffectArgs): SettleEffectReque
     }
     if (args.response !== undefined) {
         return {
-            type: "effect.result",
-            kind: "llm_call",
+            type: "llm.result",
             id: args.id,
             response: args.response,
             attempt: args.attempt,
         };
     }
     return {
-        type: "effect.error",
-        kind: args.kind ?? "tool_call",
+        type: (args.kind ?? "tool_call") === "llm_call" ? "llm.error" : "tool.error",
         id: args.id,
         error: args.error,
         retryable: args.retryable ?? false,
@@ -609,12 +619,15 @@ export interface WorkerStateUpdated {
     anchor?: string;
 }
 
-/** Outstanding work abandoned because its branch was forked away. */
-export interface EffectVoided {
-    type: "effect.voided";
+/** An outstanding call abandoned because its branch was forked away (or the
+ *  session was interrupted or cancelled). */
+export interface CallVoided {
+    type: "call.voided";
     kind: "tool_call" | "llm_call" | "sub_agent";
-    /** The effect's id (the child session id for a sub-agent). */
+    /** The call id — for a sub-agent, the model tool call the delegation answers. */
     id: string;
+    /** The child session, present on `sub_agent` voids; the cancellation cascades to it. */
+    session_id?: Uuid;
 }
 
 export interface TurnStarted {
@@ -650,7 +663,7 @@ export type EventPayload =
     | WorkerDecisionErrored
     | SessionMessageRequested
     | WorkerStateUpdated
-    | EffectVoided
+    | CallVoided
     | SessionCancelled
     | SessionDone
     | TurnStarted
@@ -855,41 +868,41 @@ export interface WorkerAuthOptions {
     bearerToken: string;
 }
 
-// In-flight effects surfaced on each worker decision as a flat, tagged list. `kind`
+// In-flight calls surfaced on each worker decision as a flat, tagged list. `kind`
 // is open, so a worker ignores kinds it doesn't handle.
 
-export interface EffectBase {
+export interface InFlightCallBase {
     id: string;
     status: EffectStatus;
     attempt: number;
     deadline?: DateTime;
-    /** The tree node the effect was requested at. A fork that leaves it off
-     *  the active path voids the effect (`effect.voided`). */
+    /** The tree node the call was requested at. A fork that leaves it off
+     *  the active path voids the call (`call.voided`). */
     anchor?: string;
 }
 
-export interface ToolCallEffect extends EffectBase {
+export interface InFlightToolCall extends InFlightCallBase {
     kind: "tool_call";
     name: string;
     arguments: string;
     handler: ToolHandler;
 }
 
-export interface SubAgentEffect extends EffectBase {
+export interface InFlightSubAgent extends InFlightCallBase {
     kind: "sub_agent";
     agent_id: string;
     session_id: Uuid;
 }
 
-export interface LlmCallEffect extends EffectBase {
+export interface InFlightLlmCall extends InFlightCallBase {
     kind: "llm_call";
     handler: LlmHandler;
     stream: boolean;
 }
 
-/** An effect kind this SDK doesn't know; ignore it. The `never` fields keep
+/** A call kind this SDK doesn't know; ignore it. The `never` fields keep
  *  narrowing on `kind` usable for the known variants. */
-export interface UnknownEffect extends EffectBase {
+export interface UnknownInFlightCall extends InFlightCallBase {
     kind: string & {};
     name?: never;
     arguments?: never;
@@ -899,26 +912,24 @@ export interface UnknownEffect extends EffectBase {
     stream?: never;
 }
 
-export type Effect = ToolCallEffect | SubAgentEffect | LlmCallEffect | UnknownEffect;
+export type InFlightCall = InFlightToolCall | InFlightSubAgent | InFlightLlmCall | UnknownInFlightCall;
 
 export interface WorkerDecisionRequestWire {
     session_id: Uuid;
-    tenant_id: string;
     decision_id: string;
     agent_id: string;
     identity: WorkerIdentity;
     trigger: DecisionTrigger;
     /** Your state as raw JSON, resolved from the active branch; `null` when the session has none. */
     state: unknown;
-    effects: Effect[];
-    /** How many `tool_call`/`sub_agent` effects are still in flight: the step gate as a number (prompt at 0). */
-    pending_effects: number;
+    calls: InFlightCall[];
+    /** How many `tool_call`/`sub_agent` calls are still in flight: the step gate as a number (prompt at 0). */
+    pending_calls: number;
     /** The active conversation as a flat list*/
     transcript?: Message[];
     /** The full tree, for clients that need branch structure. */
     message_tree?: MessageTree;
     ancestry?: Uuid[];
-    span: SpanContext;
     attempts: number;
     deadline?: DateTime;
     turn_id?: string;

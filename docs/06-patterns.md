@@ -6,7 +6,7 @@ Things you can build out of tools, custom decision functions, and client actions
 
 ## System prompt
 
-Instructions are worker config, not conversation. Keep the tree pure conversation: never store a system message in it. Prepend the instructions to each `call.llm`'s `messages` at build time — the exact prompt sent is durably recorded on the `llm.call.requested` event, so nothing is lost. Record the instructions (or their version) in `state.system` so their history is branch-aware: because state is [branch-scoped](./02-concepts.md#state-is-branch-scoped), changing `state.system` is "branching at the system prompt" — same conversation, new instructions, and the old branch still resolves to the version that governed it.
+Instructions are worker config, not conversation. Keep the tree pure conversation: never store a system message in it. Prepend the instructions to each `llm.call`'s `messages` at build time — the exact prompt sent is durably recorded on the `llm.call.requested` event, so nothing is lost. Record the instructions (or their version) in `state.system` so their history is branch-aware: because state is [branch-scoped](./02-concepts.md#state-is-branch-scoped), changing `state.system` is "branching at the system prompt" — same conversation, new instructions, and the old branch still resolves to the version that governed it.
 
 ## Memory
 

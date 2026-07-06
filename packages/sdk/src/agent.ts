@@ -63,7 +63,7 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
 
     const ask = (messages: Message[]): WorkerAction => {
         return {
-            type: "call.llm",
+            type: "llm.call",
             id: crypto.randomUUID(),
             request: { ...llmParams, messages, tools: toolSchemas },
             handler: handler ?? "server",
@@ -101,151 +101,134 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
                 const base = withSystem(history);
                 return { transcript: base, actions: [ask(base)] };
             }
-            case "effect.execute": {
-                switch (d.trigger.kind) {
-                    case "llm_call": {
-                        try {
-                            // biome-ignore lint/style/noNonNullAssertion: the Llm union guarantees a worker LLM has `run`
-                            const response = await config.llm.run!(d.trigger.request, { emitDelta: d.emitDelta });
-                            const action: WorkerAction = {
-                                type: "effect.result",
-                                kind: "llm_call",
+            case "llm.execute": {
+                try {
+                    // biome-ignore lint/style/noNonNullAssertion: the Llm union guarantees a worker LLM has `run`
+                    const response = await config.llm.run!(d.trigger.request, { emitDelta: d.emitDelta });
+                    const action: WorkerAction = {
+                        type: "llm.result",
+                        id: d.trigger.id,
+                        response,
+                        attempt: d.trigger.attempt,
+                    };
+                    return { transcript: history, actions: [action] };
+                } catch (error) {
+                    const message = error instanceof Error ? error.message : String(error);
+                    const action: WorkerAction = {
+                        type: "llm.error",
+                        id: d.trigger.id,
+                        error: message,
+                        retryable: false,
+                        attempt: d.trigger.attempt,
+                    };
+                    return { transcript: history, actions: [action] };
+                }
+            }
+            case "tool.execute": {
+                const def = toolMap[d.trigger.name];
+                if (!def)
+                    return {
+                        actions: [
+                            {
+                                type: "tool.error",
                                 id: d.trigger.id,
-                                response,
+                                error: `Unknown tool: ${d.trigger.name}`,
+                                retryable: false,
                                 attempt: d.trigger.attempt,
-                            };
-                            return { transcript: history, actions: [action] };
-                        } catch (error) {
-                            const message = error instanceof Error ? error.message : String(error);
-                            const action: WorkerAction = {
-                                type: "effect.error",
-                                kind: "llm_call",
+                            },
+                        ],
+                    };
+                try {
+                    const out = await def.execute(d.trigger.arguments, d);
+                    // A deferred tool's execute only starts the work; the result arrives via settleEffect.
+                    if (def.deferred) return {};
+                    return {
+                        actions: [
+                            {
+                                type: "tool.result",
+                                id: d.trigger.id,
+                                result: out ?? "",
+                                attempt: d.trigger.attempt,
+                            },
+                        ],
+                    };
+                } catch (error) {
+                    const message = error instanceof Error ? error.message : String(error);
+                    return {
+                        actions: [
+                            {
+                                type: "tool.error",
                                 id: d.trigger.id,
                                 error: message,
                                 retryable: false,
                                 attempt: d.trigger.attempt,
-                            };
-                            return { transcript: history, actions: [action] };
-                        }
-                    }
-                    case "tool_call": {
-                        const def = toolMap[d.trigger.name];
-                        if (!def)
-                            return {
-                                actions: [
-                                    {
-                                        type: "effect.error",
-                                        kind: "tool_call",
-                                        id: d.trigger.id,
-                                        error: `Unknown tool: ${d.trigger.name}`,
-                                        retryable: false,
-                                        attempt: d.trigger.attempt,
-                                    },
-                                ],
-                            };
-                        try {
-                            const out = await def.execute(d.trigger.arguments, d);
-                            // A deferred tool's execute only starts the work; the result arrives via settleEffect.
-                            if (def.deferred) return {};
-                            return {
-                                actions: [
-                                    {
-                                        type: "effect.result",
-                                        kind: "tool_call",
-                                        id: d.trigger.id,
-                                        result: out ?? "",
-                                        attempt: d.trigger.attempt,
-                                    },
-                                ],
-                            };
-                        } catch (error) {
-                            const message = error instanceof Error ? error.message : String(error);
-                            return {
-                                actions: [
-                                    {
-                                        type: "effect.error",
-                                        kind: "tool_call",
-                                        id: d.trigger.id,
-                                        error: message,
-                                        retryable: false,
-                                        attempt: d.trigger.attempt,
-                                    },
-                                ],
-                            };
-                        }
-                    }
-                    default:
-                        return {};
+                            },
+                        ],
+                    };
                 }
             }
-            case "effect.settled": {
-                switch (d.trigger.kind) {
-                    case "llm_call": {
-                        if (!d.trigger.ok || d.trigger.message === undefined) return {};
-                        const assistant = d.trigger.message;
-                        const transcript = [...history, assistant];
-                        const calls = assistant.tool_calls ?? [];
-                        if (calls.length === 0)
-                            return {
-                                transcript,
-                                actions: [{ type: "done", data: assistant.content ?? null }],
-                            };
+            case "llm.finished": {
+                if (!d.trigger.ok || d.trigger.message === undefined) return {};
+                const assistant = d.trigger.message;
+                const transcript = [...history, assistant];
+                const calls = assistant.tool_calls ?? [];
+                if (calls.length === 0)
+                    return {
+                        transcript,
+                        actions: [{ type: "done", data: assistant.content ?? null }],
+                    };
 
-                        const actions: WorkerAction[] = [];
-                        for (const tc of calls) {
-                            if (subIds.has(tc.function.name)) {
-                                const childId = crypto.randomUUID();
-                                let message = tc.function.arguments;
-                                try {
-                                    const args = JSON.parse(tc.function.arguments);
-                                    if (typeof args?.message === "string") message = args.message;
-                                } catch {
-                                    // leave raw arguments as the message
-                                }
-                                actions.push(
-                                    {
-                                        type: "spawn.sub_agent",
-                                        session_id: childId,
-                                        agent_id: tc.function.name,
-                                        tool_call_id: tc.id,
-                                        retry: config.retry,
-                                    },
-                                    {
-                                        type: "send.message",
-                                        session_id: childId,
-                                        message: { role: "user", content: message },
-                                    },
-                                );
-                            } else if (toolMap[tc.function.name]) {
-                                const def = toolMap[tc.function.name];
-                                actions.push({
-                                    type: "call.tool",
-                                    id: tc.id,
-                                    name: tc.function.name,
-                                    arguments: tc.function.arguments,
-                                    handler: def.handler ?? "worker",
-                                    retry: def.retry,
-                                });
-                            }
+                const actions: WorkerAction[] = [];
+                for (const tc of calls) {
+                    if (subIds.has(tc.function.name)) {
+                        const childId = crypto.randomUUID();
+                        let message = tc.function.arguments;
+                        try {
+                            const args = JSON.parse(tc.function.arguments);
+                            if (typeof args?.message === "string") message = args.message;
+                        } catch {
+                            // leave raw arguments as the message
                         }
-                        return { transcript, actions };
+                        actions.push(
+                            {
+                                type: "sub_agent.spawn",
+                                session_id: childId,
+                                agent_id: tc.function.name,
+                                tool_call_id: tc.id,
+                                retry: config.retry,
+                            },
+                            {
+                                type: "message.send",
+                                session_id: childId,
+                                message: { role: "user", content: message },
+                            },
+                        );
+                    } else if (toolMap[tc.function.name]) {
+                        const def = toolMap[tc.function.name];
+                        actions.push({
+                            type: "tool.call",
+                            id: tc.id,
+                            name: tc.function.name,
+                            arguments: tc.function.arguments,
+                            handler: def.handler ?? "worker",
+                            retry: def.retry,
+                        });
                     }
-                    case "sub_agent":
-                    case "tool_call": {
-                        const node: Message = {
-                            id: crypto.randomUUID(),
-                            role: "tool",
-                            content: (d.trigger.ok ? d.trigger.result : d.trigger.error) ?? "",
-                            tool_call_id: d.trigger.id,
-                            name: d.trigger.kind === "sub_agent" ? d.trigger.agent_id : d.trigger.name,
-                        };
-                        const transcript = [...history, node];
-                        if (d.pending_effects > 0) return { transcript };
-                        return { transcript, actions: [ask(transcript)] };
-                    }
-                    default:
-                        return {};
                 }
+                return { transcript, actions };
+            }
+            case "sub_agent.finished":
+            case "tool.finished": {
+                const node: Message = {
+                    id: crypto.randomUUID(),
+                    role: "tool",
+                    content: (d.trigger.ok ? d.trigger.result : d.trigger.error) ?? "",
+                    tool_call_id: d.trigger.id,
+                    name: d.trigger.type === "sub_agent.finished" ? d.trigger.agent_id : d.trigger.name,
+                };
+                const transcript = [...history, node];
+                if (d.pending_calls > 0) return { transcript };
+                return { transcript, actions: [ask(transcript)] };
             }
             default:
                 return {};

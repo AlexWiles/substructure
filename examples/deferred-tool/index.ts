@@ -1,6 +1,6 @@
 // Deferred tool: `deferred: true` makes `execute` a kick-off with no result action, so the
 // engine leaves the call pending until `settleEffect` routes the out-of-band result back as
-// an `effect.settled` trigger, the pattern for webhooks, long jobs, or human approvals.
+// a `tool.finished` trigger, the pattern for webhooks, long jobs, or human approvals.
 
 import { agent, tool, toolLoop } from "@substructure.ai/sdk";
 import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
@@ -18,7 +18,7 @@ const wait = tool({
     deferred: true,
     execute: (args, request) => {
         const { seconds } = JSON.parse(args) as { seconds: number };
-        if (request.trigger.type !== "effect.execute") throw new Error("wait ran outside a tool call");
+        if (request.trigger.type !== "tool.execute") throw new Error("wait ran outside a tool call");
         const { id, attempt } = request.trigger;
         const sessionId = request.session_id;
 

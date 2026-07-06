@@ -89,6 +89,14 @@ impl SpanContext {
         self
     }
 
+    /// W3C `traceparent` header value.
+    pub fn traceparent(&self) -> String {
+        format!(
+            "00-{}-{}-{:02x}",
+            self.trace_id, self.span_id, self.trace_flags
+        )
+    }
+
     pub fn in_trace(trace_id: TraceId, name: impl Into<String>) -> Self {
         SpanContext {
             trace_id,

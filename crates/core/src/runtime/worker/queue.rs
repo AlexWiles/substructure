@@ -16,6 +16,8 @@ use crate::runtime::span::SpanContext;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerDecisionRequest {
     pub session_id: String,
+    /// Engine routing only; the wire carries the tenant in `identity`.
+    #[serde(skip_serializing, default)]
     pub tenant_id: String,
     pub decision_id: String,
     pub agent_id: String,
@@ -24,12 +26,12 @@ pub struct WorkerDecisionRequest {
     pub trigger: DecisionTrigger,
     /// The session's current state, resolved from the active branch.
     pub state: WorkerState,
-    /// The in-flight effects as a flat, tagged list (each carries `kind`/`status`).
+    /// The in-flight calls as a flat, tagged list (each carries `kind`/`status`).
     #[serde(default)]
-    pub effects: Vec<Effect>,
-    /// How many `tool_call`/`sub_agent` effects are still in flight: the step gate as a number.
+    pub calls: Vec<Effect>,
+    /// How many `tool_call`/`sub_agent` calls are still in flight: the step gate as a number.
     #[serde(default)]
-    pub pending_effects: usize,
+    pub pending_calls: usize,
     /// The active conversation as a flat list (the tree's `head_id`-to-root path).
     #[serde(default)]
     pub transcript: Vec<Message>,
@@ -38,6 +40,8 @@ pub struct WorkerDecisionRequest {
     pub message_tree: MessageTree,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ancestry: Vec<String>,
+    /// Engine tracing only; rides HTTP as a `traceparent` header, not the body.
+    #[serde(skip_serializing, default = "SpanContext::root")]
     pub span: SpanContext,
     pub attempts: u32,
     pub deadline: Option<DateTime<Utc>>,

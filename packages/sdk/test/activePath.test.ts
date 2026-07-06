@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { toolLoop } from "../src/agent";
 import { activePath } from "../src/core";
 import type { Message, MessageTree, Node } from "../src/types";
-import { appendedMessages, callLlm, runAgent, clientMessage } from "./harness";
+import { appendedMessages, callLlm, clientMessage, runAgent } from "./harness";
 
 function node(id: string, parentId: string | undefined, content: string, role: Message["role"] = "user"): Node {
     return { kind: "message", parent_id: parentId, message: { id, role, content } };

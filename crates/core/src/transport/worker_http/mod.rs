@@ -35,7 +35,7 @@ pub fn router(state: WorkerHttpState) -> Router {
             post(routes::submit_client_payload),
         )
         .route(
-            "/api/machine/sessions/{session_id}/effects/settle",
+            "/api/machine/sessions/{session_id}/calls/settle",
             post(routes::settle_effect),
         )
         .route(

@@ -49,8 +49,8 @@ Each trigger carries the new content and the current transcript; the worker fold
 | `client.message` | A client sent a chat message. The worker adds it to the transcript (rooting a fresh branch with its system prompt on cold start) and prompts. |
 | `client.transcript` | A client sent a full transcript (e.g. an AG-UI client view, an edit, or a regenerate). The worker returns it; the engine reconciles it into the tree. |
 | `client.action` | A client called `startTurn` with a typed action instead of a message. |
-| `effect.execute` | The engine is delegating effect work to your worker: run a tool (`kind: "tool_call"`) or make an LLM call (`kind: "llm_call"`). `toolLoop` handles this and dispatches to the matching tool's `execute` or the worker-run model; a custom `decide` reacts to it directly. |
-| `effect.settled` | An effect landed: the model replied (`kind: "llm_call"`), or a tool/sub-agent call finished (`kind: "tool_call"` / `"sub_agent"`). Fires as each one lands, so the transcript fills incrementally. The request's `effects` list says what's still in flight, so the worker prompts once no tool/sub-agent effect is pending, without tracking the round itself. `ok` says whether the effect succeeded. |
+| `tool.execute` / `llm.execute` | The engine is delegating a call to your worker: run a tool, or make an LLM call. `toolLoop` handles these and dispatches to the matching tool's `execute` or the worker-run model; a custom `decide` reacts to them directly. |
+| `llm.finished` / `tool.finished` / `sub_agent.finished` | A call's final word: the model replied, or a tool/sub-agent finished. Fires as each one lands, so the transcript fills incrementally. The request's `calls` list says what's still in flight, so the worker prompts once no tool/sub-agent call is pending, without tracking the round itself. `ok` says whether the call succeeded. |
 | `interrupt.resumed` | A paused session was resumed by an external signal. |
 
 For most agents, `toolLoop` handles every trigger you'd see in practice. You only need to think about them when writing a custom `decide`.
@@ -61,15 +61,15 @@ A decision returns a flat `transcript` (the conversation as it should now be) pl
 
 | Action | Effect |
 | --- | --- |
-| `call.llm` | Make an LLM request with a prompt message list. Produces an `effect.settled` trigger when it completes. The prompt is separate from the transcript, so it can be shaped per call (compaction, injected context) without changing the record. |
-| `call.tool` | Have the engine schedule a tool call, named by `id`. Produces an `effect.execute` trigger back at the worker. |
-| `effect.result` | Answer an `effect.execute` with a success: a tool's `result` or a worker-run model's `response`. |
-| `effect.error` | Answer an `effect.execute` with a failure; uniform across kinds. |
-| `spawn.sub_agent` | Start a child session under a different agent. Its output (or error) comes back as an `effect.settled` trigger when the child's turn completes. |
-| `send.message` | Push a message into another session (handy for fan-out or notifying a parent). |
+| `llm.call` | Make an LLM request with a prompt message list. Produces an `llm.finished` trigger when it completes. The prompt is separate from the transcript, so it can be shaped per call (compaction, injected context) without changing the record. |
+| `tool.call` | Have the engine schedule a tool call, named by `id`. Produces a `tool.execute` trigger back at the worker. |
+| `tool.result` / `llm.result` | Answer an execute with a success: a tool's `result` or a worker-run model's `response`. |
+| `tool.error` / `llm.error` | Answer an execute with a failure. |
+| `sub_agent.spawn` | Start a child session under a different agent. Its output (or error) comes back as a `sub_agent.finished` trigger when the child's turn completes. |
+| `message.send` | Push a message into another session (handy for fan-out or notifying a parent). |
 | `done` | Finish the turn. The `data` payload becomes the turn's result, returned from `client.turnResult(scope)`. |
 
-A single decision can return multiple actions: for example, several `call.tool` actions in parallel, or a `send.message` followed by `done`.
+A single decision can return multiple actions: for example, several `tool.call` actions in parallel, or a `message.send` followed by `done`.
 
 ## State
 
@@ -104,5 +104,5 @@ For browser clients, identity is baked into the short-lived token your backend m
 
 ## Sub-agents
 
-A **sub-agent** is an agent another agent can delegate to, as if calling a tool. The parent emits a `spawn.sub_agent` action; the engine creates a child session, runs it to completion, and returns the result to the parent. The parent agent's session keeps the parent's history; the child's session keeps the child's. This lets you compose agents with clean isolation: a planner agent that delegates to specialist agents, a router that hands off to different worker pools, and so on. See the [Sub-agents](./05-sub-agents.md) page for the full walkthrough.
+A **sub-agent** is an agent another agent can delegate to, as if calling a tool. The parent emits a `sub_agent.spawn` action; the engine creates a child session, runs it to completion, and returns the result to the parent. The parent agent's session keeps the parent's history; the child's session keeps the child's. This lets you compose agents with clean isolation: a planner agent that delegates to specialist agents, a router that hands off to different worker pools, and so on. See the [Sub-agents](./05-sub-agents.md) page for the full walkthrough.
 

@@ -25,10 +25,10 @@ approval decision itself is read inside the tool's `execute`.
 its `execute` reads `state.approvalDecision`. On a denial it returns
 `{ exit_code: 1, stderr: "User denied this command. Reason: ..." }` as
 its result; otherwise it runs the command via `spawnSync`. Because the
-tool closes over `state`, the loop runs it normally on `effect.execute` —
+tool closes over `state`, the loop runs it normally on `tool.execute` —
 the host shell actually executes here, so approve carefully.
 
-**On the model's reply (`effect.settled`, `kind: "llm_call"`):** if the model called `run_command`, the `decide`
+**On the model's reply (`llm.finished`):** if the model called `run_command`, the `decide`
 records the assistant turn, parks `{ toolCallId, cmd }` in
 `state.pendingCommand`, and ends the turn with `done({ pendingCommand })`
 instead of letting the loop run the call. The session is now waiting for

@@ -57,8 +57,8 @@ pub enum EventPayload {
     DecisionRequestQueued(DecisionRequestQueued),
     #[serde(rename = "decision_request.dropped")]
     DecisionRequestDropped(DecisionRequestDropped),
-    #[serde(rename = "effect.voided")]
-    EffectVoided(EffectVoided),
+    #[serde(rename = "call.voided")]
+    CallVoided(CallVoided),
     #[serde(rename = "session.cancelled")]
     SessionCancelled,
     #[serde(rename = "session.done")]
@@ -390,21 +390,16 @@ pub enum EffectKind {
     SubAgent,
 }
 
-impl From<super::decision::WorkKind> for EffectKind {
-    fn from(kind: super::decision::WorkKind) -> Self {
-        match kind {
-            super::decision::WorkKind::ToolCall => EffectKind::ToolCall,
-            super::decision::WorkKind::LlmCall => EffectKind::LlmCall,
-        }
-    }
-}
-
-/// Outstanding work abandoned because its branch was forked away.
-/// `id` is the effect's map key (the child session id for a sub-agent).
+/// An outstanding call abandoned because its branch was forked away (or the
+/// session was interrupted or cancelled). `id` is the call id — for a
+/// sub-agent, the model tool call the delegation answers; `session_id` then
+/// carries the child session so the cancellation can cascade.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EffectVoided {
+pub struct CallVoided {
     pub kind: EffectKind,
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

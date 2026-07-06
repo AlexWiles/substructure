@@ -163,7 +163,7 @@ function sseEmitDelta(sse: SseStream): EmitDelta {
 
 function embeddedEmitDelta(runtime: NativeRuntime, request: WorkerDecisionRequestWire): EmitDelta | undefined {
     const { trigger } = request;
-    if (trigger.type !== "effect.execute" || trigger.kind !== "llm_call" || !trigger.stream) return undefined;
+    if (trigger.type !== "llm.execute" || !trigger.stream) return undefined;
 
     const rootSessionId = request.ancestry?.[0] ?? request.session_id;
     let seq = 0;
@@ -171,7 +171,7 @@ function embeddedEmitDelta(runtime: NativeRuntime, request: WorkerDecisionReques
     return async (delta: LlmTokenDeltaInput) => {
         await runtime.emitTokenDelta(
             JSON.stringify({
-                tenant_id: request.tenant_id,
+                tenant_id: request.identity.tenant_id,
                 root_session_id: rootSessionId,
                 session_id: request.session_id,
                 agent_id: request.agent_id,

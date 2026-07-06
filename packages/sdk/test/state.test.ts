@@ -10,21 +10,19 @@ import { toolLoop } from "../src/agent";
 import type { Agent } from "../src/core";
 import type { WorkerDecisionRequestWire } from "../src/types";
 import { Worker } from "../src/worker";
-import { linearTree, clientMessage, clientTranscript } from "./harness";
+import { clientMessage, clientTranscript, linearTree } from "./harness";
 
 function wireRequest(overrides: Partial<WorkerDecisionRequestWire> = {}): WorkerDecisionRequestWire {
     return {
         session_id: "00000000-0000-0000-0000-000000000000",
-        tenant_id: "test",
         decision_id: "decision-0",
         agent_id: "a",
         identity: { tenant_id: "test", id: "tester" },
         trigger: clientMessage("hi"),
         state: null,
-        effects: [],
-        pending_effects: 0,
+        calls: [],
+        pending_calls: 0,
         transcript: [],
-        span: { trace_id: "0".repeat(32), span_id: "0".repeat(16), trace_flags: 1 },
         attempts: 0,
         ...overrides,
     };

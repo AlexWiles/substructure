@@ -11,7 +11,7 @@ use serde::Deserialize;
 use sha2::Sha256;
 
 use crate::runtime::llm::{StreamDelta, TokenDelta, TokenDeltaTransport};
-use crate::runtime::session::decision::{DecisionTrigger, EffectWork};
+use crate::runtime::session::decision::DecisionTrigger;
 use crate::transport::worker_http::types::SubmitRequest;
 use crate::worker::push::{PushError, PushResponse, PushTransport, TransportConstructor};
 use crate::worker::WorkerDecisionRequest;
@@ -57,6 +57,7 @@ impl PushTransport for HttpPushTransport {
             .post(&self.endpoint_url)
             .header("Content-Type", "application/json")
             .header(ACCEPT, "text/event-stream, application/json")
+            .header("traceparent", decision.span.traceparent())
             .timeout(self.timeout);
 
         if let Some(ref secret) = self.signing_secret {
@@ -224,15 +225,15 @@ async fn publish_worker_delta(
     token_delta_transport: &Arc<dyn TokenDeltaTransport>,
     seq: &mut u32,
 ) -> Result<(), PushError> {
-    let DecisionTrigger::EffectExecute {
+    let DecisionTrigger::LlmExecute {
         id: call_id,
         attempt,
-        work: EffectWork::LlmCall { stream, .. },
+        stream,
         ..
     } = &decision.trigger
     else {
         return Err(PushError {
-            message: "llm.token.delta is only valid for llm effect.execute decisions".to_string(),
+            message: "llm.token.delta is only valid for llm.execute decisions".to_string(),
             retryable: false,
         });
     };
@@ -305,25 +306,23 @@ mod tests {
                 id: Some("user-1".to_string()),
                 metadata: Default::default(),
             },
-            trigger: DecisionTrigger::EffectExecute {
+            trigger: DecisionTrigger::LlmExecute {
                 id: "llm-1".to_string(),
+                request: LlmRequest {
+                    model: "test-model".to_string(),
+                    messages: vec![],
+                    tools: None,
+                    temperature: None,
+                    max_completion_tokens: None,
+                    reasoning: None,
+                },
+                stream: true,
                 attempt: 0,
                 deadline: None,
-                work: EffectWork::LlmCall {
-                    request: LlmRequest {
-                        model: "test-model".to_string(),
-                        messages: vec![],
-                        tools: None,
-                        temperature: None,
-                        max_completion_tokens: None,
-                        reasoning: None,
-                    },
-                    stream: true,
-                },
             },
             state: Default::default(),
-            effects: Default::default(),
-            pending_effects: 0,
+            calls: Default::default(),
+            pending_calls: 0,
             transcript: vec![],
             message_tree: Default::default(),
             ancestry: vec![],

@@ -1,4 +1,4 @@
-// Fan out one `call.llm` per lens on the user's message, then hand the combined
+// Fan out one `llm.call` per lens on the user's message, then hand the combined
 // answers to a stock `toolLoop` to synthesize. Two flavors: `fanout` (engine-run)
 // and `deferred-fanout` (worker-run, settled out-of-band via `settleEffect`).
 
@@ -49,7 +49,7 @@ function withLenses(loop: Agent<FanoutState>, handler: "server" | "worker"): Age
             return {
                 actions: LENSES.map(
                     (l): WorkerAction => ({
-                        type: "call.llm",
+                        type: "llm.call",
                         id: l.id,
                         handler,
                         request: { model: MODEL, messages: [{ role: "user", content: l.prompt(question) }] },
@@ -61,7 +61,7 @@ function withLenses(loop: Agent<FanoutState>, handler: "server" | "worker"): Age
 
         // (deferred flavor) start the lens call in the background and return now with no
         // actions so the calls overlap; settle each out-of-band whenever it finishes.
-        if (d.trigger.type === "effect.execute" && d.trigger.kind === "llm_call" && isLens(d.trigger.id)) {
+        if (d.trigger.type === "llm.execute" && isLens(d.trigger.id)) {
             const { id, attempt, request } = d.trigger;
             const sessionId = d.session_id;
             void runModel(request)
@@ -80,7 +80,7 @@ function withLenses(loop: Agent<FanoutState>, handler: "server" | "worker"): Age
         }
 
         // A lens settling: fold it in; once the last lands, hand the enriched question to the loop.
-        if (d.trigger.type === "effect.settled" && d.trigger.kind === "llm_call" && isLens(d.trigger.id)) {
+        if (d.trigger.type === "llm.finished" && isLens(d.trigger.id)) {
             const settledId = d.trigger.id;
             const prev = d.state ?? { question: "", pending: [], results: {} };
             const answer =

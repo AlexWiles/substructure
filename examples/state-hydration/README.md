@@ -21,7 +21,7 @@ wire / state:         { todos: Todo[] }           ← updated, handed back next 
 ## The default loop, over state that rides the wire
 
 `toolLoop(config)` returns the exact decision function the engine runs — prompt
-assembly, `call.llm`, the tool round-trip, round gating. Nothing here is
+assembly, `llm.call`, the tool round-trip, round gating. Nothing here is
 overridden: the `decide` reads `req.state`, builds the loop, and calls it.
 
 ```ts
@@ -58,7 +58,7 @@ function todoTools(state: State) {
 ```
 
 `toolLoop` turns them into the model's tool schemas and runs them on
-`effect.execute`. Their edits land in `state.todos` — the same object the loop
+`tool.execute`. Their edits land in `state.todos` — the same object the loop
 echoes back out — so the todo list rides the wire with no manual plumbing.
 
 ## Run

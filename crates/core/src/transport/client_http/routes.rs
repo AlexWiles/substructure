@@ -68,10 +68,9 @@ pub async fn settle_effect(
     Path(session_id): Path<String>,
     Json(req): Json<SettleEffectRequest>,
 ) -> Response {
-    // The client surface settles client tools only; `kind` is always `tool_call`.
+    // The client surface settles client tools only; the type restricts to `tool.*`.
     let (id, attempt, settlement) = match req {
         SettleEffectRequest::Result {
-            kind: _,
             id,
             result,
             attempt,
@@ -81,7 +80,6 @@ pub async fn settle_effect(
             EffectSettlement::Result(EffectResultPayload::ToolCall { result }),
         ),
         SettleEffectRequest::Error {
-            kind: _,
             id,
             error,
             retryable,

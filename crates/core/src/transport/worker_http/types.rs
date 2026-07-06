@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::llm::ErrorCode;
+use crate::llm::{ErrorCode, LlmResponse};
 use crate::runtime::session::decision::ClientPayload;
 use crate::runtime::session::message::Message;
-use crate::session::decision::{EffectResultPayload, WorkKind, WorkerAction};
+use crate::session::decision::WorkerAction;
 use crate::span::SpanContext;
 use crate::worker::WorkerState;
 
@@ -28,22 +28,39 @@ pub struct SubmitResponse {
     pub error: Option<String>,
 }
 
-/// The worker settle body: an `effect.result` or `effect.error`, settling
-/// worker-handled `tool_call` and `llm_call` effects.
+/// The worker settle body: a `tool.result`/`llm.result` or
+/// `tool.error`/`llm.error`, settling worker-handled calls.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 pub enum SettleEffectRequest {
-    #[serde(rename = "effect.result")]
-    Result {
+    #[serde(rename = "tool.result")]
+    ToolResult {
         id: String,
         #[serde(default)]
         attempt: Option<u32>,
-        #[serde(flatten)]
-        result: EffectResultPayload,
+        result: String,
     },
-    #[serde(rename = "effect.error")]
-    Error {
-        kind: WorkKind,
+    #[serde(rename = "llm.result")]
+    LlmResult {
+        id: String,
+        #[serde(default)]
+        attempt: Option<u32>,
+        response: LlmResponse,
+    },
+    #[serde(rename = "tool.error")]
+    ToolError {
+        id: String,
+        error: String,
+        retryable: bool,
+        #[serde(default)]
+        attempt: Option<u32>,
+        #[serde(default)]
+        code: Option<ErrorCode>,
+        #[serde(default)]
+        detail: Option<serde_json::Value>,
+    },
+    #[serde(rename = "llm.error")]
+    LlmError {
         id: String,
         error: String,
         retryable: bool,
@@ -114,30 +131,19 @@ mod tests {
 
     #[test]
     fn worker_surface_settles_an_llm_result() {
-        let body = r#"{"type":"effect.result","kind":"llm_call","id":"llm-1","attempt":0,"response":{"model":"m"}}"#;
-        let req: SettleEffectRequest =
-            serde_json::from_str(body).expect("llm_call result deserializes");
+        let body = r#"{"type":"llm.result","id":"llm-1","attempt":0,"response":{"model":"m"}}"#;
+        let req: SettleEffectRequest = serde_json::from_str(body).expect("llm.result deserializes");
         match req {
-            SettleEffectRequest::Result {
-                id,
-                result: EffectResultPayload::LlmCall { .. },
-                ..
-            } => assert_eq!(id, "llm-1"),
-            other => panic!("expected an llm_call result; got {other:?}"),
+            SettleEffectRequest::LlmResult { id, .. } => assert_eq!(id, "llm-1"),
+            other => panic!("expected an llm.result; got {other:?}"),
         }
     }
 
     #[test]
     fn worker_surface_settles_a_tool_error() {
-        let body = r#"{"type":"effect.error","kind":"tool_call","id":"tc-1","attempt":1,"error":"boom","retryable":true}"#;
-        let req: SettleEffectRequest =
-            serde_json::from_str(body).expect("tool_call error deserializes");
-        assert!(matches!(
-            req,
-            SettleEffectRequest::Error {
-                kind: WorkKind::ToolCall,
-                ..
-            }
-        ));
+        let body =
+            r#"{"type":"tool.error","id":"tc-1","attempt":1,"error":"boom","retryable":true}"#;
+        let req: SettleEffectRequest = serde_json::from_str(body).expect("tool.error deserializes");
+        assert!(matches!(req, SettleEffectRequest::ToolError { .. }));
     }
 }
