@@ -107,7 +107,7 @@ fn do_enqueue(conn: &Connection, decision: WorkerDecisionRequest) -> Result<(), 
             enqueued_at = excluded.enqueued_at",
         rusqlite::params![
             decision.decision_id,
-            decision.tenant_id,
+            decision.tenant_id(),
             decision.agent_id,
             payload,
             enqueued_at,
@@ -151,4 +151,77 @@ fn do_dequeue(
     let decision =
         serde_json::from_str::<WorkerDecisionRequest>(&payload).map_err(|e| e.to_string())?;
     Ok(Some(decision))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::llm::LlmRequest;
+    use crate::runtime::owner::SessionOwner;
+    use crate::runtime::session::decision::DecisionTrigger;
+    use crate::runtime::span::SpanContext;
+    use uuid::Uuid;
+
+    fn sample_decision(tenant_id: &str, decision_id: &str) -> WorkerDecisionRequest {
+        WorkerDecisionRequest {
+            session_id: "sess-1".to_string(),
+            decision_id: decision_id.to_string(),
+            agent_id: "agent-1".to_string(),
+            identity: SessionOwner {
+                tenant_id: tenant_id.to_string(),
+                id: Some("user-1".to_string()),
+                metadata: Default::default(),
+            },
+            trigger: DecisionTrigger::LlmExecute {
+                id: "llm-1".to_string(),
+                request: LlmRequest {
+                    model: "test-model".to_string(),
+                    messages: vec![],
+                    tools: None,
+                    temperature: None,
+                    max_completion_tokens: None,
+                    reasoning: None,
+                },
+                stream: true,
+                attempt: 0,
+                deadline: None,
+            },
+            state: Default::default(),
+            calls: Default::default(),
+            pending_calls: 0,
+            transcript: vec![],
+            message_tree: Default::default(),
+            ancestry: vec![],
+            span: SpanContext::root(),
+            attempts: 0,
+            deadline: None,
+            turn_id: None,
+        }
+    }
+
+    /// The durable queue serializes the decision into SQLite and reads it back.
+    /// The tenant lives only on `identity` now, so this proves it survives the
+    /// round-trip — otherwise the push loop's `registry.lookup(decision.tenant_id())`
+    /// would key on an empty tenant and silently drop the decision.
+    #[tokio::test]
+    async fn dequeue_preserves_tenant_across_serialization() {
+        let path = std::env::temp_dir().join(format!("core-worker-queue-{}.db", Uuid::now_v7()));
+        let db = SqliteDb::open(path.to_str().unwrap(), Duration::from_secs(5)).unwrap();
+        let queue = SqliteWorkerQueue::new(db).unwrap();
+
+        queue.enqueue(sample_decision("tenant-xyz", "dec-1")).await;
+        let dequeued = queue
+            .dequeue(&DequeueFilter {
+                tenant_id: "tenant-xyz".to_string(),
+            })
+            .await
+            .expect("a decision");
+
+        assert_eq!(dequeued.tenant_id(), "tenant-xyz");
+        assert_eq!(dequeued.decision_id, "dec-1");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
 }

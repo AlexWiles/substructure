@@ -10,6 +10,11 @@ same version.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking (Rust):** `WorkerDecisionRequest.tenant_id` removed; use the
+  `tenant_id()` accessor. Fixes decisions dropped after a durable-queue round-trip.
+
 ## [0.1.21] - 2026-07-06
 
 ### Added

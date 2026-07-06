@@ -16,9 +16,6 @@ use crate::runtime::span::SpanContext;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerDecisionRequest {
     pub session_id: String,
-    /// Engine routing only; not sent on the wire.
-    #[serde(skip_serializing, default)]
-    pub tenant_id: String,
     pub decision_id: String,
     pub agent_id: String,
     pub identity: SessionOwner,
@@ -43,6 +40,15 @@ pub struct WorkerDecisionRequest {
     pub deadline: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
+}
+
+impl WorkerDecisionRequest {
+    /// The tenant that owns this decision's session, for engine routing. The
+    /// tenant lives on `identity` (serialized, so it survives a durable queue);
+    /// this is the routing accessor over it, not a second copy that can drift.
+    pub fn tenant_id(&self) -> &str {
+        &self.identity.tenant_id
+    }
 }
 
 pub struct DequeueFilter {

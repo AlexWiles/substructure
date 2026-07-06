@@ -151,6 +151,9 @@ impl EmbeddedRuntime {
                     Some(d) => d,
                     None => continue,
                 };
+                // Bind before moving fields out of `decision` below:
+                // `tenant_id()` borrows the whole struct.
+                let decision_tenant = decision.tenant_id().to_string();
 
                 let decision_json = match serde_json::to_string(&decision) {
                     Ok(j) => j,
@@ -173,7 +176,7 @@ impl EmbeddedRuntime {
                                 let submit_decision = SubmitDecision {
                                     session_id: decision.session_id,
                                     caller: Caller::System {
-                                        tenant_id: decision.tenant_id.clone(),
+                                        tenant_id: decision_tenant.clone(),
                                     },
                                     decision_id: decision.decision_id.clone(),
                                     transcript: submit.transcript,
@@ -199,7 +202,7 @@ impl EmbeddedRuntime {
                                 let fail = FailDecision {
                                     session_id: decision.session_id,
                                     caller: Caller::System {
-                                        tenant_id: decision.tenant_id.clone(),
+                                        tenant_id: decision_tenant.clone(),
                                     },
                                     decision_id: decision.decision_id.clone(),
                                     error: format!("failed to parse worker response: {e}"),
@@ -225,7 +228,7 @@ impl EmbeddedRuntime {
                         let fail = FailDecision {
                             session_id: decision.session_id,
                             caller: Caller::System {
-                                tenant_id: decision.tenant_id.clone(),
+                                tenant_id: decision_tenant.clone(),
                             },
                             decision_id: decision.decision_id.clone(),
                             error: format!("js worker callback failed: {e}"),

@@ -89,7 +89,10 @@ impl PushAdapter {
                 tokio::spawn(async move {
                     let _permit = permit;
 
-                    let transport = match registry.lookup(&decision.tenant_id).await {
+                    // Bind the tenant before moving fields out of `decision`
+                    // below: `tenant_id()` borrows the whole struct.
+                    let tenant_id = decision.tenant_id().to_string();
+                    let transport = match registry.lookup(&tenant_id).await {
                         Some(t) => t,
                         None => return,
                     };
@@ -100,7 +103,7 @@ impl PushAdapter {
                             let submit = SubmitDecision {
                                 session_id: decision.session_id,
                                 caller: Caller::System {
-                                    tenant_id: decision.tenant_id.clone(),
+                                    tenant_id: tenant_id.clone(),
                                 },
                                 decision_id: decision.decision_id.clone(),
                                 transcript: resp.transcript,

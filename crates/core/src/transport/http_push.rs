@@ -244,7 +244,7 @@ async fn publish_worker_delta(
 
     token_delta_transport
         .publish(TokenDelta {
-            tenant_id: decision.tenant_id.clone(),
+            tenant_id: decision.tenant_id().to_string(),
             root_session_id: decision
                 .ancestry
                 .first()
@@ -295,7 +295,6 @@ mod tests {
     fn streaming_decision() -> WorkerDecisionRequest {
         WorkerDecisionRequest {
             session_id: "sess-1".to_string(),
-            tenant_id: "tenant-a".to_string(),
             decision_id: "dec-1".to_string(),
             agent_id: "agent-1".to_string(),
             identity: SessionOwner {

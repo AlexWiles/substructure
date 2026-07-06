@@ -11,7 +11,7 @@ struct Waiter {
 
 impl Waiter {
     fn matches(&self, decision: &WorkerDecisionRequest) -> bool {
-        self.tenant_id == decision.tenant_id
+        self.tenant_id.as_str() == decision.tenant_id()
     }
 }
 
@@ -58,7 +58,7 @@ impl WorkerQueue for InMemoryWorkerQueue {
             if let Some(idx) = inner
                 .items
                 .iter()
-                .position(|d| d.tenant_id == filter.tenant_id)
+                .position(|d| d.tenant_id() == filter.tenant_id.as_str())
             {
                 return inner.items.remove(idx);
             }

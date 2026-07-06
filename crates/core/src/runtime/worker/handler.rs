@@ -98,7 +98,6 @@ fn try_extract(raw: &Event) -> Option<WorkerDecisionRequest> {
 
     Some(WorkerDecisionRequest {
         session_id: event.aggregate_id.clone(),
-        tenant_id: event.tenant_id.clone(),
         decision_id: req.decision_id.clone(),
         agent_id: agent_id.clone(),
         identity: owner.clone(),
