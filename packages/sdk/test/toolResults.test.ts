@@ -16,7 +16,7 @@ const assistant: Message = {
     ],
 };
 
-describe("effect.settled", () => {
+describe("finished calls", () => {
     it("records the result and continues when nothing is left pending", async () => {
         // call_a already landed; call_b (a sub-agent) just completed and no effect is pending.
         const messageTree = linearTree({ role: "user", content: "go" }, assistant, {
@@ -33,7 +33,7 @@ describe("effect.settled", () => {
         expect(appendedMessages(result)).toMatchObject([
             { role: "tool", content: "RB", tool_call_id: "call_b", name: "researcher" },
         ]);
-        expect(actionsOfType(result, "call.llm")).toHaveLength(1);
+        expect(actionsOfType(result, "llm.call")).toHaveLength(1);
 
         const toolMsgs = (callLlm(result)?.request.messages ?? []).filter((m) => m.role === "tool");
         expect(toolMsgs).toMatchObject([
@@ -49,7 +49,7 @@ describe("effect.settled", () => {
         const result = await runAgent(loop, {
             trigger: toolResult("call_a", "getWeather", "RA"),
             messageTree,
-            effects: [
+            calls: [
                 {
                     id: "call_b",
                     kind: "sub_agent",
@@ -64,14 +64,13 @@ describe("effect.settled", () => {
         expect(appendedMessages(result)).toMatchObject([
             { role: "tool", content: "RA", tool_call_id: "call_a", name: "getWeather" },
         ]);
-        expect(actionsOfType(result, "call.llm")).toHaveLength(0);
+        expect(actionsOfType(result, "llm.call")).toHaveLength(0);
     });
 });
 
 describe("deferred tools", () => {
     const executeTrigger: DecisionTrigger = {
-        type: "effect.execute",
-        kind: "tool_call",
+        type: "tool.execute",
         id: "tc-1",
         name: "wait",
         arguments: "{}",
@@ -97,7 +96,7 @@ describe("deferred tools", () => {
         expect(result.actions).toHaveLength(0);
     });
 
-    it("a throwing kick-off still reports effect.error", async () => {
+    it("a throwing kick-off still reports tool.error", async () => {
         const wait = tool({
             name: "wait",
             description: "settled out-of-band",
@@ -111,8 +110,6 @@ describe("deferred tools", () => {
             trigger: executeTrigger,
         });
 
-        expect(actionsOfType(result, "effect.error")).toMatchObject([
-            { kind: "tool_call", id: "tc-1", error: "enqueue failed" },
-        ]);
+        expect(actionsOfType(result, "tool.error")).toMatchObject([{ id: "tc-1", error: "enqueue failed" }]);
     });
 });

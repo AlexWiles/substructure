@@ -6,7 +6,7 @@ A tool whose result arrives out-of-band via `settleEffect`. Declaring it with
 emits **no result action** — so the engine leaves the tool call pending. When
 the work finishes, `settleEffect` delivers the result and the loop resumes as
 if the tool had returned synchronously. If the kick-off itself throws, the
-loop reports it as an `effect.error` like any other tool failure.
+loop reports it as a `tool.error` like any other tool failure.
 
 This example runs the runtime in-process (`SubstructureEmbedded.create`), so a single
 file drives the whole demo.

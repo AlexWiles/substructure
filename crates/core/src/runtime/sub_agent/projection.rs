@@ -9,7 +9,7 @@ use crate::runtime::processor::{
     EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCheckpointStore,
     ProcessorError,
 };
-use crate::runtime::session::events::EventPayload;
+use crate::runtime::session::events::{EffectKind, EventPayload};
 use crate::runtime::session::state::SessionState;
 
 use super::SubAgentTask;
@@ -84,6 +84,16 @@ impl EventProcessor for SubAgentDispatchProjection {
                 message: req.message.clone(),
                 span: event.span,
             }),
+            // A voided sub-agent delegation cancels its child session.
+            EventPayload::CallVoided(v) if v.kind == EffectKind::SubAgent => v
+                .session_id
+                .as_ref()
+                .map(|child_session_id| SubAgentTask::CancelSubAgent {
+                    source_event_id: event.id,
+                    tenant_id: event.tenant_id.clone(),
+                    child_session_id: child_session_id.clone(),
+                    span: event.span,
+                }),
             EventPayload::TurnCompleted(tc) => {
                 let derived = event
                     .derived

@@ -68,10 +68,9 @@ pub async fn settle_effect(
     Path(session_id): Path<String>,
     Json(req): Json<SettleEffectRequest>,
 ) -> Response {
-    // The client surface settles client tools only; `kind` is always `tool_call`.
+    // The client surface settles client tools only; the type restricts to `tool.*`.
     let (id, attempt, settlement) = match req {
         SettleEffectRequest::Result {
-            kind: _,
             id,
             result,
             attempt,
@@ -81,7 +80,6 @@ pub async fn settle_effect(
             EffectSettlement::Result(EffectResultPayload::ToolCall { result }),
         ),
         SettleEffectRequest::Error {
-            kind: _,
             id,
             error,
             retryable,
@@ -259,7 +257,7 @@ pub async fn ag_ui_run(
 ) -> Response {
     let session_id = input.thread_id.clone();
 
-    // Pure passthrough: the aggregate classifies the submission against effect state (new turn vs. client tool results).
+    // Passthrough; the core classifies new turn vs. client tool results.
     if input.resume.is_empty() && input.to_messages().is_empty() {
         let body = serde_json::json!({"error": "no messages or resume in RunAgentInput"});
         return (StatusCode::BAD_REQUEST, Json(body)).into_response();
@@ -280,7 +278,7 @@ pub async fn ag_ui_run(
         .await;
 
     let submit = if !input.resume.is_empty() {
-        // Stale interrupt ids no-op in the core, keeping resumes idempotent.
+        // Stale interrupt ids no-op, keeping resumes idempotent.
         let mut outcome: Result<(), RuntimeError> = Ok(());
         for entry in input.resume.clone() {
             let payload = serde_json::json!({
@@ -344,7 +342,7 @@ pub async fn ag_ui_connect(
     Path(_agent_id): Path<String>,
     Json(input): Json<RunAgentInput>,
 ) -> Response {
-    // Reads events to authorize and to carry the active interrupt (payload lives only in the event log).
+    // Read events to authorize and recover the active interrupt.
     let events = match state
         .runtime
         .read_session_events(&caller, &input.thread_id, None, None)
@@ -354,7 +352,7 @@ pub async fn ag_ui_connect(
         Err(e) => return runtime_error_response(e),
     };
 
-    // No events ⇒ session not yet created (fresh thread); empty tree.
+    // No events ⇒ session not yet created; empty tree.
     let tree = if events.is_empty() {
         MessageTree::default()
     } else {

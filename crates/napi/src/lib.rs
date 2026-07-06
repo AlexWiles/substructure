@@ -8,7 +8,6 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing_subscriber::EnvFilter;
 
-use base64::Engine;
 use substructure_core::llm::LlmResponse;
 use substructure_core::owner::SessionOwner;
 use substructure_core::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
@@ -179,15 +178,7 @@ impl EmbeddedRuntime {
                                     decision_id: decision.decision_id.clone(),
                                     transcript: submit.transcript,
                                     actions: submit.actions,
-                                    state: submit
-                                        .state
-                                        .map(|s| {
-                                            base64::engine::general_purpose::STANDARD
-                                                .decode(s)
-                                                .unwrap_or_default()
-                                        })
-                                        .unwrap_or_default()
-                                        .into(),
+                                    state: submit.state.map(Into::into),
                                     span: decision.span.child("js_worker"),
                                 };
 
@@ -310,7 +301,7 @@ impl EmbeddedRuntime {
     /// either fails with `errorMessage`.
     #[napi(
         js_name = "settleEffect",
-        ts_args_type = "sessionId: string, tenantId: string, kind: string, id: string, attempt: number, resultJson: string | undefined, responseJson: string | undefined, errorMessage: string | undefined, retryable: boolean | undefined"
+        ts_args_type = "sessionId: string, tenantId: string, kind: string, id: string, attempt: number | undefined, resultJson: string | undefined, responseJson: string | undefined, errorMessage: string | undefined, retryable: boolean | undefined"
     )]
     pub async fn settle_effect(
         &self,
@@ -318,7 +309,7 @@ impl EmbeddedRuntime {
         tenant_id: String,
         kind: String,
         id: String,
-        attempt: u32,
+        attempt: Option<u32>,
         result_json: Option<String>,
         response_json: Option<String>,
         error_message: Option<String>,
@@ -456,5 +447,5 @@ struct WorkerResponse {
     transcript: Vec<substructure_core::session::message::Message>,
     actions: Vec<substructure_core::session::decision::WorkerAction>,
     #[serde(default)]
-    state: Option<String>,
+    state: Option<serde_json::Value>,
 }

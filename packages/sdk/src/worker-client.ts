@@ -4,9 +4,9 @@ import type {
     MachineSubmitPayloadRequest,
     MintClientTokenRequest,
     MintClientTokenResponse,
-    StreamSessionEventsParams,
     SettleEffectRequest,
     SettleEffectResponse,
+    StreamSessionEventsParams,
     SubmitClientPayloadResponse,
     SubmitRequest,
     SubmitResponse,
@@ -36,7 +36,7 @@ export class WorkerClient extends BaseClient {
         request: SettleEffectRequest,
         auth?: WorkerAuthOptions,
     ): Promise<SettleEffectResponse> {
-        return this.post(`/api/machine/sessions/${sessionId}/effects/settle`, request, {
+        return this.post(`/api/machine/sessions/${sessionId}/calls/settle`, request, {
             headers: buildWorkerAuthHeaders(auth),
         });
     }

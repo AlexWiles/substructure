@@ -71,7 +71,7 @@ const assistant = agent<State>({
         });
 
         // The model asked to run a command: record the turn, park the call, end it.
-        if (req.trigger.type === "effect.settled" && req.trigger.kind === "llm_call" && req.trigger.message) {
+        if (req.trigger.type === "llm.finished" && req.trigger.message) {
             const message = req.trigger.message;
             const call = (message.tool_calls ?? []).find((tc) => tc.function.name === "run_command");
             if (call) {
@@ -95,7 +95,7 @@ const assistant = agent<State>({
             return {
                 actions: [
                     {
-                        type: "call.tool",
+                        type: "tool.call",
                         id: pending.toolCallId,
                         name: "run_command",
                         arguments: JSON.stringify({ cmd: pending.cmd }),
@@ -107,7 +107,9 @@ const assistant = agent<State>({
         }
 
         // Prompting, running the approved command, and continuing are the default loop.
-        return loop({ ...req, state });
+        // The tools mutate `state` while the loop runs, so return it to persist.
+        const d = await loop({ ...req, state });
+        return { ...d, state };
     },
 });
 

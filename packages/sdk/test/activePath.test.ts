@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { toolLoop } from "../src/agent";
 import { activePath } from "../src/core";
 import type { Message, MessageTree, Node } from "../src/types";
-import { appendedMessages, callLlm, runAgent, userMessage } from "./harness";
+import { appendedMessages, callLlm, clientMessage, runAgent } from "./harness";
 
 function node(id: string, parentId: string | undefined, content: string, role: Message["role"] = "user"): Node {
     return { kind: "message", parent_id: parentId, message: { id, role, content } };
@@ -48,7 +48,7 @@ describe("agent prompt", () => {
         (callLlm(result)?.request.messages ?? []).map((m) => m.content);
 
     it("seeds [system, user] on a cold start (empty tree)", async () => {
-        const result = await runAgent(loop, { trigger: userMessage("hi") });
+        const result = await runAgent(loop, { trigger: clientMessage("hi") });
         expect(appendedMessages(result).map((m) => m.role)).toEqual(["system", "user"]);
         expect(appendedMessages(result).map((m) => m.content)).toEqual(["SYS", "hi"]);
         expect(promptOf(result)).toEqual(["SYS", "hi"]);
@@ -63,7 +63,7 @@ describe("agent prompt", () => {
             ],
             head_id: "a1",
         };
-        const result = await runAgent(loop, { trigger: userMessage("U2"), messageTree: tree });
+        const result = await runAgent(loop, { trigger: clientMessage("U2"), messageTree: tree });
         expect(appendedMessages(result).map((m) => m.content)).toEqual(["U2"]);
         // The new turn is the tail of the transcript, continuing the active path.
         expect(result.transcript.map((m) => m.content)).toEqual(["SYS", "U1", "A1", "U2"]);
@@ -75,7 +75,7 @@ describe("agent prompt", () => {
             nodes: [node("s1", undefined, "SYS-IN-TREE", "system"), node("u1", "s1", "U1")],
             head_id: "u1",
         };
-        const result = await runAgent(loop, { trigger: userMessage("U2"), messageTree: tree });
+        const result = await runAgent(loop, { trigger: clientMessage("U2"), messageTree: tree });
         expect(appendedMessages(result).map((m) => m.role)).toEqual(["user"]);
         expect(promptOf(result)).toEqual(["SYS-IN-TREE", "U1", "U2"]);
     });
@@ -83,7 +83,7 @@ describe("agent prompt", () => {
     it("omits the system message when no instructions are given", async () => {
         const bare = toolLoop({ llm: { model: "test-model" } });
         const tree: MessageTree = { nodes: [node("u1", undefined, "U1")], head_id: "u1" };
-        const result = await runAgent(bare, { trigger: userMessage("U2"), messageTree: tree });
+        const result = await runAgent(bare, { trigger: clientMessage("U2"), messageTree: tree });
         expect(appendedMessages(result).map((m) => m.content)).toEqual(["U2"]);
         expect(promptOf(result)).toEqual(["U1", "U2"]);
     });

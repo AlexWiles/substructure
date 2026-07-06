@@ -3,14 +3,12 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 
-use super::decision::{
-    ClientPayload, DecisionTrigger, EffectOutcome, EffectResultPayload, EffectWork, WorkKind,
-    WorkerAction,
-};
+use super::decision::{ClientPayload, DecisionTrigger, WorkerAction};
 use super::events::*;
 use super::message::{Content, ContentPart, ImageUrl, Message, Role};
 use super::state::{
-    json_to_string, new_call_id, new_message_id, EffectStatus, SessionState, SessionStatus,
+    json_to_string, new_call_id, new_message_id, EffectStatus, EffectTracking, SessionState,
+    SessionStatus,
 };
 use crate::runtime::aggregate::Caller;
 use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse};
@@ -46,12 +44,13 @@ pub enum CommandPayload {
     },
     CompleteLlmCall {
         call_id: String,
-        attempt: u32,
+        /// `None` = settle the current attempt; `Some` fences a stale executor.
+        attempt: Option<u32>,
         response: LlmResponse,
     },
     FailLlmCall {
         call_id: String,
-        attempt: u32,
+        attempt: Option<u32>,
         error: String,
         retryable: bool,
         code: Option<ErrorCode>,
@@ -66,16 +65,14 @@ pub enum CommandPayload {
     },
     CompleteToolCall {
         tool_call_id: String,
-        attempt: u32,
+        attempt: Option<u32>,
         result: String,
-        worker_state: Option<WorkerState>,
     },
     FailToolCall {
         tool_call_id: String,
-        attempt: u32,
+        attempt: Option<u32>,
         error: String,
         retryable: bool,
-        worker_state: Option<WorkerState>,
     },
     RequestSubAgent {
         session_id: String,
@@ -112,7 +109,8 @@ pub enum CommandPayload {
         decision_id: String,
         transcript: Vec<Message>,
         actions: Vec<WorkerAction>,
-        state: WorkerState,
+        /// `None` = no opinion, keep the current state.
+        state: Option<WorkerState>,
     },
     FailWorkerDecision {
         decision_id: String,
@@ -271,7 +269,7 @@ impl SessionState {
                 Ok(vec![EventPayload::SessionCreated(Box::new(
                     SessionCreated {
                         agent_id,
-                        owner,
+                        identity: owner,
                         ancestry,
                         worker_retry,
                     },
@@ -285,6 +283,7 @@ impl SessionState {
         }
     }
 
+    // Sole producer of NewMessage; the tree changes only on decision submit.
     fn reconcile_transcript(&self, transcript: Vec<Message>) -> Vec<EventPayload> {
         if transcript.is_empty() {
             return vec![];
@@ -311,35 +310,167 @@ impl SessionState {
 
     fn emit_tool_result(
         &self,
+        batch: &[EventPayload],
         tool_call_id: String,
         name: String,
-        result: String,
+        output: String,
         is_error: bool,
     ) -> EventPayload {
-        self.emit_decision_request(DecisionTrigger::EffectSettled {
-            id: tool_call_id,
-            ok: !is_error,
-            outcome: EffectOutcome::ToolCall { name, result },
-        })
+        let (result, error) = if is_error {
+            (None, Some(output))
+        } else {
+            (Some(output), None)
+        };
+        self.emit_decision_request(
+            batch,
+            DecisionTrigger::ToolFinished {
+                id: tool_call_id,
+                ok: !is_error,
+                name,
+                result,
+                error,
+            },
+        )
     }
 
     fn emit_sub_agent_result(
         &self,
+        batch: &[EventPayload],
         session_id: String,
         tool_call_id: String,
         agent_id: String,
-        result: String,
+        output: String,
         is_error: bool,
     ) -> EventPayload {
-        self.emit_decision_request(DecisionTrigger::EffectSettled {
-            id: session_id,
-            ok: !is_error,
-            outcome: EffectOutcome::SubAgent {
-                tool_call_id,
+        let (result, error) = if is_error {
+            (None, Some(output))
+        } else {
+            (Some(output), None)
+        };
+        self.emit_decision_request(
+            batch,
+            DecisionTrigger::SubAgentFinished {
+                id: tool_call_id,
+                ok: !is_error,
+                session_id,
                 agent_id,
                 result,
+                error,
             },
-        })
+        )
+    }
+
+    /// Whether the decision's effect is anchored off the path to `leaf`.
+    fn stale_decision(&self, leaf: Option<&str>, trigger: &DecisionTrigger) -> bool {
+        let anchor = match trigger {
+            DecisionTrigger::ToolFinished { id, .. } | DecisionTrigger::ToolExecute { id, .. } => {
+                self.tool_calls.get(id).and_then(|c| c.anchor.as_deref())
+            }
+            DecisionTrigger::SubAgentFinished { session_id, .. } => self
+                .sub_agent_calls
+                .get(session_id)
+                .and_then(|c| c.anchor.as_deref()),
+            DecisionTrigger::LlmFinished { id, .. } | DecisionTrigger::LlmExecute { id, .. } => {
+                self.llm_calls.get(id).and_then(|c| c.anchor.as_deref())
+            }
+            _ => return false,
+        };
+        !self.anchor_on_path(leaf, anchor)
+    }
+
+    /// Void events for every effect matching `stranded`.
+    fn void_effects(
+        &self,
+        stranded: impl Fn(&EffectTracking, Option<&str>) -> bool,
+    ) -> Vec<EventPayload> {
+        let mut events = Vec::new();
+        for tc in self.tool_calls.values() {
+            if stranded(&tc.tracking, tc.anchor.as_deref()) {
+                events.push(EventPayload::CallVoided(CallVoided {
+                    kind: EffectKind::ToolCall,
+                    id: tc.tool_call_id.clone(),
+                    session_id: None,
+                }));
+            }
+        }
+        for call in self.llm_calls.values() {
+            if stranded(&call.tracking, call.anchor.as_deref()) {
+                events.push(EventPayload::CallVoided(CallVoided {
+                    kind: EffectKind::LlmCall,
+                    id: call.call_id.clone(),
+                    session_id: None,
+                }));
+            }
+        }
+        for sa in self.sub_agent_calls.values() {
+            if stranded(&sa.tracking, sa.anchor.as_deref()) {
+                events.push(EventPayload::CallVoided(CallVoided {
+                    kind: EffectKind::SubAgent,
+                    id: sa.tool_call_id.clone(),
+                    session_id: Some(sa.session_id.clone()),
+                }));
+            }
+        }
+        events
+    }
+
+    /// Voids pending LLM calls (including this `batch`'s), sparing tools and sub-agents.
+    fn void_llm_calls_for_interrupt(&self, batch: &[EventPayload]) -> Vec<EventPayload> {
+        let mut ids: Vec<String> = self
+            .llm_calls
+            .values()
+            .filter(|c| c.tracking.status == EffectStatus::Pending)
+            .map(|c| c.call_id.clone())
+            .collect();
+        ids.extend(batch.iter().filter_map(|e| match e {
+            EventPayload::LlmCallRequested(r) => Some(r.call_id.clone()),
+            _ => None,
+        }));
+        ids.into_iter()
+            .filter(|id| {
+                !batch
+                    .iter()
+                    .any(|e| matches!(e, EventPayload::CallVoided(v) if v.id == *id))
+            })
+            .map(|id| {
+                EventPayload::CallVoided(CallVoided {
+                    kind: EffectKind::LlmCall,
+                    id,
+                    session_id: None,
+                })
+            })
+            .collect()
+    }
+
+    /// Whether `batch` already voided this call.
+    fn batch_voided(batch: &[EventPayload], kind: EffectKind, id: &str) -> bool {
+        batch
+            .iter()
+            .any(|e| matches!(e, EventPayload::CallVoided(v) if v.kind == kind && v.id == id))
+    }
+
+    /// Void work and drop undelivered decisions anchored off the retained path.
+    fn void_stranded_work(&self, leaf: Option<&str>) -> Vec<EventPayload> {
+        let mut events = self.void_effects(|tracking, anchor| {
+            matches!(
+                tracking.status,
+                EffectStatus::Pending | EffectStatus::RetryScheduled
+            ) && !self.anchor_on_path(leaf, anchor)
+        });
+        for wd in self.worker_decisions.values() {
+            if matches!(
+                wd.tracking.status,
+                EffectStatus::Queued | EffectStatus::RetryScheduled
+            ) && self.stale_decision(leaf, &wd.trigger)
+            {
+                events.push(EventPayload::DecisionRequestDropped(
+                    DecisionRequestDropped {
+                        decision_id: wd.decision_id.clone(),
+                    },
+                ));
+            }
+        }
+        events
     }
 
     /// `(tool_call_id, name, content)` for a transcript tool message answering a pending client tool call.
@@ -360,11 +491,18 @@ impl SessionState {
         Some((id.to_string(), tc.name.clone(), content))
     }
 
-    fn emit_decision_request(&self, trigger: DecisionTrigger) -> EventPayload {
-        let decision_id = new_call_id();
-        if self.has_pending_worker_decision()
+    fn emit_decision_request(
+        &self,
+        batch: &[EventPayload],
+        trigger: DecisionTrigger,
+    ) -> EventPayload {
+        let queued = self.has_pending_worker_decision()
             || matches!(self.status, SessionStatus::Interrupted { .. })
-        {
+            || batch
+                .iter()
+                .any(|e| matches!(e, EventPayload::WorkerDecisionRequested(_)));
+        let decision_id = new_call_id();
+        if queued {
             EventPayload::DecisionRequestQueued(DecisionRequestQueued {
                 decision_id,
                 trigger,
@@ -417,9 +555,13 @@ impl SessionState {
                             return Err(SessionError::SessionInterrupted);
                         }
                         if message.role == Role::User {
-                            events.push(self.emit_decision_request(DecisionTrigger::UserMessage {
-                                message: assign_id(message),
-                            }));
+                            let request = self.emit_decision_request(
+                                &events,
+                                DecisionTrigger::ClientMessage {
+                                    message: assign_id(message),
+                                },
+                            );
+                            events.push(request);
                         }
                     }
                     ClientPayload::Messages {
@@ -435,57 +577,47 @@ impl SessionState {
                                 .filter_map(|m| self.pending_client_result(m))
                                 .collect();
                             // First completion prompts; the rest queue behind it.
-                            let mut live = self.has_pending_worker_decision()
-                                || matches!(self.status, SessionStatus::Interrupted { .. });
                             for (tool_call_id, name, content) in completions {
                                 events.push(EventPayload::ToolCallCompleted(ToolCallCompleted {
                                     tool_call_id: tool_call_id.clone(),
                                     name: name.clone(),
                                     result: content.clone(),
                                 }));
-                                let trigger = DecisionTrigger::EffectSettled {
-                                    id: tool_call_id,
-                                    ok: true,
-                                    outcome: EffectOutcome::ToolCall {
+                                let request = self.emit_decision_request(
+                                    &events,
+                                    DecisionTrigger::ToolFinished {
+                                        id: tool_call_id,
+                                        ok: true,
                                         name,
-                                        result: content,
+                                        result: Some(content),
+                                        error: None,
                                     },
-                                };
-                                let decision_id = new_call_id();
-                                if live {
-                                    events.push(EventPayload::DecisionRequestQueued(
-                                        DecisionRequestQueued {
-                                            decision_id,
-                                            trigger,
-                                        },
-                                    ));
-                                } else {
-                                    live = true;
-                                    events.push(EventPayload::WorkerDecisionRequested(
-                                        WorkerDecisionRequested {
-                                            decision_id,
-                                            trigger,
-                                        },
-                                    ));
-                                }
+                                );
+                                events.push(request);
                             }
                         } else {
                             if matches!(self.status, SessionStatus::Interrupted { .. }) {
                                 return Err(SessionError::SessionInterrupted);
                             }
-                            events.push(self.emit_decision_request(
-                                DecisionTrigger::UserTranscript { messages },
-                            ));
+                            let request = self.emit_decision_request(
+                                &events,
+                                DecisionTrigger::ClientTranscript { messages },
+                            );
+                            events.push(request);
                         }
                     }
                     ClientPayload::Action { action } => {
                         if matches!(self.status, SessionStatus::Interrupted { .. }) {
                             return Err(SessionError::SessionInterrupted);
                         }
-                        events.push(self.emit_decision_request(DecisionTrigger::ClientAction {
-                            name: action.name,
-                            args: action.args,
-                        }));
+                        let request = self.emit_decision_request(
+                            &events,
+                            DecisionTrigger::ClientAction {
+                                name: action.name,
+                                args: action.args,
+                            },
+                        );
+                        events.push(request);
                     }
                 }
 
@@ -522,9 +654,13 @@ impl SessionState {
                             events.push(EventPayload::TurnStarted(TurnStarted { turn_id }));
                         }
                         if message.role == Role::User {
-                            events.push(self.emit_decision_request(DecisionTrigger::UserMessage {
-                                message: assign_id(message),
-                            }));
+                            let request = self.emit_decision_request(
+                                &events,
+                                DecisionTrigger::ClientMessage {
+                                    message: assign_id(message),
+                                },
+                            );
+                            events.push(request);
                         }
                         Ok(events)
                     }
@@ -561,12 +697,17 @@ impl SessionState {
                     })];
 
                     if handler == LlmHandler::Worker {
-                        events.push(self.emit_decision_request(DecisionTrigger::EffectExecute {
-                            id: call_id,
-                            attempt: 0,
-                            deadline: retry.deadline(chrono::Utc::now()),
-                            work: EffectWork::LlmCall { request, stream },
-                        }));
+                        let execute = self.emit_decision_request(
+                            &events,
+                            DecisionTrigger::LlmExecute {
+                                id: call_id,
+                                request,
+                                stream,
+                                attempt: 0,
+                                deadline: retry.deadline(chrono::Utc::now()),
+                            },
+                        );
+                        events.push(execute);
                     }
 
                     Ok(events)
@@ -591,7 +732,7 @@ impl SessionState {
                 match call {
                     Some(c)
                         if c.tracking.status == EffectStatus::Pending
-                            && c.tracking.retry.attempts == attempt =>
+                            && attempt.is_none_or(|a| a == c.tracking.retry.attempts) =>
                     {
                         let truncated = response.finish_reason.as_deref() == Some("length");
                         let usage = response.usage.clone();
@@ -617,27 +758,26 @@ impl SessionState {
                             }
                             Some(Content::Parts(parts))
                         };
-                        // id-less so the engine mints a fresh node on reconcile.
+                        // Fresh id so reconcile records a new node.
                         let message = Message {
-                            id: String::new(),
+                            id: new_message_id(),
                             role: Role::Assistant,
                             content,
                             tool_calls,
                             tool_call_id: None,
                             name: None,
                         };
-                        Ok(vec![
-                            EventPayload::LlmCallCompleted(LlmCallCompleted {
-                                call_id: call_id.clone(),
-                                attempt,
-                                response,
-                            }),
-                            self.emit_decision_request(DecisionTrigger::EffectSettled {
-                                id: call_id,
-                                ok: true,
-                                outcome: EffectOutcome::llm_ok(message, truncated, usage, cost),
-                            }),
-                        ])
+                        let mut events = vec![EventPayload::LlmCallCompleted(LlmCallCompleted {
+                            call_id: call_id.clone(),
+                            attempt: c.tracking.retry.attempts,
+                            response,
+                        })];
+                        let settle = self.emit_decision_request(
+                            &events,
+                            DecisionTrigger::llm_ok(call_id, message, truncated, usage, cost),
+                        );
+                        events.push(settle);
+                        Ok(events)
                     }
                     // Late/stale settle: silent for the executor (idempotent), an error for an out-of-band caller.
                     _ if is_system => Ok(vec![]),
@@ -663,7 +803,7 @@ impl SessionState {
                 let call = match call {
                     Some(c)
                         if c.tracking.status == EffectStatus::Pending
-                            && c.tracking.retry.attempts == attempt =>
+                            && attempt.is_none_or(|a| a == c.tracking.retry.attempts) =>
                     {
                         c
                     }
@@ -676,7 +816,7 @@ impl SessionState {
                 };
                 let mut events = vec![EventPayload::LlmCallErrored(LlmCallErrored {
                     call_id: call_id.clone(),
-                    attempt,
+                    attempt: call.tracking.retry.attempts,
                     error: error.clone(),
                     retryable,
                     code: code.clone(),
@@ -687,11 +827,11 @@ impl SessionState {
                     .retry_policy
                     .exhausted(&call.tracking.retry, retryable)
                 {
-                    events.push(self.emit_decision_request(DecisionTrigger::EffectSettled {
-                        id: call_id,
-                        ok: false,
-                        outcome: EffectOutcome::llm_err(error, code, detail),
-                    }));
+                    let settle = self.emit_decision_request(
+                        &events,
+                        DecisionTrigger::llm_err(call_id, error, code, detail),
+                    );
+                    events.push(settle);
                 }
                 Ok(events)
             }
@@ -716,14 +856,17 @@ impl SessionState {
                             retry: retry.clone(),
                         })];
                         if handler == ToolHandler::Worker {
-                            events.push(self.emit_decision_request(
-                                DecisionTrigger::EffectExecute {
+                            let execute = self.emit_decision_request(
+                                &events,
+                                DecisionTrigger::ToolExecute {
                                     id: tool_call_id,
+                                    name,
+                                    arguments,
                                     attempt: 0,
                                     deadline: retry.deadline(chrono::Utc::now()),
-                                    work: EffectWork::ToolCall { name, arguments },
                                 },
-                            ));
+                            );
+                            events.push(execute);
                         }
                         Ok(events)
                     }
@@ -734,7 +877,6 @@ impl SessionState {
                 tool_call_id,
                 attempt,
                 result,
-                worker_state,
             } => {
                 let tc = self
                     .tool_calls
@@ -745,7 +887,7 @@ impl SessionState {
                     return Err(SessionError::EffectNotPending);
                 }
 
-                if tc.tracking.retry.attempts != attempt {
+                if attempt.is_some_and(|a| a != tc.tracking.retry.attempts) {
                     return Err(SessionError::EffectAttemptMismatch);
                 }
 
@@ -758,12 +900,8 @@ impl SessionState {
                     name: name.clone(),
                     result: result.clone(),
                 })];
-                if let Some(ws) = worker_state {
-                    events.push(EventPayload::WorkerStateUpdated(WorkerStateUpdated {
-                        state: ws,
-                    }));
-                }
-                events.push(self.emit_tool_result(tool_call_id, name, result, false));
+                let settle = self.emit_tool_result(&events, tool_call_id, name, result, false);
+                events.push(settle);
                 Ok(events)
             }
 
@@ -772,7 +910,6 @@ impl SessionState {
                 attempt,
                 error,
                 retryable,
-                worker_state,
             } => {
                 let tc = self
                     .tool_calls
@@ -781,7 +918,7 @@ impl SessionState {
                 if tc.tracking.status != EffectStatus::Pending {
                     return Err(SessionError::EffectNotPending);
                 }
-                if tc.tracking.retry.attempts != attempt {
+                if attempt.is_some_and(|a| a != tc.tracking.retry.attempts) {
                     return Err(SessionError::EffectAttemptMismatch);
                 }
                 self.check_tool_call_caller(tc, caller)?;
@@ -796,13 +933,9 @@ impl SessionState {
                     error: error.clone(),
                     retryable,
                 })];
-                if let Some(ws) = worker_state {
-                    events.push(EventPayload::WorkerStateUpdated(WorkerStateUpdated {
-                        state: ws,
-                    }));
-                }
                 if exhausted {
-                    events.push(self.emit_tool_result(tool_call_id, name, error, true));
+                    let settle = self.emit_tool_result(&events, tool_call_id, name, error, true);
+                    events.push(settle);
                 }
                 Ok(events)
             }
@@ -865,13 +998,15 @@ impl SessionState {
                     retryable,
                 })];
                 if exhausted {
-                    events.push(self.emit_sub_agent_result(
+                    let settle = self.emit_sub_agent_result(
+                        &events,
                         session_id,
                         tool_call_id,
                         agent_id,
                         error,
                         true,
-                    ));
+                    );
+                    events.push(settle);
                 }
                 Ok(events)
             }
@@ -896,13 +1031,15 @@ impl SessionState {
                     token_usage,
                     data,
                 })];
-                events.push(self.emit_sub_agent_result(
+                let settle = self.emit_sub_agent_result(
+                    &events,
                     session_id,
                     tool_call_id,
                     agent_id,
                     result,
                     false,
-                ));
+                );
+                events.push(settle);
                 Ok(events)
             }
 
@@ -914,12 +1051,17 @@ impl SessionState {
                 self.ensure_owns_session(caller)?;
                 match self.status {
                     SessionStatus::Interrupted { .. } => Ok(vec![]),
-                    _ => Ok(vec![EventPayload::SessionInterrupted(SessionInterrupted {
-                        interrupt_id,
-                        origin: Self::caller_interrupt_origin(caller),
-                        reason,
-                        payload,
-                    })]),
+                    _ => {
+                        let mut events =
+                            vec![EventPayload::SessionInterrupted(SessionInterrupted {
+                                interrupt_id,
+                                origin: Self::caller_interrupt_origin(caller),
+                                reason,
+                                payload,
+                            })];
+                        events.extend(self.void_llm_calls_for_interrupt(&[]));
+                        Ok(events)
+                    }
                 }
             }
 
@@ -933,8 +1075,7 @@ impl SessionState {
                         if Self::caller_interrupt_origin(caller).privilege() < origin.privilege() {
                             return Err(SessionError::SessionAccessDenied);
                         }
-                        // Emitted directly, not via emit_decision_request: state is still
-                        // Interrupted (which would queue) but nothing is pending.
+                        // Emitted directly: emit_decision_request would queue while Interrupted.
                         Ok(vec![
                             EventPayload::InterruptResumed(InterruptResumed {
                                 interrupt_id: interrupt_id.clone(),
@@ -969,9 +1110,56 @@ impl SessionState {
                     _ => return Ok(vec![]),
                 }
                 let mut events: Vec<EventPayload> = vec![EventPayload::WorkerDecisionCompleted(
-                    WorkerDecisionCompleted { decision_id, state },
+                    WorkerDecisionCompleted { decision_id },
                 )];
-                events.extend(self.reconcile_transcript(transcript));
+                let reconcile = self.reconcile_transcript(transcript);
+
+                let post_head = reconcile
+                    .iter()
+                    .rev()
+                    .find_map(|e| match e {
+                        EventPayload::NewMessage(m) => Some(m.message.id.clone()),
+                        _ => None,
+                    })
+                    .or_else(|| self.head_id.clone());
+
+                // New nodes carry no anchor; walk to the deepest pre-existing ancestor.
+                let batch_parents: std::collections::HashMap<&str, Option<&str>> = reconcile
+                    .iter()
+                    .filter_map(|e| match e {
+                        EventPayload::NewMessage(m) => {
+                            Some((m.message.id.as_str(), m.parent_id.as_deref()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let mut prefix_cursor = post_head.as_deref();
+                let mut seen = std::collections::HashSet::new();
+                while let Some(id) = prefix_cursor {
+                    if !seen.insert(id) {
+                        break; // malformed parent cycle guard, mirrors path_ids
+                    }
+                    match batch_parents.get(id) {
+                        Some(parent) => prefix_cursor = *parent,
+                        None => break,
+                    }
+                }
+                let prefix_leaf = prefix_cursor.map(str::to_string);
+
+                events.extend(reconcile);
+
+                let reap = self.void_stranded_work(prefix_leaf.as_deref());
+                events.extend(reap);
+
+                if let Some(state) = state {
+                    if state != self.resolve_state_for(prefix_leaf.as_deref()) {
+                        events.push(EventPayload::WorkerStateUpdated(WorkerStateUpdated {
+                            state,
+                            anchor: post_head,
+                        }));
+                    }
+                }
+
                 let system = Caller::System {
                     tenant_id: self
                         .owner
@@ -981,6 +1169,19 @@ impl SessionState {
                 };
                 for action in actions {
                     let sub_events = match action {
+                        // Settle for work this batch voided: drop it.
+                        WorkerAction::ToolResult { ref id, .. }
+                        | WorkerAction::ToolError { ref id, .. }
+                            if Self::batch_voided(&events, EffectKind::ToolCall, id) =>
+                        {
+                            Ok(vec![])
+                        }
+                        WorkerAction::LlmResult { ref id, .. }
+                        | WorkerAction::LlmError { ref id, .. }
+                            if Self::batch_voided(&events, EffectKind::LlmCall, id) =>
+                        {
+                            Ok(vec![])
+                        }
                         WorkerAction::CallLlm {
                             id,
                             request,
@@ -1042,71 +1243,79 @@ impl SessionState {
                             payload,
                         } => match self.status {
                             SessionStatus::Interrupted { .. } => Ok(vec![]),
-                            _ => Ok(vec![EventPayload::SessionInterrupted(SessionInterrupted {
-                                interrupt_id: if interrupt_id.is_empty() {
-                                    new_call_id()
-                                } else {
-                                    interrupt_id
-                                },
-                                origin: InterruptOrigin::Frontend,
-                                reason,
-                                payload,
-                            })]),
+                            _ => {
+                                let mut sub =
+                                    vec![EventPayload::SessionInterrupted(SessionInterrupted {
+                                        interrupt_id: if interrupt_id.is_empty() {
+                                            new_call_id()
+                                        } else {
+                                            interrupt_id
+                                        },
+                                        origin: InterruptOrigin::Frontend,
+                                        reason,
+                                        payload,
+                                    })];
+                                sub.extend(self.void_llm_calls_for_interrupt(&events));
+                                Ok(sub)
+                            }
                         },
-                        WorkerAction::EffectResult {
+                        WorkerAction::ToolResult {
                             id,
                             attempt,
                             result,
-                        } => match result {
-                            EffectResultPayload::ToolCall { result } => self.handle(
-                                CommandPayload::CompleteToolCall {
-                                    tool_call_id: id,
-                                    attempt,
-                                    result,
-                                    worker_state: None,
-                                },
-                                &system,
-                            ),
-                            EffectResultPayload::LlmCall { response } => self.handle(
-                                CommandPayload::CompleteLlmCall {
-                                    call_id: id,
-                                    attempt,
-                                    response,
-                                },
-                                &system,
-                            ),
-                        },
-                        WorkerAction::EffectError {
-                            kind,
+                        } => self.handle(
+                            CommandPayload::CompleteToolCall {
+                                tool_call_id: id,
+                                attempt,
+                                result,
+                            },
+                            &system,
+                        ),
+                        WorkerAction::LlmResult {
+                            id,
+                            attempt,
+                            response,
+                        } => self.handle(
+                            CommandPayload::CompleteLlmCall {
+                                call_id: id,
+                                attempt,
+                                response,
+                            },
+                            &system,
+                        ),
+                        WorkerAction::ToolError {
+                            id,
+                            attempt,
+                            error,
+                            retryable,
+                            ..
+                        } => self.handle(
+                            CommandPayload::FailToolCall {
+                                tool_call_id: id,
+                                attempt,
+                                error,
+                                retryable,
+                            },
+                            &system,
+                        ),
+                        WorkerAction::LlmError {
                             id,
                             attempt,
                             error,
                             retryable,
                             code,
                             detail,
-                        } => match kind {
-                            WorkKind::ToolCall => self.handle(
-                                CommandPayload::FailToolCall {
-                                    tool_call_id: id,
-                                    attempt,
-                                    error,
-                                    retryable,
-                                    worker_state: None,
-                                },
-                                &system,
-                            ),
-                            WorkKind::LlmCall => self.handle(
-                                CommandPayload::FailLlmCall {
-                                    call_id: id,
-                                    attempt,
-                                    error,
-                                    retryable,
-                                    code,
-                                    detail,
-                                },
-                                &system,
-                            ),
-                        },
+                        } => self.handle(
+                            CommandPayload::FailLlmCall {
+                                call_id: id,
+                                attempt,
+                                error,
+                                retryable,
+                                code,
+                                detail,
+                            },
+                            &system,
+                        ),
                         WorkerAction::Done { data } => {
                             self.handle(CommandPayload::MarkDone { data }, &system)
                         }
@@ -1120,20 +1329,32 @@ impl SessionState {
                 let interrupted_in_batch = events
                     .iter()
                     .any(|e| matches!(e, EventPayload::SessionInterrupted(_)));
-                let next_decision = self
-                    .next_queued_decision()
-                    .map(|d| (d.decision_id.clone(), d.trigger.clone()))
-                    .or_else(|| {
-                        events.iter().find_map(|e| match e {
-                            EventPayload::DecisionRequestQueued(q) => {
-                                Some((q.decision_id.clone(), q.trigger.clone()))
-                            }
-                            _ => None,
+                if !interrupted_in_batch {
+                    let promoted = {
+                        let dropped: std::collections::HashSet<&str> = events
+                            .iter()
+                            .filter_map(|e| match e {
+                                EventPayload::DecisionRequestDropped(d) => {
+                                    Some(d.decision_id.as_str())
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                        let mut candidates = self
+                            .queued_decisions()
+                            .into_iter()
+                            .filter(|d| !dropped.contains(d.decision_id.as_str()))
+                            .map(|d| (d.decision_id.clone(), d.trigger.clone()));
+                        candidates.next().or_else(|| {
+                            events.iter().find_map(|e| match e {
+                                EventPayload::DecisionRequestQueued(q) => {
+                                    Some((q.decision_id.clone(), q.trigger.clone()))
+                                }
+                                _ => None,
+                            })
                         })
-                    });
-
-                if let Some((decision_id, trigger)) = next_decision {
-                    if !interrupted_in_batch {
+                    };
+                    if let Some((decision_id, trigger)) = promoted {
                         events.push(EventPayload::WorkerDecisionRequested(
                             WorkerDecisionRequested {
                                 decision_id,
@@ -1171,7 +1392,17 @@ impl SessionState {
 
             CommandPayload::CancelSession => {
                 Self::ensure_machine_or_system(caller)?;
-                Ok(vec![EventPayload::SessionCancelled])
+                if matches!(self.status, SessionStatus::Done) {
+                    return Ok(vec![]);
+                }
+                let mut events = vec![EventPayload::SessionCancelled];
+                events.extend(self.void_effects(|tracking, _| {
+                    matches!(
+                        tracking.status,
+                        EffectStatus::Pending | EffectStatus::RetryScheduled
+                    )
+                }));
+                Ok(events)
             }
 
             CommandPayload::MarkDone { data } => {
@@ -1225,12 +1456,14 @@ impl SessionState {
                     retryable: true,
                 })];
                 if tc.tracking.retry_policy.exhausted(&tc.tracking.retry, true) {
-                    events.push(self.emit_tool_result(
+                    let settle = self.emit_tool_result(
+                        &events,
                         tc.tool_call_id.clone(),
                         tc.name.clone(),
                         "deadline exceeded".to_string(),
                         true,
-                    ));
+                    );
+                    events.push(settle);
                 }
                 return Ok(events);
             }
@@ -1251,17 +1484,17 @@ impl SessionState {
                             handler: call.handler.clone(),
                         })];
                         if call.handler == LlmHandler::Worker {
-                            events.push(self.emit_decision_request(
-                                DecisionTrigger::EffectExecute {
+                            let execute = self.emit_decision_request(
+                                &events,
+                                DecisionTrigger::LlmExecute {
                                     id: call.call_id.clone(),
+                                    request,
+                                    stream: call.stream,
                                     attempt: call.tracking.retry.attempts,
                                     deadline: call.tracking.retry_policy.deadline(now),
-                                    work: EffectWork::LlmCall {
-                                        request,
-                                        stream: call.stream,
-                                    },
                                 },
-                            ));
+                            );
+                            events.push(execute);
                         }
                         return Ok(events);
                     }
@@ -1283,17 +1516,17 @@ impl SessionState {
                             retry: tc.tracking.retry_policy.clone(),
                         })];
                         if tc.handler == ToolHandler::Worker {
-                            events.push(self.emit_decision_request(
-                                DecisionTrigger::EffectExecute {
+                            let execute = self.emit_decision_request(
+                                &events,
+                                DecisionTrigger::ToolExecute {
                                     id: tc.tool_call_id.clone(),
+                                    name: tc.name.clone(),
+                                    arguments: tc.arguments.clone(),
                                     attempt: tc.tracking.retry.attempts,
                                     deadline: tc.tracking.retry_policy.deadline(now),
-                                    work: EffectWork::ToolCall {
-                                        name: tc.name.clone(),
-                                        arguments: tc.arguments.clone(),
-                                    },
                                 },
-                            ));
+                            );
+                            events.push(execute);
                         }
                         return Ok(events);
                     }
@@ -1312,13 +1545,15 @@ impl SessionState {
                     retryable: true,
                 })];
                 if sa.tracking.retry_policy.exhausted(&sa.tracking.retry, true) {
-                    events.push(self.emit_sub_agent_result(
+                    let settle = self.emit_sub_agent_result(
+                        &events,
                         sa.session_id.clone(),
                         sa.tool_call_id.clone(),
                         sa.agent_id.clone(),
                         "deadline exceeded".to_string(),
                         true,
-                    ));
+                    );
+                    events.push(settle);
                 }
                 return Ok(events);
             }
@@ -1371,26 +1606,12 @@ impl SessionState {
             }
         }
 
-        // Lost `effect.settled`s are recovered by work-queue redelivery, not by re-firing here.
-        if let Some(wd) = self.next_queued_decision() {
+        // Lost decisions are recovered by work-queue redelivery, not re-fired here.
+        if let Some(wd) = self.queued_decisions().first() {
             return Ok(vec![EventPayload::WorkerDecisionRequested(
                 WorkerDecisionRequested {
                     decision_id: wd.decision_id.clone(),
                     trigger: wd.trigger.clone(),
-                },
-            )]);
-        }
-
-        // Nothing left in flight → stall recovery.
-        if self.all_tools_resolved()
-            && !self.has_pending_llm()
-            && !self.has_queued_worker_decision()
-            && !self.has_pending_worker_decision()
-        {
-            return Ok(vec![EventPayload::WorkerDecisionRequested(
-                WorkerDecisionRequested {
-                    decision_id: new_call_id(),
-                    trigger: DecisionTrigger::Stall,
                 },
             )]);
         }
@@ -1410,10 +1631,7 @@ mod tests {
     use crate::runtime::llm::{LlmRequest, LlmResponse};
     use crate::runtime::owner::SessionOwner;
     use crate::runtime::retry::RetryPolicy;
-    use crate::runtime::session::decision::{
-        ClientPayload, DecisionTrigger, EffectOutcome, EffectResultPayload, EffectWork,
-        WorkerAction,
-    };
+    use crate::runtime::session::decision::{ClientPayload, DecisionTrigger, WorkerAction};
     use crate::runtime::session::events::{EventPayload, LlmHandler, ToolHandler};
     use crate::runtime::session::message::{Content, Message, Role};
     use crate::runtime::session::state::{EffectStatus, SessionState, SessionStatus};
@@ -1481,9 +1699,8 @@ mod tests {
             &mut agg,
             CommandPayload::CompleteToolCall {
                 tool_call_id: "tc-1".to_string(),
-                attempt: 0,
+                attempt: Some(0),
                 result: "ok".to_string(),
-                worker_state: None,
             },
             &Caller::Frontend {
                 tenant_id: "tenant-a".to_string(),
@@ -1538,9 +1755,8 @@ mod tests {
             .handle(
                 CommandPayload::CompleteToolCall {
                     tool_call_id: "tc-1".to_string(),
-                    attempt: 0,
+                    attempt: Some(0),
                     result: "ok".to_string(),
-                    worker_state: None,
                 },
                 &caller,
             )
@@ -1580,9 +1796,8 @@ mod tests {
             .handle(
                 CommandPayload::CompleteToolCall {
                     tool_call_id: "tc-1".to_string(),
-                    attempt: 0,
+                    attempt: Some(0),
                     result: "ok".to_string(),
-                    worker_state: None,
                 },
                 &caller,
             )
@@ -1658,7 +1873,7 @@ mod tests {
 
     #[test]
     fn machine_completes_worker_handled_tool_call_after_worker_releases_decision() {
-        // Async-tool flow: worker acks the effect.execute with no actions, then the tool settles out-of-band.
+        // Async-tool flow: worker acks the tool.execute with no actions, then the tool settles out-of-band.
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
         let request_events = dispatch(
             &mut agg,
@@ -1679,33 +1894,30 @@ mod tests {
                 EventPayload::WorkerDecisionRequested(p) => Some(p.decision_id.clone()),
                 _ => None,
             })
-            .expect("worker-handled tool call emits an effect.execute decision");
+            .expect("worker-handled tool call emits a tool.execute decision");
 
         let machine = Caller::Machine {
             tenant_id: "tenant-a".to_string(),
             key_id: "prod-key-1".to_string(),
         };
 
-        // Worker releases its decision with no actions.
         dispatch(
             &mut agg,
             CommandPayload::SubmitWorkerDecision {
                 decision_id: d1,
                 transcript: vec![],
                 actions: vec![],
-                state: vec![].into(),
+                state: None,
             },
             &machine,
         );
 
-        // Now the machine completes the tool call directly.
         let events = dispatch(
             &mut agg,
             CommandPayload::CompleteToolCall {
                 tool_call_id: "tc-1".to_string(),
-                attempt: 0,
+                attempt: Some(0),
                 result: "ok".to_string(),
-                worker_state: None,
             },
             &machine,
         );
@@ -1728,8 +1940,7 @@ mod tests {
 
     #[test]
     fn machine_completes_worker_handled_tool_call_before_worker_releases_decision() {
-        // Tool result arrives before the worker has acknowledged its
-        // effect.execute decision.
+        // Tool result arrives before the worker acks its tool.execute decision.
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
         dispatch(
             &mut agg,
@@ -1749,9 +1960,8 @@ mod tests {
             &mut agg,
             CommandPayload::CompleteToolCall {
                 tool_call_id: "tc-1".to_string(),
-                attempt: 0,
+                attempt: Some(0),
                 result: "ok".to_string(),
-                worker_state: None,
             },
             &Caller::Machine {
                 tenant_id: "tenant-a".to_string(),
@@ -1802,9 +2012,8 @@ mod tests {
             .handle(
                 CommandPayload::CompleteToolCall {
                     tool_call_id: "tc-1".to_string(),
-                    attempt: 7,
+                    attempt: Some(7),
                     result: "ok".to_string(),
-                    worker_state: None,
                 },
                 &caller,
             )
@@ -1910,7 +2119,7 @@ mod tests {
                         handler: ToolHandler::Worker,
                         retry: RetryPolicy::no_retry(),
                     }],
-                    state: vec![].into(),
+                    state: None,
                 },
                 &machine,
             )
@@ -1966,14 +2175,13 @@ mod tests {
             key_id: "prod-key-1".to_string(),
         };
 
-        // First submission completes the decision.
         dispatch(
             &mut agg,
             CommandPayload::SubmitWorkerDecision {
                 decision_id: decision_id.clone(),
                 transcript: vec![],
                 actions: vec![],
-                state: vec![].into(),
+                state: None,
             },
             &machine,
         );
@@ -1992,7 +2200,7 @@ mod tests {
                         handler: ToolHandler::Worker,
                         retry: RetryPolicy::no_retry(),
                     }],
-                    state: vec![].into(),
+                    state: None,
                 },
                 &machine,
             )
@@ -2064,9 +2272,8 @@ mod tests {
             .handle(
                 CommandPayload::CompleteToolCall {
                     tool_call_id: "tc-unknown".to_string(),
-                    attempt: 0,
+                    attempt: Some(0),
                     result: "ok".to_string(),
-                    worker_state: None,
                 },
                 &caller,
             )
@@ -2254,7 +2461,7 @@ mod tests {
                 decision_id,
                 transcript: nodes.into_iter().map(|n| n.message).collect(),
                 actions: vec![],
-                state: vec![].into(),
+                state: None,
             },
             &machine(),
         );
@@ -2330,7 +2537,7 @@ mod tests {
             })
             .expect("a decision request");
         match trigger {
-            DecisionTrigger::UserTranscript { messages } => {
+            DecisionTrigger::ClientTranscript { messages } => {
                 assert_eq!(
                     messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
                     vec!["c1", "a1", "c2"]
@@ -2382,7 +2589,7 @@ mod tests {
         assert!(
             decision_with(&events, |t| matches!(
                 t,
-                DecisionTrigger::UserMessage { .. }
+                DecisionTrigger::ClientMessage { .. }
             ))
             .is_none(),
             "a tool-result submission is not a user turn"
@@ -2427,24 +2634,12 @@ mod tests {
             .filter_map(|e| match e {
                 EventPayload::ToolCallCompleted(_) => Some("complete"),
                 EventPayload::WorkerDecisionRequested(p)
-                    if matches!(
-                        p.trigger,
-                        DecisionTrigger::EffectSettled {
-                            outcome: EffectOutcome::ToolCall { .. },
-                            ..
-                        }
-                    ) =>
+                    if matches!(p.trigger, DecisionTrigger::ToolFinished { .. }) =>
                 {
                     Some("live")
                 }
                 EventPayload::DecisionRequestQueued(p)
-                    if matches!(
-                        p.trigger,
-                        DecisionTrigger::EffectSettled {
-                            outcome: EffectOutcome::ToolCall { .. },
-                            ..
-                        }
-                    ) =>
+                    if matches!(p.trigger, DecisionTrigger::ToolFinished { .. }) =>
                 {
                     Some("queued")
                 }
@@ -2510,7 +2705,7 @@ mod tests {
             &mut agg,
             CommandPayload::CompleteLlmCall {
                 call_id: "llm-1".to_string(),
-                attempt: 0,
+                attempt: Some(0),
                 response: LlmResponse {
                     model: "test-model".to_string(),
                     content: Some("hello".to_string()),
@@ -2539,14 +2734,10 @@ mod tests {
         assert!(
             decision_with(&events, |t| matches!(
                 t,
-                DecisionTrigger::EffectSettled {
-                    id,
-                    ok: true,
-                    outcome: EffectOutcome::LlmCall { .. },
-                } if id == "llm-1"
+                DecisionTrigger::LlmFinished { id, ok: true, .. } if id == "llm-1"
             ))
             .is_some(),
-            "completion fires an effect.settled trigger; got {events:?}"
+            "completion fires an llm.finished trigger; got {events:?}"
         );
         let call = agg.state.llm_calls.get("llm-1").expect("llm call present");
         assert_eq!(call.tracking.status, EffectStatus::Completed);
@@ -2580,7 +2771,7 @@ mod tests {
             &mut agg,
             CommandPayload::FailLlmCall {
                 call_id: "llm-1".to_string(),
-                attempt: 0,
+                attempt: Some(0),
                 error: "provider down".to_string(),
                 retryable: false,
                 code: None,
@@ -2657,7 +2848,7 @@ mod tests {
             &mut agg,
             CommandPayload::FailLlmCall {
                 call_id: "llm-1".to_string(),
-                attempt: 0,
+                attempt: Some(0),
                 error: "provider hiccup".to_string(),
                 retryable: true,
                 code: None,
@@ -2738,13 +2929,9 @@ mod tests {
         assert!(
             matches!(
                 trigger,
-                DecisionTrigger::EffectExecute {
-                    id,
-                    work: EffectWork::LlmCall { .. },
-                    ..
-                } if id == "llm-1"
+                DecisionTrigger::LlmExecute { id, .. } if id == "llm-1"
             ),
-            "expected an effect.execute trigger for the llm call; got {trigger:?}"
+            "expected an llm.execute trigger for the llm call; got {trigger:?}"
         );
         let call = agg.state.llm_calls.get("llm-1").expect("llm call present");
         assert_eq!(call.handler, LlmHandler::Worker);
@@ -2798,7 +2985,7 @@ mod tests {
                 EventPayload::WorkerDecisionRequested(p) => Some(p.decision_id.clone()),
                 _ => None,
             })
-            .expect("worker-handled llm call emits an effect.execute decision");
+            .expect("worker-handled llm call emits an llm.execute decision");
 
         let machine = Caller::Machine {
             tenant_id: "tenant-a".to_string(),
@@ -2810,22 +2997,20 @@ mod tests {
             CommandPayload::SubmitWorkerDecision {
                 decision_id,
                 transcript: vec![],
-                actions: vec![WorkerAction::EffectResult {
+                actions: vec![WorkerAction::LlmResult {
                     id: "llm-1".to_string(),
-                    attempt: 0,
-                    result: EffectResultPayload::LlmCall {
-                        response: LlmResponse {
-                            model: "test-model".to_string(),
-                            content: Some("hello from the worker".to_string()),
-                            tool_calls: vec![],
-                            finish_reason: Some("stop".to_string()),
-                            usage: None,
-                            cost: None,
-                            images: vec![],
-                        },
+                    attempt: Some(0),
+                    response: LlmResponse {
+                        model: "test-model".to_string(),
+                        content: Some("hello from the worker".to_string()),
+                        tool_calls: vec![],
+                        finish_reason: Some("stop".to_string()),
+                        usage: None,
+                        cost: None,
+                        images: vec![],
                     },
                 }],
-                state: vec![].into(),
+                state: None,
             },
             &machine,
         );
@@ -2839,14 +3024,10 @@ mod tests {
         assert!(
             decision_with(&events, |t| matches!(
                 t,
-                DecisionTrigger::EffectSettled {
-                    id,
-                    ok: true,
-                    outcome: EffectOutcome::LlmCall { .. },
-                } if id == "llm-1"
+                DecisionTrigger::LlmFinished { id, ok: true, .. } if id == "llm-1"
             ))
             .is_some(),
-            "completion fires an effect.settled trigger; got {events:?}"
+            "completion fires an llm.finished trigger; got {events:?}"
         );
         let call = agg.state.llm_calls.get("llm-1").expect("llm call present");
         assert_eq!(call.tracking.status, EffectStatus::Completed);
@@ -2874,7 +3055,7 @@ mod tests {
                 EventPayload::WorkerDecisionRequested(p) => Some(p.decision_id.clone()),
                 _ => None,
             })
-            .expect("worker-handled tool call emits an effect.execute decision");
+            .expect("worker-handled tool call emits a tool.execute decision");
 
         let machine = Caller::Machine {
             tenant_id: "tenant-a".to_string(),
@@ -2888,7 +3069,7 @@ mod tests {
                 decision_id: d1,
                 transcript: vec![],
                 actions: vec![],
-                state: vec![].into(),
+                state: None,
             },
             &machine,
         );
@@ -2897,10 +3078,9 @@ mod tests {
             &mut agg,
             CommandPayload::FailToolCall {
                 tool_call_id: "tc-1".to_string(),
-                attempt: 0,
+                attempt: Some(0),
                 error: "boom".to_string(),
                 retryable: false,
-                worker_state: None,
             },
             &machine,
         );
@@ -2922,17 +3102,13 @@ mod tests {
                 EventPayload::DecisionRequestQueued(p) => Some(&p.trigger),
                 _ => None,
             })
-            .expect("an effect.settled decision");
+            .expect("a tool.finished decision");
         assert!(
             matches!(
                 trigger,
-                DecisionTrigger::EffectSettled {
-                    id,
-                    ok: false,
-                    outcome: EffectOutcome::ToolCall { .. },
-                } if id == "tc-1"
+                DecisionTrigger::ToolFinished { id, ok: false, .. } if id == "tc-1"
             ),
-            "expected an errored effect.settled for tc-1; got {trigger:?}"
+            "expected an errored tool.finished for tc-1; got {trigger:?}"
         );
         let tc = agg.state.tool_calls.get("tc-1").expect("tool call present");
         assert_eq!(tc.tracking.status, EffectStatus::Failed);
@@ -3139,9 +3315,8 @@ mod tests {
             agg,
             CommandPayload::CompleteToolCall {
                 tool_call_id: id.to_string(),
-                attempt: 0,
+                attempt: Some(0),
                 result: result.to_string(),
-                worker_state: None,
             },
             &machine(),
         )
@@ -3151,7 +3326,7 @@ mod tests {
         dispatch(agg, CommandPayload::Wake { now: Utc::now() }, &system())
     }
 
-    /// The `tool_call_id`s of every tool/sub-agent `effect.settled` trigger, in order (deduped by decision id).
+    /// The `tool_call_id`s of every `tool.finished`/`sub_agent.finished` trigger, in order (deduped by decision id).
     fn fired_tool_result(events: &[EventPayload]) -> Vec<String> {
         let mut seen = std::collections::HashSet::new();
         events
@@ -3163,15 +3338,8 @@ mod tests {
                     _ => return None,
                 };
                 let tool_call_id = match trigger {
-                    DecisionTrigger::EffectSettled {
-                        id,
-                        outcome: EffectOutcome::ToolCall { .. },
-                        ..
-                    } => id,
-                    DecisionTrigger::EffectSettled {
-                        outcome: EffectOutcome::SubAgent { tool_call_id, .. },
-                        ..
-                    } => tool_call_id,
+                    DecisionTrigger::ToolFinished { id, .. }
+                    | DecisionTrigger::SubAgentFinished { id, .. } => id,
                     _ => return None,
                 };
                 seen.insert(decision_id.clone())
@@ -3236,9 +3404,10 @@ mod tests {
             },
             &system(),
         );
-        let decision_id =
-            decision_with(&setup, |t| matches!(t, DecisionTrigger::UserMessage { .. }))
-                .expect("user message decision");
+        let decision_id = decision_with(&setup, |t| {
+            matches!(t, DecisionTrigger::ClientMessage { .. })
+        })
+        .expect("user message decision");
 
         let dispatched = dispatch(
             &mut agg,
@@ -3252,41 +3421,33 @@ mod tests {
                     handler: ToolHandler::Worker,
                     retry: RetryPolicy::no_retry(),
                 }],
-                state: vec![].into(),
+                state: None,
             },
             &machine(),
         );
         let exec = decision_with(&dispatched, |t| {
-            matches!(
-                t,
-                DecisionTrigger::EffectExecute {
-                    work: EffectWork::ToolCall { .. },
-                    ..
-                }
-            )
+            matches!(t, DecisionTrigger::ToolExecute { .. })
         })
-        .expect("effect.execute decision");
+        .expect("tool.execute decision");
 
         let completed = dispatch(
             &mut agg,
             CommandPayload::SubmitWorkerDecision {
                 decision_id: exec,
                 transcript: vec![],
-                actions: vec![WorkerAction::EffectResult {
+                actions: vec![WorkerAction::ToolResult {
                     id: "t1".to_string(),
-                    attempt: 0,
-                    result: EffectResultPayload::ToolCall {
-                        result: "RA".to_string(),
-                    },
+                    attempt: Some(0),
+                    result: "RA".to_string(),
                 }],
-                state: vec![].into(),
+                state: None,
             },
             &machine(),
         );
         assert_eq!(
             fired_tool_result(&completed),
             vec!["t1".to_string()],
-            "effect.settled fires in the completion commit; got {completed:?}"
+            "the finished trigger fires in the completion commit; got {completed:?}"
         );
         assert_eq!(
             agg.state.tool_calls.get("t1").unwrap().result.as_deref(),
@@ -3400,7 +3561,7 @@ mod tests {
                         retry: RetryPolicy::no_retry(),
                     },
                 ],
-                state: vec![].into(),
+                state: None,
             },
             &machine(),
         );
@@ -3421,15 +3582,9 @@ mod tests {
             events.iter().any(|e| matches!(
                 e,
                 EventPayload::WorkerDecisionRequested(p)
-                    if matches!(
-                        p.trigger,
-                        DecisionTrigger::EffectExecute {
-                            work: EffectWork::ToolCall { .. },
-                            ..
-                        }
-                    )
+                    if matches!(p.trigger, DecisionTrigger::ToolExecute { .. })
             )),
-            "tool's effect.execute decision dispatched; got {events:?}"
+            "tool's tool.execute decision dispatched; got {events:?}"
         );
 
         assert_eq!(
@@ -3480,7 +3635,7 @@ mod tests {
         assert_eq!(
             fired_tool_result(&errored),
             vec!["t1".to_string()],
-            "the timed-out effect fires an effect.settled"
+            "the timed-out call fires a tool.finished"
         );
         assert!(
             fired_tool_result(&wake(&mut agg)).is_empty(),
@@ -3894,15 +4049,48 @@ mod tests {
                 _ => None,
             })
             .expect("user message should request a worker decision");
-
+        request_client_tool(&mut agg, "tc-1");
+        request_llm(&mut agg, "llm-1", LlmHandler::Server);
         dispatch(
+            &mut agg,
+            CommandPayload::RequestSubAgent {
+                session_id: "child-1".to_string(),
+                agent_id: "helper".to_string(),
+                tool_call_id: "call-1".to_string(),
+                retry: RetryPolicy::no_retry(),
+            },
+            &system(),
+        );
+
+        let events = dispatch(
             &mut agg,
             CommandPayload::CancelSession,
             &Caller::System {
                 tenant_id: "tenant-a".to_string(),
             },
         );
+        let mut voided = voided_ids(&events);
+        voided.sort_unstable();
+        assert_eq!(voided, vec!["call-1", "llm-1", "tc-1"], "got {events:?}");
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                EventPayload::CallVoided(v)
+                    if v.kind == EffectKind::SubAgent
+                        && v.session_id.as_deref() == Some("child-1")
+            )),
+            "the sub-agent void names the child session for the cascade; got {events:?}"
+        );
         assert!(!agg.state.has_pending_worker_decision());
+
+        let again = dispatch(
+            &mut agg,
+            CommandPayload::CancelSession,
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
+        );
+        assert!(again.is_empty(), "got {again:?}");
 
         let stale = dispatch(
             &mut agg,
@@ -3912,7 +4100,7 @@ mod tests {
                 actions: vec![WorkerAction::Done {
                     data: serde_json::Value::Null,
                 }],
-                state: vec![].into(),
+                state: None,
             },
             &Caller::System {
                 tenant_id: "tenant-a".to_string(),
@@ -3921,6 +4109,63 @@ mod tests {
         assert!(
             stale.is_empty(),
             "stale submission after cancel should no-op; got {stale:?}"
+        );
+    }
+
+    #[test]
+    fn interrupt_voids_llm_calls_but_spares_tools() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        request_client_tool(&mut agg, "tc-1");
+        request_llm(&mut agg, "llm-1", LlmHandler::Server);
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::Interrupt {
+                interrupt_id: "int-1".to_string(),
+                reason: String::new(),
+                payload: serde_json::Value::Null,
+            },
+            &system(),
+        );
+        assert_eq!(voided_ids(&events), vec!["llm-1"], "got {events:?}");
+        assert_eq!(
+            agg.state.tool_calls.get("tc-1").unwrap().tracking.status,
+            EffectStatus::Pending,
+            "tools settle during an interrupt and queue"
+        );
+    }
+
+    #[test]
+    fn interrupt_action_voids_llm_calls_requested_in_the_same_submit() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d1 = open_decision(&mut agg, "hi");
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: d1,
+                transcript: vec![node_msg("u1", Role::User, "hi")],
+                actions: vec![
+                    WorkerAction::CallLlm {
+                        id: "llm-1".to_string(),
+                        request: request_with(vec![]),
+                        stream: false,
+                        retry: RetryPolicy::no_retry(),
+                        handler: LlmHandler::Server,
+                    },
+                    WorkerAction::Interrupt {
+                        interrupt_id: "int-1".to_string(),
+                        reason: "hold".to_string(),
+                        payload: serde_json::Value::Null,
+                    },
+                ],
+                state: None,
+            },
+            &machine(),
+        );
+        assert_eq!(voided_ids(&events), vec!["llm-1"], "got {events:?}");
+        assert_eq!(
+            agg.state.llm_calls.get("llm-1").unwrap().tracking.status,
+            EffectStatus::Failed,
         );
     }
 
@@ -3977,7 +4222,7 @@ mod tests {
                 actions: vec![WorkerAction::Done {
                     data: serde_json::Value::Null,
                 }],
-                state: vec![].into(),
+                state: None,
             },
             &Caller::System {
                 tenant_id: "tenant-a".to_string(),
@@ -4055,7 +4300,7 @@ mod tests {
                     handler: ToolHandler::Worker,
                     retry: RetryPolicy::no_retry(),
                 }],
-                state: vec![].into(),
+                state: None,
             },
             &system,
         );
@@ -4075,9 +4320,8 @@ mod tests {
             &mut agg,
             CommandPayload::CompleteToolCall {
                 tool_call_id: "tc-1".to_string(),
-                attempt: 0,
+                attempt: Some(0),
                 result: "done".to_string(),
-                worker_state: None,
             },
             &system,
         );
@@ -4091,7 +4335,7 @@ mod tests {
             agg.state.tool_calls.get("tc-1").unwrap().result.as_deref(),
             Some("done")
         );
-        // The effect.settled trigger is queued while interrupted; only its delivery is deferred.
+        // The tool.finished trigger is queued while interrupted; only its delivery is deferred.
         assert!(
             events
                 .iter()
@@ -4132,7 +4376,7 @@ mod tests {
                 decision_id: resumed_decision_id,
                 transcript: vec![],
                 actions: vec![],
-                state: vec![].into(),
+                state: None,
             },
             &system,
         );
@@ -4144,14 +4388,8 @@ mod tests {
             })
             .expect("queued decision should promote after the resumed decision completes");
         assert!(
-            matches!(
-                trigger,
-                DecisionTrigger::EffectSettled {
-                    outcome: EffectOutcome::ToolCall { .. },
-                    ..
-                }
-            ),
-            "expected an effect.settled trigger; got {trigger:?}"
+            matches!(trigger, DecisionTrigger::ToolFinished { .. }),
+            "expected a tool.finished trigger; got {trigger:?}"
         );
     }
 
@@ -4196,7 +4434,7 @@ mod tests {
                     reason: "confirmation".to_string(),
                     payload: serde_json::json!({"message": "Send the email?"}),
                 }],
-                state: vec![].into(),
+                state: None,
             },
             &Caller::System {
                 tenant_id: "tenant-a".to_string(),
@@ -4312,9 +4550,8 @@ mod tests {
             .handle(
                 CommandPayload::CompleteToolCall {
                     tool_call_id: "tc-1".to_string(),
-                    attempt: 0,
+                    attempt: Some(0),
                     result: "ok".to_string(),
-                    worker_state: None,
                 },
                 &cross_tenant_machine,
             )
@@ -4392,9 +4629,8 @@ mod tests {
                 agg,
                 CommandPayload::CompleteToolCall {
                     tool_call_id: id.to_string(),
-                    attempt: 0,
+                    attempt: Some(0),
                     result: format!("result-{id}"),
-                    worker_state: None,
                 },
                 &sys,
             )
@@ -4429,9 +4665,10 @@ mod tests {
             },
             &system(),
         );
-        let decision_id =
-            decision_with(&setup, |t| matches!(t, DecisionTrigger::UserMessage { .. }))
-                .expect("user message decision");
+        let decision_id = decision_with(&setup, |t| {
+            matches!(t, DecisionTrigger::ClientMessage { .. })
+        })
+        .expect("user message decision");
 
         let events = dispatch(
             &mut agg,
@@ -4439,7 +4676,7 @@ mod tests {
                 decision_id,
                 transcript: vec![node_msg("u1", Role::User, "hi")],
                 actions: vec![],
-                state: vec![].into(),
+                state: None,
             },
             &machine(),
         );
@@ -4532,7 +4769,7 @@ mod tests {
             agg,
             CommandPayload::CompleteLlmCall {
                 call_id: id.to_string(),
-                attempt,
+                attempt: Some(attempt),
                 response: llm_response("ok"),
             },
             caller,
@@ -4568,13 +4805,13 @@ mod tests {
                 decision_id,
                 transcript: vec![],
                 actions,
-                state: vec![].into(),
+                state: None,
             },
             &machine(),
         )
     }
 
-    /// The effect ids of every llm `effect.execute` trigger, deduped by decision id.
+    /// The call ids of every `llm.execute` trigger, deduped by decision id.
     fn fired_llm_execute(events: &[EventPayload]) -> Vec<String> {
         let mut seen = std::collections::HashSet::new();
         events
@@ -4586,18 +4823,16 @@ mod tests {
                     _ => return None,
                 };
                 match trigger {
-                    DecisionTrigger::EffectExecute {
-                        id,
-                        work: EffectWork::LlmCall { .. },
-                        ..
-                    } if seen.insert(decision_id.clone()) => Some(id.clone()),
+                    DecisionTrigger::LlmExecute { id, .. } if seen.insert(decision_id.clone()) => {
+                        Some(id.clone())
+                    }
                     _ => None,
                 }
             })
             .collect()
     }
 
-    /// The effect ids of every llm `effect.settled` trigger, deduped by decision id.
+    /// The call ids of every `llm.finished` trigger, deduped by decision id.
     fn settled_llm_ids(events: &[EventPayload]) -> Vec<String> {
         let mut seen = std::collections::HashSet::new();
         events
@@ -4609,11 +4844,9 @@ mod tests {
                     _ => return None,
                 };
                 match trigger {
-                    DecisionTrigger::EffectSettled {
-                        id,
-                        outcome: EffectOutcome::LlmCall { .. },
-                        ..
-                    } if seen.insert(decision_id.clone()) => Some(id.clone()),
+                    DecisionTrigger::LlmFinished { id, .. } if seen.insert(decision_id.clone()) => {
+                        Some(id.clone())
+                    }
                     _ => None,
                 }
             })
@@ -4666,7 +4899,7 @@ mod tests {
         assert_eq!(
             execs,
             vec!["llm-1".to_string(), "llm-2".to_string()],
-            "each worker-handled call delegates an effect.execute; got {events:?}"
+            "each worker-handled call delegates an llm.execute; got {events:?}"
         );
         assert_eq!(agg.state.effects().len(), 2);
     }
@@ -4690,34 +4923,6 @@ mod tests {
         let e1 = complete_llm(&mut agg, "llm-1", 0, &system());
         assert!(settled_llm_ids(&e1).contains(&"llm-1".to_string()));
         assert!(agg.state.effects().is_empty());
-    }
-
-    #[test]
-    fn wake_suppresses_stall_while_an_llm_call_is_pending() {
-        let mut agg = create_session("sess-1", "tenant-a", "user-1");
-        // A still-pending llm call must suppress stall recovery even though tools are resolved.
-        dispatch(
-            &mut agg,
-            CommandPayload::RequestToolCall {
-                tool_call_id: "tc-1".to_string(),
-                name: "t".to_string(),
-                arguments: "{}".to_string(),
-                handler: ToolHandler::Worker,
-                retry: RetryPolicy::no_retry(),
-            },
-            &system(),
-        );
-        complete_tool(&mut agg, "tc-1", "done");
-        request_llm(&mut agg, "llm-1", LlmHandler::Server);
-
-        let woken = wake(&mut agg);
-        assert!(
-            !woken
-                .iter()
-                .any(|e| matches!(e, EventPayload::WorkerDecisionRequested(p)
-                    if matches!(p.trigger, DecisionTrigger::Stall))),
-            "a pending llm call suppresses the stall trigger; got {woken:?}"
-        );
     }
 
     #[test]
@@ -4808,7 +5013,7 @@ mod tests {
             &mut agg,
             CommandPayload::FailLlmCall {
                 call_id: "llm-1".to_string(),
-                attempt: 0,
+                attempt: Some(0),
                 error: "boom".to_string(),
                 retryable: false,
                 code: None,
@@ -4834,7 +5039,7 @@ mod tests {
             .handle(
                 CommandPayload::CompleteLlmCall {
                     call_id: "llm-1".to_string(),
-                    attempt: 0,
+                    attempt: Some(0),
                     response: llm_response("hi"),
                 },
                 &machine(),
@@ -4855,7 +5060,7 @@ mod tests {
             .handle(
                 CommandPayload::CompleteLlmCall {
                     call_id: "llm-1".to_string(),
-                    attempt: 7,
+                    attempt: Some(7),
                     response: llm_response("hi"),
                 },
                 &machine(),
@@ -4869,13 +5074,13 @@ mod tests {
 
     #[test]
     fn machine_settle_of_unknown_llm_is_not_found() {
-        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let agg = create_session("sess-1", "tenant-a", "user-1");
         let err = agg
             .state
             .handle(
                 CommandPayload::CompleteLlmCall {
                     call_id: "nope".to_string(),
-                    attempt: 0,
+                    attempt: Some(0),
                     response: llm_response("hi"),
                 },
                 &machine(),
@@ -4915,5 +5120,779 @@ mod tests {
             settled_llm_ids(&events).contains(&"llm-1".to_string()),
             "a late settle after done still fires a decision; got {events:?}"
         );
+    }
+
+    // ── Branch-scoped worker state ───────────────────────────────────────
+
+    use serde_json::json;
+
+    fn open_decision(agg: &mut Aggregate<SessionState>, text: &str) -> String {
+        let setup = dispatch(
+            agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Message {
+                    message: node_msg("", Role::User, text),
+                    stream: false,
+                },
+                turn_id: None,
+            },
+            &system(),
+        );
+        decision_with(&setup, |t| {
+            matches!(t, DecisionTrigger::ClientMessage { .. })
+        })
+        .expect("user message opens a decision")
+    }
+
+    fn submit_state(
+        agg: &mut Aggregate<SessionState>,
+        decision_id: String,
+        transcript: Vec<Message>,
+        state: Option<serde_json::Value>,
+    ) -> Vec<EventPayload> {
+        dispatch(
+            agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id,
+                transcript,
+                actions: vec![],
+                state: state.map(WorkerState::from),
+            },
+            &machine(),
+        )
+    }
+
+    fn state_updates(events: &[EventPayload]) -> Vec<&WorkerStateUpdated> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                EventPayload::WorkerStateUpdated(p) => Some(p),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn echoed_state_writes_nothing() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d1 = open_decision(&mut agg, "hi");
+        let events = submit_state(
+            &mut agg,
+            d1,
+            vec![node_msg("u1", Role::User, "hi")],
+            Some(json!({"a": 1, "b": 2})),
+        );
+        assert_eq!(
+            state_updates(&events).len(),
+            1,
+            "the first write records a version; got {events:?}"
+        );
+
+        // Echo with shuffled key order: structural equality dedups it.
+        let d2 = open_decision(&mut agg, "again");
+        let events = submit_state(
+            &mut agg,
+            d2,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("u2", Role::User, "again"),
+            ],
+            Some(json!({"b": 2, "a": 1})),
+        );
+        assert!(
+            state_updates(&events).is_empty(),
+            "an echoed state writes nothing; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn null_valued_key_differs_from_absent_key() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d1 = open_decision(&mut agg, "hi");
+        submit_state(
+            &mut agg,
+            d1,
+            vec![node_msg("u1", Role::User, "hi")],
+            Some(json!({})),
+        );
+        let d2 = open_decision(&mut agg, "again");
+        let events = submit_state(
+            &mut agg,
+            d2,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("u2", Role::User, "again"),
+            ],
+            Some(json!({"a": null})),
+        );
+        assert_eq!(
+            state_updates(&events).len(),
+            1,
+            "null is not absence; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn changed_state_anchors_at_the_post_reconcile_head() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d1 = open_decision(&mut agg, "hi");
+        let events = submit_state(
+            &mut agg,
+            d1,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("a1", Role::Assistant, "hello"),
+            ],
+            Some(json!({"v": 1})),
+        );
+        let updates = state_updates(&events);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(
+            updates[0].anchor.as_deref(),
+            Some("a1"),
+            "the version anchors to the last appended node"
+        );
+        assert_eq!(agg.state.derived_state().worker_state.0, json!({"v": 1}));
+    }
+
+    #[test]
+    fn omitted_state_keeps_the_current_version() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d1 = open_decision(&mut agg, "hi");
+        submit_state(
+            &mut agg,
+            d1,
+            vec![node_msg("u1", Role::User, "hi")],
+            Some(json!({"v": 1})),
+        );
+        let d2 = open_decision(&mut agg, "more");
+        let events = submit_state(
+            &mut agg,
+            d2,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("u2", Role::User, "more"),
+            ],
+            None,
+        );
+        assert!(state_updates(&events).is_empty());
+        assert_eq!(
+            agg.state.resolve_state_for(agg.state.head_id.as_deref()).0,
+            json!({"v": 1})
+        );
+    }
+
+    #[test]
+    fn fork_anchors_new_state_and_resolves_as_of_the_prefix_without_one() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d1 = open_decision(&mut agg, "hi");
+        submit_state(
+            &mut agg,
+            d1,
+            vec![node_msg("u1", Role::User, "hi")],
+            Some(json!({"v": 1})),
+        );
+        let d2 = open_decision(&mut agg, "more");
+        submit_state(
+            &mut agg,
+            d2,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("a1", Role::Assistant, "hello"),
+                node_msg("u2", Role::User, "more"),
+            ],
+            Some(json!({"v": 2})),
+        );
+        assert_eq!(
+            agg.state.resolve_state_for(agg.state.head_id.as_deref()).0,
+            json!({"v": 2})
+        );
+
+        let d3 = open_decision(&mut agg, "redo");
+        let events = submit_state(
+            &mut agg,
+            d3,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("x1", Role::User, "redo"),
+            ],
+            Some(json!({"v": 3})),
+        );
+        let updates = state_updates(&events);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].anchor.as_deref(), Some("x1"));
+        assert_eq!(
+            agg.state.resolve_state_for(agg.state.head_id.as_deref()).0,
+            json!({"v": 3})
+        );
+
+        // Fork with no state opinion resolves as-of the fork point.
+        let d4 = open_decision(&mut agg, "retry");
+        let events = submit_state(
+            &mut agg,
+            d4,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("y1", Role::User, "retry"),
+            ],
+            None,
+        );
+        assert!(state_updates(&events).is_empty());
+        assert_eq!(agg.state.head_id.as_deref(), Some("y1"));
+        assert_eq!(
+            agg.state.derived_state().worker_state.0,
+            json!({"v": 1}),
+            "the fork is uncontaminated by the abandoned branches"
+        );
+    }
+
+    #[test]
+    fn effect_anchor_is_the_post_reconcile_head() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d1 = open_decision(&mut agg, "hi");
+        dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: d1,
+                transcript: vec![node_msg("u1", Role::User, "hi")],
+                actions: vec![WorkerAction::CallTool {
+                    id: "t1".to_string(),
+                    name: "slow".to_string(),
+                    arguments: "{}".to_string(),
+                    handler: ToolHandler::Worker,
+                    retry: RetryPolicy::no_retry(),
+                }],
+                state: None,
+            },
+            &machine(),
+        );
+        assert_eq!(
+            agg.state.tool_calls.get("t1").unwrap().anchor.as_deref(),
+            Some("u1"),
+            "the anchor is the head after this submit's appends"
+        );
+    }
+
+    fn settle_decisions(events: &[EventPayload]) -> Vec<&DecisionTrigger> {
+        events
+            .iter()
+            .filter_map(|e| {
+                let trigger = match e {
+                    EventPayload::WorkerDecisionRequested(p) => &p.trigger,
+                    EventPayload::DecisionRequestQueued(p) => &p.trigger,
+                    _ => return None,
+                };
+                matches!(
+                    trigger,
+                    DecisionTrigger::ToolFinished { .. }
+                        | DecisionTrigger::SubAgentFinished { .. }
+                        | DecisionTrigger::LlmFinished { .. }
+                )
+                .then_some(trigger)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn settle_without_attempt_settles_the_current_attempt() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        request_client_tool(&mut agg, "tc-1");
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::CompleteToolCall {
+                tool_call_id: "tc-1".to_string(),
+                attempt: None,
+                result: "ok".to_string(),
+            },
+            &machine(),
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::ToolCallCompleted(_))),
+            "an attempt-less settle lands on the current attempt; got {events:?}"
+        );
+
+        // A supplied attempt still fences.
+        request_client_tool(&mut agg, "tc-2");
+        let err = agg
+            .state
+            .handle(
+                CommandPayload::CompleteToolCall {
+                    tool_call_id: "tc-2".to_string(),
+                    attempt: Some(7),
+                    result: "ok".to_string(),
+                },
+                &machine(),
+            )
+            .expect_err("mismatched attempt is fenced");
+        assert!(matches!(err, SessionError::EffectAttemptMismatch));
+    }
+
+    fn voided_ids(events: &[EventPayload]) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                EventPayload::CallVoided(v) => Some(v.id.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fork_voids_a_pending_tool_call() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d1 = open_decision(&mut agg, "hi");
+        submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
+        request_client_tool(&mut agg, "tc-1"); // anchored at u1
+
+        let d2 = open_decision(&mut agg, "redo");
+        let events = submit_state(&mut agg, d2, vec![node_msg("x1", Role::User, "redo")], None);
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                EventPayload::CallVoided(v)
+                    if v.kind == EffectKind::ToolCall && v.id == "tc-1"
+            )),
+            "the fork voids the stranded call; got {events:?}"
+        );
+
+        // A late settle is rejected: the effect died with its branch.
+        let err = agg
+            .state
+            .handle(
+                CommandPayload::CompleteToolCall {
+                    tool_call_id: "tc-1".to_string(),
+                    attempt: Some(0),
+                    result: "ok".to_string(),
+                },
+                &machine(),
+            )
+            .expect_err("settling voided work is an error");
+        assert!(matches!(err, SessionError::EffectNotPending));
+    }
+
+    #[test]
+    fn fork_spares_work_anchored_on_the_shared_prefix() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d1 = open_decision(&mut agg, "hi");
+        submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
+        request_client_tool(&mut agg, "tc-1"); // anchored at u1
+
+        // Head advances past the anchor then forks below it; u1 stays on-path.
+        let d2 = open_decision(&mut agg, "more");
+        submit_state(
+            &mut agg,
+            d2,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("a1", Role::Assistant, "?"),
+            ],
+            None,
+        );
+        let d3 = open_decision(&mut agg, "redo");
+        let events = submit_state(
+            &mut agg,
+            d3,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("b1", Role::Assistant, "!"),
+            ],
+            None,
+        );
+        assert!(
+            voided_ids(&events).is_empty(),
+            "work above the fork point is untouched; got {events:?}"
+        );
+
+        let events = complete_tool(&mut agg, "tc-1", "ok");
+        assert_eq!(fired_tool_result(&events), vec!["tc-1".to_string()]);
+    }
+
+    #[test]
+    fn fork_voids_a_retrying_effect() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d1 = open_decision(&mut agg, "hi");
+        submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
+        dispatch(
+            &mut agg,
+            CommandPayload::RequestToolCall {
+                tool_call_id: "tc-1".to_string(),
+                name: "flaky".to_string(),
+                arguments: "{}".to_string(),
+                handler: ToolHandler::Client,
+                retry: RetryPolicy {
+                    timeout_secs: None,
+                    max_retries: 2,
+                    backoff_base_secs: 1,
+                    backoff_max_secs: 1,
+                },
+            },
+            &system(),
+        );
+        dispatch(
+            &mut agg,
+            CommandPayload::FailToolCall {
+                tool_call_id: "tc-1".to_string(),
+                attempt: Some(0),
+                error: "flake".to_string(),
+                retryable: true,
+            },
+            &machine(),
+        );
+
+        let d2 = open_decision(&mut agg, "redo");
+        let events = submit_state(&mut agg, d2, vec![node_msg("x1", Role::User, "redo")], None);
+        assert_eq!(voided_ids(&events), vec!["tc-1"], "got {events:?}");
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::Wake {
+                now: Utc::now() + chrono::Duration::hours(1),
+            },
+            &system(),
+        );
+        assert!(events.is_empty(), "got {events:?}");
+    }
+
+    #[test]
+    fn promoting_submit_drops_a_queued_settle_for_the_branch_it_forked_away() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d1 = open_decision(&mut agg, "hi");
+        submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
+        request_client_tool(&mut agg, "tc-1"); // anchored at u1
+
+        // Settle queues behind the pending edit; a user message queues behind the settle.
+        let d2 = open_decision(&mut agg, "redo");
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::CompleteToolCall {
+                tool_call_id: "tc-1".to_string(),
+                attempt: Some(0),
+                result: "ok".to_string(),
+            },
+            &machine(),
+        );
+        let settle_id = decision_with(&events, |t| {
+            matches!(t, DecisionTrigger::ToolFinished { .. })
+        })
+        .expect("on-path settle queues behind the pending decision");
+        open_decision(&mut agg, "also this");
+
+        let events = submit_state(&mut agg, d2, vec![node_msg("x1", Role::User, "redo")], None);
+        let dropped: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                EventPayload::DecisionRequestDropped(p) => Some(p.decision_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dropped, vec![settle_id.as_str()], "got {events:?}");
+        assert!(
+            settle_decisions(&events).is_empty(),
+            "the stale settle is not delivered; got {events:?}"
+        );
+        let promoted = events.iter().find_map(|e| match e {
+            EventPayload::WorkerDecisionRequested(p) => Some(&p.trigger),
+            _ => None,
+        });
+        assert!(
+            matches!(promoted, Some(DecisionTrigger::ClientMessage { .. })),
+            "the next live decision is promoted past the dropped settle; got {events:?}"
+        );
+        assert!(
+            agg.state.queued_decisions().is_empty(),
+            "nothing is left queued"
+        );
+    }
+
+    #[test]
+    fn fork_voids_a_pending_llm_call() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d1 = open_decision(&mut agg, "hi");
+        submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
+        request_llm(&mut agg, "llm-1", LlmHandler::Server); // anchored at u1
+
+        let d2 = open_decision(&mut agg, "redo");
+        let events = submit_state(&mut agg, d2, vec![node_msg("x1", Role::User, "redo")], None);
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                EventPayload::CallVoided(v)
+                    if v.kind == EffectKind::LlmCall && v.id == "llm-1"
+            )),
+            "the fork voids the in-flight call; got {events:?}"
+        );
+
+        // The executor's late result no-ops.
+        let events = complete_llm(&mut agg, "llm-1", 0, &system());
+        assert!(events.is_empty(), "got {events:?}");
+    }
+
+    #[test]
+    fn fork_drops_a_queued_execute_decision() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d1 = open_decision(&mut agg, "hi");
+        let call_tool = |id: &str| WorkerAction::CallTool {
+            id: id.to_string(),
+            name: "slow".to_string(),
+            arguments: "{}".to_string(),
+            handler: ToolHandler::Worker,
+            retry: RetryPolicy::no_retry(),
+        };
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: d1,
+                transcript: vec![node_msg("u1", Role::User, "hi")],
+                actions: vec![call_tool("t1"), call_tool("t2")],
+                state: None,
+            },
+            &machine(),
+        );
+        // t1's execute is delivered; t2's queues behind it.
+        let exec_t1 = decision_with(
+            &events,
+            |t| matches!(t, DecisionTrigger::ToolExecute { id, .. } if id == "t1"),
+        )
+        .expect("first execute is delivered");
+        let exec_t2 = decision_with(
+            &events,
+            |t| matches!(t, DecisionTrigger::ToolExecute { id, .. } if id == "t2"),
+        )
+        .expect("second execute queues");
+
+        let events = submit_state(
+            &mut agg,
+            exec_t1,
+            vec![node_msg("x1", Role::User, "redo")],
+            None,
+        );
+        let mut voided = voided_ids(&events);
+        voided.sort_unstable();
+        assert_eq!(voided, vec!["t1", "t2"], "got {events:?}");
+        let dropped: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                EventPayload::DecisionRequestDropped(p) => Some(p.decision_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dropped, vec![exec_t2.as_str()], "got {events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, EventPayload::WorkerDecisionRequested(_))),
+            "nothing is left to promote; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn submit_settling_work_it_forked_away_voids_it_instead() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d1 = open_decision(&mut agg, "hi");
+        submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
+        request_client_tool(&mut agg, "tc-1"); // anchored at u1
+
+        let d2 = open_decision(&mut agg, "redo");
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: d2,
+                transcript: vec![node_msg("x1", Role::User, "redo")],
+                actions: vec![WorkerAction::ToolResult {
+                    id: "tc-1".to_string(),
+                    attempt: None,
+                    result: "late".to_string(),
+                }],
+                state: None,
+            },
+            &machine(),
+        );
+        assert_eq!(voided_ids(&events), vec!["tc-1"], "got {events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, EventPayload::ToolCallCompleted(_))),
+            "the settle dies with the branch; got {events:?}"
+        );
+        assert!(settle_decisions(&events).is_empty(), "got {events:?}");
+    }
+
+    #[test]
+    fn submit_settling_a_call_its_own_interrupt_voided_swallows_it() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d1 = open_decision(&mut agg, "hi");
+        request_llm(&mut agg, "llm-1", LlmHandler::Server);
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: d1,
+                transcript: vec![node_msg("u1", Role::User, "hi")],
+                actions: vec![
+                    WorkerAction::Interrupt {
+                        interrupt_id: "int-1".to_string(),
+                        reason: "hold".to_string(),
+                        payload: serde_json::Value::Null,
+                    },
+                    WorkerAction::LlmResult {
+                        id: "llm-1".to_string(),
+                        attempt: None,
+                        response: llm_response("late"),
+                    },
+                ],
+                state: None,
+            },
+            &machine(),
+        );
+        assert_eq!(voided_ids(&events), vec!["llm-1"], "got {events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, EventPayload::LlmCallCompleted(_))),
+            "the settle dies with the voided call; got {events:?}"
+        );
+        assert_eq!(
+            agg.state.llm_calls.get("llm-1").unwrap().tracking.status,
+            EffectStatus::Failed,
+        );
+    }
+
+    #[test]
+    fn void_guard_matches_kind_not_just_id() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d1 = open_decision(&mut agg, "hi");
+        submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
+        request_client_tool(&mut agg, "shared"); // anchored at u1
+
+        // Sub-agent with the same id, anchored one node deeper.
+        let d2 = open_decision(&mut agg, "more");
+        submit_state(
+            &mut agg,
+            d2,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("a1", Role::Assistant, "?"),
+            ],
+            None,
+        );
+        dispatch(
+            &mut agg,
+            CommandPayload::RequestSubAgent {
+                session_id: "child-x".to_string(),
+                agent_id: "helper".to_string(),
+                tool_call_id: "shared".to_string(),
+                retry: RetryPolicy::no_retry(),
+            },
+            &system(),
+        );
+
+        // Forking voids the sub-agent, not the tool; the tool settle must survive the id collision.
+        let d3 = open_decision(&mut agg, "redo");
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: d3,
+                transcript: vec![
+                    node_msg("u1", Role::User, "hi"),
+                    node_msg("b1", Role::Assistant, "!"),
+                ],
+                actions: vec![WorkerAction::ToolResult {
+                    id: "shared".to_string(),
+                    attempt: None,
+                    result: "ok".to_string(),
+                }],
+                state: None,
+            },
+            &machine(),
+        );
+        assert_eq!(voided_ids(&events), vec!["shared"], "got {events:?}");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::ToolCallCompleted(_))),
+            "the tool settle lands despite the voided sub-agent sharing its id; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn fork_drops_a_retrying_settle_decision() {
+        let mut agg = Aggregate::new(
+            "sess-1".to_string(),
+            "tenant-a".to_string(),
+            SessionState::new("sess-1".to_string()),
+        );
+        dispatch(
+            &mut agg,
+            CommandPayload::CreateSession {
+                agent_id: "agent-1".to_string(),
+                owner: SessionOwner {
+                    tenant_id: "tenant-a".to_string(),
+                    id: Some("user-1".to_string()),
+                    metadata: HashMap::new(),
+                },
+                ancestry: vec![],
+                worker_retry: RetryPolicy {
+                    timeout_secs: None,
+                    max_retries: 2,
+                    backoff_base_secs: 1,
+                    backoff_max_secs: 1,
+                },
+            },
+            &system(),
+        );
+
+        let d1 = open_decision(&mut agg, "hi");
+        submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
+        request_client_tool(&mut agg, "tc-1"); // anchored at u1
+
+        // The on-path settle is delivered, then the worker errors retryably.
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::CompleteToolCall {
+                tool_call_id: "tc-1".to_string(),
+                attempt: Some(0),
+                result: "ok".to_string(),
+            },
+            &machine(),
+        );
+        let settle_id = decision_with(&events, |t| {
+            matches!(t, DecisionTrigger::ToolFinished { .. })
+        })
+        .expect("on-path settle is delivered");
+        dispatch(
+            &mut agg,
+            CommandPayload::FailWorkerDecision {
+                decision_id: settle_id.clone(),
+                error: "worker crashed".to_string(),
+                retryable: true,
+            },
+            &machine(),
+        );
+
+        let d2 = open_decision(&mut agg, "redo");
+        let events = submit_state(&mut agg, d2, vec![node_msg("x1", Role::User, "redo")], None);
+        let dropped: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                EventPayload::DecisionRequestDropped(p) => Some(p.decision_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dropped, vec![settle_id.as_str()], "got {events:?}");
+        assert!(
+            settle_decisions(&events).is_empty(),
+            "the stale settle is not re-delivered; got {events:?}"
+        );
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::Wake {
+                now: Utc::now() + chrono::Duration::hours(1),
+            },
+            &system(),
+        );
+        assert!(events.is_empty(), "got {events:?}");
     }
 }

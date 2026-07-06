@@ -1,9 +1,9 @@
-// Fan out one `call.llm` per lens on the user's message, then hand the combined
+// Fan out one `llm.call` per lens on the user's message, then hand the combined
 // answers to a stock `toolLoop` to synthesize. Two flavors: `fanout` (engine-run)
 // and `deferred-fanout` (worker-run, settled out-of-band via `settleEffect`).
 
-import { agent, contentText, toolLoop } from "@substructure.ai/sdk";
 import type { Agent, LlmRequest, LlmResponse, WorkerAction } from "@substructure.ai/sdk";
+import { agent, contentText, toolLoop } from "@substructure.ai/sdk";
 import { SubstructureEmbedded } from "@substructure.ai/sdk/embedded";
 
 const MODEL = "anthropic/claude-sonnet-4-6";
@@ -44,12 +44,12 @@ const INSTRUCTIONS = "Combine the lens analyses into one short answer for the us
 function withLenses(loop: Agent<FanoutState>, handler: "server" | "worker"): Agent<FanoutState> {
     return async (d) => {
         // The user's message: fan out the lenses instead of starting the loop.
-        if (d.trigger.type === "user.message") {
+        if (d.trigger.type === "client.message") {
             const question = contentText(d.trigger.message.content);
             return {
                 actions: LENSES.map(
                     (l): WorkerAction => ({
-                        type: "call.llm",
+                        type: "llm.call",
                         id: l.id,
                         handler,
                         request: { model: MODEL, messages: [{ role: "user", content: l.prompt(question) }] },
@@ -61,7 +61,7 @@ function withLenses(loop: Agent<FanoutState>, handler: "server" | "worker"): Age
 
         // (deferred flavor) start the lens call in the background and return now with no
         // actions so the calls overlap; settle each out-of-band whenever it finishes.
-        if (d.trigger.type === "effect.execute" && d.trigger.kind === "llm_call" && isLens(d.trigger.id)) {
+        if (d.trigger.type === "llm.execute" && isLens(d.trigger.id)) {
             const { id, attempt, request } = d.trigger;
             const sessionId = d.session_id;
             void runModel(request)
@@ -80,7 +80,7 @@ function withLenses(loop: Agent<FanoutState>, handler: "server" | "worker"): Age
         }
 
         // A lens settling: fold it in; once the last lands, hand the enriched question to the loop.
-        if (d.trigger.type === "effect.settled" && d.trigger.kind === "llm_call" && isLens(d.trigger.id)) {
+        if (d.trigger.type === "llm.finished" && isLens(d.trigger.id)) {
             const settledId = d.trigger.id;
             const prev = d.state ?? { question: "", pending: [], results: {} };
             const answer =
@@ -99,11 +99,16 @@ function withLenses(loop: Agent<FanoutState>, handler: "server" | "worker"): Age
                 "Lens analyses (from parallel calls):",
                 ...LENSES.map((l) => `- ${l.id}: ${state.results[l.id]}`),
             ].join("\n");
-            return loop({
+            // toolLoop expresses no state opinion; return `state` to persist the fan-out result.
+            const decision = await loop({
                 ...d,
                 state,
-                trigger: { type: "user.message", message: { role: "user", content: briefing } },
+                trigger: {
+                    type: "client.message",
+                    message: { id: crypto.randomUUID(), role: "user", content: briefing },
+                },
             });
+            return { ...decision, state };
         }
 
         // Everything else (the loop's own llm settles, tools, done) is the loop's.

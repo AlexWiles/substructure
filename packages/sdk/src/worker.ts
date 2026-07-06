@@ -21,7 +21,7 @@ export interface NativeRuntime {
         tenantId: string,
         kind: string,
         id: string,
-        attempt: number,
+        attempt: number | undefined,
         resultJson: string | undefined,
         responseJson: string | undefined,
         errorMessage: string | undefined,
@@ -43,37 +43,24 @@ export interface FetchHandlerOptions {
     tolerance?: number;
 }
 
-/** The agents to serve: each a `NamedAgent` from `agent({ name, ... })`. They
- *  carry independent state types, so the collection is `NamedAgent<any>`. */
+/** The agents to serve, each a `NamedAgent` from `agent({ name, ... })`. */
 // biome-ignore lint/suspicious/noExplicitAny: heterogeneous state types across agents
 export type Agents = NamedAgent<any>[];
 
-// ── State codec (base64 JSON, the worker boundary) ───────────────────────────
-
-function decodeState(raw: string): unknown {
-    if (!raw) return {};
-    return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(raw), (c) => c.charCodeAt(0))));
-}
-
-function encodeState(value: unknown): string {
-    return btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(value))));
-}
-
-/** The one transform: decode `worker_state` into the decision, run the agent,
- *  encode the returned state back out. Everything else is the wire envelope. */
 async function runDecision(
     fn: Agent,
     request: WorkerDecisionRequestWire,
     emitDelta?: EmitDelta,
 ): Promise<SubmitRequest> {
-    const req: DecisionRequest = { ...request, state: decodeState(request.worker_state), emitDelta };
+    const req: DecisionRequest = { ...request, state: request.state ?? null, emitDelta };
     const out = await fn(req);
     return {
         session_id: request.session_id,
         decision_id: request.decision_id,
         actions: out.actions ?? [],
         transcript: out.transcript ?? request.transcript ?? [],
-        state: encodeState(out.state !== undefined ? out.state : req.state),
+        // undefined keeps the current state; a returned value is deduped engine-side.
+        state: out.state,
     };
 }
 
@@ -102,8 +89,7 @@ export class Worker {
         return this.fetchHandler(options);
     }
 
-    /** When `options.signingSecret` is provided, incoming requests are verified
-     *  against the HMAC-SHA256 signature in the `X-Substructure-Signature` header. */
+    /** With `options.signingSecret`, verifies the `X-Substructure-Signature` HMAC-SHA256 header. */
     fetchHandler(options?: FetchHandlerOptions): (req: Request) => Promise<Response> {
         return async (req: Request) => {
             let decision: WorkerDecisionRequestWire;
@@ -158,8 +144,8 @@ export class Worker {
     }
 }
 
-/** Build the HTTP worker for these (named) agents. `worker([agent]).fetch(opts)`
- *  is a `(Request) => Response` handler; each agent is routed by its name. */
+/** Build the HTTP worker for these agents; `worker([...]).fetch(opts)` is a
+ *  `(Request) => Response` handler routed by agent name. */
 export function worker(agents: Agents): Worker {
     return new Worker(agents);
 }
@@ -175,7 +161,7 @@ function sseEmitDelta(sse: SseStream): EmitDelta {
 
 function embeddedEmitDelta(runtime: NativeRuntime, request: WorkerDecisionRequestWire): EmitDelta | undefined {
     const { trigger } = request;
-    if (trigger.type !== "effect.execute" || trigger.kind !== "llm_call" || !trigger.stream) return undefined;
+    if (trigger.type !== "llm.execute" || !trigger.stream) return undefined;
 
     const rootSessionId = request.ancestry?.[0] ?? request.session_id;
     let seq = 0;
@@ -183,7 +169,7 @@ function embeddedEmitDelta(runtime: NativeRuntime, request: WorkerDecisionReques
     return async (delta: LlmTokenDeltaInput) => {
         await runtime.emitTokenDelta(
             JSON.stringify({
-                tenant_id: request.tenant_id,
+                tenant_id: request.identity.tenant_id,
                 root_session_id: rootSessionId,
                 session_id: request.session_id,
                 agent_id: request.agent_id,

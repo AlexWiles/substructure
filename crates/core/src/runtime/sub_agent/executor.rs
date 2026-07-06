@@ -182,5 +182,38 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
                 );
             }
         }
+        SubAgentTask::CancelSubAgent {
+            tenant_id,
+            child_session_id,
+            span,
+            ..
+        } => {
+            let result = execute::<SessionState>(
+                store,
+                ExecuteInput {
+                    aggregate_id: child_session_id.clone(),
+                    caller: Caller::System { tenant_id },
+                    command: CommandPayload::CancelSession,
+                    span: span.child("cancel_sub_agent"),
+                },
+                &ConflictRetry::default(),
+            )
+            .await;
+
+            if let Err(err) = result {
+                if matches!(err, ExecuteError::Command(SessionError::SessionNotCreated)) {
+                    tracing::debug!(
+                        child_session_id = %child_session_id,
+                        "cancel for a child session that was never created"
+                    );
+                } else {
+                    tracing::error!(
+                        child_session_id = %child_session_id,
+                        error = %err,
+                        "failed to cancel sub-agent session"
+                    );
+                }
+            }
+        }
     }
 }

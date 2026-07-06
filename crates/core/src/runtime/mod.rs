@@ -104,7 +104,8 @@ pub struct SettleEffectInput {
     pub session_id: String,
     pub kind: WorkKind,
     pub id: String,
-    pub attempt: u32,
+    /// `None` settles the current attempt; `Some` fences a stale executor.
+    pub attempt: Option<u32>,
     pub settlement: EffectSettlement,
     pub caller: Caller,
     pub span: SpanContext,
@@ -388,7 +389,6 @@ impl Runtime {
                     tool_call_id: input.id,
                     attempt: input.attempt,
                     result,
-                    worker_state: None,
                 }
             }
             EffectSettlement::Result(EffectResultPayload::LlmCall { response }) => {
@@ -409,7 +409,6 @@ impl Runtime {
                     attempt: input.attempt,
                     error,
                     retryable,
-                    worker_state: None,
                 },
                 WorkKind::LlmCall => CommandPayload::FailLlmCall {
                     call_id: input.id,

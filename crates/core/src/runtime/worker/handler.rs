@@ -82,8 +82,8 @@ fn try_extract(raw: &Event) -> Option<WorkerDecisionRequest> {
     let owner = derived.owner.as_ref()?;
     let wd = derived.worker_decisions.get(&req.decision_id)?;
 
-    let pending_effects = derived
-        .effects
+    let pending_calls = derived
+        .calls
         .iter()
         .filter(|e| {
             matches!(
@@ -103,9 +103,9 @@ fn try_extract(raw: &Event) -> Option<WorkerDecisionRequest> {
         agent_id: agent_id.clone(),
         identity: owner.clone(),
         trigger: req.trigger.clone(),
-        worker_state: derived.worker_state.clone(),
-        effects: derived.effects.clone(),
-        pending_effects,
+        state: derived.worker_state.clone(),
+        calls: derived.calls.clone(),
+        pending_calls,
         transcript: derived
             .message_tree
             .head_id

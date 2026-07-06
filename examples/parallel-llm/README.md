@@ -1,9 +1,9 @@
 # parallel-llm
 
-Fan out several `call.llm` actions in one decision, layered over the stock
+Fan out several `llm.call` actions in one decision, layered over the stock
 `toolLoop`. A thin wrapper owns the fan-out: on the user's message it issues one
-`call.llm` per "lens", each named by its own `id`; each settles independently as
-its own `effect.settled { kind: "llm_call" }` trigger, serialized on the decision
+`llm.call` per "lens", each named by its own `id`; each settles independently as
+its own `llm.finished` trigger, serialized on the decision
 stream (a worker never sees two decisions at once) but arriving in completion
 order. Once every lens has landed, the wrapper hands the enriched question to the
 wrapped `toolLoop`, which synthesizes the final answer — and every trigger the
@@ -19,8 +19,8 @@ Two agents:
   shrinking wall-clock time — and each call's retry deadline keeps ticking while
   it waits behind its siblings, so give fanned-out calls generous `timeout_secs`.
 - **`deferred-fanout`** — worker-handled lenses (`handler: "worker"`). Each call
-  arrives as an `effect.execute`; the worker starts it in the background, returns
-  the decision immediately with no actions (so the next `effect.execute` promotes
+  arrives as an `llm.execute`; the worker starts it in the background, returns
+  the decision immediately with no actions (so the next `llm.execute` promotes
   at once and the calls overlap), and settles each out-of-band with
   `settleEffect` when it finishes. This is the path to true wall-clock overlap.
   `runModel` is a stub standing in for your real provider call, and the loop's
@@ -30,7 +30,7 @@ Ids must be **fresh per logical call** — reusing a pending/completed id is an
 idempotent no-op (that's what makes decision redelivery and retry-after-interrupt
 safe), so an accidentally reused id silently loses the call.
 
-Two equivalent ways to detect drain for a single fan-out. `d.effects` lists the
+Two equivalent ways to detect drain for a single fan-out. `d.calls` lists the
 calls still in flight, frozen on each decision at commit time and delivered in
 completion order — so it empties exactly on the last settle, after every sibling
 has been folded. This example instead tracks the ids it issued, which is also

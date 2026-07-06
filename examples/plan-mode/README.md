@@ -23,7 +23,7 @@ interaction in coding agents like Claude Code.
 
 ## Architecture
 
-One shared state shape, which rides the wire as `worker_state` (the engine
+One shared state shape, which rides the wire as `state` (the engine
 owns the conversation history — it isn't part of state):
 
 ```ts
@@ -54,7 +54,7 @@ gating. The `decide` runs that loop for everything except one case: the
 
 On `set_mode` (a `client.action`), the `decide` writes the requested mode to
 state. If it's *entering* `executing`, it forks a fresh thread: it replaces
-`req.transcript` with an empty one and synthesizes a `user.message` trigger
+`req.transcript` with an empty one and synthesizes a `client.message` trigger
 holding only `renderPlan(plan)`, so the executing loop roots a brand-new
 thread with its own system prompt and sees only the rendered plan, none of
 the planning chatter. Otherwise the loop just re-prompts under the new mode

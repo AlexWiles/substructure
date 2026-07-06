@@ -18,11 +18,10 @@ const streamingModel: Llm = {
 };
 
 describe("worker LLM streaming", () => {
-    it("runs the generator on an llm effect.execute, streams flattened deltas, and returns the result", async () => {
+    it("runs the generator on an llm.execute, streams flattened deltas, and returns the result", async () => {
         const deltas: LlmTokenDeltaInput[] = [];
         const trigger: DecisionTrigger = {
-            type: "effect.execute",
-            kind: "llm_call",
+            type: "llm.execute",
             id: "c1",
             request: { model: "mock-model", messages: [] },
             stream: true,
@@ -40,7 +39,7 @@ describe("worker LLM streaming", () => {
         expect(deltas).toEqual([{ text: "Hel" }, { text: "lo" }]);
 
         // The call's result is returned to the engine.
-        const [ret] = actionsOfType(result, "effect.result");
-        expect(ret).toMatchObject({ kind: "llm_call", id: "c1", response: { content: "Hello" } });
+        const [ret] = actionsOfType(result, "llm.result");
+        expect(ret).toMatchObject({ id: "c1", response: { content: "Hello" } });
     });
 });

@@ -3,11 +3,10 @@
 import Anthropic from "@anthropic-ai/sdk";
 
 import type { Llm, LlmGenerate } from "../core";
-import type { LlmParams, LlmTokenDeltaInput, LlmTool, Message, ToolCall } from "../types";
+import type { LlmParams, LlmTokenDeltaInput, LlmTool, MessageInput, ToolCall } from "../types";
 import { contentText } from "../types";
 
-// `MessageCreateParams` minus what the loop supplies: `messages`/`system` and
-// `tools` come from the request; `stream` is set on `llm`.
+// MessageCreateParams minus what the loop supplies (messages/system/tools/stream).
 export type AnthropicGenerateSettings = Omit<
     Anthropic.MessageCreateParamsNonStreaming,
     "messages" | "system" | "tools" | "stream"
@@ -111,7 +110,7 @@ export function toDelta(
 // Anthropic has no `system`/`tool` role: the system prompt is a top-level param and
 // tool results ride inside a `user` message as `tool_result` blocks (merged when
 // consecutive).
-export function toMessages(messages: Message[]): { system?: string; messages: Anthropic.MessageParam[] } {
+export function toMessages(messages: MessageInput[]): { system?: string; messages: Anthropic.MessageParam[] } {
     const systemParts: string[] = [];
     const out: Anthropic.MessageParam[] = [];
 

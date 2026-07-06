@@ -1,14 +1,11 @@
-// Pure-function harness for agent tests.
-//
-// An agent is `(DecisionRequest) -> Decision`. `runAgent` builds a request from a
-// trigger (+ optional tree/pending/state) and runs the agent against it,
-// mirroring the worker boundary minus the base64 state codec. Deterministic.
+// Pure-function harness for agent tests. `runAgent` builds a request from a
+// trigger (+ optional tree/pending/state) and runs the agent against it.
 
 import type { Agent, DecisionRequest } from "../src/core";
 import { activePath } from "../src/core";
 import type {
     DecisionTrigger,
-    Effect,
+    InFlightCall,
     LlmTokenDeltaInput,
     Message,
     MessageTree,
@@ -31,8 +28,8 @@ export interface RunOptions {
     trigger: DecisionTrigger;
     state?: Record<string, unknown>;
     messageTree?: MessageTree;
-    /** In-flight effects the engine would surface on the request (default none). */
-    effects?: Effect[];
+    /** In-flight calls on the request (default none). */
+    calls?: InFlightCall[];
     emitDelta?: (delta: LlmTokenDeltaInput) => Promise<void>;
 }
 
@@ -59,24 +56,22 @@ export async function runAgent(agent: Agent, opts: RunOptions): Promise<RunResul
 }
 
 function makeRequest(opts: RunOptions, transcript?: Message[]): WorkerDecisionRequestWire {
-    const effects = opts.effects ?? [];
+    const calls = opts.calls ?? [];
     return {
         session_id: "00000000-0000-0000-0000-000000000000",
-        tenant_id: "test",
         decision_id: "decision-0",
         agent_id: "test-agent",
         identity: { tenant_id: "test", id: "tester" },
         trigger: opts.trigger,
-        worker_state: "",
-        effects,
-        pending_effects: effects.filter(
-            (e) =>
-                (e.kind === "tool_call" || e.kind === "sub_agent") &&
-                (e.status === "pending" || e.status === "retry_scheduled"),
+        state: {},
+        calls,
+        pending_calls: calls.filter(
+            (c) =>
+                (c.kind === "tool_call" || c.kind === "sub_agent") &&
+                (c.status === "pending" || c.status === "retry_scheduled"),
         ).length,
         transcript,
         message_tree: opts.messageTree,
-        span: { trace_id: "0".repeat(32), span_id: "0".repeat(16), trace_flags: 1 },
         attempts: 0,
     };
 }
@@ -97,36 +92,34 @@ function nextNodeId(): string {
     return `node-${nodeCounter++}`;
 }
 
-export function userMessage(content: string): DecisionTrigger {
-    return { type: "user.message", message: { id: nextNodeId(), role: "user", content } };
+export function clientMessage(content: string): DecisionTrigger {
+    return { type: "client.message", message: { id: nextNodeId(), role: "user", content } };
 }
 
-export function userTranscript(messages: Message[]): DecisionTrigger {
-    return { type: "user.transcript", messages };
+export function clientTranscript(messages: Message[]): DecisionTrigger {
+    return { type: "client.transcript", messages };
 }
 
 export function llmResponse(message: Message, callId = "call-0"): DecisionTrigger {
-    return { type: "effect.settled", id: callId, ok: true, kind: "llm_call", message, truncated: false };
+    return { type: "llm.finished", id: callId, ok: true, message, truncated: false };
 }
 
 export function toolCall(name: string, args: unknown, id = "tc-0"): ToolCall {
     return { id, type: "function", function: { name, arguments: JSON.stringify(args) } };
 }
 
-/** One tool completion; the worker records its result in the transcript.
- *  Whether it then prompts is driven by the `tool_call`/`sub_agent` effects still in flight. */
+/** One tool completion. */
 export function toolResult(toolCallId: string, name: string, result: string, isError = false): DecisionTrigger {
     return {
-        type: "effect.settled",
+        type: "tool.finished",
         id: toolCallId,
         ok: !isError,
-        kind: "tool_call",
         name,
-        result,
+        ...(isError ? { error: result } : { result }),
     };
 }
 
-/** One sub-agent completion; `id` is the child session, `tool_call_id` the model call it answers. */
+/** One sub-agent completion; `id` is the model call it answers. */
 export function subAgentResult(
     sessionId: string,
     toolCallId: string,
@@ -135,13 +128,12 @@ export function subAgentResult(
     isError = false,
 ): DecisionTrigger {
     return {
-        type: "effect.settled",
-        id: sessionId,
+        type: "sub_agent.finished",
+        id: toolCallId,
         ok: !isError,
-        kind: "sub_agent",
-        tool_call_id: toolCallId,
+        session_id: sessionId,
         agent_id: agentId,
-        result,
+        ...(isError ? { error: result } : { result }),
     };
 }
 
@@ -162,8 +154,8 @@ export function actionsOfType<T extends WorkerAction["type"]>(
     return result.actions.filter((a): a is Extract<WorkerAction, { type: T }> => a.type === type);
 }
 
-export function callLlm(result: RunResult): Extract<WorkerAction, { type: "call.llm" }> | undefined {
-    return actionsOfType(result, "call.llm")[0];
+export function callLlm(result: RunResult): Extract<WorkerAction, { type: "llm.call" }> | undefined {
+    return actionsOfType(result, "llm.call")[0];
 }
 
 export function toolMessages(result: RunResult, toolCallId: string): Message[] {

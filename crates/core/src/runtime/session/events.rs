@@ -55,6 +55,10 @@ pub enum EventPayload {
     SubAgentTurnCompleted(SubAgentTurnCompleted),
     #[serde(rename = "decision_request.queued")]
     DecisionRequestQueued(DecisionRequestQueued),
+    #[serde(rename = "decision_request.dropped")]
+    DecisionRequestDropped(DecisionRequestDropped),
+    #[serde(rename = "call.voided")]
+    CallVoided(CallVoided),
     #[serde(rename = "session.cancelled")]
     SessionCancelled,
     #[serde(rename = "session.done")]
@@ -68,7 +72,7 @@ pub enum EventPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionCreated {
     pub agent_id: String,
-    pub owner: SessionOwner,
+    pub identity: SessionOwner,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ancestry: Vec<String>,
     pub worker_retry: RetryPolicy,
@@ -326,8 +330,6 @@ pub struct WorkerDecisionRequested {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerDecisionCompleted {
     pub decision_id: String,
-    /// Opaque worker state — session stores but never interprets.
-    pub state: WorkerState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -347,6 +349,9 @@ pub struct SessionMessageRequested {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerStateUpdated {
     pub state: WorkerState,
+    /// Active head when written; `None` if the tree was empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -369,6 +374,30 @@ pub struct TurnCompleted {
 pub struct DecisionRequestQueued {
     pub decision_id: String,
     pub trigger: DecisionTrigger,
+}
+
+/// A settle decision dropped when its branch was forked away.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionRequestDropped {
+    pub decision_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectKind {
+    ToolCall,
+    LlmCall,
+    SubAgent,
+}
+
+/// An abandoned in-flight call. For a sub-agent, `id` is the tool call and
+/// `session_id` the child session to cancel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallVoided {
+    pub kind: EffectKind,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

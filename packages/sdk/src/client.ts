@@ -32,6 +32,7 @@ export type {
     LlmTokenDelta,
     LlmTool,
     Message,
+    MessageInput,
     MessageNode,
     MessageTree,
     Node,

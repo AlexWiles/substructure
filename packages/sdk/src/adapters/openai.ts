@@ -6,16 +6,15 @@ import { Agent, RunContext } from "@openai/agents";
 import OpenAI from "openai";
 import { toolLoop } from "../agent";
 import type { Llm, LlmGenerate, Agent as SdkAgent, ToolDef } from "../core";
-import type { LlmParams, LlmTokenDeltaInput, LlmTool, Message, ToolCall } from "../types";
+import type { LlmParams, LlmTokenDeltaInput, LlmTool, MessageInput, ToolCall } from "../types";
 import { contentText } from "../types";
 
 type ResponseInputItem = OpenAI.Responses.ResponseInputItem;
 type ResponseStreamEvent = OpenAI.Responses.ResponseStreamEvent;
 type ResponseOutputItem = OpenAI.Responses.ResponseOutputItem;
 
-// The Responses API's own create params minus what the loop supplies: `input` is
-// the transcript and `tools` are declared in `tools()`. `model` is re-required
-// (optional upstream); `stream` is always on.
+// Responses create params minus what the loop supplies (input/tools/stream);
+// `model` is re-required (optional upstream).
 export type OpenAIGenerateSettings = Omit<
     OpenAI.Responses.ResponseCreateParamsStreaming,
     "input" | "tools" | "stream" | "model"
@@ -211,7 +210,7 @@ export function toDelta(event: ResponseStreamEvent, callIdByItem: Map<string, st
     }
 }
 
-export function toResponsesInput(messages: Message[]): ResponseInputItem[] {
+export function toResponsesInput(messages: MessageInput[]): ResponseInputItem[] {
     const out: ResponseInputItem[] = [];
     for (const m of messages) {
         switch (m.role) {

@@ -11,7 +11,7 @@ use serde::Deserialize;
 use sha2::Sha256;
 
 use crate::runtime::llm::{StreamDelta, TokenDelta, TokenDeltaTransport};
-use crate::runtime::session::decision::{DecisionTrigger, EffectWork};
+use crate::runtime::session::decision::DecisionTrigger;
 use crate::transport::worker_http::types::SubmitRequest;
 use crate::worker::push::{PushError, PushResponse, PushTransport, TransportConstructor};
 use crate::worker::WorkerDecisionRequest;
@@ -57,6 +57,7 @@ impl PushTransport for HttpPushTransport {
             .post(&self.endpoint_url)
             .header("Content-Type", "application/json")
             .header(ACCEPT, "text/event-stream, application/json")
+            .header("traceparent", decision.span.traceparent())
             .timeout(self.timeout);
 
         if let Some(ref secret) = self.signing_secret {
@@ -154,10 +155,7 @@ fn retryable_default() -> bool {
     true
 }
 
-/// Reads a streaming worker response: interim `llm.token.delta` frames are
-/// republished onto the token-delta transport; the terminal `decision.result`
-/// frame carries the `SubmitRequest`. The actual SSE framing (UTF-8 across
-/// chunk boundaries, multi-line data, comments) is handled by `eventsource_stream`.
+/// Republishes streamed token deltas and returns the terminal `SubmitRequest`.
 async fn read_sse_response<S, B, E>(
     stream: S,
     decision: &WorkerDecisionRequest,
@@ -224,15 +222,15 @@ async fn publish_worker_delta(
     token_delta_transport: &Arc<dyn TokenDeltaTransport>,
     seq: &mut u32,
 ) -> Result<(), PushError> {
-    let DecisionTrigger::EffectExecute {
+    let DecisionTrigger::LlmExecute {
         id: call_id,
         attempt,
-        work: EffectWork::LlmCall { stream, .. },
+        stream,
         ..
     } = &decision.trigger
     else {
         return Err(PushError {
-            message: "llm.token.delta is only valid for llm effect.execute decisions".to_string(),
+            message: "llm.token.delta is only valid for llm.execute decisions".to_string(),
             retryable: false,
         });
     };
@@ -305,25 +303,23 @@ mod tests {
                 id: Some("user-1".to_string()),
                 metadata: Default::default(),
             },
-            trigger: DecisionTrigger::EffectExecute {
+            trigger: DecisionTrigger::LlmExecute {
                 id: "llm-1".to_string(),
+                request: LlmRequest {
+                    model: "test-model".to_string(),
+                    messages: vec![],
+                    tools: None,
+                    temperature: None,
+                    max_completion_tokens: None,
+                    reasoning: None,
+                },
+                stream: true,
                 attempt: 0,
                 deadline: None,
-                work: EffectWork::LlmCall {
-                    request: LlmRequest {
-                        model: "test-model".to_string(),
-                        messages: vec![],
-                        tools: None,
-                        temperature: None,
-                        max_completion_tokens: None,
-                        reasoning: None,
-                    },
-                    stream: true,
-                },
             },
-            worker_state: vec![].into(),
-            effects: Default::default(),
-            pending_effects: 0,
+            state: Default::default(),
+            calls: Default::default(),
+            pending_calls: 0,
             transcript: vec![],
             message_tree: Default::default(),
             ancestry: vec![],
@@ -334,9 +330,7 @@ mod tests {
         }
     }
 
-    /// Feed `body` as many tiny chunks so multibyte chars and SSE frames are
-    /// split across chunk boundaries — the case the old hand-rolled parser got
-    /// wrong.
+    /// Split `body` into tiny chunks so multibyte chars and SSE frames straddle boundaries.
     fn chunked(body: &str) -> impl futures_util::Stream<Item = Result<Vec<u8>, std::io::Error>> {
         let chunks: Vec<_> = body.as_bytes().chunks(3).map(|c| Ok(c.to_vec())).collect();
         futures_util::stream::iter(chunks)
@@ -346,7 +340,7 @@ mod tests {
     async fn parses_deltas_then_terminal_result() {
         let transport = Arc::new(RecordingTransport::default());
         let decision = streaming_decision();
-        // Note the multibyte token text; chunked() splits it mid-codepoint.
+        // Multibyte token text; chunked() splits it mid-codepoint.
         let body = "event: llm.token.delta\ndata: {\"text\":\"héllo 🎉\"}\n\n\
                     event: llm.token.delta\ndata: {\"reasoning\":\"hmm\"}\n\n\
                     event: decision.result\ndata: {\"session_id\":\"sess-1\",\"decision_id\":\"dec-1\",\"actions\":[],\"state\":\"\"}\n\n";
