@@ -909,7 +909,9 @@ export interface WorkerDecisionRequestWire {
     /** Your state as raw JSON; `null` when the session has none. */
     state: unknown;
     calls: InFlightCall[];
-    /** Count of `tool_call`/`sub_agent` calls still in flight (the step gate; prompt at 0). */
+    /** Outstanding parallel work for this step: in-flight `tool_call`/`sub_agent`
+     *  calls plus sibling results not yet recorded. The default step gate — the
+     *  built-in loop prompts at 0. Inspect `calls` for finer control. */
     pending_calls: number;
     /** The active conversation as a flat list. */
     transcript?: Message[];

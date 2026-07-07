@@ -272,6 +272,48 @@ pub struct DerivedState {
     pub sub_agent_token_usage: BTreeMap<String, u64>,
 }
 
+impl DerivedState {
+    /// Outstanding parallel work the decision `decision_id` must wait for before
+    /// it prompts: in-flight tool/sub-agent calls, plus other `*.finished`
+    /// decisions still queued or pending — results not yet folded into the
+    /// transcript. Without the latter, every finished decision of a parallel
+    /// fan-out sees zero (all calls already completed) and prompts, so each
+    /// sibling issues a follow-up call against an incomplete transcript.
+    pub fn pending_work(&self, decision_id: &str) -> usize {
+        let in_flight_calls = self
+            .calls
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.detail,
+                    EffectDetail::ToolCall { .. } | EffectDetail::SubAgent { .. }
+                ) && matches!(
+                    e.status,
+                    EffectStatus::Pending | EffectStatus::RetryScheduled
+                )
+            })
+            .count();
+        let unrecorded_results = self
+            .worker_decisions
+            .values()
+            .filter(|d| d.decision_id != decision_id)
+            .filter(|d| {
+                matches!(
+                    d.tracking.status,
+                    EffectStatus::Pending | EffectStatus::Queued
+                )
+            })
+            .filter(|d| {
+                matches!(
+                    d.trigger,
+                    DecisionTrigger::ToolFinished { .. } | DecisionTrigger::SubAgentFinished { .. }
+                )
+            })
+            .count();
+        in_flight_calls + unrecorded_results
+    }
+}
+
 pub(super) fn new_call_id() -> String {
     Uuid::now_v7().to_string()
 }

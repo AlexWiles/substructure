@@ -1739,30 +1739,36 @@ impl SessionState {
             }
         }
 
-        // RetryScheduled worker decisions ready to re-issue
-        for wd in self.worker_decisions.values() {
-            if wd.tracking.status == EffectStatus::RetryScheduled {
-                if let Some(next_at) = wd.tracking.retry.next_at {
-                    if next_at <= now {
-                        return Ok(vec![EventPayload::WorkerDecisionRequested(
-                            WorkerDecisionRequested {
-                                decision_id: wd.decision_id.clone(),
-                                trigger: wd.trigger.clone(),
-                            },
-                        )]);
+        // Re-issue a due decision (a RetryScheduled retry, or a queued one) only
+        // when nothing is live — a second live decision lets two transcript
+        // writers run against the same head and fork the tree. This mirrors the
+        // condition `wake_at` schedules on; state can change between scheduling
+        // and firing, so re-check here. Lost decisions are otherwise recovered by
+        // work-queue redelivery, not re-fired.
+        if !self.has_pending_worker_decision() {
+            for wd in self.worker_decisions.values() {
+                if wd.tracking.status == EffectStatus::RetryScheduled {
+                    if let Some(next_at) = wd.tracking.retry.next_at {
+                        if next_at <= now {
+                            return Ok(vec![EventPayload::WorkerDecisionRequested(
+                                WorkerDecisionRequested {
+                                    decision_id: wd.decision_id.clone(),
+                                    trigger: wd.trigger.clone(),
+                                },
+                            )]);
+                        }
                     }
                 }
             }
-        }
 
-        // Lost decisions are recovered by work-queue redelivery, not re-fired here.
-        if let Some(wd) = self.queued_decisions().first() {
-            return Ok(vec![EventPayload::WorkerDecisionRequested(
-                WorkerDecisionRequested {
-                    decision_id: wd.decision_id.clone(),
-                    trigger: wd.trigger.clone(),
-                },
-            )]);
+            if let Some(wd) = self.queued_decisions().first() {
+                return Ok(vec![EventPayload::WorkerDecisionRequested(
+                    WorkerDecisionRequested {
+                        decision_id: wd.decision_id.clone(),
+                        trigger: wd.trigger.clone(),
+                    },
+                )]);
+            }
         }
 
         Ok(vec![])
@@ -5501,6 +5507,332 @@ mod tests {
         assert_eq!(tc.tracking.status, EffectStatus::Completed);
         assert_eq!(tc.result.as_deref(), Some("ok"));
         assert!(!tc.is_error);
+    }
+
+    // ── Parallel worker-tool results must stay on one linear path ─────────
+
+    fn submit_decision(
+        agg: &mut Aggregate<SessionState>,
+        decision_id: String,
+        transcript: Vec<Message>,
+        actions: Vec<WorkerAction>,
+    ) -> Vec<EventPayload> {
+        dispatch(
+            agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id,
+                transcript,
+                actions,
+                state: None,
+            },
+            &machine(),
+        )
+    }
+
+    fn call_tool_action(id: &str) -> WorkerAction {
+        WorkerAction::CallTool {
+            id: id.to_string(),
+            name: "find".to_string(),
+            arguments: "{}".to_string(),
+            handler: ToolHandler::Worker,
+            retry: RetryPolicy::no_retry(),
+        }
+    }
+
+    fn tool_result_action(id: &str) -> WorkerAction {
+        WorkerAction::ToolResult {
+            id: id.to_string(),
+            attempt: Some(0),
+            result: format!("result-{id}"),
+        }
+    }
+
+    /// The transcript the runtime would hand a decision requested right now:
+    /// the root→head path, exactly as `try_extract` materializes it.
+    fn delivered_transcript(agg: &Aggregate<SessionState>) -> Vec<Message> {
+        agg.state
+            .head_id
+            .as_deref()
+            .map(|h| agg.state.message_tree().path_to(h))
+            .unwrap_or_default()
+    }
+
+    fn pending_worker_decisions(agg: &Aggregate<SessionState>) -> usize {
+        agg.state
+            .worker_decisions
+            .values()
+            .filter(|d| d.tracking.status == EffectStatus::Pending)
+            .count()
+    }
+
+    /// The single live (pending) decision — its id and trigger.
+    fn live_decision(agg: &Aggregate<SessionState>) -> (String, DecisionTrigger) {
+        agg.state
+            .worker_decisions
+            .values()
+            .filter(|d| d.tracking.status == EffectStatus::Pending)
+            .min_by_key(|d| d.source_event_sequence)
+            .map(|d| (d.decision_id.clone(), d.trigger.clone()))
+            .expect("a live decision")
+    }
+
+    /// Freeze the transcript each newly-requested decision is handed — the
+    /// root→head path at request time, exactly as `try_extract` materializes it
+    /// into the delivered decision. A decision keeps this base even if the head
+    /// later moves; that is why two writers promoted against the same head fork.
+    fn record_bases(
+        events: &[EventPayload],
+        agg: &Aggregate<SessionState>,
+        bases: &mut HashMap<String, Vec<Message>>,
+    ) {
+        let frozen = delivered_transcript(agg);
+        for e in events {
+            if let EventPayload::WorkerDecisionRequested(p) = e {
+                bases.insert(p.decision_id.clone(), frozen.clone());
+            }
+        }
+    }
+
+    /// Drive the worker to quiescence the way the runtime does: a single thread
+    /// answers each live decision with the transcript it was frozen, and a wake
+    /// fires after every step to surface queued work. Executes reply with a
+    /// result; finishes append their result node to the frozen base.
+    fn drive_worker(agg: &mut Aggregate<SessionState>, bases: &mut HashMap<String, Vec<Message>>) {
+        for _ in 0..128 {
+            let mut live: Vec<(String, DecisionTrigger)> = agg
+                .state
+                .worker_decisions
+                .values()
+                .filter(|d| d.tracking.status == EffectStatus::Pending)
+                .map(|d| (d.decision_id.clone(), d.trigger.clone()))
+                .collect();
+            live.sort_by(|a, b| a.0.cmp(&b.0));
+
+            let Some((id, trigger)) = live.into_iter().next() else {
+                if !agg.state.has_queued_worker_decision() {
+                    return;
+                }
+                let woken = wake(agg);
+                record_bases(&woken, agg, bases);
+                continue;
+            };
+
+            let base = bases.get(&id).cloned().unwrap_or_default();
+            let events = match trigger {
+                DecisionTrigger::ToolExecute { id: tid, .. } => {
+                    submit_decision(agg, id, vec![], vec![tool_result_action(&tid)])
+                }
+                DecisionTrigger::ToolFinished { id: tid, name, .. } => {
+                    let mut answer = base;
+                    answer.push(tool_msg(&tid, &format!("done-{name}")));
+                    submit_decision(agg, id, answer, vec![])
+                }
+                _ => submit_decision(agg, id, base, vec![]),
+            };
+            record_bases(&events, agg, bases);
+
+            let woken = wake(agg);
+            record_bases(&woken, agg, bases);
+        }
+        panic!("worker did not settle");
+    }
+
+    // A wake exists to promote a queued worker decision when the session is
+    // otherwise idle. It must not promote one while a decision is already live —
+    // a second live decision lets two transcript writers run against the same
+    // head and fork the tree. This is the exact hole that split a real session's
+    // parallel tool results (a wake fired between two tool.execute submits).
+    #[test]
+    fn a_wake_does_not_promote_a_second_decision_while_one_is_pending() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+
+        // One decision fans out into two worker-handled tool calls: one execute
+        // is promoted inline, the other queues behind it.
+        let d0 = decision_with(
+            &submit_messages(&mut agg, vec![node_msg("u1", Role::User, "hi")]),
+            |_| true,
+        )
+        .expect("a client decision");
+        submit_decision(
+            &mut agg,
+            d0,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("asst", Role::Assistant, "calling"),
+            ],
+            vec![call_tool_action("tc-a"), call_tool_action("tc-b")],
+        );
+        assert_eq!(pending_worker_decisions(&agg), 1, "one execute live");
+        assert!(agg.state.has_queued_worker_decision(), "one execute queued");
+
+        wake(&mut agg);
+
+        assert_eq!(
+            pending_worker_decisions(&agg),
+            1,
+            "the wake promoted a second decision while one was pending — the \
+             serialization hole that forks parallel tool results"
+        );
+    }
+
+    // The downstream symptom: a model that fans out into parallel worker-handled
+    // tool calls must land every result on one linear path, so the next LLM call
+    // is sent all of them. A forked tree hides some results from the model.
+    #[test]
+    fn parallel_tool_finishes_keep_results_on_one_path() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let mut bases: HashMap<String, Vec<Message>> = HashMap::new();
+
+        // Record [user, assistant] and fan out into two worker-handled tool
+        // calls in one batch — the shape a parallel tool call produces.
+        let d0 = decision_with(
+            &submit_messages(&mut agg, vec![node_msg("u1", Role::User, "hi")]),
+            |_| true,
+        )
+        .expect("a client decision");
+        let fanout = submit_decision(
+            &mut agg,
+            d0,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("asst", Role::Assistant, "calling"),
+            ],
+            vec![call_tool_action("tc-a"), call_tool_action("tc-b")],
+        );
+        record_bases(&fanout, &agg, &mut bases);
+        let woken = wake(&mut agg);
+        record_bases(&woken, &agg, &mut bases);
+
+        drive_worker(&mut agg, &mut bases);
+
+        // Both results must lie on the single path an LLM call would be sent.
+        let head = agg.state.head_id.clone().expect("a head");
+        let path = agg.state.message_tree().path_to(&head);
+        let seen: Vec<&str> = path
+            .iter()
+            .filter_map(|m| m.tool_call_id.as_deref())
+            .collect();
+        assert!(
+            seen.contains(&"tc-a") && seen.contains(&"tc-b"),
+            "parallel results forked: path holds {seen:?}, not both tc-a and tc-b"
+        );
+    }
+
+    // Parallel worker tools all complete before any `tool.finished` is processed
+    // (executes queue ahead of finishes), so counting only in-flight calls leaves
+    // every finish seeing zero pending work — and each prompts, the earlier ones
+    // against a transcript missing the still-unrecorded sibling results. Only the
+    // last finish should prompt; `pending_work` also counts sibling finishes
+    // still awaiting recording.
+    #[test]
+    fn only_the_last_parallel_tool_finish_reports_no_pending_work() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d0 = decision_with(
+            &submit_messages(&mut agg, vec![node_msg("u1", Role::User, "hi")]),
+            |_| true,
+        )
+        .expect("a client decision");
+        submit_decision(
+            &mut agg,
+            d0,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("asst", Role::Assistant, "calling"),
+            ],
+            vec![call_tool_action("tc-a"), call_tool_action("tc-b")],
+        );
+
+        // Run both executes; both tool calls complete and their finishes queue.
+        let (exec_a, _) = live_decision(&agg);
+        submit_decision(&mut agg, exec_a, vec![], vec![tool_result_action("tc-a")]);
+        let (exec_b, _) = live_decision(&agg);
+        submit_decision(&mut agg, exec_b, vec![], vec![tool_result_action("tc-b")]);
+
+        // Both calls are done — in-flight work is zero. The first finish is live
+        // with the second still queued, so it must report pending work, or it
+        // would prompt now against a transcript missing the second result.
+        let (finish_first, trigger) = live_decision(&agg);
+        assert!(matches!(trigger, DecisionTrigger::ToolFinished { .. }));
+        assert_eq!(
+            agg.state.derived_state().pending_work(&finish_first),
+            1,
+            "the first finish must wait: a sibling result is still unrecorded"
+        );
+
+        // Record the first result; the last finish is now live, nothing pending.
+        let mut answer = delivered_transcript(&agg);
+        answer.push(tool_msg("tc-a", "A"));
+        submit_decision(&mut agg, finish_first, answer, vec![]);
+
+        let (finish_last, trigger) = live_decision(&agg);
+        assert!(matches!(trigger, DecisionTrigger::ToolFinished { .. }));
+        assert_eq!(
+            agg.state.derived_state().pending_work(&finish_last),
+            0,
+            "the last finish prompts: every result is recorded"
+        );
+    }
+
+    // Deferred and client-handled tools (and sub-agents) leave their call
+    // Pending after `tool.execute` returns — the result arrives later, out of
+    // band. A fast sibling's finish must not prompt while that call is still in
+    // flight, or the model is prompted without the deferred result. An in-flight
+    // call keeps `pending_work` non-zero exactly as an unrecorded finish does, so
+    // the two patterns compose. (The old in-flight-only count already handled
+    // this half; the point here is the fix did not regress it.)
+    #[test]
+    fn an_in_flight_deferred_sibling_keeps_a_fast_tool_from_prompting() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d0 = decision_with(
+            &submit_messages(&mut agg, vec![node_msg("u1", Role::User, "hi")]),
+            |_| true,
+        )
+        .expect("a client decision");
+        submit_decision(
+            &mut agg,
+            d0,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("asst", Role::Assistant, "calling"),
+            ],
+            vec![call_tool_action("tc-fast"), call_tool_action("tc-deferred")],
+        );
+
+        // Answer the fast tool's execute with a result; "start" the deferred one
+        // by answering its execute with nothing — the engine leaves its call
+        // Pending, just as a deferred tool or a client-handled tool would.
+        let (exec_fast, t) = live_decision(&agg);
+        assert!(matches!(&t, DecisionTrigger::ToolExecute { id, .. } if id == "tc-fast"));
+        submit_decision(
+            &mut agg,
+            exec_fast,
+            vec![],
+            vec![tool_result_action("tc-fast")],
+        );
+
+        let (exec_deferred, t) = live_decision(&agg);
+        assert!(matches!(&t, DecisionTrigger::ToolExecute { id, .. } if id == "tc-deferred"));
+        submit_decision(&mut agg, exec_deferred, vec![], vec![]);
+
+        // The fast tool's finish is live while the deferred call is still in
+        // flight — it must report pending work and record only, not prompt.
+        let (finish_fast, trigger) = live_decision(&agg);
+        assert!(matches!(trigger, DecisionTrigger::ToolFinished { .. }));
+        assert_eq!(
+            agg.state
+                .tool_calls
+                .get("tc-deferred")
+                .unwrap()
+                .tracking
+                .status,
+            EffectStatus::Pending,
+            "the deferred call stays in flight after its execute"
+        );
+        assert_eq!(
+            agg.state.derived_state().pending_work(&finish_fast),
+            1,
+            "the fast tool must wait: a deferred sibling is still in flight"
+        );
     }
 
     // ── Concurrent LLM calls (fan-out) ───────────────────────────────────

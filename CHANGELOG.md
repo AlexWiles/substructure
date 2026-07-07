@@ -24,6 +24,12 @@ same version.
 - **Breaking (Rust):** `WorkerDecisionRequest.tenant_id` removed; use the
   `tenant_id()` accessor. Fixes decisions dropped after a durable-queue round-trip.
 
+### Fixed
+
+- `pending_calls` now counts sibling results still awaiting recording.
+- A wake no longer promotes a worker decision while one is live, which could
+  fork the transcript across parallel tool results.
+
 ## [0.1.21] - 2026-07-06
 
 ### Added

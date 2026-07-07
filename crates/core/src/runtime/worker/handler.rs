@@ -12,7 +12,7 @@ use crate::runtime::session::decision::DecisionTrigger;
 use crate::runtime::session::events::{EventPayload, MessageTree};
 use crate::runtime::session::message::Message;
 use crate::runtime::session::reconcile::news_start;
-use crate::runtime::session::state::{EffectDetail, EffectStatus, SessionState};
+use crate::runtime::session::state::SessionState;
 
 use super::{WorkerDecisionRequest, WorkerQueue};
 
@@ -111,19 +111,7 @@ fn try_extract(raw: &Event) -> Option<WorkerDecisionRequest> {
     let owner = derived.owner.as_ref()?;
     let wd = derived.worker_decisions.get(&req.decision_id)?;
 
-    let pending_calls = derived
-        .calls
-        .iter()
-        .filter(|e| {
-            matches!(
-                e.detail,
-                EffectDetail::ToolCall { .. } | EffectDetail::SubAgent { .. }
-            ) && matches!(
-                e.status,
-                EffectStatus::Pending | EffectStatus::RetryScheduled
-            )
-        })
-        .count();
+    let pending_calls = derived.pending_work(&req.decision_id);
 
     let transcript = derived
         .message_tree
