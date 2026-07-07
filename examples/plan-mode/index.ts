@@ -142,8 +142,9 @@ const planner = agent<State>({
             if (entering && requested === "executing") {
                 transcript = [];
                 trigger = {
-                    type: "client.message",
-                    message: { id: crypto.randomUUID(), role: "user", content: renderPlan(state.plan) },
+                    type: "client.transcript",
+                    messages: [{ id: crypto.randomUUID(), role: "user", content: renderPlan(state.plan) }],
+                    new_from: 0,
                 };
             }
         }

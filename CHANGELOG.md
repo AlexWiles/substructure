@@ -12,6 +12,15 @@ same version.
 
 ### Changed
 
+- **Breaking:** `client.message` removed. All client input delivers as
+  `client.transcript`: `messages` is the full proposed conversation, and a new
+  `new_from` field is the index where the unrecorded suffix starts. Bare-message
+  submissions are expanded onto the active branch at delivery; the client API
+  (`message`/`messages` payloads) is unchanged.
+- The engine mints an `llm.call`/`tool.call` id when the worker omits one (as it
+  already did for interrupts), so SDK-less workers need not generate ids. The
+  `id` field on those two actions is now optional on the wire — omit it and the
+  engine assigns one (previously a missing `id` failed frame parsing).
 - **Breaking (Rust):** `WorkerDecisionRequest.tenant_id` removed; use the
   `tenant_id()` accessor. Fixes decisions dropped after a durable-queue round-trip.
 

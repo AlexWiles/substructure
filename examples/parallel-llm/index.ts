@@ -43,9 +43,9 @@ const INSTRUCTIONS = "Combine the lens analyses into one short answer for the us
 /** Wrap a `toolLoop` with a lens fan-out pre-pass; non-lens triggers fall through. */
 function withLenses(loop: Agent<FanoutState>, handler: "server" | "worker"): Agent<FanoutState> {
     return async (d) => {
-        // The user's message: fan out the lenses instead of starting the loop.
-        if (d.trigger.type === "client.message") {
-            const question = contentText(d.trigger.message.content);
+        // The user's turn: fan out the lenses instead of starting the loop.
+        if (d.trigger.type === "client.transcript") {
+            const question = contentText(d.trigger.messages.at(-1)?.content);
             return {
                 actions: LENSES.map(
                     (l): WorkerAction => ({
@@ -100,12 +100,14 @@ function withLenses(loop: Agent<FanoutState>, handler: "server" | "worker"): Age
                 ...LENSES.map((l) => `- ${l.id}: ${state.results[l.id]}`),
             ].join("\n");
             // toolLoop expresses no state opinion; return `state` to persist the fan-out result.
+            const history = d.transcript ?? [];
             const decision = await loop({
                 ...d,
                 state,
                 trigger: {
-                    type: "client.message",
-                    message: { id: crypto.randomUUID(), role: "user", content: briefing },
+                    type: "client.transcript",
+                    messages: [...history, { id: crypto.randomUUID(), role: "user", content: briefing }],
+                    new_from: history.length,
                 },
             });
             return { ...decision, state };

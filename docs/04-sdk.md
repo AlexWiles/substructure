@@ -250,13 +250,13 @@ const echo = agent({
   name: "echo",
   decide: (req) => {
     switch (req.trigger.type) {
-      case "client.message":
+      case "client.transcript":
         return {
           actions: [
             {
               type: "llm.call",
               id: crypto.randomUUID(),
-              request: { model: "anthropic/claude-sonnet-4-6", messages: [...(req.transcript ?? []), req.trigger.message] },
+              request: { model: "anthropic/claude-sonnet-4-6", messages: req.trigger.messages },
               handler: "server",
             },
           ],
@@ -273,7 +273,7 @@ const echo = agent({
 
 The `DecisionRequest` (conventionally `req`) is the engine's wire envelope, with an absent `state` normalized to `null`. Read off it:
 
-- `req.trigger`: what happened, one of `client.message`, `client.transcript`, `client.action`, `tool.execute`, `llm.execute`, `tool.finished`, `llm.finished`, `sub_agent.finished`, and so on.
+- `req.trigger`: what happened, one of `client.transcript`, `client.action`, `tool.execute`, `llm.execute`, `tool.finished`, `llm.finished`, `sub_agent.finished`, and so on.
 - `req.transcript`: the active transcript (the head-to-root path); may be empty.
 - `req.state`: your state as raw JSON, `null` when the session has none (return a value to persist a new one).
 - `req.pending_calls`: how many `tool_call`/`sub_agent` calls are still in flight; the step gate. On a `tool.finished`/`sub_agent.finished` trigger, prompt again once it hits `0` (a non-zero value doubles as a "steps still running" count).

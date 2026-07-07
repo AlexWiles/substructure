@@ -82,12 +82,11 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
         };
 
         switch (d.trigger.type) {
-            case "client.message": {
-                const transcript = [...withSystem(history), d.trigger.message];
-                return { transcript, actions: [ask(transcript)] };
-            }
             case "client.transcript": {
                 const transcript = withSystem(d.trigger.messages.filter((m) => m.role !== "system"));
+                // Client news arriving mid-step (calls still in flight): record
+                // the proposal now, prompt once the open step settles.
+                if (d.pending_calls > 0) return { transcript };
                 return { transcript, actions: [ask(transcript)] };
             }
             case "client.action": {
@@ -208,14 +207,26 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
                 }
                 return { transcript, actions };
             }
-            case "sub_agent.finished":
+            case "sub_agent.finished": {
+                const node: Message = {
+                    id: crypto.randomUUID(),
+                    role: "tool",
+                    content: (d.trigger.ok ? d.trigger.result : d.trigger.error) ?? "",
+                    tool_call_id: d.trigger.id,
+                    name: d.trigger.agent_id,
+                };
+                const transcript = [...history, node];
+                if (d.pending_calls > 0) return { transcript };
+                return { transcript, actions: [ask(transcript)] };
+            }
+
             case "tool.finished": {
                 const node: Message = {
                     id: crypto.randomUUID(),
                     role: "tool",
                     content: (d.trigger.ok ? d.trigger.result : d.trigger.error) ?? "",
                     tool_call_id: d.trigger.id,
-                    name: d.trigger.type === "sub_agent.finished" ? d.trigger.agent_id : d.trigger.name,
+                    name: d.trigger.name,
                 };
                 const transcript = [...history, node];
                 if (d.pending_calls > 0) return { transcript };

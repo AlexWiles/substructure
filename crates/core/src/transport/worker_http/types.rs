@@ -145,4 +145,33 @@ mod tests {
         let req: SettleEffectRequest = serde_json::from_str(body).expect("tool.error deserializes");
         assert!(matches!(req, SettleEffectRequest::ToolError { .. }));
     }
+
+    #[test]
+    fn a_call_action_parses_without_an_id() {
+        // An SDK-less worker may omit the id and let the engine mint one; the
+        // decision.result frame must still parse (it did not before, failing
+        // with "missing field `id`").
+        let body = r#"{
+            "session_id":"s","decision_id":"d","transcript":[],
+            "actions":[
+                {"type":"llm.call","request":{"model":"m","messages":[]},"handler":"server"},
+                {"type":"tool.call","name":"t","arguments":"{}","handler":"worker"}
+            ]
+        }"#;
+        let req: SubmitRequest = serde_json::from_str(body).expect("id-less call actions parse");
+        assert!(matches!(
+            req.actions.as_slice(),
+            [WorkerAction::CallLlm { .. }, WorkerAction::CallTool { .. }]
+        ));
+        for a in &req.actions {
+            let id = match a {
+                WorkerAction::CallLlm { id, .. } | WorkerAction::CallTool { id, .. } => id,
+                _ => unreachable!(),
+            };
+            assert!(
+                id.is_empty(),
+                "omitted id defaults to empty for the engine to mint"
+            );
+        }
+    }
 }

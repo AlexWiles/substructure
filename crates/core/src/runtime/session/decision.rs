@@ -37,10 +37,17 @@ pub enum ClientPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DecisionTrigger {
+    /// Internal only: materialized into `ClientTranscript` at delivery, never sent to workers.
     #[serde(rename = "client.message")]
     ClientMessage { message: Message },
+    /// `messages` is the full proposed conversation; `messages[new_from..]` is
+    /// unrecorded (recomputed at delivery against the tree).
     #[serde(rename = "client.transcript")]
-    ClientTranscript { messages: Vec<Message> },
+    ClientTranscript {
+        messages: Vec<Message>,
+        #[serde(default)]
+        new_from: usize,
+    },
     #[serde(rename = "client.action")]
     ClientAction {
         name: String,
@@ -181,6 +188,8 @@ pub enum EffectResultPayload {
 pub enum WorkerAction {
     #[serde(rename = "llm.call")]
     CallLlm {
+        // Omit to have the engine mint one; it becomes the assistant node's id.
+        #[serde(default)]
         id: String,
         request: LlmRequest,
         #[serde(default)]
@@ -191,6 +200,8 @@ pub enum WorkerAction {
     },
     #[serde(rename = "tool.call")]
     CallTool {
+        // Omit for an ad-hoc worker tool; the engine mints one.
+        #[serde(default)]
         id: String,
         name: String,
         arguments: String,

@@ -30,7 +30,7 @@ describe("concurrent llm fan-out", () => {
         request: { model: "m", messages: [] },
     });
     const fanout: Agent = (d) => {
-        if (d.trigger.type === "client.message") {
+        if (d.trigger.type === "client.transcript") {
             return { actions: [call("a"), call("b")], state: { pending: ["a", "b"], results: {} } };
         }
         if (d.trigger.type === "llm.finished") {

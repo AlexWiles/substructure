@@ -6,6 +6,7 @@ use rust_decimal::Decimal;
 use super::decision::{ClientPayload, DecisionTrigger, WorkerAction};
 use super::events::*;
 use super::message::{Content, ContentPart, ImageUrl, Message, Role};
+use super::reconcile::plan_reconcile;
 use super::state::{
     json_to_string, new_call_id, new_message_id, EffectStatus, EffectTracking, SessionState,
     SessionStatus,
@@ -159,6 +160,15 @@ fn assign_id(mut message: Message) -> Message {
     message
 }
 
+/// A tool message in a submitted view that answers a still-pending client call.
+struct Completion {
+    /// Position in the normalized view (used to line up with the reconcile plan).
+    index: usize,
+    tool_call_id: String,
+    name: String,
+    result: String,
+}
+
 impl SessionState {
     fn ensure_internal(caller: &Caller) -> Result<(), SessionError> {
         match caller {
@@ -284,25 +294,39 @@ impl SessionState {
     }
 
     // Sole producer of NewMessage; the tree changes only on decision submit.
+    // Executes the plan from `plan_reconcile` — the one interpreter of "what
+    // recording this list writes" — so submit-time classification and delivery
+    // annotation can't drift from what actually lands in the tree.
     fn reconcile_transcript(&self, transcript: Vec<Message>) -> Vec<EventPayload> {
-        if transcript.is_empty() {
-            return vec![];
-        }
-        let existing: std::collections::HashSet<String> =
-            self.nodes.iter().map(|n| n.id().to_string()).collect();
-        let mut events = Vec::new();
+        let known: std::collections::HashSet<&str> = self.nodes.iter().map(|n| n.id()).collect();
+        let plan = plan_reconcile(&known, &transcript);
+        let mut events = Vec::with_capacity(plan.len());
+        let mut plan_iter = plan.iter().peekable();
         let mut parent: Option<String> = None;
-        for msg in transcript {
-            if !msg.id.is_empty() && existing.contains(&msg.id) {
-                parent = Some(msg.id);
-            } else {
-                let msg = assign_id(msg);
-                let id = msg.id.clone();
-                events.push(EventPayload::NewMessage(NewMessage {
-                    message: msg,
-                    parent_id: parent.take(),
-                }));
-                parent = Some(id);
+        for (index, msg) in transcript.into_iter().enumerate() {
+            match plan_iter.peek() {
+                Some(write) if write.index == index => {
+                    let rerecord = write.rerecord;
+                    plan_iter.next();
+                    // Re-record known ids in the news region as fresh nodes so
+                    // the branch stays a chain instead of grafting onto the old.
+                    let msg = if rerecord {
+                        Message {
+                            id: new_message_id(),
+                            ..msg
+                        }
+                    } else {
+                        assign_id(msg)
+                    };
+                    let id = msg.id.clone();
+                    events.push(EventPayload::NewMessage(NewMessage {
+                        message: msg,
+                        parent_id: parent.take(),
+                    }));
+                    parent = Some(id);
+                }
+                // Known prefix before the news: advance the parent cursor only.
+                _ => parent = Some(msg.id),
             }
         }
         events
@@ -491,6 +515,59 @@ impl SessionState {
         Some((id.to_string(), tc.name.clone(), content))
     }
 
+    /// The id of a recorded tool-result node answering `tool_call_id`, if any —
+    /// preferring one on the active path, then the most recently recorded.
+    fn recorded_result_node(
+        &self,
+        tool_call_id: &str,
+        on_path: &std::collections::HashSet<&str>,
+    ) -> Option<String> {
+        let mut best: Option<&str> = None;
+        let mut best_on_path = false;
+        for m in self.nodes.iter().filter_map(|n| n.message()) {
+            if m.role != Role::Tool || m.tool_call_id.as_deref() != Some(tool_call_id) {
+                continue;
+            }
+            let on = on_path.contains(m.id.as_str());
+            if on {
+                best = Some(&m.id);
+                best_on_path = true;
+            } else if !best_on_path {
+                best = Some(&m.id);
+            }
+        }
+        best.map(str::to_string)
+    }
+
+    /// Fold client echoes of already-recorded tool results back onto their
+    /// nodes: an unknown-id tool message whose call already has a recorded node
+    /// IS that node's echo, so it adopts the node's id and the tree sees a
+    /// resend rather than a fork. Identification, not deletion — nothing is
+    /// dropped, so the reconcile plan stays coherent.
+    fn normalize_client_view(&self, messages: Vec<Message>) -> Vec<Message> {
+        let known: std::collections::HashSet<&str> = self.nodes.iter().map(|n| n.id()).collect();
+        let on_path: std::collections::HashSet<&str> = self
+            .head_id
+            .as_deref()
+            .map(|h| self.path_ids(h))
+            .unwrap_or_default();
+        messages
+            .into_iter()
+            .map(|m| {
+                if m.role == Role::Tool && !known.contains(m.id.as_str()) {
+                    if let Some(node_id) = m
+                        .tool_call_id
+                        .as_deref()
+                        .and_then(|tcid| self.recorded_result_node(tcid, &on_path))
+                    {
+                        return Message { id: node_id, ..m };
+                    }
+                }
+                m
+            })
+            .collect()
+    }
+
     fn emit_decision_request(
         &self,
         batch: &[EventPayload],
@@ -568,40 +645,92 @@ impl SessionState {
                         messages,
                         stream: _,
                     } => {
-                        let messages: Vec<Message> = messages.into_iter().map(assign_id).collect();
+                        // Assign ids, then fold client echoes of already-recorded
+                        // results onto their nodes so the tree sees a resend, not
+                        // a fork.
+                        let messages = self
+                            .normalize_client_view(messages.into_iter().map(assign_id).collect());
 
-                        // A transcript ending in a tool message answers pending client tools, not a new turn.
-                        if matches!(messages.last(), Some(m) if m.role == Role::Tool) {
-                            let completions: Vec<(String, String, String)> = messages
-                                .iter()
-                                .filter_map(|m| self.pending_client_result(m))
-                                .collect();
-                            // First completion prompts; the rest queue behind it.
-                            for (tool_call_id, name, content) in completions {
-                                events.push(EventPayload::ToolCallCompleted(ToolCallCompleted {
-                                    tool_call_id: tool_call_id.clone(),
-                                    name: name.clone(),
-                                    result: content.clone(),
-                                }));
-                                let request = self.emit_decision_request(
-                                    &events,
-                                    DecisionTrigger::ToolFinished {
-                                        id: tool_call_id,
-                                        ok: true,
+                        // Answers to still-pending client calls, first-wins per
+                        // call id (a repeat within one view has no recorded node
+                        // to fold onto, so the later copy is dropped).
+                        let mut seen = std::collections::HashSet::new();
+                        let completions: Vec<Completion> = messages
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, m)| {
+                                self.pending_client_result(m)
+                                    .map(|(tc, name, result)| Completion {
+                                        index,
+                                        tool_call_id: tc,
                                         name,
-                                        result: Some(content),
-                                        error: None,
-                                    },
+                                        result,
+                                    })
+                            })
+                            .filter(|c| seen.insert(c.tool_call_id.clone()))
+                            .collect();
+
+                        // A submission with no answers can't pass the interrupt
+                        // gate; one that answers pending work queues until resume.
+                        if completions.is_empty()
+                            && matches!(self.status, SessionStatus::Interrupted { .. })
+                        {
+                            return Err(SessionError::SessionInterrupted);
+                        }
+
+                        // What recording this view would write, by the one
+                        // reconcile interpreter; classification reads this plan
+                        // rather than re-walking the tree.
+                        let known: std::collections::HashSet<&str> =
+                            self.nodes.iter().map(|n| n.id()).collect();
+                        let plan = plan_reconcile(&known, &messages);
+
+                        // Fast path iff the view's only change is one answer to one
+                        // pending call — provable from the plan: exactly one write,
+                        // and it is that answer.
+                        let single_answer = plan.len() == 1
+                            && completions.len() == 1
+                            && plan.first().map(|w| w.index)
+                                == completions.first().map(|c| c.index);
+
+                        if single_answer {
+                            // Mirror the settle endpoint: settle + tool.finished,
+                            // the worker appends the node, the view is discarded.
+                            if let Some(c) = completions.into_iter().next() {
+                                events.push(EventPayload::ToolCallCompleted(ToolCallCompleted {
+                                    tool_call_id: c.tool_call_id.clone(),
+                                    name: c.name.clone(),
+                                    result: c.result.clone(),
+                                }));
+                                let request = self.emit_tool_result(
+                                    &events,
+                                    c.tool_call_id,
+                                    c.name,
+                                    c.result,
+                                    false,
                                 );
                                 events.push(request);
                             }
                         } else {
-                            if matches!(self.status, SessionStatus::Interrupted { .. }) {
-                                return Err(SessionError::SessionInterrupted);
+                            // Bedrock: settle every answer silently (no
+                            // tool.finished), then hand the worker the whole
+                            // normalized view as one frozen transcript. The
+                            // worker's echo records the client's messages. Covers
+                            // plan-empty views (no-op resend / regenerate): still
+                            // delivered, the worker decides.
+                            for c in completions {
+                                events.push(EventPayload::ToolCallCompleted(ToolCallCompleted {
+                                    tool_call_id: c.tool_call_id,
+                                    name: c.name,
+                                    result: c.result,
+                                }));
                             }
                             let request = self.emit_decision_request(
                                 &events,
-                                DecisionTrigger::ClientTranscript { messages },
+                                DecisionTrigger::ClientTranscript {
+                                    messages,
+                                    new_from: 0,
+                                },
                             );
                             events.push(request);
                         }
@@ -675,6 +804,15 @@ impl SessionState {
                 handler,
             } => {
                 Self::ensure_internal(caller)?;
+
+                // Mint an id when the worker omits one, as interrupts do. The id
+                // becomes the assistant node's id and the id AG-UI streams, so a
+                // worker never has to invent one to avoid forking.
+                let call_id = if call_id.is_empty() {
+                    new_call_id()
+                } else {
+                    call_id
+                };
 
                 // Idempotent by id: (re-)issue only for a new/Failed/RetryScheduled call.
                 let issue = matches!(
@@ -758,9 +896,13 @@ impl SessionState {
                             }
                             Some(Content::Parts(parts))
                         };
-                        // Fresh id so reconcile records a new node.
+                        // Record the assistant under the call id. It's globally
+                        // unique (so reconcile still records a new node) and it's
+                        // the id the client was already streamed — AG-UI keys the
+                        // assistant message on the call id — so a client's
+                        // full-view echo matches this node instead of forking.
                         let message = Message {
-                            id: new_message_id(),
+                            id: call_id.clone(),
                             role: Role::Assistant,
                             content,
                             tool_calls,
@@ -844,6 +986,13 @@ impl SessionState {
                 retry,
             } => {
                 Self::ensure_internal(caller)?;
+                // Mint an id when the worker omits one (LLM-driven tools carry the
+                // model's id; an ad-hoc worker tool need not invent one).
+                let tool_call_id = if tool_call_id.is_empty() {
+                    new_call_id()
+                } else {
+                    tool_call_id
+                };
                 match self.tool_calls.get(&tool_call_id) {
                     Some(_) => Ok(vec![]),
                     None => {
@@ -2537,7 +2686,7 @@ mod tests {
             })
             .expect("a decision request");
         match trigger {
-            DecisionTrigger::ClientTranscript { messages } => {
+            DecisionTrigger::ClientTranscript { messages, .. } => {
                 assert_eq!(
                     messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
                     vec!["c1", "a1", "c2"]
@@ -2558,6 +2707,55 @@ mod tests {
         }
     }
 
+    fn tool_node(id: &str, tool_call_id: &str, content: &str) -> Message {
+        Message {
+            id: id.into(),
+            ..tool_msg(tool_call_id, content)
+        }
+    }
+
+    /// Record `transcript` into the tree via one worker decision, giving tests
+    /// exact control over recorded ids (reconcile keeps explicit unknown ids).
+    fn seed_tree(agg: &mut Aggregate<SessionState>, transcript: Vec<Message>) {
+        let events = dispatch(
+            agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Message {
+                    message: node_msg("", Role::User, "seed"),
+                    stream: false,
+                },
+                turn_id: None,
+            },
+            &system(),
+        );
+        let decision_id = decision_with(&events, |_| true).expect("a decision");
+        dispatch(
+            agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id,
+                transcript,
+                actions: vec![],
+                state: None,
+            },
+            &machine(),
+        );
+    }
+
+    /// The messages carried by the (fired or queued) `client.transcript` decision.
+    fn transcript_messages(events: &[EventPayload]) -> Option<Vec<Message>> {
+        events.iter().find_map(|e| {
+            let trigger = match e {
+                EventPayload::WorkerDecisionRequested(p) => &p.trigger,
+                EventPayload::DecisionRequestQueued(p) => &p.trigger,
+                _ => return None,
+            };
+            match trigger {
+                DecisionTrigger::ClientTranscript { messages, .. } => Some(messages.clone()),
+                _ => None,
+            }
+        })
+    }
+
     fn submit_messages(
         agg: &mut Aggregate<SessionState>,
         messages: Vec<Message>,
@@ -2576,12 +2774,14 @@ mod tests {
     }
 
     #[test]
-    fn submit_messages_resolves_a_client_tool_result() {
+    fn submit_messages_single_answer_takes_the_fast_path() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
         request_client_tool(&mut agg, "tc-1");
 
         let events = submit_messages(&mut agg, vec![tool_msg("tc-1", "the answer")]);
 
+        // The view's only change is one answer to one pending call: settle plus
+        // a tool.finished decision, mirroring the settle endpoint. No transcript.
         assert!(events
             .iter()
             .any(|e| matches!(e, EventPayload::ToolCallCompleted(_))));
@@ -2589,10 +2789,10 @@ mod tests {
         assert!(
             decision_with(&events, |t| matches!(
                 t,
-                DecisionTrigger::ClientMessage { .. }
+                DecisionTrigger::ClientTranscript { .. }
             ))
             .is_none(),
-            "a tool-result submission is not a user turn"
+            "the fast path fires tool.finished, not a transcript; got {events:?}"
         );
 
         let tc = agg.state.tool_calls.get("tc-1").expect("tool call present");
@@ -2601,16 +2801,22 @@ mod tests {
     }
 
     #[test]
-    fn submit_messages_fires_a_tool_result_per_client_completion() {
+    fn submit_messages_settles_client_tools_across_submissions() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
         request_client_tool(&mut agg, "a");
         request_client_tool(&mut agg, "b");
 
+        // Each lone answer is its own fast path (tool.finished), settling one
+        // call at a time.
         let first = submit_messages(&mut agg, vec![tool_msg("a", "RA")]);
         assert_eq!(fired_tool_result(&first), vec!["a".to_string()]);
         assert_eq!(
             agg.state.tool_calls.get("a").unwrap().result.as_deref(),
             Some("RA")
+        );
+        assert_eq!(
+            agg.state.tool_calls.get("b").unwrap().tracking.status,
+            EffectStatus::Pending
         );
 
         let second = submit_messages(&mut agg, vec![tool_msg("b", "RB")]);
@@ -2622,31 +2828,27 @@ mod tests {
     }
 
     #[test]
-    fn submit_messages_resolving_several_client_tools_fires_a_tool_result_each() {
+    fn submit_messages_settles_all_client_tools_with_one_decision() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
         request_client_tool(&mut agg, "a");
         request_client_tool(&mut agg, "b");
 
         let events = submit_messages(&mut agg, vec![tool_msg("a", "RA"), tool_msg("b", "RB")]);
-        // Each completion is followed by its decision, so later siblings stay counted as pending.
+        // Both settle up front, then one live transcript decision carries the proposal.
         let sequence: Vec<&str> = events
             .iter()
             .filter_map(|e| match e {
                 EventPayload::ToolCallCompleted(_) => Some("complete"),
                 EventPayload::WorkerDecisionRequested(p)
-                    if matches!(p.trigger, DecisionTrigger::ToolFinished { .. }) =>
+                    if matches!(p.trigger, DecisionTrigger::ClientTranscript { .. }) =>
                 {
                     Some("live")
                 }
-                EventPayload::DecisionRequestQueued(p)
-                    if matches!(p.trigger, DecisionTrigger::ToolFinished { .. }) =>
-                {
-                    Some("queued")
-                }
+                EventPayload::DecisionRequestQueued(_) => Some("queued"),
                 _ => None,
             })
             .collect();
-        assert_eq!(sequence, vec!["complete", "live", "complete", "queued"]);
+        assert_eq!(sequence, vec!["complete", "complete", "live"]);
         assert_eq!(
             agg.state.tool_calls.get("a").unwrap().result.as_deref(),
             Some("RA")
@@ -2658,12 +2860,13 @@ mod tests {
     }
 
     #[test]
-    fn submit_messages_echoing_a_resolved_tool_result_is_inert() {
+    fn submit_messages_echoing_a_resolved_tool_result_settles_nothing() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
         request_client_tool(&mut agg, "tc-1");
         submit_messages(&mut agg, vec![tool_msg("tc-1", "done")]);
 
-        // A re-sent, already-resolved tool result matches nothing pending and must not fabricate a response.
+        // A re-sent, already-resolved tool result matches nothing pending and must
+        // not fabricate a completion; it proceeds as a plain transcript submission.
         let echo = submit_messages(&mut agg, vec![tool_msg("tc-1", "done")]);
         assert!(
             !echo
@@ -2672,9 +2875,457 @@ mod tests {
             "nothing to complete; got {echo:?}"
         );
         assert!(
-            decision_with(&echo, |_| true).is_none(),
-            "no worker decision; got {echo:?}"
+            decision_with(&echo, |t| matches!(
+                t,
+                DecisionTrigger::ClientTranscript { .. }
+            ))
+            .is_some(),
+            "the submission still delivers as a transcript decision; got {echo:?}"
         );
+    }
+
+    #[test]
+    fn submit_messages_with_tool_results_and_a_user_message_settles_and_delivers_once() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        request_client_tool(&mut agg, "tc-1");
+
+        let events = submit_messages(
+            &mut agg,
+            vec![tool_msg("tc-1", "R"), node_msg("", Role::User, "and also")],
+        );
+
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, EventPayload::ToolCallCompleted(_))));
+        assert_eq!(fired_tool_result(&events), Vec::<String>::new());
+        let transcript_decisions = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    EventPayload::WorkerDecisionRequested(p)
+                        if matches!(p.trigger, DecisionTrigger::ClientTranscript { .. })
+                )
+            })
+            .count();
+        assert_eq!(
+            transcript_decisions, 1,
+            "one decision carries the whole submission"
+        );
+
+        let tc = agg.state.tool_calls.get("tc-1").expect("tool call present");
+        assert_eq!(tc.tracking.status, EffectStatus::Completed);
+        assert_eq!(tc.result.as_deref(), Some("R"));
+    }
+
+    #[test]
+    fn transcript_with_completions_passes_the_interrupt_gate_and_queues() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        request_client_tool(&mut agg, "tc-1");
+        dispatch(
+            &mut agg,
+            CommandPayload::Interrupt {
+                interrupt_id: "int-1".to_string(),
+                reason: "paused".to_string(),
+                payload: serde_json::Value::Null,
+            },
+            &system(),
+        );
+
+        let events = submit_messages(&mut agg, vec![tool_msg("tc-1", "R")]);
+
+        // A lone answer still takes the fast path while interrupted; the
+        // tool.finished decision queues until resume rather than firing.
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, EventPayload::ToolCallCompleted(_))));
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                EventPayload::DecisionRequestQueued(p)
+                    if matches!(p.trigger, DecisionTrigger::ToolFinished { .. })
+            )),
+            "the decision queues until resume; got {events:?}"
+        );
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, EventPayload::WorkerDecisionRequested(_))));
+    }
+
+    #[test]
+    fn plain_transcript_rejected_while_interrupted() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        dispatch(
+            &mut agg,
+            CommandPayload::Interrupt {
+                interrupt_id: "int-1".to_string(),
+                reason: "paused".to_string(),
+                payload: serde_json::Value::Null,
+            },
+            &system(),
+        );
+
+        let err = agg
+            .state
+            .handle(
+                CommandPayload::SubmitClientPayload {
+                    payload: ClientPayload::Messages {
+                        messages: vec![node_msg("", Role::User, "hello")],
+                        stream: false,
+                    },
+                    turn_id: None,
+                },
+                &system(),
+            )
+            .expect_err("a transcript that settles nothing is rejected while interrupted");
+        assert!(matches!(err, SessionError::SessionInterrupted));
+    }
+
+    #[test]
+    fn normalize_folds_a_client_tool_echo_onto_its_recorded_node() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        // Recorded tree: u1, a1, and a tool-result node w1 answering tc-1.
+        seed_tree(
+            &mut agg,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("a1", Role::Assistant, "calling"),
+                tool_node("w1", "tc-1", "result"),
+            ],
+        );
+
+        // A local-memory client resends the whole view with ITS OWN id for the
+        // already-recorded tool message, plus a new user turn.
+        let events = submit_messages(
+            &mut agg,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("a1", Role::Assistant, "calling"),
+                tool_node("client-tm", "tc-1", "result"),
+                node_msg("", Role::User, "next"),
+            ],
+        );
+
+        let messages = transcript_messages(&events).expect("a transcript decision");
+        // The echo adopts w1's id, so the whole prefix is known and only the new
+        // user turn is news — no fork.
+        assert_eq!(
+            messages[2].id, "w1",
+            "tool echo adopts the recorded node id"
+        );
+        let known: std::collections::HashSet<&str> =
+            agg.state.nodes.iter().map(|n| n.id()).collect();
+        let plan = plan_reconcile(&known, &messages);
+        assert_eq!(
+            plan.len(),
+            1,
+            "only the new user turn is news; got {plan:?}"
+        );
+        assert_eq!(plan.first().map(|w| w.index), Some(3));
+    }
+
+    #[test]
+    fn edit_with_tail_replay_keeps_the_tool_result() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        // Recorded: u1, a1, tool node w1 (tc-1), a2.
+        seed_tree(
+            &mut agg,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("a1", Role::Assistant, "calling"),
+                tool_node("w1", "tc-1", "result"),
+                node_msg("a2", Role::Assistant, "done"),
+            ],
+        );
+
+        // Edit u1 (fresh id), then replay the tail including the client's own
+        // copy of the tool result. The echo folds onto w1, so the re-recorded
+        // branch keeps the tool result rather than dangling a tool_use.
+        let events = submit_messages(
+            &mut agg,
+            vec![
+                node_msg("u1b", Role::User, "hi (edited)"),
+                node_msg("a1", Role::Assistant, "calling"),
+                tool_node("client-tm", "tc-1", "result"),
+                node_msg("a2", Role::Assistant, "done"),
+            ],
+        );
+
+        let messages = transcript_messages(&events).expect("a transcript decision");
+        assert_eq!(
+            messages[2].id, "w1",
+            "the replayed tool result folds onto w1"
+        );
+        let known: std::collections::HashSet<&str> =
+            agg.state.nodes.iter().map(|n| n.id()).collect();
+        let plan = plan_reconcile(&known, &messages);
+        // News starts at the edit and doesn't stop: all four re-record onto the
+        // new branch, tool result included.
+        assert_eq!(
+            plan.len(),
+            4,
+            "the whole edited branch is news; got {plan:?}"
+        );
+        assert!(
+            plan.iter().any(|w| w.index == 2),
+            "the tool result is part of the re-recorded branch"
+        );
+    }
+
+    #[test]
+    fn scrambled_answer_takes_the_bedrock_path() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        request_client_tool(&mut agg, "tc-1");
+
+        // A view whose recording changes more than the one answer (an extra new
+        // assistant turn) can't take the fast path — it's recorded as-is.
+        let events = submit_messages(
+            &mut agg,
+            vec![
+                tool_msg("tc-1", "R"),
+                node_msg("", Role::Assistant, "scrambled"),
+            ],
+        );
+
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, EventPayload::ToolCallCompleted(_))));
+        assert_eq!(fired_tool_result(&events), Vec::<String>::new());
+        assert!(
+            transcript_messages(&events).is_some(),
+            "a scrambled view delivers as a transcript; got {events:?}"
+        );
+        assert_eq!(
+            agg.state.tool_calls.get("tc-1").unwrap().tracking.status,
+            EffectStatus::Completed
+        );
+    }
+
+    #[test]
+    fn duplicate_answers_in_one_view_settle_once() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        request_client_tool(&mut agg, "tc-1");
+
+        // Two tool messages answer the same pending call; only the first counts.
+        let events = submit_messages(
+            &mut agg,
+            vec![tool_msg("tc-1", "first"), tool_msg("tc-1", "second")],
+        );
+
+        let completions = events
+            .iter()
+            .filter(|e| matches!(e, EventPayload::ToolCallCompleted(_)))
+            .count();
+        assert_eq!(
+            completions, 1,
+            "one settle for the one call; got {events:?}"
+        );
+        assert_eq!(
+            agg.state.tool_calls.get("tc-1").unwrap().result.as_deref(),
+            Some("first")
+        );
+    }
+
+    #[test]
+    fn recorded_echo_beside_a_new_answer_fast_paths_the_new_one() {
+        // The across-runs case: run 1's answer to tc-1 has been recorded (worker
+        // echoed w1) by the time run 2 arrives. Run 2 resends its stale copy of
+        // tc-1 beside a genuinely new answer to tc-2.
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        seed_tree(
+            &mut agg,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("a1", Role::Assistant, "calling"),
+                tool_node("w1", "tc-1", "RA"),
+            ],
+        );
+        request_client_tool(&mut agg, "tc-2");
+
+        let events = submit_messages(
+            &mut agg,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("a1", Role::Assistant, "calling"),
+                tool_node("client-tm", "tc-1", "RA"),
+                tool_msg("tc-2", "RB"),
+            ],
+        );
+
+        // The stale echo folds onto w1, so only the new answer is news: fast path.
+        assert_eq!(fired_tool_result(&events), vec!["tc-2".to_string()]);
+        assert!(
+            transcript_messages(&events).is_none(),
+            "run 2 reduces to a single live answer; got {events:?}"
+        );
+        assert_eq!(
+            agg.state.tool_calls.get("tc-2").unwrap().result.as_deref(),
+            Some("RB")
+        );
+    }
+
+    #[test]
+    fn mixed_answer_and_message_while_interrupted_queues_bedrock() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        request_client_tool(&mut agg, "tc-1");
+        dispatch(
+            &mut agg,
+            CommandPayload::Interrupt {
+                interrupt_id: "int-1".to_string(),
+                reason: "paused".to_string(),
+                payload: serde_json::Value::Null,
+            },
+            &system(),
+        );
+
+        let events = submit_messages(
+            &mut agg,
+            vec![tool_msg("tc-1", "R"), node_msg("", Role::User, "and also")],
+        );
+
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, EventPayload::ToolCallCompleted(_))));
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                EventPayload::DecisionRequestQueued(p)
+                    if matches!(p.trigger, DecisionTrigger::ClientTranscript { .. })
+            )),
+            "the bedrock transcript queues until resume; got {events:?}"
+        );
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, EventPayload::WorkerDecisionRequested(_))));
+    }
+
+    #[test]
+    fn queued_client_message_stays_a_delta_until_delivery() {
+        // Materialization happens at delivery, so a queued message composes with
+        // whatever the decision ahead of it writes.
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let first = dispatch(
+            &mut agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Message {
+                    message: node_msg("", Role::User, "A"),
+                    stream: false,
+                },
+                turn_id: None,
+            },
+            &system(),
+        );
+        assert!(first
+            .iter()
+            .any(|e| matches!(e, EventPayload::WorkerDecisionRequested(p)
+                if matches!(p.trigger, DecisionTrigger::ClientMessage { .. }))));
+
+        let second = dispatch(
+            &mut agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Message {
+                    message: node_msg("", Role::User, "B"),
+                    stream: false,
+                },
+                turn_id: None,
+            },
+            &system(),
+        );
+        assert!(
+            second
+                .iter()
+                .any(|e| matches!(e, EventPayload::DecisionRequestQueued(p)
+                    if matches!(p.trigger, DecisionTrigger::ClientMessage { .. }))),
+            "the stored trigger keeps the bare message; got {second:?}"
+        );
+    }
+
+    #[test]
+    fn reconcile_re_records_known_ids_past_the_first_new_node() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Message {
+                    message: node_msg("", Role::User, "hi"),
+                    stream: false,
+                },
+                turn_id: None,
+            },
+            &system(),
+        );
+        let d1 = decision_with(&events, |_| true).expect("a decision");
+        dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: d1,
+                transcript: vec![
+                    node_msg("u1", Role::User, "hi"),
+                    node_msg("a1", Role::Assistant, "yo"),
+                    node_msg("u2", Role::User, "more"),
+                ],
+                actions: vec![],
+                state: None,
+            },
+            &machine(),
+        );
+        assert_eq!(agg.state.head_id.as_deref(), Some("u2"));
+
+        // Edit a1 while keeping u2's known id after the fork point: the known id
+        // must be re-recorded as a fresh node, not grafted back onto the old branch.
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Message {
+                    message: node_msg("", Role::User, "again"),
+                    stream: false,
+                },
+                turn_id: None,
+            },
+            &system(),
+        );
+        let d2 = decision_with(&events, |_| true).expect("a decision");
+        let submit = dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: d2,
+                transcript: vec![
+                    node_msg("u1", Role::User, "hi"),
+                    node_msg("e1", Role::Assistant, "edited"),
+                    node_msg("u2", Role::User, "more"),
+                ],
+                actions: vec![],
+                state: None,
+            },
+            &machine(),
+        );
+
+        let new_nodes: Vec<(&str, Option<&str>, &Message)> = submit
+            .iter()
+            .filter_map(|e| match e {
+                EventPayload::NewMessage(m) => {
+                    Some((m.message.id.as_str(), m.parent_id.as_deref(), &m.message))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            new_nodes.len(),
+            2,
+            "e1 and the u2 re-record; got {submit:?}"
+        );
+        assert_eq!((new_nodes[0].0, new_nodes[0].1), ("e1", Some("u1")));
+        let (copy_id, copy_parent, copy) = new_nodes[1];
+        assert_ne!(
+            copy_id, "u2",
+            "the known id past the fork gets a fresh node id"
+        );
+        assert_eq!(copy_parent, Some("e1"));
+        assert_eq!(
+            copy.content.as_ref().map(Content::text_owned).as_deref(),
+            Some("more")
+        );
+        assert_eq!(agg.state.head_id.as_deref(), Some(copy_id));
     }
 
     #[test]
@@ -2741,6 +3392,141 @@ mod tests {
         );
         let call = agg.state.llm_calls.get("llm-1").expect("llm call present");
         assert_eq!(call.tracking.status, EffectStatus::Completed);
+    }
+
+    #[test]
+    fn llm_completion_records_the_assistant_under_the_call_id() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        request_llm(&mut agg, "call-1", LlmHandler::Server);
+        let events = complete_llm(&mut agg, "call-1", 0, &system());
+
+        // The assistant node's id is the call id, matching what AG-UI streamed,
+        // so a client's echo of it reconciles instead of forking.
+        let msg_id = events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(p) => match &p.trigger {
+                    DecisionTrigger::LlmFinished {
+                        message: Some(m), ..
+                    } => Some(m.id.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("an llm.finished trigger carrying the assistant");
+        assert_eq!(msg_id, "call-1");
+    }
+
+    #[test]
+    fn request_llm_call_mints_an_id_when_the_worker_omits_it() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let events = request_llm(&mut agg, "", LlmHandler::Server);
+
+        let minted = events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::LlmCallRequested(r) => Some(r.call_id.clone()),
+                _ => None,
+            })
+            .expect("a requested event");
+        assert!(!minted.is_empty(), "the engine mints an id when omitted");
+        assert!(agg.state.llm_calls.contains_key(&minted));
+    }
+
+    #[test]
+    fn request_tool_call_mints_an_id_when_the_worker_omits_it() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::RequestToolCall {
+                tool_call_id: String::new(),
+                name: "do_thing".to_string(),
+                arguments: "{}".to_string(),
+                handler: ToolHandler::Worker,
+                retry: RetryPolicy::no_retry(),
+            },
+            &system(),
+        );
+
+        let minted = events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::ToolCallRequested(t) => Some(t.tool_call_id.clone()),
+                _ => None,
+            })
+            .expect("a requested event");
+        assert!(!minted.is_empty(), "the engine mints an id when omitted");
+        assert!(agg.state.tool_calls.contains_key(&minted));
+    }
+
+    #[test]
+    fn agui_resend_of_a_prior_assistant_turn_appends_without_forking() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        // Turn 1: a user message, then an LLM turn whose assistant is recorded
+        // under the call id, then the worker echoes it into the tree.
+        let d1 = decision_with(
+            &submit_messages(&mut agg, vec![node_msg("u1", Role::User, "hi")]),
+            |_| true,
+        )
+        .expect("a client decision");
+        dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: d1,
+                transcript: vec![node_msg("u1", Role::User, "hi")],
+                actions: vec![],
+                state: None,
+            },
+            &machine(),
+        );
+        request_llm(&mut agg, "call-1", LlmHandler::Server);
+        let done = complete_llm(&mut agg, "call-1", 0, &system());
+        // The worker echoes the assistant message straight from the trigger; its
+        // id is whatever the engine recorded it under (the fix: the call id).
+        let (d2, assistant) = done
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(p) => match &p.trigger {
+                    DecisionTrigger::LlmFinished {
+                        message: Some(m), ..
+                    } => Some((p.decision_id.clone(), m.clone())),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("an llm.finished decision carrying the assistant");
+        dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: d2,
+                transcript: vec![node_msg("u1", Role::User, "hi"), assistant],
+                actions: vec![],
+                state: None,
+            },
+            &machine(),
+        );
+        // The client was streamed the assistant under the call id, so its
+        // full-view echo uses "call-1". The recorded node must carry the same id.
+        assert_eq!(agg.state.head_id.as_deref(), Some("call-1"));
+
+        let events = submit_messages(
+            &mut agg,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("call-1", Role::Assistant, "hello"),
+                node_msg("", Role::User, "again"),
+            ],
+        );
+        let messages = transcript_messages(&events).expect("a transcript decision");
+        let known: std::collections::HashSet<&str> =
+            agg.state.nodes.iter().map(|n| n.id()).collect();
+        let plan = plan_reconcile(&known, &messages);
+        assert_eq!(
+            plan.len(),
+            1,
+            "only the new user turn is news; got {plan:?}"
+        );
+        assert_eq!(plan.first().map(|w| w.index), Some(2));
     }
 
     #[test]

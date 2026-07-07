@@ -5,7 +5,7 @@ import { toolLoop } from "../src/agent";
 import type { Agent } from "../src/core";
 import type { WorkerDecisionRequestWire } from "../src/types";
 import { Worker } from "../src/worker";
-import { clientMessage, clientTranscript, linearTree } from "./harness";
+import { clientTranscript, linearTree } from "./harness";
 
 function wireRequest(overrides: Partial<WorkerDecisionRequestWire> = {}): WorkerDecisionRequestWire {
     return {
@@ -13,7 +13,7 @@ function wireRequest(overrides: Partial<WorkerDecisionRequestWire> = {}): Worker
         decision_id: "decision-0",
         agent_id: "a",
         identity: { tenant_id: "test", id: "tester" },
-        trigger: clientMessage("hi"),
+        trigger: clientTranscript([{ role: "user", content: "hi" }]),
         state: null,
         calls: [],
         pending_calls: 0,

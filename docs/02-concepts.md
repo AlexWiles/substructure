@@ -46,8 +46,7 @@ Each trigger carries the new content and the current transcript; the worker fold
 
 | Trigger | When the engine sends it |
 | --- | --- |
-| `client.message` | A client sent a chat message. The worker adds it to the transcript (rooting a fresh branch with its system prompt on cold start) and prompts. |
-| `client.transcript` | A client sent a full transcript (e.g. an AG-UI client view, an edit, or a regenerate). The worker returns it; the engine reconciles it into the tree. |
+| `client.transcript` | The client proposed the conversation — a bare message, an AG-UI full view, an edit, a regenerate, all one shape. `messages` is the full proposed transcript (a bare message is materialized onto the active branch at delivery) and `messages[new_from..]` is the unrecorded news. The worker returns it (or amends it); the engine reconciles it into the tree. |
 | `client.action` | A client called `startTurn` with a typed action instead of a message. |
 | `tool.execute` / `llm.execute` | The engine is delegating a call to your worker: run a tool, or make an LLM call. `toolLoop` handles these and dispatches to the matching tool's `execute` or the worker-run model; a custom `decide` reacts to them directly. |
 | `llm.finished` / `tool.finished` / `sub_agent.finished` | A call's final word: the model replied, or a tool/sub-agent finished. Fires as each one lands, so the transcript fills incrementally. The request's `calls` list says what's still in flight, so the worker prompts once no tool/sub-agent call is pending, without tracking the round itself. `ok` says whether the call succeeded. |

@@ -21,10 +21,10 @@ One rule makes the whole protocol cohere:
 > decision says how the conversation now reads (`transcript`) and what to do
 > next (`actions`).
 
-A `client.message`'s message is not in the transcript until you put it there; an
-`llm.finished`'s assistant message isn't either; a `tool.finished`'s result
-becomes a tool message only because you write one. Every trigger is a different
-sort of news, and your reply writes it in.
+A `client.transcript`'s proposed messages are not in the transcript until you put
+them there; an `llm.finished`'s assistant message isn't either; a
+`tool.finished`'s result becomes a tool message only because you write one. Every
+trigger is a different sort of news, and your reply writes it in.
 
 ## The exchange
 
@@ -104,8 +104,7 @@ ignores the rest — unknown types are additive, never a wire break.
 
 | `type` | Fields | Meaning |
 |---|---|---|
-| `client.message` | `message` | A new user turn. Prompt the model. |
-| `client.transcript` | `messages` | A full client-supplied transcript (e.g. AG-UI). Reconcile it and prompt. |
+| `client.transcript` | `messages`, `new_from` | The client proposed the conversation — a new message, an edit, or a full view, all one shape. `messages` is the full proposed transcript; `messages[new_from..]` is unrecorded. Echo it (or amend it) and prompt. |
 | `client.action` | `name`, `args?` | A non-message signal from the client (mode switch, approval). |
 | `llm.finished` | `id`, `ok`, `message`, `truncated`, `usage?`, `cost?` \| `error`, `code?`, `detail?` | The model's final word on call `id`. |
 | `tool.finished` | `id`, `ok`, `name`, `result` \| `error` | A tool's final word (retries exhausted on failure). |
@@ -118,6 +117,74 @@ ignores the rest — unknown types are additive, never a wire break.
 when not. **Finished means final** — you will never hear about that call id
 again, and every `*.finished` you receive has its requesting call on the
 delivered transcript (see Forks and in-flight calls).
+
+### The client transcript
+
+All conversational input arrives as one trigger. A client that submits a bare
+message (`{"type": "message", ...}`) and a client that submits its full view
+(`{"type": "messages", ...}`, e.g. AG-UI) produce the same shape on your wire:
+the **full proposed conversation** in `messages`, with `new_from` marking where
+the unrecorded suffix starts. The engine computes both at delivery time against
+the tree, so a message that queued behind another decision is materialized
+*after* that decision's writes — the annotation is exact, not advisory, and
+identical across redeliveries.
+
+The simple worker ignores `new_from` and echoes: `transcript = messages`,
+prompt. A worker with per-turn policy gets everything the annotation implies:
+
+- **The news**: `messages[new_from..]` — exactly what reconciling your echo will
+  write. Moderate it, transform it (the news' ids are assigned but unrecorded, so
+  you may rewrite content before echoing), or bill by it.
+- **Append vs. edit**: the proposal is a pure append iff
+  `messages[new_from - 1].id` is the last id of the request's `transcript`;
+  anything else forks.
+- **Reject**: return the request's `transcript` unchanged (or omit `transcript`)
+  and the proposal is never written — not echoing is the veto.
+- **Empty news** (`new_from == len(messages)`): nothing to write. A strict-prefix
+  proposal is a *regenerate* gesture — prompt from it and the fork lands when
+  your next assistant message reconciles.
+
+Three contracts keep client views well-formed:
+
+- **An edit is a new message.** Reconcile keys on id: a message that keeps its
+  recorded id *is* the recorded node, content changes ignored. Edits must carry a
+  fresh (or no) id.
+- **The news doesn't stop.** Once reconcile writes its first new node, every
+  later message in the echo is written as a new node (a known id past that point
+  is re-recorded fresh) — a fork rewrites its whole tail.
+- **Full views must echo recorded ids.** An id-less resend of the whole
+  conversation is all news and forks at the root, every turn. Clients that don't
+  track ids should submit bare messages instead.
+
+A client transcript may also answer **client-handled tool calls**: any message
+whose `tool_call_id` matches a pending client tool settles that call. How the
+submission then delivers depends on its shape, decided by the same reconcile plan
+that will write your echo:
+
+- **Fast path** — the submission's only change is exactly one answer to one
+  pending call. The engine runs the structured flow: it settles the call and
+  sends you a `tool.finished`, identical to the settle endpoint. You append the
+  result node and prompt; the submitted view is discarded.
+- **Bedrock** — anything else (several answers at once, an answer plus a new
+  message, an edit, a whole imported history). Every answered call settles
+  silently — **no `tool.finished`** — and the entire view arrives as one
+  `client.transcript`. Your echo records the client's tool messages along with
+  the rest.
+
+Before either, the engine **normalizes**: a client that resends its own copy of
+an already-recorded tool result has that message folded onto the recorded node
+(matched by `tool_call_id`), so local-memory clients that replay their tool
+messages every turn resend rather than fork. (AG-UI clients must therefore key
+tool messages by `tool_call_id`, per the protocol; the settle echoes back a
+`TOOL_CALL_RESULT` under that id.)
+
+While a session is interrupted, a submission that settles pending tools is
+accepted — the resulting decision (fast-path `tool.finished` or bedrock
+transcript) queues until resume; one that settles nothing is rejected.
+
+One deliberate limitation: an echo of entirely-known ids writes nothing, so a
+**pure head move** (truncating or switching branches with no new message and no
+follow-up prompt) is a no-op — branches materialize only when a new node lands.
 
 ## Actions
 
@@ -203,9 +270,9 @@ def decide(req, state):
 
     match trigger["type"]:
 
-        # A user turn arrived → write it in, prompt the model.
-        case "client.message":
-            transcript = history + [ trigger["message"] ]
+        # The client proposed the conversation → write it in, prompt the model.
+        case "client.transcript":
+            transcript = trigger["messages"]
             return { "transcript": transcript, "actions": [ call_llm(transcript, schemas) ] }
 
         # The model's final word → finish the turn, or run its tools.
@@ -256,7 +323,7 @@ def done(data):                    return { "type": "done", "data": data }
 
 That's the entire loop: four flat cases, one per trigger type, and
 `trigger["type"]` is the only discriminator in the whole protocol.
-`client.message` prompts, `llm.finished` drives the loop, `tool.execute` runs
+`client.transcript` prompts, `llm.finished` drives the loop, `tool.execute` runs
 delegated work, and `tool.finished` folds results in (prompting again once
 nothing is pending). Everything below is an optional extension on the same
 skeleton.

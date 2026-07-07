@@ -875,6 +875,26 @@ mod tests {
         assert!(t.terminated);
     }
 
+    #[test]
+    fn client_answers_in_a_fresh_run_emit_results_without_yielding() {
+        // The bedrock/settle path: a run whose submission carries client tool
+        // answers has no batch of its own (the calls were requested in a prior
+        // run), so each settle surfaces a TOOL_CALL_RESULT keyed by tool_call_id
+        // and the run does not prematurely finish.
+        let mut t = AgUiTranslator::new("t1".into(), "r1".into());
+        let a = t.on_event(ev(json!({
+            "type": "tool.call.completed", "tool_call_id": "tc-1", "name": "f", "result": "RA",
+        })));
+        assert_eq!(kinds(&vals(a.clone())), ["TOOL_CALL_RESULT"]);
+        assert_eq!(vals(a)[0]["messageId"], "tc-1");
+
+        let b = vals(t.on_event(ev(json!({
+            "type": "tool.call.completed", "tool_call_id": "tc-2", "name": "g", "result": "RB",
+        }))));
+        assert_eq!(kinds(&b), ["TOOL_CALL_RESULT"]);
+        assert!(!t.terminated, "settles in a fresh run must not finish it");
+    }
+
     fn llm_completed_with_tools(call_id: &str, tool_ids: &[&str]) -> EventPayload {
         let tool_calls: Vec<Value> = tool_ids
             .iter()

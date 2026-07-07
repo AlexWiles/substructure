@@ -38,7 +38,7 @@ A worker is one stateless HTTP handler. The engine `POST`s a JSON **decision req
 
 ### 1. The smallest agent
 
-Two triggers make a chat agent: a user message arrives → prompt the model; the model answers → end the turn.
+Two triggers make a chat agent: the client proposes the conversation → prompt the model; the model answers → end the turn.
 
 ```javascript
 // worker.js: a complete Substructure worker. No SDK, no dependencies.
@@ -50,9 +50,10 @@ export default {
 
 function decide(req) {
   switch (req.trigger.type) {
-    // A user message arrived → write it into the conversation, prompt the model.
-    case "client.message": {
-      const transcript = [...req.transcript, req.trigger.message];
+    // The client proposed the conversation (a new message, an edit, a full
+    // view — all one shape) → write it in, prompt the model.
+    case "client.transcript": {
+      const transcript = req.trigger.messages;
       return reply(req, { transcript, actions: [promptModel(transcript)] });
     }
 
@@ -200,9 +201,9 @@ export default {
 
 function decide(req) {
   switch (req.trigger.type) {
-    // A user message arrived → write it into the conversation, prompt the model.
-    case "client.message": {
-      const transcript = [...req.transcript, req.trigger.message];
+    // The client proposed the conversation → write it in, prompt the model.
+    case "client.transcript": {
+      const transcript = req.trigger.messages;
       return reply(req, { transcript, actions: [promptModel(transcript)] });
     }
 

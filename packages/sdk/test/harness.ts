@@ -24,13 +24,42 @@ export interface RunResult {
     inputIds: Set<string>;
 }
 
+/** Engine-internal client message; materialized into a `client.transcript` at delivery. */
+export type ClientMessageInput = { type: "client.message"; message: Message };
+
 export interface RunOptions {
-    trigger: DecisionTrigger;
+    trigger: DecisionTrigger | ClientMessageInput;
     state?: Record<string, unknown>;
     messageTree?: MessageTree;
     /** In-flight calls on the request (default none). */
     calls?: InFlightCall[];
     emitDelta?: (delta: LlmTokenDeltaInput) => Promise<void>;
+}
+
+/** Mirror of the engine's delivery-time unification: a bare message becomes the
+ *  full proposed transcript, and `new_from` marks where the news starts. */
+function materializeTrigger(
+    trigger: DecisionTrigger | ClientMessageInput,
+    transcript: Message[],
+    tree?: MessageTree,
+): DecisionTrigger {
+    if (trigger.type === "client.message") {
+        return {
+            type: "client.transcript",
+            messages: [...transcript, trigger.message],
+            new_from: transcript.length,
+        };
+    }
+    if (trigger.type === "client.transcript") {
+        const known = new Set<string>();
+        for (const node of tree?.nodes ?? []) {
+            const id = nodeId(node);
+            if (id) known.add(id);
+        }
+        const first = trigger.messages.findIndex((m) => m.id == null || !known.has(m.id));
+        return { ...trigger, new_from: first === -1 ? trigger.messages.length : first };
+    }
+    return trigger;
 }
 
 export async function runAgent(agent: Agent, opts: RunOptions): Promise<RunResult> {
@@ -62,7 +91,7 @@ function makeRequest(opts: RunOptions, transcript?: Message[]): WorkerDecisionRe
         decision_id: "decision-0",
         agent_id: "test-agent",
         identity: { tenant_id: "test", id: "tester" },
-        trigger: opts.trigger,
+        trigger: materializeTrigger(opts.trigger, transcript ?? [], opts.messageTree),
         state: {},
         calls,
         pending_calls: calls.filter(
@@ -92,12 +121,13 @@ function nextNodeId(): string {
     return `node-${nodeCounter++}`;
 }
 
-export function clientMessage(content: string): DecisionTrigger {
+export function clientMessage(content: string): ClientMessageInput {
     return { type: "client.message", message: { id: nextNodeId(), role: "user", content } };
 }
 
 export function clientTranscript(messages: Message[]): DecisionTrigger {
-    return { type: "client.transcript", messages };
+    // new_from is recomputed against the tree at materialization.
+    return { type: "client.transcript", messages, new_from: 0 };
 }
 
 export function llmResponse(message: Message, callId = "call-0"): DecisionTrigger {

@@ -249,8 +249,12 @@ export type LlmOutcome =
 /** What a decision's `trigger` carries. A `sub_agent.finished`'s `id` is the
  *  tool call it answers; `session_id` is the child session. */
 export type DecisionTrigger =
-    | { type: "client.message"; message: Message }
-    | { type: "client.transcript"; messages: Message[] }
+    | {
+          /** The full proposed conversation; `messages[new_from..]` is unrecorded. */
+          type: "client.transcript";
+          messages: Message[];
+          new_from: number;
+      }
     | ({ type: "client.action" } & ClientAction)
     | { type: "tool.execute"; id: string; name: string; arguments: string; attempt: number; deadline?: DateTime }
     | { type: "llm.execute"; id: string; request: LlmRequest; stream: boolean; attempt: number; deadline?: DateTime }

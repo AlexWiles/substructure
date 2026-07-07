@@ -715,7 +715,7 @@ impl SessionState {
     }
 
     /// All node ids (messages and controls) on the root→`leaf` chain.
-    fn path_ids<'a>(&'a self, leaf: &'a str) -> std::collections::HashSet<&'a str> {
+    pub(crate) fn path_ids<'a>(&'a self, leaf: &'a str) -> std::collections::HashSet<&'a str> {
         let by_id: HashMap<&str, &Node> = self.nodes.iter().map(|n| (n.id(), n)).collect();
         let mut ids = std::collections::HashSet::new();
         let mut cursor = Some(leaf);
