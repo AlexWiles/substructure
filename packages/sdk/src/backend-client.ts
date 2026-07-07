@@ -8,7 +8,7 @@ import type {
     SessionScope,
     SettleEffectArgs,
     SettleEffectResponse,
-    SubmitRequest,
+    SubmitDecisionRequest,
     SubmitResponse,
     TurnResult,
 } from "./types";
@@ -84,7 +84,7 @@ export class BackendClient {
         return { token: response.token, expiresAt: response.expires_at };
     }
 
-    async submitWorkerDecision(request: SubmitRequest): Promise<SubmitResponse> {
+    async submitWorkerDecision(request: SubmitDecisionRequest): Promise<SubmitResponse> {
         return this.worker.submit(request);
     }
 

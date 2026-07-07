@@ -1,6 +1,6 @@
 import type { Agent, DecisionRequest, EmitDelta, NamedAgent } from "./core";
 import { createSseStream, type SseStream } from "./sse";
-import type { LlmTokenDeltaInput, SubmitRequest, WorkerDecisionRequestWire } from "./types";
+import type { LlmTokenDeltaInput, WorkerDecisionRequestWire, WorkerDecisionResponse } from "./types";
 import { verifyWebhookSignature } from "./webhook";
 
 export interface NativeRuntime {
@@ -51,12 +51,10 @@ async function runDecision(
     fn: Agent,
     request: WorkerDecisionRequestWire,
     emitDelta?: EmitDelta,
-): Promise<SubmitRequest> {
+): Promise<WorkerDecisionResponse> {
     const req: DecisionRequest = { ...request, state: request.state ?? null, emitDelta };
     const out = await fn(req);
     return {
-        session_id: request.session_id,
-        decision_id: request.decision_id,
         actions: out.actions ?? [],
         messages: out.messages ?? request.messages ?? [],
         // undefined keeps the current state; a returned value is deduped engine-side.
@@ -112,7 +110,7 @@ export class Worker {
         };
     }
 
-    async handleDecision(request: WorkerDecisionRequestWire, emitDelta?: EmitDelta): Promise<SubmitRequest> {
+    async handleDecision(request: WorkerDecisionRequestWire, emitDelta?: EmitDelta): Promise<WorkerDecisionResponse> {
         const fn = this.agents[request.agent_id];
         if (!fn) {
             throw new Error(`No agent registered for: ${request.agent_id}`);

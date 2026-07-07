@@ -20,14 +20,14 @@ use crate::{Caller, EffectSettlement, RuntimeError, SettleEffectInput, SubmitCli
 use super::types::{
     MintClientTokenRequest, MintClientTokenResponse, SettleEffectRequest,
     StreamSessionEventsParams, SubmitClientPayloadRequest, SubmitClientPayloadResponse,
-    SubmitRequest, SubmitResponse,
+    SubmitDecisionRequest, SubmitResponse,
 };
 use super::WorkerHttpState;
 
 pub async fn submit(
     State(state): State<WorkerHttpState>,
     Extension(caller): Extension<Caller>,
-    Json(req): Json<SubmitRequest>,
+    Json(req): Json<SubmitDecisionRequest>,
 ) -> Response {
     let span = req
         .span
@@ -40,9 +40,9 @@ pub async fn submit(
             session_id: req.session_id,
             caller,
             decision_id: req.decision_id,
-            transcript: req.transcript,
-            actions: req.actions,
-            state: req.state,
+            transcript: req.decision.transcript,
+            actions: req.decision.actions,
+            state: req.decision.state,
             span,
         })
         .await;

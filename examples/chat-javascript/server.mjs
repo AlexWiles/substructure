@@ -37,5 +37,5 @@ function decide(req) {
     };
   }
 
-  return { session_id: req.session_id, decision_id: req.decision_id, ...decision };
+  return { actions: [], ...decision };
 }

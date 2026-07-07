@@ -37,7 +37,7 @@ decision.
 ```jsonc
 {
   "session_id":    "…",          // the conversation this decision belongs to
-  "decision_id":   "…",          // echo both back unchanged
+  "decision_id":   "…",          // identifies this specific decision
   "agent_id":      "assistant",  // which agent the engine is asking
   "identity":      { "tenant_id": "…", "id": "user-42" },  // the end user
   "trigger":       { "type": "…", … },   // the news; the one field you switch on
@@ -76,8 +76,6 @@ decision.
 
 ```jsonc
 {
-  "session_id":  "…",          // from the request
-  "decision_id": "…",          // from the request
   "actions":     [ … ],        // what to do next; see Actions
   "messages":    [ … ],        // the conversation as it should now read
   "state":       { … }         // your state as raw JSON; omit the field to keep it. See State.
@@ -253,8 +251,6 @@ def handle(request):
     state = request.get("state")                     # raw JSON; None when the session has none
     out   = decide(request, state)                   # run the loop
     resp  = {
-        "session_id":  request["session_id"],
-        "decision_id": request["decision_id"],
         "actions":     out.get("actions", []),
         "messages":    out.get("messages", request.get("messages", [])),
     }

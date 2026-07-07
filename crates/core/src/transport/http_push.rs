@@ -12,7 +12,7 @@ use sha2::Sha256;
 
 use crate::runtime::llm::{StreamDelta, TokenDelta, TokenDeltaTransport};
 use crate::runtime::session::decision::DecisionTrigger;
-use crate::transport::worker_http::types::SubmitRequest;
+use crate::transport::worker_http::types::WorkerDecisionResponse;
 use crate::worker::push::{PushError, PushResponse, PushTransport, TransportConstructor};
 use crate::worker::WorkerDecisionRequest;
 
@@ -104,13 +104,6 @@ impl PushTransport for HttpPushTransport {
             })?
         };
 
-        if submit.session_id != decision.session_id || submit.decision_id != decision.decision_id {
-            return Err(PushError {
-                message: "worker response did not match requested session/decision".to_string(),
-                retryable: false,
-            });
-        }
-
         Ok(PushResponse {
             transcript: submit.transcript,
             actions: submit.actions,
@@ -155,12 +148,12 @@ fn retryable_default() -> bool {
     true
 }
 
-/// Republishes streamed token deltas and returns the terminal `SubmitRequest`.
+/// Republishes streamed token deltas and returns the terminal decision.
 async fn read_sse_response<S, B, E>(
     stream: S,
     decision: &WorkerDecisionRequest,
     token_delta_transport: Arc<dyn TokenDeltaTransport>,
-) -> Result<SubmitRequest, PushError>
+) -> Result<WorkerDecisionResponse, PushError>
 where
     S: futures_util::Stream<Item = Result<B, E>>,
     B: AsRef<[u8]>,
@@ -342,14 +335,15 @@ mod tests {
         // Multibyte token text; chunked() splits it mid-codepoint.
         let body = "event: llm.token.delta\ndata: {\"text\":\"héllo 🎉\"}\n\n\
                     event: llm.token.delta\ndata: {\"reasoning\":\"hmm\"}\n\n\
-                    event: decision.result\ndata: {\"session_id\":\"sess-1\",\"decision_id\":\"dec-1\",\"actions\":[],\"state\":\"\"}\n\n";
+                    event: decision.result\ndata: {\"actions\":[],\"state\":\"\"}\n\n";
 
         let submit = read_sse_response(chunked(body), &decision, transport.clone())
             .await
             .expect("should parse the stream");
 
-        assert_eq!(submit.session_id, "sess-1");
-        assert_eq!(submit.decision_id, "dec-1");
+        // The terminal frame carries only the worker-authored decision — no ids.
+        assert!(submit.actions.is_empty());
+        assert!(submit.state.is_some());
 
         let deltas = transport.deltas.lock().unwrap();
         assert_eq!(deltas.len(), 2);

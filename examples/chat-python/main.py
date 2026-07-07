@@ -25,4 +25,4 @@ async def decide(request: Request):
         decision = {"messages": [*req["messages"], t["message"]],
                     "actions": [{"type": "done", "data": t["message"]["content"]}]}
 
-    return {"session_id": req["session_id"], "decision_id": req["decision_id"], **decision}
+    return {"actions": [], **decision}

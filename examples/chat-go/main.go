@@ -16,7 +16,7 @@ func main() {
 		var req map[string]any
 		json.NewDecoder(r.Body).Decode(&req)
 		t := req["trigger"].(map[string]any)
-		out := map[string]any{"session_id": req["session_id"], "decision_id": req["decision_id"]}
+		out := map[string]any{"actions": []any{}}
 
 		switch t["type"] {
 		// The client sent the conversation → prompt the model.

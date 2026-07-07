@@ -7,10 +7,11 @@ use crate::session::decision::WorkerAction;
 use crate::span::SpanContext;
 use crate::worker::WorkerState;
 
+/// The decision a worker authors in reply to a `WorkerDecisionRequest`: the
+/// updated conversation, what to do next, and the new state. The whole sync
+/// HTTP response body, and the streamed `decision.result` frame.
 #[derive(Debug, Deserialize)]
-pub struct SubmitRequest {
-    pub session_id: String,
-    pub decision_id: String,
+pub struct WorkerDecisionResponse {
     /// Wire field: `messages`.
     #[serde(default, rename = "messages")]
     pub transcript: Vec<Message>,
@@ -18,8 +19,19 @@ pub struct SubmitRequest {
     /// Omitted or `null` keeps the current state; clear with a non-null empty value.
     #[serde(default)]
     pub state: Option<WorkerState>,
+}
+
+/// A decision pushed to the engine out-of-band via the submit route: the
+/// `session_id`/`decision_id` that route it, wrapping the worker-authored
+/// `decision` payload.
+#[derive(Debug, Deserialize)]
+pub struct SubmitDecisionRequest {
+    pub session_id: String,
+    pub decision_id: String,
     #[serde(default)]
     pub span: Option<SpanContext>,
+    #[serde(flatten)]
+    pub decision: WorkerDecisionResponse,
 }
 
 #[derive(Debug, Serialize)]
@@ -153,13 +165,14 @@ mod tests {
         // decision.result frame must still parse (it did not before, failing
         // with "missing field `id`").
         let body = r#"{
-            "session_id":"s","decision_id":"d","messages":[],
+            "messages":[],
             "actions":[
                 {"type":"llm.call","request":{"model":"m","messages":[]},"handler":"server"},
                 {"type":"tool.call","name":"t","arguments":"{}","handler":"worker"}
             ]
         }"#;
-        let req: SubmitRequest = serde_json::from_str(body).expect("id-less call actions parse");
+        let req: WorkerDecisionResponse =
+            serde_json::from_str(body).expect("id-less call actions parse");
         assert!(matches!(
             req.actions.as_slice(),
             [WorkerAction::CallLlm { .. }, WorkerAction::CallTool { .. }]
@@ -174,5 +187,17 @@ mod tests {
                 "omitted id defaults to empty for the engine to mint"
             );
         }
+    }
+
+    #[test]
+    fn submit_route_flattens_the_decision_and_requires_ids() {
+        let body = r#"{"session_id":"s","decision_id":"d","messages":[],"actions":[]}"#;
+        let req: SubmitDecisionRequest = serde_json::from_str(body).expect("submit parses");
+        assert_eq!(req.session_id, "s");
+        assert_eq!(req.decision_id, "d");
+        assert!(req.decision.actions.is_empty());
+
+        // The submit route routes by id, so it requires them.
+        assert!(serde_json::from_str::<SubmitDecisionRequest>(r#"{"actions":[]}"#).is_err());
     }
 }

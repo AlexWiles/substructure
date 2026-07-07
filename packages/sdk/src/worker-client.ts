@@ -8,13 +8,13 @@ import type {
     SettleEffectResponse,
     StreamSessionEventsParams,
     SubmitClientPayloadResponse,
-    SubmitRequest,
+    SubmitDecisionRequest,
     SubmitResponse,
     WorkerAuthOptions,
 } from "./types";
 
 export class WorkerClient extends BaseClient {
-    async submit(request: SubmitRequest, auth?: WorkerAuthOptions): Promise<SubmitResponse> {
+    async submit(request: SubmitDecisionRequest, auth?: WorkerAuthOptions): Promise<SubmitResponse> {
         return this.post("/api/machine/workers/submit", request, { headers: buildWorkerAuthHeaders(auth) });
     }
 

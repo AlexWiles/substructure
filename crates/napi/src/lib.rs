@@ -21,6 +21,7 @@ use substructure_core::span::SpanContext as CoreSpanContext;
 use substructure_core::worker::{DequeueFilter, FailDecision, SubmitDecision};
 use substructure_core::{
     Caller, EffectSettlement, Runtime, RuntimeConfig, SettleEffectInput, SubmitClientPayload,
+    WorkerDecisionResponse,
 };
 
 /// Result returned by `submitPayload`.
@@ -171,7 +172,7 @@ impl EmbeddedRuntime {
 
                 match result {
                     Ok(response_json) => {
-                        match serde_json::from_str::<WorkerResponse>(&response_json) {
+                        match serde_json::from_str::<WorkerDecisionResponse>(&response_json) {
                             Ok(submit) => {
                                 let submit_decision = SubmitDecision {
                                     session_id: decision.session_id,
@@ -181,7 +182,7 @@ impl EmbeddedRuntime {
                                     decision_id: decision.decision_id.clone(),
                                     transcript: submit.transcript,
                                     actions: submit.actions,
-                                    state: submit.state.map(Into::into),
+                                    state: submit.state,
                                     span: decision.span.child("js_worker"),
                                 };
 
@@ -441,14 +442,4 @@ impl EmbeddedRuntime {
         self.inner.shutdown().await;
         Ok(())
     }
-}
-
-/// Response format expected from JS worker callbacks.
-#[derive(serde::Deserialize)]
-struct WorkerResponse {
-    #[serde(default, rename = "messages")]
-    transcript: Vec<substructure_core::session::message::Message>,
-    actions: Vec<substructure_core::session::decision::WorkerAction>,
-    #[serde(default)]
-    state: Option<serde_json::Value>,
 }

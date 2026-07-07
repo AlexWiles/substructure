@@ -923,15 +923,24 @@ export interface WorkerDecisionRequestWire {
     turn_id?: string;
 }
 
-export interface SubmitRequest {
-    session_id: Uuid;
-    decision_id: string;
+/** The decision a worker authors in reply to a decision request: the updated
+ *  conversation, the next actions, and new state. The whole sync HTTP response
+ *  body, and the streamed `decision.result` frame. */
+export interface WorkerDecisionResponse {
     actions: WorkerAction[];
     /** Flat conversation the engine reconciles into the message tree: known ids
      *  continue, id-less/unknown messages are appended (forking automatically). */
     messages: MessageInput[];
     /** Opaque worker state as raw JSON; omit or `null` keeps current, `{}` clears. */
     state?: unknown;
+}
+
+/** A decision pushed to the engine out-of-band via the submit route: the
+ *  `session_id`/`decision_id` that route it, wrapping the worker-authored
+ *  decision. */
+export interface SubmitDecisionRequest extends WorkerDecisionResponse {
+    session_id: Uuid;
+    decision_id: string;
 }
 
 export interface SubmitResponse {

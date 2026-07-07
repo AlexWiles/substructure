@@ -28,11 +28,10 @@ defmodule Worker do
           %{"messages" => conn.body_params["messages"] ++ [t["message"]],
             "actions" => [%{"type" => "done", "data" => t["message"]["content"]}]}
 
-        _ -> %{}
+        _ -> %{"actions" => []}
       end
 
-    base = Map.take(conn.body_params, ["session_id", "decision_id"])
-    send_resp(conn, 200, Jason.encode!(Map.merge(base, decision)))
+    send_resp(conn, 200, Jason.encode!(decision))
   end
 end
 

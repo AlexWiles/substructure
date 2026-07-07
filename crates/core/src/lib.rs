@@ -11,3 +11,4 @@ pub use runtime::{
     worker, EffectSettlement, InterruptSessionInput, ResumeInterruptInput, Runtime, RuntimeConfig,
     RuntimeError, SettleEffectInput, SubmitClientPayload, SubmitClientPayloadOutput,
 };
+pub use transport::worker_http::types::WorkerDecisionResponse;

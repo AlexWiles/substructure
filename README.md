@@ -100,8 +100,6 @@ function promptModel(messages) {
 
 function reply(req, decision) {
   return Response.json({
-    session_id: req.session_id,
-    decision_id: req.decision_id,
     messages: req.messages,
     actions: [],
     ...decision,
@@ -284,8 +282,6 @@ function promptModel(messages) {
 
 function reply(req, decision) {
   return Response.json({
-    session_id: req.session_id,
-    decision_id: req.decision_id,
     messages: req.messages,
     actions: [],
     ...decision,
