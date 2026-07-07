@@ -17,7 +17,7 @@ function wireRequest(overrides: Partial<WorkerDecisionRequestWire> = {}): Worker
         state: null,
         calls: [],
         pending_calls: 0,
-        transcript: [],
+        messages: [],
         attempts: 0,
         ...overrides,
     };
@@ -74,7 +74,7 @@ describe("toolLoop state opinion", () => {
         expect(submit.actions.length).toBeGreaterThan(0);
     });
 
-    it("expresses no state on a forking client.transcript, so the engine resolves as-of the fork", async () => {
+    it("expresses no state on a forking client.messages, so the engine resolves as-of the fork", async () => {
         const tree = linearTree(
             { id: "", role: "user", content: "one" },
             { id: "", role: "assistant", content: "two" },

@@ -41,8 +41,8 @@ pub enum DecisionTrigger {
     #[serde(rename = "client.message")]
     ClientMessage { message: Message },
     /// `messages` is the full proposed conversation; `messages[new_from..]` is
-    /// unrecorded (recomputed at delivery against the tree).
-    #[serde(rename = "client.transcript")]
+    /// unrecorded (recomputed at delivery against the tree). Wire tag: `client.messages`.
+    #[serde(rename = "client.messages")]
     ClientTranscript {
         messages: Vec<Message>,
         #[serde(default)]

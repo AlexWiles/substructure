@@ -7,15 +7,29 @@
 
 Substructure is an open-source engine for building durable, long-running AI agents using just an HTTP endpoint hosted on your infrastructure, in your code.
 
+```javascript
+// A complete chat agent. No SDK.
+function decide(req) {
+  switch (req.trigger.type) {
+    case "client.messages":
+      return reply(req, { messages: req.trigger.messages, actions: [promptModel(req.trigger.messages)] });
+    case "llm.finished":
+      return reply(req, { actions: [{ type: "done", data: req.trigger.message.content }] });
+  }
+}
+```
+
+The worker contract is one JSON request in, one JSON response out. Simple enough to implement in any language, no SDK required.
+
 Substructure drives the agent loop, handling retries, sub-agent supervision, llm calls, real-time event streaming and more. Tool execution, agent decisions, llm calls (optionally) live in your codebase and execute on your infrastructure.
 
-The worker contract is one JSON request in, one JSON response out. It's simple enough to implement in any language without an SDK.
+Front ends get the same treatment: the engine speaks **AG-UI** natively, so a browser chat UI (TanStack AI, CopilotKit, assistant-ui) drops in and can speak directly to the engine.
 
 ## How it works
 
 - **Server:** The engine that drives the agent loop, written in Rust. It can be run locally on your machine, embedded in process, or as a cloud hosted version available at [https://app.substructure.ai](https://app.substructure.ai). The server drives the loop, handles durability, retries, llm calls (optionally), realtime streaming, subagent supervision and more.
 - **Workers:** Your agent logic. Receives a decision trigger, returns actions. Runs in your codebase with your dependencies. Can be an HTTP endpoint for use with the cloud/local server, or a callback passed to embedded substructure.
-- **Clients:**  Submit work and stream events back. We have support for both backend-to-backend as well as browser based clients.
+- **Clients:** Submit work and stream events back, backend-to-backend or straight from the browser. The engine also serves a native **AG-UI** endpoint, so any AG-UI chat frontend connects and streams directly. No Substructure SDK in the browser. See [`examples/ag-ui`](./examples/ag-ui).
 - **CLI:** Substructure comes with a CLI to help you provision, observe, and debug from the terminal. You can also start a local server.
 - **SDK (optional):** We provide a TypeScript SDK for building agents and setting up your worker with a just a few lines of code. It also includes server-to-server and browser clients. It's a convenience layer over the protocol, never a requirement.
 
@@ -34,7 +48,7 @@ npm i @substructure.ai/sdk
 
 ## A Quick Example. No SDK required
 
-A worker is one stateless HTTP handler. The engine `POST`s a JSON **decision request** (`trigger`) and the conversation so far (`transcript`) and your handler replies with a JSON **decision**. The decision is an updated transcript, and what to do next (`actions`). Durability, retries, scheduling, and streaming are all handled by the engine.
+A worker is one stateless HTTP handler. The engine `POST`s a JSON **decision request** (`trigger`) and the conversation so far (`messages`) and your handler replies with a JSON **decision**. The decision is the updated conversation (`messages`) and what to do next (`actions`). Durability, retries, scheduling, and streaming are all handled by the engine.
 
 ### 1. The smallest agent
 
@@ -52,9 +66,9 @@ function decide(req) {
   switch (req.trigger.type) {
     // The client proposed the conversation (a new message, an edit, a full
     // view — all one shape) → write it in, prompt the model.
-    case "client.transcript": {
-      const transcript = req.trigger.messages;
-      return reply(req, { transcript, actions: [promptModel(transcript)] });
+    case "client.messages": {
+      const messages = req.trigger.messages;
+      return reply(req, { messages, actions: [promptModel(messages)] });
     }
 
     // The model answered → write it in, end the turn.
@@ -62,8 +76,8 @@ function decide(req) {
       if (!req.trigger.ok) {
         return reply(req, { actions: [{ type: "done", data: { error: req.trigger.error } }] });
       }
-      const transcript = [...req.transcript, req.trigger.message];
-      return reply(req, { transcript, actions: [{ type: "done", data: req.trigger.message.content }] });
+      const messages = [...req.messages, req.trigger.message];
+      return reply(req, { messages, actions: [{ type: "done", data: req.trigger.message.content }] });
     }
 
     default:
@@ -71,7 +85,7 @@ function decide(req) {
   }
 }
 
-function promptModel(transcript) {
+function promptModel(messages) {
   return {
     type: "llm.call",
     id: crypto.randomUUID(),
@@ -79,7 +93,7 @@ function promptModel(transcript) {
     stream: true,      // …and streams tokens to any listening client
     request: {
       model: "anthropic/claude-sonnet-4-6",
-      messages: [{ role: "system", content: "You are a helpful assistant." }, ...transcript],
+      messages: [{ role: "system", content: "You are a helpful assistant." }, ...messages],
     },
   };
 }
@@ -88,7 +102,7 @@ function reply(req, decision) {
   return Response.json({
     session_id: req.session_id,
     decision_id: req.decision_id,
-    transcript: req.transcript,
+    messages: req.messages,
     actions: [],
     ...decision,
   });
@@ -122,7 +136,7 @@ Advertise them to the model with one new field on the `llm.call` request:
 ```javascript
     request: {
       model: "anthropic/claude-sonnet-4-6",
-      messages: [{ role: "system", content: "You are a helpful assistant." }, ...transcript],
+      messages: [{ role: "system", content: "You are a helpful assistant." }, ...messages],
       tools: Object.entries(tools).map(([name, t]) => ({
         function: { name, description: t.description, parameters: t.parameters },
       })),
@@ -138,13 +152,13 @@ And handle their lifecycle: `llm.finished` now schedules tool calls, and two new
         return reply(req, { actions: [{ type: "done", data: { error: req.trigger.error } }] });
       }
       const message = req.trigger.message;
-      const transcript = [...req.transcript, message];
+      const messages = [...req.messages, message];
       const calls = message.tool_calls ?? [];
       if (calls.length === 0) {
-        return reply(req, { transcript, actions: [{ type: "done", data: message.content }] });
+        return reply(req, { messages, actions: [{ type: "done", data: message.content }] });
       }
       return reply(req, {
-        transcript,
+        messages,
         actions: calls.map((c) => ({
           type: "tool.call",
           id: c.id,
@@ -164,12 +178,12 @@ And handle their lifecycle: `llm.finished` now schedules tool calls, and two new
     // A tool finished → write the result in; prompt again once the step is done.
     case "tool.finished": {
       const { id, name, ok, result, error } = req.trigger;
-      const transcript = [
-        ...req.transcript,
+      const messages = [
+        ...req.messages,
         { role: "tool", content: ok ? result : error, tool_call_id: id, name },
       ];
-      if (req.pending_calls > 0) return reply(req, { transcript }); // siblings still running
-      return reply(req, { transcript, actions: [promptModel(transcript)] });
+      if (req.pending_calls > 0) return reply(req, { messages }); // siblings still running
+      return reply(req, { messages, actions: [promptModel(messages)] });
     }
 ```
 
@@ -202,9 +216,9 @@ export default {
 function decide(req) {
   switch (req.trigger.type) {
     // The client proposed the conversation → write it in, prompt the model.
-    case "client.transcript": {
-      const transcript = req.trigger.messages;
-      return reply(req, { transcript, actions: [promptModel(transcript)] });
+    case "client.messages": {
+      const messages = req.trigger.messages;
+      return reply(req, { messages, actions: [promptModel(messages)] });
     }
 
     // The model answered → run its tool calls, or end the turn if there are none.
@@ -213,13 +227,13 @@ function decide(req) {
         return reply(req, { actions: [{ type: "done", data: { error: req.trigger.error } }] });
       }
       const message = req.trigger.message;
-      const transcript = [...req.transcript, message];
+      const messages = [...req.messages, message];
       const calls = message.tool_calls ?? [];
       if (calls.length === 0) {
-        return reply(req, { transcript, actions: [{ type: "done", data: message.content }] });
+        return reply(req, { messages, actions: [{ type: "done", data: message.content }] });
       }
       return reply(req, {
-        transcript,
+        messages,
         actions: calls.map((c) => ({
           type: "tool.call",
           id: c.id,
@@ -239,12 +253,12 @@ function decide(req) {
     // A tool finished → write the result in; prompt again once the step is done.
     case "tool.finished": {
       const { id, name, ok, result, error } = req.trigger;
-      const transcript = [
-        ...req.transcript,
+      const messages = [
+        ...req.messages,
         { role: "tool", content: ok ? result : error, tool_call_id: id, name },
       ];
-      if (req.pending_calls > 0) return reply(req, { transcript }); // siblings still running
-      return reply(req, { transcript, actions: [promptModel(transcript)] });
+      if (req.pending_calls > 0) return reply(req, { messages }); // siblings still running
+      return reply(req, { messages, actions: [promptModel(messages)] });
     }
 
     default:
@@ -252,7 +266,7 @@ function decide(req) {
   }
 }
 
-function promptModel(transcript) {
+function promptModel(messages) {
   return {
     type: "llm.call",
     id: crypto.randomUUID(),
@@ -260,7 +274,7 @@ function promptModel(transcript) {
     stream: true,      // …and streams tokens to any listening client
     request: {
       model: "anthropic/claude-sonnet-4-6",
-      messages: [{ role: "system", content: "You are a helpful assistant." }, ...transcript],
+      messages: [{ role: "system", content: "You are a helpful assistant." }, ...messages],
       tools: Object.entries(tools).map(([name, t]) => ({
         function: { name, description: t.description, parameters: t.parameters },
       })),
@@ -272,7 +286,7 @@ function reply(req, decision) {
   return Response.json({
     session_id: req.session_id,
     decision_id: req.decision_id,
-    transcript: req.transcript,
+    messages: req.messages,
     actions: [],
     ...decision,
   });

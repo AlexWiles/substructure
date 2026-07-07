@@ -26,8 +26,8 @@ pub struct WorkerDecisionRequest {
     /// Count of in-flight `tool_call`/`sub_agent` calls.
     #[serde(default)]
     pub pending_calls: usize,
-    /// The active conversation as a flat list.
-    #[serde(default)]
+    /// The active conversation as a flat list. Wire field: `messages`.
+    #[serde(default, rename = "messages")]
     pub transcript: Vec<Message>,
     #[serde(default)]
     pub message_tree: MessageTree,

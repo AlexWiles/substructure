@@ -133,16 +133,16 @@ const planner = agent<State>({
 
         // A `set_mode` action switches modes; entering execution forks a fresh thread seeded with only the plan.
         let trigger: DecisionTrigger = req.trigger;
-        let transcript = req.transcript;
+        let messages = req.messages;
         if (req.trigger.type === "client.action" && req.trigger.name === "set_mode") {
             const requested = (req.trigger.args as { mode?: Mode } | undefined)?.mode;
             if (requested !== "planning" && requested !== "executing") return { actions: [], state };
             const entering = requested !== state.mode;
             state.mode = requested;
             if (entering && requested === "executing") {
-                transcript = [];
+                messages = [];
                 trigger = {
-                    type: "client.transcript",
+                    type: "client.messages",
                     messages: [{ id: crypto.randomUUID(), role: "user", content: renderPlan(state.plan) }],
                     new_from: 0,
                 };
@@ -156,7 +156,7 @@ const planner = agent<State>({
             tools: planTools(state),
         });
 
-        const d = await loop({ ...req, trigger, transcript, state });
+        const d = await loop({ ...req, trigger, messages, state });
         return { ...d, state };
     },
 });

@@ -2747,7 +2747,7 @@ mod tests {
         );
     }
 
-    /// The messages carried by the (fired or queued) `client.transcript` decision.
+    /// The messages carried by the (fired or queued) `client.messages` decision.
     fn transcript_messages(events: &[EventPayload]) -> Option<Vec<Message>> {
         events.iter().find_map(|e| {
             let trigger = match e {

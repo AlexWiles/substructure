@@ -180,7 +180,7 @@ mod tests {
     fn transcript_of(trigger: DecisionTrigger) -> (Vec<Message>, usize) {
         match trigger {
             DecisionTrigger::ClientTranscript { messages, new_from } => (messages, new_from),
-            t => panic!("expected a client.transcript trigger; got {t:?}"),
+            t => panic!("expected a client.messages trigger; got {t:?}"),
         }
     }
 

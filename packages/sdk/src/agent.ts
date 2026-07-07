@@ -67,7 +67,7 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
     };
 
     return async (d) => {
-        const history = d.transcript ?? [];
+        const history = d.messages ?? [];
 
         const instructions =
             typeof config.instructions === "function" ? await config.instructions() : config.instructions;
@@ -82,16 +82,16 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
         };
 
         switch (d.trigger.type) {
-            case "client.transcript": {
-                const transcript = withSystem(d.trigger.messages.filter((m) => m.role !== "system"));
+            case "client.messages": {
+                const messages = withSystem(d.trigger.messages.filter((m) => m.role !== "system"));
                 // Client news arriving mid-step (calls still in flight): record
                 // the proposal now, prompt once the open step settles.
-                if (d.pending_calls > 0) return { transcript };
-                return { transcript, actions: [ask(transcript)] };
+                if (d.pending_calls > 0) return { messages };
+                return { messages, actions: [ask(messages)] };
             }
             case "client.action": {
                 const base = withSystem(history);
-                return { transcript: base, actions: [ask(base)] };
+                return { messages: base, actions: [ask(base)] };
             }
             case "llm.execute": {
                 try {
@@ -103,7 +103,7 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
                         response,
                         attempt: d.trigger.attempt,
                     };
-                    return { transcript: history, actions: [action] };
+                    return { messages: history, actions: [action] };
                 } catch (error) {
                     const message = error instanceof Error ? error.message : String(error);
                     const action: WorkerAction = {
@@ -113,7 +113,7 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
                         retryable: false,
                         attempt: d.trigger.attempt,
                     };
-                    return { transcript: history, actions: [action] };
+                    return { messages: history, actions: [action] };
                 }
             }
             case "tool.execute": {
@@ -162,11 +162,11 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
             case "llm.finished": {
                 if (!d.trigger.ok || d.trigger.message === undefined) return {};
                 const assistant = d.trigger.message;
-                const transcript = [...history, assistant];
+                const messages = [...history, assistant];
                 const calls = assistant.tool_calls ?? [];
                 if (calls.length === 0)
                     return {
-                        transcript,
+                        messages,
                         actions: [{ type: "done", data: assistant.content ?? null }],
                     };
 
@@ -205,7 +205,7 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
                         });
                     }
                 }
-                return { transcript, actions };
+                return { messages, actions };
             }
             case "sub_agent.finished": {
                 const node: Message = {
@@ -215,9 +215,9 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
                     tool_call_id: d.trigger.id,
                     name: d.trigger.agent_id,
                 };
-                const transcript = [...history, node];
-                if (d.pending_calls > 0) return { transcript };
-                return { transcript, actions: [ask(transcript)] };
+                const messages = [...history, node];
+                if (d.pending_calls > 0) return { messages };
+                return { messages, actions: [ask(messages)] };
             }
 
             case "tool.finished": {
@@ -228,9 +228,9 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
                     tool_call_id: d.trigger.id,
                     name: d.trigger.name,
                 };
-                const transcript = [...history, node];
-                if (d.pending_calls > 0) return { transcript };
-                return { transcript, actions: [ask(transcript)] };
+                const messages = [...history, node];
+                if (d.pending_calls > 0) return { messages };
+                return { messages, actions: [ask(messages)] };
             }
             default:
                 return {};

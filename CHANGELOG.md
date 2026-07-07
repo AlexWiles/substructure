@@ -10,6 +10,13 @@ same version.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** the decision wire unifies on `messages` — the conversation field
+  (was `transcript`) and the trigger `client.messages` (was `client.transcript`).
+  The SDK's `DecisionRequest`/`Decision` follow, so custom decision functions read
+  `req.messages` and return `{ messages }`; `toolLoop` callers are unaffected.
+
 ## [0.1.22] - 2026-07-07
 
 ### Changed

@@ -10,7 +10,7 @@ const loop = toolLoop({ llm: { model: "test-model" }, instructions: "SYS" });
 
 const prompt = (r: Awaited<ReturnType<typeof runAgent>>) => (callLlm(r)?.request.messages ?? []).map((m) => m.content);
 
-describe("client.transcript (AG-UI reconcile)", () => {
+describe("client.messages (AG-UI reconcile)", () => {
     it("cold start roots [system, user] from an id-less transcript", async () => {
         const result = await runAgent(loop, {
             trigger: clientTranscript([{ role: "user", content: "hi" }]),

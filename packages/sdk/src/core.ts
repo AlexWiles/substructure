@@ -25,12 +25,12 @@ export type DecisionRequest<S = unknown> = WorkerDecisionRequestWire & {
     emitDelta?: EmitDelta;
 };
 
-/** What the agent decides. `actions` default to none, `transcript` to the request's;
+/** What the agent decides. `actions` default to none, `messages` to the request's;
  *  omit `state` to keep the current one, or return a value to write it (`{}` clears).
  *  Only return a `state` you mean to set — a forking decision carries it to the new branch. */
 export interface Decision {
     actions?: WorkerAction[];
-    transcript?: MessageInput[];
+    messages?: MessageInput[];
     state?: unknown;
 }
 

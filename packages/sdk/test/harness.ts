@@ -24,7 +24,7 @@ export interface RunResult {
     inputIds: Set<string>;
 }
 
-/** Engine-internal client message; materialized into a `client.transcript` at delivery. */
+/** Engine-internal client message; materialized into a `client.messages` at delivery. */
 export type ClientMessageInput = { type: "client.message"; message: Message };
 
 export interface RunOptions {
@@ -45,12 +45,12 @@ function materializeTrigger(
 ): DecisionTrigger {
     if (trigger.type === "client.message") {
         return {
-            type: "client.transcript",
+            type: "client.messages",
             messages: [...transcript, trigger.message],
             new_from: transcript.length,
         };
     }
-    if (trigger.type === "client.transcript") {
+    if (trigger.type === "client.messages") {
         const known = new Set<string>();
         for (const node of tree?.nodes ?? []) {
             const id = nodeId(node);
@@ -79,7 +79,7 @@ export async function runAgent(agent: Agent, opts: RunOptions): Promise<RunResul
     return {
         actions: out.actions ?? [],
         state: out.state !== undefined ? out.state : req.state,
-        transcript: out.transcript ?? req.transcript ?? [],
+        transcript: out.messages ?? req.messages ?? [],
         inputIds,
     };
 }
@@ -99,7 +99,7 @@ function makeRequest(opts: RunOptions, transcript?: Message[]): WorkerDecisionRe
                 (c.kind === "tool_call" || c.kind === "sub_agent") &&
                 (c.status === "pending" || c.status === "retry_scheduled"),
         ).length,
-        transcript,
+        messages: transcript,
         message_tree: opts.messageTree,
         attempts: 0,
     };
@@ -127,7 +127,7 @@ export function clientMessage(content: string): ClientMessageInput {
 
 export function clientTranscript(messages: Message[]): DecisionTrigger {
     // new_from is recomputed against the tree at materialization.
-    return { type: "client.transcript", messages, new_from: 0 };
+    return { type: "client.messages", messages, new_from: 0 };
 }
 
 export function llmResponse(message: Message, callId = "call-0"): DecisionTrigger {

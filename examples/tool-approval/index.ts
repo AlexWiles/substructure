@@ -78,7 +78,7 @@ const assistant = agent<State>({
                 const assistantMsg: Message = { ...message, id: crypto.randomUUID() };
                 state.pendingCommand = { toolCallId: call.id, cmd: JSON.parse(call.function.arguments).cmd };
                 return {
-                    transcript: [...(req.transcript ?? []), assistantMsg],
+                    messages: [...(req.messages ?? []), assistantMsg],
                     actions: [{ type: "done", data: { pendingCommand: state.pendingCommand } }],
                     state,
                 };

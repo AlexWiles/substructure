@@ -446,7 +446,7 @@ impl EmbeddedRuntime {
 /// Response format expected from JS worker callbacks.
 #[derive(serde::Deserialize)]
 struct WorkerResponse {
-    #[serde(default)]
+    #[serde(default, rename = "messages")]
     transcript: Vec<substructure_core::session::message::Message>,
     actions: Vec<substructure_core::session::decision::WorkerAction>,
     #[serde(default)]

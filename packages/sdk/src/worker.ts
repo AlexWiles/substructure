@@ -58,7 +58,7 @@ async function runDecision(
         session_id: request.session_id,
         decision_id: request.decision_id,
         actions: out.actions ?? [],
-        transcript: out.transcript ?? request.transcript ?? [],
+        messages: out.messages ?? request.messages ?? [],
         // undefined keeps the current state; a returned value is deduped engine-side.
         state: out.state,
     };

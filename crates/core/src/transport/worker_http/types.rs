@@ -11,7 +11,8 @@ use crate::worker::WorkerState;
 pub struct SubmitRequest {
     pub session_id: String,
     pub decision_id: String,
-    #[serde(default)]
+    /// Wire field: `messages`.
+    #[serde(default, rename = "messages")]
     pub transcript: Vec<Message>,
     pub actions: Vec<WorkerAction>,
     /// Omitted or `null` keeps the current state; clear with a non-null empty value.
@@ -152,7 +153,7 @@ mod tests {
         // decision.result frame must still parse (it did not before, failing
         // with "missing field `id`").
         let body = r#"{
-            "session_id":"s","decision_id":"d","transcript":[],
+            "session_id":"s","decision_id":"d","messages":[],
             "actions":[
                 {"type":"llm.call","request":{"model":"m","messages":[]},"handler":"server"},
                 {"type":"tool.call","name":"t","arguments":"{}","handler":"worker"}

@@ -34,7 +34,7 @@ Inside one turn, many things can happen: the LLM is called, tools execute, sub-a
 
 ## Decisions
 
-A **decision** is one HTTP call from the engine to your worker. Every decision carries a **trigger** (what just happened), the current **transcript** (the active conversation), and the current **state** (either inline as raw JSON, or empty if your worker loads state from its own database). Your worker responds with the updated **transcript** and a list of **actions** (what to do next).
+A **decision** is one HTTP call from the engine to your worker. Every decision carries a **trigger** (what just happened), the current **transcript** (the active conversation, on the wire as `messages`), and the current **state** (either inline as raw JSON, or empty if your worker loads state from its own database). Your worker responds with the updated **transcript** and a list of **actions** (what to do next).
 
 The engine reconciles the returned transcript into the conversation tree, carries out the actions, records what happened to the event log, and calls back with a new decision when there's something else for the worker to react to. This loop is the agent loop. The engine drives it; your worker decides what to do at each step.
 
@@ -46,7 +46,7 @@ Each trigger carries the new content and the current transcript; the worker fold
 
 | Trigger | When the engine sends it |
 | --- | --- |
-| `client.transcript` | The client proposed the conversation — a bare message, an AG-UI full view, an edit, a regenerate, all one shape. `messages` is the full proposed transcript (a bare message is materialized onto the active branch at delivery) and `messages[new_from..]` is the unrecorded news. The worker returns it (or amends it); the engine reconciles it into the tree. |
+| `client.messages` | The client proposed the conversation — a bare message, an AG-UI full view, an edit, a regenerate, all one shape. `messages` is the full proposed transcript (a bare message is materialized onto the active branch at delivery) and `messages[new_from..]` is the unrecorded news. The worker returns it (or amends it); the engine reconciles it into the tree. |
 | `client.action` | A client called `startTurn` with a typed action instead of a message. |
 | `tool.execute` / `llm.execute` | The engine is delegating a call to your worker: run a tool, or make an LLM call. `toolLoop` handles these and dispatches to the matching tool's `execute` or the worker-run model; a custom `decide` reacts to them directly. |
 | `llm.finished` / `tool.finished` / `sub_agent.finished` | A call's final word: the model replied, or a tool/sub-agent finished. Fires as each one lands, so the transcript fills incrementally. The request's `calls` list says what's still in flight, so the worker prompts once no tool/sub-agent call is pending, without tracking the round itself. `ok` says whether the call succeeded. |
@@ -56,7 +56,7 @@ For most agents, `toolLoop` handles every trigger you'd see in practice. You onl
 
 ### Actions
 
-A decision returns a flat `transcript` (the conversation as it should now be) plus a list of actions. The engine reconciles the transcript into the tree (the one place the tree is written) and carries out the actions:
+A decision returns a flat `messages` (the conversation as it should now be) plus a list of actions. The engine reconciles the transcript into the tree (the one place the tree is written) and carries out the actions:
 
 | Action | Effect |
 | --- | --- |

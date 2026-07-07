@@ -250,7 +250,7 @@ const echo = agent({
   name: "echo",
   decide: (req) => {
     switch (req.trigger.type) {
-      case "client.transcript":
+      case "client.messages":
         return {
           actions: [
             {
@@ -273,14 +273,14 @@ const echo = agent({
 
 The `DecisionRequest` (conventionally `req`) is the engine's wire envelope, with an absent `state` normalized to `null`. Read off it:
 
-- `req.trigger`: what happened, one of `client.transcript`, `client.action`, `tool.execute`, `llm.execute`, `tool.finished`, `llm.finished`, `sub_agent.finished`, and so on.
-- `req.transcript`: the active transcript (the head-to-root path); may be empty.
+- `req.trigger`: what happened, one of `client.messages`, `client.action`, `tool.execute`, `llm.execute`, `tool.finished`, `llm.finished`, `sub_agent.finished`, and so on.
+- `req.messages`: the active transcript (the head-to-root path); may be empty.
 - `req.state`: your state as raw JSON, `null` when the session has none (return a value to persist a new one).
 - `req.pending_calls`: how many `tool_call`/`sub_agent` calls are still in flight; the step gate. On a `tool.finished`/`sub_agent.finished` trigger, prompt again once it hits `0` (a non-zero value doubles as a "steps still running" count).
 - `req.effects`: the same in-flight effects as a flat, tagged list, when you need more than the count (each with `id`, `kind`, `status`, `attempt`, plus kind-specific fields like a tool's `name`/`arguments`). `kind`/`status` are open, so new effect kinds are additive.
 - `req.session_id`, `req.identity`, `req.turn_id`, and the rest of the envelope, read directly.
 
-Return a `Decision`, `{ actions?, transcript?, state? }`. `actions` defaults to none; `transcript` echoes `req.transcript`; an omitted `state` keeps the current state at the engine (returning a value persists it; an echo of the current value is deduped engine-side and writes nothing).
+Return a `Decision`, `{ actions?, messages?, state? }`. `actions` defaults to none; `messages` echoes `req.messages`; an omitted `state` keeps the current state at the engine (returning a value persists it; an echo of the current value is deduped engine-side and writes nothing).
 
 Actions are plain objects that you return directly:
 

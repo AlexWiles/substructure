@@ -18,10 +18,10 @@ One rule makes the whole protocol cohere:
 
 > **A trigger is news that hasn't been written into the conversation yet.** The
 > request carries the conversation as recorded and the news as `trigger`; your
-> decision says how the conversation now reads (`transcript`) and what to do
+> decision says how the conversation now reads (`messages`) and what to do
 > next (`actions`).
 
-A `client.transcript`'s proposed messages are not in the transcript until you put
+A `client.messages`'s proposed messages are not in the transcript until you put
 them there; an `llm.finished`'s assistant message isn't either; a
 `tool.finished`'s result becomes a tool message only because you write one. Every
 trigger is a different sort of news, and your reply writes it in.
@@ -48,14 +48,14 @@ decision.
   ],
   "pending_calls": 1,            // tool_call/sub_agent calls still in flight: the step gate
 
-  "transcript":  [ { "role": "user", "content": "hi", "id": "…" }, … ],
+  "messages":  [ { "role": "user", "content": "hi", "id": "…" }, … ],
   "turn_id":     "…",
   "attempts":    0
 }
 ```
 
 - **`trigger`** is what you switch on. It's the one field that says what happened.
-- **`transcript`** is the active conversation as a flat list, oldest first: all a
+- **`messages`** is the active conversation as a flat list, oldest first: all a
   tool loop needs. (`message_tree` carries the full branch structure.)
 - **`pending_calls`** is the step gate as a number: how many
   `tool_call`/`sub_agent` calls are still in flight.
@@ -79,12 +79,12 @@ decision.
   "session_id":  "…",          // from the request
   "decision_id": "…",          // from the request
   "actions":     [ … ],        // what to do next; see Actions
-  "transcript":  [ … ],        // the conversation as it should now read
+  "messages":    [ … ],        // the conversation as it should now read
   "state":       { … }         // your state as raw JSON; omit the field to keep it. See State.
 }
 ```
 
-The engine carries out the `actions`, reconciles the `transcript` into the
+The engine carries out the `actions`, reconciles the `messages` into the
 conversation tree (messages with a known `id` continue the branch; id-less or
 unknown messages are appended, forking automatically), records everything, and
 calls back with the next decision when there's something to react to. That loop,
@@ -104,7 +104,7 @@ ignores the rest — unknown types are additive, never a wire break.
 
 | `type` | Fields | Meaning |
 |---|---|---|
-| `client.transcript` | `messages`, `new_from` | The client proposed the conversation — a new message, an edit, or a full view, all one shape. `messages` is the full proposed transcript; `messages[new_from..]` is unrecorded. Echo it (or amend it) and prompt. |
+| `client.messages` | `messages`, `new_from` | The client proposed the conversation — a new message, an edit, or a full view, all one shape. `messages` is the full proposed transcript; `messages[new_from..]` is unrecorded. Echo it (or amend it) and prompt. |
 | `client.action` | `name`, `args?` | A non-message signal from the client (mode switch, approval). |
 | `llm.finished` | `id`, `ok`, `message`, `truncated`, `usage?`, `cost?` \| `error`, `code?`, `detail?` | The model's final word on call `id`. |
 | `tool.finished` | `id`, `ok`, `name`, `result` \| `error` | A tool's final word (retries exhausted on failure). |
@@ -129,16 +129,17 @@ the tree, so a message that queued behind another decision is materialized
 *after* that decision's writes — the annotation is exact, not advisory, and
 identical across redeliveries.
 
-The simple worker ignores `new_from` and echoes: `transcript = messages`,
-prompt. A worker with per-turn policy gets everything the annotation implies:
+The simple worker ignores `new_from` and echoes the trigger's `messages` straight
+back as its decision's `messages`, then prompts. A worker with per-turn policy gets
+everything the annotation implies:
 
 - **The news**: `messages[new_from..]` — exactly what reconciling your echo will
   write. Moderate it, transform it (the news' ids are assigned but unrecorded, so
   you may rewrite content before echoing), or bill by it.
 - **Append vs. edit**: the proposal is a pure append iff
-  `messages[new_from - 1].id` is the last id of the request's `transcript`;
+  `messages[new_from - 1].id` is the last id of the request's `messages`;
   anything else forks.
-- **Reject**: return the request's `transcript` unchanged (or omit `transcript`)
+- **Reject**: return the request's `messages` unchanged (or omit `messages`)
   and the proposal is never written — not echoing is the veto.
 - **Empty news** (`new_from == len(messages)`): nothing to write. A strict-prefix
   proposal is a *regenerate* gesture — prompt from it and the fork lands when
@@ -168,7 +169,7 @@ that will write your echo:
 - **Bedrock** — anything else (several answers at once, an answer plus a new
   message, an edit, a whole imported history). Every answered call settles
   silently — **no `tool.finished`** — and the entire view arrives as one
-  `client.transcript`. Your echo records the client's tool messages along with
+  `client.messages`. Your echo records the client's tool messages along with
   the rest.
 
 Before either, the engine **normalizes**: a client that resends its own copy of
@@ -255,37 +256,37 @@ def handle(request):
         "session_id":  request["session_id"],
         "decision_id": request["decision_id"],
         "actions":     out.get("actions", []),
-        "transcript":  out.get("transcript", request.get("transcript", [])),
+        "messages":    out.get("messages", request.get("messages", [])),
     }
     if "state" in out:
         resp["state"] = out["state"]     # omitted = keep; echoes are deduped engine-side
     return resp
 
-# ── Loop: a pure function of (trigger, transcript, pending_calls) → decision. ──
+# ── Loop: a pure function of (trigger, messages, pending_calls) → decision. ──
 def decide(req, state):
     trigger    = req["trigger"]
-    history    = req.get("transcript", [])
+    history    = req.get("messages", [])
     tools      = { t.name: t for t in MY_TOOLS }         # your tool registry
     schemas    = [ tool_schema(t) for t in MY_TOOLS ]    # tools as the model sees them
 
     match trigger["type"]:
 
         # The client proposed the conversation → write it in, prompt the model.
-        case "client.transcript":
-            transcript = trigger["messages"]
-            return { "transcript": transcript, "actions": [ call_llm(transcript, schemas) ] }
+        case "client.messages":
+            messages = trigger["messages"]
+            return { "messages": messages, "actions": [ call_llm(messages, schemas) ] }
 
         # The model's final word → finish the turn, or run its tools.
         case "llm.finished":
             if not trigger["ok"]:
                 return { "actions": [ done({ "error": trigger["error"] }) ] }
             assistant  = trigger["message"]
-            transcript = history + [ assistant ]
+            messages   = history + [ assistant ]
             calls      = assistant.get("tool_calls", [])
             if not calls:
-                return { "transcript": transcript, "actions": [ done(assistant.get("content")) ] }
+                return { "messages": messages, "actions": [ done(assistant.get("content")) ] }
             actions = [ call_tool(c["id"], c["function"]["name"], c["function"]["arguments"]) for c in calls ]
-            return { "transcript": transcript, "actions": actions }
+            return { "messages": messages, "actions": actions }
 
         # The engine hands a tool to us → run it, answer.
         case "tool.execute":
@@ -300,10 +301,10 @@ def decide(req, state):
             content    = trigger["result"] if trigger["ok"] else trigger["error"]
             node       = { "role": "tool", "content": content,
                            "tool_call_id": trigger["id"], "name": trigger["name"] }
-            transcript = history + [ node ]
+            messages   = history + [ node ]
             if req["pending_calls"] > 0:
-                return { "transcript": transcript }                          # siblings still running, just record
-            return { "transcript": transcript, "actions": [ call_llm(transcript, schemas) ] }
+                return { "messages": messages }                              # siblings still running, just record
+            return { "messages": messages, "actions": [ call_llm(messages, schemas) ] }
 
         case _:
             return {}
@@ -323,7 +324,7 @@ def done(data):                    return { "type": "done", "data": data }
 
 That's the entire loop: four flat cases, one per trigger type, and
 `trigger["type"]` is the only discriminator in the whole protocol.
-`client.transcript` prompts, `llm.finished` drives the loop, `tool.execute` runs
+`client.messages` prompts, `llm.finished` drives the loop, `tool.execute` runs
 delegated work, and `tool.finished` folds results in (prompting again once
 nothing is pending). Everything below is an optional extension on the same
 skeleton.

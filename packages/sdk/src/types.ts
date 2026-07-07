@@ -251,7 +251,7 @@ export type LlmOutcome =
 export type DecisionTrigger =
     | {
           /** The full proposed conversation; `messages[new_from..]` is unrecorded. */
-          type: "client.transcript";
+          type: "client.messages";
           messages: Message[];
           new_from: number;
       }
@@ -914,7 +914,7 @@ export interface WorkerDecisionRequestWire {
      *  built-in loop prompts at 0. Inspect `calls` for finer control. */
     pending_calls: number;
     /** The active conversation as a flat list. */
-    transcript?: Message[];
+    messages?: Message[];
     /** The full tree, for clients that need branch structure. */
     message_tree?: MessageTree;
     ancestry?: Uuid[];
@@ -929,7 +929,7 @@ export interface SubmitRequest {
     actions: WorkerAction[];
     /** Flat conversation the engine reconciles into the message tree: known ids
      *  continue, id-less/unknown messages are appended (forking automatically). */
-    transcript: MessageInput[];
+    messages: MessageInput[];
     /** Opaque worker state as raw JSON; omit or `null` keeps current, `{}` clears. */
     state?: unknown;
 }
