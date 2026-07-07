@@ -1,6 +1,6 @@
 {
   "name": "@substructure.ai/runtime",
-  "version": "0.1.21",
+  "version": "0.1.22",
   "description": "In-process Substructure runtime for Node.js",
   "license": "FSL-1.1-ALv2",
   "type": "module",
@@ -50,9 +50,9 @@
     "prepublish:platforms": "napi prepublish -t npm"
   },
   "optionalDependencies": {
-    "@substructure.ai/runtime-darwin-arm64": "0.1.21",
-    "@substructure.ai/runtime-darwin-x64": "0.1.21",
-    "@substructure.ai/runtime-linux-arm64-gnu": "0.1.21",
-    "@substructure.ai/runtime-linux-x64-gnu": "0.1.21"
+    "@substructure.ai/runtime-darwin-arm64": "0.1.22",
+    "@substructure.ai/runtime-darwin-x64": "0.1.22",
+    "@substructure.ai/runtime-linux-arm64-gnu": "0.1.22",
+    "@substructure.ai/runtime-linux-x64-gnu": "0.1.22"
   }
 }

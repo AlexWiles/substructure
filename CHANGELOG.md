@@ -10,6 +10,8 @@ same version.
 
 ## [Unreleased]
 
+## [0.1.22] - 2026-07-07
+
 ### Changed
 
 - **Breaking:** `client.message` removed. All client input delivers as
@@ -269,7 +271,8 @@ same version.
 
 - SDK typing and developer-experience improvements.
 
-[Unreleased]: https://github.com/substructureai/substructure/compare/v0.1.21...HEAD
+[Unreleased]: https://github.com/substructureai/substructure/compare/v0.1.22...HEAD
+[0.1.22]: https://github.com/substructureai/substructure/compare/v0.1.21...v0.1.22
 [0.1.21]: https://github.com/substructureai/substructure/compare/v0.1.20...v0.1.21
 [0.1.20]: https://github.com/substructureai/substructure/compare/v0.1.19...v0.1.20
 [0.1.19]: https://github.com/substructureai/substructure/compare/v0.1.18...v0.1.19
