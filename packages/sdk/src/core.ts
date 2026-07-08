@@ -57,7 +57,10 @@ export type DeferredToolFn = (args: string, request: DecisionRequest) => void | 
 export interface ToolDef {
     name: string;
     description: string;
-    parameters: unknown;
+    /** JSON Schema for the tool's arguments; omitted declares a no-argument tool. */
+    input?: unknown;
+    /** JSON Schema the result must satisfy; the engine settles a violating result as a tool error. */
+    output?: unknown;
     execute: ToolFn | DeferredToolFn;
     retry?: RetryPolicy;
     /** "worker" (default) runs `execute` here; "client" routes the call to the frontend, which settles it. */
@@ -70,7 +73,8 @@ export function tool(
     config: {
         name: string;
         description: string;
-        parameters: unknown;
+        input?: unknown;
+        output?: unknown;
         retry?: RetryPolicy;
     } & (
         | { handler?: "worker"; deferred?: false; execute: ToolFn }
@@ -81,7 +85,8 @@ export function tool(
     return {
         name: config.name,
         description: config.description,
-        parameters: config.parameters,
+        input: config.input,
+        output: config.output,
         execute:
             config.execute ??
             (() => {

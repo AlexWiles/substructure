@@ -17,7 +17,7 @@ describe("subAgents", () => {
     describe("tool exposure", () => {
         it("presents each sub-agent to the model as a tool", async () => {
             const result = await runAgent(assistant, { trigger: clientMessage("hi") });
-            expect(callLlm(result)?.request.tools?.map((t) => t.function.name)).toEqual(["researcher"]);
+            expect(callLlm(result)?.request.tools?.map((t) => t.name)).toEqual(["researcher"]);
         });
     });
 

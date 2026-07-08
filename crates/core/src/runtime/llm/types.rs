@@ -14,16 +14,32 @@ pub struct ResponseImage {
     pub url: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LlmToolFunction {
-    pub name: String,
-    pub description: String,
-    pub parameters: serde_json::Value,
-}
-
+/// A tool's declared contract: flat on the wire. Providers that need
+/// OpenAI-style `{"type": "function", "function": {…}}` nesting re-wrap at
+/// their own boundary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmTool {
-    pub function: LlmToolFunction,
+    pub name: String,
+    pub description: String,
+    /// JSON Schema for the tool's arguments; omitted declares a no-argument
+    /// tool. The engine validates each call's arguments against it and hands
+    /// providers their native form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<serde_json::Value>,
+    /// JSON Schema the settled result must satisfy; never sent to the model.
+    /// A violating result settles as a terminal tool error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<serde_json::Value>,
+}
+
+impl LlmTool {
+    /// The schema providers receive: the declared `input`, or the empty
+    /// object schema for a no-argument tool.
+    pub fn input_schema(&self) -> serde_json::Value {
+        self.input
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

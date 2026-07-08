@@ -1,9 +1,12 @@
 # chat-python
 
 The most basic chattable agent, in Python — no SDK, one FastAPI POST handler. The
-whole worker reads the decision request and returns the next actions. Two triggers
-make a chat agent — the client proposes the conversation (`client.messages`) →
-prompt the model; the model answers (`llm.finished`) → end the turn.
+whole worker reads the decision request and returns the next actions. It accepts
+every decision the engine has a default for (`proposed`) first, then authors the
+two that are genuinely its own: `client.messages` → the LLM request (the agent's
+identity), and `tool.execute` → run the tool. Everything else — tool results,
+model replies, model failures, even broken or hallucinated tool calls — is the
+engine's default loop, accepted by echoing `proposed` back.
 
 The worker contract is one JSON request in, one JSON response out. See
 [`docs/07-protocol.md`](../../docs/07-protocol.md) for the full protocol.
@@ -15,8 +18,8 @@ Three terminals.
 **1. Start a local Substructure server** pointed at this worker:
 
 ```sh
-export OPENROUTER_API_KEY=sk-or-...
-substructure serve --dev --provider openrouter --worker-url http://localhost:4444
+export ANTHROPIC_API_KEY=sk-ant-...
+substructure serve --dev --provider anthropic --worker-url http://localhost:4444
 ```
 
 **2. Start the worker** (listens on `:4444`):

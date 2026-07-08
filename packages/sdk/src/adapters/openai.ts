@@ -80,9 +80,9 @@ function modelTools(toolList: LlmTool[] | undefined): OpenAI.Responses.Tool[] {
     return (toolList ?? []).map(
         (t): OpenAI.Responses.Tool => ({
             type: "function",
-            name: t.function.name,
-            description: t.function.description || undefined,
-            parameters: (t.function.parameters ?? {}) as Record<string, unknown>,
+            name: t.name,
+            description: t.description || undefined,
+            parameters: (t.input ?? { type: "object", properties: {} }) as Record<string, unknown>,
             strict: null,
         }),
     );
@@ -181,7 +181,7 @@ export function openAITools(toolset: Tool[], context?: unknown): ToolDef[] {
             {
                 name: t.name,
                 description: t.description ?? "",
-                parameters: t.parameters,
+                input: t.parameters,
                 execute: async (args) => {
                     const result = await t.invoke(new RunContext(context), args || "{}");
                     return typeof result === "string" ? result : JSON.stringify(result);

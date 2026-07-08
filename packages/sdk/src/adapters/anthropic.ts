@@ -73,9 +73,9 @@ export function anthropicGenerate(settings: AnthropicGenerateSettings): Llm {
 
 function modelTools(tools: LlmTool[] | undefined): Anthropic.Tool[] {
     return (tools ?? []).map((t) => ({
-        name: t.function.name,
-        description: t.function.description || undefined,
-        input_schema: t.function.parameters as Anthropic.Tool.InputSchema,
+        name: t.name,
+        description: t.description || undefined,
+        input_schema: (t.input ?? { type: "object", properties: {} }) as Anthropic.Tool.InputSchema,
     }));
 }
 

@@ -128,15 +128,25 @@ export function contentText(content: Content | undefined): string {
         .join("\n");
 }
 
-export interface LlmToolFunction {
+/** A tool's declared contract: flat on the wire. */
+export interface LlmTool {
     name: string;
     description: string;
-    parameters: unknown;
+    /** JSON Schema for the tool's arguments; omitted declares a no-argument
+     *  tool. The engine validates each call's arguments against it and hands
+     *  providers their native form. */
+    input?: unknown;
+    /** JSON Schema the settled result must satisfy; never sent to the model.
+     *  A violating result settles as a terminal tool error. */
+    output?: unknown;
 }
 
-export interface LlmTool {
-    function: LlmToolFunction;
-}
+/** The engine's classification of a tool call's arguments against the tool's
+ *  declared `input` schema. Always present on a `tool.execute` trigger. */
+export type ToolInput =
+    | { status: "valid"; value: Record<string, unknown> }
+    | { status: "invalid"; value: Record<string, unknown>; error: string }
+    | { status: "malformed"; error: string };
 
 /** Model id and per-call parameters: the reusable core of an LLM call, shared by
  *  `LlmRequest` (the wire payload) and `Llm` (the loop's config). */
@@ -256,7 +266,18 @@ export type DecisionTrigger =
           new_from: number;
       }
     | ({ type: "client.action" } & ClientAction)
-    | { type: "tool.execute"; id: string; name: string; arguments: string; attempt: number; deadline?: DateTime }
+    | {
+          type: "tool.execute";
+          id: string;
+          name: string;
+          arguments: string;
+          /** The engine's classification of `arguments`: `valid` (with the
+           *  parsed `value`), `invalid` (value plus the schema violation), or
+           *  `malformed` (not a JSON object; empty parses as `{}`). */
+          input: ToolInput;
+          attempt: number;
+          deadline?: DateTime;
+      }
     | { type: "llm.execute"; id: string; request: LlmRequest; stream: boolean; attempt: number; deadline?: DateTime }
     | { type: "tool.finished"; id: string; ok: boolean; name: string; result?: string; error?: string }
     | {
@@ -282,26 +303,36 @@ export type WorkerAction =
           request: LlmRequest;
           stream?: boolean;
           retry?: RetryPolicy;
-          handler: LlmHandler;
+          /** Omitted ⇒ `"server"`. */
+          handler?: LlmHandler;
       }
     | {
           /** `id` is the model's tool call id; omit it for an ad-hoc worker tool and the engine mints one. */
           type: "tool.call";
           id?: string;
           name: string;
-          arguments: string;
-          handler: ToolHandler;
+          /** A non-string value is canonicalized to its JSON text engine-side. */
+          arguments: string | Record<string, unknown>;
+          /** Omitted ⇒ `"worker"`. */
+          handler?: ToolHandler;
           retry?: RetryPolicy;
       }
     // On the sync/pull paths a settle's `id` may be omitted — the answered
     // `*.execute` trigger names the effect the engine resolves it against.
-    | { type: "tool.result"; id?: string; result: string; attempt?: number }
+    | {
+          type: "tool.result";
+          id?: string;
+          /** A non-string value is canonicalized to its JSON text engine-side. */
+          result: unknown;
+          attempt?: number;
+      }
     | { type: "llm.result"; id?: string; response: LlmResponse; attempt?: number }
     | {
           type: "tool.error";
           id?: string;
           error: string;
-          retryable: boolean;
+          /** Omitted ⇒ terminal. */
+          retryable?: boolean;
           attempt?: number;
           code?: string;
           detail?: unknown;
@@ -310,7 +341,8 @@ export type WorkerAction =
           type: "llm.error";
           id?: string;
           error: string;
-          retryable: boolean;
+          /** Omitted ⇒ terminal. */
+          retryable?: boolean;
           attempt?: number;
           code?: string;
           detail?: unknown;
@@ -322,13 +354,20 @@ export type WorkerAction =
 
 /** Body settling a call: a result or an error. */
 export type SettleEffectRequest =
-    | { type: "tool.result"; id: string; result: string; attempt?: number }
+    | {
+          type: "tool.result";
+          id: string;
+          /** A non-string value is canonicalized to its JSON text engine-side. */
+          result: unknown;
+          attempt?: number;
+      }
     | { type: "llm.result"; id: string; response: LlmResponse; attempt?: number }
     | {
           type: "tool.error";
           id: string;
           error: string;
-          retryable: boolean;
+          /** Omitted ⇒ terminal. */
+          retryable?: boolean;
           attempt?: number;
           code?: string;
           detail?: unknown;
@@ -337,7 +376,8 @@ export type SettleEffectRequest =
           type: "llm.error";
           id: string;
           error: string;
-          retryable: boolean;
+          /** Omitted ⇒ terminal. */
+          retryable?: boolean;
           attempt?: number;
           code?: string;
           detail?: unknown;
@@ -902,6 +942,14 @@ export interface UnknownInFlightCall extends InFlightCallBase {
 
 export type InFlightCall = InFlightToolCall | InFlightSubAgent | InFlightLlmCall | UnknownInFlightCall;
 
+/** The engine-derived default continuation for a trigger: the decision an SDK
+ *  agent loop would author. Advisory — the engine never applies it; a worker
+ *  accepts by returning it (amended or verbatim) as its decision. */
+export interface ProposedDecision {
+    messages: MessageInput[];
+    actions: WorkerAction[];
+}
+
 /** Exactly what a worker receives when the engine asks for a decision. Every
  *  field is always present on the wire — the contract is total, not shaped by
  *  what happens to be empty; `deadline`/`turn_id` are `null` when unset. */
@@ -911,6 +959,10 @@ export interface WireDecisionRequest {
     agent_id: string;
     identity: WorkerIdentity;
     trigger: DecisionTrigger;
+    /** The default continuation for `trigger`; `null` when only the worker can
+     *  answer (`client.messages`, a well-formed `tool.execute`, `llm.execute`)
+     *  or there is nothing to do (`client.action`, `interrupt.resumed`). */
+    proposed: ProposedDecision | null;
     /** Your state as raw JSON; `null` when the session has none. */
     state: unknown;
     calls: InFlightCall[];

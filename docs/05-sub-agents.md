@@ -66,17 +66,14 @@ For each agent passed to `subAgents`, the LLM sees:
 
 ```json
 {
-  "type": "function",
-  "function": {
-    "name": "<agentId>",
-    "description": "Delegate to <agentId>",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "message": { "type": "string", "description": "The message to send to the agent" }
-      },
-      "required": ["message"]
-    }
+  "name": "<agentId>",
+  "description": "Delegate to <agentId>",
+  "input": {
+    "type": "object",
+    "properties": {
+      "message": { "type": "string", "description": "The message to send to the agent" }
+    },
+    "required": ["message"]
   }
 }
 ```

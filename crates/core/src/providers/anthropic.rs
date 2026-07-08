@@ -229,9 +229,9 @@ fn build_body(request: &LlmRequest, default_max_tokens: u64, stream: bool) -> An
     let tools = request.tools.as_ref().map(|ts| {
         ts.iter()
             .map(|t| AnthropicTool {
-                name: t.function.name.clone(),
-                description: t.function.description.clone(),
-                input_schema: t.function.parameters.clone(),
+                name: t.name.clone(),
+                description: t.description.clone(),
+                input_schema: t.input_schema(),
             })
             .collect()
     });
@@ -764,7 +764,7 @@ impl LlmProviderTrait for AnthropicProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::{LlmRequest, LlmTool, LlmToolFunction, ReasoningConfig};
+    use crate::llm::{LlmRequest, LlmTool, ReasoningConfig};
     use crate::session::wire::WireMessage;
     use serde_json::json;
 
@@ -862,13 +862,20 @@ mod tests {
     #[test]
     fn maps_tools_effort_and_max_tokens() {
         let mut r = req(vec![msg(Role::User, Some("hi"))]);
-        r.tools = Some(vec![LlmTool {
-            function: LlmToolFunction {
+        r.tools = Some(vec![
+            LlmTool {
                 name: "f".to_string(),
                 description: "d".to_string(),
-                parameters: json!({"type": "object"}),
+                input: Some(json!({"type": "object"})),
+                output: None,
             },
-        }]);
+            LlmTool {
+                name: "no_args".to_string(),
+                description: "d".to_string(),
+                input: None,
+                output: None,
+            },
+        ]);
         r.max_completion_tokens = Some(1000);
         r.reasoning = Some(ReasoningConfig {
             effort: Some(ReasoningEffort::High),
@@ -880,6 +887,11 @@ mod tests {
         assert_eq!(v["max_tokens"], 1000);
         assert_eq!(v["tools"][0]["name"], "f");
         assert_eq!(v["tools"][0]["input_schema"]["type"], "object");
+        assert_eq!(
+            v["tools"][1]["input_schema"],
+            json!({"type": "object", "properties": {}}),
+            "a no-input tool gets the empty object schema"
+        );
         assert_eq!(v["thinking"]["type"], "adaptive");
         assert_eq!(v["output_config"]["effort"], "high");
         assert_eq!(v["stream"], true);

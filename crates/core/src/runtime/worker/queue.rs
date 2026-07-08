@@ -8,6 +8,7 @@ use crate::runtime::owner::SessionOwner;
 use crate::runtime::session::decision::Action;
 use crate::runtime::session::events::MessageTree;
 use crate::runtime::session::message::Message;
+use crate::runtime::session::propose::Proposal;
 use crate::runtime::session::state::Effect;
 use crate::runtime::session::wire::{WireMessage, WireTrigger};
 use crate::runtime::span::SpanContext;
@@ -20,6 +21,11 @@ pub struct WorkerDecisionRequest {
     pub agent_id: String,
     pub identity: SessionOwner,
     pub trigger: WireTrigger,
+    /// The engine-derived default continuation for `trigger`; `None` when the
+    /// trigger needs worker knowledge. Advisory — the worker accepts by echoing
+    /// it (amended or verbatim) as its decision.
+    #[serde(default)]
+    pub proposed: Option<Proposal>,
     pub state: WorkerState,
     #[serde(default)]
     pub calls: Vec<Effect>,

@@ -82,7 +82,7 @@ function todoTools(namespace: DurableObjectNamespace<AgentState>) {
   const addTodo = tool({
     name: "add_todo",
     description: "Add a todo item",
-    parameters: {
+    input: {
       type: "object",
       properties: { title: { type: "string" } },
       required: ["title"],
@@ -99,7 +99,6 @@ function todoTools(namespace: DurableObjectNamespace<AgentState>) {
   const listTodos = tool({
     name: "list_todos",
     description: "List all todos",
-    parameters: { type: "object", properties: {} },
     execute: async (_args, request) => {
       const stub = namespace.getByName(request.session_id);
       return JSON.stringify((await stub.getState()).items);

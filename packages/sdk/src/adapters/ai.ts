@@ -61,9 +61,11 @@ export function aiGenerate(settings: AIGenerateSettings): Llm {
 function modelTools(toolList: LlmTool[] | undefined): ToolSet {
     const out: ToolSet = {};
     for (const t of toolList ?? []) {
-        out[t.function.name] = tool({
-            description: t.function.description || undefined,
-            inputSchema: jsonSchema(t.function.parameters as Parameters<typeof jsonSchema>[0]),
+        out[t.name] = tool({
+            description: t.description || undefined,
+            inputSchema: jsonSchema(
+                (t.input ?? { type: "object", properties: {} }) as Parameters<typeof jsonSchema>[0],
+            ),
         });
     }
     return out;
@@ -91,7 +93,7 @@ export function aiSdkTools(toolset: ToolSet, experimentalContext?: unknown): Too
         if (t.type === "provider") return [];
 
         const description = t.description ?? "";
-        const parameters = asSchema(t.inputSchema).jsonSchema;
+        const input = asSchema(t.inputSchema).jsonSchema;
         const execute = t.execute;
 
         // No `execute` → client tool: the worker never runs it (the frontend settles it).
@@ -100,7 +102,7 @@ export function aiSdkTools(toolset: ToolSet, experimentalContext?: unknown): Too
                 {
                     name,
                     description,
-                    parameters,
+                    input,
                     handler: "client",
                     execute: async () => {
                         throw new Error(
@@ -115,18 +117,18 @@ export function aiSdkTools(toolset: ToolSet, experimentalContext?: unknown): Too
             {
                 name,
                 description,
-                parameters,
+                input,
                 execute: async (args, request) => {
-                    const input = args ? JSON.parse(args) : {};
+                    const parsed = args ? JSON.parse(args) : {};
                     const options = {
                         toolCallId: request.trigger.type === "tool.execute" ? request.trigger.id : "",
                         messages: [] as ModelMessage[],
                         experimental_context: experimentalContext,
                     };
-                    const output = await execute(input, options);
+                    const output = await execute(parsed, options);
                     if (t.toModelOutput) {
                         return modelOutputToString(
-                            await t.toModelOutput({ toolCallId: options.toolCallId, input, output }),
+                            await t.toModelOutput({ toolCallId: options.toolCallId, input: parsed, output }),
                         );
                     }
                     return typeof output === "string" ? output : JSON.stringify(output);

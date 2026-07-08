@@ -10,6 +10,5 @@ pub use queue::LlmTask;
 pub use token_delta::{InMemoryTokenDeltaTransport, TokenDelta, TokenDeltaTransport};
 pub use types::{
     CallContext, ErrorCode, LlmCallError, LlmCallable, LlmProviderTrait, LlmRequest, LlmResponse,
-    LlmTool, LlmToolFunction, ReasoningConfig, ReasoningEffort, ResponseImage, StreamDelta,
-    ToolCallChunk,
+    LlmTool, ReasoningConfig, ReasoningEffort, ResponseImage, StreamDelta, ToolCallChunk,
 };

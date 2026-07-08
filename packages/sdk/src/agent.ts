@@ -21,21 +21,19 @@ export interface AgentConfig<S = unknown> {
 }
 
 function toolSchema(def: ToolDef): LlmTool {
-    return { function: { name: def.name, description: def.description, parameters: def.parameters } };
+    return { name: def.name, description: def.description, input: def.input, output: def.output };
 }
 
 function subAgentSchema(agentId: string): LlmTool {
     return {
-        function: {
-            name: agentId,
-            description: `Delegate to ${agentId}`,
-            parameters: {
-                type: "object",
-                properties: {
-                    message: { type: "string", description: "The message to send to the agent" },
-                },
-                required: ["message"],
+        name: agentId,
+        description: `Delegate to ${agentId}`,
+        input: {
+            type: "object",
+            properties: {
+                message: { type: "string", description: "The message to send to the agent" },
             },
+            required: ["message"],
         },
     };
 }

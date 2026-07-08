@@ -46,3 +46,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["serde", "v7"] }
 webbrowser = "1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+jsonschema = { version = "0.47.0", default-features = false }

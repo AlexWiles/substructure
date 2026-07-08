@@ -9,6 +9,7 @@ use crate::runtime::processor::{
     ProcessorError,
 };
 use crate::runtime::session::events::EventPayload;
+use crate::runtime::session::propose::propose;
 use crate::runtime::session::state::SessionState;
 use crate::runtime::session::wire::to_wire_trigger;
 
@@ -92,12 +93,26 @@ fn try_extract(raw: &Event) -> Option<WorkerDecisionRequest> {
         .map(|h| derived.message_tree.path_to(h))
         .unwrap_or_default();
 
+    let trigger = to_wire_trigger(
+        req.trigger.clone(),
+        &transcript,
+        &derived.message_tree,
+        &derived.open_llm_calls,
+    );
+    let proposed = propose(
+        &trigger,
+        &transcript,
+        &derived.open_llm_calls,
+        pending_calls,
+    );
+
     Some(WorkerDecisionRequest {
         session_id: event.aggregate_id.clone(),
         decision_id: req.decision_id.clone(),
         agent_id: agent_id.clone(),
         identity: owner.clone(),
-        trigger: to_wire_trigger(req.trigger.clone(), &transcript, &derived.message_tree),
+        trigger,
+        proposed,
         state: derived.worker_state.clone(),
         calls: derived.calls.clone(),
         pending_calls,

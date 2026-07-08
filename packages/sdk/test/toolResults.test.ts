@@ -74,6 +74,7 @@ describe("deferred tools", () => {
         id: "tc-1",
         name: "wait",
         arguments: "{}",
+        input: { status: "valid", value: {} },
         attempt: 0,
     };
 
@@ -82,7 +83,6 @@ describe("deferred tools", () => {
         const wait = tool({
             name: "wait",
             description: "settled out-of-band",
-            parameters: { type: "object", properties: {} },
             deferred: true,
             execute: () => {
                 kickedOff = true;
@@ -100,7 +100,6 @@ describe("deferred tools", () => {
         const wait = tool({
             name: "wait",
             description: "settled out-of-band",
-            parameters: { type: "object", properties: {} },
             deferred: true,
             execute: () => {
                 throw new Error("enqueue failed");

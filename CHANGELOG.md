@@ -12,19 +12,27 @@ same version.
 
 ### Added
 
+- Decision requests carry `proposed`, the engine's default continuation for
+  every mechanical trigger, including model failures (interrupt) and broken
+  or undeclared tool calls (`tool.error` back to the model). `null` only on
+  the decisions that are genuinely the worker's.
+- Tools declare `input`/`output` JSON Schemas; the engine validates both
+  directions. `tool.execute` carries the classification as `input`
+  (`valid`/`invalid`/`malformed`), and a result violating `output` settles as
+  a terminal tool error.
+- Lenient worker wire: `handler`, `retryable`, and `actions` have defaults;
+  `tool.result.result` / `tool.call.arguments` accept any JSON value.
 - Native Anthropic and OpenAI LLM providers.
 
 ### Changed
 
-- **Breaking:** the decision wire unifies on `messages`. Affects conversation field
-  (was `transcript`) and the trigger `client.messages` (was `client.transcript`).
-  The SDK's `DecisionRequest`/`Decision` follow, so custom decision functions read
-  `req.messages` and return `{ messages }`; `toolLoop` callers are unaffected.
-- The sync worker decision response no longer needs `session_id`/`decision_id`.
-- Worker-authored ids (action, settle, `interrupt_id`, message) are optional and
-  engine-assigned; `sub_agent.spawn` requires `tool_call_id`.
-- Explicit `WireDecisionRequest`/`WireDecisionResponse` wire types; the request
-  serializes every field.
+- **Breaking:** the decision wire unifies on `messages` (was `transcript` /
+  `client.transcript`); the SDK's `DecisionRequest`/`Decision` follow.
+- **Breaking:** `LlmTool` is flat: `{name, description, input?, output?}`,
+  with no `function` nesting and no `parameters` (the SDK's `tool({...})`
+  follows). Old persisted events no longer deserialize; wipe dev databases.
+- Worker-authored ids are optional (engine-assigned), and the sync decision
+  response drops `session_id`/`decision_id`.
 
 ## [0.1.22] - 2026-07-07
 

@@ -130,9 +130,13 @@ pub struct LlmCallSpec {
 
 impl LlmCallSpec {
     pub fn to_request(&self, messages: Vec<Message>) -> LlmRequest {
+        self.to_wire_request(messages.into_iter().map(WireMessage::from).collect())
+    }
+
+    pub fn to_wire_request(&self, messages: Vec<WireMessage>) -> LlmRequest {
         LlmRequest {
             model: self.model.clone(),
-            messages: messages.into_iter().map(WireMessage::from).collect(),
+            messages,
             tools: self.tools.clone(),
             temperature: self.temperature,
             max_completion_tokens: self.max_completion_tokens,
@@ -256,6 +260,11 @@ pub struct DerivedState {
     pub ancestry: Vec<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub sub_agent_calls: HashMap<String, SubAgentCallState>,
+    /// Llm calls whose assistant message has tool calls not yet answered on the
+    /// active path — the parents a `tool.finished` proposal may re-issue. Pruned
+    /// to that window so stored prompts don't accumulate in per-event state.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub open_llm_calls: HashMap<String, LlmCallState>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub worker_decisions: HashMap<String, WorkerDecisionState>,
     pub turn_id: Option<String>,
@@ -869,7 +878,34 @@ impl SessionState {
         effects
     }
 
+    /// A call is open while any of its tool calls lacks a recorded answer on the
+    /// active path. The tree is frozen during a pending decision, so the call
+    /// answering the last `tool.finished` is still open when that decision is
+    /// projected — exactly when its re-issue proposal is derived.
+    fn open_llm_calls(&self, tree: &MessageTree) -> HashMap<String, LlmCallState> {
+        let Some(head) = tree.head_id.as_deref() else {
+            return HashMap::new();
+        };
+        let path = tree.path_to(head);
+        let answered: std::collections::HashSet<&str> = path
+            .iter()
+            .filter_map(|m| m.tool_call_id.as_deref())
+            .collect();
+        path.iter()
+            .filter(|m| {
+                m.tool_calls
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|c| !answered.contains(c.id.as_str()))
+            })
+            .filter_map(|m| self.llm_calls.get(&m.id).map(|c| (m.id.clone(), c.clone())))
+            .collect()
+    }
+
     pub fn derived_state(&self) -> DerivedState {
+        let message_tree = self.message_tree();
+        let open_llm_calls = self.open_llm_calls(&message_tree);
         DerivedState {
             status: self.status.clone(),
             wake_at: self.wake_at(),
@@ -877,9 +913,10 @@ impl SessionState {
             owner: self.owner.clone(),
             agent_id: self.agent_id.clone(),
             worker_state: self.resolve_state_for(self.head_id.as_deref()),
-            message_tree: self.message_tree(),
+            message_tree,
             ancestry: self.ancestry.clone(),
             sub_agent_calls: self.sub_agent_calls.clone(),
+            open_llm_calls,
             worker_decisions: self.worker_decisions.clone(),
             turn_id: self.turn_id.clone(),
             cost: self.cost,
@@ -913,6 +950,102 @@ impl SessionState {
                 *self.turn_token_usage.entry(k.clone()).or_insert(0) += n;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod open_llm_calls_tests {
+    use super::*;
+    use crate::runtime::retry::RetryPolicy;
+    use crate::runtime::session::message::{ToolCall, ToolCallFunction};
+
+    fn node(message: Message, parent_id: Option<&str>) -> Node {
+        Node::Message(NewMessage {
+            message,
+            parent_id: parent_id.map(str::to_string),
+        })
+    }
+
+    fn user(id: &str) -> Message {
+        Message {
+            id: id.to_string(),
+            role: Role::User,
+            content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    fn assistant_calling(id: &str, tool_call_id: &str) -> Message {
+        Message {
+            id: id.to_string(),
+            role: Role::Assistant,
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: tool_call_id.to_string(),
+                call_type: "function".to_string(),
+                function: ToolCallFunction {
+                    name: "t".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }]),
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    fn tool_answer(id: &str, tool_call_id: &str) -> Message {
+        Message {
+            id: id.to_string(),
+            role: Role::Tool,
+            content: None,
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id.to_string()),
+            name: None,
+        }
+    }
+
+    fn call_state(call_id: &str) -> LlmCallState {
+        LlmCallState {
+            call_id: call_id.to_string(),
+            tracking: EffectTracking::new(RetryPolicy::no_retry(), Utc::now()),
+            prompt: vec![],
+            spec: LlmCallSpec {
+                model: "m".to_string(),
+                tools: None,
+                temperature: None,
+                max_completion_tokens: None,
+                reasoning: None,
+            },
+            stream: false,
+            handler: LlmHandler::Server,
+            anchor: None,
+        }
+    }
+
+    #[test]
+    fn a_call_is_open_until_its_tool_answer_is_recorded() {
+        let mut s = SessionState::new("sess-1".to_string());
+        s.nodes.push(node(user("u1"), None));
+        s.nodes
+            .push(node(assistant_calling("call-1", "tc-1"), Some("u1")));
+        s.head_id = Some("call-1".to_string());
+        s.llm_calls
+            .insert("call-1".to_string(), call_state("call-1"));
+
+        assert!(
+            s.derived_state().open_llm_calls.contains_key("call-1"),
+            "unanswered tool call keeps the parent open"
+        );
+
+        s.nodes
+            .push(node(tool_answer("t1", "tc-1"), Some("call-1")));
+        s.head_id = Some("t1".to_string());
+        assert!(
+            s.derived_state().open_llm_calls.is_empty(),
+            "recorded answer closes the call"
+        );
     }
 }
 

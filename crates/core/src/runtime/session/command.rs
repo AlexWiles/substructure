@@ -10,6 +10,7 @@ use super::reconcile::plan_reconcile;
 use super::state::{
     json_to_string, new_call_id, EffectStatus, EffectTracking, SessionState, SessionStatus,
 };
+use super::tool_contract::{declared_tool, output_violation, DeclaredTool};
 use super::wire::WireMessage;
 use crate::runtime::aggregate::Caller;
 use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse};
@@ -320,6 +321,18 @@ impl SessionState {
             }
         }
         events
+    }
+
+    /// The `output` schema the settling tool was declared with, resolved by
+    /// lineage on the active path. `None` when the tool declared no output
+    /// contract or the call has no resolvable spec.
+    fn declared_output_schema(&self, tool_call_id: &str, name: &str) -> Option<serde_json::Value> {
+        let tree = self.message_tree();
+        let path = tree.path_to(tree.head_id.as_deref()?);
+        match declared_tool(tool_call_id, name, &path, &self.llm_calls) {
+            DeclaredTool::Declared(tool) => tool.output.clone(),
+            _ => None,
+        }
     }
 
     fn emit_tool_result(
@@ -1021,6 +1034,24 @@ impl SessionState {
                 self.check_tool_call_caller(tc, caller)?;
 
                 let name = tc.name.clone();
+
+                // Enforce the tool's own declared output contract: a violating
+                // result settles as a terminal tool error instead.
+                if let Some(schema) = self.declared_output_schema(&tool_call_id, &name) {
+                    if let Some(violation) = output_violation(&schema, &result) {
+                        return self.handle(
+                            CommandPayload::FailToolCall {
+                                tool_call_id,
+                                attempt,
+                                error: format!(
+                                    "tool output violated its declared schema: {violation}"
+                                ),
+                                retryable: false,
+                            },
+                            caller,
+                        );
+                    }
+                }
 
                 let mut events = vec![EventPayload::ToolCallCompleted(ToolCallCompleted {
                     tool_call_id: tool_call_id.clone(),
@@ -1934,6 +1965,143 @@ mod tests {
             matches!(err, SessionError::EffectWrongHandler),
             "expected EffectWrongHandler; got {err:?}"
         );
+    }
+
+    /// Declare a `get_weather` tool with an output contract, run its llm.call
+    /// to the point where the tool call is in flight, and settle it with
+    /// `result`. Returns the settle's events.
+    fn settle_with_output_contract(result: &str) -> (Aggregate<SessionState>, Vec<EventPayload>) {
+        use crate::runtime::llm::LlmTool;
+        use crate::runtime::session::message::{ToolCall, ToolCallFunction};
+
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        dispatch(
+            &mut agg,
+            CommandPayload::RequestLlmCall {
+                call_id: "call-1".to_string(),
+                request: LlmRequest {
+                    model: "test-model".to_string(),
+                    messages: vec![],
+                    tools: Some(vec![LlmTool {
+                        name: "get_weather".to_string(),
+                        description: "d".to_string(),
+                        input: None,
+                        output: Some(serde_json::json!({
+                            "type": "object",
+                            "properties": { "temp_c": { "type": "number" } },
+                            "required": ["temp_c"],
+                        })),
+                    }]),
+                    temperature: None,
+                    max_completion_tokens: None,
+                    reasoning: None,
+                },
+                stream: false,
+                retry: RetryPolicy::no_retry(),
+                handler: LlmHandler::Server,
+            },
+            &system(),
+        );
+        let tool_call = ToolCall {
+            id: "tc-1".to_string(),
+            call_type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "get_weather".to_string(),
+                arguments: "{}".to_string(),
+            },
+        };
+        let finished = dispatch(
+            &mut agg,
+            CommandPayload::CompleteLlmCall {
+                call_id: "call-1".to_string(),
+                attempt: Some(0),
+                response: LlmResponse {
+                    model: "test-model".to_string(),
+                    content: None,
+                    tool_calls: vec![tool_call.clone()],
+                    finish_reason: None,
+                    usage: None,
+                    cost: None,
+                    images: vec![],
+                },
+            },
+            &system(),
+        );
+        let decision_id = finished
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(p) => Some(p.decision_id.clone()),
+                _ => None,
+            })
+            .expect("llm.finished opens a decision");
+        // Echo the default: record the assistant under the call id, dispatch the call.
+        dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id,
+                transcript: vec![WireMessage {
+                    id: Some("call-1".to_string()),
+                    role: Role::Assistant,
+                    content: None,
+                    tool_calls: Some(vec![tool_call]),
+                    tool_call_id: None,
+                    name: None,
+                }],
+                actions: vec![Action::CallTool {
+                    id: "tc-1".to_string(),
+                    name: "get_weather".to_string(),
+                    arguments: "{}".to_string(),
+                    handler: ToolHandler::Worker,
+                    retry: RetryPolicy::no_retry(),
+                }],
+                state: None,
+            },
+            &machine(),
+        );
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::CompleteToolCall {
+                tool_call_id: "tc-1".to_string(),
+                attempt: Some(0),
+                result: result.to_string(),
+            },
+            &machine(),
+        );
+        (agg, events)
+    }
+
+    #[test]
+    fn a_result_violating_the_declared_output_schema_settles_as_an_error() {
+        let (agg, events) = settle_with_output_contract(r#"{"temp_c": "warm"}"#);
+
+        assert!(
+            matches!(events.as_slice(), [EventPayload::ToolCallErrored(_), ..]),
+            "the completion becomes a terminal failure; got {events:?}"
+        );
+        assert!(
+            decision_with(&events, |t| matches!(
+                t,
+                DecisionTrigger::ToolFinished { id, ok: false, error: Some(e), .. }
+                    if id == "tc-1" && e.contains("tool output violated its declared schema")
+            ))
+            .is_some(),
+            "the violation reaches the model as the tool's error; got {events:?}"
+        );
+        let tc = agg.state.tool_calls.get("tc-1").expect("tool call present");
+        assert!(tc.is_error);
+    }
+
+    #[test]
+    fn a_result_satisfying_the_declared_output_schema_settles_normally() {
+        let (agg, events) = settle_with_output_contract(r#"{"temp_c": 21}"#);
+
+        assert!(
+            matches!(events.as_slice(), [EventPayload::ToolCallCompleted(_), ..]),
+            "a conforming result completes; got {events:?}"
+        );
+        let tc = agg.state.tool_calls.get("tc-1").expect("tool call present");
+        assert!(!tc.is_error);
+        assert_eq!(tc.result.as_deref(), Some(r#"{"temp_c": 21}"#));
     }
 
     #[test]

@@ -35,7 +35,7 @@ import { agent, tool, toolLoop } from "@substructure.ai/sdk";
 const getWeather = tool({
   name: "get_weather",
   description: "Get the current weather for a city.",
-  parameters: {
+  input: {
     type: "object",
     properties: { city: { type: "string" } },
     required: ["city"],
@@ -75,7 +75,7 @@ Tools are how the agent acts on the world. A tool is a pure function of its argu
 const getWeather = tool({
   name: "get_weather",
   description: "Get the current weather for a city.",
-  parameters: {
+  input: {
     type: "object",
     properties: { city: { type: "string" } },
     required: ["city"],
@@ -89,7 +89,8 @@ const getWeather = tool({
 
 A few notes:
 
-- `parameters` is a plain JSON Schema object. The LLM uses it to format calls.
+- `input` is a plain JSON Schema object. The LLM uses it to format calls, and the engine validates each call's arguments against it before your tool runs — a violating call is bounced back to the model as a tool error by default. Omit it for a no-argument tool.
+- `output` (optional) is a JSON Schema for the result; the engine settles a violating result as a tool error. It is never sent to the model.
 - `execute` receives the raw stringified JSON args. Parse it yourself.
 - Return a string: the tool result fed back to the LLM. For structured data, `JSON.stringify` it yourself. (To complete a call out-of-band instead, see [Deferred tool calls](#deferred-async-tool-calls).)
 - Tools can be async. Substructure waits for the promise.
@@ -105,7 +106,7 @@ It does not work for tools that hand work off to something the worker can't awai
 const wait = tool({
   name: "wait",
   description: "Wait for the given number of seconds, then return.",
-  parameters: {
+  input: {
     type: "object",
     properties: { seconds: { type: "number" } },
     required: ["seconds"],
@@ -154,7 +155,7 @@ A tool with `handler: "client"` runs in the browser, not the worker. The engine 
 const setTheme = tool({
   name: "set_theme",
   description: "Set the page's colors. Runs in the user's browser.",
-  parameters: {
+  input: {
     type: "object",
     properties: { background: { type: "string" }, accent: { type: "string" } },
     required: ["background", "accent"],
@@ -177,7 +178,7 @@ Tools reach their store directly through the decision request. Key it by `reques
 const addTodo = tool({
   name: "add_todo",
   description: "Add a todo item",
-  parameters: {
+  input: {
     type: "object",
     properties: { title: { type: "string" } },
     required: ["title"],
@@ -211,13 +212,13 @@ function todoTools(state: State) {
     tool({
       name: "add_todo",
       description: "Add a todo item",
-      parameters: { type: "object", properties: { title: { type: "string" } }, required: ["title"] },
+      input: { type: "object", properties: { title: { type: "string" } }, required: ["title"] },
       execute: (args) => {
         state.todos.push({ id: crypto.randomUUID(), title: JSON.parse(args).title, done: false });
         return "added";
       },
     }),
-    tool({ name: "list_todos", description: "List todos", parameters: { type: "object", properties: {} },
+    tool({ name: "list_todos", description: "List todos",
            execute: () => JSON.stringify(state.todos) }),
   ];
 }

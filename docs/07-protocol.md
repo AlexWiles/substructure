@@ -41,6 +41,7 @@ decision.
   "agent_id":      "assistant",  // which agent the engine is asking
   "identity":      { "tenant_id": "…", "id": "user-42" },  // the end user
   "trigger":       { "type": "…", … },   // the news; the one field you switch on
+  "proposed":      { "messages": […], "actions": […] },  // default continuation; null when only you can answer
   "state":         { … },        // your state as raw JSON (any JSON value)
   "calls": [                     // calls still in flight, a flat tagged list, see below
     { "id": "…", "kind": "tool_call", "status": "pending", "attempt": 0,
@@ -55,6 +56,10 @@ decision.
 ```
 
 - **`trigger`** is what you switch on. It's the one field that says what happened.
+- **`proposed`** is the engine-derived default continuation for the trigger —
+  the decision the reference loop below would author. Advisory: the engine never
+  applies it; accept it by returning it as your decision, amend it first, or
+  ignore it. `null` on the triggers only you can answer. See Proposed decisions.
 - **`messages`** is the active conversation as a flat list, oldest first: all a
   tool loop needs. (`message_tree` carries the full branch structure.)
 - **`pending_calls`** is the step gate as a number: how many
@@ -95,6 +100,52 @@ transcript and state and waits, it does not poll or nudge you to make more
 progress. So finish a turn deliberately with a `done` action; returning no actions
 just means "nothing to do right now," not "the turn is over."
 
+### Proposed decisions
+
+Triggers whose continuation is mechanical arrive with `proposed`: the exact
+decision the reference loop below would make, pre-authored. Echo it back —
+amended or verbatim — and that *is* your decision; the engine never applies a
+proposal on its own, so the worker stays the sole author of everything that
+happens.
+
+| Trigger | Proposed `messages` | Proposed `actions` |
+|---|---|---|
+| `llm.finished` (ok, tool calls) | append the assistant message | one `tool.call` per model tool call, under the model's ids |
+| `llm.finished` (ok, no tool calls) | append the assistant message | `done` with the message content |
+| `llm.finished` (failed or truncated) | unchanged | `interrupt`, with the failure in `reason` and `payload` |
+| `tool.finished` / `sub_agent.finished` (siblings in flight) | append the tool message | none — wait for the step to settle |
+| `tool.finished` / `sub_agent.finished` (last of the step) | append the tool message | the parent `llm.call`, re-issued |
+| `tool.execute` (undeclared name, or `input` not `valid`) | unchanged | `tool.error` feeding the failure back to the model |
+
+The re-issued `llm.call` is "what you did last time, continued": the parent
+call's model, tools, temperature, reasoning, stream, handler, and retry policy,
+its **verbatim prompt** (preserving any prompt shaping you did — system message,
+compaction) extended with the messages recorded since, plus the new tool result.
+Change models mid-conversation and proposals follow your latest call
+automatically. A `sub_agent.finished` folds in exactly like a tool, as a tool
+message under the child's `agent_id`.
+
+A failed tool or sub-agent proposes its error text as the tool message, so the
+model sees the failure and can react. A failed or truncated `llm.finished` is
+different — the loop's own engine died, which is not news the model can react
+to — so it proposes an `interrupt` carrying the failure: pausing is recoverable
+in both directions (resume and re-prompt, or end it), where a `done` would
+unilaterally close a turn that might be salvageable. And a `tool.execute` that
+fails its contract — a name the originating request never declared, or
+arguments its `input` schema rejects — proposes the `tool.error` that routes
+the failure back to the model, which can repair the call and retry.
+
+`proposed` is `null` only when the trigger is genuinely yours to answer
+(`client.messages` — the LLM request is your agent's identity; a declared,
+`valid` `tool.execute` or an `llm.execute` — the work itself) or when there is
+nothing to do (`client.action`, `interrupt.resumed`), so a worker that echoes
+blindly fails fast instead of silently stalling the session. That makes
+`proposed` itself the cleanest guard: accept every default first, and what
+remains is exactly the work that defines your agent.
+
+Proposals are derived from state frozen while the decision is pending —
+redeliveries of the same decision carry the same proposal.
+
 ## Triggers
 
 What the engine sends in `trigger`. A worker handles the ones it cares about and
@@ -107,7 +158,7 @@ ignores the rest — unknown types are additive, never a wire break.
 | `llm.finished` | `id`, `ok`, `message`, `truncated`, `usage?`, `cost?` \| `error`, `code?`, `detail?` | The model's final word on call `id`. |
 | `tool.finished` | `id`, `ok`, `name`, `result` \| `error` | A tool's final word (retries exhausted on failure). |
 | `sub_agent.finished` | `id`, `ok`, `session_id`, `agent_id`, `result` \| `error` | A child agent's turn ended. `id` is the model call it answers — the same id you'd fold a tool result under; `session_id` is the child session. |
-| `tool.execute` | `id`, `name`, `arguments`, `attempt`, `deadline?` | Run this tool yourself and answer with `tool.result`/`tool.error`. |
+| `tool.execute` | `id`, `name`, `arguments`, `input`, `attempt`, `deadline?` | Run this tool yourself and answer with `tool.result`/`tool.error`. `input` is the engine's classification of `arguments` against the tool's declared `input` schema: `{"status": "valid", "value": {…}}` (use `value` — it's exactly the parsed `arguments`, never coerced), `{"status": "invalid", "value": {…}, "error": "…"}` (parsed, violates the schema), or `{"status": "malformed", "error": "…"}` (not a JSON object; empty parses as `{}`). Always present. |
 | `llm.execute` | `id`, `request`, `stream`, `attempt`, `deadline?` | Make this model call yourself (worker-handled model) and answer with `llm.result`/`llm.error`. |
 | `interrupt.resumed` | `interrupt_id`, `payload?` | A paused session resumed. |
 
@@ -192,11 +243,11 @@ is just constructing the struct.
 
 | `type` | Fields | Effect |
 |---|---|---|
-| `llm.call` | `id`, `request`, `handler`, `stream?`, `retry?` | Make an LLM call named by `id` (like `tool.call`). `handler` is required: `"server"` lets the engine call its provider; `"worker"` hands the call back to you as an `llm.execute` trigger. You may emit several in one decision, and each finishes independently as its own `llm.finished`. |
-| `tool.call` | `id`, `name`, `arguments`, `handler`, `retry?` | Schedule a tool call named by `id` (the model's tool call id). `handler: "worker"` runs on your worker (you'll get a `tool.execute` trigger); `handler: "client"` routes it to the browser. |
-| `tool.result` | `id`, `result`, `attempt?` | Answer a `tool.execute` with the tool's output. Omit `attempt` to settle the current attempt; echo the trigger's to fence out a stale executor. |
+| `llm.call` | `id`, `request`, `handler?`, `stream?`, `retry?` | Make an LLM call named by `id` (like `tool.call`). `handler` defaults to `"server"` — the engine calls its provider; `"worker"` hands the call back to you as an `llm.execute` trigger. You may emit several in one decision, and each finishes independently as its own `llm.finished`. |
+| `tool.call` | `id`, `name`, `arguments`, `handler?`, `retry?` | Schedule a tool call named by `id` (the model's tool call id). `handler` defaults to `"worker"` — runs on your worker (you'll get a `tool.execute` trigger); `"client"` routes it to the browser. `arguments` takes any JSON value; a non-string is canonicalized to its JSON text. |
+| `tool.result` | `id`, `result`, `attempt?` | Answer a `tool.execute` with the tool's output — any JSON value; a non-string is canonicalized to its JSON text. Omit `attempt` to settle the current attempt; echo the trigger's to fence out a stale executor. |
 | `llm.result` | `id`, `response`, `attempt?` | Answer an `llm.execute` with the provider's `LlmResponse`. |
-| `tool.error` / `llm.error` | `id`, `error`, `retryable`, `attempt?`, `code?`, `detail?` | Answer an execute with a failure. |
+| `tool.error` / `llm.error` | `id`, `error`, `retryable?`, `attempt?`, `code?`, `detail?` | Answer an execute with a failure. `retryable` defaults to false — the failure is terminal. |
 | `sub_agent.spawn` | `session_id`, `agent_id`, `tool_call_id`, `retry?` | Start a child agent in a new session, linked to the tool call that requested it. |
 | `message.send` | `session_id`, `message` | Deliver a message to a session; used to seed a spawned sub-agent. |
 | `interrupt` | `interrupt_id?`, `reason`, `payload?` | Pause the session. |
@@ -232,8 +283,17 @@ The types the triggers and actions carry. All snake_case on the wire.
 // LlmRequest: the prompt you send with llm.call.
 { "model": "anthropic/claude-sonnet-4-6", "messages": [ Message ], "tools": [ LlmTool ] }
 
-// LlmTool: a tool as the model sees it.
-{ "function": { "name": "getWeather", "description": "…", "parameters": { /* JSON Schema */ } } }
+// LlmTool: a tool's declared contract. `input` and `output` are JSON Schemas,
+// both optional. `input` omitted declares a no-argument tool; the engine hands
+// each provider its native form (OpenAI's nested `function.parameters`,
+// Anthropic's `input_schema`), so this flat shape is all you ever write.
+// `output` is never sent to the model — the engine checks the settled result
+// against it and turns a violation into a terminal tool error.
+{
+  "name": "getWeather", "description": "…",
+  "input":  { "type": "object", "properties": { "city": { "type": "string" } }, "required": ["city"] },
+  "output": { "type": "object", "properties": { "temp_c": { "type": "number" } }, "required": ["temp_c"] }
+}
 
 // LlmResponse: what a worker-run model returns (see llm.execute).
 { "model": "…", "content": "…", "tool_calls": [ ToolCall ], "finish_reason": "…" }
@@ -275,7 +335,7 @@ def decide(req, state):
         # The model's final word → finish the turn, or run its tools.
         case "llm.finished":
             if not trigger["ok"]:
-                return { "actions": [ done({ "error": trigger["error"] }) ] }
+                return { "actions": [ { "type": "interrupt", "reason": f"llm call failed: {trigger['error']}" } ] }
             assistant  = trigger["message"]
             messages   = history + [ assistant ]
             calls      = assistant.get("tool_calls", [])
@@ -284,10 +344,12 @@ def decide(req, state):
             actions = [ call_tool(c["id"], c["function"]["name"], c["function"]["arguments"]) for c in calls ]
             return { "messages": messages, "actions": actions }
 
-        # The engine hands a tool to us → run it, answer.
+        # The engine hands a tool to us → run it, answer. A `tool.execute`
+        # without a proposal is declared and valid: `input.value` is the parsed,
+        # schema-checked arguments. A result can be any JSON value.
         case "tool.execute":
             try:
-                result = tools[ trigger["name"] ].run( trigger["arguments"] )
+                result = tools[ trigger["name"] ].run( trigger["input"]["value"] )
                 return { "actions": [ tool_result(trigger["id"], result) ] }
             except Exception as e:
                 return { "actions": [ tool_error(trigger["id"], str(e)) ] }
@@ -306,10 +368,12 @@ def decide(req, state):
             return {}
 
 # Actions are plain data; the "builders" just construct the tagged struct.
-def call_llm(messages, tools):     return { "type": "llm.call", "id": fresh_id(), "request": { "model": MODEL, "messages": [system_message()] + messages, "tools": tools }, "handler": "server" }
-def call_tool(id, name, args):     return { "type": "tool.call", "id": id, "name": name, "arguments": args, "handler": "worker" }
+# Defaults do the rest: handler is "server" on llm.call and "worker" on
+# tool.call, errors are terminal unless marked retryable.
+def call_llm(messages, tools):     return { "type": "llm.call", "id": fresh_id(), "request": { "model": MODEL, "messages": [system_message()] + messages, "tools": tools } }
+def call_tool(id, name, args):     return { "type": "tool.call", "id": id, "name": name, "arguments": args }
 def tool_result(id, result):       return { "type": "tool.result", "id": id, "result": result }
-def tool_error(id, error):         return { "type": "tool.error", "id": id, "error": error, "retryable": False }
+def tool_error(id, error):         return { "type": "tool.error", "id": id, "error": error }
 def done(data):                    return { "type": "done", "data": data }
 
 # system_message(): { "role": "system", "content": INSTRUCTIONS }. Instructions are
@@ -325,17 +389,58 @@ delegated work, and `tool.finished` folds results in (prompting again once
 nothing is pending). Everything below is an optional extension on the same
 skeleton.
 
+And two of the four cases are exactly what the engine already proposes (see
+Proposed decisions), so the minimal worker inverts the order: accept every
+default *first*, then handle what's left — which is, by the null-proposal
+rule, exactly the two decisions that define the agent.
+
+```python
+def decide(req, state):
+    if req.get("proposed") is not None:
+        return req["proposed"]           # accept every default continuation
+
+    match req["trigger"]["type"]:
+        case "client.messages": ...      # prompt the model — your identity
+        case "tool.execute":    ...      # declared + valid: run it
+    return {}
+```
+
+The proposed-first line absorbs `llm.finished`, `tool.finished`, model
+failures, and every broken tool call (malformed arguments, schema violations,
+hallucinated names — each proposes the `tool.error` that lets the model
+repair itself), so the floor worker handles no error case at all. Keep
+explicit cases when you want different behavior — structured `done` data, a
+model switch mid-loop, message rewrites, or salvaging a failed model call
+instead of accepting the proposed `interrupt`.
+
 ## Extensions
 
+**Tool contracts.** A tool's `input` and `output` schemas are enforced by the
+engine, in both directions, and the engine only ever *validates* — it never
+coerces a value, fills a default, or rewrites arguments; `input.value` is
+always exactly the parsed `arguments` string. Inbound, every `tool.execute`
+carries the classification in `input`, and a call that fails its contract
+(including a name the originating request never declared) arrives with the
+proposed `tool.error` that routes the failure back to the model. Outbound, a
+`tool.result` for a tool that declared `output` is checked at settle time —
+the result is read as JSON when it parses, as a plain string otherwise — and a
+violation settles the call as a terminal tool error ("tool output violated its
+declared schema: …") instead. This is the one place the engine transforms a
+worker's action, and only ever against the contract the worker itself
+declared; omit `output` to opt out. Calls the engine can't trace to a declared
+tools list (worker-authored `tool.call`s outside any model turn) skip every
+check — `arguments` stays usable as an arbitrary string channel.
+
 **Sub-agents.** Present each child agent to the model as a tool (an `LlmTool`
-whose `parameters` is `{ message: string }`). When the model calls one, instead of
+whose `input` is `{ message: string }`). When the model calls one, instead of
 `tool.call`, emit two actions: `sub_agent.spawn` (a fresh child `session_id`, the
 child's `agent_id`, and the originating `tool_call_id`) and `message.send` (that
 same `session_id`, a user message with the unwrapped `message` argument). The
 child's turn runs in its own session; when it finishes, the engine sends the
 parent a `sub_agent.finished` whose `id` is that same `tool_call_id` — the shape
-a tool produces, so the loop above handles the result with one more `case` that
-folds it in exactly like `tool.finished` (using `agent_id` as the name).
+a tool produces, and it carries the same proposal `tool.finished` would: echo it
+and the result folds in as a tool message (under `agent_id` as the name), or add
+a `case` to handle it yourself.
 
 **Worker-run models.** If you call the LLM provider yourself rather than letting
 the engine do it, set `handler: "worker"` on your `llm.call`. The engine then

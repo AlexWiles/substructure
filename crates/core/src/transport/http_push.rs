@@ -305,6 +305,7 @@ mod tests {
                 attempt: 0,
                 deadline: None,
             },
+            proposed: None,
             state: Default::default(),
             calls: Default::default(),
             pending_calls: 0,

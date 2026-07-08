@@ -37,9 +37,9 @@ impl From<&LlmTool> for WireTool {
         WireTool {
             tool_type: "function",
             function: WireToolFunction {
-                name: t.function.name.clone(),
-                description: t.function.description.clone(),
-                parameters: t.function.parameters.clone(),
+                name: t.name.clone(),
+                description: t.description.clone(),
+                parameters: t.input_schema(),
             },
         }
     }

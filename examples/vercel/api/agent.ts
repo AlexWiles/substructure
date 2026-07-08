@@ -11,7 +11,7 @@ import { agent, tool, toolLoop, worker } from "@substructure.ai/sdk";
 const getWeather = tool({
     name: "get_weather",
     description: "Get current weather for a city",
-    parameters: {
+    input: {
         type: "object",
         properties: { city: { type: "string" } },
         required: ["city"],

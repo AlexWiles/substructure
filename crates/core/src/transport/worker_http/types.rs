@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::llm::{ErrorCode, LlmResponse};
 use crate::runtime::session::decision::ClientPayload;
-use crate::session::wire::WireDecisionResponse;
+use crate::session::wire::{string_or_json, WireDecisionResponse};
 use crate::span::SpanContext;
 
 /// A decision pushed to the engine out-of-band via the submit route: the
@@ -34,6 +34,8 @@ pub enum SettleEffectRequest {
         id: String,
         #[serde(default)]
         attempt: Option<u32>,
+        /// Accepts any JSON value; a non-string is canonicalized to its JSON text.
+        #[serde(deserialize_with = "string_or_json")]
         result: String,
     },
     #[serde(rename = "llm.result")]
@@ -47,6 +49,8 @@ pub enum SettleEffectRequest {
     ToolError {
         id: String,
         error: String,
+        /// Omitted ⇒ terminal.
+        #[serde(default)]
         retryable: bool,
         #[serde(default)]
         attempt: Option<u32>,
@@ -59,6 +63,8 @@ pub enum SettleEffectRequest {
     LlmError {
         id: String,
         error: String,
+        /// Omitted ⇒ terminal.
+        #[serde(default)]
         retryable: bool,
         #[serde(default)]
         attempt: Option<u32>,

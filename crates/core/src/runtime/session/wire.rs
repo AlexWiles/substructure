@@ -7,6 +7,11 @@
 //! - Outbound (engine → worker): [`WireTrigger`] is the materialized projection of the
 //!   internal [`DecisionTrigger`] a worker sees; `to_wire_trigger` is the single seam
 //!   that produces it. It has no `ClientMessage` — that variant can never reach a worker.
+//!
+//! The outbound request also carries `proposed`, the engine-derived default
+//! continuation for the trigger; its derivation lives in [`super::propose`].
+
+use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -15,8 +20,10 @@ use serde::{Deserialize, Serialize};
 use super::decision::{Action, DecisionTrigger};
 use super::events::{LlmHandler, MessageTree, ToolHandler};
 use super::message::{Content, Message, Role, ToolCall};
+use super::propose::Proposal;
 use super::reconcile::news_start;
-use super::state::{new_call_id, new_message_id, Effect};
+use super::state::{new_call_id, new_message_id, Effect, LlmCallState};
+use super::tool_contract::{classify_arguments, declared_tool, DeclaredTool, ToolInput};
 use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse};
 use crate::runtime::owner::SessionOwner;
 use crate::runtime::retry::RetryPolicy;
@@ -104,6 +111,11 @@ pub enum WireTrigger {
         id: String,
         name: String,
         arguments: String,
+        /// The engine's classification of `arguments` against the tool's
+        /// declared `input` schema: `valid` (with the parsed `value`),
+        /// `invalid` (value plus the violation), or `malformed` (not a JSON
+        /// object). Always on the wire.
+        input: ToolInput,
         attempt: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         deadline: Option<DateTime<Utc>>,
@@ -184,6 +196,8 @@ pub enum WireAction {
         stream: bool,
         #[serde(default = "RetryPolicy::no_retry")]
         retry: RetryPolicy,
+        /// Omitted ⇒ `server`.
+        #[serde(default)]
         handler: LlmHandler,
     },
     /// `id` omitted ⇒ the engine mints one (LLM-driven tools carry the model's id).
@@ -192,7 +206,11 @@ pub enum WireAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         name: String,
+        /// Accepts any JSON value; a non-string is canonicalized to its JSON text.
+        #[serde(deserialize_with = "string_or_json")]
         arguments: String,
+        /// Omitted ⇒ `worker`.
+        #[serde(default)]
         handler: ToolHandler,
         #[serde(default = "RetryPolicy::no_retry")]
         retry: RetryPolicy,
@@ -204,6 +222,8 @@ pub enum WireAction {
         id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attempt: Option<u32>,
+        /// Accepts any JSON value; a non-string is canonicalized to its JSON text.
+        #[serde(deserialize_with = "string_or_json")]
         result: String,
     },
     /// `id` omitted ⇒ the effect named by the answering `llm.execute` trigger.
@@ -222,6 +242,8 @@ pub enum WireAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attempt: Option<u32>,
         error: String,
+        /// Omitted ⇒ terminal.
+        #[serde(default)]
         retryable: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         code: Option<ErrorCode>,
@@ -235,6 +257,8 @@ pub enum WireAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attempt: Option<u32>,
         error: String,
+        /// Omitted ⇒ terminal.
+        #[serde(default)]
         retryable: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         code: Option<ErrorCode>,
@@ -269,6 +293,20 @@ pub enum WireAction {
         #[serde(default)]
         data: serde_json::Value,
     },
+}
+
+/// Deserialize a string field leniently: a JSON string passes through, any
+/// other JSON value is canonicalized to its JSON text. Lets workers settle
+/// results and author tool arguments as plain values instead of
+/// JSON-encoded-in-a-string.
+pub(crate) fn string_or_json<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(s) => s,
+        value => value.to_string(),
+    })
 }
 
 /// Which `*.execute` trigger can name an omitted settle id.
@@ -445,13 +483,16 @@ pub fn resolve_actions(
 
 /// Project an internal [`DecisionTrigger`] to the [`WireTrigger`] a worker sees. A bare
 /// `ClientMessage` becomes a full proposed transcript; a `ClientTranscript` has its
-/// `new_from` recomputed against the frozen tree; every other trigger maps 1:1. The
-/// tree is frozen while the decision is pending, so the result is stable across
-/// redeliveries and matches what reconciling the echo will write.
+/// `new_from` recomputed against the frozen tree; a `ToolExecute` has its arguments
+/// classified against the tool's declared `input` schema (resolved from
+/// `open_llm_calls`); every other trigger maps 1:1. The tree is frozen while the
+/// decision is pending, so the result is stable across redeliveries and matches
+/// what reconciling the echo will write.
 pub fn to_wire_trigger(
     trigger: DecisionTrigger,
     active_path: &[Message],
     tree: &MessageTree,
+    open_llm_calls: &HashMap<String, LlmCallState>,
 ) -> WireTrigger {
     match trigger {
         DecisionTrigger::ClientMessage { message } => {
@@ -474,13 +515,21 @@ pub fn to_wire_trigger(
             arguments,
             attempt,
             deadline,
-        } => WireTrigger::ToolExecute {
-            id,
-            name,
-            arguments,
-            attempt,
-            deadline,
-        },
+        } => {
+            let schema = match declared_tool(&id, &name, active_path, open_llm_calls) {
+                DeclaredTool::Declared(t) => t.input.as_ref(),
+                _ => None,
+            };
+            let input = classify_arguments(&arguments, schema);
+            WireTrigger::ToolExecute {
+                id,
+                name,
+                arguments,
+                input,
+                attempt,
+                deadline,
+            }
+        }
         DecisionTrigger::LlmExecute {
             id,
             request,
@@ -557,6 +606,7 @@ pub fn to_wire_trigger(
 pub struct WireDecisionResponse {
     #[serde(default)]
     pub messages: Vec<WireMessage>,
+    #[serde(default)]
     pub actions: Vec<WireAction>,
     /// Omitted or `null` keeps the current state; clear with a non-null empty value.
     #[serde(default)]
@@ -570,6 +620,9 @@ pub struct WireDecisionRequest<'a> {
     pub agent_id: &'a str,
     pub identity: &'a SessionOwner,
     pub trigger: &'a WireTrigger,
+    /// The engine's default continuation for `trigger` (`null` when it needs
+    /// worker knowledge). Advisory: accept by echoing it as the decision.
+    pub proposed: &'a Option<Proposal>,
     pub state: &'a WorkerState,
     pub calls: &'a [Effect],
     /// Count of in-flight `tool_call`/`sub_agent` calls.
@@ -590,6 +643,7 @@ impl<'a> From<&'a WorkerDecisionRequest> for WireDecisionRequest<'a> {
             agent_id: &r.agent_id,
             identity: &r.identity,
             trigger: &r.trigger,
+            proposed: &r.proposed,
             state: &r.state,
             calls: &r.calls,
             pending_calls: r.pending_calls,
@@ -634,6 +688,9 @@ mod tests {
             id: "eff-1".to_string(),
             name: "do_thing".to_string(),
             arguments: "{}".to_string(),
+            input: ToolInput::Valid {
+                value: serde_json::json!({}),
+            },
             attempt: 0,
             deadline: None,
         };
@@ -719,6 +776,7 @@ mod tests {
             },
             &path,
             &tree,
+            &HashMap::new(),
         ));
 
         assert_eq!(
@@ -748,6 +806,7 @@ mod tests {
             },
             &path,
             &tree,
+            &HashMap::new(),
         ));
         assert_eq!(new_from, 2);
     }
@@ -770,6 +829,7 @@ mod tests {
             },
             &path,
             &tree,
+            &HashMap::new(),
         ));
         assert_eq!(new_from, 1);
     }
@@ -789,6 +849,7 @@ mod tests {
             },
             &path,
             &tree,
+            &HashMap::new(),
         ));
         assert_eq!(new_from, 2, "empty news: nothing to write");
     }
@@ -814,6 +875,7 @@ mod tests {
             },
             &path,
             &tree,
+            &HashMap::new(),
         ));
         assert_eq!(new_from, 0);
     }
@@ -831,7 +893,202 @@ mod tests {
             },
             &[],
             &tree,
+            &HashMap::new(),
         );
         assert!(matches!(out, WireTrigger::ToolFinished { .. }));
+    }
+
+    fn tool_execute(
+        name: &str,
+        arguments: &str,
+        active_path: &[Message],
+        open_llm_calls: &HashMap<String, LlmCallState>,
+    ) -> ToolInput {
+        let trigger = to_wire_trigger(
+            DecisionTrigger::ToolExecute {
+                id: "tc-1".to_string(),
+                name: name.to_string(),
+                arguments: arguments.to_string(),
+                attempt: 0,
+                deadline: None,
+            },
+            active_path,
+            &MessageTree::default(),
+            open_llm_calls,
+        );
+        match trigger {
+            WireTrigger::ToolExecute { input, .. } => input,
+            t => panic!("expected a tool.execute trigger; got {t:?}"),
+        }
+    }
+
+    fn weather_call(schema: serde_json::Value) -> (Vec<Message>, HashMap<String, LlmCallState>) {
+        use crate::runtime::llm::LlmTool;
+        use crate::runtime::session::message::ToolCallFunction;
+        use crate::runtime::session::state::{EffectTracking, LlmCallSpec};
+
+        let assistant = Message {
+            id: "call-1".to_string(),
+            role: Role::Assistant,
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "tc-1".to_string(),
+                call_type: "function".to_string(),
+                function: ToolCallFunction {
+                    name: "get_weather".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }]),
+            tool_call_id: None,
+            name: None,
+        };
+        let call = LlmCallState {
+            call_id: "call-1".to_string(),
+            tracking: EffectTracking::new(RetryPolicy::no_retry(), chrono::Utc::now()),
+            prompt: vec![],
+            spec: LlmCallSpec {
+                model: "m".to_string(),
+                tools: Some(vec![LlmTool {
+                    name: "get_weather".to_string(),
+                    description: "d".to_string(),
+                    input: Some(schema),
+                    output: None,
+                }]),
+                temperature: None,
+                max_completion_tokens: None,
+                reasoning: None,
+            },
+            stream: false,
+            handler: LlmHandler::Server,
+            anchor: None,
+        };
+        (
+            vec![msg("u1", Role::User, "hi"), assistant],
+            HashMap::from([("call-1".to_string(), call)]),
+        )
+    }
+
+    #[test]
+    fn tool_arguments_are_classified_against_the_declared_input() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "city": { "type": "string" } },
+            "required": ["city"],
+        });
+        let (path, calls) = weather_call(schema);
+
+        assert!(matches!(
+            tool_execute("get_weather", r#"{"city":"NYC"}"#, &path, &calls),
+            ToolInput::Valid { .. }
+        ));
+        match tool_execute("get_weather", r#"{"city":5}"#, &path, &calls) {
+            ToolInput::Invalid { value, error } => {
+                assert_eq!(
+                    value,
+                    serde_json::json!({"city":5}),
+                    "the object is still delivered"
+                );
+                assert!(
+                    error.contains("city"),
+                    "the violation is reported; got {error}"
+                );
+            }
+            other => panic!("expected invalid; got {other:?}"),
+        }
+        assert!(matches!(
+            tool_execute("get_weather", "not json", &path, &calls),
+            ToolInput::Malformed { .. }
+        ));
+    }
+
+    #[test]
+    fn the_input_classification_is_always_on_the_wire() {
+        let trigger = to_wire_trigger(
+            DecisionTrigger::ToolExecute {
+                id: "tc-1".to_string(),
+                name: "t".to_string(),
+                arguments: "not json".to_string(),
+                attempt: 0,
+                deadline: None,
+            },
+            &[],
+            &MessageTree::default(),
+            &HashMap::new(),
+        );
+        let v = serde_json::to_value(&trigger).expect("serializes");
+        assert_eq!(v["input"]["status"], "malformed");
+        assert!(v["input"]["error"].is_string());
+    }
+
+    #[test]
+    fn an_undeclared_tool_is_classified_by_parse_alone() {
+        let (path, calls) = weather_call(serde_json::json!({"type": "object"}));
+        assert!(
+            matches!(
+                tool_execute("not_declared", r#"{"anything": true}"#, &path, &calls),
+                ToolInput::Valid { .. }
+            ),
+            "no declared schema to check against; the proposal carries the unknown-tool default"
+        );
+    }
+
+    #[test]
+    fn action_defaults_fill_handler_and_retryable() {
+        let actions: Vec<WireAction> = serde_json::from_str(
+            r#"[
+                {"type":"llm.call","request":{"model":"m","messages":[]}},
+                {"type":"tool.call","name":"t","arguments":{"city":"NYC"}},
+                {"type":"tool.error","id":"tc-1","error":"boom"}
+            ]"#,
+        )
+        .expect("defaults fill");
+        assert!(matches!(
+            &actions[0],
+            WireAction::CallLlm {
+                handler: LlmHandler::Server,
+                ..
+            }
+        ));
+        match &actions[1] {
+            WireAction::CallTool {
+                handler, arguments, ..
+            } => {
+                assert!(matches!(handler, ToolHandler::Worker));
+                assert_eq!(
+                    arguments, r#"{"city":"NYC"}"#,
+                    "object arguments canonicalize to their JSON text"
+                );
+            }
+            other => panic!("expected a tool.call; got {other:?}"),
+        }
+        assert!(matches!(
+            &actions[2],
+            WireAction::ToolError {
+                retryable: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_tool_result_settles_with_any_json_value() {
+        let a: WireAction =
+            serde_json::from_str(r#"{"type":"tool.result","result":{"temp":71}}"#).expect("parses");
+        match a {
+            WireAction::ToolResult { result, .. } => assert_eq!(result, r#"{"temp":71}"#),
+            other => panic!("expected a tool.result; got {other:?}"),
+        }
+        let a: WireAction =
+            serde_json::from_str(r#"{"type":"tool.result","result":"plain"}"#).expect("parses");
+        match a {
+            WireAction::ToolResult { result, .. } => assert_eq!(result, "plain"),
+            other => panic!("expected a tool.result; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_decision_may_omit_actions() {
+        let r: WireDecisionResponse = serde_json::from_str(r#"{"messages":[]}"#).expect("parses");
+        assert!(r.actions.is_empty());
     }
 }
