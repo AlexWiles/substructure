@@ -29,7 +29,7 @@ Front ends get the same treatment: the engine speaks **AG-UI** natively, so a br
 
 - **Server:** The engine that drives the agent loop, written in Rust. It can be run locally on your machine, embedded in process, or as a cloud hosted version available at [https://app.substructure.ai](https://app.substructure.ai). The server drives the loop, handles durability, retries, llm calls (optionally), realtime streaming, subagent supervision and more.
 - **Workers:** Your agent logic. Receives a decision trigger, returns actions. Runs in your codebase with your dependencies. Can be an HTTP endpoint for use with the cloud/local server, or a callback passed to embedded substructure.
-- **Clients:** Submit work and stream events back, backend-to-backend or straight from the browser. The engine also serves a native **AG-UI** endpoint, so any AG-UI chat frontend connects and streams directly. No Substructure SDK in the browser. See [`examples/ag-ui`](./examples/ag-ui).
+- **Clients:** Submit work and stream events back, backend-to-backend or straight from the browser. The engine also serves a native **AG-UI** endpoint, so any AG-UI chat frontend connects and streams directly. No Substructure SDK in the browser. See [`examples/typescript-sdk-ag-ui`](./examples/typescript-sdk-ag-ui).
 - **CLI:** Substructure comes with a CLI to help you provision, observe, and debug from the terminal. You can also start a local server.
 - **SDK (optional):** We provide a TypeScript SDK for building agents and setting up your worker with a just a few lines of code. It also includes server-to-server and browser clients. It's a convenience layer over the protocol, never a requirement.
 
@@ -372,7 +372,7 @@ const chatAgent = agent({
 
 ### Tools
 
-Tools are pure functions with a JSON-schema signature. There is no SDK-held tool state; a tool reaches whatever store it needs. Here the list lives in a module-level object that persists for the life of the process. See [`examples/node-embedded`](./examples/node-embedded).
+Tools are pure functions with a JSON-schema signature. There is no SDK-held tool state; a tool reaches whatever store it needs. Here the list lives in a module-level object that persists for the life of the process. See [`examples/typescript-sdk-node-embedded`](./examples/typescript-sdk-node-embedded).
 
 ```typescript
 import { agent, server, tool, toolLoop } from "@substructure.ai/sdk";
@@ -416,7 +416,7 @@ const todoAgent = agent({
 
 ### State in your own database
 
-There is no SDK-held tool state. To persist data across sessions, a tool reaches your database directly through `ctx`, keyed by `ctx.request.identity.id`. The list lives in your store, follows the user across sessions, and never rides the wire. Swap `loadTodos`/`saveTodos` for Postgres, Redis, S3, or a Durable Object. See [`examples/hybrid-state`](./examples/hybrid-state).
+There is no SDK-held tool state. To persist data across sessions, a tool reaches your database directly through `ctx`, keyed by `ctx.request.identity.id`. The list lives in your store, follows the user across sessions, and never rides the wire. Swap `loadTodos`/`saveTodos` for Postgres, Redis, S3, or a Durable Object. See [`examples/typescript-sdk-hybrid-state`](./examples/typescript-sdk-hybrid-state).
 
 ```typescript
 import { agent, server, tool, toolLoop } from "@substructure.ai/sdk";
@@ -449,7 +449,7 @@ const todoAgent = agent({
 
 ### State on the wire
 
-Skip the database and let small state ride the decision envelope as `worker_state`, round-tripped every turn. There is no SDK-held tool state, so the agent is a custom `decide` that builds its tools per decision (each closing over the live state), hands them to `toolLoop`, and passes `state` into the loop. The loop runs the tools and echoes the state you gave it, so the mutations ride the wire with no manual plumbing. See [`examples/state-hydration`](./examples/state-hydration).
+Skip the database and let small state ride the decision envelope as `worker_state`, round-tripped every turn. There is no SDK-held tool state, so the agent is a custom `decide` that builds its tools per decision (each closing over the live state), hands them to `toolLoop`, and passes `state` into the loop. The loop runs the tools and echoes the state you gave it, so the mutations ride the wire with no manual plumbing. See [`examples/typescript-sdk-state-hydration`](./examples/typescript-sdk-state-hydration).
 
 ```typescript
 import { agent, server, tool, toolLoop } from "@substructure.ai/sdk";
@@ -499,9 +499,9 @@ const todoAgent = agent<State>({
 
 An existing agent built on another framework can run on Substructure through an adapter. The model, tools, and instructions stay as they are. Substructure handles durability, retries, and streaming around them.
 
-- **[Vercel AI SDK](https://sdk.vercel.ai):** `aiSdkAgent` from `@substructure.ai/sdk/adapters/ai`. See [`examples/ai-sdk-example`](./examples/ai-sdk-example).
-- **[OpenAI Agents](https://github.com/openai/openai-agents-js):** `openaiAgent` from `@substructure.ai/sdk/adapters/openai`. See [`examples/openai-example`](./examples/openai-example).
-- **[Anthropic SDK](https://github.com/anthropics/anthropic-sdk-typescript):** `anthropicGenerate` from `@substructure.ai/sdk/adapters/anthropic`, a generator you pass as a `toolLoop`'s `model` (the core SDK has no agent type to wrap). See [`examples/anthropic-example`](./examples/anthropic-example).
+- **[Vercel AI SDK](https://sdk.vercel.ai):** `aiSdkAgent` from `@substructure.ai/sdk/adapters/ai`. See [`examples/typescript-sdk-ai-sdk`](./examples/typescript-sdk-ai-sdk).
+- **[OpenAI Agents](https://github.com/openai/openai-agents-js):** `openaiAgent` from `@substructure.ai/sdk/adapters/openai`. See [`examples/typescript-sdk-openai`](./examples/typescript-sdk-openai).
+- **[Anthropic SDK](https://github.com/anthropics/anthropic-sdk-typescript):** `anthropicGenerate` from `@substructure.ai/sdk/adapters/anthropic`, a generator you pass as a `toolLoop`'s `model` (the core SDK has no agent type to wrap). See [`examples/typescript-sdk-anthropic`](./examples/typescript-sdk-anthropic).
 
 The agent adapters return a `decide` you wrap with `agent({ name, decide })` and pass to `worker([...])`:
 

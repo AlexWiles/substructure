@@ -145,7 +145,7 @@ What happens on the wire:
 
 `settleEffect` is available on every flavor of client, so the callback can come from wherever finishes the work. To report a failure instead, pass `error` (and optional `retryable`) in place of `result`. If you never call it, the tool stays pending forever, so set a `retry` policy (with a `timeout_secs`) on the tool so the engine eventually fails the call and the loop sees a `tool.finished` with `ok: false`.
 
-Full runnable version: [`examples/deferred-tool`](https://github.com/substructureai/substructure/tree/main/examples/deferred-tool).
+Full runnable version: [`examples/typescript-sdk-deferred-tool`](https://github.com/substructureai/substructure/tree/main/examples/typescript-sdk-deferred-tool).
 
 ### Client (frontend) tools
 
@@ -164,7 +164,7 @@ const setTheme = tool({
 });
 ```
 
-See [`examples/frontend-tool`](https://github.com/substructureai/substructure/tree/main/examples/frontend-tool).
+See [`examples/typescript-sdk-frontend-tool`](https://github.com/substructureai/substructure/tree/main/examples/typescript-sdk-frontend-tool).
 
 ## State
 
@@ -195,7 +195,7 @@ const addTodo = tool({
 });
 ```
 
-Swap `db` for Postgres, Redis, S3, or a Durable Object; the agent doesn't change. The [`cloudflare-worker`](https://github.com/substructureai/substructure/tree/main/examples/cloudflare-worker) example keys a Durable Object by `request.session_id`; [`hybrid-state`](https://github.com/substructureai/substructure/tree/main/examples/hybrid-state) keys a file store by user id so a todo list follows the user across sessions.
+Swap `db` for Postgres, Redis, S3, or a Durable Object; the agent doesn't change. The [`typescript-sdk-cloudflare-worker`](https://github.com/substructureai/substructure/tree/main/examples/typescript-sdk-cloudflare-worker) example keys a Durable Object by `request.session_id`; [`typescript-sdk-hybrid-state`](https://github.com/substructureai/substructure/tree/main/examples/typescript-sdk-hybrid-state) keys a file store by user id so a todo list follows the user across sessions.
 
 ### On the wire (custom `decide`)
 
@@ -238,7 +238,7 @@ const todoAgent = agent<State>({
 });
 ```
 
-`toolLoop` never returns `state`, so a custom `decide` that needs to intercept a trigger (a mode switch, an approval gate) can do that work, run `loop({ ...req, state })` for everything else, and decide per decision whether to persist: returning `state` writes it (echoes of the current value are free — the engine dedups); omitting it keeps whatever the session already has. The omission default is what makes forks safe: on a decision whose transcript forks the tree, the delivered `req.state` came from the old branch, and only a *returned* state carries it over — see [Concepts / State](./02-concepts.md#state-is-branch-scoped). See [`examples/state-hydration`](https://github.com/substructureai/substructure/tree/main/examples/state-hydration) and [`examples/plan-mode`](https://github.com/substructureai/substructure/tree/main/examples/plan-mode).
+`toolLoop` never returns `state`, so a custom `decide` that needs to intercept a trigger (a mode switch, an approval gate) can do that work, run `loop({ ...req, state })` for everything else, and decide per decision whether to persist: returning `state` writes it (echoes of the current value are free — the engine dedups); omitting it keeps whatever the session already has. The omission default is what makes forks safe: on a decision whose transcript forks the tree, the delivered `req.state` came from the old branch, and only a *returned* state carries it over — see [Concepts / State](./02-concepts.md#state-is-branch-scoped). See [`examples/typescript-sdk-state-hydration`](https://github.com/substructureai/substructure/tree/main/examples/typescript-sdk-state-hydration) and [`examples/typescript-sdk-plan-mode`](https://github.com/substructureai/substructure/tree/main/examples/typescript-sdk-plan-mode).
 
 ## Custom decision functions
 
@@ -293,7 +293,7 @@ Actions are plain objects that you return directly:
 | Delegate to a sub-agent | `{ type: "sub_agent.spawn", session_id, agent_id, tool_call_id }` + `{ type: "message.send", session_id, message }` |
 | Finish the turn | `{ type: "done", data }` |
 
-A `client.action` trigger is how a custom `decide` reacts to the client: approvals, mode switches, replays. The [`tool-approval`](https://github.com/substructureai/substructure/tree/main/examples/tool-approval) example parks a tool call when the model replies (`llm.finished`) and re-emits it on a `client.action approve_command`; [`plan-mode`](https://github.com/substructureai/substructure/tree/main/examples/plan-mode) reads its mode from state and forks a fresh branch when it switches to executing.
+A `client.action` trigger is how a custom `decide` reacts to the client: approvals, mode switches, replays. The [`typescript-sdk-tool-approval`](https://github.com/substructureai/substructure/tree/main/examples/typescript-sdk-tool-approval) example parks a tool call when the model replies (`llm.finished`) and re-emits it on a `client.action approve_command`; [`typescript-sdk-plan-mode`](https://github.com/substructureai/substructure/tree/main/examples/typescript-sdk-plan-mode) reads its mode from state and forks a fresh branch when it switches to executing.
 
 ## Serving as a worker
 
