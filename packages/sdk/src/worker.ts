@@ -1,6 +1,6 @@
 import type { Agent, DecisionRequest, EmitDelta, NamedAgent } from "./core";
 import { createSseStream, type SseStream } from "./sse";
-import type { LlmTokenDeltaInput, WorkerDecisionRequestWire, WorkerDecisionResponse } from "./types";
+import type { LlmTokenDeltaInput, WireDecisionRequest, WireDecisionResponse } from "./types";
 import { verifyWebhookSignature } from "./webhook";
 
 export interface NativeRuntime {
@@ -49,9 +49,9 @@ export type Agents = NamedAgent<any>[];
 
 async function runDecision(
     fn: Agent,
-    request: WorkerDecisionRequestWire,
+    request: WireDecisionRequest,
     emitDelta?: EmitDelta,
-): Promise<WorkerDecisionResponse> {
+): Promise<WireDecisionResponse> {
     const req: DecisionRequest = { ...request, state: request.state ?? null, emitDelta };
     const out = await fn(req);
     return {
@@ -76,7 +76,7 @@ export class Worker {
 
     async register(runtime: NativeRuntime, tenantId: string): Promise<void> {
         await runtime.registerWorker(tenantId, this.agentIds, async (decisionJson: string) => {
-            const request: WorkerDecisionRequestWire = JSON.parse(decisionJson);
+            const request: WireDecisionRequest = JSON.parse(decisionJson);
             const submit = await this.handleDecision(request, embeddedEmitDelta(runtime, request));
             return JSON.stringify(submit);
         });
@@ -90,14 +90,14 @@ export class Worker {
     /** With `options.signingSecret`, verifies the `X-Substructure-Signature` HMAC-SHA256 header. */
     fetchHandler(options?: FetchHandlerOptions): (req: Request) => Promise<Response> {
         return async (req: Request) => {
-            let decision: WorkerDecisionRequestWire;
+            let decision: WireDecisionRequest;
 
             if (options?.signingSecret) {
-                decision = await verifyWebhookSignature<WorkerDecisionRequestWire>(req, options.signingSecret, {
+                decision = await verifyWebhookSignature<WireDecisionRequest>(req, options.signingSecret, {
                     tolerance: options.tolerance,
                 });
             } else {
-                decision = (await req.json()) as WorkerDecisionRequestWire;
+                decision = (await req.json()) as WireDecisionRequest;
             }
 
             const wantsStream = req.headers.get("accept")?.includes("text/event-stream") ?? false;
@@ -110,7 +110,7 @@ export class Worker {
         };
     }
 
-    async handleDecision(request: WorkerDecisionRequestWire, emitDelta?: EmitDelta): Promise<WorkerDecisionResponse> {
+    async handleDecision(request: WireDecisionRequest, emitDelta?: EmitDelta): Promise<WireDecisionResponse> {
         const fn = this.agents[request.agent_id];
         if (!fn) {
             throw new Error(`No agent registered for: ${request.agent_id}`);
@@ -118,7 +118,7 @@ export class Worker {
         return runDecision(fn, request, emitDelta);
     }
 
-    private handleDecisionStream(request: WorkerDecisionRequestWire): Response {
+    private handleDecisionStream(request: WireDecisionRequest): Response {
         const sse = createSseStream();
 
         void (async () => {
@@ -157,7 +157,7 @@ function sseEmitDelta(sse: SseStream): EmitDelta {
     return (delta) => sse.writeSSE({ event: "llm.token.delta", data: delta });
 }
 
-function embeddedEmitDelta(runtime: NativeRuntime, request: WorkerDecisionRequestWire): EmitDelta | undefined {
+function embeddedEmitDelta(runtime: NativeRuntime, request: WireDecisionRequest): EmitDelta | undefined {
     const { trigger } = request;
     if (trigger.type !== "llm.execute" || !trigger.stream) return undefined;
 

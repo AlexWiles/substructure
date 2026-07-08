@@ -2,23 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::llm::{ErrorCode, LlmResponse};
 use crate::runtime::session::decision::ClientPayload;
-use crate::session::wire::{WireAction, WireMessage};
+use crate::session::wire::WireDecisionResponse;
 use crate::span::SpanContext;
-use crate::worker::WorkerState;
-
-/// The decision a worker authors in reply to a `WorkerDecisionRequest`: the
-/// updated conversation, what to do next, and the new state. The whole sync
-/// HTTP response body, and the streamed `decision.result` frame.
-#[derive(Debug, Deserialize)]
-pub struct WorkerDecisionResponse {
-    /// Wire field: `messages`.
-    #[serde(default, rename = "messages")]
-    pub transcript: Vec<WireMessage>,
-    pub actions: Vec<WireAction>,
-    /// Omitted or `null` keeps the current state; clear with a non-null empty value.
-    #[serde(default)]
-    pub state: Option<WorkerState>,
-}
 
 /// A decision pushed to the engine out-of-band via the submit route: the
 /// `session_id`/`decision_id` that route it, wrapping the worker-authored
@@ -30,7 +15,7 @@ pub struct SubmitDecisionRequest {
     #[serde(default)]
     pub span: Option<SpanContext>,
     #[serde(flatten)]
-    pub decision: WorkerDecisionResponse,
+    pub decision: WireDecisionResponse,
 }
 
 #[derive(Debug, Serialize)]
@@ -139,6 +124,7 @@ pub struct StreamSessionEventsParams {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::wire::WireAction;
 
     #[test]
     fn worker_surface_settles_an_llm_result() {
@@ -170,7 +156,7 @@ mod tests {
                 {"type":"tool.call","name":"t","arguments":"{}","handler":"worker"}
             ]
         }"#;
-        let req: WorkerDecisionResponse =
+        let req: WireDecisionResponse =
             serde_json::from_str(body).expect("id-less call actions parse");
         assert!(matches!(
             req.actions.as_slice(),

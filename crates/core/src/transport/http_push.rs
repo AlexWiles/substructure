@@ -11,9 +11,8 @@ use serde::Deserialize;
 use sha2::Sha256;
 
 use crate::runtime::llm::{StreamDelta, TokenDelta, TokenDeltaTransport};
-use crate::runtime::session::wire::WireTrigger;
-use crate::transport::worker_http::types::WorkerDecisionResponse;
-use crate::worker::push::{PushError, PushResponse, PushTransport, TransportConstructor};
+use crate::runtime::session::wire::{WireDecisionRequest, WireDecisionResponse, WireTrigger};
+use crate::worker::push::{PushError, PushTransport, TransportConstructor};
 use crate::worker::WorkerDecisionRequest;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -46,11 +45,12 @@ impl PushTransport for HttpPushTransport {
         &self,
         decision: &WorkerDecisionRequest,
         token_delta_transport: Arc<dyn TokenDeltaTransport>,
-    ) -> Result<PushResponse, PushError> {
-        let body = serde_json::to_vec(decision).map_err(|e| PushError {
-            message: format!("failed to serialize decision: {e}"),
-            retryable: false,
-        })?;
+    ) -> Result<WireDecisionResponse, PushError> {
+        let body =
+            serde_json::to_vec(&WireDecisionRequest::from(decision)).map_err(|e| PushError {
+                message: format!("failed to serialize decision: {e}"),
+                retryable: false,
+            })?;
 
         let mut builder = self
             .http
@@ -104,11 +104,7 @@ impl PushTransport for HttpPushTransport {
             })?
         };
 
-        Ok(PushResponse {
-            transcript: submit.transcript,
-            actions: submit.actions,
-            state: submit.state,
-        })
+        Ok(submit)
     }
 }
 
@@ -153,7 +149,7 @@ async fn read_sse_response<S, B, E>(
     stream: S,
     decision: &WorkerDecisionRequest,
     token_delta_transport: Arc<dyn TokenDeltaTransport>,
-) -> Result<WorkerDecisionResponse, PushError>
+) -> Result<WireDecisionResponse, PushError>
 where
     S: futures_util::Stream<Item = Result<B, E>>,
     B: AsRef<[u8]>,

@@ -122,7 +122,7 @@ impl PushAdapter {
                                     tenant_id: tenant_id.clone(),
                                 },
                                 decision_id: decision.decision_id.clone(),
-                                transcript: resp.transcript,
+                                transcript: resp.messages,
                                 actions,
                                 state: resp.state,
                                 span: decision.span.child("push_worker"),

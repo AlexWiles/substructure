@@ -3,8 +3,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use super::WorkerState;
 use crate::runtime::llm::TokenDeltaTransport;
+use crate::runtime::session::wire::WireDecisionResponse;
 
 use super::WorkerDecisionRequest;
 
@@ -14,14 +14,7 @@ pub trait PushTransport: Send + Sync {
         &self,
         decision: &WorkerDecisionRequest,
         token_delta_transport: std::sync::Arc<dyn TokenDeltaTransport>,
-    ) -> Result<PushResponse, PushError>;
-}
-
-pub struct PushResponse {
-    pub transcript: Vec<crate::runtime::session::wire::WireMessage>,
-    pub actions: Vec<crate::runtime::session::wire::WireAction>,
-    /// `None` = no opinion, keep the current state.
-    pub state: Option<WorkerState>,
+    ) -> Result<WireDecisionResponse, PushError>;
 }
 
 #[derive(Debug)]

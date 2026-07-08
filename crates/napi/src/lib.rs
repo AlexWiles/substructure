@@ -19,12 +19,13 @@ use substructure_core::providers::sqlite::{
 };
 use substructure_core::providers::worker_queue::InMemoryWorkerQueue;
 use substructure_core::session::decision::{ClientPayload, EffectResultPayload, WorkKind};
-use substructure_core::session::wire::resolve_actions;
+use substructure_core::session::wire::{
+    resolve_actions, WireDecisionRequest, WireDecisionResponse,
+};
 use substructure_core::span::SpanContext as CoreSpanContext;
 use substructure_core::worker::{DequeueFilter, FailDecision, SubmitDecision};
 use substructure_core::{
     Caller, EffectSettlement, Runtime, RuntimeConfig, SettleEffectInput, SubmitClientPayload,
-    WorkerDecisionResponse,
 };
 
 /// Result returned by `submitPayload`.
@@ -180,13 +181,14 @@ impl EmbeddedRuntime {
                 // `tenant_id()` borrows the whole struct.
                 let decision_tenant = decision.tenant_id().to_string();
 
-                let decision_json = match serde_json::to_string(&decision) {
-                    Ok(j) => j,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to serialize decision");
-                        continue;
-                    }
-                };
+                let decision_json =
+                    match serde_json::to_string(&WireDecisionRequest::from(&decision)) {
+                        Ok(j) => j,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to serialize decision");
+                            continue;
+                        }
+                    };
 
                 let result: Result<String> =
                     match callback.call_async::<Promise<String>>(decision_json).await {
@@ -196,7 +198,7 @@ impl EmbeddedRuntime {
 
                 match result {
                     Ok(response_json) => {
-                        match serde_json::from_str::<WorkerDecisionResponse>(&response_json) {
+                        match serde_json::from_str::<WireDecisionResponse>(&response_json) {
                             Ok(submit) => {
                                 // Resolve wire actions against the trigger this decision
                                 // answers before handing them to the core.
@@ -208,7 +210,7 @@ impl EmbeddedRuntime {
                                                 tenant_id: decision_tenant.clone(),
                                             },
                                             decision_id: decision.decision_id.clone(),
-                                            transcript: submit.transcript,
+                                            transcript: submit.messages,
                                             actions,
                                             state: submit.state,
                                             span: decision.span.child("js_worker"),

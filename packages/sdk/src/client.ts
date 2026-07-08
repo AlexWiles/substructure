@@ -56,7 +56,7 @@ export type {
     ToolResult,
     TurnResult,
     WorkerAction,
-    WorkerDecisionRequestWire,
+    WireDecisionRequest,
     WorkerIdentity,
 } from "./types";
 export { contentText, isTokenDelta, persistedOnly } from "./types";

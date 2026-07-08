@@ -23,6 +23,8 @@ same version.
 - The sync worker decision response no longer needs `session_id`/`decision_id`.
 - Worker-authored ids (action, settle, `interrupt_id`, message) are optional and
   engine-assigned; `sub_agent.spawn` requires `tool_call_id`.
+- Explicit `WireDecisionRequest`/`WireDecisionResponse` wire types; the request
+  serializes every field.
 
 ## [0.1.22] - 2026-07-07
 

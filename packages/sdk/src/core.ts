@@ -9,7 +9,7 @@ import type {
     RetryPolicy,
     ToolHandler,
     WorkerAction,
-    WorkerDecisionRequestWire,
+    WireDecisionRequest,
 } from "./types";
 import { nodeId } from "./types";
 
@@ -19,7 +19,7 @@ import { nodeId } from "./types";
 export type EmitDelta = (delta: LlmTokenDeltaInput) => Promise<void>;
 
 /** What the engine sends the agent: the wire envelope, with absent `state` normalized to `null`. */
-export type DecisionRequest<S = unknown> = WorkerDecisionRequestWire & {
+export type DecisionRequest<S = unknown> = WireDecisionRequest & {
     state: S | null;
     /** Stream token deltas, present on a streaming `llm.execute` trigger. */
     emitDelta?: EmitDelta;

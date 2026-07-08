@@ -16,9 +16,11 @@ use super::decision::{Action, DecisionTrigger};
 use super::events::{LlmHandler, MessageTree, ToolHandler};
 use super::message::{Content, Message, Role, ToolCall};
 use super::reconcile::news_start;
-use super::state::{new_call_id, new_message_id};
+use super::state::{new_call_id, new_message_id, Effect};
 use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse};
+use crate::runtime::owner::SessionOwner;
 use crate::runtime::retry::RetryPolicy;
+use crate::runtime::worker::{WorkerDecisionRequest, WorkerState};
 
 /// The wire form of a [`Message`]: `id` is optional because a client-submitted or
 /// worker-authored message is not yet recorded. `record`/`rerecord` are the seams
@@ -106,17 +108,6 @@ pub enum WireTrigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         deadline: Option<DateTime<Utc>>,
     },
-    /// Answer with `llm.result`/`llm.error`.
-    #[serde(rename = "llm.execute")]
-    LlmExecute {
-        id: String,
-        request: LlmRequest,
-        #[serde(default)]
-        stream: bool,
-        attempt: u32,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        deadline: Option<DateTime<Utc>>,
-    },
     #[serde(rename = "tool.finished")]
     ToolFinished {
         id: String,
@@ -127,16 +118,16 @@ pub enum WireTrigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
-    #[serde(rename = "sub_agent.finished")]
-    SubAgentFinished {
+    /// Answer with `llm.result`/`llm.error`.
+    #[serde(rename = "llm.execute")]
+    LlmExecute {
         id: String,
-        ok: bool,
-        session_id: String,
-        agent_id: String,
+        request: LlmRequest,
+        #[serde(default)]
+        stream: bool,
+        attempt: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        result: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
+        deadline: Option<DateTime<Utc>>,
     },
     #[serde(rename = "llm.finished")]
     LlmFinished {
@@ -156,6 +147,17 @@ pub enum WireTrigger {
         code: Option<ErrorCode>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<serde_json::Value>,
+    },
+    #[serde(rename = "sub_agent.finished")]
+    SubAgentFinished {
+        id: String,
+        ok: bool,
+        session_id: String,
+        agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     #[serde(rename = "interrupt.resumed")]
     InterruptResumed {
@@ -548,6 +550,56 @@ pub fn to_wire_trigger(
             interrupt_id,
             payload,
         },
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireDecisionResponse {
+    #[serde(default)]
+    pub messages: Vec<WireMessage>,
+    pub actions: Vec<WireAction>,
+    /// Omitted or `null` keeps the current state; clear with a non-null empty value.
+    #[serde(default)]
+    pub state: Option<WorkerState>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WireDecisionRequest<'a> {
+    pub session_id: &'a str,
+    pub decision_id: &'a str,
+    pub agent_id: &'a str,
+    pub identity: &'a SessionOwner,
+    pub trigger: &'a WireTrigger,
+    pub state: &'a WorkerState,
+    pub calls: &'a [Effect],
+    /// Count of in-flight `tool_call`/`sub_agent` calls.
+    pub pending_calls: usize,
+    pub messages: &'a [Message],
+    pub message_tree: &'a MessageTree,
+    pub ancestry: &'a [String],
+    pub attempts: u32,
+    pub deadline: &'a Option<DateTime<Utc>>,
+    pub turn_id: &'a Option<String>,
+}
+
+impl<'a> From<&'a WorkerDecisionRequest> for WireDecisionRequest<'a> {
+    fn from(r: &'a WorkerDecisionRequest) -> Self {
+        WireDecisionRequest {
+            session_id: &r.session_id,
+            decision_id: &r.decision_id,
+            agent_id: &r.agent_id,
+            identity: &r.identity,
+            trigger: &r.trigger,
+            state: &r.state,
+            calls: &r.calls,
+            pending_calls: r.pending_calls,
+            messages: &r.transcript,
+            message_tree: &r.message_tree,
+            ancestry: &r.ancestry,
+            attempts: r.attempts,
+            deadline: &r.deadline,
+            turn_id: &r.turn_id,
+        }
     }
 }
 

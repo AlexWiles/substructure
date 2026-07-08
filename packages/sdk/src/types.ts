@@ -902,7 +902,10 @@ export interface UnknownInFlightCall extends InFlightCallBase {
 
 export type InFlightCall = InFlightToolCall | InFlightSubAgent | InFlightLlmCall | UnknownInFlightCall;
 
-export interface WorkerDecisionRequestWire {
+/** Exactly what a worker receives when the engine asks for a decision. Every
+ *  field is always present on the wire — the contract is total, not shaped by
+ *  what happens to be empty; `deadline`/`turn_id` are `null` when unset. */
+export interface WireDecisionRequest {
     session_id: Uuid;
     decision_id: string;
     agent_id: string;
@@ -916,19 +919,19 @@ export interface WorkerDecisionRequestWire {
      *  built-in loop prompts at 0. Inspect `calls` for finer control. */
     pending_calls: number;
     /** The active conversation as a flat list. */
-    messages?: Message[];
+    messages: Message[];
     /** The full tree, for clients that need branch structure. */
-    message_tree?: MessageTree;
-    ancestry?: Uuid[];
+    message_tree: MessageTree;
+    ancestry: Uuid[];
     attempts: number;
-    deadline?: DateTime;
-    turn_id?: string;
+    deadline: DateTime | null;
+    turn_id: string | null;
 }
 
 /** The decision a worker authors in reply to a decision request: the updated
  *  conversation, the next actions, and new state. The whole sync HTTP response
  *  body, and the streamed `decision.result` frame. */
-export interface WorkerDecisionResponse {
+export interface WireDecisionResponse {
     actions: WorkerAction[];
     /** Flat conversation the engine reconciles into the message tree: known ids
      *  continue, id-less/unknown messages are appended (forking automatically). */
@@ -940,7 +943,7 @@ export interface WorkerDecisionResponse {
 /** A decision pushed to the engine out-of-band via the submit route: the
  *  `session_id`/`decision_id` that route it, wrapping the worker-authored
  *  decision. */
-export interface SubmitDecisionRequest extends WorkerDecisionResponse {
+export interface SubmitDecisionRequest extends WireDecisionResponse {
     session_id: Uuid;
     decision_id: string;
 }

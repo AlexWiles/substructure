@@ -50,16 +50,11 @@ async def decide(request: Request):
     if t["type"] == "client.messages":
         return {"messages": messages, "actions": [llm_call_action(t["messages"])]}
 
-    if t["type"] == "tool.execute":
-        tool = next(tool for tool in TOOLS where tool["name"] ==  t["name"], None)
-        if tool is None:
-            return {"type": "tool.result", "id": t["id"], "result": "Tool not found"}
-
-
     # The model answered.
     if t["type"] == "llm.finished":
         new_message = t["message"]
 
+        # extract any tool calls, turning them into actions
         tool_use_actions = [
             {
                 "type": "tool.call",
@@ -70,21 +65,46 @@ async def decide(request: Request):
             if c["type"] == "tool_use"
         ]
 
-        # append new message to the requests message array
-        # we return it to update the message list in the engine
+        # append the new message to the message history
         messages = [*req["messages"], new_message]
 
         if tool_use_actions:
+            # if there are tool calls, return the updated message list
+            # and trigger tool calls by returning the options
             return {
                 "messages": messages,
                 "actions": [llm_call_action(messages)],
             }
         else:
+            # if there are no tool calls, return the updated message list
+            # and return the done action, so the turn ends
             return {
-                # mark the turn done
                 "messages": messages,
                 "actions": [{"type": "done", "data": message["content"]}],
             }
+
+
+    if t["type"] == "tool.execute":
+        tool = next([tool for tool in TOOLS if tool["name"] == t["name"]], None)
+        if tool is None:
+            return {"actions": [{"type": "tool.result", "result": "Tool not found"}]}
+        else:
+            result = tool["exec"](t["args"])
+            return {"actions": [{"type": "tool.result", "result": result}]}
+    if t["type"] == "tool.finished":
+        new_message = {
+            "role": "tool",
+            "content": t["result"],
+            "tool_call_id": t["id"],
+            "name": t["name"],
+        }
+        messages = [*req["messages"], new_message]
+        if req["pending_calls"] > 0:
+            # if there are pending calls, we only update the message history
+            return {"actions": [], "messages": messages}
+        else:
+            # if there are no pending calls, we update the message history and call the LLM
+            return {"actions": [llm_call_action(messages)], "messages": messages}
 
     # return no actions
     return {"actions": []}
