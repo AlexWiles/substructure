@@ -7,6 +7,7 @@ use uuid::Uuid;
 use super::decision::DecisionTrigger;
 use super::events::*;
 use super::message::{Message, Role};
+use super::wire::WireMessage;
 use rust_decimal::Decimal;
 
 use crate::runtime::aggregate::ApplyContext;
@@ -131,7 +132,7 @@ impl LlmCallSpec {
     pub fn to_request(&self, messages: Vec<Message>) -> LlmRequest {
         LlmRequest {
             model: self.model.clone(),
-            messages,
+            messages: messages.into_iter().map(WireMessage::from).collect(),
             tools: self.tools.clone(),
             temperature: self.temperature,
             max_completion_tokens: self.max_completion_tokens,
@@ -432,20 +433,22 @@ impl SessionState {
                 if payload.message.role == Role::User {
                     self.status = SessionStatus::Idle;
                 }
-                if !payload.message.id.is_empty() {
-                    self.head_id = Some(payload.message.id.clone());
-                }
+                self.head_id = Some(payload.message.id.clone());
                 self.nodes.push(Node::Message(payload.clone()));
             }
             EventPayload::NewControl(payload) => {
-                if !payload.control.id.is_empty() {
-                    self.head_id = Some(payload.control.id.clone());
-                }
+                self.head_id = Some(payload.control.id.clone());
                 self.nodes.push(Node::Control(payload.clone()));
             }
             EventPayload::LlmCallRequested(payload) => {
                 self.status = SessionStatus::Idle;
-                let prompt = payload.request.messages.clone();
+                let prompt: Vec<Message> = payload
+                    .request
+                    .messages
+                    .iter()
+                    .cloned()
+                    .map(WireMessage::record)
+                    .collect();
                 let spec = LlmCallSpec::from(&payload.request);
                 if let Some(existing) = self.llm_calls.get_mut(&payload.call_id) {
                     existing.tracking.reset_pending(now);

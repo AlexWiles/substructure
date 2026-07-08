@@ -1,5 +1,5 @@
 import type { Agent, Llm, NamedAgent, ToolDef } from "./core";
-import type { LlmTool, Message, RetryPolicy, WorkerAction } from "./types";
+import type { LlmTool, Message, MessageInput, RetryPolicy, WorkerAction } from "./types";
 
 // ── agent(config): the default tool/sub-agent loop ───────────────────────────
 
@@ -55,7 +55,7 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
 
     const { handler, run: _run, stream, ...llmParams } = config.llm;
 
-    const ask = (messages: Message[]): WorkerAction => {
+    const ask = (messages: MessageInput[]): WorkerAction => {
         return {
             type: "llm.call",
             id: crypto.randomUUID(),
@@ -72,7 +72,7 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
         const instructions =
             typeof config.instructions === "function" ? await config.instructions() : config.instructions;
         // Lead with the system message, reusing the stored one (stable id) when present.
-        const withSystem = (messages: Message[]): Message[] => {
+        const withSystem = (messages: MessageInput[]): MessageInput[] => {
             if (messages[0]?.role === "system") return messages;
             const existing = history[0]?.role === "system" ? history[0] : undefined;
             const system =

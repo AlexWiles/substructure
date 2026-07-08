@@ -7,3 +7,4 @@ pub mod message;
 pub mod reconcile;
 pub mod state;
 pub mod subscriptions;
+pub mod wire;

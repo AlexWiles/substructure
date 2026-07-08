@@ -3,10 +3,14 @@ use clap::ValueEnum;
 #[derive(Copy, Clone, ValueEnum)]
 pub enum LlmProviderArg {
     Openrouter,
+    Anthropic,
+    Openai,
 }
 
 pub enum ProviderEnv {
     Openrouter { api_key: String },
+    Anthropic { api_key: String },
+    Openai { api_key: String },
 }
 
 pub struct AuthEnvVars {
@@ -27,6 +31,14 @@ impl EnvVars {
             Some(LlmProviderArg::Openrouter) => &[(
                 "OPENROUTER_API_KEY",
                 "API key for OpenRouter (https://openrouter.ai/keys)",
+            )],
+            Some(LlmProviderArg::Anthropic) => &[(
+                "ANTHROPIC_API_KEY",
+                "API key for Anthropic (https://console.anthropic.com/settings/keys)",
+            )],
+            Some(LlmProviderArg::Openai) => &[(
+                "OPENAI_API_KEY",
+                "API key for OpenAI (https://platform.openai.com/api-keys)",
             )],
             None => &[],
         };
@@ -77,6 +89,12 @@ impl EnvVars {
 
         let provider = match provider {
             Some(LlmProviderArg::Openrouter) => Some(ProviderEnv::Openrouter {
+                api_key: provider_values.into_iter().next().unwrap(),
+            }),
+            Some(LlmProviderArg::Anthropic) => Some(ProviderEnv::Anthropic {
+                api_key: provider_values.into_iter().next().unwrap(),
+            }),
+            Some(LlmProviderArg::Openai) => Some(ProviderEnv::Openai {
                 api_key: provider_values.into_iter().next().unwrap(),
             }),
             None => None,

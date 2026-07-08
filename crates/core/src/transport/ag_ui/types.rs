@@ -1,6 +1,7 @@
 use serde::Deserialize;
 
-use crate::session::message::{Content, Message, Role};
+use crate::session::message::{Content, Role};
+use crate::session::wire::WireMessage;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -64,7 +65,7 @@ pub struct AgUiMessage {
 
 impl RunAgentInput {
     /// Unknown roles (e.g. `reasoning`) are dropped.
-    pub fn to_messages(&self) -> Vec<Message> {
+    pub fn to_messages(&self) -> Vec<WireMessage> {
         self.messages
             .iter()
             .filter_map(|m| {
@@ -75,8 +76,8 @@ impl RunAgentInput {
                     "tool" => Role::Tool,
                     _ => return None,
                 };
-                Some(Message {
-                    id: m.id.clone().unwrap_or_default(),
+                Some(WireMessage {
+                    id: m.id.clone(),
                     role,
                     content: m.content.clone().map(Content::Text),
                     tool_calls: None,
@@ -125,7 +126,7 @@ mod tests {
         assert_eq!(msgs[2].role, Role::Assistant);
         assert_eq!(msgs[3].role, Role::Tool);
         assert_eq!(msgs[3].tool_call_id.as_deref(), Some("call-1"));
-        let ids: Vec<&str> = msgs.iter().map(|m| m.id.as_str()).collect();
+        let ids: Vec<&str> = msgs.iter().map(|m| m.id.as_deref().unwrap()).collect();
         assert_eq!(ids, ["s1", "u1", "a1", "t1"]);
     }
 

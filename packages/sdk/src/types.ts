@@ -238,7 +238,7 @@ export type ClientPayload =
 /** Result of a finished llm call: response fields on success, error fields on failure. */
 export type LlmOutcome =
     | {
-          message: Message;
+          message: MessageInput;
           truncated: boolean;
           usage?: Record<string, unknown>;
           cost?: Decimal;
@@ -250,9 +250,9 @@ export type LlmOutcome =
  *  tool call it answers; `session_id` is the child session. */
 export type DecisionTrigger =
     | {
-          /** The full proposed conversation; `messages[new_from..]` is unrecorded. */
+          /** The full proposed conversation; `messages[new_from..]` is unrecorded (ids optional there). */
           type: "client.messages";
-          messages: Message[];
+          messages: MessageInput[];
           new_from: number;
       }
     | ({ type: "client.action" } & ClientAction)
@@ -276,28 +276,30 @@ export type WorkKind = "tool_call" | "llm_call";
 
 export type WorkerAction =
     | {
-          /** `id` correlates the outcome (an `llm.finished` trigger). */
+          /** Omit `id` and the engine mints one; it becomes the assistant node's id. */
           type: "llm.call";
-          id: string;
+          id?: string;
           request: LlmRequest;
           stream?: boolean;
           retry?: RetryPolicy;
           handler: LlmHandler;
       }
     | {
-          /** `id` is the model's tool call id; correlates the `tool.finished` outcome. */
+          /** `id` is the model's tool call id; omit it for an ad-hoc worker tool and the engine mints one. */
           type: "tool.call";
-          id: string;
+          id?: string;
           name: string;
           arguments: string;
           handler: ToolHandler;
           retry?: RetryPolicy;
       }
-    | { type: "tool.result"; id: string; result: string; attempt?: number }
-    | { type: "llm.result"; id: string; response: LlmResponse; attempt?: number }
+    // On the sync/pull paths a settle's `id` may be omitted — the answered
+    // `*.execute` trigger names the effect the engine resolves it against.
+    | { type: "tool.result"; id?: string; result: string; attempt?: number }
+    | { type: "llm.result"; id?: string; response: LlmResponse; attempt?: number }
     | {
           type: "tool.error";
-          id: string;
+          id?: string;
           error: string;
           retryable: boolean;
           attempt?: number;
@@ -306,7 +308,7 @@ export type WorkerAction =
       }
     | {
           type: "llm.error";
-          id: string;
+          id?: string;
           error: string;
           retryable: boolean;
           attempt?: number;

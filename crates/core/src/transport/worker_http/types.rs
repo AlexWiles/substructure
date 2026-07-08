@@ -2,8 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::llm::{ErrorCode, LlmResponse};
 use crate::runtime::session::decision::ClientPayload;
-use crate::runtime::session::message::Message;
-use crate::session::decision::WorkerAction;
+use crate::session::wire::{WireAction, WireMessage};
 use crate::span::SpanContext;
 use crate::worker::WorkerState;
 
@@ -14,8 +13,8 @@ use crate::worker::WorkerState;
 pub struct WorkerDecisionResponse {
     /// Wire field: `messages`.
     #[serde(default, rename = "messages")]
-    pub transcript: Vec<Message>,
-    pub actions: Vec<WorkerAction>,
+    pub transcript: Vec<WireMessage>,
+    pub actions: Vec<WireAction>,
     /// Omitted or `null` keeps the current state; clear with a non-null empty value.
     #[serde(default)]
     pub state: Option<WorkerState>,
@@ -175,16 +174,16 @@ mod tests {
             serde_json::from_str(body).expect("id-less call actions parse");
         assert!(matches!(
             req.actions.as_slice(),
-            [WorkerAction::CallLlm { .. }, WorkerAction::CallTool { .. }]
+            [WireAction::CallLlm { .. }, WireAction::CallTool { .. }]
         ));
         for a in &req.actions {
             let id = match a {
-                WorkerAction::CallLlm { id, .. } | WorkerAction::CallTool { id, .. } => id,
+                WireAction::CallLlm { id, .. } | WireAction::CallTool { id, .. } => id,
                 _ => unreachable!(),
             };
             assert!(
-                id.is_empty(),
-                "omitted id defaults to empty for the engine to mint"
+                id.is_none(),
+                "an omitted id parses as None for the engine to mint"
             );
         }
     }

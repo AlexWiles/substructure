@@ -11,7 +11,7 @@ use serde::Deserialize;
 use sha2::Sha256;
 
 use crate::runtime::llm::{StreamDelta, TokenDelta, TokenDeltaTransport};
-use crate::runtime::session::decision::DecisionTrigger;
+use crate::runtime::session::wire::WireTrigger;
 use crate::transport::worker_http::types::WorkerDecisionResponse;
 use crate::worker::push::{PushError, PushResponse, PushTransport, TransportConstructor};
 use crate::worker::WorkerDecisionRequest;
@@ -215,7 +215,7 @@ async fn publish_worker_delta(
     token_delta_transport: &Arc<dyn TokenDeltaTransport>,
     seq: &mut u32,
 ) -> Result<(), PushError> {
-    let DecisionTrigger::LlmExecute {
+    let WireTrigger::LlmExecute {
         id: call_id,
         attempt,
         stream,
@@ -295,7 +295,7 @@ mod tests {
                 id: Some("user-1".to_string()),
                 metadata: Default::default(),
             },
-            trigger: DecisionTrigger::LlmExecute {
+            trigger: WireTrigger::LlmExecute {
                 id: "llm-1".to_string(),
                 request: LlmRequest {
                     model: "test-model".to_string(),

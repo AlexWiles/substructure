@@ -10,13 +10,16 @@ use tracing_subscriber::EnvFilter;
 
 use substructure_core::llm::LlmResponse;
 use substructure_core::owner::SessionOwner;
+use substructure_core::providers::anthropic::{AnthropicConfig, AnthropicProvider};
 use substructure_core::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
+use substructure_core::providers::openai::{OpenAiConfig, OpenAiProvider};
 use substructure_core::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
 use substructure_core::providers::sqlite::{
     SqliteCheckpointStore, SqliteDb, SqliteEventStore, SqliteSessionIndexStore, SqliteWakeStore,
 };
 use substructure_core::providers::worker_queue::InMemoryWorkerQueue;
 use substructure_core::session::decision::{ClientPayload, EffectResultPayload, WorkKind};
+use substructure_core::session::wire::resolve_actions;
 use substructure_core::span::SpanContext as CoreSpanContext;
 use substructure_core::worker::{DequeueFilter, FailDecision, SubmitDecision};
 use substructure_core::{
@@ -40,6 +43,14 @@ pub struct RuntimeOptions {
     pub openrouter_base_url: Option<String>,
     /// OpenRouter API key
     pub openrouter_api_key: Option<String>,
+    /// Anthropic API base URL (default: "https://api.anthropic.com")
+    pub anthropic_base_url: Option<String>,
+    /// Anthropic API key
+    pub anthropic_api_key: Option<String>,
+    /// OpenAI API base URL (default: "https://api.openai.com/v1")
+    pub openai_base_url: Option<String>,
+    /// OpenAI API key
+    pub openai_api_key: Option<String>,
     /// Number of concurrent LLM handler tasks (default: 4)
     pub llm_pool_size: Option<u32>,
 }
@@ -94,14 +105,27 @@ impl EmbeddedRuntime {
                 config.sub_agent_executor_workers as u32,
             ));
         let llm_provider: Option<Arc<dyn substructure_core::llm::LlmProviderTrait>> =
-            match options.openrouter_api_key {
-                Some(api_key) => Some(Arc::new(OpenRouterProvider::new(OpenRouterConfig {
+            if let Some(api_key) = options.openrouter_api_key {
+                Some(Arc::new(OpenRouterProvider::new(OpenRouterConfig {
                     base_url: options
                         .openrouter_base_url
                         .unwrap_or_else(|| "https://openrouter.ai/api".to_string()),
                     api_key,
-                }))),
-                None => None,
+                })))
+            } else if let Some(api_key) = options.anthropic_api_key {
+                let mut config = AnthropicConfig::new(api_key);
+                if let Some(base_url) = options.anthropic_base_url {
+                    config.base_url = base_url;
+                }
+                Some(Arc::new(AnthropicProvider::new(config)))
+            } else if let Some(api_key) = options.openai_api_key {
+                let mut config = OpenAiConfig::new(api_key);
+                if let Some(base_url) = options.openai_base_url {
+                    config.base_url = base_url;
+                }
+                Some(Arc::new(OpenAiProvider::new(config)))
+            } else {
+                None
             };
         let token_delta_transport =
             Arc::new(substructure_core::llm::InMemoryTokenDeltaTransport::new());
@@ -174,24 +198,39 @@ impl EmbeddedRuntime {
                     Ok(response_json) => {
                         match serde_json::from_str::<WorkerDecisionResponse>(&response_json) {
                             Ok(submit) => {
-                                let submit_decision = SubmitDecision {
-                                    session_id: decision.session_id,
-                                    caller: Caller::System {
-                                        tenant_id: decision_tenant.clone(),
-                                    },
-                                    decision_id: decision.decision_id.clone(),
-                                    transcript: submit.transcript,
-                                    actions: submit.actions,
-                                    state: submit.state,
-                                    span: decision.span.child("js_worker"),
-                                };
+                                // Resolve wire actions against the trigger this decision
+                                // answers before handing them to the core.
+                                match resolve_actions(submit.actions, Some(&decision.trigger)) {
+                                    Ok(actions) => {
+                                        let submit_decision = SubmitDecision {
+                                            session_id: decision.session_id,
+                                            caller: Caller::System {
+                                                tenant_id: decision_tenant.clone(),
+                                            },
+                                            decision_id: decision.decision_id.clone(),
+                                            transcript: submit.transcript,
+                                            actions,
+                                            state: submit.state,
+                                            span: decision.span.child("js_worker"),
+                                        };
 
-                                if let Err(e) = runtime.submit_decision(submit_decision).await {
-                                    tracing::warn!(
-                                        decision_id = %decision.decision_id,
-                                        error = %e,
-                                        "failed to submit worker decision"
-                                    );
+                                        if let Err(e) =
+                                            runtime.submit_decision(submit_decision).await
+                                        {
+                                            tracing::warn!(
+                                                decision_id = %decision.decision_id,
+                                                error = %e,
+                                                "failed to submit worker decision"
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            decision_id = %decision.decision_id,
+                                            error = %e,
+                                            "unresolvable worker action"
+                                        );
+                                    }
                                 }
                             }
                             Err(e) => {

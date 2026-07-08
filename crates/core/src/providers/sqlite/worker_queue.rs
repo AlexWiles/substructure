@@ -158,7 +158,7 @@ mod tests {
     use super::*;
     use crate::runtime::llm::LlmRequest;
     use crate::runtime::owner::SessionOwner;
-    use crate::runtime::session::decision::DecisionTrigger;
+    use crate::runtime::session::wire::WireTrigger;
     use crate::runtime::span::SpanContext;
     use uuid::Uuid;
 
@@ -172,7 +172,7 @@ mod tests {
                 id: Some("user-1".to_string()),
                 metadata: Default::default(),
             },
-            trigger: DecisionTrigger::LlmExecute {
+            trigger: WireTrigger::LlmExecute {
                 id: "llm-1".to_string(),
                 request: LlmRequest {
                     model: "test-model".to_string(),

@@ -1,0 +1,23 @@
+# Compiled binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+main
+chat-go
+
+# Test binary / coverage
+*.test
+*.out
+coverage.txt
+
+# Go workspace
+go.work
+go.work.sum
+
+# Dependency directory (when vendoring)
+vendor/
+
+# Environment variables
+.env

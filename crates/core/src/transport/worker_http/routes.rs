@@ -12,6 +12,7 @@ use crate::owner::SessionOwner;
 use crate::session::command::SessionError;
 use crate::session::decision::{EffectResultPayload, WorkKind};
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
+use crate::session::wire::resolve_actions;
 use crate::span::SpanContext;
 use crate::transport::session_sse::merge_session_stream;
 use crate::worker::SubmitDecision;
@@ -34,6 +35,22 @@ pub async fn submit(
         .unwrap_or_else(SpanContext::root)
         .child("worker_submit");
 
+    // Out-of-band submit: no answered trigger in scope, so every settle must name
+    // its own effect id. An omitted id can't be resolved here — reject it.
+    let actions = match resolve_actions(req.decision.actions, None) {
+        Ok(actions) => actions,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(SubmitResponse {
+                    ok: false,
+                    error: Some(e.to_string()),
+                }),
+            )
+                .into_response();
+        }
+    };
+
     let result = state
         .runtime
         .submit_decision(SubmitDecision {
@@ -41,7 +58,7 @@ pub async fn submit(
             caller,
             decision_id: req.decision_id,
             transcript: req.decision.transcript,
-            actions: req.decision.actions,
+            actions,
             state: req.decision.state,
             span,
         })

@@ -1,22 +1,23 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_stream::StreamExt;
 
-use rust_decimal::Decimal;
-
 use crate::llm::{
     CallContext, ErrorCode, LlmCallError, LlmCallable, LlmProviderTrait, LlmRequest, LlmResponse,
-    LlmTool, ReasoningConfig, ResponseImage, StreamDelta, ToolCallChunk,
+    LlmTool, ReasoningEffort, StreamDelta, ToolCallChunk,
 };
 use crate::owner::SessionOwner;
 use crate::session::message::{ToolCall, ToolCallFunction};
 
+const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
+
 /// Wraps our normalized `LlmTool` with the `"type": "function"` field
-/// that the OpenAI/OpenRouter API expects.
+/// that the OpenAI API expects.
 #[derive(Serialize)]
 struct WireTool {
     #[serde(rename = "type")]
@@ -53,11 +54,60 @@ struct WireBody<'a> {
     tools: Option<Vec<WireTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f64>,
-    #[serde(rename = "max_tokens", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     max_completion_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning: Option<&'a ReasoningConfig>,
+    reasoning_effort: Option<&'static str>,
     stream: bool,
+}
+
+fn effort_str(e: ReasoningEffort) -> &'static str {
+    match e {
+        ReasoningEffort::Xhigh => "xhigh",
+        ReasoningEffort::High => "high",
+        ReasoningEffort::Medium => "medium",
+        ReasoningEffort::Low => "low",
+        ReasoningEffort::Minimal => "minimal",
+        ReasoningEffort::None => "none",
+    }
+}
+
+/// Reasoning models (GPT-5 family, o-series) reject sampling params like
+/// `temperature`. Detect them by id prefix so we strip it even when the
+/// request doesn't set an explicit effort.
+fn is_reasoning_model(model: &str) -> bool {
+    const PREFIXES: &[&str] = &["gpt-5", "o1", "o3", "o4"];
+    PREFIXES.iter().any(|p| model.starts_with(p))
+}
+
+impl<'a> WireBody<'a> {
+    fn build(request: &'a LlmRequest, stream: bool) -> Self {
+        let reasoning_effort = request
+            .reasoning
+            .as_ref()
+            .and_then(|r| r.effort)
+            .map(effort_str);
+
+        // Omit temperature for reasoning models — they 400 on it.
+        let temperature = if reasoning_effort.is_some() || is_reasoning_model(&request.model) {
+            None
+        } else {
+            request.temperature
+        };
+
+        WireBody {
+            model: &request.model,
+            messages: &request.messages,
+            tools: request
+                .tools
+                .as_ref()
+                .map(|ts| ts.iter().map(WireTool::from).collect()),
+            temperature,
+            max_completion_tokens: request.max_completion_tokens,
+            reasoning_effort,
+            stream,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,25 +125,13 @@ struct Choice {
 }
 
 #[derive(Debug, Deserialize)]
-struct WireResponseImage {
-    image_url: WireImageUrl,
-}
-
-#[derive(Debug, Deserialize)]
-struct WireImageUrl {
-    url: String,
-}
-
-#[derive(Debug, Deserialize)]
 struct ChoiceMessage {
     content: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<WireToolCall>>,
-    #[serde(default)]
-    images: Option<Vec<WireResponseImage>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct WireToolCall {
     id: String,
     #[serde(rename = "type")]
@@ -101,7 +139,7 @@ struct WireToolCall {
     function: WireFunctionCall,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct WireFunctionCall {
     name: String,
     arguments: String,
@@ -120,32 +158,9 @@ impl From<WireToolCall> for ToolCall {
     }
 }
 
-/// Extract `cost` from OpenRouter's usage object as a Decimal.
-/// Parses from the raw JSON number string to avoid f64 precision loss.
-fn extract_cost(usage: &Option<serde_json::Value>) -> Option<Decimal> {
-    let cost_value = usage.as_ref()?.get("cost")?;
-    // serde_json::Value::Number preserves the original string representation
-    // when using Number::to_string(), so we parse that directly into Decimal.
-    cost_value
-        .as_number()
-        .and_then(|n| n.to_string().parse::<Decimal>().ok())
-}
-
 impl ChatCompletionResponse {
     fn into_llm_response(self) -> LlmResponse {
         let choice = self.choices.into_iter().next();
-        let cost = extract_cost(&self.usage);
-        let images = choice
-            .as_ref()
-            .and_then(|c| c.message.images.as_ref())
-            .map(|imgs| {
-                imgs.iter()
-                    .map(|img| ResponseImage {
-                        url: img.image_url.url.clone(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
         LlmResponse {
             model: self.model,
             content: choice.as_ref().and_then(|c| c.message.content.clone()),
@@ -156,22 +171,8 @@ impl ChatCompletionResponse {
                 .unwrap_or_default(),
             finish_reason: choice.and_then(|c| c.finish_reason),
             usage: self.usage,
-            cost,
-            images,
-        }
-    }
-}
-
-// Cloning needed for the into_llm_response borrow pattern
-impl Clone for WireToolCall {
-    fn clone(&self) -> Self {
-        WireToolCall {
-            id: self.id.clone(),
-            call_type: self.call_type.clone(),
-            function: WireFunctionCall {
-                name: self.function.name.clone(),
-                arguments: self.function.arguments.clone(),
-            },
+            cost: None,
+            images: Vec::new(),
         }
     }
 }
@@ -198,11 +199,7 @@ struct StreamChunkDelta {
     #[serde(default)]
     content: Option<String>,
     #[serde(default)]
-    reasoning: Option<String>,
-    #[serde(default)]
     tool_calls: Option<Vec<ToolCallDelta>>,
-    #[serde(default)]
-    images: Option<Vec<WireResponseImage>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -230,31 +227,51 @@ struct ToolCallAccum {
 }
 
 #[derive(Deserialize)]
-pub struct OpenRouterConfig {
+pub struct OpenAiConfig {
     pub base_url: String,
     pub api_key: String,
+    #[serde(default)]
+    pub organization: Option<String>,
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
-pub struct OpenRouterClient {
-    http: Client,
-    config: OpenRouterConfig,
-}
-
-impl OpenRouterClient {
-    pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
+impl OpenAiConfig {
+    pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            http: Client::new(),
-            config: OpenRouterConfig {
-                base_url: base_url.into(),
-                api_key: api_key.into(),
-            },
+            base_url: DEFAULT_BASE_URL.to_string(),
+            api_key: api_key.into(),
+            organization: None,
+            project: None,
         }
     }
+}
 
-    pub fn from_config(config: OpenRouterConfig) -> Self {
+pub struct OpenAiClient {
+    http: Client,
+    base_url: String,
+    api_key: String,
+    extra_headers: HeaderMap,
+}
+
+impl OpenAiClient {
+    pub fn from_config(config: OpenAiConfig) -> Self {
+        let mut extra_headers = HeaderMap::new();
+        if let Some(org) = config.organization.as_deref() {
+            if let Ok(v) = HeaderValue::from_str(org) {
+                extra_headers.insert(HeaderName::from_static("openai-organization"), v);
+            }
+        }
+        if let Some(project) = config.project.as_deref() {
+            if let Ok(v) = HeaderValue::from_str(project) {
+                extra_headers.insert(HeaderName::from_static("openai-project"), v);
+            }
+        }
         Self {
             http: Client::new(),
-            config,
+            base_url: config.base_url,
+            api_key: config.api_key,
+            extra_headers,
         }
     }
 
@@ -263,27 +280,13 @@ impl OpenRouterClient {
         request: &LlmRequest,
         stream: bool,
     ) -> Result<reqwest::Response, LlmCallError> {
-        let wire = WireBody {
-            model: &request.model,
-            messages: &request.messages,
-            tools: request
-                .tools
-                .as_ref()
-                .map(|ts| ts.iter().map(WireTool::from).collect()),
-            temperature: request.temperature,
-            max_completion_tokens: request.max_completion_tokens,
-            reasoning: request.reasoning.as_ref(),
-            stream,
-        };
-
-        let url = format!(
-            "{}/v1/chat/completions",
-            self.config.base_url.trim_end_matches('/')
-        );
+        let wire = WireBody::build(request, stream);
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
 
         self.http
             .post(&url)
-            .bearer_auth(&self.config.api_key)
+            .bearer_auth(&self.api_key)
+            .headers(self.extra_headers.clone())
             .json(&wire)
             .send()
             .await
@@ -305,7 +308,7 @@ fn classify_error(status: reqwest::StatusCode, body: &str) -> LlmCallError {
         ErrorCode::ProviderError
     };
     LlmCallError {
-        message: format!("OpenRouter API error {status}: {body}"),
+        message: format!("OpenAI API error {status}: {body}"),
         retryable,
         code: Some(code),
         detail: None,
@@ -313,7 +316,7 @@ fn classify_error(status: reqwest::StatusCode, body: &str) -> LlmCallError {
 }
 
 #[async_trait]
-impl LlmCallable for OpenRouterClient {
+impl LlmCallable for OpenAiClient {
     async fn call(
         &self,
         request: &LlmRequest,
@@ -364,7 +367,6 @@ impl LlmCallable for OpenRouterClient {
 
         let mut content = String::new();
         let mut tool_calls: Vec<ToolCallAccum> = Vec::new();
-        let mut images: Vec<ResponseImage> = Vec::new();
         let mut finish_reason: Option<String> = None;
         let mut model = request.model.clone();
         let mut usage: Option<serde_json::Value> = None;
@@ -421,15 +423,6 @@ impl LlmCallable for OpenRouterClient {
                         });
                     }
 
-                    if let Some(ref reasoning) = choice.delta.reasoning {
-                        if !reasoning.is_empty() {
-                            let _ = chunk_tx.send(StreamDelta {
-                                reasoning: Some(reasoning.clone()),
-                                ..Default::default()
-                            });
-                        }
-                    }
-
                     if let Some(tc_deltas) = choice.delta.tool_calls {
                         for tc_delta in tc_deltas {
                             while tool_calls.len() <= tc_delta.index {
@@ -462,12 +455,6 @@ impl LlmCallable for OpenRouterClient {
                         }
                     }
 
-                    if let Some(imgs) = choice.delta.images {
-                        images.extend(imgs.into_iter().map(|img| ResponseImage {
-                            url: img.image_url.url,
-                        }));
-                    }
-
                     if let Some(reason) = choice.finish_reason {
                         finish_reason = Some(reason.clone());
                         let _ = chunk_tx.send(StreamDelta {
@@ -478,8 +465,6 @@ impl LlmCallable for OpenRouterClient {
                 }
             }
         }
-
-        let cost = extract_cost(&usage);
 
         Ok(LlmResponse {
             model,
@@ -502,27 +487,83 @@ impl LlmCallable for OpenRouterClient {
                 .collect(),
             finish_reason,
             usage,
-            cost,
-            images,
+            cost: None,
+            images: Vec::new(),
         })
     }
 }
 
-pub struct OpenRouterProvider {
-    client: Arc<OpenRouterClient>,
+pub struct OpenAiProvider {
+    client: Arc<OpenAiClient>,
 }
 
-impl OpenRouterProvider {
-    pub fn new(config: OpenRouterConfig) -> Self {
+impl OpenAiProvider {
+    pub fn new(config: OpenAiConfig) -> Self {
         Self {
-            client: Arc::new(OpenRouterClient::from_config(config)),
+            client: Arc::new(OpenAiClient::from_config(config)),
         }
     }
 }
 
 #[async_trait]
-impl LlmProviderTrait for OpenRouterProvider {
+impl LlmProviderTrait for OpenAiProvider {
     async fn resolve(&self, _owner: &SessionOwner) -> Result<Arc<dyn LlmCallable>, String> {
         Ok(self.client.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::ReasoningConfig;
+    use crate::session::message::{Content, Role};
+    use crate::session::wire::WireMessage;
+
+    fn req(model: &str) -> LlmRequest {
+        LlmRequest {
+            model: model.to_string(),
+            messages: vec![WireMessage {
+                id: None,
+                role: Role::User,
+                content: Some(Content::Text("hi".to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            }],
+            tools: None,
+            temperature: Some(0.7),
+            max_completion_tokens: Some(500),
+            reasoning: None,
+        }
+    }
+
+    #[test]
+    fn reasoning_model_strips_temperature_and_maps_effort() {
+        let mut r = req("gpt-5.5");
+        r.reasoning = Some(ReasoningConfig {
+            effort: Some(ReasoningEffort::High),
+            max_tokens: None,
+            exclude: None,
+            enabled: None,
+        });
+        let v = serde_json::to_value(WireBody::build(&r, false)).unwrap();
+        assert_eq!(v["reasoning_effort"], "high");
+        assert!(v.get("temperature").is_none());
+        assert_eq!(v["max_completion_tokens"], 500);
+        assert!(v.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn reasoning_model_without_explicit_effort_still_strips_temperature() {
+        let v = serde_json::to_value(WireBody::build(&req("gpt-5.4-mini"), false)).unwrap();
+        assert!(v.get("temperature").is_none());
+        assert!(v.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn non_reasoning_model_keeps_temperature() {
+        let v = serde_json::to_value(WireBody::build(&req("gpt-4o"), false)).unwrap();
+        assert_eq!(v["temperature"], 0.7);
+        assert!(v.get("reasoning_effort").is_none());
     }
 }

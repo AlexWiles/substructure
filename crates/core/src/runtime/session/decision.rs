@@ -3,7 +3,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use super::events::{LlmHandler, ToolHandler};
-use super::message::Message;
+use super::wire::WireMessage;
 use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse};
 use crate::runtime::retry::RetryPolicy;
 
@@ -18,12 +18,12 @@ pub struct ClientAction {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientPayload {
     Message {
-        message: Message,
+        message: WireMessage,
         #[serde(default)]
         stream: bool,
     },
     Messages {
-        messages: Vec<Message>,
+        messages: Vec<WireMessage>,
         #[serde(default)]
         stream: bool,
     },
@@ -39,12 +39,12 @@ pub enum ClientPayload {
 pub enum DecisionTrigger {
     /// Internal only: materialized into `ClientTranscript` at delivery, never sent to workers.
     #[serde(rename = "client.message")]
-    ClientMessage { message: Message },
+    ClientMessage { message: WireMessage },
     /// `messages` is the full proposed conversation; `messages[new_from..]` is
     /// unrecorded (recomputed at delivery against the tree). Wire tag: `client.messages`.
     #[serde(rename = "client.messages")]
     ClientTranscript {
-        messages: Vec<Message>,
+        messages: Vec<WireMessage>,
         #[serde(default)]
         new_from: usize,
     },
@@ -102,7 +102,7 @@ pub enum DecisionTrigger {
         id: String,
         ok: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        message: Option<Message>,
+        message: Option<WireMessage>,
         /// True when finish_reason was "length" (output truncated).
         #[serde(default)]
         truncated: bool,
@@ -128,7 +128,7 @@ pub enum DecisionTrigger {
 impl DecisionTrigger {
     pub fn llm_ok(
         id: String,
-        message: Message,
+        message: WireMessage,
         truncated: bool,
         usage: Option<serde_json::Value>,
         cost: Option<Decimal>,
@@ -182,14 +182,16 @@ pub enum EffectResultPayload {
     LlmCall { response: LlmResponse },
 }
 
-/// Omitting `attempt` on a result/error settles the current attempt; echo it to fence a stale executor.
+/// Resolved worker action — the internal, engine-facing form. Every effect id is
+/// present. Produced only by `resolve_actions` from a `WireAction`; the core never
+/// deserializes this from the wire. Omitting `attempt` on a result/error settles the
+/// current attempt; echo it to fence a stale executor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
-pub enum WorkerAction {
+pub enum Action {
     #[serde(rename = "llm.call")]
     CallLlm {
         // Omit to have the engine mint one; it becomes the assistant node's id.
-        #[serde(default)]
         id: String,
         request: LlmRequest,
         #[serde(default)]
@@ -201,7 +203,6 @@ pub enum WorkerAction {
     #[serde(rename = "tool.call")]
     CallTool {
         // Omit for an ad-hoc worker tool; the engine mints one.
-        #[serde(default)]
         id: String,
         name: String,
         arguments: String,
@@ -251,8 +252,7 @@ pub enum WorkerAction {
     SpawnSubAgent {
         session_id: String,
         agent_id: String,
-        /// The model tool-call id this delegation answers.
-        #[serde(default)]
+        /// The model tool-call this delegation answers.
         tool_call_id: String,
         #[serde(default = "RetryPolicy::no_retry")]
         retry: RetryPolicy,
@@ -260,12 +260,11 @@ pub enum WorkerAction {
     #[serde(rename = "message.send")]
     SendMessage {
         session_id: String,
-        message: Message,
+        message: WireMessage,
     },
     /// Pause the session awaiting external input.
     #[serde(rename = "interrupt")]
     Interrupt {
-        #[serde(default)]
         interrupt_id: String,
         reason: String,
         #[serde(default)]

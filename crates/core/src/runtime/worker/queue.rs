@@ -5,11 +5,11 @@ use serde::{Deserialize, Serialize};
 use super::WorkerState;
 use crate::runtime::aggregate::Caller;
 use crate::runtime::owner::SessionOwner;
-use crate::runtime::session::decision::DecisionTrigger;
-use crate::runtime::session::decision::WorkerAction;
+use crate::runtime::session::decision::Action;
 use crate::runtime::session::events::MessageTree;
 use crate::runtime::session::message::Message;
 use crate::runtime::session::state::Effect;
+use crate::runtime::session::wire::{WireMessage, WireTrigger};
 use crate::runtime::span::SpanContext;
 
 /// Wire format sent to workers (via poll or push) when a decision is needed.
@@ -19,7 +19,7 @@ pub struct WorkerDecisionRequest {
     pub decision_id: String,
     pub agent_id: String,
     pub identity: SessionOwner,
-    pub trigger: DecisionTrigger,
+    pub trigger: WireTrigger,
     pub state: WorkerState,
     #[serde(default)]
     pub calls: Vec<Effect>,
@@ -60,8 +60,8 @@ pub struct SubmitDecision {
     pub session_id: String,
     pub caller: Caller,
     pub decision_id: String,
-    pub transcript: Vec<Message>,
-    pub actions: Vec<WorkerAction>,
+    pub transcript: Vec<WireMessage>,
+    pub actions: Vec<Action>,
     /// `None` = no opinion, keep the current state.
     pub state: Option<WorkerState>,
     pub span: SpanContext,

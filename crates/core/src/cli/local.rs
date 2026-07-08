@@ -7,7 +7,9 @@ use crate::cli::auth::AuthWiring;
 use crate::cli::env::{EnvVars, LlmProviderArg, ProviderEnv};
 use crate::cli::register_startup_worker;
 use crate::llm::{LlmProviderTrait, LlmTask};
+use crate::providers::anthropic::{AnthropicConfig, AnthropicProvider};
 use crate::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
+use crate::providers::openai::{OpenAiConfig, OpenAiProvider};
 use crate::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
 use crate::providers::sqlite::{
     SqliteCheckpointStore, SqliteDb, SqliteEventStore, SqlitePushStore, SqliteSessionIndexStore,
@@ -97,6 +99,22 @@ async fn start_server(
                     .unwrap_or_else(|_| "https://openrouter.ai/api".to_string()),
                 api_key,
             })))
+        }
+        Some(ProviderEnv::Anthropic { api_key }) => {
+            let mut config = AnthropicConfig::new(api_key);
+            if let Ok(base_url) = std::env::var("ANTHROPIC_BASE_URL") {
+                config.base_url = base_url;
+            }
+            Some(Arc::new(AnthropicProvider::new(config)))
+        }
+        Some(ProviderEnv::Openai { api_key }) => {
+            let mut config = OpenAiConfig::new(api_key);
+            if let Ok(base_url) = std::env::var("OPENAI_BASE_URL") {
+                config.base_url = base_url;
+            }
+            config.organization = std::env::var("OPENAI_ORG_ID").ok();
+            config.project = std::env::var("OPENAI_PROJECT_ID").ok();
+            Some(Arc::new(OpenAiProvider::new(config)))
         }
         None => {
             tracing::info!("no LLM provider configured; server-side LLM execution is disabled (worker-handled calls only)");

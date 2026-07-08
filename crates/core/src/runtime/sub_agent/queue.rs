@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::runtime::owner::SessionOwner;
 use crate::runtime::retry::RetryPolicy;
-use crate::runtime::session::message::Message;
+use crate::runtime::session::wire::WireMessage;
 use crate::runtime::span::SpanContext;
 
 #[derive(Debug, Clone)]
@@ -23,7 +23,7 @@ pub enum SubAgentTask {
         source_event_id: Uuid,
         tenant_id: String,
         target_session_id: String,
-        message: Message,
+        message: WireMessage,
         span: SpanContext,
     },
     CompleteSubAgentTurn {

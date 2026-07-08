@@ -10,6 +10,10 @@ same version.
 
 ## [Unreleased]
 
+### Added
+
+- Native Anthropic and OpenAI LLM providers.
+
 ### Changed
 
 - **Breaking:** the decision wire unifies on `messages`. Affects conversation field
@@ -17,6 +21,8 @@ same version.
   The SDK's `DecisionRequest`/`Decision` follow, so custom decision functions read
   `req.messages` and return `{ messages }`; `toolLoop` callers are unaffected.
 - The sync worker decision response no longer needs `session_id`/`decision_id`.
+- Worker-authored ids (action, settle, `interrupt_id`, message) are optional and
+  engine-assigned; `sub_agent.spawn` requires `tool_call_id`.
 
 ## [0.1.22] - 2026-07-07
 

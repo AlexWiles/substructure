@@ -5,7 +5,7 @@
 
 > Substructure is under active development. APIs, CLI commands, and the wire protocol may change between releases for versions 0.1.x
 
-Substructure is an open-source engine for building durable, long-running AI agents using just an HTTP endpoint hosted on your infrastructure, in your code.
+Substructure is an open-source engine that drives your agent loop over HTTP. It keeps sessions durable and streams AG-UI events to your clients. Your code stays on your infrastructure. It's language agnostic. You don't even need an SDK (but we do have one).
 
 ```javascript
 // A complete chat agent. No SDK.

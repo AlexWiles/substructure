@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
+use crate::session::wire::resolve_actions;
 use crate::worker::push::{PushRegistrationRecord, PushRegistry};
 use crate::worker::{DequeueFilter, SubmitDecision};
 use crate::{Caller, Runtime};
@@ -100,6 +101,21 @@ impl PushAdapter {
 
                     match transport.push(&decision, token_delta_transport).await {
                         Ok(resp) => {
+                            // Resolve wire actions against the trigger this response
+                            // answers, so any omitted settle id is filled in before the
+                            // core ever sees it.
+                            let actions =
+                                match resolve_actions(resp.actions, Some(&decision.trigger)) {
+                                    Ok(actions) => actions,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            decision_id = %decision.decision_id,
+                                            error = %e,
+                                            "unresolvable worker action"
+                                        );
+                                        return;
+                                    }
+                                };
                             let submit = SubmitDecision {
                                 session_id: decision.session_id,
                                 caller: Caller::System {
@@ -107,7 +123,7 @@ impl PushAdapter {
                                 },
                                 decision_id: decision.decision_id.clone(),
                                 transcript: resp.transcript,
-                                actions: resp.actions,
+                                actions,
                                 state: resp.state,
                                 span: decision.span.child("push_worker"),
                             };

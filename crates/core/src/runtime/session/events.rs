@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::decision::DecisionTrigger;
 use super::message::Message;
+use super::wire::WireMessage;
 use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse};
 use crate::runtime::owner::SessionOwner;
 use crate::runtime::retry::RetryPolicy;
@@ -343,7 +344,7 @@ pub struct WorkerDecisionErrored {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMessageRequested {
     pub target_session_id: String,
-    pub message: Message,
+    pub message: WireMessage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

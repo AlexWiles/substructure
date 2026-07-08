@@ -3,14 +3,14 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 
-use super::decision::{ClientPayload, DecisionTrigger, WorkerAction};
+use super::decision::{Action, ClientPayload, DecisionTrigger};
 use super::events::*;
-use super::message::{Content, ContentPart, ImageUrl, Message, Role};
+use super::message::{Content, ContentPart, ImageUrl, Role};
 use super::reconcile::plan_reconcile;
 use super::state::{
-    json_to_string, new_call_id, new_message_id, EffectStatus, EffectTracking, SessionState,
-    SessionStatus,
+    json_to_string, new_call_id, EffectStatus, EffectTracking, SessionState, SessionStatus,
 };
+use super::wire::WireMessage;
 use crate::runtime::aggregate::Caller;
 use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse};
 use crate::runtime::owner::SessionOwner;
@@ -30,7 +30,7 @@ pub enum CommandPayload {
         turn_id: Option<String>,
     },
     SendMessage {
-        message: Message,
+        message: WireMessage,
         #[allow(dead_code)]
         stream: bool,
         turn_id: Option<String>,
@@ -108,8 +108,8 @@ pub enum CommandPayload {
     },
     SubmitWorkerDecision {
         decision_id: String,
-        transcript: Vec<Message>,
-        actions: Vec<WorkerAction>,
+        transcript: Vec<WireMessage>,
+        actions: Vec<Action>,
         /// `None` = no opinion, keep the current state.
         state: Option<WorkerState>,
     },
@@ -151,13 +151,6 @@ pub enum SessionError {
     EffectAttemptMismatch,
     #[error("caller may not settle this effect")]
     EffectWrongHandler,
-}
-
-fn assign_id(mut message: Message) -> Message {
-    if message.id.is_empty() {
-        message.id = new_message_id();
-    }
-    message
 }
 
 /// A tool message in a submitted view that answers a still-pending client call.
@@ -297,7 +290,7 @@ impl SessionState {
     // Executes the plan from `plan_reconcile` — the one interpreter of "what
     // recording this list writes" — so submit-time classification and delivery
     // annotation can't drift from what actually lands in the tree.
-    fn reconcile_transcript(&self, transcript: Vec<Message>) -> Vec<EventPayload> {
+    fn reconcile_transcript(&self, transcript: Vec<WireMessage>) -> Vec<EventPayload> {
         let known: std::collections::HashSet<&str> = self.nodes.iter().map(|n| n.id()).collect();
         let plan = plan_reconcile(&known, &transcript);
         let mut events = Vec::with_capacity(plan.len());
@@ -311,12 +304,9 @@ impl SessionState {
                     // Re-record known ids in the news region as fresh nodes so
                     // the branch stays a chain instead of grafting onto the old.
                     let msg = if rerecord {
-                        Message {
-                            id: new_message_id(),
-                            ..msg
-                        }
+                        msg.rerecord()
                     } else {
-                        assign_id(msg)
+                        msg.record()
                     };
                     let id = msg.id.clone();
                     events.push(EventPayload::NewMessage(NewMessage {
@@ -326,7 +316,7 @@ impl SessionState {
                     parent = Some(id);
                 }
                 // Known prefix before the news: advance the parent cursor only.
-                _ => parent = Some(msg.id),
+                _ => parent = msg.id,
             }
         }
         events
@@ -498,7 +488,7 @@ impl SessionState {
     }
 
     /// `(tool_call_id, name, content)` for a transcript tool message answering a pending client tool call.
-    fn pending_client_result(&self, m: &Message) -> Option<(String, String, String)> {
+    fn pending_client_result(&self, m: &WireMessage) -> Option<(String, String, String)> {
         if m.role != Role::Tool {
             return None;
         }
@@ -544,7 +534,7 @@ impl SessionState {
     /// IS that node's echo, so it adopts the node's id and the tree sees a
     /// resend rather than a fork. Identification, not deletion — nothing is
     /// dropped, so the reconcile plan stays coherent.
-    fn normalize_client_view(&self, messages: Vec<Message>) -> Vec<Message> {
+    fn normalize_client_view(&self, messages: Vec<WireMessage>) -> Vec<WireMessage> {
         let known: std::collections::HashSet<&str> = self.nodes.iter().map(|n| n.id()).collect();
         let on_path: std::collections::HashSet<&str> = self
             .head_id
@@ -554,13 +544,17 @@ impl SessionState {
         messages
             .into_iter()
             .map(|m| {
-                if m.role == Role::Tool && !known.contains(m.id.as_str()) {
+                let is_known = m.id.as_deref().is_some_and(|id| known.contains(id));
+                if m.role == Role::Tool && !is_known {
                     if let Some(node_id) = m
                         .tool_call_id
                         .as_deref()
                         .and_then(|tcid| self.recorded_result_node(tcid, &on_path))
                     {
-                        return Message { id: node_id, ..m };
+                        return WireMessage {
+                            id: Some(node_id),
+                            ..m
+                        };
                     }
                 }
                 m
@@ -634,9 +628,7 @@ impl SessionState {
                         if message.role == Role::User {
                             let request = self.emit_decision_request(
                                 &events,
-                                DecisionTrigger::ClientMessage {
-                                    message: assign_id(message),
-                                },
+                                DecisionTrigger::ClientMessage { message },
                             );
                             events.push(request);
                         }
@@ -645,11 +637,9 @@ impl SessionState {
                         messages,
                         stream: _,
                     } => {
-                        // Assign ids, then fold client echoes of already-recorded
-                        // results onto their nodes so the tree sees a resend, not
-                        // a fork.
-                        let messages = self
-                            .normalize_client_view(messages.into_iter().map(assign_id).collect());
+                        // Fold client echoes of already-recorded results onto their
+                        // nodes so the tree sees a resend, not a fork.
+                        let messages = self.normalize_client_view(messages);
 
                         // Answers to still-pending client calls, first-wins per
                         // call id (a repeat within one view has no recorded node
@@ -785,9 +775,7 @@ impl SessionState {
                         if message.role == Role::User {
                             let request = self.emit_decision_request(
                                 &events,
-                                DecisionTrigger::ClientMessage {
-                                    message: assign_id(message),
-                                },
+                                DecisionTrigger::ClientMessage { message },
                             );
                             events.push(request);
                         }
@@ -805,15 +793,6 @@ impl SessionState {
             } => {
                 Self::ensure_internal(caller)?;
 
-                // Mint an id when the worker omits one, as interrupts do. The id
-                // becomes the assistant node's id and the id AG-UI streams, so a
-                // worker never has to invent one to avoid forking.
-                let call_id = if call_id.is_empty() {
-                    new_call_id()
-                } else {
-                    call_id
-                };
-
                 // Idempotent by id: (re-)issue only for a new/Failed/RetryScheduled call.
                 let issue = matches!(
                     self.llm_calls.get(&call_id).map(|c| &c.tracking.status),
@@ -821,8 +800,14 @@ impl SessionState {
                 );
 
                 if issue {
+                    // Mint ids now so the stored prompt (and its retries) is
+                    // deterministic across replay; keep the wire form.
                     let request = LlmRequest {
-                        messages: request.messages.into_iter().map(assign_id).collect(),
+                        messages: request
+                            .messages
+                            .into_iter()
+                            .map(|m| WireMessage::from(m.record()))
+                            .collect(),
                         ..request
                     };
                     let mut events = vec![EventPayload::LlmCallRequested(LlmCallRequested {
@@ -901,8 +886,8 @@ impl SessionState {
                         // the id the client was already streamed — AG-UI keys the
                         // assistant message on the call id — so a client's
                         // full-view echo matches this node instead of forking.
-                        let message = Message {
-                            id: call_id.clone(),
+                        let message = WireMessage {
+                            id: Some(call_id.clone()),
                             role: Role::Assistant,
                             content,
                             tool_calls,
@@ -986,13 +971,6 @@ impl SessionState {
                 retry,
             } => {
                 Self::ensure_internal(caller)?;
-                // Mint an id when the worker omits one (LLM-driven tools carry the
-                // model's id; an ad-hoc worker tool need not invent one).
-                let tool_call_id = if tool_call_id.is_empty() {
-                    new_call_id()
-                } else {
-                    tool_call_id
-                };
                 match self.tool_calls.get(&tool_call_id) {
                     Some(_) => Ok(vec![]),
                     None => {
@@ -1319,19 +1297,17 @@ impl SessionState {
                 for action in actions {
                     let sub_events = match action {
                         // Settle for work this batch voided: drop it.
-                        WorkerAction::ToolResult { ref id, .. }
-                        | WorkerAction::ToolError { ref id, .. }
+                        Action::ToolResult { ref id, .. } | Action::ToolError { ref id, .. }
                             if Self::batch_voided(&events, EffectKind::ToolCall, id) =>
                         {
                             Ok(vec![])
                         }
-                        WorkerAction::LlmResult { ref id, .. }
-                        | WorkerAction::LlmError { ref id, .. }
+                        Action::LlmResult { ref id, .. } | Action::LlmError { ref id, .. }
                             if Self::batch_voided(&events, EffectKind::LlmCall, id) =>
                         {
                             Ok(vec![])
                         }
-                        WorkerAction::CallLlm {
+                        Action::CallLlm {
                             id,
                             request,
                             stream,
@@ -1347,7 +1323,7 @@ impl SessionState {
                             },
                             &system,
                         ),
-                        WorkerAction::CallTool {
+                        Action::CallTool {
                             id,
                             name,
                             arguments,
@@ -1363,7 +1339,7 @@ impl SessionState {
                             },
                             &system,
                         ),
-                        WorkerAction::SpawnSubAgent {
+                        Action::SpawnSubAgent {
                             session_id,
                             agent_id,
                             tool_call_id,
@@ -1377,7 +1353,7 @@ impl SessionState {
                             },
                             &system,
                         ),
-                        WorkerAction::SendMessage {
+                        Action::SendMessage {
                             session_id,
                             message,
                         } => Ok(vec![EventPayload::SessionMessageRequested(
@@ -1386,7 +1362,7 @@ impl SessionState {
                                 message,
                             },
                         )]),
-                        WorkerAction::Interrupt {
+                        Action::Interrupt {
                             interrupt_id,
                             reason,
                             payload,
@@ -1395,11 +1371,7 @@ impl SessionState {
                             _ => {
                                 let mut sub =
                                     vec![EventPayload::SessionInterrupted(SessionInterrupted {
-                                        interrupt_id: if interrupt_id.is_empty() {
-                                            new_call_id()
-                                        } else {
-                                            interrupt_id
-                                        },
+                                        interrupt_id,
                                         origin: InterruptOrigin::Frontend,
                                         reason,
                                         payload,
@@ -1408,7 +1380,7 @@ impl SessionState {
                                 Ok(sub)
                             }
                         },
-                        WorkerAction::ToolResult {
+                        Action::ToolResult {
                             id,
                             attempt,
                             result,
@@ -1420,7 +1392,7 @@ impl SessionState {
                             },
                             &system,
                         ),
-                        WorkerAction::LlmResult {
+                        Action::LlmResult {
                             id,
                             attempt,
                             response,
@@ -1432,7 +1404,7 @@ impl SessionState {
                             },
                             &system,
                         ),
-                        WorkerAction::ToolError {
+                        Action::ToolError {
                             id,
                             attempt,
                             error,
@@ -1447,7 +1419,7 @@ impl SessionState {
                             },
                             &system,
                         ),
-                        WorkerAction::LlmError {
+                        Action::LlmError {
                             id,
                             attempt,
                             error,
@@ -1465,7 +1437,7 @@ impl SessionState {
                             },
                             &system,
                         ),
-                        WorkerAction::Done { data } => {
+                        Action::Done { data } => {
                             self.handle(CommandPayload::MarkDone { data }, &system)
                         }
                     };
@@ -1786,7 +1758,7 @@ mod tests {
     use crate::runtime::llm::{LlmRequest, LlmResponse};
     use crate::runtime::owner::SessionOwner;
     use crate::runtime::retry::RetryPolicy;
-    use crate::runtime::session::decision::{ClientPayload, DecisionTrigger, WorkerAction};
+    use crate::runtime::session::decision::{Action, ClientPayload, DecisionTrigger};
     use crate::runtime::session::events::{EventPayload, LlmHandler, ToolHandler};
     use crate::runtime::session::message::{Content, Message, Role};
     use crate::runtime::session::state::{EffectStatus, SessionState, SessionStatus};
@@ -2184,8 +2156,8 @@ mod tests {
     fn submit_client_payload_with_active_turn_id_is_rejected() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
         let payload = ClientPayload::Message {
-            message: Message {
-                id: String::new(),
+            message: WireMessage {
+                id: None,
                 role: Role::User,
                 content: Some(Content::Text("hello".to_string())),
                 tool_calls: None,
@@ -2232,8 +2204,8 @@ mod tests {
             &mut agg,
             CommandPayload::SubmitClientPayload {
                 payload: ClientPayload::Message {
-                    message: Message {
-                        id: String::new(),
+                    message: WireMessage {
+                        id: None,
                         role: Role::User,
                         content: Some(Content::Text("hi".to_string())),
                         tool_calls: None,
@@ -2267,7 +2239,7 @@ mod tests {
                 CommandPayload::SubmitWorkerDecision {
                     decision_id,
                     transcript: vec![],
-                    actions: vec![WorkerAction::CallTool {
+                    actions: vec![Action::CallTool {
                         id: "tc-1".to_string(),
                         name: "my_tool".to_string(),
                         arguments: "{}".to_string(),
@@ -2301,8 +2273,8 @@ mod tests {
             &mut agg,
             CommandPayload::SubmitClientPayload {
                 payload: ClientPayload::Message {
-                    message: Message {
-                        id: String::new(),
+                    message: WireMessage {
+                        id: None,
                         role: Role::User,
                         content: Some(Content::Text("hi".to_string())),
                         tool_calls: None,
@@ -2348,7 +2320,7 @@ mod tests {
                 CommandPayload::SubmitWorkerDecision {
                     decision_id,
                     transcript: vec![],
-                    actions: vec![WorkerAction::CallTool {
+                    actions: vec![Action::CallTool {
                         id: "tc-1".to_string(),
                         name: "my_tool".to_string(),
                         arguments: "{}".to_string(),
@@ -2383,8 +2355,8 @@ mod tests {
         );
 
         let user_message = ClientPayload::Message {
-            message: Message {
-                id: String::new(),
+            message: WireMessage {
+                id: None,
                 role: Role::User,
                 content: Some(Content::Text("hello".to_string())),
                 tool_calls: None,
@@ -2447,8 +2419,8 @@ mod tests {
         let events = dispatch(
             &mut agg,
             CommandPayload::SendMessage {
-                message: Message {
-                    id: String::new(),
+                message: WireMessage {
+                    id: None,
                     role: Role::User,
                     content: Some(Content::Text("hi".to_string())),
                     tool_calls: None,
@@ -2568,9 +2540,9 @@ mod tests {
         assert_eq!(call.tracking.status, EffectStatus::Pending);
     }
 
-    fn node_msg(id: &str, role: Role, content: &str) -> Message {
-        Message {
-            id: id.into(),
+    fn node_msg(id: &str, role: Role, content: &str) -> WireMessage {
+        WireMessage {
+            id: (!id.is_empty()).then(|| id.to_string()),
             role,
             content: Some(Content::Text(content.into())),
             tool_calls: None,
@@ -2579,7 +2551,7 @@ mod tests {
         }
     }
 
-    fn request_with(messages: Vec<Message>) -> LlmRequest {
+    fn request_with(messages: Vec<WireMessage>) -> LlmRequest {
         LlmRequest {
             model: "test-model".to_string(),
             messages,
@@ -2591,7 +2563,7 @@ mod tests {
     }
 
     /// Drive a worker `Append` action onto the tree via a user-message decision.
-    fn append_via_worker(agg: &mut Aggregate<SessionState>, nodes: Vec<NewMessage>) {
+    fn append_via_worker(agg: &mut Aggregate<SessionState>, transcript: Vec<WireMessage>) {
         let setup = dispatch(
             agg,
             CommandPayload::SubmitClientPayload {
@@ -2614,7 +2586,7 @@ mod tests {
             agg,
             CommandPayload::SubmitWorkerDecision {
                 decision_id,
-                transcript: nodes.into_iter().map(|n| n.message).collect(),
+                transcript,
                 actions: vec![],
                 state: None,
             },
@@ -2694,17 +2666,17 @@ mod tests {
         match trigger {
             DecisionTrigger::ClientTranscript { messages, .. } => {
                 assert_eq!(
-                    messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
-                    vec!["c1", "a1", "c2"]
+                    messages.iter().map(|m| m.id.as_deref()).collect::<Vec<_>>(),
+                    vec![Some("c1"), Some("a1"), Some("c2")]
                 );
             }
             t => panic!("expected a UserTranscript trigger; got {t:?}"),
         }
     }
 
-    fn tool_msg(tool_call_id: &str, content: &str) -> Message {
-        Message {
-            id: String::new(),
+    fn tool_msg(tool_call_id: &str, content: &str) -> WireMessage {
+        WireMessage {
+            id: None,
             role: Role::Tool,
             content: Some(Content::Text(content.into())),
             tool_calls: None,
@@ -2713,16 +2685,16 @@ mod tests {
         }
     }
 
-    fn tool_node(id: &str, tool_call_id: &str, content: &str) -> Message {
-        Message {
-            id: id.into(),
+    fn tool_node(id: &str, tool_call_id: &str, content: &str) -> WireMessage {
+        WireMessage {
+            id: Some(id.into()),
             ..tool_msg(tool_call_id, content)
         }
     }
 
     /// Record `transcript` into the tree via one worker decision, giving tests
     /// exact control over recorded ids (reconcile keeps explicit unknown ids).
-    fn seed_tree(agg: &mut Aggregate<SessionState>, transcript: Vec<Message>) {
+    fn seed_tree(agg: &mut Aggregate<SessionState>, transcript: Vec<WireMessage>) {
         let events = dispatch(
             agg,
             CommandPayload::SubmitClientPayload {
@@ -2748,7 +2720,7 @@ mod tests {
     }
 
     /// The messages carried by the (fired or queued) `client.messages` decision.
-    fn transcript_messages(events: &[EventPayload]) -> Option<Vec<Message>> {
+    fn transcript_messages(events: &[EventPayload]) -> Option<Vec<WireMessage>> {
         events.iter().find_map(|e| {
             let trigger = match e {
                 EventPayload::WorkerDecisionRequested(p) => &p.trigger,
@@ -2764,7 +2736,7 @@ mod tests {
 
     fn submit_messages(
         agg: &mut Aggregate<SessionState>,
-        messages: Vec<Message>,
+        messages: Vec<WireMessage>,
     ) -> Vec<EventPayload> {
         dispatch(
             agg,
@@ -3016,7 +2988,8 @@ mod tests {
         // The echo adopts w1's id, so the whole prefix is known and only the new
         // user turn is news — no fork.
         assert_eq!(
-            messages[2].id, "w1",
+            messages[2].id.as_deref(),
+            Some("w1"),
             "tool echo adopts the recorded node id"
         );
         let known: std::collections::HashSet<&str> =
@@ -3059,7 +3032,8 @@ mod tests {
 
         let messages = transcript_messages(&events).expect("a transcript decision");
         assert_eq!(
-            messages[2].id, "w1",
+            messages[2].id.as_deref(),
+            Some("w1"),
             "the replayed tool result folds onto w1"
         );
         let known: std::collections::HashSet<&str> =
@@ -3414,55 +3388,13 @@ mod tests {
                 EventPayload::WorkerDecisionRequested(p) => match &p.trigger {
                     DecisionTrigger::LlmFinished {
                         message: Some(m), ..
-                    } => Some(m.id.clone()),
+                    } => m.id.clone(),
                     _ => None,
                 },
                 _ => None,
             })
             .expect("an llm.finished trigger carrying the assistant");
         assert_eq!(msg_id, "call-1");
-    }
-
-    #[test]
-    fn request_llm_call_mints_an_id_when_the_worker_omits_it() {
-        let mut agg = create_session("sess-1", "tenant-a", "user-1");
-        let events = request_llm(&mut agg, "", LlmHandler::Server);
-
-        let minted = events
-            .iter()
-            .find_map(|e| match e {
-                EventPayload::LlmCallRequested(r) => Some(r.call_id.clone()),
-                _ => None,
-            })
-            .expect("a requested event");
-        assert!(!minted.is_empty(), "the engine mints an id when omitted");
-        assert!(agg.state.llm_calls.contains_key(&minted));
-    }
-
-    #[test]
-    fn request_tool_call_mints_an_id_when_the_worker_omits_it() {
-        let mut agg = create_session("sess-1", "tenant-a", "user-1");
-        let events = dispatch(
-            &mut agg,
-            CommandPayload::RequestToolCall {
-                tool_call_id: String::new(),
-                name: "do_thing".to_string(),
-                arguments: "{}".to_string(),
-                handler: ToolHandler::Worker,
-                retry: RetryPolicy::no_retry(),
-            },
-            &system(),
-        );
-
-        let minted = events
-            .iter()
-            .find_map(|e| match e {
-                EventPayload::ToolCallRequested(t) => Some(t.tool_call_id.clone()),
-                _ => None,
-            })
-            .expect("a requested event");
-        assert!(!minted.is_empty(), "the engine mints an id when omitted");
-        assert!(agg.state.tool_calls.contains_key(&minted));
     }
 
     #[test]
@@ -3602,14 +3534,8 @@ mod tests {
         append_via_worker(
             &mut agg,
             vec![
-                NewMessage {
-                    parent_id: None,
-                    message: node_msg("sys", Role::System, "sys prompt"),
-                },
-                NewMessage {
-                    parent_id: Some("sys".to_string()),
-                    message: node_msg("u1", Role::User, "hi"),
-                },
+                node_msg("sys", Role::System, "sys prompt"),
+                node_msg("u1", Role::User, "hi"),
             ],
         );
         dispatch(
@@ -3665,8 +3591,8 @@ mod tests {
 
         assert_eq!(reissued.request.model, "test-model");
         assert_eq!(reissued.request.messages.len(), 2);
-        assert_eq!(reissued.request.messages[0].id, "sys");
-        assert_eq!(reissued.request.messages[1].id, "u1");
+        assert_eq!(reissued.request.messages[0].id.as_deref(), Some("sys"));
+        assert_eq!(reissued.request.messages[1].id.as_deref(), Some("u1"));
         assert!(matches!(
             &reissued.request.messages[1].content,
             Some(Content::Text(t)) if t == "hi"
@@ -3789,7 +3715,7 @@ mod tests {
             CommandPayload::SubmitWorkerDecision {
                 decision_id,
                 transcript: vec![],
-                actions: vec![WorkerAction::LlmResult {
+                actions: vec![Action::LlmResult {
                     id: "llm-1".to_string(),
                     attempt: Some(0),
                     response: LlmResponse {
@@ -4182,8 +4108,8 @@ mod tests {
             &mut agg,
             CommandPayload::SubmitClientPayload {
                 payload: ClientPayload::Message {
-                    message: Message {
-                        id: String::new(),
+                    message: WireMessage {
+                        id: None,
                         role: Role::User,
                         content: Some(Content::Text("go".to_string())),
                         tool_calls: None,
@@ -4206,7 +4132,7 @@ mod tests {
             CommandPayload::SubmitWorkerDecision {
                 decision_id,
                 transcript: vec![],
-                actions: vec![WorkerAction::CallTool {
+                actions: vec![Action::CallTool {
                     id: "t1".to_string(),
                     name: "getWeather".to_string(),
                     arguments: "{}".to_string(),
@@ -4227,7 +4153,7 @@ mod tests {
             CommandPayload::SubmitWorkerDecision {
                 decision_id: exec,
                 transcript: vec![],
-                actions: vec![WorkerAction::ToolResult {
+                actions: vec![Action::ToolResult {
                     id: "t1".to_string(),
                     attempt: Some(0),
                     result: "RA".to_string(),
@@ -4311,8 +4237,8 @@ mod tests {
             &mut agg,
             CommandPayload::SubmitClientPayload {
                 payload: ClientPayload::Message {
-                    message: Message {
-                        id: String::new(),
+                    message: WireMessage {
+                        id: None,
                         role: Role::User,
                         content: Some(Content::Text("go".to_string())),
                         tool_calls: None,
@@ -4339,14 +4265,14 @@ mod tests {
                 decision_id,
                 transcript: vec![],
                 actions: vec![
-                    WorkerAction::CallTool {
+                    Action::CallTool {
                         id: "t1".to_string(),
                         name: "getWeather".to_string(),
                         arguments: "{}".to_string(),
                         handler: ToolHandler::Worker,
                         retry: RetryPolicy::no_retry(),
                     },
-                    WorkerAction::SpawnSubAgent {
+                    Action::SpawnSubAgent {
                         session_id: "child-1".to_string(),
                         agent_id: "researcher".to_string(),
                         tool_call_id: "s1".to_string(),
@@ -4818,8 +4744,8 @@ mod tests {
             &mut agg,
             CommandPayload::SubmitClientPayload {
                 payload: ClientPayload::Message {
-                    message: Message {
-                        id: String::new(),
+                    message: WireMessage {
+                        id: None,
                         role: Role::User,
                         content: Some(Content::Text("hi".to_string())),
                         tool_calls: None,
@@ -4889,7 +4815,7 @@ mod tests {
             CommandPayload::SubmitWorkerDecision {
                 decision_id,
                 transcript: vec![],
-                actions: vec![WorkerAction::Done {
+                actions: vec![Action::Done {
                     data: serde_json::Value::Null,
                 }],
                 state: None,
@@ -4937,14 +4863,14 @@ mod tests {
                 decision_id: d1,
                 transcript: vec![node_msg("u1", Role::User, "hi")],
                 actions: vec![
-                    WorkerAction::CallLlm {
+                    Action::CallLlm {
                         id: "llm-1".to_string(),
                         request: request_with(vec![]),
                         stream: false,
                         retry: RetryPolicy::no_retry(),
                         handler: LlmHandler::Server,
                     },
-                    WorkerAction::Interrupt {
+                    Action::Interrupt {
                         interrupt_id: "int-1".to_string(),
                         reason: "hold".to_string(),
                         payload: serde_json::Value::Null,
@@ -4968,8 +4894,8 @@ mod tests {
             &mut agg,
             CommandPayload::SubmitClientPayload {
                 payload: ClientPayload::Message {
-                    message: Message {
-                        id: String::new(),
+                    message: WireMessage {
+                        id: None,
                         role: Role::User,
                         content: Some(Content::Text("hi".to_string())),
                         tool_calls: None,
@@ -5011,7 +4937,7 @@ mod tests {
             CommandPayload::SubmitWorkerDecision {
                 decision_id,
                 transcript: vec![],
-                actions: vec![WorkerAction::Done {
+                actions: vec![Action::Done {
                     data: serde_json::Value::Null,
                 }],
                 state: None,
@@ -5058,8 +4984,8 @@ mod tests {
             &mut agg,
             CommandPayload::SubmitClientPayload {
                 payload: ClientPayload::Message {
-                    message: Message {
-                        id: String::new(),
+                    message: WireMessage {
+                        id: None,
                         role: Role::User,
                         content: Some(Content::Text("crawl the site".to_string())),
                         tool_calls: None,
@@ -5085,7 +5011,7 @@ mod tests {
             CommandPayload::SubmitWorkerDecision {
                 decision_id,
                 transcript: vec![],
-                actions: vec![WorkerAction::CallTool {
+                actions: vec![Action::CallTool {
                     id: "tc-1".to_string(),
                     name: "crawl".to_string(),
                     arguments: "{}".to_string(),
@@ -5192,8 +5118,8 @@ mod tests {
             &mut agg,
             CommandPayload::SubmitClientPayload {
                 payload: ClientPayload::Message {
-                    message: Message {
-                        id: String::new(),
+                    message: WireMessage {
+                        id: None,
                         role: Role::User,
                         content: Some(Content::Text("send the email".to_string())),
                         tool_calls: None,
@@ -5221,7 +5147,7 @@ mod tests {
             CommandPayload::SubmitWorkerDecision {
                 decision_id,
                 transcript: vec![],
-                actions: vec![WorkerAction::Interrupt {
+                actions: vec![Action::Interrupt {
                     interrupt_id: "int-1".to_string(),
                     reason: "confirmation".to_string(),
                     payload: serde_json::json!({"message": "Send the email?"}),
@@ -5280,8 +5206,8 @@ mod tests {
             &mut agg,
             CommandPayload::SubmitClientPayload {
                 payload: ClientPayload::Message {
-                    message: Message {
-                        id: String::new(),
+                    message: WireMessage {
+                        id: None,
                         role: Role::User,
                         content: Some(Content::Text("hi".to_string())),
                         tool_calls: None,
@@ -5514,8 +5440,8 @@ mod tests {
     fn submit_decision(
         agg: &mut Aggregate<SessionState>,
         decision_id: String,
-        transcript: Vec<Message>,
-        actions: Vec<WorkerAction>,
+        transcript: Vec<WireMessage>,
+        actions: Vec<Action>,
     ) -> Vec<EventPayload> {
         dispatch(
             agg,
@@ -5529,8 +5455,8 @@ mod tests {
         )
     }
 
-    fn call_tool_action(id: &str) -> WorkerAction {
-        WorkerAction::CallTool {
+    fn call_tool_action(id: &str) -> Action {
+        Action::CallTool {
             id: id.to_string(),
             name: "find".to_string(),
             arguments: "{}".to_string(),
@@ -5539,8 +5465,8 @@ mod tests {
         }
     }
 
-    fn tool_result_action(id: &str) -> WorkerAction {
-        WorkerAction::ToolResult {
+    fn tool_result_action(id: &str) -> Action {
+        Action::ToolResult {
             id: id.to_string(),
             attempt: Some(0),
             result: format!("result-{id}"),
@@ -5549,12 +5475,15 @@ mod tests {
 
     /// The transcript the runtime would hand a decision requested right now:
     /// the root→head path, exactly as `try_extract` materializes it.
-    fn delivered_transcript(agg: &Aggregate<SessionState>) -> Vec<Message> {
+    fn delivered_transcript(agg: &Aggregate<SessionState>) -> Vec<WireMessage> {
         agg.state
             .head_id
             .as_deref()
             .map(|h| agg.state.message_tree().path_to(h))
             .unwrap_or_default()
+            .into_iter()
+            .map(WireMessage::from)
+            .collect()
     }
 
     fn pending_worker_decisions(agg: &Aggregate<SessionState>) -> usize {
@@ -5583,7 +5512,7 @@ mod tests {
     fn record_bases(
         events: &[EventPayload],
         agg: &Aggregate<SessionState>,
-        bases: &mut HashMap<String, Vec<Message>>,
+        bases: &mut HashMap<String, Vec<WireMessage>>,
     ) {
         let frozen = delivered_transcript(agg);
         for e in events {
@@ -5597,7 +5526,10 @@ mod tests {
     /// answers each live decision with the transcript it was frozen, and a wake
     /// fires after every step to surface queued work. Executes reply with a
     /// result; finishes append their result node to the frozen base.
-    fn drive_worker(agg: &mut Aggregate<SessionState>, bases: &mut HashMap<String, Vec<Message>>) {
+    fn drive_worker(
+        agg: &mut Aggregate<SessionState>,
+        bases: &mut HashMap<String, Vec<WireMessage>>,
+    ) {
         for _ in 0..128 {
             let mut live: Vec<(String, DecisionTrigger)> = agg
                 .state
@@ -5681,7 +5613,7 @@ mod tests {
     #[test]
     fn parallel_tool_finishes_keep_results_on_one_path() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
-        let mut bases: HashMap<String, Vec<Message>> = HashMap::new();
+        let mut bases: HashMap<String, Vec<WireMessage>> = HashMap::new();
 
         // Record [user, assistant] and fan out into two worker-handled tool
         // calls in one batch — the shape a parallel tool call produces.
@@ -5837,8 +5769,8 @@ mod tests {
 
     // ── Concurrent LLM calls (fan-out) ───────────────────────────────────
 
-    fn call_llm_action(id: &str, handler: LlmHandler) -> WorkerAction {
-        WorkerAction::CallLlm {
+    fn call_llm_action(id: &str, handler: LlmHandler) -> Action {
+        Action::CallLlm {
             id: id.to_string(),
             request: request_with(vec![]),
             stream: false,
@@ -5897,7 +5829,7 @@ mod tests {
     /// Open a worker decision (via a user message) and answer it with `actions`.
     fn submit_decision_with(
         agg: &mut Aggregate<SessionState>,
-        actions: Vec<WorkerAction>,
+        actions: Vec<Action>,
     ) -> Vec<EventPayload> {
         let setup = dispatch(
             agg,
@@ -6265,7 +6197,7 @@ mod tests {
     fn submit_state(
         agg: &mut Aggregate<SessionState>,
         decision_id: String,
-        transcript: Vec<Message>,
+        transcript: Vec<WireMessage>,
         state: Option<serde_json::Value>,
     ) -> Vec<EventPayload> {
         dispatch(
@@ -6473,7 +6405,7 @@ mod tests {
             CommandPayload::SubmitWorkerDecision {
                 decision_id: d1,
                 transcript: vec![node_msg("u1", Role::User, "hi")],
-                actions: vec![WorkerAction::CallTool {
+                actions: vec![Action::CallTool {
                     id: "t1".to_string(),
                     name: "slow".to_string(),
                     arguments: "{}".to_string(),
@@ -6751,7 +6683,7 @@ mod tests {
     fn fork_drops_a_queued_execute_decision() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
         let d1 = open_decision(&mut agg, "hi");
-        let call_tool = |id: &str| WorkerAction::CallTool {
+        let call_tool = |id: &str| Action::CallTool {
             id: id.to_string(),
             name: "slow".to_string(),
             arguments: "{}".to_string(),
@@ -6818,7 +6750,7 @@ mod tests {
             CommandPayload::SubmitWorkerDecision {
                 decision_id: d2,
                 transcript: vec![node_msg("x1", Role::User, "redo")],
-                actions: vec![WorkerAction::ToolResult {
+                actions: vec![Action::ToolResult {
                     id: "tc-1".to_string(),
                     attempt: None,
                     result: "late".to_string(),
@@ -6849,12 +6781,12 @@ mod tests {
                 decision_id: d1,
                 transcript: vec![node_msg("u1", Role::User, "hi")],
                 actions: vec![
-                    WorkerAction::Interrupt {
+                    Action::Interrupt {
                         interrupt_id: "int-1".to_string(),
                         reason: "hold".to_string(),
                         payload: serde_json::Value::Null,
                     },
-                    WorkerAction::LlmResult {
+                    Action::LlmResult {
                         id: "llm-1".to_string(),
                         attempt: None,
                         response: llm_response("late"),
@@ -6916,7 +6848,7 @@ mod tests {
                     node_msg("u1", Role::User, "hi"),
                     node_msg("b1", Role::Assistant, "!"),
                 ],
-                actions: vec![WorkerAction::ToolResult {
+                actions: vec![Action::ToolResult {
                     id: "shared".to_string(),
                     attempt: None,
                     result: "ok".to_string(),

@@ -5,7 +5,8 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::runtime::owner::SessionOwner;
-use crate::runtime::session::message::{Message, ToolCall};
+use crate::runtime::session::message::ToolCall;
+use crate::runtime::session::wire::WireMessage;
 
 /// An image returned by the model in the response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,7 +29,7 @@ pub struct LlmTool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmRequest {
     pub model: String,
-    pub messages: Vec<Message>,
+    pub messages: Vec<WireMessage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<LlmTool>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
