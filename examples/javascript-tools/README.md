@@ -23,7 +23,7 @@ Three terminals.
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
-substructure serve --dev --provider anthropic --worker-url http://localhost:4444
+subs serve --dev --provider anthropic --worker-url http://localhost:4444
 ```
 
 **2. Start the worker** (listens on `:4444`):
@@ -47,7 +47,7 @@ curl -s localhost:8080/api/machine/sessions/submit \
 Then watch the turn play out (use the `session_id` from the response):
 
 ```sh
-substructure sessions events <SESSION_ID> --url http://localhost:8080
+subs sessions events <SESSION_ID> --url http://localhost:8080
 ```
 
 You'll see the user message, the model's tool call, the tool result, the model's

@@ -69,7 +69,7 @@ try {
 } catch (err: any) {
     append(
         "tool",
-        `✗ couldn't mint a client token: ${err?.message ?? err}. is \`substructure start --dev --port 9000 --worker-url http://localhost:3333/agent\` running?`,
+        `✗ couldn't mint a client token: ${err?.message ?? err}. is \`subs start --dev --port 9000 --worker-url http://localhost:3333/agent\` running?`,
     );
     throw err;
 }

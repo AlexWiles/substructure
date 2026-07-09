@@ -12,7 +12,7 @@ In one terminal, a local engine pointed at this app's worker route:
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
-substructure start --dev --port 9000 --worker-url http://localhost:3030/api/agent
+subs start --dev --port 9000 --worker-url http://localhost:3030/api/agent
 ```
 
 In another, the app:

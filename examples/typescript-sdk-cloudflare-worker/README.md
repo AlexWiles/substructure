@@ -12,12 +12,12 @@ Substructure backend).
 
 1. Log in to Substructure.
    ```sh
-   substructure login
+   subs login
    ```
 
 2. Link this directory to your org/app (writes `substructure.toml`).
    ```sh
-   substructure link
+   subs link
    ```
 
 3. Deploy the worker and copy its URL.
@@ -27,13 +27,13 @@ Substructure backend).
 
 4. Point the app at the worker URL (this also enables delivery).
    ```sh
-   substructure webhook set https://<your-worker>.workers.dev
+   subs webhook set https://<your-worker>.workers.dev
    ```
 
 5. Pipe the signing secret into the worker env — the secret never
    touches your terminal or shell history.
    ```sh
-   substructure webhook secret | wrangler secret put SIGNING_SECRET
+   subs webhook secret | wrangler secret put SIGNING_SECRET
    ```
 
 ## Trigger a turn
@@ -41,7 +41,7 @@ Substructure backend).
 Mint an API key and pipe it straight into the client process:
 
 ```sh
-export SUBSTRUCTURE_API_KEY=$(substructure keys create local-dev)
+export SUBSTRUCTURE_API_KEY=$(subs keys create local-dev)
 tsx client.ts
 ```
 
@@ -50,12 +50,12 @@ tsx client.ts
 ## Useful commands
 
 ```sh
-substructure webhook show          # endpoint + state
-substructure webhook secret        # print signing secret to stdout
-substructure webhook rotate-secret # rotate and print new signing secret
-substructure webhook disable       # pause delivery (keeps URL)
-substructure sessions list         # recent sessions
-substructure keys list             # active API keys
+subs webhook show          # endpoint + state
+subs webhook secret        # print signing secret to stdout
+subs webhook rotate-secret # rotate and print new signing secret
+subs webhook disable       # pause delivery (keeps URL)
+subs sessions list         # recent sessions
+subs keys list             # active API keys
 ```
 
 All secret-emitting commands (`keys create`, `webhook secret`,

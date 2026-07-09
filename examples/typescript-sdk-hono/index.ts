@@ -2,7 +2,7 @@
 // (Request) => Promise<Response>, so it drops into any Web-fetch framework.
 //
 // Point a Substructure server at this URL:
-//   substructure start --dev --port 9000 --worker-url http://localhost:3000/agent
+//   subs start --dev --port 9000 --worker-url http://localhost:3000/agent
 
 import { serve } from "@hono/node-server";
 import { agent, tool, toolLoop, worker } from "@substructure.ai/sdk";

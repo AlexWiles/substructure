@@ -1,5 +1,5 @@
 // The Substructure worker webhook: the engine POSTs decision requests here.
-// Point the engine at this route: `substructure start --worker-url https://<app>/api/agent`.
+// Point the engine at this route: `subs start --worker-url https://<app>/api/agent`.
 import { createFileRoute } from "@tanstack/react-router";
 
 import { substructureHandler } from "../../substructure";

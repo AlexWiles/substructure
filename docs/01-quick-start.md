@@ -15,14 +15,14 @@ npm i -g @substructure.ai/cli
 Verify it:
 
 ```bash
-substructure --help
+subs --help
 ```
 
 ## 2. Log in and create an app
 
 ```bash
-substructure login
-substructure apps create example-agent
+subs login
+subs apps create example-agent
 ```
 
 ## 3. Scaffold a worker
@@ -39,7 +39,7 @@ npm i -D wrangler typescript @types/node
 Link the directory to your org and app (writes `substructure.toml`):
 
 ```bash
-substructure link
+subs link
 ```
 
 ## 4. Write the agent
@@ -156,8 +156,8 @@ Copy the printed `*.workers.dev` URL.
 Point the app at the worker, then pipe the signing secret into the worker env:
 
 ```bash
-substructure webhook set https://<your-worker>.workers.dev
-substructure webhook secret | wrangler secret put SIGNING_SECRET
+subs webhook set https://<your-worker>.workers.dev
+subs webhook secret | wrangler secret put SIGNING_SECRET
 ```
 
 The secret goes straight from the CLI to Wrangler; it never lands in your shell history.
@@ -165,13 +165,13 @@ The secret goes straight from the CLI to Wrangler; it never lands in your shell 
 ## 8. Add funds
 
 ```bash
-substructure open
+subs open
 ```
 
 Add funds so your agent can execute LLM calls, then confirm the balance from the terminal:
 
 ```bash
-substructure apps show
+subs apps show
 ```
 
 ## 9. Run a turn
@@ -179,7 +179,7 @@ substructure apps show
 Mint an API key:
 
 ```bash
-export SUBSTRUCTURE_API_KEY=$(substructure keys create quickstart)
+export SUBSTRUCTURE_API_KEY=$(subs keys create quickstart)
 ```
 
 `client.ts`:
@@ -219,13 +219,13 @@ The agent calls `add_todo`, then `list_todos`, and returns the list.
 Each turn runs inside a session. List recent ones:
 
 ```bash
-substructure sessions list
+subs sessions list
 ```
 
 Copy a session id and stream its events:
 
 ```bash
-substructure sessions events <SESSION_ID>
+subs sessions events <SESSION_ID>
 ```
 
 This replays the full history, then stays attached for live events (Ctrl-C to stop). You'll see the user message, each LLM response, the `add_todo` and `list_todos` tool calls with their results, and the final turn output.
@@ -233,7 +233,7 @@ This replays the full history, then stays attached for live events (Ctrl-C to st
 Pass `--from <N>` to skip to a given event index. Or view the same session in the browser:
 
 ```bash
-substructure open
+subs open
 ```
 
 ## Next

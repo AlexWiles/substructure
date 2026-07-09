@@ -30,7 +30,7 @@ Three terminals.
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
-substructure serve --dev --provider anthropic --worker-url http://localhost:4444
+subs serve --dev --provider anthropic --worker-url http://localhost:4444
 ```
 
 **2. Start the worker** (listens on `:4444`):
@@ -70,7 +70,7 @@ curl -s localhost:8080/api/machine/sessions/submit \
 Watch either turn play out:
 
 ```sh
-substructure sessions events <SESSION_ID> --url http://localhost:8080
+subs sessions events <SESSION_ID> --url http://localhost:8080
 ```
 
 In planning you'll see `add_step` build the checklist; after `set_mode` the

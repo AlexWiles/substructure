@@ -13,7 +13,7 @@ Components:
 - **Cloud** The hosted Substructure engine at https://app.substructure.ai. Sign up, point the SDK at it, and run production agent sessions without operating any infrastructure or worrying about LLM providers. This is the default way to use Substructure.
 - **CLI** `@substructure.ai/cli`. Provisions projects, observes live sessions, and debugs runs against the cloud from the terminal. Built to pair with coding agents.
 - **SDK** First-party TypeScript SDK for defining agents and serving them as a worker. An agent is `agent({ name, decide })`, where `decide` is `toolLoop({ llm, instructions, tools, subAgents })` for the common tool/sub-agent loop, or your own function for full control over each decision. Workers in other languages can implement [the decision protocol](./07-protocol.md) directly.
-- **Local** Self-hosted Substructure server (Rust, SQLite). Escape hatch for development and air-gapped deploys; start with `substructure serve`.
+- **Local** Self-hosted Substructure server (Rust, SQLite). Escape hatch for development and air-gapped deploys; start with `subs serve`.
 - **Embedded** The same server in-process via NAPI (`SubstructureEmbedded.create({...})` from `@substructure.ai/sdk/embedded`). Useful for tests and single-binary deploys.
 
 ## Why substructure.ai

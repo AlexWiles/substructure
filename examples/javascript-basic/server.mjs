@@ -7,7 +7,7 @@
 // through the proposed-first line at the top.
 //
 // Point a local Substructure server at it:
-//   substructure serve --dev --provider anthropic --worker-url http://localhost:4444
+//   subs serve --dev --provider anthropic --worker-url http://localhost:4444
 import { createServer } from "node:http";
 
 function decide({ trigger: t, proposed: proposed } = req) {

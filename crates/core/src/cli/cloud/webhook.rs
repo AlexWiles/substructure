@@ -27,7 +27,7 @@ pub enum WebhookCommand {
         scope: AppScope,
     },
     /// Print the current signing secret to stdout (raw, pipe-friendly).
-    /// E.g. `substructure webhook secret | wrangler secret put SUBS_SIGNING_SECRET`.
+    /// E.g. `subs webhook secret | wrangler secret put SUBS_SIGNING_SECRET`.
     Secret {
         #[command(flatten)]
         scope: AppScope,

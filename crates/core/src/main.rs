@@ -3,7 +3,7 @@ use clap::Parser;
 use substructure_core::cli::{self, Command};
 
 #[derive(Parser)]
-#[command(name = "substructure", version)]
+#[command(name = "subs", version)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

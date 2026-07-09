@@ -13,7 +13,7 @@ In one terminal, start a local Substructure server pointed at this worker:
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
-substructure start --dev --port 9000 --worker-url http://localhost:3000/agent
+subs start --dev --port 9000 --worker-url http://localhost:3000/agent
 ```
 
 In another terminal, start the Hono worker:

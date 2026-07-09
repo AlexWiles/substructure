@@ -27,6 +27,8 @@ same version.
 
 ### Changed
 
+- **Breaking:** the CLI binary and installed command are renamed from
+  `substructure` to `subs`
 - **Breaking:** client payloads are namespaced — `client.message` /
   `client.messages` / `client.action` (were `message` / `messages` / `action`),
   matching the dotted `client.*` decision triggers and `tool.*` settle

@@ -50,7 +50,7 @@ In one terminal, start a local Substructure server pointed at this worker. The
 worker makes the OpenAI calls itself, so the server needs no LLM provider:
 
 ```sh
-substructure start --dev --port 9000 --worker-url http://localhost:3030
+subs start --dev --port 9000 --worker-url http://localhost:3030
 ```
 
 In another terminal, start the worker:

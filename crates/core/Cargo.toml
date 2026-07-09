@@ -6,7 +6,7 @@ description = "Core runtime for Substructure"
 license-file = "LICENSE"
 
 [[bin]]
-name = "substructure"
+name = "subs"
 path = "src/main.rs"
 
 [dependencies]

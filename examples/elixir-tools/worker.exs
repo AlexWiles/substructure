@@ -8,7 +8,7 @@
 # flows through the proposed-first clause at the top.
 #
 # Point a local Substructure server at it:
-#   substructure serve --dev --provider anthropic --worker-url http://localhost:4444
+#   subs serve --dev --provider anthropic --worker-url http://localhost:4444
 Mix.install([:bandit, :plug, :jason])
 
 defmodule Worker do

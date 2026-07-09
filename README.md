@@ -296,13 +296,13 @@ function reply(req, decision) {
 The worker is a standard `fetch` handler, so deploy it anywhere that serves HTTP (Cloudflare Workers, Deno, Bun, or Node behind any adapter). Then point [Substructure Cloud](https://app.substructure.ai) at it:
 
 ```sh
-substructure login
-substructure link                                          # link this directory to an org & app
-substructure webhook set https://your-worker.example.com   # where the engine sends decision requests
-export SUBSTRUCTURE_API_KEY=$(substructure keys create demo)
+subs login
+subs link                                          # link this directory to an org & app
+subs webhook set https://your-worker.example.com   # where the engine sends decision requests
+export SUBSTRUCTURE_API_KEY=$(subs keys create demo)
 ```
 
-Engine requests are HMAC-signed: `X-Substructure-Signature` carries HMAC-SHA256 of `"{timestamp}.{body}"` under the secret from `substructure webhook secret`. Verify it in production (the SDK's `verifyWebhookSignature` does this if you'd rather not).
+Engine requests are HMAC-signed: `X-Substructure-Signature` carries HMAC-SHA256 of `"{timestamp}.{body}"` under the secret from `subs webhook secret`. Verify it in production (the SDK's `verifyWebhookSignature` does this if you'd rather not).
 
 Submitting a turn is one POST, no client library:
 
@@ -325,7 +325,7 @@ curl -N "https://api.substructure.ai/api/machine/sessions/$SESSION_ID/events/str
   -H "Authorization: Bearer $SUBSTRUCTURE_API_KEY"
 ```
 
-Prefer to run the engine yourself? `substructure serve` starts a local one and the same flow applies (see [`docs/03-cli.md`](./docs/03-cli.md)).
+Prefer to run the engine yourself? `subs serve` starts a local one and the same flow applies (see [`docs/03-cli.md`](./docs/03-cli.md)).
 
 ### 4. Where the SDK fits
 

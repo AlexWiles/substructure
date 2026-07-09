@@ -24,11 +24,11 @@ export function resolve() {
 
   try {
     const pkgJson = require.resolve(`${pkg}/package.json`);
-    return join(pkgJson, "..", "bin", "substructure");
+    return join(pkgJson, "..", "bin", "subs");
   } catch {
     throw new Error(
       `Could not find package ${pkg}. Make sure it's installed.\n` +
-      `If you're developing locally, build the Rust binary with: cargo build -p substructure-core --bin substructure`
+      `If you're developing locally, build the Rust binary with: cargo build -p substructure-core --bin subs`
     );
   }
 }

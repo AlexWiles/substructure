@@ -7,7 +7,7 @@
 # executor starts clean.
 #
 # Point a local Substructure server at it:
-#   substructure serve --dev --provider anthropic --worker-url http://localhost:4444
+#   subs serve --dev --provider anthropic --worker-url http://localhost:4444
 from fastapi import FastAPI, Request
 
 # ── Tools, per mode ───────────────────────────────────────────────────────────

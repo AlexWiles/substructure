@@ -8,7 +8,7 @@
 //
 // Point a local Substructure server at it:
 //
-//	substructure serve --dev --provider anthropic --worker-url http://localhost:4444
+//	subs serve --dev --provider anthropic --worker-url http://localhost:4444
 package main
 
 import (

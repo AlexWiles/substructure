@@ -276,7 +276,7 @@ fn program_name() -> String {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .unwrap_or_else(|| "substructure".into())
+        .unwrap_or_else(|| "subs".into())
 }
 
 /// The invocation that resumes this session with the next turn. `--output` and
@@ -316,7 +316,7 @@ mod tests {
     #[test]
     fn resume_command_leads_with_program_and_omits_default_db() {
         let cmd = resume_command(
-            "substructure",
+            "subs",
             "sess-1",
             "http://localhost:4444",
             Some("my-agent"),
@@ -326,7 +326,7 @@ mod tests {
         );
         assert_eq!(
             cmd,
-            r#"substructure run --session sess-1 --worker-url http://localhost:4444 --agent my-agent --provider anthropic --input '{"type":"client.message","message":{"role":"user","content":"..."}}'"#
+            r#"subs run --session sess-1 --worker-url http://localhost:4444 --agent my-agent --provider anthropic --input '{"type":"client.message","message":{"role":"user","content":"..."}}'"#
         );
     }
 
@@ -339,7 +339,7 @@ mod tests {
     #[test]
     fn resume_command_echoes_non_default_db_and_skips_absent_flags() {
         let cmd = resume_command(
-            "substructure",
+            "subs",
             "sess-2",
             "http://localhost:4444",
             None,
@@ -355,26 +355,10 @@ mod tests {
 
     #[test]
     fn resume_command_echoes_non_default_output_and_omits_the_default() {
-        let pretty = resume_command(
-            "substructure",
-            "s",
-            "w",
-            None,
-            None,
-            Some("pretty"),
-            "data.db",
-        );
+        let pretty = resume_command("subs", "s", "w", None, None, Some("pretty"), "data.db");
         assert!(pretty.contains(" --output pretty"), "{pretty}");
 
-        let default = resume_command(
-            "substructure",
-            "s",
-            "w",
-            None,
-            None,
-            Some("ag-ui"),
-            "data.db",
-        );
+        let default = resume_command("subs", "s", "w", None, None, Some("ag-ui"), "data.db");
         assert!(!default.contains("--output"), "{default}");
     }
 
