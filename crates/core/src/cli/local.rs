@@ -85,6 +85,7 @@ async fn start_server(
 
     if let Some(ref url) = worker_url {
         register_startup_worker(&adapter, url, signing_secret).await?;
+        tracing::info!(url, "startup worker registered (signing enabled)");
     }
 
     let shutdown = tokio_util::sync::CancellationToken::new();

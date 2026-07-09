@@ -2,6 +2,7 @@ pub mod auth;
 pub mod cloud;
 pub mod env;
 pub mod local;
+mod pretty;
 pub mod run;
 
 use clap::Subcommand;
@@ -172,6 +173,5 @@ pub async fn register_startup_worker(
         })
         .await
         .map_err(|e| anyhow::anyhow!("failed to register startup worker: {e}"))?;
-    tracing::info!(url, "startup worker registered (signing enabled)");
     Ok(())
 }

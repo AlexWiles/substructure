@@ -10,6 +10,27 @@
 //   substructure serve --dev --provider anthropic --worker-url http://localhost:4444
 import { createServer } from "node:http";
 
+function decide({ trigger: t, proposed: proposed } = req) {
+    // The engine proposes actions for a default agent tool loop
+    if (proposed) return proposed;
+
+    // The client sent the conversation → record it, prompt the model.
+    if (t.type === "client.messages") {
+        return {
+            messages: t.messages,
+            actions: [{
+                type: "llm.call", stream: true,
+                request: {
+                    model: "claude-haiku-4-5-20251001",
+                    messages: t.messages
+                }
+            }],
+        };
+    }
+
+    return { actions: [] };
+}
+
 const PORT = 4444;
 
 createServer((req, res) => {
@@ -25,23 +46,3 @@ createServer((req, res) => {
         }
     });
 }).listen(PORT, () => console.log(`worker listening on http://localhost:${PORT}`));
-
-function decide(req) {
-    // The engine proposes actions for a default agent tool loop
-    if (req.proposed) return req.proposed;
-
-    const t = req.trigger;
-
-    // The client sent the conversation → record it, prompt the model.
-    if (t.type === "client.messages") {
-        return {
-            messages: t.messages,
-            actions: [{
-                type: "llm.call", stream: true,
-                request: { model: "claude-haiku-4-5-20251001", messages: t.messages }
-            }],
-        };
-    }
-
-    return { actions: [] };
-}

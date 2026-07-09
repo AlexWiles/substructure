@@ -12,10 +12,11 @@ same version.
 
 ### Added
 
+- Native Anthropic and OpenAI LLM providers.
 - `run` - CLI command to send input to the engine. Helpful for testing/debugging.
-- Decision requests carry `proposed`, the engine's default continuation for
-  every mechanical trigger, including model failures (interrupt) and broken
-  or undeclared tool calls (`tool.error` back to the model). `null` only on
+- Decision requests carry `proposed`, the engine's default continuation for most
+  triggers. The proposed actions implement an agent tool loop and handle failure
+  cases.
   the decisions that are genuinely the worker's.
 - Tools declare `input`/`output` JSON Schemas; the engine validates both
   directions. `tool.execute` carries the classification as `input`
@@ -23,7 +24,6 @@ same version.
   a terminal tool error.
 - Lenient worker wire: `handler`, `retryable`, and `actions` have defaults;
   `tool.result.result` / `tool.call.arguments` accept any JSON value.
-- Native Anthropic and OpenAI LLM providers.
 
 ### Changed
 

@@ -4,6 +4,7 @@ use clap::{Args, ValueEnum};
 use uuid::Uuid;
 
 use super::env::{EnvVars, LlmProviderArg};
+use super::pretty::PrettyPrinter;
 use super::{local, register_startup_worker, DEFAULT_TENANT};
 use crate::owner::SessionOwner;
 use crate::session::events::EventPayload;
@@ -58,6 +59,35 @@ enum OutputMode {
     AgUi,
     /// Stream raw persisted engine events, one JSON object per line.
     Jsonl,
+    /// Human-readable text: streamed replies, tool calls, and results.
+    Pretty,
+}
+
+/// Where translated AG-UI events go. `Jsonl` renders nothing here — its raw
+/// engine events are written straight to stdout in the run loop instead.
+enum Renderer {
+    AgUi,
+    Jsonl,
+    Pretty(PrettyPrinter),
+}
+
+impl Renderer {
+    fn emit(&mut self, stdout: &mut std::io::Stdout, events: Vec<AgUiEvent>) -> anyhow::Result<()> {
+        match self {
+            Renderer::AgUi => {
+                for ev in events {
+                    write_json(stdout, &ev)?;
+                }
+            }
+            Renderer::Pretty(printer) => {
+                for ev in &events {
+                    printer.render(stdout, ev)?;
+                }
+            }
+            Renderer::Jsonl => {}
+        }
+        Ok(())
+    }
 }
 
 /// Parse `--input`, splicing `--agent` in as `agent_id` when the JSON didn't carry one.
@@ -87,6 +117,10 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
         .provider
         .and_then(|p| p.to_possible_value())
         .map(|v| v.get_name().to_string());
+    let output = args
+        .output
+        .to_possible_value()
+        .map(|v| v.get_name().to_string());
 
     let input = parse_input(&args.input, args.agent)?;
 
@@ -115,7 +149,6 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
     register_startup_worker(&adapter, &worker_url, args.signing_secret).await?;
 
     let session_id = args.session.unwrap_or_else(|| Uuid::now_v7().to_string());
-    eprintln!("session: {session_id}");
 
     let caller = Caller::System {
         tenant_id: DEFAULT_TENANT.to_string(),
@@ -165,29 +198,22 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
     // yield, or an interrupt — which is exactly when this invocation should stop.
     let mut translator = AgUiTranslator::new(session_id.clone(), turn_id);
     let mut stdout = std::io::stdout();
-    let ag_ui = matches!(args.output, OutputMode::AgUi);
-
-    if ag_ui {
-        for ev in translator.start() {
-            write_json(&mut stdout, &ev)?;
-        }
-    }
-
-    let emit_ag = |stdout: &mut std::io::Stdout, evs: Vec<AgUiEvent>| -> anyhow::Result<()> {
-        if ag_ui {
-            for ev in evs {
-                write_json(stdout, &ev)?;
-            }
-        }
-        Ok(())
+    let raw = matches!(args.output, OutputMode::Jsonl);
+    let mut renderer = match args.output {
+        OutputMode::AgUi => Renderer::AgUi,
+        OutputMode::Jsonl => Renderer::Jsonl,
+        OutputMode::Pretty => Renderer::Pretty(PrettyPrinter::new(stdout.is_terminal())),
     };
+
+    let evs = translator.start();
+    renderer.emit(&mut stdout, evs)?;
 
     let mut deltas_open = true;
     loop {
         tokio::select! {
             maybe_event = events.recv() => {
                 let Some(event) = maybe_event else { break };
-                if !ag_ui {
+                if raw {
                     write_json(&mut stdout, &event)?;
                 }
                 let Ok(payload) = serde_json::from_value::<EventPayload>(event.payload) else {
@@ -198,11 +224,11 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
                 if matches!(payload, EventPayload::LlmCallCompleted(_)) {
                     while let Ok(d) = deltas.try_recv() {
                         let evs = translator.on_delta(d);
-                        emit_ag(&mut stdout, evs)?;
+                        renderer.emit(&mut stdout, evs)?;
                     }
                 }
                 let evs = translator.on_event(payload);
-                emit_ag(&mut stdout, evs)?;
+                renderer.emit(&mut stdout, evs)?;
                 if translator.terminated {
                     break;
                 }
@@ -211,7 +237,7 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
                 match maybe_delta {
                     Some(d) => {
                         let evs = translator.on_delta(d);
-                        emit_ag(&mut stdout, evs)?;
+                        renderer.emit(&mut stdout, evs)?;
                     }
                     None => deltas_open = false,
                 }
@@ -228,6 +254,7 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
                 &worker_url,
                 agent.as_deref(),
                 provider.as_deref(),
+                output.as_deref(),
                 &args.db,
             )
         );
@@ -252,14 +279,15 @@ fn program_name() -> String {
         .unwrap_or_else(|| "substructure".into())
 }
 
-/// The invocation that resumes this session with the next turn. `--db` is echoed
-/// only when non-default so the common case stays short.
+/// The invocation that resumes this session with the next turn. `--output` and
+/// `--db` are echoed only when non-default so the common case stays short.
 fn resume_command(
     program: &str,
     session: &str,
     worker_url: &str,
     agent: Option<&str>,
     provider: Option<&str>,
+    output: Option<&str>,
     db: &str,
 ) -> String {
     let mut cmd = format!("{program} run --session {session} --worker-url {worker_url}");
@@ -268,6 +296,9 @@ fn resume_command(
     }
     if let Some(provider) = provider {
         cmd.push_str(&format!(" --provider {provider}"));
+    }
+    if let Some(output) = output.filter(|o| *o != "ag-ui") {
+        cmd.push_str(&format!(" --output {output}"));
     }
     if db != "data.db" {
         cmd.push_str(&format!(" --db {db}"));
@@ -290,6 +321,7 @@ mod tests {
             "http://localhost:4444",
             Some("my-agent"),
             Some("anthropic"),
+            Some("ag-ui"),
             "data.db",
         );
         assert_eq!(
@@ -300,7 +332,7 @@ mod tests {
 
     #[test]
     fn resume_command_uses_the_given_program_name() {
-        let cmd = resume_command("renamed-cli", "s", "w", None, None, "data.db");
+        let cmd = resume_command("renamed-cli", "s", "w", None, None, None, "data.db");
         assert!(cmd.starts_with("renamed-cli run "), "{cmd}");
     }
 
@@ -312,11 +344,38 @@ mod tests {
             "http://localhost:4444",
             None,
             None,
+            Some("ag-ui"),
             "other.db",
         );
         assert!(cmd.contains(" --db other.db"), "{cmd}");
         assert!(!cmd.contains("--agent"), "{cmd}");
         assert!(!cmd.contains("--provider"), "{cmd}");
+        assert!(!cmd.contains("--output"), "{cmd}");
+    }
+
+    #[test]
+    fn resume_command_echoes_non_default_output_and_omits_the_default() {
+        let pretty = resume_command(
+            "substructure",
+            "s",
+            "w",
+            None,
+            None,
+            Some("pretty"),
+            "data.db",
+        );
+        assert!(pretty.contains(" --output pretty"), "{pretty}");
+
+        let default = resume_command(
+            "substructure",
+            "s",
+            "w",
+            None,
+            None,
+            Some("ag-ui"),
+            "data.db",
+        );
+        assert!(!default.contains("--output"), "{default}");
     }
 
     #[test]
