@@ -10,6 +10,7 @@ pub use runtime::session::propose::Proposal;
 pub use runtime::session::wire::{WireDecisionRequest, WireDecisionResponse};
 pub use runtime::{
     aggregate, event_store, llm, owner, processor, retry, session, span, start, sub_agent, wake,
-    worker, EffectSettlement, InterruptSessionInput, ResumeInterruptInput, Runtime, RuntimeConfig,
-    RuntimeError, SettleEffectInput, SubmitClientPayload, SubmitClientPayloadOutput,
+    worker, ClientInputOutput, EffectSettlement, HandleClientInput, InterruptSessionInput,
+    ResumeInterruptInput, Runtime, RuntimeConfig, RuntimeError, SettleEffectInput,
+    SubmitClientPayload, SubmitClientPayloadOutput,
 };

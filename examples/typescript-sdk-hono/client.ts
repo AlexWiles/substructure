@@ -14,7 +14,7 @@ const client = sub.backend.client({
 const scope = await client.startTurn({
     agentId: "weather",
     payload: {
-        type: "message",
+        type: "client.message",
         message: { role: "user", content: "What's the weather in San Francisco?" },
     },
     identity: { id: "demo" },

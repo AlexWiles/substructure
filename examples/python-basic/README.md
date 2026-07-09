@@ -39,7 +39,7 @@ curl -s localhost:8080/api/machine/sessions/submit \
   -d '{
     "agent_id": "assistant",
     "identity": { "id": "demo" },
-    "payload": { "type": "message", "message": { "role": "user", "content": "Hello!" } }
+    "payload": { "type": "client.message", "message": { "role": "user", "content": "Hello!" } }
   }'
 ```
 

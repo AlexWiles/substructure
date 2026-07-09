@@ -1,24 +1,18 @@
 import { BaseClient } from "./base";
 import type {
+    ClientInputRequest,
+    ClientInputResponse,
     Event,
     InterruptSessionRequest,
     InterruptSessionResponse,
-    ResumeInterruptRequest,
-    ResumeInterruptResponse,
-    SettleEffectRequest,
-    SettleEffectResponse,
     StreamSessionEventsParams,
-    SubmitClientPayloadResponse,
-    SubmitPayloadRequest,
 } from "./types";
 
 export class UserClient extends BaseClient {
-    async submitPayload(request: SubmitPayloadRequest): Promise<SubmitClientPayloadResponse> {
-        return this.post("/api/client/sessions/submit", request);
-    }
-
-    async settleEffect(sessionId: string, request: SettleEffectRequest): Promise<SettleEffectResponse> {
-        return this.post(`/api/client/sessions/${sessionId}/calls/settle`, request);
+    /** Post any client input — a submit, an interrupt resume, or a client tool settle —
+     *  to the one input endpoint. */
+    async send(request: ClientInputRequest): Promise<ClientInputResponse> {
+        return this.post("/api/client/sessions/input", request);
     }
 
     async interruptSession(
@@ -26,10 +20,6 @@ export class UserClient extends BaseClient {
         request: InterruptSessionRequest = {},
     ): Promise<InterruptSessionResponse> {
         return this.post(`/api/client/sessions/${sessionId}/interrupt`, request);
-    }
-
-    async resumeInterrupt(sessionId: string, request: ResumeInterruptRequest): Promise<ResumeInterruptResponse> {
-        return this.post(`/api/client/sessions/${sessionId}/interrupt/resume`, request);
     }
 
     async *streamSessionEvents(sessionId: string, params?: StreamSessionEventsParams): AsyncGenerator<Event> {

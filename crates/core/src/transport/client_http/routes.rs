@@ -9,123 +9,54 @@ use uuid::Uuid;
 
 use crate::owner::SessionOwner;
 use crate::session::command::SessionError;
-use crate::session::decision::ClientPayload;
-use crate::session::decision::{EffectResultPayload, WorkKind};
 use crate::session::events::MessageTree;
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
+use crate::session::wire::WireClientInput;
 use crate::transport::ag_ui::snapshot::snapshot_events;
 use crate::transport::ag_ui::translator::run_ag_ui_translation;
 use crate::transport::ag_ui::types::RunAgentInput;
 use crate::transport::session_sse::merge_session_stream;
-use crate::{
-    Caller, EffectSettlement, InterruptSessionInput, ResumeInterruptInput, RuntimeError,
-    SettleEffectInput, SubmitClientPayload,
-};
+use crate::{Caller, HandleClientInput, InterruptSessionInput, RuntimeError};
 
 use super::types::{
-    InterruptSessionRequest, InterruptSessionResponse, ResumeInterruptRequest,
-    ResumeInterruptResponse, SettleEffectRequest, SettleEffectResponse, StreamSessionEventsParams,
-    SubmitClientPayloadRequest, SubmitClientPayloadResponse,
+    ClientInputRequest, ClientInputResponse, InterruptSessionRequest, InterruptSessionResponse,
+    StreamSessionEventsParams,
 };
 use super::ClientHttpState;
 
-pub async fn submit_client_payload(
+/// The one client input endpoint. `input` is the tagged union of everything a client can
+/// send, carrying its own addressing; a submit missing `agent_id` fails to deserialize (a
+/// 422 from the JSON extractor). `handle_client_input` routes it; always 202 on success
+/// with the resolved ids.
+pub async fn client_input(
     State(state): State<ClientHttpState>,
     Extension(caller): Extension<Caller>,
     Extension(owner): Extension<SessionOwner>,
-    Json(req): Json<SubmitClientPayloadRequest>,
+    Json(req): Json<ClientInputRequest>,
 ) -> Response {
     let session_id = req.session_id.unwrap_or_else(|| Uuid::now_v7().to_string());
 
     let result = state
         .runtime
-        .submit_client_payload(SubmitClientPayload {
+        .handle_client_input(HandleClientInput {
             session_id,
             caller,
             owner,
-            agent_id: req.agent_id,
-            payload: req.payload,
-            turn_id: req.turn_id,
+            input: req.input,
+            span: crate::span::SpanContext::root().child("client_input"),
         })
         .await;
 
     match result {
         Ok(output) => (
             StatusCode::ACCEPTED,
-            Json(SubmitClientPayloadResponse {
+            Json(ClientInputResponse {
                 session_id: output.session_id,
                 turn_id: output.turn_id,
             }),
         )
             .into_response(),
         Err(e) => runtime_error_response(e),
-    }
-}
-
-pub async fn settle_effect(
-    State(state): State<ClientHttpState>,
-    Extension(caller): Extension<Caller>,
-    Path(session_id): Path<String>,
-    Json(req): Json<SettleEffectRequest>,
-) -> Response {
-    // The client surface settles client tools only; the type restricts to `tool.*`.
-    let (id, attempt, settlement) = match req {
-        SettleEffectRequest::Result {
-            id,
-            result,
-            attempt,
-        } => (
-            id,
-            attempt,
-            EffectSettlement::Result(EffectResultPayload::ToolCall { result }),
-        ),
-        SettleEffectRequest::Error {
-            id,
-            error,
-            retryable,
-            attempt,
-        } => (
-            id,
-            attempt,
-            EffectSettlement::Error {
-                error,
-                retryable,
-                code: None,
-                detail: None,
-            },
-        ),
-    };
-
-    let result = state
-        .runtime
-        .settle_effect(SettleEffectInput {
-            session_id,
-            kind: WorkKind::ToolCall,
-            id,
-            attempt,
-            settlement,
-            caller,
-            span: crate::span::SpanContext::root().child("client_effect_settle"),
-        })
-        .await;
-
-    match result {
-        Ok(()) => Json(SettleEffectResponse {
-            ok: true,
-            error: None,
-        })
-        .into_response(),
-        Err(e) => {
-            let (status, message) = runtime_error_status(&e);
-            (
-                status,
-                Json(SettleEffectResponse {
-                    ok: false,
-                    error: Some(message),
-                }),
-            )
-                .into_response()
-        }
     }
 }
 
@@ -161,29 +92,6 @@ pub async fn interrupt_session(
     }
 }
 
-pub async fn resume_interrupt(
-    State(state): State<ClientHttpState>,
-    Extension(caller): Extension<Caller>,
-    Path(session_id): Path<String>,
-    Json(req): Json<ResumeInterruptRequest>,
-) -> Response {
-    let result = state
-        .runtime
-        .resume_interrupt(ResumeInterruptInput {
-            session_id,
-            interrupt_id: req.interrupt_id,
-            payload: req.payload.unwrap_or(serde_json::Value::Null),
-            caller,
-            span: crate::span::SpanContext::root().child("client_resume_interrupt"),
-        })
-        .await;
-
-    match result {
-        Ok(()) => Json(ResumeInterruptResponse { ok: true }).into_response(),
-        Err(e) => runtime_error_response(e),
-    }
-}
-
 /// Map RuntimeError variants to HTTP status codes for the client API.
 pub(crate) fn runtime_error_status(err: &RuntimeError) -> (StatusCode, String) {
     let status = match err {
@@ -200,7 +108,8 @@ pub(crate) fn runtime_error_status(err: &RuntimeError) -> (StatusCode, String) {
             | SessionError::EffectAttemptMismatch
             | SessionError::SessionInterrupted
             | SessionError::TurnAlreadyActive { .. }
-            | SessionError::TurnAlreadyCompleted { .. },
+            | SessionError::TurnAlreadyCompleted { .. }
+            | SessionError::NoActiveTurn,
         ) => StatusCode::CONFLICT,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
@@ -277,6 +186,8 @@ pub async fn ag_ui_run(
         .subscribe_token_deltas(&caller, &session_id)
         .await;
 
+    // AG-UI's input is already classified (a `resume` list vs. messages), so the inputs are
+    // built directly with their addressing rather than parsed from untrusted tagged JSON.
     let submit = if !input.resume.is_empty() {
         // Stale interrupt ids no-op, keeping resumes idempotent.
         let mut outcome: Result<(), RuntimeError> = Ok(());
@@ -287,11 +198,14 @@ pub async fn ag_ui_run(
             });
             let r = state
                 .runtime
-                .resume_interrupt(ResumeInterruptInput {
+                .handle_client_input(HandleClientInput {
                     session_id: session_id.clone(),
-                    interrupt_id: entry.interrupt_id,
-                    payload,
                     caller: caller.clone(),
+                    owner: owner.clone(),
+                    input: WireClientInput::InterruptResume {
+                        interrupt_id: entry.interrupt_id,
+                        payload,
+                    },
                     span: crate::span::SpanContext::root().child("ag_ui_resume"),
                 })
                 .await;
@@ -304,17 +218,18 @@ pub async fn ag_ui_run(
     } else {
         state
             .runtime
-            .submit_client_payload(SubmitClientPayload {
+            .handle_client_input(HandleClientInput {
                 session_id: session_id.clone(),
                 caller,
                 owner,
-                agent_id,
-                // Full client view so edits/branches reconcile into the tree.
-                payload: ClientPayload::Messages {
+                input: WireClientInput::Messages {
+                    agent_id,
+                    turn_id: Some(input.run_id.clone()),
+                    // Full client view so edits/branches reconcile into the tree.
                     messages: input.to_messages(),
                     stream: true,
                 },
-                turn_id: Some(input.run_id.clone()),
+                span: crate::span::SpanContext::root().child("ag_ui_run"),
             })
             .await
             .map(|_| ())
@@ -402,5 +317,6 @@ mod tests {
             status_of(SessionError::EffectAttemptMismatch),
             StatusCode::CONFLICT
         );
+        assert_eq!(status_of(SessionError::NoActiveTurn), StatusCode::CONFLICT);
     }
 }

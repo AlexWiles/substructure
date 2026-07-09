@@ -35,14 +35,7 @@ pub fn router(state: ClientHttpState) -> Router {
             .expose_headers(Any)
     };
     Router::new()
-        .route(
-            "/api/client/sessions/submit",
-            post(routes::submit_client_payload),
-        )
-        .route(
-            "/api/client/sessions/{session_id}/calls/settle",
-            post(routes::settle_effect),
-        )
+        .route("/api/client/sessions/input", post(routes::client_input))
         .route(
             "/api/client/sessions/{session_id}/events/stream",
             get(routes::stream_session_events),
@@ -50,10 +43,6 @@ pub fn router(state: ClientHttpState) -> Router {
         .route(
             "/api/client/sessions/{session_id}/interrupt",
             post(routes::interrupt_session),
-        )
-        .route(
-            "/api/client/sessions/{session_id}/interrupt/resume",
-            post(routes::resume_interrupt),
         )
         .route(
             "/api/client/ag-ui/agents/{agent_id}/run",

@@ -31,7 +31,7 @@ const embedded = await SubstructureEmbedded.create({
 const scope = await embedded.startTurn({
     agentId: "assistant",
     payload: {
-        type: "message",
+        type: "client.message",
         message: { role: "user", content: "What time is it right now?" },
     },
     identity: { tenant_id: "default", id: "demo" },

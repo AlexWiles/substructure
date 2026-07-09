@@ -12,6 +12,7 @@ same version.
 
 ### Added
 
+- `run` - CLI command to send input to the engine. Helpful for testing/debugging.
 - Decision requests carry `proposed`, the engine's default continuation for
   every mechanical trigger, including model failures (interrupt) and broken
   or undeclared tool calls (`tool.error` back to the model). `null` only on
@@ -26,6 +27,11 @@ same version.
 
 ### Changed
 
+- **Breaking:** client payloads are namespaced — `client.message` /
+  `client.messages` / `client.action` (were `message` / `messages` / `action`),
+  matching the dotted `client.*` decision triggers and `tool.*` settle
+  vocabulary. Update clients sending `payload: { type: "message", ... }` to
+  `{ type: "client.message", ... }`.
 - **Breaking:** the decision wire unifies on `messages` (was `transcript` /
   `client.transcript`); the SDK's `DecisionRequest`/`Decision` follow.
 - **Breaking:** `LlmTool` is flat: `{name, description, input?, output?}`,

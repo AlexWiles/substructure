@@ -241,9 +241,32 @@ export interface ClientAction {
 }
 
 export type ClientPayload =
-    | { type: "message"; message: MessageInput; stream?: boolean }
-    | { type: "messages"; messages: MessageInput[]; stream?: boolean }
-    | ({ type: "action" } & ClientAction);
+    | { type: "client.message"; message: MessageInput; stream?: boolean }
+    | { type: "client.messages"; messages: MessageInput[]; stream?: boolean }
+    | ({ type: "client.action" } & ClientAction);
+
+/** Everything a client can send to the input endpoint. The three submit shapes are a
+ *  {@link ClientPayload} carrying its own addressing — `agent_id` (routes the turn,
+ *  creating the session if new) and the optional idempotency `turn_id`; a resume/settle
+ *  addresses an interrupt/effect id. `session_id` is the one universal address and rides
+ *  the request envelope, so it is unmisplaceable. */
+export type ClientInput =
+    | (ClientPayload & { agent_id: string; turn_id?: string })
+    | { type: "interrupt.resume"; interrupt_id: string; payload?: unknown }
+    | { type: "tool.result"; id: string; result?: unknown; attempt?: number }
+    | { type: "tool.error"; id: string; error: string; retryable: boolean; attempt?: number };
+
+/** The one client input request body: the {@link ClientInput} plus the universal
+ *  `session_id` address (minted when absent). */
+export interface ClientInputRequest {
+    session_id?: Uuid;
+    input: ClientInput;
+}
+
+export interface ClientInputResponse {
+    session_id: Uuid;
+    turn_id: string;
+}
 
 /** Result of a finished llm call: response fields on success, error fields on failure. */
 export type LlmOutcome =
@@ -399,15 +422,6 @@ export interface InterruptSessionResponse {
     interrupt_id: string;
 }
 
-export interface ResumeInterruptRequest {
-    interrupt_id: string;
-    payload?: unknown;
-}
-
-export interface ResumeInterruptResponse {
-    ok: boolean;
-}
-
 /** Which effect to settle, on which session; optional `attempt` fences a stale executor. */
 export interface SettleEffectTarget {
     sessionId: string;
@@ -415,10 +429,11 @@ export interface SettleEffectTarget {
     attempt?: number;
 }
 
-/** Settle a `tool_call` with its result string. */
+/** Settle a `tool_call` with its result; any non-string value is canonicalized to its
+ *  JSON text engine-side. */
 export interface SettleToolResult {
     kind?: "tool_call";
-    result: string;
+    result: unknown;
     response?: never;
     error?: never;
     retryable?: never;
@@ -457,14 +472,8 @@ export type SettleToolCallOutcome = SettleToolResult | (SettleEffectFailure & { 
 export type SettleToolCallArgs = SettleEffectTarget & SettleToolCallOutcome;
 
 export function toSettleEffectRequest(args: SettleEffectArgs): SettleEffectRequest {
-    if (args.result !== undefined) {
-        return {
-            type: "tool.result",
-            id: args.id,
-            result: args.result,
-            attempt: args.attempt,
-        };
-    }
+    // Discriminate on `response`/`error` first: a tool `result` is now `unknown`, which
+    // includes `undefined`, so it can't be the presence check — a failure is.
     if (args.response !== undefined) {
         return {
             type: "llm.result",
@@ -473,11 +482,19 @@ export function toSettleEffectRequest(args: SettleEffectArgs): SettleEffectReque
             attempt: args.attempt,
         };
     }
+    if (args.error !== undefined) {
+        return {
+            type: (args.kind ?? "tool_call") === "llm_call" ? "llm.error" : "tool.error",
+            id: args.id,
+            error: args.error,
+            retryable: args.retryable ?? false,
+            attempt: args.attempt,
+        };
+    }
     return {
-        type: (args.kind ?? "tool_call") === "llm_call" ? "llm.error" : "tool.error",
+        type: "tool.result",
         id: args.id,
-        error: args.error,
-        retryable: args.retryable ?? false,
+        result: args.result,
         attempt: args.attempt,
     };
 }
@@ -849,16 +866,6 @@ export interface SessionState {
     tool_calls: Record<string, ToolCallState>;
     sub_agent_calls: Record<string, SubAgentCallState>;
     worker_decisions: Record<string, WorkerDecisionState>;
-}
-
-export interface SubmitPayloadRequest {
-    agent_id: string;
-    payload: ClientPayload;
-    /** Required for embedded runtime; ignored/forbidden on remote HTTP submit. */
-    identity?: ClientIdentity;
-    tenant_id?: string;
-    session_id?: Uuid;
-    turn_id?: string;
 }
 
 export interface MintClientTokenRequest {

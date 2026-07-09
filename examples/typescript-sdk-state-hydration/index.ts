@@ -62,7 +62,7 @@ const embedded = await SubstructureEmbedded.create({
 const scope = await embedded.startTurn({
     agentId: "todo",
     payload: {
-        type: "message",
+        type: "client.message",
         message: { role: "user", content: "Add 'buy groceries' and 'walk the dog', then list them" },
     },
     identity: { tenant_id: "default", id: "demo" },

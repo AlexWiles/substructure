@@ -1,9 +1,9 @@
 import type {
+    ClientInput,
     ClientPayload,
     Event,
     PersistedEvent,
     SessionScope,
-    SettleEffectResponse,
     SettleToolCallArgs,
     TurnResult,
 } from "./types";
@@ -46,18 +46,21 @@ export class FrontendClient {
 
     /** Fire-and-forget: enqueue a turn, return as soon as it's accepted. */
     async startTurn(request: StartTurnRequest): Promise<SessionScope> {
-        const response = await this.user.submitPayload({
+        const input: ClientInput = {
+            ...request.payload,
             agent_id: request.agentId,
-            payload: request.payload,
-            session_id: request.sessionId,
             turn_id: request.turnId,
-        });
+        };
+        const response = await this.user.send({ session_id: request.sessionId, input });
         return { sessionId: response.session_id, turnId: response.turn_id };
     }
 
     /** Settle a client-handled tool call out-of-band (result or failure). */
-    async settleEffect(args: SettleToolCallArgs): Promise<SettleEffectResponse> {
-        return this.user.settleEffect(args.sessionId, toSettleEffectRequest(args));
+    async settleEffect(args: SettleToolCallArgs): Promise<void> {
+        // `SettleToolCallArgs` only ever yields a `tool.*` settle, which is a
+        // `ClientInput` variant; the wider `SettleEffectRequest` return type is narrowed here.
+        const input = toSettleEffectRequest(args) as ClientInput;
+        await this.user.send({ session_id: args.sessionId, input });
     }
 
     /** Pause a running session. The agent stops between decisions and the
@@ -75,7 +78,10 @@ export class FrontendClient {
     }
 
     async resume(sessionId: string, interruptId: string, payload?: unknown): Promise<void> {
-        await this.user.resumeInterrupt(sessionId, { interrupt_id: interruptId, payload });
+        await this.user.send({
+            session_id: sessionId,
+            input: { type: "interrupt.resume", interrupt_id: interruptId, payload },
+        });
     }
 
     /** When `scope.turnId` is set, the stream is filtered to that turn and

@@ -176,8 +176,8 @@ if (!sessionId || !input) {
 }
 
 const payload = input.startsWith("/mode ")
-    ? { type: "action" as const, name: "set_mode", args: { mode: input.slice(6).trim() as Mode } }
-    : { type: "message" as const, message: { role: "user" as const, content: input } };
+    ? { type: "client.action" as const, name: "set_mode", args: { mode: input.slice(6).trim() as Mode } }
+    : { type: "client.message" as const, message: { role: "user" as const, content: input } };
 
 const embedded = await SubstructureEmbedded.create({
     agents: [planner],

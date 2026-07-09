@@ -8,7 +8,7 @@ interaction in coding agents like Claude Code.
 ## What it shows
 
 - **`client.action` payloads** as a non-message way for the client to
-  drive state changes. Sending `{ type: "action", name: "set_mode", ... }`
+  drive state changes. Sending `{ type: "client.action", name: "set_mode", ... }`
   flips the mode inside the worker without producing a user message in
   the transcript.
 - **A custom `decide` function as a modal agent**: one decision function reads its

@@ -143,7 +143,7 @@ console.log(`agent: ${agentId}`);
 const scope = await embedded.startTurn({
     agentId,
     payload: {
-        type: "message",
+        type: "client.message",
         message: { role: "user", content: "Substructure lets one agent fan out several model calls at once." },
     },
     identity: { tenant_id: "default", id: "demo" },

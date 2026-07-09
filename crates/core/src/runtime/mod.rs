@@ -17,12 +17,16 @@ use owner::SessionOwner;
 use processor::ProcessorCheckpointStore;
 use retry::{NoRetryResolver, WorkerRetryResolver};
 use session::command::{CommandPayload, SessionError};
-use session::decision::{ClientPayload, EffectResultPayload, WorkKind};
+use session::decision::{EffectResultPayload, WorkKind};
 use session::index::{
     spawn_session_index_processor, SessionFilter, SessionIndexStore, SessionPage,
 };
 use session::state::SessionState;
 use session::subscriptions::SessionSubscriptionSpec;
+use session::wire::{
+    result_to_string, WireClientAction, WireClientInput, WireClientMessage, WireClientMessages,
+    WireClientPayload,
+};
 use span::SpanContext;
 use sub_agent::{spawn_sub_agent_dispatch_processor, spawn_sub_agent_task_executor, SubAgentTask};
 use wake::{spawn_wake_dispatcher, spawn_wake_processor, WakeScheduleStore};
@@ -78,7 +82,7 @@ pub struct SubmitClientPayload {
     pub caller: Caller,
     pub owner: SessionOwner,
     pub agent_id: String,
-    pub payload: ClientPayload,
+    pub payload: WireClientPayload,
     /// Caller-provided turn ID for idempotency. Auto-generated if None.
     pub turn_id: Option<String>,
 }
@@ -88,8 +92,27 @@ pub struct SubmitClientPayloadOutput {
     pub turn_id: String,
 }
 
+/// A client input plus the ambient context an engine call needs. The single entry point
+/// for the whole client input surface — HTTP, CLI, and AG-UI all build one of these and
+/// hand it to [`Runtime::handle_client_input`]. `session_id` is the universal address
+/// (minted by the caller when absent); the submit-only `agent_id`/`turn_id` ride inside
+/// `input`.
+pub struct HandleClientInput {
+    pub session_id: String,
+    pub caller: Caller,
+    pub owner: SessionOwner,
+    pub input: WireClientInput,
+    pub span: SpanContext,
+}
+
+pub struct ClientInputOutput {
+    pub session_id: String,
+    pub turn_id: String,
+}
+
 /// How an effect settled out-of-band. `Result` carries a tool result or llm
 /// response; `Error` is uniform across kinds.
+#[derive(Debug)]
 pub enum EffectSettlement {
     Result(EffectResultPayload),
     Error {
@@ -245,6 +268,176 @@ impl Runtime {
             session_id,
             turn_id: effective_turn_id,
         })
+    }
+
+    /// The single seam for the whole client input surface. A submit delegates to
+    /// [`Self::submit_client_payload`]; a resume/settle continues the session's active turn
+    /// — looked up here, `NoActiveTurn` if there is none — via [`Self::resume_interrupt`] /
+    /// [`Self::settle_effect`]. Those three methods stay public for the machine and embedded
+    /// surfaces, which address effects directly rather than the active turn.
+    pub async fn handle_client_input(
+        &self,
+        input: HandleClientInput,
+    ) -> Result<ClientInputOutput, RuntimeError> {
+        let HandleClientInput {
+            session_id,
+            caller,
+            owner,
+            input,
+            span,
+        } = input;
+
+        // Submit variants carry their addressing inline; resume/settle continue the active
+        // turn. The submit arms yield the payload and fall through to one submit call; the
+        // rest handle their own dispatch and return.
+        let (agent_id, turn_id, payload) = match input {
+            WireClientInput::Message {
+                agent_id,
+                turn_id,
+                message,
+                stream,
+            } => (
+                agent_id,
+                turn_id,
+                WireClientPayload::Message(WireClientMessage { message, stream }),
+            ),
+            WireClientInput::Messages {
+                agent_id,
+                turn_id,
+                messages,
+                stream,
+            } => (
+                agent_id,
+                turn_id,
+                WireClientPayload::Messages(WireClientMessages { messages, stream }),
+            ),
+            WireClientInput::Action {
+                agent_id,
+                turn_id,
+                name,
+                args,
+            } => (
+                agent_id,
+                turn_id,
+                WireClientPayload::Action(WireClientAction { name, args }),
+            ),
+            WireClientInput::InterruptResume {
+                interrupt_id,
+                payload,
+            } => {
+                let turn_id = self.active_turn_id(&caller, &session_id).await?;
+                self.resume_interrupt(ResumeInterruptInput {
+                    session_id: session_id.clone(),
+                    interrupt_id,
+                    payload,
+                    caller,
+                    span,
+                })
+                .await?;
+                return Ok(ClientInputOutput {
+                    session_id,
+                    turn_id,
+                });
+            }
+            WireClientInput::ToolResult {
+                id,
+                attempt,
+                result,
+            } => {
+                return self
+                    .settle_client_tool(
+                        session_id,
+                        caller,
+                        span,
+                        id,
+                        attempt,
+                        EffectSettlement::Result(EffectResultPayload::ToolCall {
+                            result: result_to_string(result),
+                        }),
+                    )
+                    .await;
+            }
+            WireClientInput::ToolError {
+                id,
+                error,
+                retryable,
+                attempt,
+            } => {
+                return self
+                    .settle_client_tool(
+                        session_id,
+                        caller,
+                        span,
+                        id,
+                        attempt,
+                        EffectSettlement::Error {
+                            error,
+                            retryable,
+                            code: None,
+                            detail: None,
+                        },
+                    )
+                    .await;
+            }
+        };
+
+        let out = self
+            .submit_client_payload(SubmitClientPayload {
+                session_id,
+                caller,
+                owner,
+                agent_id,
+                payload,
+                turn_id,
+            })
+            .await?;
+        Ok(ClientInputOutput {
+            session_id: out.session_id,
+            turn_id: out.turn_id,
+        })
+    }
+
+    /// Settle a client-handled effect against the session's active turn (returned for
+    /// stream scoping); `NoActiveTurn` if there is none.
+    async fn settle_client_tool(
+        &self,
+        session_id: String,
+        caller: Caller,
+        span: SpanContext,
+        id: String,
+        attempt: Option<u32>,
+        settlement: EffectSettlement,
+    ) -> Result<ClientInputOutput, RuntimeError> {
+        let turn_id = self.active_turn_id(&caller, &session_id).await?;
+        self.settle_effect(SettleEffectInput {
+            session_id: session_id.clone(),
+            kind: WorkKind::ToolCall,
+            id,
+            attempt,
+            settlement,
+            caller,
+            span,
+        })
+        .await?;
+        Ok(ClientInputOutput {
+            session_id,
+            turn_id,
+        })
+    }
+
+    /// The active turn a resume/settle continues. `NoActiveTurn` when the session has
+    /// none (or does not exist yet); the subsequent resume/settle enforces ownership.
+    async fn active_turn_id(
+        &self,
+        caller: &Caller,
+        session_id: &str,
+    ) -> Result<String, RuntimeError> {
+        match self.get_session(caller.tenant_id(), session_id).await {
+            Ok((_, state)) => state
+                .turn_id
+                .ok_or(RuntimeError::Session(SessionError::NoActiveTurn)),
+            Err(_) => Err(RuntimeError::Session(SessionError::NoActiveTurn)),
+        }
     }
 
     /// Unified event stream. `spec` selects which events to observe (a single

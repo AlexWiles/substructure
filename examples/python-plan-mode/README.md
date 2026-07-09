@@ -49,7 +49,7 @@ curl -s localhost:8080/api/machine/sessions/submit \
   -d '{
     "agent_id": "assistant",
     "identity": { "id": "demo" },
-    "payload": { "type": "message", "message": { "role": "user", "content": "Plan a weekend trip to the coast." } }
+    "payload": { "type": "client.message", "message": { "role": "user", "content": "Plan a weekend trip to the coast." } }
   }'
 ```
 
@@ -63,7 +63,7 @@ curl -s localhost:8080/api/machine/sessions/submit \
     "agent_id": "assistant",
     "identity": { "id": "demo" },
     "session_id": "<SESSION_ID>",
-    "payload": { "type": "action", "name": "set_mode", "args": { "mode": "executing" } }
+    "payload": { "type": "client.action", "name": "set_mode", "args": { "mode": "executing" } }
   }'
 ```
 

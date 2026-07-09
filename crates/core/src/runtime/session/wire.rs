@@ -1,6 +1,13 @@
-//! The wire forms of the decision protocol and the two boundaries that convert them
-//! to and from the internal representation.
+//! The wire forms of the client and worker protocols and the boundaries that convert
+//! them to and from the internal representation.
 //!
+//! - Inbound (client → engine): [`WireClientInput`] is the authoritative set of everything a
+//!   client can send — a submit, an interrupt resume, or a client tool settle. Each variant
+//!   carries its own addressing (a submit's `agent_id`/`turn_id`; a settle's effect id), so
+//!   `Runtime::handle_client_input` dispatches it directly, mirroring `resolve_actions` on the
+//!   worker side. A submit rebuilds a [`WireClientPayload`] — still what the
+//!   `SubmitClientPayload` command seam (`command.rs`) lowers to domain events, and still a
+//!   live wire type on the machine and embedded surfaces.
 //! - Inbound (worker → engine): [`WireAction`] is deserialized from untrusted worker
 //!   output; `resolve_actions` is the single seam where it becomes the strict internal
 //!   [`Action`] the core consumes.
@@ -16,6 +23,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::decision::{Action, DecisionTrigger};
 use super::events::{LlmHandler, MessageTree, ToolHandler};
@@ -83,6 +91,121 @@ impl WireMessage {
             tool_call_id: self.tool_call_id,
             name: self.name,
         }
+    }
+}
+
+/// The body of a `client.message`: one message, optionally streamed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireClientMessage {
+    pub message: WireMessage,
+    #[serde(default)]
+    pub stream: bool,
+}
+
+/// The body of a `client.messages`: the client's full conversation view, optionally streamed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireClientMessages {
+    pub messages: Vec<WireMessage>,
+    #[serde(default)]
+    pub stream: bool,
+}
+
+/// The payload of a `client.action`: a named action with optional JSON args.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireClientAction {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Value>,
+}
+
+/// The client→engine inbound *submit* wire form: an untrusted client submits a message,
+/// its full conversation view, or a named action. Lowered to domain events at the
+/// `SubmitClientPayload` command seam (`command.rs`); never persisted as-is. Carried
+/// verbatim inside [`WireClientInput`], which is the full client input surface.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum WireClientPayload {
+    #[serde(rename = "client.message")]
+    Message(WireClientMessage),
+    #[serde(rename = "client.messages")]
+    Messages(WireClientMessages),
+    #[serde(rename = "client.action")]
+    Action(WireClientAction),
+}
+
+/// Everything a client can send on the input surface: submit a message / a full view / a
+/// named action, resume an interrupt, or settle a client tool. A flat, internally-tagged
+/// union — its six tags produce serde's "unknown variant, expected one of …" error for
+/// free. `Runtime::handle_client_input` is the single seam that dispatches it (mirroring
+/// `resolve_actions` on the worker side).
+///
+/// Addressing lives where it is meaningful, not in a shared envelope: `agent_id` (routes
+/// the turn, creating the session if new) and the optional idempotency `turn_id` are
+/// fields of the three submit variants only. A resume/settle addresses an interrupt/effect
+/// id and continues whatever turn is active, so it carries neither — misplacing them is
+/// unrepresentable rather than rejected. `session_id` is the one universal address and
+/// rides the envelope. A submit's body rebuilds a [`WireClientPayload`] at the seam.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum WireClientInput {
+    #[serde(rename = "client.message")]
+    Message {
+        agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        message: WireMessage,
+        #[serde(default)]
+        stream: bool,
+    },
+    #[serde(rename = "client.messages")]
+    Messages {
+        agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        messages: Vec<WireMessage>,
+        #[serde(default)]
+        stream: bool,
+    },
+    #[serde(rename = "client.action")]
+    Action {
+        agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        args: Option<Value>,
+    },
+    #[serde(rename = "interrupt.resume")]
+    InterruptResume {
+        interrupt_id: String,
+        #[serde(default)]
+        payload: Value,
+    },
+    #[serde(rename = "tool.result")]
+    ToolResult {
+        id: String,
+        #[serde(default)]
+        attempt: Option<u32>,
+        #[serde(default)]
+        result: Value,
+    },
+    #[serde(rename = "tool.error")]
+    ToolError {
+        id: String,
+        error: String,
+        retryable: bool,
+        #[serde(default)]
+        attempt: Option<u32>,
+    },
+}
+
+/// A client tool result on the wire accepts any JSON; a string passes through, `null`
+/// becomes empty, any other value is canonicalized to its JSON text.
+pub(crate) fn result_to_string(value: Value) -> String {
+    match value {
+        Value::String(s) => s,
+        Value::Null => String::new(),
+        other => other.to_string(),
     }
 }
 
@@ -1090,5 +1213,119 @@ mod tests {
     fn a_decision_may_omit_actions() {
         let r: WireDecisionResponse = serde_json::from_str(r#"{"messages":[]}"#).expect("parses");
         assert!(r.actions.is_empty());
+    }
+
+    #[test]
+    fn client_input_parses_every_tag_to_its_variant() {
+        let cases: [(&str, fn(&WireClientInput) -> bool); 6] = [
+            (
+                r#"{"type":"client.message","agent_id":"bot","message":{"role":"user","content":"hi"}}"#,
+                |i| matches!(i, WireClientInput::Message { .. }),
+            ),
+            (
+                r#"{"type":"client.messages","agent_id":"bot","messages":[]}"#,
+                |i| matches!(i, WireClientInput::Messages { .. }),
+            ),
+            (
+                r#"{"type":"client.action","agent_id":"bot","name":"approve","args":{"ok":true}}"#,
+                |i| matches!(i, WireClientInput::Action { .. }),
+            ),
+            (r#"{"type":"interrupt.resume","interrupt_id":"iid"}"#, |i| {
+                matches!(i, WireClientInput::InterruptResume { .. })
+            }),
+            (
+                r#"{"type":"tool.result","id":"c1","result":{"n":1}}"#,
+                |i| matches!(i, WireClientInput::ToolResult { .. }),
+            ),
+            (
+                r#"{"type":"tool.error","id":"c1","error":"boom","retryable":true}"#,
+                |i| matches!(i, WireClientInput::ToolError { .. }),
+            ),
+        ];
+        for (json, is_variant) in cases {
+            let input: WireClientInput = serde_json::from_str(json).expect("parses");
+            assert!(is_variant(&input), "wrong variant for {json}");
+        }
+    }
+
+    #[test]
+    fn a_submit_without_an_agent_id_is_a_deserialize_error() {
+        // `agent_id` is a required field of the submit variants, so a missing one is a
+        // type error at the boundary — not a runtime check.
+        let err = serde_json::from_str::<WireClientInput>(
+            r#"{"type":"client.message","message":{"role":"user","content":"hi"}}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("agent_id"),
+            "error should name agent_id: {err}"
+        );
+    }
+
+    #[test]
+    fn a_settle_has_no_agent_or_turn_slot_to_misplace() {
+        // A stray `agent_id`/`turn_id` on a settle has no field to land in, so it is
+        // ignored rather than mistaken for addressing.
+        let input: WireClientInput = serde_json::from_str(
+            r#"{"type":"tool.result","id":"c1","result":"ok","agent_id":"bot","turn_id":"t1"}"#,
+        )
+        .expect("parses; the stray addressing fields are ignored");
+        assert!(matches!(input, WireClientInput::ToolResult { .. }));
+    }
+
+    #[test]
+    fn submit_payload_json_stays_flat_after_the_newtype_conversion() {
+        // The `client.action` body was `#[serde(flatten)]`; the newtype variant must keep
+        // `name`/`args` at the top level rather than nesting them under `action`.
+        let payload = WireClientPayload::Action(WireClientAction {
+            name: "approve".to_string(),
+            args: Some(serde_json::json!({"ok": true})),
+        });
+        assert_eq!(
+            serde_json::to_value(&payload).unwrap(),
+            serde_json::json!({"type": "client.action", "name": "approve", "args": {"ok": true}})
+        );
+    }
+
+    #[test]
+    fn unknown_client_input_tag_lists_all_six() {
+        let err = serde_json::from_str::<WireClientInput>(r#"{"type":"frob"}"#)
+            .unwrap_err()
+            .to_string();
+        for tag in [
+            "client.message",
+            "client.messages",
+            "client.action",
+            "interrupt.resume",
+            "tool.result",
+            "tool.error",
+        ] {
+            assert!(err.contains(tag), "error missing {tag}: {err}");
+        }
+    }
+
+    #[test]
+    fn interrupt_resume_uses_the_interrupt_id_field() {
+        let input: WireClientInput =
+            serde_json::from_str(r#"{"type":"interrupt.resume","interrupt_id":"iid"}"#)
+                .expect("parses");
+        match input {
+            WireClientInput::InterruptResume { interrupt_id, .. } => {
+                assert_eq!(interrupt_id, "iid")
+            }
+            other => panic!("expected interrupt.resume, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_result_canonicalizes_non_string_values() {
+        assert_eq!(result_to_string(serde_json::json!({"n": 1})), r#"{"n":1}"#);
+        assert_eq!(result_to_string(serde_json::json!("plain")), "plain");
+        assert_eq!(
+            result_to_string(Value::Null),
+            "",
+            "null canonicalizes to empty"
+        );
     }
 }

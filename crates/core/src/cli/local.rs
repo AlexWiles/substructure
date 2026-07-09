@@ -23,7 +23,7 @@ use crate::transport::push::PushAdapter;
 use crate::transport::server::SubstructureServer;
 use crate::transport::worker_http::{self, WorkerHttpState};
 use crate::worker::push::{PushRegistry, TransportRegistry};
-use crate::{start, RuntimeConfig};
+use crate::{start, Runtime, RuntimeConfig};
 
 #[derive(Args)]
 pub struct ServeArgs {
@@ -76,76 +76,12 @@ async fn start_server(
         Err(_) => std::process::exit(2),
     };
 
-    let db = SqliteDb::open(&db_path, std::time::Duration::from_secs(5))?;
-
-    let event_store = Arc::new(SqliteEventStore::new(db.clone())?);
-    let worker_queue = Arc::new(SqliteWorkerQueue::new(db.clone())?);
-    let checkpoint_store = Arc::new(SqliteCheckpointStore::new(db.clone())?);
-    let wake_store = Arc::new(SqliteWakeStore::new(db.clone())?);
-    let session_index_store = Arc::new(SqliteSessionIndexStore::new(db.clone())?);
-    let push_store = Arc::new(SqlitePushStore::new(db)?);
-
-    let config = RuntimeConfig::default();
-    let llm_task_queue: Arc<dyn TaskQueue<LlmTask>> = Arc::new(ShardedInMemoryQueue::new(
-        config.llm_executor_workers as u32,
-    ));
-    let sub_agent_task_queue: Arc<dyn TaskQueue<SubAgentTask>> = Arc::new(
-        ShardedInMemoryQueue::new(config.sub_agent_executor_workers as u32),
-    );
-    let llm_provider: Option<Arc<dyn LlmProviderTrait>> = match env.provider {
-        Some(ProviderEnv::Openrouter { api_key }) => {
-            Some(Arc::new(OpenRouterProvider::new(OpenRouterConfig {
-                base_url: std::env::var("OPENROUTER_BASE_URL")
-                    .unwrap_or_else(|_| "https://openrouter.ai/api".to_string()),
-                api_key,
-            })))
-        }
-        Some(ProviderEnv::Anthropic { api_key }) => {
-            let mut config = AnthropicConfig::new(api_key);
-            if let Ok(base_url) = std::env::var("ANTHROPIC_BASE_URL") {
-                config.base_url = base_url;
-            }
-            Some(Arc::new(AnthropicProvider::new(config)))
-        }
-        Some(ProviderEnv::Openai { api_key }) => {
-            let mut config = OpenAiConfig::new(api_key);
-            if let Ok(base_url) = std::env::var("OPENAI_BASE_URL") {
-                config.base_url = base_url;
-            }
-            config.organization = std::env::var("OPENAI_ORG_ID").ok();
-            config.project = std::env::var("OPENAI_PROJECT_ID").ok();
-            Some(Arc::new(OpenAiProvider::new(config)))
-        }
-        None => {
-            tracing::info!("no LLM provider configured; server-side LLM execution is disabled (worker-handled calls only)");
-            None
-        }
-    };
-
-    let token_delta_transport = Arc::new(crate::llm::InMemoryTokenDeltaTransport::new());
-    let rt = start(
-        event_store.clone(),
-        llm_provider,
-        llm_task_queue,
-        sub_agent_task_queue,
-        worker_queue,
-        session_index_store,
-        checkpoint_store,
-        wake_store,
-        token_delta_transport,
-        config,
-    );
-
-    let transports = TransportRegistry::new(vec![http_transport()]);
-    let registry = PushRegistry::new(push_store, transports);
-    let adapter = Arc::new(PushAdapter::new(rt.clone(), registry, 16));
+    let (rt, adapter) = start_engine(&db_path, env.provider).await?;
 
     let auth = match env.auth {
         Some(a) => AuthWiring::from_env(a)?,
         None => AuthWiring::dev(),
     };
-
-    adapter.start().await;
 
     if let Some(ref url) = worker_url {
         register_startup_worker(&adapter, url, signing_secret).await?;
@@ -199,4 +135,79 @@ async fn start_server(
     tracing::info!(%addr, "listening");
     let listener = TcpListener::bind(&addr).await?;
     server.serve(listener, shutdown).await
+}
+
+/// Open the SQLite-backed stores, start the in-process engine, and build a
+/// started push adapter. Shared by `serve` (which then mounts HTTP routers) and
+/// `run` (which drives a single turn without any HTTP server).
+pub(crate) async fn start_engine(
+    db_path: &str,
+    provider_env: Option<ProviderEnv>,
+) -> anyhow::Result<(Arc<Runtime>, Arc<PushAdapter>)> {
+    let db = SqliteDb::open(db_path, std::time::Duration::from_secs(5))?;
+
+    let event_store = Arc::new(SqliteEventStore::new(db.clone())?);
+    let worker_queue = Arc::new(SqliteWorkerQueue::new(db.clone())?);
+    let checkpoint_store = Arc::new(SqliteCheckpointStore::new(db.clone())?);
+    let wake_store = Arc::new(SqliteWakeStore::new(db.clone())?);
+    let session_index_store = Arc::new(SqliteSessionIndexStore::new(db.clone())?);
+    let push_store = Arc::new(SqlitePushStore::new(db)?);
+
+    let config = RuntimeConfig::default();
+    let llm_task_queue: Arc<dyn TaskQueue<LlmTask>> = Arc::new(ShardedInMemoryQueue::new(
+        config.llm_executor_workers as u32,
+    ));
+    let sub_agent_task_queue: Arc<dyn TaskQueue<SubAgentTask>> = Arc::new(
+        ShardedInMemoryQueue::new(config.sub_agent_executor_workers as u32),
+    );
+    let llm_provider: Option<Arc<dyn LlmProviderTrait>> = match provider_env {
+        Some(ProviderEnv::Openrouter { api_key }) => {
+            Some(Arc::new(OpenRouterProvider::new(OpenRouterConfig {
+                base_url: std::env::var("OPENROUTER_BASE_URL")
+                    .unwrap_or_else(|_| "https://openrouter.ai/api".to_string()),
+                api_key,
+            })))
+        }
+        Some(ProviderEnv::Anthropic { api_key }) => {
+            let mut config = AnthropicConfig::new(api_key);
+            if let Ok(base_url) = std::env::var("ANTHROPIC_BASE_URL") {
+                config.base_url = base_url;
+            }
+            Some(Arc::new(AnthropicProvider::new(config)))
+        }
+        Some(ProviderEnv::Openai { api_key }) => {
+            let mut config = OpenAiConfig::new(api_key);
+            if let Ok(base_url) = std::env::var("OPENAI_BASE_URL") {
+                config.base_url = base_url;
+            }
+            config.organization = std::env::var("OPENAI_ORG_ID").ok();
+            config.project = std::env::var("OPENAI_PROJECT_ID").ok();
+            Some(Arc::new(OpenAiProvider::new(config)))
+        }
+        None => {
+            tracing::info!("no LLM provider configured; server-side LLM execution is disabled (worker-handled calls only)");
+            None
+        }
+    };
+
+    let token_delta_transport = Arc::new(crate::llm::InMemoryTokenDeltaTransport::new());
+    let rt = start(
+        event_store,
+        llm_provider,
+        llm_task_queue,
+        sub_agent_task_queue,
+        worker_queue,
+        session_index_store,
+        checkpoint_store,
+        wake_store,
+        token_delta_transport,
+        config,
+    );
+
+    let transports = TransportRegistry::new(vec![http_transport()]);
+    let registry = PushRegistry::new(push_store, transports);
+    let adapter = Arc::new(PushAdapter::new(rt.clone(), registry, 16));
+    adapter.start().await;
+
+    Ok((rt, adapter))
 }

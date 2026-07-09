@@ -17,6 +17,9 @@ export { Substructure as default, Substructure } from "./substructure";
 export type {
     ClientAction,
     ClientIdentity,
+    ClientInput,
+    ClientInputRequest,
+    ClientInputResponse,
     ClientPayload,
     Content,
     ContentPart,

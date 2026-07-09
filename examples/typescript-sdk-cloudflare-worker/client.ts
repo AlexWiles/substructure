@@ -15,7 +15,7 @@ const client = sub.backend.client({
 const scope = await client.startTurn({
     agentId: "todo",
     payload: {
-        type: "message",
+        type: "client.message",
         message: { role: "user", content: "Add 'buy groceries' and list my todos" },
     },
     identity: { id: "demo" },

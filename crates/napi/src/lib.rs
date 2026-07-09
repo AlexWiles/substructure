@@ -18,9 +18,9 @@ use substructure_core::providers::sqlite::{
     SqliteCheckpointStore, SqliteDb, SqliteEventStore, SqliteSessionIndexStore, SqliteWakeStore,
 };
 use substructure_core::providers::worker_queue::InMemoryWorkerQueue;
-use substructure_core::session::decision::{ClientPayload, EffectResultPayload, WorkKind};
+use substructure_core::session::decision::{EffectResultPayload, WorkKind};
 use substructure_core::session::wire::{
-    resolve_actions, WireDecisionRequest, WireDecisionResponse,
+    resolve_actions, WireClientPayload, WireDecisionRequest, WireDecisionResponse,
 };
 use substructure_core::span::SpanContext as CoreSpanContext;
 use substructure_core::worker::{DequeueFilter, FailDecision, SubmitDecision};
@@ -312,7 +312,7 @@ impl EmbeddedRuntime {
         identity_json: String,
         turn_id: Option<String>,
     ) -> Result<SubmitPayloadResult> {
-        let payload: ClientPayload = serde_json::from_str(&payload_json)
+        let payload: WireClientPayload = serde_json::from_str(&payload_json)
             .map_err(|e| Error::from_reason(format!("invalid payloadJson: {e}")))?;
         let owner: SessionOwner = serde_json::from_str(&identity_json)
             .map_err(|e| Error::from_reason(format!("invalid identityJson: {e}")))?;

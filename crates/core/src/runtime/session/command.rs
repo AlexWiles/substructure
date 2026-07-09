@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 
-use super::decision::{Action, ClientPayload, DecisionTrigger};
+use super::decision::{Action, DecisionTrigger};
 use super::events::*;
 use super::message::{Content, ContentPart, ImageUrl, Role};
 use super::reconcile::plan_reconcile;
@@ -11,7 +11,7 @@ use super::state::{
     json_to_string, new_call_id, EffectStatus, EffectTracking, SessionState, SessionStatus,
 };
 use super::tool_contract::{declared_tool, output_violation, DeclaredTool};
-use super::wire::WireMessage;
+use super::wire::{WireClientMessage, WireClientMessages, WireClientPayload, WireMessage};
 use crate::runtime::aggregate::Caller;
 use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse};
 use crate::runtime::owner::SessionOwner;
@@ -27,7 +27,7 @@ pub enum CommandPayload {
         worker_retry: RetryPolicy,
     },
     SubmitClientPayload {
-        payload: ClientPayload,
+        payload: WireClientPayload,
         turn_id: Option<String>,
     },
     SendMessage {
@@ -140,6 +140,8 @@ pub enum SessionError {
     TurnAlreadyActive { turn_id: String },
     #[error("turn already completed: {turn_id}")]
     TurnAlreadyCompleted { turn_id: String },
+    #[error("session has no active turn")]
+    NoActiveTurn,
     #[error("client subject is required")]
     MissingSubject,
     #[error("session access denied")]
@@ -632,7 +634,7 @@ impl SessionState {
                 }
 
                 match payload {
-                    ClientPayload::Message { message, stream: _ } => {
+                    WireClientPayload::Message(WireClientMessage { message, stream: _ }) => {
                         if matches!(self.status, SessionStatus::Interrupted { .. })
                             && message.role == Role::User
                         {
@@ -646,10 +648,10 @@ impl SessionState {
                             events.push(request);
                         }
                     }
-                    ClientPayload::Messages {
+                    WireClientPayload::Messages(WireClientMessages {
                         messages,
                         stream: _,
-                    } => {
+                    }) => {
                         // Fold client echoes of already-recorded results onto their
                         // nodes so the tree sees a resend, not a fork.
                         let messages = self.normalize_client_view(messages);
@@ -738,7 +740,7 @@ impl SessionState {
                             events.push(request);
                         }
                     }
-                    ClientPayload::Action { action } => {
+                    WireClientPayload::Action(action) => {
                         if matches!(self.status, SessionStatus::Interrupted { .. }) {
                             return Err(SessionError::SessionInterrupted);
                         }
@@ -1789,10 +1791,11 @@ mod tests {
     use crate::runtime::llm::{LlmRequest, LlmResponse};
     use crate::runtime::owner::SessionOwner;
     use crate::runtime::retry::RetryPolicy;
-    use crate::runtime::session::decision::{Action, ClientPayload, DecisionTrigger};
+    use crate::runtime::session::decision::{Action, DecisionTrigger};
     use crate::runtime::session::events::{EventPayload, LlmHandler, ToolHandler};
     use crate::runtime::session::message::{Content, Message, Role};
     use crate::runtime::session::state::{EffectStatus, SessionState, SessionStatus};
+    use crate::runtime::session::wire::WireClientPayload;
     use crate::runtime::span::SpanContext;
 
     /// Run a command through the handler and commit the resulting events, like production `execute`.
@@ -2323,7 +2326,7 @@ mod tests {
     #[test]
     fn submit_client_payload_with_active_turn_id_is_rejected() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
-        let payload = ClientPayload::Message {
+        let payload = WireClientPayload::Message(WireClientMessage {
             message: WireMessage {
                 id: None,
                 role: Role::User,
@@ -2333,7 +2336,7 @@ mod tests {
                 name: None,
             },
             stream: false,
-        };
+        });
 
         dispatch(
             &mut agg,
@@ -2371,7 +2374,7 @@ mod tests {
         let setup_events = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: ClientPayload::Message {
+                payload: WireClientPayload::Message(WireClientMessage {
                     message: WireMessage {
                         id: None,
                         role: Role::User,
@@ -2381,7 +2384,7 @@ mod tests {
                         name: None,
                     },
                     stream: false,
-                },
+                }),
                 turn_id: Some("turn-1".to_string()),
             },
             &Caller::System {
@@ -2440,7 +2443,7 @@ mod tests {
         let setup_events = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: ClientPayload::Message {
+                payload: WireClientPayload::Message(WireClientMessage {
                     message: WireMessage {
                         id: None,
                         role: Role::User,
@@ -2450,7 +2453,7 @@ mod tests {
                         name: None,
                     },
                     stream: false,
-                },
+                }),
                 turn_id: Some("turn-1".to_string()),
             },
             &Caller::System {
@@ -2522,7 +2525,7 @@ mod tests {
             },
         );
 
-        let user_message = ClientPayload::Message {
+        let user_message = WireClientPayload::Message(WireClientMessage {
             message: WireMessage {
                 id: None,
                 role: Role::User,
@@ -2532,7 +2535,7 @@ mod tests {
                 name: None,
             },
             stream: false,
-        };
+        });
 
         let err = agg
             .state
@@ -2735,10 +2738,10 @@ mod tests {
         let setup = dispatch(
             agg,
             CommandPayload::SubmitClientPayload {
-                payload: ClientPayload::Message {
+                payload: WireClientPayload::Message(WireClientMessage {
                     message: node_msg("seed", Role::User, "seed"),
                     stream: false,
-                },
+                }),
                 turn_id: None,
             },
             &system(),
@@ -2805,14 +2808,14 @@ mod tests {
         let events = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: ClientPayload::Messages {
+                payload: WireClientPayload::Messages(WireClientMessages {
                     messages: vec![
                         node_msg("c1", Role::User, "hi"),
                         node_msg("a1", Role::Assistant, "hello"),
                         node_msg("c2", Role::User, "more"),
                     ],
                     stream: false,
-                },
+                }),
                 turn_id: None,
             },
             &Caller::System {
@@ -2866,10 +2869,10 @@ mod tests {
         let events = dispatch(
             agg,
             CommandPayload::SubmitClientPayload {
-                payload: ClientPayload::Message {
+                payload: WireClientPayload::Message(WireClientMessage {
                     message: node_msg("", Role::User, "seed"),
                     stream: false,
-                },
+                }),
                 turn_id: None,
             },
             &system(),
@@ -2909,10 +2912,10 @@ mod tests {
         dispatch(
             agg,
             CommandPayload::SubmitClientPayload {
-                payload: ClientPayload::Messages {
+                payload: WireClientPayload::Messages(WireClientMessages {
                     messages,
                     stream: false,
-                },
+                }),
                 turn_id: None,
             },
             &system(),
@@ -3115,10 +3118,10 @@ mod tests {
             .state
             .handle(
                 CommandPayload::SubmitClientPayload {
-                    payload: ClientPayload::Messages {
+                    payload: WireClientPayload::Messages(WireClientMessages {
                         messages: vec![node_msg("", Role::User, "hello")],
                         stream: false,
-                    },
+                    }),
                     turn_id: None,
                 },
                 &system(),
@@ -3355,10 +3358,10 @@ mod tests {
         let first = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: ClientPayload::Message {
+                payload: WireClientPayload::Message(WireClientMessage {
                     message: node_msg("", Role::User, "A"),
                     stream: false,
-                },
+                }),
                 turn_id: None,
             },
             &system(),
@@ -3371,10 +3374,10 @@ mod tests {
         let second = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: ClientPayload::Message {
+                payload: WireClientPayload::Message(WireClientMessage {
                     message: node_msg("", Role::User, "B"),
                     stream: false,
-                },
+                }),
                 turn_id: None,
             },
             &system(),
@@ -3394,10 +3397,10 @@ mod tests {
         let events = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: ClientPayload::Message {
+                payload: WireClientPayload::Message(WireClientMessage {
                     message: node_msg("", Role::User, "hi"),
                     stream: false,
-                },
+                }),
                 turn_id: None,
             },
             &system(),
@@ -3424,10 +3427,10 @@ mod tests {
         let events = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: ClientPayload::Message {
+                payload: WireClientPayload::Message(WireClientMessage {
                     message: node_msg("", Role::User, "again"),
                     stream: false,
-                },
+                }),
                 turn_id: None,
             },
             &system(),
@@ -4275,7 +4278,7 @@ mod tests {
         let setup = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: ClientPayload::Message {
+                payload: WireClientPayload::Message(WireClientMessage {
                     message: WireMessage {
                         id: None,
                         role: Role::User,
@@ -4285,7 +4288,7 @@ mod tests {
                         name: None,
                     },
                     stream: false,
-                },
+                }),
                 turn_id: Some("turn-1".to_string()),
             },
             &system(),
@@ -4404,7 +4407,7 @@ mod tests {
         let setup = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: ClientPayload::Message {
+                payload: WireClientPayload::Message(WireClientMessage {
                     message: WireMessage {
                         id: None,
                         role: Role::User,
@@ -4414,7 +4417,7 @@ mod tests {
                         name: None,
                     },
                     stream: false,
-                },
+                }),
                 turn_id: Some("turn-1".to_string()),
             },
             &system(),
@@ -4886,12 +4889,10 @@ mod tests {
             .state
             .handle(
                 CommandPayload::SubmitClientPayload {
-                    payload: ClientPayload::Action {
-                        action: crate::session::decision::ClientAction {
-                            name: "refresh".to_string(),
-                            args: None,
-                        },
-                    },
+                    payload: WireClientPayload::Action(crate::session::wire::WireClientAction {
+                        name: "refresh".to_string(),
+                        args: None,
+                    }),
                     turn_id: None,
                 },
                 &Caller::System {
@@ -4911,7 +4912,7 @@ mod tests {
         let setup_events = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: ClientPayload::Message {
+                payload: WireClientPayload::Message(WireClientMessage {
                     message: WireMessage {
                         id: None,
                         role: Role::User,
@@ -4921,7 +4922,7 @@ mod tests {
                         name: None,
                     },
                     stream: false,
-                },
+                }),
                 turn_id: Some("turn-1".to_string()),
             },
             &Caller::System {
@@ -5061,7 +5062,7 @@ mod tests {
         let setup_events = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: ClientPayload::Message {
+                payload: WireClientPayload::Message(WireClientMessage {
                     message: WireMessage {
                         id: None,
                         role: Role::User,
@@ -5071,7 +5072,7 @@ mod tests {
                         name: None,
                     },
                     stream: false,
-                },
+                }),
                 turn_id: Some("turn-1".to_string()),
             },
             &Caller::System {
@@ -5151,7 +5152,7 @@ mod tests {
         let setup_events = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: ClientPayload::Message {
+                payload: WireClientPayload::Message(WireClientMessage {
                     message: WireMessage {
                         id: None,
                         role: Role::User,
@@ -5161,7 +5162,7 @@ mod tests {
                         name: None,
                     },
                     stream: false,
-                },
+                }),
                 turn_id: Some("turn-1".to_string()),
             },
             &system,
@@ -5285,7 +5286,7 @@ mod tests {
         let setup_events = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: ClientPayload::Message {
+                payload: WireClientPayload::Message(WireClientMessage {
                     message: WireMessage {
                         id: None,
                         role: Role::User,
@@ -5295,7 +5296,7 @@ mod tests {
                         name: None,
                     },
                     stream: false,
-                },
+                }),
                 turn_id: Some("turn-1".to_string()),
             },
             &Caller::System {
@@ -5373,7 +5374,7 @@ mod tests {
         let setup_events = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: ClientPayload::Message {
+                payload: WireClientPayload::Message(WireClientMessage {
                     message: WireMessage {
                         id: None,
                         role: Role::User,
@@ -5383,7 +5384,7 @@ mod tests {
                         name: None,
                     },
                     stream: false,
-                },
+                }),
                 turn_id: Some("turn-1".to_string()),
             },
             &Caller::System {
@@ -5543,10 +5544,10 @@ mod tests {
         let setup = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: ClientPayload::Message {
+                payload: WireClientPayload::Message(WireClientMessage {
                     message: node_msg("", Role::User, "hi"),
                     stream: false,
-                },
+                }),
                 turn_id: Some("turn-1".to_string()),
             },
             &system(),
@@ -6002,10 +6003,10 @@ mod tests {
         let setup = dispatch(
             agg,
             CommandPayload::SubmitClientPayload {
-                payload: ClientPayload::Message {
+                payload: WireClientPayload::Message(WireClientMessage {
                     message: node_msg("seed", Role::User, "seed"),
                     stream: false,
-                },
+                }),
                 turn_id: None,
             },
             &system(),
@@ -6348,10 +6349,10 @@ mod tests {
         let setup = dispatch(
             agg,
             CommandPayload::SubmitClientPayload {
-                payload: ClientPayload::Message {
+                payload: WireClientPayload::Message(WireClientMessage {
                     message: node_msg("", Role::User, text),
                     stream: false,
-                },
+                }),
                 turn_id: None,
             },
             &system(),

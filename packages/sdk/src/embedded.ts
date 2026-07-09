@@ -116,14 +116,17 @@ export class SubstructureEmbedded {
     /** Settle an effect out-of-band: a client-handled tool call, or a
      *  worker-handled llm call run in the background (the deferred fan-out pattern). */
     async settleEffect(args: SettleEffectArgs): Promise<void> {
-        if (args.result !== undefined) {
+        if (args.response === undefined && args.error === undefined) {
+            // The native settle takes a string result; canonicalize any non-string here
+            // (string passes through, else its JSON text) as the engine would.
+            const result = typeof args.result === "string" ? args.result : JSON.stringify(args.result);
             await this.runtime.settleEffect(
                 args.sessionId,
                 this.tenantId,
                 "tool_call",
                 args.id,
                 args.attempt,
-                args.result,
+                result,
                 undefined,
                 undefined,
                 undefined,

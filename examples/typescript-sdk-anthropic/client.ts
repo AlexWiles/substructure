@@ -9,7 +9,7 @@ const client = sub.backend.client({
 const scope = await client.startTurn({
     agentId: "anthropic-agent",
     payload: {
-        type: "message",
+        type: "client.message",
         message: {
             role: "user",
             content: "What's the weather in Paris? write a story about it in the style of tolstoy.",

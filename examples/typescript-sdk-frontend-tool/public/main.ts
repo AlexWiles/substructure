@@ -100,7 +100,7 @@ async function sendMessage(content: string) {
     try {
         const scope = await client.startTurn({
             agentId: "browser-assistant",
-            payload: { type: "message", message: { role: "user", content } },
+            payload: { type: "client.message", message: { role: "user", content } },
             sessionId,
         });
         sessionId = scope.sessionId;

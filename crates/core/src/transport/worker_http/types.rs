@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::llm::{ErrorCode, LlmResponse};
-use crate::runtime::session::decision::ClientPayload;
+use crate::runtime::session::wire::WireClientPayload;
 use crate::session::wire::{string_or_json, WireDecisionResponse};
 use crate::span::SpanContext;
 
@@ -98,7 +98,7 @@ pub struct MintClientTokenResponse {
 #[derive(Debug, Deserialize)]
 pub struct SubmitClientPayloadRequest {
     pub agent_id: String,
-    pub payload: ClientPayload,
+    pub payload: WireClientPayload,
     #[serde(default)]
     pub session_id: Option<String>,
     #[serde(default)]

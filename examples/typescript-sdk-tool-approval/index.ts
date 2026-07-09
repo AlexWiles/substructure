@@ -129,14 +129,14 @@ if (!sessionId || !input) {
 
 const payload =
     input === "/approve"
-        ? { type: "action" as const, name: "approve_command", args: { approved: true } }
+        ? { type: "client.action" as const, name: "approve_command", args: { approved: true } }
         : input === "/deny" || input.startsWith("/deny ")
           ? {
-                type: "action" as const,
+                type: "client.action" as const,
                 name: "approve_command",
                 args: { approved: false, reason: input.slice(5).trim() || undefined },
             }
-          : { type: "message" as const, message: { role: "user" as const, content: input } };
+          : { type: "client.message" as const, message: { role: "user" as const, content: input } };
 
 const embedded = await SubstructureEmbedded.create({
     agents: [assistant],

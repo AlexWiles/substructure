@@ -2,6 +2,7 @@ pub mod auth;
 pub mod cloud;
 pub mod env;
 pub mod local;
+pub mod run;
 
 use clap::Subcommand;
 
@@ -16,6 +17,9 @@ pub(crate) const DEFAULT_TENANT: &str = "default";
 pub enum Command {
     /// Run a local Substructure server.
     Serve(local::ServeArgs),
+    /// Run a single turn against a worker in-process and stream events, then exit.
+    /// For local development and testing example agents.
+    Run(run::RunArgs),
     /// Authenticate via the OAuth device flow and persist the token locally.
     Login {
         /// Don't try to open the verification URL in a browser.
@@ -82,6 +86,7 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
     cloud::telemetry::init(command_path(&command));
     match command {
         Command::Serve(args) => local::serve(args).await,
+        Command::Run(args) => run::run(args).await,
         Command::Login {
             no_browser,
             globals,
@@ -115,6 +120,7 @@ fn command_path(cmd: &Command) -> &'static str {
     use cloud::{sessions::SessionsCommand, webhook::WebhookCommand};
     match cmd {
         Command::Serve(_) => "serve",
+        Command::Run(_) => "run",
         Command::Login { .. } => "login",
         Command::Logout { .. } => "logout",
         Command::Whoami { .. } => "whoami",

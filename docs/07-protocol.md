@@ -170,8 +170,8 @@ delivered transcript (see Forks and in-flight calls).
 ### The client transcript
 
 All conversational input arrives as one trigger. A client that submits a bare
-message (`{"type": "message", ...}`) and a client that submits its full view
-(`{"type": "messages", ...}`, e.g. AG-UI) produce the same shape on your wire:
+message (`{"type": "client.message", ...}`) and a client that submits its full view
+(`{"type": "client.messages", ...}`, e.g. AG-UI) produce the same shape on your wire:
 the **full proposed conversation** in `messages`, with `new_from` marking where
 the unrecorded suffix starts. The engine computes both at delivery time against
 the tree, so a message that queued behind another decision is materialized

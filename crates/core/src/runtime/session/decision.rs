@@ -7,32 +7,6 @@ use super::wire::WireMessage;
 use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse};
 use crate::runtime::retry::RetryPolicy;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClientAction {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub args: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ClientPayload {
-    Message {
-        message: WireMessage,
-        #[serde(default)]
-        stream: bool,
-    },
-    Messages {
-        messages: Vec<WireMessage>,
-        #[serde(default)]
-        stream: bool,
-    },
-    Action {
-        #[serde(flatten)]
-        action: ClientAction,
-    },
-}
-
 /// Engine-sent trigger; `*.finished` carries the payload when ok, else error.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]

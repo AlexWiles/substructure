@@ -13,28 +13,35 @@ import { createServer } from "node:http";
 const PORT = 4444;
 
 createServer((req, res) => {
-  let body = "";
-  req.on("data", (chunk) => (body += chunk));
-  req.on("end", () => {
-    res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify(decide(JSON.parse(body))));
-  });
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+        res.setHeader("content-type", "application/json");
+        try {
+            res.end(JSON.stringify(decide(JSON.parse(body))));
+        } catch (err) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: String(err) }));
+        }
+    });
 }).listen(PORT, () => console.log(`worker listening on http://localhost:${PORT}`));
 
 function decide(req) {
-  // The engine proposes actions for a default agent tool loop
-  if (req.proposed) return req.proposed;
+    // The engine proposes actions for a default agent tool loop
+    if (req.proposed) return req.proposed;
 
-  const t = req.trigger;
+    const t = req.trigger;
 
-  // The client sent the conversation → record it, prompt the model.
-  if (t.type === "client.messages") {
-    return {
-      messages: t.messages,
-      actions: [{ type: "llm.call", stream: true,
-        request: { model: "claude-haiku-4-5-20251001", messages: t.messages } }],
-    };
-  }
+    // The client sent the conversation → record it, prompt the model.
+    if (t.type === "client.messages") {
+        return {
+            messages: t.messages,
+            actions: [{
+                type: "llm.call", stream: true,
+                request: { model: "claude-haiku-4-5-20251001", messages: t.messages }
+            }],
+        };
+    }
 
-  return { actions: [] };
+    return { actions: [] };
 }

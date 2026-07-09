@@ -349,7 +349,7 @@ const client = sub.backend.client({
 const scope = await client.startTurn({
   agentId: "weather-agent",
   payload: {
-    type: "message",
+    type: "client.message",
     message: { role: "user", content: "What's the weather in SF?" },
   },
   identity: { id: "user-1" },
@@ -424,7 +424,7 @@ const client = sub.frontend.client({ token });
 const scope = await client.startTurn({
   agentId: "weather-agent",
   payload: {
-    type: "message",
+    type: "client.message",
     message: { role: "user", content: "What's the weather in SF?" },
   },
 });
@@ -472,7 +472,7 @@ const embedded = await SubstructureEmbedded.create({
 const scope = await embedded.startTurn({
   agentId: "todo",
   payload: {
-    type: "message",
+    type: "client.message",
     message: { role: "user", content: "Add 'buy groceries' and list my todos" },
   },
   identity: { tenant_id: "default", id: "demo" },
