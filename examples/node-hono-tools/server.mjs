@@ -1,4 +1,4 @@
-// A complete chat agent with a tool. No SDK, no dependencies — Node's http server.
+// A complete chat agent with a tool. No SDK — the decision protocol by hand, served with Hono.
 // The engine POSTs a decision request; this returns the next actions.
 //
 // The worker accepts every decision the engine has a default for (`proposed`)
@@ -9,7 +9,8 @@
 //
 // Point a local Substructure server at it:
 //   subs serve --dev --provider anthropic --worker-url http://localhost:4444
-import { createServer } from "node:http";
+import { serve } from "@hono/node-server";
+import { Hono } from "hono";
 
 const PORT = 4444;
 
@@ -56,11 +57,8 @@ function decide(req) {
     return { actions: [] };
 }
 
-createServer((req, res) => {
-    let body = "";
-    req.on("data", (chunk) => (body += chunk));
-    req.on("end", () => {
-        res.setHeader("content-type", "application/json");
-        res.end(JSON.stringify(decide(JSON.parse(body))));
-    });
-}).listen(PORT, () => console.log(`worker listening on http://localhost:${PORT}`));
+const app = new Hono();
+app.post("/", async (c) => c.json(decide(await c.req.json())));
+
+serve({ fetch: app.fetch, port: PORT }, () =>
+    console.log(`worker listening on http://localhost:${PORT}`));

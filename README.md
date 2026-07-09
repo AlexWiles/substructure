@@ -1,25 +1,81 @@
-# substructure.ai
+# substructure.ai: The no-SDK AI agent engine
 
-[![sdk](https://img.shields.io/npm/v/@substructure.ai/sdk?label=sdk)](https://www.npmjs.com/package/@substructure.ai/sdk)
 [![cli](https://img.shields.io/npm/v/@substructure.ai/cli?label=cli)](https://www.npmjs.com/package/@substructure.ai/cli)
 
 > Substructure is under active development. APIs, CLI commands, and the wire protocol may change between releases for versions 0.1.x
 
-Substructure is an open-source engine that drives your agent loop over HTTP. It keeps sessions durable and streams AG-UI events to your clients. Your code stays on your infrastructure. It's language agnostic. You don't even need an SDK (but we do have one).
+Substructure is an open-source engine that drives your agent loop over HTTP. It keeps sessions durable and streams AG-UI events to your clients. It's language agnostic. You don't even need an SDK.
 
+Here is a basic chat bot built with javascript and hono.
 ```javascript
-// A complete chat agent. No SDK.
-function decide(req) {
-  switch (req.trigger.type) {
-    case "client.messages":
-      return reply(req, { messages: req.trigger.messages, actions: [promptModel(req.trigger.messages)] });
-    case "llm.finished":
-      return reply(req, { actions: [{ type: "done", data: req.trigger.message.content }] });
-  }
+import { serve } from "@hono/node-server";
+import { Hono } from "hono";
+
+function decide({ trigger: t, proposed }) {
+    // The engine proposes actions for a default agent tool loop
+    if (proposed) return proposed;
+
+    // The client sent an updated message list
+    if (t.type === "client.messages") {
+        return {
+            // echo back the messages to update the session state
+            messages: t.messages,
+            // call the LLM with the messages
+            actions: [{
+                type: "llm.call", stream: true,
+                request: {
+                    model: "claude-haiku-4-5-20251001",
+                    messages: t.messages
+                }
+            }],
+        };
+    }
+
+    return { actions: [] };
 }
+
+
+const app = new Hono();
+app.post("/", async (c) => c.json(decide(await c.req.json())));
+serve({ fetch: app.fetch, port: 4444 });
 ```
 
-The worker contract is one JSON request in, one JSON response out. Simple enough to implement in any language, no SDK required.
+Here is the same using Python and Fast API
+
+```python
+from fastapi import FastAPI, Request
+
+app = FastAPI()
+
+@app.post("/")
+async def decide(request: Request):
+    req = await request.json()
+
+    # The engine proposes actions for a default agent tool loop
+    if req["proposed"]:
+        return req["proposed"]
+
+    t = req["trigger"]
+
+    # The client sent the conversation → record it, prompt the model.
+    if t["type"] == "client.messages":
+        return {
+            "messages": t["messages"],
+            "actions": [
+                {
+                    "type": "llm.call",
+                    "stream": True,
+                    "request": {
+                        "model": "claude-haiku-4-5-20251001",
+                        "messages": t["messages"],
+                    },
+                }
+            ],
+        }
+
+    return {"actions": []}
+```
+
 
 Substructure drives the agent loop, handling retries, sub-agent supervision, llm calls, real-time event streaming and more. Tool execution, agent decisions, llm calls (optionally) live in your codebase and execute on your infrastructure.
 

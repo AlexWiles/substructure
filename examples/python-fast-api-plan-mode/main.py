@@ -19,9 +19,14 @@ PLANNING_TOOLS = [
         "info": {
             "name": "add_step",
             "description": "Append a step to the plan.",
-            "input": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+            "input": {
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
         },
-        "exec": lambda plan, args: plan.append({"text": args["text"], "done": False}) or plan,
+        "exec": lambda plan, args: plan.append({"text": args["text"], "done": False})
+        or plan,
     },
 ]
 
@@ -30,14 +35,20 @@ EXECUTING_TOOLS = [
         "info": {
             "name": "complete_step",
             "description": "Mark the numbered plan step done (1-based, as shown in the plan).",
-            "input": {"type": "object", "properties": {"number": {"type": "integer"}}, "required": ["number"]},
+            "input": {
+                "type": "object",
+                "properties": {"number": {"type": "integer"}},
+                "required": ["number"],
+            },
         },
         "exec": lambda plan, args: plan[args["number"] - 1].update(done=True) or plan,
     },
 ]
 
 TOOLS_BY_MODE = {"planning": PLANNING_TOOLS, "executing": EXECUTING_TOOLS}
-ALL_TOOLS = {tool["info"]["name"]: tool for tools in TOOLS_BY_MODE.values() for tool in tools}
+ALL_TOOLS = {
+    tool["info"]["name"]: tool for tools in TOOLS_BY_MODE.values() for tool in tools
+}
 
 # ── Prompts and models, per mode ──────────────────────────────────────────────
 
@@ -70,7 +81,10 @@ PROFILES = {
 def render_plan(plan):
     if not plan:
         return "(empty plan)"
-    return "\n".join(f"  {i + 1}. [{'x' if s['done'] else ' '}] {s['text']}" for i, s in enumerate(plan))
+    return "\n".join(
+        f"  {i + 1}. [{'x' if s['done'] else ' '}] {s['text']}"
+        for i, s in enumerate(plan)
+    )
 
 
 def prompt(messages, mode):
@@ -113,16 +127,32 @@ async def decide(request: Request):
         state["mode"] = requested
         if entering and requested == "executing":
             seed = {"role": "user", "content": render_plan(state["plan"])}
-            return {"messages": [seed], "actions": [prompt([seed], "executing")], "state": state}
+            return {
+                "messages": [seed],
+                "actions": [prompt([seed], "executing")],
+                "state": state,
+            }
         return {"state": state}
 
     # The client sent the conversation → record it, prompt the model in this mode.
     if t["type"] == "client.messages":
-        return {"messages": t["messages"], "actions": [prompt(t["messages"], state["mode"])], "state": state}
+        return {
+            "messages": t["messages"],
+            "actions": [prompt(t["messages"], state["mode"])],
+            "state": state,
+        }
 
     # A declared tool call with valid arguments → mutate the plan, answer.
     if t["type"] == "tool.execute":
         tool = ALL_TOOLS[t["name"]]
-        return {"actions": [{"type": "tool.result", "result": tool["exec"](state["plan"], t["input"]["value"])}], "state": state}
+        return {
+            "actions": [
+                {
+                    "type": "tool.result",
+                    "result": tool["exec"](state["plan"], t["input"]["value"]),
+                }
+            ],
+            "state": state,
+        }
 
     return {"state": state}

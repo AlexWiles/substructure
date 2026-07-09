@@ -1,14 +1,15 @@
-# python-basic
+# node-hono-basic
 
-The most basic chattable agent, in Python — no SDK, one FastAPI POST handler. The
-whole worker reads the decision request and returns the next actions. It accepts
-every decision the engine has a default for (`proposed`) first, then authors the
-one that is genuinely its own: `client.messages` → the LLM request (the agent's
-identity). Everything else — model replies and model failures — is the engine's
-default loop, accepted by echoing `proposed` back.
+The most basic chattable agent, in plain JavaScript on Node — no SDK, served
+with [Hono](https://hono.dev). The whole worker reads the decision request and
+returns the next actions. It accepts every decision the engine has a default for
+(`proposed`) first, then authors the one that is genuinely its own:
+`client.messages` → the LLM request (the agent's identity). Everything else —
+model replies and model failures — is the engine's default loop, accepted by
+echoing `proposed` back.
 
 For an agent that also runs its own tools, see
-[`python-tools`](../python-tools).
+[`node-hono-tools`](../node-hono-tools).
 
 The worker contract is one JSON request in, one JSON response out. See
 [`docs/07-protocol.md`](../../docs/07-protocol.md) for the full protocol.
@@ -27,8 +28,8 @@ subs serve --dev --provider anthropic --worker-url http://localhost:4444
 **2. Start the worker** (listens on `:4444`):
 
 ```sh
-pip install fastapi uvicorn
-uvicorn main:app --port 4444
+npm install
+node server.mjs
 ```
 
 **3. Send a message.** Prints `{"session_id":"…","turn_id":"…"}`:

@@ -1,4 +1,4 @@
-# python-plan-mode
+# python-fast-api-plan-mode
 
 A modal agent — plan, then execute — in Python, no SDK, one FastAPI POST handler.
 The worker reads a `mode` field from state and picks the model, prompt, and tool
@@ -14,7 +14,7 @@ branch seeded with only the rendered plan (a plan-only message with no id forks
 at the root), so the executor starts clean; submitting state on that forking
 decision carries the plan into the new branch.
 
-For a single-mode agent with a tool, see [`python-tools`](../python-tools). The
+For a single-mode agent with a tool, see [`python-fast-api-tools`](../python-fast-api-tools). The
 [`typescript-sdk-plan-mode`](../typescript-sdk-plan-mode) example is the same
 pattern on the SDK's `toolLoop`.
 

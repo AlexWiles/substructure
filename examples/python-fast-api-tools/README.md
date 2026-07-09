@@ -1,4 +1,4 @@
-# python-tools
+# python-fast-api-tools
 
 A chattable agent with its own tool, in Python â€” no SDK, one FastAPI POST handler.
 The whole worker reads the decision request and returns the next actions. It
@@ -9,7 +9,7 @@ results, model replies, model failures, even broken or hallucinated tool calls â
 is the engine's default loop, accepted by echoing `proposed` back.
 
 The single tool here, `get_current_time`, returns the current UTC time. For the
-same agent without tools, see [`python-basic`](../python-basic).
+same agent without tools, see [`python-fast-api-basic`](../python-fast-api-basic).
 
 The worker contract is one JSON request in, one JSON response out. See
 [`docs/07-protocol.md`](../../docs/07-protocol.md) for the full protocol.

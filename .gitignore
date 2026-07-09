@@ -27,3 +27,5 @@ target/
 
 subs.toml
 .pnpm-store
+
+.expert/

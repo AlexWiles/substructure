@@ -23,16 +23,17 @@ defmodule Worker do
 
   # The engine proposes actions for a default agent tool loop
   defp decide(%{"proposed" => proposed}) when is_map(proposed), do: proposed
-  defp decide(%{"trigger" => t}), do: trigger(t)
-
-  # The client sent the conversation → record it, prompt the model.
-  defp trigger(%{"type" => "client.messages", "messages" => messages}) do
-    %{"messages" => messages, "actions" => [%{
-      "type" => "llm.call", "stream" => true,
-      "request" => %{"model" => "claude-haiku-4-5-20251001", "messages" => messages}}]}
+  defp decide(%{"trigger" => %{"type" => "client.messages", "messages" => messages}}) do
+    %{
+      "messages" => messages,
+      "actions" => [%{
+        "type" => "llm.call", "stream" => true,
+        "request" => %{"model" => "claude-haiku-4-5-20251001", "messages" => messages}
+       }]
+    }
   end
 
-  defp trigger(_), do: %{"actions" => []}
+  defp decide(_), do: %{"actions" => []}
 end
 
 require Logger
