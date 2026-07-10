@@ -72,16 +72,31 @@ impl PrettyPrinter {
                 }
             }
             AgUiEvent::ToolCallEnd { tool_call_id } => {
-                if let Some(tool) = self.tools.remove(tool_call_id) {
+                if let Some(tool) = self.tools.get(tool_call_id) {
+                    let line = format!("→ {} {}", tool.name, compact_args(&tool.args));
                     self.break_line(w)?;
-                    let args = compact_args(&tool.args);
-                    self.write_styled(w, CYAN, &format!("→ {}", tool.name))?;
-                    self.write_body(w, &format!(" {args}"))?;
+                    self.write_styled(w, CYAN, &line)?;
                     self.newline(w)?;
                 }
             }
-            AgUiEvent::ToolCallResult { content, .. } => {
+            AgUiEvent::ToolCallResult {
+                tool_call_id,
+                content,
+                ..
+            } => {
                 self.break_line(w)?;
+                // Name the call this result answers so parallel calls stay legible;
+                // echo non-empty args to tell same-named calls apart.
+                if let Some(tool) = self.tools.remove(tool_call_id) {
+                    let args = compact_args(&tool.args);
+                    let head = if args == "{}" {
+                        format!("← {}", tool.name)
+                    } else {
+                        format!("← {} {args}", tool.name)
+                    };
+                    self.write_styled(w, CYAN, &head)?;
+                    self.newline(w)?;
+                }
                 self.open(w, DIM)?;
                 self.write_body(w, &indent(&format_result(content)))?;
                 self.close(w)?;
@@ -286,6 +301,91 @@ mod tests {
             role: "tool",
         }]);
         assert_eq!(out, "  {\n    \"temp\": 62\n  }\n");
+    }
+
+    fn call(id: &str, name: &str) -> Vec<AgUiEvent> {
+        vec![
+            AgUiEvent::ToolCallStart {
+                tool_call_id: id.into(),
+                tool_call_name: name.into(),
+                parent_message_id: None,
+            },
+            AgUiEvent::ToolCallEnd {
+                tool_call_id: id.into(),
+            },
+        ]
+    }
+
+    fn result(id: &str, content: &str) -> AgUiEvent {
+        AgUiEvent::ToolCallResult {
+            message_id: id.into(),
+            tool_call_id: id.into(),
+            content: content.into(),
+            role: "tool",
+        }
+    }
+
+    #[test]
+    fn tool_result_is_labeled_with_its_call() {
+        let mut evs = call("x", "get_current_time");
+        evs.push(result("x", "2026-07-10T04:14:56.322Z"));
+        let out = render_all(evs);
+        assert_eq!(
+            out,
+            "→ get_current_time {}\n← get_current_time\n  2026-07-10T04:14:56.322Z\n"
+        );
+    }
+
+    #[test]
+    fn parallel_tool_results_are_each_labeled() {
+        let mut evs = call("a", "get_current_time_zone");
+        evs.extend(call("b", "get_current_time"));
+        evs.push(result("a", "Asia/Bangkok"));
+        evs.push(result("b", "2026-07-10T04:14:56.322Z"));
+        let out = render_all(evs);
+        assert_eq!(
+            out,
+            "→ get_current_time_zone {}\n→ get_current_time {}\n\
+             ← get_current_time_zone\n  Asia/Bangkok\n\
+             ← get_current_time\n  2026-07-10T04:14:56.322Z\n"
+        );
+    }
+
+    #[test]
+    fn results_pair_by_id_regardless_of_completion_order() {
+        let mut evs = call("a", "first");
+        evs.extend(call("b", "second"));
+        // Results arrive in reverse dispatch order.
+        evs.push(result("b", "B"));
+        evs.push(result("a", "A"));
+        let out = render_all(evs);
+        assert_eq!(
+            out,
+            "→ first {}\n→ second {}\n← second\n  B\n← first\n  A\n"
+        );
+    }
+
+    #[test]
+    fn same_named_calls_are_disambiguated_by_args() {
+        let out = render_all(vec![
+            AgUiEvent::ToolCallStart {
+                tool_call_id: "a".into(),
+                tool_call_name: "get_weather".into(),
+                parent_message_id: None,
+            },
+            AgUiEvent::ToolCallArgs {
+                tool_call_id: "a".into(),
+                delta: r#"{"city":"Paris"}"#.into(),
+            },
+            AgUiEvent::ToolCallEnd {
+                tool_call_id: "a".into(),
+            },
+            result("a", "68"),
+        ]);
+        assert_eq!(
+            out,
+            "→ get_weather {\"city\":\"Paris\"}\n← get_weather {\"city\":\"Paris\"}\n  68\n"
+        );
     }
 
     #[test]

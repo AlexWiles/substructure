@@ -158,7 +158,7 @@ mod tests {
         let body = r#"{
             "messages":[],
             "actions":[
-                {"type":"llm.call","request":{"model":"m","messages":[]},"handler":"server"},
+                {"type":"llm.call","model":"m","messages":[],"handler":"server"},
                 {"type":"tool.call","name":"t","arguments":"{}","handler":"worker"}
             ]
         }"#;

@@ -104,6 +104,8 @@ fn try_extract(raw: &Event) -> Option<WorkerDecisionRequest> {
         &transcript,
         &derived.open_llm_calls,
         pending_calls,
+        derived.agent_config.as_ref(),
+        &req.decision_id,
     );
 
     Some(WorkerDecisionRequest {
@@ -114,6 +116,7 @@ fn try_extract(raw: &Event) -> Option<WorkerDecisionRequest> {
         trigger,
         proposed,
         state: derived.worker_state.clone(),
+        agent: derived.agent_config.clone(),
         calls: derived.calls.clone(),
         pending_calls,
         transcript,

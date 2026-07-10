@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use axum::response::sse::Event as SseEvent;
 use tokio::sync::mpsc;
@@ -35,6 +35,7 @@ pub struct AgUiTranslator {
     closed_tool_calls: HashSet<String>,
     current_call_id: Option<String>,
     open_tools: HashSet<String>,
+    sub_agent_calls: HashMap<String, String>,
     batch: Option<ToolBatch>,
     pub terminated: bool,
 }
@@ -53,6 +54,7 @@ impl AgUiTranslator {
             closed_tool_calls: HashSet::new(),
             current_call_id: None,
             open_tools: HashSet::new(),
+            sub_agent_calls: HashMap::new(),
             batch: None,
             terminated: false,
         }
@@ -253,6 +255,45 @@ impl AgUiTranslator {
                 }
                 out
             }
+            EventPayload::SubAgentRequested(s) => {
+                // A delegation surfaces to the client as a tool call named for the
+                // sub-agent; its answer arrives later on `sub_agent.turn_completed`,
+                // keyed by child session id, so remember the mapping.
+                self.sub_agent_calls
+                    .insert(s.session_id, s.tool_call_id.clone());
+                let out = if self.streamed_tool_calls.remove(&s.tool_call_id) {
+                    self.open_tools.remove(&s.tool_call_id);
+                    self.streamed_tool_call_args.remove(&s.tool_call_id);
+                    vec![AgUiEvent::ToolCallEnd {
+                        tool_call_id: s.tool_call_id.clone(),
+                    }]
+                } else {
+                    vec![
+                        AgUiEvent::ToolCallStart {
+                            tool_call_id: s.tool_call_id.clone(),
+                            tool_call_name: s.agent_id,
+                            parent_message_id: self.current_call_id.clone(),
+                        },
+                        AgUiEvent::ToolCallEnd {
+                            tool_call_id: s.tool_call_id.clone(),
+                        },
+                    ]
+                };
+                self.closed_tool_calls.insert(s.tool_call_id.clone());
+                // A sub-agent runs server-side and never yields the run to the
+                // client; track it like a worker tool so a mixed batch waits for
+                // its result before finishing.
+                if let Some(batch) = self.batch.as_mut() {
+                    if batch.pending_client_tool_calls.remove(&s.tool_call_id) {
+                        batch.pending_worker_tool_calls.insert(s.tool_call_id);
+                    }
+                }
+                out
+            }
+            EventPayload::SubAgentTurnCompleted(s) => {
+                self.settle_sub_agent(&s.session_id, sub_agent_result(&s.data))
+            }
+            EventPayload::SubAgentErrored(s) => self.settle_sub_agent(&s.session_id, s.error),
             EventPayload::LlmCallErrored(e) if !e.retryable => self.finalize_error(e.error),
             EventPayload::SessionCancelled => self.finalize_error("session cancelled".to_string()),
             EventPayload::SessionInterrupted(p) => {
@@ -329,6 +370,25 @@ impl AgUiTranslator {
         }
     }
 
+    /// Emit a sub-agent's answer as the result of its delegating tool call,
+    /// then finish the run if it was the last unresolved call in a client batch.
+    fn settle_sub_agent(&mut self, session_id: &str, content: String) -> Vec<AgUiEvent> {
+        let Some(tool_call_id) = self.sub_agent_calls.remove(session_id) else {
+            return vec![];
+        };
+        let mut out = vec![tool_result(tool_call_id.clone(), content)];
+        let yield_now = if let Some(batch) = self.batch.as_mut() {
+            batch.pending_worker_tool_calls.remove(&tool_call_id);
+            batch.is_yield_point()
+        } else {
+            false
+        };
+        if yield_now {
+            out.extend(self.finish_client_yield());
+        }
+        out
+    }
+
     fn finish_client_yield(&mut self) -> Vec<AgUiEvent> {
         let mut out = self.close_all_open();
         out.push(AgUiEvent::RunFinished {
@@ -379,6 +439,14 @@ impl AgUiTranslator {
 
 fn reasoning_id(call_id: &str) -> String {
     format!("{call_id}-reasoning")
+}
+
+/// A sub-agent turn result: a bare string renders verbatim, anything else as JSON.
+fn sub_agent_result(data: &serde_json::Value) -> String {
+    match data {
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
 }
 
 fn tool_result(tool_call_id: String, content: String) -> AgUiEvent {
@@ -1054,6 +1122,109 @@ mod tests {
         assert_eq!(interrupt["message"], "Send the email?");
         assert_eq!(interrupt["toolCallId"], "tc-1");
         assert_eq!(interrupt["responseSchema"]["type"], "object");
+        assert!(t.terminated);
+    }
+
+    fn sub_agent_requested(session: &str, agent: &str, tool_id: &str) -> EventPayload {
+        ev(json!({
+            "type": "sub_agent.requested",
+            "session_id": session,
+            "agent_id": agent,
+            "tool_call_id": tool_id,
+            "retry": serde_json::from_str::<Value>(RETRY).unwrap(),
+        }))
+    }
+
+    fn sub_agent_turn_completed(session: &str, data: Value) -> EventPayload {
+        ev(json!({
+            "type": "sub_agent.turn_completed",
+            "session_id": session,
+            "data": data,
+        }))
+    }
+
+    #[test]
+    fn streamed_sub_agent_call_closes_then_renders_result() {
+        let mut t = AgUiTranslator::new("t1".into(), "r1".into());
+        // The delegating tool call streams first, exactly like a normal tool call.
+        let a = vals(t.on_delta(tool_args_delta(
+            "c1",
+            "r1",
+            "call-1",
+            Some("weather"),
+            Some(r#"{"message":"Paris?"}"#),
+        )));
+        assert_eq!(kinds(&a), ["TOOL_CALL_START", "TOOL_CALL_ARGS"]);
+        let _ = t.on_event(llm_completed_with_tools("c1", &["call-1"]));
+
+        // `sub_agent.requested` stands in for `tool.call.requested`: it closes the bracket.
+        let req = vals(t.on_event(sub_agent_requested("child-1", "weather", "call-1")));
+        assert_eq!(kinds(&req), ["TOOL_CALL_END"]);
+        assert!(t.open_tools.is_empty());
+        assert!(!t.terminated, "a lone sub-agent must not yield the run");
+
+        // The child's answer surfaces as the tool result, keyed by the tool call id.
+        let done = vals(t.on_event(sub_agent_turn_completed("child-1", json!("Clear, 68F."))));
+        assert_eq!(kinds(&done), ["TOOL_CALL_RESULT"]);
+        assert_eq!(done[0]["toolCallId"], "call-1");
+        assert_eq!(done[0]["content"], "Clear, 68F.");
+        assert!(!t.terminated);
+
+        // The turn finishes on the parent's own completion, not the sub-agent's.
+        let end = vals(t.on_event(ev(json!({"type": "turn.completed", "turn_id": "r1"}))));
+        assert_eq!(kinds(&end), ["RUN_FINISHED"]);
+    }
+
+    #[test]
+    fn non_string_sub_agent_result_is_serialized_as_json() {
+        let mut t = AgUiTranslator::new("t1".into(), "r1".into());
+        let _ = t.on_event(sub_agent_requested("child-1", "lookup", "call-1"));
+        let done = vals(t.on_event(sub_agent_turn_completed("child-1", json!({"tempF": 68}))));
+        assert_eq!(done[0]["content"], r#"{"tempF":68}"#);
+    }
+
+    #[test]
+    fn unstreamed_sub_agent_call_synthesizes_the_bracket() {
+        let mut t = AgUiTranslator::new("t1".into(), "r1".into());
+        let req = vals(t.on_event(sub_agent_requested("child-1", "weather", "call-1")));
+        assert_eq!(kinds(&req), ["TOOL_CALL_START", "TOOL_CALL_END"]);
+        assert_eq!(req[0]["toolCallName"], "weather");
+        assert_eq!(req[0]["toolCallId"], "call-1");
+    }
+
+    #[test]
+    fn sub_agent_error_surfaces_as_a_result() {
+        let mut t = AgUiTranslator::new("t1".into(), "r1".into());
+        let _ = t.on_event(sub_agent_requested("child-1", "weather", "call-1"));
+        let err = vals(t.on_event(ev(json!({
+            "type": "sub_agent.errored",
+            "session_id": "child-1",
+            "error": "child boom",
+        }))));
+        assert_eq!(kinds(&err), ["TOOL_CALL_RESULT"]);
+        assert_eq!(err[0]["toolCallId"], "call-1");
+        assert_eq!(err[0]["content"], "child boom");
+    }
+
+    #[test]
+    fn mixed_batch_waits_for_sub_agent_before_yielding() {
+        let mut t = AgUiTranslator::new("t1".into(), "r1".into());
+        let _ = t.on_event(llm_completed_with_tools("c1", &["sub", "c"]));
+
+        let after_sub = vals(t.on_event(sub_agent_requested("child-1", "weather", "sub")));
+        assert_eq!(kinds(&after_sub), ["TOOL_CALL_START", "TOOL_CALL_END"]);
+        assert!(!t.terminated);
+
+        let after_client = vals(t.on_event(tool_requested("c", "set_color", "{}", "client")));
+        assert_eq!(
+            kinds(&after_client),
+            ["TOOL_CALL_START", "TOOL_CALL_ARGS", "TOOL_CALL_END"],
+            "must not yield while the sub-agent in the batch is unresolved"
+        );
+        assert!(!t.terminated);
+
+        let done = vals(t.on_event(sub_agent_turn_completed("child-1", json!("done"))));
+        assert_eq!(kinds(&done), ["TOOL_CALL_RESULT", "RUN_FINISHED"]);
         assert!(t.terminated);
     }
 

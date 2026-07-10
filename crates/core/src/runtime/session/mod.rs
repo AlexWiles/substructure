@@ -1,3 +1,4 @@
+pub mod agent_config;
 mod aggregate;
 pub mod command;
 pub mod decision;

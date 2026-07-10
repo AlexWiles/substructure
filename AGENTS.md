@@ -12,8 +12,8 @@ crates/napi              → N-API bindings exposing core to Node
 ```
 
 ### Coding guidelines:
-Only use comments to explain code that is unclear. No narrative comments, no comments that restate code behavior that is clear in the code.
+Keep comments to an absolute minimum and use as few words as possible.
 
-### Changes:
-Keep CHANGELOG.md up to date with a brief description of changes as they relate to the previous release.
+### CHANGELOG.md:
+Keep CHANGELOG.md up to date. There should be a maximum of two sentences per entry. First sentence states the problem in as few words as possible. Second sentence states the solution in as few words as possible.
 

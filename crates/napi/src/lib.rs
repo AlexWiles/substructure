@@ -20,7 +20,7 @@ use substructure_core::providers::sqlite::{
 use substructure_core::providers::worker_queue::InMemoryWorkerQueue;
 use substructure_core::session::decision::{EffectResultPayload, WorkKind};
 use substructure_core::session::wire::{
-    resolve_actions, WireClientPayload, WireDecisionRequest, WireDecisionResponse,
+    resolve_response, WireClientPayload, WireDecisionRequest, WireDecisionResponse,
 };
 use substructure_core::span::SpanContext as CoreSpanContext;
 use substructure_core::worker::{DequeueFilter, FailDecision, SubmitDecision};
@@ -200,19 +200,25 @@ impl EmbeddedRuntime {
                     Ok(response_json) => {
                         match serde_json::from_str::<WireDecisionResponse>(&response_json) {
                             Ok(submit) => {
-                                // Resolve wire actions against the trigger this decision
-                                // answers before handing them to the core.
-                                match resolve_actions(submit.actions, Some(&decision.trigger)) {
-                                    Ok(actions) => {
+                                // Lower the response against the trigger it answers
+                                // and the config resolved for this decision before
+                                // handing it to the core.
+                                match resolve_response(
+                                    submit,
+                                    decision.agent.as_ref(),
+                                    Some(&decision.trigger),
+                                ) {
+                                    Ok(resolved) => {
                                         let submit_decision = SubmitDecision {
                                             session_id: decision.session_id,
                                             caller: Caller::System {
                                                 tenant_id: decision_tenant.clone(),
                                             },
                                             decision_id: decision.decision_id.clone(),
-                                            transcript: submit.messages,
-                                            actions,
-                                            state: submit.state,
+                                            transcript: resolved.messages,
+                                            actions: resolved.actions,
+                                            state: resolved.state,
+                                            agent: resolved.agent,
                                             span: decision.span.child("js_worker"),
                                         };
 
@@ -230,7 +236,7 @@ impl EmbeddedRuntime {
                                         tracing::warn!(
                                             decision_id = %decision.decision_id,
                                             error = %e,
-                                            "unresolvable worker action"
+                                            "unresolvable worker decision"
                                         );
                                     }
                                 }

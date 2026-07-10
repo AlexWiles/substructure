@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
-use crate::session::wire::resolve_actions;
+use crate::session::wire::resolve_response;
 use crate::worker::push::{PushRegistrationRecord, PushRegistry};
 use crate::worker::{DequeueFilter, SubmitDecision};
 use crate::{Caller, Runtime};
@@ -101,30 +101,35 @@ impl PushAdapter {
 
                     match transport.push(&decision, token_delta_transport).await {
                         Ok(resp) => {
-                            // Resolve wire actions against the trigger this response
-                            // answers, so any omitted settle id is filled in before the
-                            // core ever sees it.
-                            let actions =
-                                match resolve_actions(resp.actions, Some(&decision.trigger)) {
-                                    Ok(actions) => actions,
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            decision_id = %decision.decision_id,
-                                            error = %e,
-                                            "unresolvable worker action"
-                                        );
-                                        return;
-                                    }
-                                };
+                            // Lower the response against the trigger it answers and
+                            // the config resolved for this decision, so omitted
+                            // settle ids and flat llm.call fields are resolved
+                            // before the core ever sees it.
+                            let resolved = match resolve_response(
+                                resp,
+                                decision.agent.as_ref(),
+                                Some(&decision.trigger),
+                            ) {
+                                Ok(resolved) => resolved,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        decision_id = %decision.decision_id,
+                                        error = %e,
+                                        "unresolvable worker decision"
+                                    );
+                                    return;
+                                }
+                            };
                             let submit = SubmitDecision {
                                 session_id: decision.session_id,
                                 caller: Caller::System {
                                     tenant_id: tenant_id.clone(),
                                 },
                                 decision_id: decision.decision_id.clone(),
-                                transcript: resp.messages,
-                                actions,
-                                state: resp.state,
+                                transcript: resolved.messages,
+                                actions: resolved.actions,
+                                state: resolved.state,
+                                agent: resolved.agent,
                                 span: decision.span.child("push_worker"),
                             };
                             if let Err(e) = runtime.submit_decision(submit).await {

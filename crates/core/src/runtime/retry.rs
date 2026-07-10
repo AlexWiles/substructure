@@ -12,7 +12,7 @@ pub struct RetryState {
 
 /// Fully-resolved retry policy — no optional fields. Stored on call state and
 /// read directly by retry logic.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetryPolicy {
     pub timeout_secs: Option<u32>,
     pub max_retries: u32,

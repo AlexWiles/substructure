@@ -188,6 +188,7 @@ mod tests {
             },
             proposed: None,
             state: Default::default(),
+            agent: None,
             calls: Default::default(),
             pending_calls: 0,
             transcript: vec![],

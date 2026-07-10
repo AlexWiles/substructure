@@ -320,10 +320,20 @@ export type WorkKind = "tool_call" | "llm_call";
 
 export type WorkerAction =
     | {
-          /** Omit `id` and the engine mints one; it becomes the assistant node's id. */
+          /** A flat, all-optional LLM request. Omit `id` and the engine mints one;
+           *  it becomes the assistant node's id. Omitted fields are filled from the
+           *  agent config, then engine defaults; omit `messages` and the engine
+           *  prompts with `[config.system?] + the decision's declared view`.
+           *  Explicit `messages` suppress system injection; a bare
+           *  `{ type: "llm.call" }` prompts per the agent's identity over the view. */
           type: "llm.call";
           id?: string;
-          request: LlmRequest;
+          model?: string;
+          messages?: MessageInput[];
+          tools?: LlmTool[];
+          temperature?: number;
+          max_completion_tokens?: number;
+          reasoning?: ReasoningConfig;
           stream?: boolean;
           retry?: RetryPolicy;
           /** Omitted ⇒ `"server"`. */

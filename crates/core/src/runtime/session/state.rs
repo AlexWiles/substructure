@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::agent_config::AgentConfig;
 use super::decision::DecisionTrigger;
 use super::events::*;
 use super::message::{Message, Role};
@@ -201,6 +202,52 @@ pub struct StateVersion {
     pub anchor: Option<String>,
 }
 
+/// Anchored agent-config write; the sibling of [`StateVersion`] for the typed
+/// agent-identity channel. Kept as its own struct (not a generic over
+/// `StateVersion`) so the persisted `state` field name never changes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentVersion {
+    pub agent: AgentConfig,
+    pub anchor: Option<String>,
+}
+
+/// A versioned, anchored document write. Both worker state and agent config
+/// resolve newest-on-path and compact by anchor identically; this shares that
+/// logic without touching either struct's serialized shape.
+pub(crate) trait Anchored {
+    fn anchor(&self) -> Option<&str>;
+}
+
+impl Anchored for StateVersion {
+    fn anchor(&self) -> Option<&str> {
+        self.anchor.as_deref()
+    }
+}
+
+impl Anchored for AgentVersion {
+    fn anchor(&self) -> Option<&str> {
+        self.anchor.as_deref()
+    }
+}
+
+/// Newest version whose anchor is on `on_path`; an unanchored version matches any path.
+pub(crate) fn resolve_on_path<'a, V: Anchored>(
+    versions: &'a [V],
+    on_path: &std::collections::HashSet<&str>,
+) -> Option<&'a V> {
+    versions.iter().rev().find(|v| match v.anchor() {
+        None => true,
+        Some(a) => on_path.contains(a),
+    })
+}
+
+/// Append `new`, dropping any prior version at the same anchor: a superseded
+/// same-anchor version can never win resolution.
+pub(crate) fn compact_push<V: Anchored>(versions: &mut Vec<V>, new: V) {
+    versions.retain(|v| v.anchor() != new.anchor());
+    versions.push(new);
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerDecisionState {
     pub decision_id: String,
@@ -254,6 +301,8 @@ pub struct DerivedState {
     pub agent_id: Option<String>,
     #[serde(default)]
     pub worker_state: WorkerState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_config: Option<AgentConfig>,
     #[serde(default)]
     pub message_tree: MessageTree,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -372,6 +421,9 @@ pub struct SessionState {
     pub state_versions: Vec<StateVersion>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_versions: Vec<AgentVersion>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ancestry: Vec<String>,
 
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
@@ -414,6 +466,7 @@ impl SessionState {
             turn_token_usage: BTreeMap::new(),
             sub_agent_token_usage: BTreeMap::new(),
             state_versions: Vec::new(),
+            agent_versions: Vec::new(),
             ancestry: Vec::new(),
             data: serde_json::Value::Null,
             worker_retry: None,
@@ -648,12 +701,22 @@ impl SessionState {
                 }
             }
             EventPayload::WorkerStateUpdated(p) => {
-                // A superseded same-anchor version can never win resolution.
-                self.state_versions.retain(|v| v.anchor != p.anchor);
-                self.state_versions.push(StateVersion {
-                    state: p.state.clone(),
-                    anchor: p.anchor.clone(),
-                });
+                compact_push(
+                    &mut self.state_versions,
+                    StateVersion {
+                        state: p.state.clone(),
+                        anchor: p.anchor.clone(),
+                    },
+                );
+            }
+            EventPayload::AgentConfigUpdated(p) => {
+                compact_push(
+                    &mut self.agent_versions,
+                    AgentVersion {
+                        agent: p.config.clone(),
+                        anchor: p.anchor.clone(),
+                    },
+                );
             }
             EventPayload::SessionCancelled => {
                 self.status = SessionStatus::Done;
@@ -791,18 +854,19 @@ impl SessionState {
         }
     }
 
-    /// Newest version whose anchor is on the path to `leaf`; unanchored matches any path.
+    /// Newest worker state whose anchor is on the path to `leaf`; unanchored matches any path.
     pub fn resolve_state_for(&self, leaf: Option<&str>) -> WorkerState {
         let on_path = leaf.map(|l| self.path_ids(l)).unwrap_or_default();
-        self.state_versions
-            .iter()
-            .rev()
-            .find(|v| match v.anchor.as_deref() {
-                None => true,
-                Some(a) => on_path.contains(a),
-            })
+        resolve_on_path(&self.state_versions, &on_path)
             .map(|v| v.state.clone())
             .unwrap_or_default()
+    }
+
+    /// Newest agent config whose anchor is on the path to `leaf`; unanchored matches
+    /// any path. `None` when no config was ever written on the path.
+    pub fn resolve_agent_for(&self, leaf: Option<&str>) -> Option<AgentConfig> {
+        let on_path = leaf.map(|l| self.path_ids(l)).unwrap_or_default();
+        resolve_on_path(&self.agent_versions, &on_path).map(|v| v.agent.clone())
     }
 
     pub fn message_tree(&self) -> MessageTree {
@@ -913,6 +977,7 @@ impl SessionState {
             owner: self.owner.clone(),
             agent_id: self.agent_id.clone(),
             worker_state: self.resolve_state_for(self.head_id.as_deref()),
+            agent_config: self.resolve_agent_for(self.head_id.as_deref()),
             message_tree,
             ancestry: self.ancestry.clone(),
             sub_agent_calls: self.sub_agent_calls.clone(),
@@ -1140,6 +1205,121 @@ mod state_version_tests {
         assert_eq!(s.state_versions.len(), 2);
         assert_eq!(s.resolve_state_for(s.head_id.as_deref()).0, json!({"v": 3}));
         assert_eq!(s.resolve_state_for(Some("x1")).0, json!({"v": 1}));
+    }
+
+    #[test]
+    fn state_version_serializes_with_the_state_field() {
+        // Guard: generalizing the store must not rename the persisted field, or
+        // existing snapshots silently lose their versions on load.
+        let v = version(json!({"v": 1}), Some("u1"));
+        let value = serde_json::to_value(&v).expect("serializes");
+        assert_eq!(value, json!({"state": {"v": 1}, "anchor": "u1"}));
+    }
+}
+
+#[cfg(test)]
+mod agent_version_tests {
+    use super::*;
+
+    fn message_node(id: &str, parent_id: Option<&str>) -> Node {
+        Node::Message(NewMessage {
+            message: Message {
+                id: id.to_string(),
+                role: Role::User,
+                content: None,
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            parent_id: parent_id.map(str::to_string),
+        })
+    }
+
+    /// A session with the tree  u1 → a1 → u2  and a fork leaf  u1 → x1.
+    fn forked_session() -> SessionState {
+        let mut s = SessionState::new("sess-1".to_string());
+        s.nodes.push(message_node("u1", None));
+        s.nodes.push(message_node("a1", Some("u1")));
+        s.nodes.push(message_node("u2", Some("a1")));
+        s.nodes.push(message_node("x1", Some("u1")));
+        s
+    }
+
+    fn config(model: &str) -> AgentConfig {
+        AgentConfig {
+            model: model.to_string(),
+            system: None,
+            stream: false,
+            retry: None,
+            tools: Vec::new(),
+            sub_agents: Vec::new(),
+        }
+    }
+
+    fn version(model: &str, anchor: Option<&str>) -> AgentVersion {
+        AgentVersion {
+            agent: config(model),
+            anchor: anchor.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn empty_versions_resolve_to_none() {
+        let s = forked_session();
+        assert_eq!(s.resolve_agent_for(Some("u2")), None);
+        assert_eq!(s.resolve_agent_for(None), None);
+    }
+
+    #[test]
+    fn linear_resolution_latest_on_path_wins() {
+        let mut s = forked_session();
+        s.agent_versions.push(version("m1", Some("u1")));
+        s.agent_versions.push(version("m2", Some("u2")));
+        assert_eq!(s.resolve_agent_for(Some("u2")), Some(config("m2")));
+    }
+
+    #[test]
+    fn fork_resolves_as_of_the_fork_point() {
+        let mut s = forked_session();
+        s.agent_versions.push(version("m1", Some("u1")));
+        s.agent_versions.push(version("m2", Some("u2")));
+        // m2 is off the u1→x1 path; the branch sees config as-of u1.
+        assert_eq!(s.resolve_agent_for(Some("x1")), Some(config("m1")));
+    }
+
+    #[test]
+    fn unanchored_config_is_the_universal_fallback() {
+        let mut s = forked_session();
+        s.agent_versions.push(version("m0", None));
+        s.agent_versions.push(version("m2", Some("u2")));
+        assert_eq!(s.resolve_agent_for(Some("x1")), Some(config("m0")));
+        assert_eq!(s.resolve_agent_for(Some("u2")), Some(config("m2")));
+        assert_eq!(s.resolve_agent_for(None), Some(config("m0")));
+    }
+
+    #[test]
+    fn same_anchor_configs_compact_to_the_newest() {
+        let mut s = forked_session();
+        s.head_id = Some("u2".to_string());
+        let ctx = ApplyContext {
+            occurred_at: Utc::now(),
+            sequence: 1,
+        };
+        for (model, anchor) in [("m1", Some("u1")), ("m2", Some("u2")), ("m3", Some("u2"))] {
+            s.apply(
+                &EventPayload::AgentConfigUpdated(AgentConfigUpdated {
+                    config: config(model),
+                    anchor: anchor.map(str::to_string),
+                }),
+                &ctx,
+            );
+        }
+        assert_eq!(s.agent_versions.len(), 2);
+        assert_eq!(
+            s.resolve_agent_for(s.head_id.as_deref()),
+            Some(config("m3"))
+        );
+        assert_eq!(s.resolve_agent_for(Some("x1")), Some(config("m1")));
     }
 }
 

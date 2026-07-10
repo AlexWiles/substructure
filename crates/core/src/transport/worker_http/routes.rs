@@ -12,7 +12,7 @@ use crate::owner::SessionOwner;
 use crate::session::command::SessionError;
 use crate::session::decision::{EffectResultPayload, WorkKind};
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
-use crate::session::wire::resolve_actions;
+use crate::session::wire::resolve_response;
 use crate::span::SpanContext;
 use crate::transport::session_sse::merge_session_stream;
 use crate::worker::SubmitDecision;
@@ -35,10 +35,11 @@ pub async fn submit(
         .unwrap_or_else(SpanContext::root)
         .child("worker_submit");
 
-    // Out-of-band submit: no answered trigger in scope, so every settle must name
-    // its own effect id. An omitted id can't be resolved here — reject it.
-    let actions = match resolve_actions(req.decision.actions, None) {
-        Ok(actions) => actions,
+    // Out-of-band submit: no answered trigger and no resolved config in scope, so
+    // every settle must name its own id and every llm.call must name its model.
+    // An unresolvable one can't be filled here — reject it.
+    let resolved = match resolve_response(req.decision, None, None) {
+        Ok(resolved) => resolved,
         Err(e) => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -57,9 +58,10 @@ pub async fn submit(
             session_id: req.session_id,
             caller,
             decision_id: req.decision_id,
-            transcript: req.decision.messages,
-            actions,
-            state: req.decision.state,
+            transcript: resolved.messages,
+            actions: resolved.actions,
+            state: resolved.state,
+            agent: resolved.agent,
             span,
         })
         .await;

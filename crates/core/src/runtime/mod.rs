@@ -565,6 +565,7 @@ impl Runtime {
                     transcript: input.transcript,
                     actions: input.actions,
                     state: input.state,
+                    agent: input.agent,
                 },
                 span: input.span,
             },

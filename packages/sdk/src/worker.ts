@@ -39,8 +39,6 @@ export interface NativeRuntime {
 
 export interface FetchHandlerOptions {
     signingSecret?: string;
-    /** Timestamp validation tolerance in seconds (default: 300) */
-    tolerance?: number;
 }
 
 /** The agents to serve, each a `NamedAgent` from `agent({ name, ... })`. */
@@ -93,9 +91,7 @@ export class Worker {
             let decision: WireDecisionRequest;
 
             if (options?.signingSecret) {
-                decision = await verifyWebhookSignature<WireDecisionRequest>(req, options.signingSecret, {
-                    tolerance: options.tolerance,
-                });
+                decision = await verifyWebhookSignature<WireDecisionRequest>(req, options.signingSecret);
             } else {
                 decision = (await req.json()) as WireDecisionRequest;
             }

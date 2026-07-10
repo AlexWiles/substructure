@@ -4,12 +4,12 @@
 //! - Inbound (client → engine): [`WireClientInput`] is the authoritative set of everything a
 //!   client can send — a submit, an interrupt resume, or a client tool settle. Each variant
 //!   carries its own addressing (a submit's `agent_id`/`turn_id`; a settle's effect id), so
-//!   `Runtime::handle_client_input` dispatches it directly, mirroring `resolve_actions` on the
+//!   `Runtime::handle_client_input` dispatches it directly, mirroring `resolve_response` on the
 //!   worker side. A submit rebuilds a [`WireClientPayload`] — still what the
 //!   `SubmitClientPayload` command seam (`command.rs`) lowers to domain events, and still a
 //!   live wire type on the machine and embedded surfaces.
 //! - Inbound (worker → engine): [`WireAction`] is deserialized from untrusted worker
-//!   output; `resolve_actions` is the single seam where it becomes the strict internal
+//!   output; `resolve_response` is the single seam where it becomes the strict internal
 //!   [`Action`] the core consumes.
 //! - Outbound (engine → worker): [`WireTrigger`] is the materialized projection of the
 //!   internal [`DecisionTrigger`] a worker sees; `to_wire_trigger` is the single seam
@@ -25,6 +25,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::agent_config::AgentConfig;
 use super::decision::{Action, DecisionTrigger};
 use super::events::{LlmHandler, MessageTree, ToolHandler};
 use super::message::{Content, Message, Role, ToolCall};
@@ -32,7 +33,7 @@ use super::propose::Proposal;
 use super::reconcile::news_start;
 use super::state::{new_call_id, new_message_id, Effect, LlmCallState};
 use super::tool_contract::{classify_arguments, declared_tool, DeclaredTool, ToolInput};
-use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse};
+use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse, LlmTool, ReasoningConfig};
 use crate::runtime::owner::SessionOwner;
 use crate::runtime::retry::RetryPolicy;
 use crate::runtime::worker::{WorkerDecisionRequest, WorkerState};
@@ -137,7 +138,7 @@ pub enum WireClientPayload {
 /// named action, resume an interrupt, or settle a client tool. A flat, internally-tagged
 /// union — its six tags produce serde's "unknown variant, expected one of …" error for
 /// free. `Runtime::handle_client_input` is the single seam that dispatches it (mirroring
-/// `resolve_actions` on the worker side).
+/// `resolve_response` on the worker side).
 ///
 /// Addressing lives where it is meaningful, not in a shared envelope: `agent_id` (routes
 /// the turn, creating the session if new) and the optional idempotency `turn_id` are
@@ -216,6 +217,9 @@ pub(crate) fn result_to_string(value: Value) -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WireTrigger {
+    /// The first decision of every session; carries no proposal.
+    #[serde(rename = "session.start")]
+    SessionStart,
     #[serde(rename = "client.messages")]
     ClientTranscript {
         messages: Vec<WireMessage>,
@@ -304,21 +308,37 @@ pub enum WireTrigger {
 
 /// The action a worker authors on the wire. Mirrors [`Action`], but a settle's effect
 /// id may be omitted: on the sync/pull paths the answered `*.execute` trigger names
-/// it, so echoing it is redundant. `resolve_actions` turns this into the internal
+/// it, so echoing it is redundant. `resolve_response` turns this into the internal
 /// [`Action`] (id always present) at the transport boundary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WireAction {
-    /// `id` omitted ⇒ the engine mints one; it becomes the assistant node's id.
+    /// A flat, all-optional LLM request. `id` omitted ⇒ the engine mints one; it
+    /// becomes the assistant node's id. Omitted fields are filled from the agent
+    /// config (merge source), then engine defaults; `messages` omitted ⇒
+    /// `[config.system?] + the decision's declared view`. Explicit `messages`
+    /// suppress system injection. A bare `{"type":"llm.call"}` prompts per the
+    /// agent's identity over the current view.
     #[serde(rename = "llm.call")]
     CallLlm {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
-        request: LlmRequest,
-        #[serde(default)]
-        stream: bool,
-        #[serde(default = "RetryPolicy::no_retry")]
-        retry: RetryPolicy,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        messages: Option<Vec<WireMessage>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tools: Option<Vec<LlmTool>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        temperature: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_completion_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<ReasoningConfig>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stream: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry: Option<RetryPolicy>,
         /// Omitted ⇒ `server`.
         #[serde(default)]
         handler: LlmHandler,
@@ -454,6 +474,8 @@ pub enum ResolveError {
     /// A settle omitted its effect id, but the answered decision was not the matching
     /// `*.execute` (or there was no trigger context), so the id can't be inferred.
     UnresolvableSettleId { kind: &'static str },
+    /// An `llm.call` omitted `model` and no agent config supplied one.
+    MissingModel,
 }
 
 impl std::fmt::Display for ResolveError {
@@ -462,6 +484,10 @@ impl std::fmt::Display for ResolveError {
             ResolveError::UnresolvableSettleId { kind } => write!(
                 f,
                 "{kind}.result/{kind}.error omitted its id, but this decision does not answer a {kind}.execute"
+            ),
+            ResolveError::MissingModel => write!(
+                f,
+                "llm.call omitted `model` and no agent config supplies one"
             ),
         }
     }
@@ -486,11 +512,53 @@ fn resolve_settle_id(
     }
 }
 
-/// Lower worker-authored wire actions to internal actions, filling any omitted settle
-/// id from `trigger` (the `*.execute` this decision answers). `trigger` is `None` on
-/// the out-of-band submit route, where an omitted settle id is an error.
-pub fn resolve_actions(
+/// The internal, fully-resolved form of a worker decision response: canonical
+/// `Action`s (ids minted, `llm.call` merged into a full `LlmRequest`), plus the
+/// transcript and the state/agent-config writes.
+#[derive(Debug)]
+pub struct ResolvedResponse {
+    pub messages: Vec<WireMessage>,
+    pub actions: Vec<Action>,
+    pub state: Option<WorkerState>,
+    pub agent: Option<AgentConfig>,
+}
+
+/// Lower a worker-authored decision response to its canonical internal form.
+///
+/// Fills omitted settle ids from `trigger` (the `*.execute` this decision
+/// answers; `None` on the out-of-band submit route, where an omitted id is an
+/// error) and merges each flat `llm.call` into a full [`LlmRequest`] using
+/// precedence explicit > merge-source config > engine default. The merge source
+/// is the config the response itself sets, else `echoed_config` (the config
+/// resolved for this decision). The declared view for an omitted-`messages`
+/// `llm.call` is the response's `messages`.
+pub fn resolve_response(
+    response: WireDecisionResponse,
+    echoed_config: Option<&AgentConfig>,
+    trigger: Option<&WireTrigger>,
+) -> Result<ResolvedResponse, ResolveError> {
+    let WireDecisionResponse {
+        messages,
+        actions,
+        state,
+        agent,
+    } = response;
+    let merge_cfg = agent.as_ref().or(echoed_config);
+    let resolved = lower_actions(actions, &messages, merge_cfg, trigger)?;
+    Ok(ResolvedResponse {
+        messages,
+        actions: resolved,
+        state,
+        agent,
+    })
+}
+
+/// Lower each wire action to its internal [`Action`]. `view` is the response's
+/// declared transcript, used to fill an omitted-`messages` `llm.call`.
+fn lower_actions(
     actions: Vec<WireAction>,
+    view: &[WireMessage],
+    config: Option<&AgentConfig>,
     trigger: Option<&WireTrigger>,
 ) -> Result<Vec<Action>, ResolveError> {
     actions
@@ -499,17 +567,45 @@ pub fn resolve_actions(
             Ok(match action {
                 WireAction::CallLlm {
                     id,
-                    request,
+                    model,
+                    messages,
+                    tools,
+                    temperature,
+                    max_completion_tokens,
+                    reasoning,
                     stream,
                     retry,
                     handler,
-                } => Action::CallLlm {
-                    id: id.unwrap_or_else(new_call_id),
-                    request,
-                    stream,
-                    retry,
-                    handler,
-                },
+                } => {
+                    let model = model
+                        .or_else(|| config.map(|c| c.model.clone()))
+                        .ok_or(ResolveError::MissingModel)?;
+                    // Explicit messages are used verbatim (no system injection);
+                    // omitted ⇒ config.system prepended to the declared view.
+                    let messages = messages.unwrap_or_else(|| match config {
+                        Some(c) => c.prompt_for(view),
+                        None => view.to_vec(),
+                    });
+                    let tools = tools.or_else(|| config.and_then(|c| c.tools_as_llm()));
+                    let stream = stream.or_else(|| config.map(|c| c.stream)).unwrap_or(false);
+                    let retry = retry
+                        .or_else(|| config.and_then(|c| c.retry.clone()))
+                        .unwrap_or_else(RetryPolicy::no_retry);
+                    Action::CallLlm {
+                        id: id.unwrap_or_else(new_call_id),
+                        request: LlmRequest {
+                            model,
+                            messages,
+                            tools,
+                            temperature,
+                            max_completion_tokens,
+                            reasoning,
+                        },
+                        stream,
+                        retry,
+                        handler,
+                    }
+                }
                 WireAction::CallTool {
                     id,
                     name,
@@ -618,6 +714,7 @@ pub fn to_wire_trigger(
     open_llm_calls: &HashMap<String, LlmCallState>,
 ) -> WireTrigger {
     match trigger {
+        DecisionTrigger::SessionStart => WireTrigger::SessionStart,
         DecisionTrigger::ClientMessage { message } => {
             let mut messages: Vec<WireMessage> =
                 active_path.iter().cloned().map(WireMessage::from).collect();
@@ -734,6 +831,9 @@ pub struct WireDecisionResponse {
     /// Omitted or `null` keeps the current state; clear with a non-null empty value.
     #[serde(default)]
     pub state: Option<WorkerState>,
+    /// A new agent config write; omitted keeps the current config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentConfig>,
 }
 
 #[derive(Debug, Serialize)]
@@ -747,6 +847,8 @@ pub struct WireDecisionRequest<'a> {
     /// worker knowledge). Advisory: accept by echoing it as the decision.
     pub proposed: &'a Option<Proposal>,
     pub state: &'a WorkerState,
+    /// The agent config resolved for the active path (`null` when none is set).
+    pub agent: &'a Option<AgentConfig>,
     pub calls: &'a [Effect],
     /// Count of in-flight `tool_call`/`sub_agent` calls.
     pub pending_calls: usize,
@@ -768,6 +870,7 @@ impl<'a> From<&'a WorkerDecisionRequest> for WireDecisionRequest<'a> {
             trigger: &r.trigger,
             proposed: &r.proposed,
             state: &r.state,
+            agent: &r.agent,
             calls: &r.calls,
             pending_calls: r.pending_calls,
             messages: &r.transcript,
@@ -786,9 +889,27 @@ mod tests {
     use crate::runtime::session::events::{NewMessage, Node};
     use crate::runtime::session::message::{Content, Role};
 
+    /// Lower just `actions` (no messages/config) through the response seam.
+    fn resolve_test_actions(
+        actions: Vec<WireAction>,
+        trigger: Option<&WireTrigger>,
+    ) -> Result<Vec<Action>, ResolveError> {
+        resolve_response(
+            WireDecisionResponse {
+                messages: vec![],
+                actions,
+                state: None,
+                agent: None,
+            },
+            None,
+            trigger,
+        )
+        .map(|r| r.actions)
+    }
+
     #[test]
     fn call_id_is_minted_when_omitted() {
-        let actions = resolve_actions(
+        let actions = resolve_test_actions(
             vec![WireAction::CallTool {
                 id: None,
                 name: "do_thing".to_string(),
@@ -817,7 +938,7 @@ mod tests {
             attempt: 0,
             deadline: None,
         };
-        let actions = resolve_actions(
+        let actions = resolve_test_actions(
             vec![WireAction::ToolResult {
                 id: None,
                 attempt: None,
@@ -834,7 +955,7 @@ mod tests {
 
     #[test]
     fn omitted_settle_id_without_a_matching_execute_is_an_error() {
-        let err = resolve_actions(
+        let err = resolve_test_actions(
             vec![WireAction::ToolResult {
                 id: None,
                 attempt: None,
@@ -844,6 +965,159 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, ResolveError::UnresolvableSettleId { kind: "tool" });
+    }
+
+    fn cfg(model: &str, system: Option<&str>) -> AgentConfig {
+        AgentConfig {
+            model: model.to_string(),
+            system: system.map(str::to_string),
+            stream: true,
+            retry: None,
+            tools: Vec::new(),
+            sub_agents: Vec::new(),
+        }
+    }
+
+    fn user_wire(text: &str) -> WireMessage {
+        WireMessage {
+            id: None,
+            role: Role::User,
+            content: Some(Content::Text(text.to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    fn bare_llm_call() -> WireAction {
+        WireAction::CallLlm {
+            id: None,
+            model: None,
+            messages: None,
+            tools: None,
+            temperature: None,
+            max_completion_tokens: None,
+            reasoning: None,
+            stream: None,
+            retry: None,
+            handler: LlmHandler::Server,
+        }
+    }
+
+    fn resolve_one_call(
+        call: WireAction,
+        view: Vec<WireMessage>,
+        echoed: Option<&AgentConfig>,
+        response_agent: Option<AgentConfig>,
+    ) -> Result<Action, ResolveError> {
+        let r = resolve_response(
+            WireDecisionResponse {
+                messages: view,
+                actions: vec![call],
+                state: None,
+                agent: response_agent,
+            },
+            echoed,
+            None,
+        )?;
+        Ok(r.actions.into_iter().next().expect("one action"))
+    }
+
+    #[test]
+    fn bare_llm_call_merges_model_stream_and_system_from_config() {
+        let config = cfg("m1", Some("be nice"));
+        let action =
+            resolve_one_call(bare_llm_call(), vec![user_wire("hi")], Some(&config), None).unwrap();
+        match action {
+            Action::CallLlm {
+                request, stream, ..
+            } => {
+                assert_eq!(request.model, "m1");
+                assert!(stream, "stream comes from config");
+                let roles: Vec<_> = request.messages.iter().map(|m| &m.role).collect();
+                assert!(
+                    matches!(roles[..], [Role::System, Role::User]),
+                    "omitted messages ⇒ system + declared view; got {roles:?}"
+                );
+            }
+            other => panic!("expected llm.call; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explicit_messages_suppress_system_injection() {
+        let config = cfg("m1", Some("be nice"));
+        let call = WireAction::CallLlm {
+            id: None,
+            model: None,
+            messages: Some(vec![user_wire("only me")]),
+            tools: None,
+            temperature: None,
+            max_completion_tokens: None,
+            reasoning: None,
+            stream: None,
+            retry: None,
+            handler: LlmHandler::Server,
+        };
+        let action =
+            resolve_one_call(call, vec![user_wire("the view")], Some(&config), None).unwrap();
+        match action {
+            Action::CallLlm { request, .. } => {
+                let roles: Vec<_> = request.messages.iter().map(|m| &m.role).collect();
+                assert!(
+                    matches!(roles[..], [Role::User]),
+                    "explicit messages are verbatim, no system; got {roles:?}"
+                );
+            }
+            other => panic!("expected llm.call; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explicit_model_overrides_config() {
+        let config = cfg("base", None);
+        let call = WireAction::CallLlm {
+            id: None,
+            model: Some("override".to_string()),
+            messages: None,
+            tools: None,
+            temperature: None,
+            max_completion_tokens: None,
+            reasoning: None,
+            stream: None,
+            retry: None,
+            handler: LlmHandler::Server,
+        };
+        let action = resolve_one_call(call, vec![], Some(&config), None).unwrap();
+        match action {
+            Action::CallLlm { request, .. } => assert_eq!(request.model, "override"),
+            other => panic!("expected llm.call; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bare_llm_call_without_a_model_source_is_an_error() {
+        let err = resolve_one_call(bare_llm_call(), vec![], None, None).unwrap_err();
+        assert_eq!(err, ResolveError::MissingModel);
+    }
+
+    #[test]
+    fn the_response_config_is_the_merge_source_over_the_echoed_one() {
+        let echoed = cfg("old", None);
+        let action = resolve_one_call(
+            bare_llm_call(),
+            vec![user_wire("hi")],
+            Some(&echoed),
+            Some(cfg("new", None)),
+        )
+        .unwrap();
+        match action {
+            Action::CallLlm { request, .. } => assert_eq!(
+                request.model, "new",
+                "a config set in this response wins over the echoed one"
+            ),
+            other => panic!("expected llm.call; got {other:?}"),
+        }
     }
 
     fn msg(id: &str, role: Role, text: &str) -> Message {

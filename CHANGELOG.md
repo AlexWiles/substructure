@@ -13,34 +13,38 @@ same version.
 ### Added
 
 - Native Anthropic and OpenAI LLM providers.
-- `run` - CLI command to send input to the engine. Helpful for testing/debugging.
-- Decision requests carry `proposed`, the engine's default continuation for most
-  triggers. The proposed actions implement an agent tool loop and handle failure
-  cases.
-  the decisions that are genuinely the worker's.
-- Tools declare `input`/`output` JSON Schemas; the engine validates both
-  directions. `tool.execute` carries the classification as `input`
-  (`valid`/`invalid`/`malformed`), and a result violating `output` settles as
-  a terminal tool error.
-- Lenient worker wire: `handler`, `retryable`, and `actions` have defaults;
-  `tool.result.result` / `tool.call.arguments` accept any JSON value.
+- `run` CLI command sends input to the engine.
+- Workers authored every decision. Requests now carry `proposed`, the engine's
+  default continuation, so workers author only their own.
+- Tool I/O went unvalidated. Tools declare `input`/`output` JSON Schemas the
+  engine checks both ways.
+- The worker wire rejected sparse frames. `handler`/`retryable`/`actions` now
+  default and tool payloads accept any JSON.
+- AG-UI dropped sub-agent delegations and misordered their marker. Each now
+  renders as an in-order tool call resolving to the child's answer.
+- `pretty` couldn't tell parallel tool results apart. Each now carries a
+  `← name` header pairing it to its call.
+- No example showed webhook signature checks. Added `node-hono-signature`
+  verifying the request HMAC before deciding.
+- Python examples lagged the node-hono set. Rewrote `python-fast-api-*` to mirror
+  node-hono one-for-one, adding `-signature` and `-subagent`.
+- Python examples had no dependency manifest. Added a pinned `requirements.txt` to
+  each `python-fast-api-*` example.
+- `python3 main.py` exited immediately since the file only defined the app. Added a
+  `__main__` block launching uvicorn so each `python-fast-api-*` example self-runs.
 
 ### Changed
 
-- **Breaking:** the CLI binary and installed command are renamed from
-  `substructure` to `subs`
-- **Breaking:** client payloads are namespaced — `client.message` /
-  `client.messages` / `client.action` (were `message` / `messages` / `action`),
-  matching the dotted `client.*` decision triggers and `tool.*` settle
-  vocabulary. Update clients sending `payload: { type: "message", ... }` to
-  `{ type: "client.message", ... }`.
-- **Breaking:** the decision wire unifies on `messages` (was `transcript` /
-  `client.transcript`); the SDK's `DecisionRequest`/`Decision` follow.
-- **Breaking:** `LlmTool` is flat: `{name, description, input?, output?}`,
-  with no `function` nesting and no `parameters` (the SDK's `tool({...})`
-  follows). Old persisted events no longer deserialize; wipe dev databases.
-- Worker-authored ids are optional (engine-assigned), and the sync decision
-  response drops `session_id`/`decision_id`.
+- Webhook signing used two headers and a timestamp window. Simplified to a
+  single `X-Substructure-Signature: sha256=<hex>` HMAC over the body,
+  GitHub-style.
+- **Breaking:** CLI binary renamed `substructure` → `subs`.
+- **Breaking:** client payloads namespaced (`message` → `client.message`, etc.).
+- **Breaking:** decision wire unifies on `messages` (was `transcript`).
+- **Breaking:** `LlmTool` is flat `{name, description, input?, output?}`; old
+  events won't deserialize, so wipe dev databases.
+- Worker ids are optional (engine-assigned); the sync decision response drops
+  `session_id`/`decision_id`.
 
 ## [0.1.22] - 2026-07-07
 

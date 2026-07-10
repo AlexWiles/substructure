@@ -57,7 +57,9 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
         return {
             type: "llm.call",
             id: crypto.randomUUID(),
-            request: { ...llmParams, messages, tools: toolSchemas },
+            ...llmParams,
+            messages,
+            tools: toolSchemas,
             handler: handler ?? "server",
             stream: stream ?? false,
             retry: config.retry,

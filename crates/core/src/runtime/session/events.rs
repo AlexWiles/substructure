@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+use super::agent_config::AgentConfig;
 use super::decision::DecisionTrigger;
 use super::message::Message;
 use super::wire::WireMessage;
@@ -52,6 +53,8 @@ pub enum EventPayload {
     SessionMessageRequested(SessionMessageRequested),
     #[serde(rename = "worker.state.updated")]
     WorkerStateUpdated(WorkerStateUpdated),
+    #[serde(rename = "agent.updated")]
+    AgentConfigUpdated(AgentConfigUpdated),
     #[serde(rename = "sub_agent.turn_completed")]
     SubAgentTurnCompleted(SubAgentTurnCompleted),
     #[serde(rename = "decision_request.queued")]
@@ -350,6 +353,14 @@ pub struct SessionMessageRequested {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerStateUpdated {
     pub state: WorkerState,
+    /// Active head when written; `None` if the tree was empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentConfigUpdated {
+    pub config: AgentConfig,
     /// Active head when written; `None` if the tree was empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<String>,

@@ -61,18 +61,12 @@ impl PushTransport for HttpPushTransport {
             .timeout(self.timeout);
 
         if let Some(ref secret) = self.signing_secret {
-            let timestamp = chrono::Utc::now().timestamp();
-            let body_str = String::from_utf8_lossy(&body);
-            let signing_payload = format!("{timestamp}.{body_str}");
-
             let mut mac =
                 HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
-            mac.update(signing_payload.as_bytes());
+            mac.update(&body);
             let signature = hex::encode(mac.finalize().into_bytes());
 
-            builder = builder
-                .header("X-Substructure-Timestamp", timestamp.to_string())
-                .header("X-Substructure-Signature", format!("v1={signature}"));
+            builder = builder.header("X-Substructure-Signature", format!("sha256={signature}"));
         }
 
         let resp = builder.body(body).send().await.map_err(|e| PushError {
@@ -307,6 +301,7 @@ mod tests {
             },
             proposed: None,
             state: Default::default(),
+            agent: None,
             calls: Default::default(),
             pending_calls: 0,
             transcript: vec![],

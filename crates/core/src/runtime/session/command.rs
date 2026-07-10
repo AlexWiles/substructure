@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 
+use super::agent_config::AgentConfig;
 use super::decision::{Action, DecisionTrigger};
 use super::events::*;
 use super::message::{Content, ContentPart, ImageUrl, Role};
@@ -113,6 +114,8 @@ pub enum CommandPayload {
         actions: Vec<Action>,
         /// `None` = no opinion, keep the current state.
         state: Option<WorkerState>,
+        /// `None` = no opinion, keep the current agent config.
+        agent: Option<AgentConfig>,
     },
     FailWorkerDecision {
         decision_id: String,
@@ -272,14 +275,18 @@ impl SessionState {
                         return Err(SessionError::SessionAccessDenied);
                     }
                 }
-                Ok(vec![EventPayload::SessionCreated(Box::new(
-                    SessionCreated {
-                        agent_id,
-                        identity: owner,
-                        ancestry,
-                        worker_retry,
-                    },
-                ))])
+                let mut events = vec![EventPayload::SessionCreated(Box::new(SessionCreated {
+                    agent_id,
+                    identity: owner,
+                    ancestry,
+                    worker_retry,
+                }))];
+                // The session's first decision: the worker declares its identity
+                // before any client input. A brand-new session has no pending
+                // decision, so this is requested (not queued) directly.
+                let start = self.emit_decision_request(&events, DecisionTrigger::SessionStart);
+                events.push(start);
+                Ok(events)
             }
             (Some(_), CommandPayload::CreateSession { .. }) => {
                 Err(SessionError::SessionAlreadyCreated)
@@ -1259,6 +1266,7 @@ impl SessionState {
                 transcript,
                 actions,
                 state,
+                agent,
             } => {
                 Self::ensure_machine_or_system(caller)?;
                 match self
@@ -1315,6 +1323,15 @@ impl SessionState {
                     if state != self.resolve_state_for(prefix_leaf.as_deref()) {
                         events.push(EventPayload::WorkerStateUpdated(WorkerStateUpdated {
                             state,
+                            anchor: post_head.clone(),
+                        }));
+                    }
+                }
+
+                if let Some(config) = agent {
+                    if Some(&config) != self.resolve_agent_for(prefix_leaf.as_deref()).as_ref() {
+                        events.push(EventPayload::AgentConfigUpdated(AgentConfigUpdated {
+                            config,
                             anchor: post_head,
                         }));
                     }
@@ -1813,14 +1830,26 @@ mod tests {
         events
     }
 
-    /// Build an empty aggregate and run `CreateSession` against it.
+    /// Build an empty aggregate and run `CreateSession`, then drain the
+    /// `session.start` decision with an empty (no-config) response so tests
+    /// resume from a clean "no pending decision" state. Use
+    /// [`create_session_with_config`] when a test needs an agent config set.
     fn create_session(session_id: &str, tenant_id: &str, user_id: &str) -> Aggregate<SessionState> {
+        create_session_with_config(session_id, tenant_id, user_id, None)
+    }
+
+    fn create_session_with_config(
+        session_id: &str,
+        tenant_id: &str,
+        user_id: &str,
+        agent: Option<AgentConfig>,
+    ) -> Aggregate<SessionState> {
         let mut agg = Aggregate::new(
             session_id.to_string(),
             tenant_id.to_string(),
             SessionState::new(session_id.to_string()),
         );
-        dispatch(
+        let events = dispatch(
             &mut agg,
             CommandPayload::CreateSession {
                 agent_id: "agent-1".to_string(),
@@ -1836,7 +1865,51 @@ mod tests {
                 tenant_id: "tenant-a".to_string(),
             },
         );
+        let start = events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(w) => Some(w.decision_id.clone()),
+                _ => None,
+            })
+            .expect("CreateSession opens a session.start decision");
+        dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: start,
+                transcript: vec![],
+                actions: vec![],
+                state: None,
+                agent,
+            },
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
+        );
         agg
+    }
+
+    /// Complete the pending `session.start` decision with an empty response, for
+    /// tests that build the aggregate directly (e.g. a custom `worker_retry`)
+    /// instead of through [`create_session`].
+    fn drain_session_start(agg: &mut Aggregate<SessionState>) {
+        let start = agg
+            .state
+            .worker_decisions
+            .values()
+            .find(|d| matches!(d.trigger, DecisionTrigger::SessionStart))
+            .map(|d| d.decision_id.clone())
+            .expect("a pending session.start decision");
+        dispatch(
+            agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: start,
+                transcript: vec![],
+                actions: vec![],
+                state: None,
+                agent: None,
+            },
+            &machine(),
+        );
     }
 
     #[test]
@@ -2058,6 +2131,7 @@ mod tests {
                     retry: RetryPolicy::no_retry(),
                 }],
                 state: None,
+                agent: None,
             },
             &machine(),
         );
@@ -2206,6 +2280,7 @@ mod tests {
                 transcript: vec![],
                 actions: vec![],
                 state: None,
+                agent: None,
             },
             &machine,
         );
@@ -2418,6 +2493,7 @@ mod tests {
                         retry: RetryPolicy::no_retry(),
                     }],
                     state: None,
+                    agent: None,
                 },
                 &machine,
             )
@@ -2480,6 +2556,7 @@ mod tests {
                 transcript: vec![],
                 actions: vec![],
                 state: None,
+                agent: None,
             },
             &machine,
         );
@@ -2499,6 +2576,7 @@ mod tests {
                         retry: RetryPolicy::no_retry(),
                     }],
                     state: None,
+                    agent: None,
                 },
                 &machine,
             )
@@ -2760,6 +2838,7 @@ mod tests {
                 transcript,
                 actions: vec![],
                 state: None,
+                agent: None,
             },
             &machine(),
         );
@@ -2885,6 +2964,7 @@ mod tests {
                 transcript,
                 actions: vec![],
                 state: None,
+                agent: None,
             },
             &machine(),
         );
@@ -3417,6 +3497,7 @@ mod tests {
                 ],
                 actions: vec![],
                 state: None,
+                agent: None,
             },
             &machine(),
         );
@@ -3447,6 +3528,7 @@ mod tests {
                 ],
                 actions: vec![],
                 state: None,
+                agent: None,
             },
             &machine(),
         );
@@ -3585,6 +3667,7 @@ mod tests {
                 transcript: vec![node_msg("u1", Role::User, "hi")],
                 actions: vec![],
                 state: None,
+                agent: None,
             },
             &machine(),
         );
@@ -3611,6 +3694,7 @@ mod tests {
                 transcript: vec![node_msg("u1", Role::User, "hi"), assistant],
                 actions: vec![],
                 state: None,
+                agent: None,
             },
             &machine(),
         );
@@ -3900,6 +3984,7 @@ mod tests {
                     },
                 }],
                 state: None,
+                agent: None,
             },
             &machine,
         );
@@ -3959,6 +4044,7 @@ mod tests {
                 transcript: vec![],
                 actions: vec![],
                 state: None,
+                agent: None,
             },
             &machine,
         );
@@ -4311,6 +4397,7 @@ mod tests {
                     retry: RetryPolicy::no_retry(),
                 }],
                 state: None,
+                agent: None,
             },
             &machine(),
         );
@@ -4330,6 +4417,7 @@ mod tests {
                     result: "RA".to_string(),
                 }],
                 state: None,
+                agent: None,
             },
             &machine(),
         );
@@ -4451,6 +4539,7 @@ mod tests {
                     },
                 ],
                 state: None,
+                agent: None,
             },
             &machine(),
         );
@@ -4988,6 +5077,7 @@ mod tests {
                     data: serde_json::Value::Null,
                 }],
                 state: None,
+                agent: None,
             },
             &Caller::System {
                 tenant_id: "tenant-a".to_string(),
@@ -5046,6 +5136,7 @@ mod tests {
                     },
                 ],
                 state: None,
+                agent: None,
             },
             &machine(),
         );
@@ -5110,6 +5201,7 @@ mod tests {
                     data: serde_json::Value::Null,
                 }],
                 state: None,
+                agent: None,
             },
             &Caller::System {
                 tenant_id: "tenant-a".to_string(),
@@ -5188,6 +5280,7 @@ mod tests {
                     retry: RetryPolicy::no_retry(),
                 }],
                 state: None,
+                agent: None,
             },
             &system,
         );
@@ -5264,6 +5357,7 @@ mod tests {
                 transcript: vec![],
                 actions: vec![],
                 state: None,
+                agent: None,
             },
             &system,
         );
@@ -5322,6 +5416,7 @@ mod tests {
                     payload: serde_json::json!({"message": "Send the email?"}),
                 }],
                 state: None,
+                agent: None,
             },
             &Caller::System {
                 tenant_id: "tenant-a".to_string(),
@@ -5564,6 +5659,7 @@ mod tests {
                 transcript: vec![node_msg("u1", Role::User, "hi")],
                 actions: vec![],
                 state: None,
+                agent: None,
             },
             &machine(),
         );
@@ -5619,6 +5715,7 @@ mod tests {
                 transcript,
                 actions,
                 state: None,
+                agent: None,
             },
             &machine(),
         )
@@ -6025,6 +6122,7 @@ mod tests {
                 transcript: vec![],
                 actions,
                 state: None,
+                agent: None,
             },
             &machine(),
         )
@@ -6376,6 +6474,7 @@ mod tests {
                 transcript,
                 actions: vec![],
                 state: state.map(WorkerState::from),
+                agent: None,
             },
             &machine(),
         )
@@ -6501,6 +6600,227 @@ mod tests {
         );
     }
 
+    fn agent_updates(events: &[EventPayload]) -> Vec<&AgentConfigUpdated> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                EventPayload::AgentConfigUpdated(p) => Some(p),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn agent_config(model: &str) -> AgentConfig {
+        AgentConfig {
+            model: model.to_string(),
+            system: None,
+            stream: true,
+            retry: None,
+            tools: Vec::new(),
+            sub_agents: Vec::new(),
+        }
+    }
+
+    fn submit_agent(
+        agg: &mut Aggregate<SessionState>,
+        decision_id: String,
+        transcript: Vec<WireMessage>,
+        agent: Option<AgentConfig>,
+    ) -> Vec<EventPayload> {
+        dispatch(
+            agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id,
+                transcript,
+                actions: vec![],
+                state: None,
+                agent,
+            },
+            &machine(),
+        )
+    }
+
+    #[test]
+    fn changed_agent_config_anchors_at_head_and_dedups() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+
+        let d1 = open_decision(&mut agg, "hi");
+        let events = submit_agent(
+            &mut agg,
+            d1,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("a1", Role::Assistant, "hello"),
+            ],
+            Some(agent_config("m1")),
+        );
+        let updates = agent_updates(&events);
+        assert_eq!(updates.len(), 1, "the first write records a config version");
+        assert_eq!(
+            updates[0].anchor.as_deref(),
+            Some("a1"),
+            "the config anchors to the last appended node"
+        );
+        assert_eq!(
+            agg.state.derived_state().agent_config,
+            Some(agent_config("m1"))
+        );
+
+        // Echo the same config: structural equality dedups it.
+        let d2 = open_decision(&mut agg, "again");
+        let events = submit_agent(
+            &mut agg,
+            d2,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("a1", Role::Assistant, "hello"),
+                node_msg("u2", Role::User, "again"),
+            ],
+            Some(agent_config("m1")),
+        );
+        assert!(
+            agent_updates(&events).is_empty(),
+            "an echoed config writes nothing; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn omitted_agent_keeps_the_current_config() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d1 = open_decision(&mut agg, "hi");
+        submit_agent(
+            &mut agg,
+            d1,
+            vec![node_msg("u1", Role::User, "hi")],
+            Some(agent_config("m1")),
+        );
+        let d2 = open_decision(&mut agg, "more");
+        let events = submit_agent(
+            &mut agg,
+            d2,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("u2", Role::User, "more"),
+            ],
+            None,
+        );
+        assert!(agent_updates(&events).is_empty());
+        assert_eq!(
+            agg.state.resolve_agent_for(agg.state.head_id.as_deref()),
+            Some(agent_config("m1"))
+        );
+    }
+
+    #[test]
+    fn create_session_emits_session_start_before_client_input() {
+        let mut agg = Aggregate::new(
+            "sess-1".to_string(),
+            "tenant-a".to_string(),
+            SessionState::new("sess-1".to_string()),
+        );
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::CreateSession {
+                agent_id: "agent-1".to_string(),
+                owner: SessionOwner {
+                    tenant_id: "tenant-a".to_string(),
+                    id: Some("user-1".to_string()),
+                    metadata: HashMap::new(),
+                },
+                ancestry: vec![],
+                worker_retry: RetryPolicy::no_retry(),
+            },
+            &system(),
+        );
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    EventPayload::SessionCreated(_),
+                    EventPayload::WorkerDecisionRequested(w),
+                ] if matches!(w.trigger, DecisionTrigger::SessionStart)
+            ),
+            "CreateSession opens session.start as the first decision; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn session_start_config_is_visible_to_a_queued_client_decision() {
+        let mut agg = Aggregate::new(
+            "sess-1".to_string(),
+            "tenant-a".to_string(),
+            SessionState::new("sess-1".to_string()),
+        );
+        dispatch(
+            &mut agg,
+            CommandPayload::CreateSession {
+                agent_id: "agent-1".to_string(),
+                owner: SessionOwner {
+                    tenant_id: "tenant-a".to_string(),
+                    id: Some("user-1".to_string()),
+                    metadata: HashMap::new(),
+                },
+                ancestry: vec![],
+                worker_retry: RetryPolicy::no_retry(),
+            },
+            &system(),
+        );
+
+        // A client message arrives before session.start completes: it queues.
+        let setup = dispatch(
+            &mut agg,
+            CommandPayload::SubmitClientPayload {
+                payload: WireClientPayload::Message(WireClientMessage {
+                    message: node_msg("", Role::User, "hi"),
+                    stream: false,
+                }),
+                turn_id: None,
+            },
+            &system(),
+        );
+        assert!(
+            setup
+                .iter()
+                .any(|e| matches!(e, EventPayload::DecisionRequestQueued(_))),
+            "the client decision queues behind session.start; got {setup:?}"
+        );
+
+        // The worker declares its config on session.start.
+        let start = agg
+            .state
+            .worker_decisions
+            .values()
+            .find(|d| matches!(d.trigger, DecisionTrigger::SessionStart))
+            .map(|d| d.decision_id.clone())
+            .expect("a pending session.start decision");
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: start,
+                transcript: vec![],
+                actions: vec![],
+                state: None,
+                agent: Some(agent_config("m1")),
+            },
+            &machine(),
+        );
+
+        // Completing session.start promotes the queued client decision, whose
+        // derived snapshot now resolves the just-written config.
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                EventPayload::WorkerDecisionRequested(w)
+                    if matches!(w.trigger, DecisionTrigger::ClientMessage { .. })
+            )),
+            "the queued client decision is promoted; got {events:?}"
+        );
+        assert_eq!(
+            agg.state.derived_state().agent_config,
+            Some(agent_config("m1"))
+        );
+    }
+
     #[test]
     fn fork_anchors_new_state_and_resolves_as_of_the_prefix_without_one() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
@@ -6582,6 +6902,7 @@ mod tests {
                     retry: RetryPolicy::no_retry(),
                 }],
                 state: None,
+                agent: None,
             },
             &machine(),
         );
@@ -6866,6 +7187,7 @@ mod tests {
                 transcript: vec![node_msg("u1", Role::User, "hi")],
                 actions: vec![call_tool("t1"), call_tool("t2")],
                 state: None,
+                agent: None,
             },
             &machine(),
         );
@@ -6925,6 +7247,7 @@ mod tests {
                     result: "late".to_string(),
                 }],
                 state: None,
+                agent: None,
             },
             &machine(),
         );
@@ -6962,6 +7285,7 @@ mod tests {
                     },
                 ],
                 state: None,
+                agent: None,
             },
             &machine(),
         );
@@ -7023,6 +7347,7 @@ mod tests {
                     result: "ok".to_string(),
                 }],
                 state: None,
+                agent: None,
             },
             &machine(),
         );
@@ -7061,6 +7386,7 @@ mod tests {
             },
             &system(),
         );
+        drain_session_start(&mut agg);
 
         let d1 = open_decision(&mut agg, "hi");
         submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);

@@ -1,0 +1,12 @@
+{
+  "name": "@substructure.ai/example-node-hono-plan-mode",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.0.8",
+    "hono": "4.12.28"
+  }
+}

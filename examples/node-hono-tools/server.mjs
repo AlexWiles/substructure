@@ -1,64 +1,45 @@
-// A complete chat agent with a tool. No SDK — the decision protocol by hand, served with Hono.
-// The engine POSTs a decision request; this returns the next actions.
-//
-// The worker accepts every decision the engine has a default for (`proposed`)
-// and authors only the two that are genuinely its own: the LLM request (the
-// agent's identity) and the tool execution. Everything else — tool results,
-// model replies, model failures, even broken or hallucinated tool calls —
-// flows through the proposed-first line at the top.
-//
-// Point a local Substructure server at it:
-//   subs serve --dev --provider anthropic --worker-url http://localhost:4444
+// A chat agent with a tool, served with Hono.
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 
-const PORT = 4444;
-
-const TOOLS = [
+const tools = [
     {
-        info: {
-            name: "get_current_time",
-            description:
-                "Get the current UTC date and time. " +
-                "Call this whenever the user asks what time or date it is.",
-        },
-        exec: () => new Date().toISOString(),
+        name: "get_current_time",
+        description: "Get the current UTC date and time.",
+        exec: () => new Date().toISOString()
     },
+    {
+        name: "get_current_time_zone",
+        description: "Get the user's current timezone",
+        exec: () => Intl.DateTimeFormat().resolvedOptions().timeZone
+    }
 ];
 
-
-function decide(req) {
-    // The engine proposes actions for a default agent tool loop
-    if (req.proposed) return req.proposed;
-
-    const t = req.trigger;
-
-    // The client sent the conversation → record it, prompt the model.
-    if (t.type === "client.messages") {
+function decide({ trigger, proposed }) {
+    if (trigger.type === "session.start") {
+        // The engine will use this agent config to generate proposed actions.
         return {
-            messages: t.messages,
-            actions: [{
-                type: "llm.call", stream: true,
-                request: {
-                    model: "claude-haiku-4-5-20251001", messages: t.messages,
-                    tools: TOOLS.map((tool) => tool.info)
-                }
-            }],
+            agent: {
+                model: "claude-haiku-4-5-20251001",
+                stream: true,
+                tools: tools.map(({ name, description }) => ({ name, description }))
+            }
         };
     }
 
-    // A declared tool call with valid arguments → run it, answer.
-    // Invalid tool calls will have a proposal from the engine already
-    if (t.type === "tool.execute") {
-        const tool = TOOLS.find((tool) => tool.info.name === t.name);
-        return { actions: [{ type: "tool.result", result: tool.exec(t.input.value) }] };
+    // Run our tool when the model calls it.
+    if (trigger.type === "tool.execute") {
+        const tool = tools.find((t) => t.name === trigger.name);
+        return { actions: [{ type: "tool.result", result: tool.exec() }] };
     }
 
-    return { actions: [] };
+    // Accept the engine's proposal for every other decision.
+    return proposed;
 }
+
 
 const app = new Hono();
 app.post("/", async (c) => c.json(decide(await c.req.json())));
 
-serve({ fetch: app.fetch, port: PORT }, () =>
-    console.log(`worker listening on http://localhost:${PORT}`));
+serve({ fetch: app.fetch, port: 4444 }, () =>
+    console.log("worker listening on http://localhost:4444"));

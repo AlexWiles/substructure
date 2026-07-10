@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::WorkerState;
 use crate::runtime::aggregate::Caller;
 use crate::runtime::owner::SessionOwner;
+use crate::runtime::session::agent_config::AgentConfig;
 use crate::runtime::session::decision::Action;
 use crate::runtime::session::events::MessageTree;
 use crate::runtime::session::message::Message;
@@ -27,6 +28,9 @@ pub struct WorkerDecisionRequest {
     #[serde(default)]
     pub proposed: Option<Proposal>,
     pub state: WorkerState,
+    /// The agent config resolved for the active path; `None` when none is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentConfig>,
     #[serde(default)]
     pub calls: Vec<Effect>,
     /// Count of in-flight `tool_call`/`sub_agent` calls.
@@ -70,6 +74,8 @@ pub struct SubmitDecision {
     pub actions: Vec<Action>,
     /// `None` = no opinion, keep the current state.
     pub state: Option<WorkerState>,
+    /// `None` = no opinion, keep the current agent config.
+    pub agent: Option<AgentConfig>,
     pub span: SpanContext,
 }
 

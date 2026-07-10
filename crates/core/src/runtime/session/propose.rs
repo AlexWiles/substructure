@@ -26,9 +26,11 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
-use super::events::ToolHandler;
-use super::message::{Content, Message, Role};
+use super::agent_config::AgentConfig;
+use super::events::{LlmHandler, ToolHandler};
+use super::message::{Content, Message, Role, ToolCall};
 use super::state::LlmCallState;
 use super::tool_contract::{declared_tool, DeclaredTool};
 use super::wire::{WireAction, WireMessage, WireTrigger};
@@ -49,14 +51,19 @@ pub fn propose(
     transcript: &[Message],
     llm_calls: &HashMap<String, LlmCallState>,
     pending_calls: usize,
+    config: Option<&AgentConfig>,
+    decision_id: &str,
 ) -> Option<Proposal> {
     match trigger {
+        // The engine can now author the agent's identity: record the client's
+        // view and prompt the model per the config. No config ⇒ None (fail-fast).
+        WireTrigger::ClientTranscript { messages, .. } => config.map(|c| client_turn(messages, c)),
         WireTrigger::LlmFinished {
             ok: true,
             message: Some(message),
             truncated: false,
             ..
-        } => Some(llm_finished(message, transcript)),
+        } => Some(llm_finished(message, transcript, config, decision_id)),
         WireTrigger::LlmFinished {
             id,
             ok,
@@ -114,13 +121,22 @@ pub fn propose(
                 tool_error(id, format!("invalid tool arguments: {error}"), transcript)
             }),
         },
+        // The worker declares its `agent` config here; a truthy empty proposal
+        // would short-circuit proposed-first workers before their config branch runs.
+        WireTrigger::SessionStart => None,
         _ => None,
     }
 }
 
-/// Record the assistant message, then dispatch its tool calls — or, when the
-/// model stopped calling tools, end the turn with the message content.
-fn llm_finished(message: &WireMessage, transcript: &[Message]) -> Proposal {
+/// Record the assistant message, then dispatch its tool calls — routed per the
+/// config — or, when the model stopped calling tools, end the turn with the
+/// message content.
+fn llm_finished(
+    message: &WireMessage,
+    transcript: &[Message],
+    config: Option<&AgentConfig>,
+    decision_id: &str,
+) -> Proposal {
     let tool_calls = message.tool_calls.as_deref().unwrap_or_default();
     let actions = if tool_calls.is_empty() {
         vec![WireAction::Done {
@@ -129,18 +145,103 @@ fn llm_finished(message: &WireMessage, transcript: &[Message]) -> Proposal {
     } else {
         tool_calls
             .iter()
-            .map(|call| WireAction::CallTool {
-                id: Some(call.id.clone()),
-                name: call.function.name.clone(),
-                arguments: call.function.arguments.clone(),
-                handler: ToolHandler::Worker,
-                retry: RetryPolicy::no_retry(),
-            })
+            .flat_map(|call| route_tool_call(call, config, decision_id))
             .collect()
     };
     Proposal {
         messages: appended(transcript, message.clone()),
         actions,
+    }
+}
+
+/// Dispatch one model tool call per config: a sub-agent spawn (paired with the
+/// message that delegates to it) when the called name is a declared sub-agent,
+/// else a `tool.call` handled per the tool's `handler` (worker being the default
+/// and the no-config behavior).
+fn route_tool_call(
+    call: &ToolCall,
+    config: Option<&AgentConfig>,
+    decision_id: &str,
+) -> Vec<WireAction> {
+    if let Some(sub) = config.and_then(|c| c.sub_agent(&call.function.name)) {
+        let session_id = child_session_id(decision_id, &call.id);
+        return vec![
+            WireAction::SpawnSubAgent {
+                session_id: session_id.clone(),
+                agent_id: sub.id.clone(),
+                tool_call_id: call.id.clone(),
+                retry: RetryPolicy::no_retry(),
+            },
+            WireAction::SendMessage {
+                session_id,
+                message: delegation_message(&call.function.arguments),
+            },
+        ];
+    }
+    let handler = config
+        .and_then(|c| c.tool(&call.function.name))
+        .and_then(|t| t.handler.clone())
+        .unwrap_or(ToolHandler::Worker);
+    vec![WireAction::CallTool {
+        id: Some(call.id.clone()),
+        name: call.function.name.clone(),
+        arguments: call.function.arguments.clone(),
+        handler,
+        retry: RetryPolicy::no_retry(),
+    }]
+}
+
+/// The user message that opens a delegated child session: the tool call's
+/// `message` argument when present, else the raw arguments verbatim.
+fn delegation_message(arguments: &str) -> WireMessage {
+    let content = serde_json::from_str::<serde_json::Value>(arguments)
+        .ok()
+        .and_then(|v| {
+            v.get("message")
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| arguments.to_string());
+    WireMessage {
+        id: None,
+        role: Role::User,
+        content: Some(Content::Text(content)),
+        tool_calls: None,
+        tool_call_id: None,
+        name: None,
+    }
+}
+
+/// Namespace for deriving deterministic child session ids (a fixed constant).
+const SPAWN_NAMESPACE: Uuid = Uuid::from_u128(0x7b5e_1f2a_3c4d_5e6f_8091_a2b3_c4d5_e6f7);
+
+/// A stable, collision-safe child session id for a config-routed spawn. Pure in
+/// `(decision_id, tool_call_id)`, so redeliveries derive the same id.
+fn child_session_id(decision_id: &str, tool_call_id: &str) -> String {
+    Uuid::new_v5(
+        &SPAWN_NAMESPACE,
+        format!("{decision_id}:{tool_call_id}").as_bytes(),
+    )
+    .to_string()
+}
+
+/// Record the client's view and prompt the model per the config: model, tools,
+/// stream, and retry from the config, with `[system?] + view` as the prompt.
+fn client_turn(view: &[WireMessage], config: &AgentConfig) -> Proposal {
+    Proposal {
+        messages: view.to_vec(),
+        actions: vec![WireAction::CallLlm {
+            id: None,
+            model: Some(config.model.clone()),
+            messages: Some(config.prompt_for(view)),
+            tools: config.tools_as_llm(),
+            temperature: None,
+            max_completion_tokens: None,
+            reasoning: None,
+            stream: Some(config.stream),
+            retry: Some(config.retry.clone().unwrap_or_else(RetryPolicy::no_retry)),
+            handler: LlmHandler::Server,
+        }],
     }
 }
 
@@ -255,11 +356,18 @@ fn reissue(
     );
     messages.push(tool_message.clone());
 
+    // Every field is explicit from the stored spec, so the seam merges nothing:
+    // this preserves any per-turn override (model, prompt shaping) for the loop.
     Some(WireAction::CallLlm {
         id: None,
-        request: call.spec.to_wire_request(messages),
-        stream: call.stream,
-        retry: call.tracking.retry_policy.clone(),
+        model: Some(call.spec.model.clone()),
+        messages: Some(messages),
+        tools: call.spec.tools.clone(),
+        temperature: call.spec.temperature,
+        max_completion_tokens: call.spec.max_completion_tokens,
+        reasoning: call.spec.reasoning.clone(),
+        stream: Some(call.stream),
+        retry: Some(call.tracking.retry_policy.clone()),
         handler: call.handler.clone(),
     })
 }
@@ -278,6 +386,7 @@ fn appended(transcript: &[Message], message: WireMessage) -> Vec<WireMessage> {
 mod tests {
     use chrono::Utc;
 
+    use super::super::agent_config::{AgentTool, SubAgent};
     use super::*;
     use crate::runtime::llm::LlmRequest;
     use crate::runtime::session::events::LlmHandler;
@@ -361,15 +470,30 @@ mod tests {
         }
     }
 
-    fn reissued_request(proposal: &Proposal) -> (&LlmRequest, bool, &LlmHandler) {
+    fn reissued_request(proposal: &Proposal) -> (LlmRequest, bool, LlmHandler) {
         match &proposal.actions[..] {
             [WireAction::CallLlm {
                 id: None,
-                request,
+                model,
+                messages,
+                tools,
+                temperature,
+                max_completion_tokens,
+                reasoning,
                 stream,
                 handler,
                 ..
-            }] => (request, *stream, handler),
+            }] => {
+                let request = LlmRequest {
+                    model: model.clone().expect("reissue sets model"),
+                    messages: messages.clone().expect("reissue sets messages"),
+                    tools: tools.clone(),
+                    temperature: *temperature,
+                    max_completion_tokens: *max_completion_tokens,
+                    reasoning: reasoning.clone(),
+                };
+                (request, stream.unwrap_or(false), handler.clone())
+            }
             other => panic!("expected a single llm.call with no id; got {other:?}"),
         }
     }
@@ -387,6 +511,8 @@ mod tests {
             &transcript,
             &HashMap::new(),
             0,
+            None,
+            "d0",
         )
         .expect("proposes");
 
@@ -427,6 +553,8 @@ mod tests {
             &transcript,
             &HashMap::new(),
             0,
+            None,
+            "d0",
         )
         .expect("proposes");
 
@@ -450,7 +578,8 @@ mod tests {
                 "llm call truncated",
             ),
         ] {
-            let p = propose(&trigger, &transcript, &HashMap::new(), 0).expect("proposes");
+            let p =
+                propose(&trigger, &transcript, &HashMap::new(), 0, None, "d0").expect("proposes");
             assert_eq!(p.messages.len(), 1, "nothing recorded, not even a partial");
             match &p.actions[..] {
                 [WireAction::Interrupt {
@@ -478,7 +607,7 @@ mod tests {
             code: Some(ErrorCode::RateLimited),
             detail: None,
         };
-        let p = propose(&trigger, &[], &HashMap::new(), 0).expect("proposes");
+        let p = propose(&trigger, &[], &HashMap::new(), 0, None, "d0").expect("proposes");
         match &p.actions[..] {
             [WireAction::Interrupt {
                 reason, payload, ..
@@ -507,7 +636,7 @@ mod tests {
             error: None,
         };
 
-        let p = propose(&trigger, &transcript, &llm_calls, 0).expect("proposes");
+        let p = propose(&trigger, &transcript, &llm_calls, 0, None, "d0").expect("proposes");
 
         let folded = p.messages.last().expect("tool message appended");
         assert!(matches!(folded.role, Role::Tool));
@@ -552,7 +681,7 @@ mod tests {
                 attempt: 0,
                 deadline: None,
             };
-            let p = propose(&trigger, &[], &HashMap::new(), 0).expect("proposes");
+            let p = propose(&trigger, &[], &HashMap::new(), 0, None, "d0").expect("proposes");
             let (id, error) = expect_tool_error(&p);
             assert_eq!(id, "tc-1");
             assert_eq!(
@@ -587,7 +716,7 @@ mod tests {
             deadline: None,
         };
 
-        let p = propose(&trigger, &transcript, &llm_calls, 0).expect("proposes");
+        let p = propose(&trigger, &transcript, &llm_calls, 0, None, "d0").expect("proposes");
         let (id, error) = expect_tool_error(&p);
         assert_eq!(id, "tc-1");
         assert_eq!(error, "unknown tool: hallucinated");
@@ -605,6 +734,8 @@ mod tests {
             &transcript,
             &HashMap::new(),
             1,
+            None,
+            "d0",
         )
         .expect("proposes");
 
@@ -640,6 +771,8 @@ mod tests {
             &transcript,
             &llm_calls,
             0,
+            None,
+            "d0",
         )
         .expect("proposes");
 
@@ -671,6 +804,8 @@ mod tests {
             &transcript,
             &llm_calls,
             0,
+            None,
+            "d0",
         )
         .expect("proposes");
 
@@ -690,6 +825,8 @@ mod tests {
             &transcript,
             &HashMap::new(),
             0,
+            None,
+            "d0",
         )
         .is_none());
     }
@@ -713,7 +850,179 @@ mod tests {
             },
         ];
         for trigger in triggers {
-            assert!(propose(&trigger, &[], &HashMap::new(), 0).is_none());
+            assert!(propose(&trigger, &[], &HashMap::new(), 0, None, "d0").is_none());
         }
+    }
+
+    #[test]
+    fn session_start_carries_no_proposal() {
+        assert!(propose(
+            &WireTrigger::SessionStart,
+            &[],
+            &HashMap::new(),
+            0,
+            None,
+            "d0"
+        )
+        .is_none());
+    }
+
+    fn agent_cfg() -> AgentConfig {
+        let tool = |name: &str, handler: Option<ToolHandler>| AgentTool {
+            name: name.to_string(),
+            description: String::new(),
+            input: None,
+            output: None,
+            handler,
+        };
+        AgentConfig {
+            model: "cfg-model".to_string(),
+            system: Some("be terse".to_string()),
+            stream: true,
+            retry: None,
+            tools: vec![
+                tool("confirm", Some(ToolHandler::Client)),
+                tool("get_time", None),
+            ],
+            sub_agents: vec![SubAgent {
+                id: "researcher".to_string(),
+                description: String::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn client_transcript_proposes_the_configured_llm_call() {
+        let view = vec![WireMessage::from(msg("u1", Role::User, "hi"))];
+        let cfg = agent_cfg();
+        let trigger = WireTrigger::ClientTranscript {
+            messages: view.clone(),
+            new_from: 0,
+        };
+        let p = propose(&trigger, &[], &HashMap::new(), 0, Some(&cfg), "d0")
+            .expect("config ⇒ a proposal");
+        assert_eq!(p.messages.len(), 1, "records the client view");
+        match &p.actions[..] {
+            [WireAction::CallLlm {
+                model,
+                messages,
+                stream,
+                tools,
+                ..
+            }] => {
+                assert_eq!(model.as_deref(), Some("cfg-model"));
+                assert_eq!(*stream, Some(true));
+                assert_eq!(
+                    tools.as_ref().map(Vec::len),
+                    Some(3),
+                    "config tools offered"
+                );
+                let roles: Vec<_> = messages
+                    .as_ref()
+                    .expect("explicit prompt")
+                    .iter()
+                    .map(|m| &m.role)
+                    .collect();
+                assert!(
+                    matches!(roles[..], [Role::System, Role::User]),
+                    "prompt = system + view; got {roles:?}"
+                );
+            }
+            other => panic!("expected one llm.call; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_config_still_fails_fast_on_client_messages() {
+        let view = vec![WireMessage::from(msg("u1", Role::User, "hi"))];
+        let trigger = WireTrigger::ClientTranscript {
+            messages: view,
+            new_from: 0,
+        };
+        assert!(propose(&trigger, &[], &HashMap::new(), 0, None, "d0").is_none());
+    }
+
+    #[test]
+    fn tool_calls_route_per_config() {
+        let assistant = WireMessage::from(assistant_with_calls(
+            "call-1",
+            &[
+                ("tc-a", "researcher"),
+                ("tc-b", "confirm"),
+                ("tc-c", "get_time"),
+            ],
+        ));
+        let transcript = vec![msg("u1", Role::User, "hi")];
+        let cfg = agent_cfg();
+        let p = propose(
+            &llm_finished_trigger(assistant, true, false),
+            &transcript,
+            &HashMap::new(),
+            0,
+            Some(&cfg),
+            "dX",
+        )
+        .expect("proposes");
+        match &p.actions[..] {
+            [WireAction::SpawnSubAgent {
+                agent_id,
+                tool_call_id,
+                session_id,
+                ..
+            }, WireAction::SendMessage {
+                session_id: msg_session,
+                ..
+            }, WireAction::CallTool { handler: hb, .. }, WireAction::CallTool { handler: hc, .. }] =>
+            {
+                assert_eq!(agent_id.as_str(), "researcher");
+                assert_eq!(tool_call_id.as_str(), "tc-a");
+                assert_eq!(session_id, &child_session_id("dX", "tc-a"));
+                assert_eq!(
+                    msg_session, session_id,
+                    "the delegating message targets the spawned child"
+                );
+                assert_eq!(*hb, ToolHandler::Client);
+                assert_eq!(*hc, ToolHandler::Worker);
+            }
+            other => panic!("expected agent/client/worker routing; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sub_agent_spawn_forwards_the_delegating_message() {
+        let mut assistant = assistant_with_calls("call-1", &[("tc-a", "researcher")]);
+        // The model's tool arguments carry the delegation under `message`.
+        assistant.tool_calls.as_mut().unwrap()[0].function.arguments =
+            r#"{"message":"find X"}"#.to_string();
+        let p = propose(
+            &llm_finished_trigger(WireMessage::from(assistant), true, false),
+            &[msg("u1", Role::User, "hi")],
+            &HashMap::new(),
+            0,
+            Some(&agent_cfg()),
+            "dX",
+        )
+        .expect("proposes");
+        match &p.actions[..] {
+            [WireAction::SpawnSubAgent { session_id, .. }, WireAction::SendMessage {
+                session_id: to,
+                message,
+            }] => {
+                assert_eq!(to, session_id);
+                assert_eq!(message.role, Role::User);
+                assert_eq!(
+                    message.content.as_ref().and_then(Content::text),
+                    Some("find X")
+                );
+            }
+            other => panic!("expected spawn + delegating message; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spawn_session_id_is_deterministic_and_distinct() {
+        assert_eq!(child_session_id("d1", "tc1"), child_session_id("d1", "tc1"));
+        assert_ne!(child_session_id("d1", "tc1"), child_session_id("d1", "tc2"));
+        assert_ne!(child_session_id("d1", "tc1"), child_session_id("d2", "tc1"));
     }
 }
