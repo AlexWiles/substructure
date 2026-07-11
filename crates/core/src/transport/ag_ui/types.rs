@@ -1,7 +1,6 @@
 use serde::Deserialize;
 
-use crate::session::message::{Content, Role};
-use crate::session::wire::WireMessage;
+use crate::protocol::{Content, DraftMessage, Role};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -65,7 +64,7 @@ pub struct AgUiMessage {
 
 impl RunAgentInput {
     /// Unknown roles (e.g. `reasoning`) are dropped.
-    pub fn to_messages(&self) -> Vec<WireMessage> {
+    pub fn to_messages(&self) -> Vec<DraftMessage> {
         self.messages
             .iter()
             .filter_map(|m| {
@@ -76,7 +75,7 @@ impl RunAgentInput {
                     "tool" => Role::Tool,
                     _ => return None,
                 };
-                Some(WireMessage {
+                Some(DraftMessage {
                     id: m.id.clone(),
                     role,
                     content: m.content.clone().map(Content::Text),

@@ -1,5 +1,4 @@
-use crate::runtime::llm::LlmRequest;
-use crate::runtime::owner::SessionOwner;
+use crate::protocol::{LlmRequest, SessionOwner};
 use crate::runtime::span::SpanContext;
 
 #[derive(Debug, Clone)]

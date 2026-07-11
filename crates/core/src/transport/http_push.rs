@@ -10,8 +10,10 @@ use reqwest::Client;
 use serde::Deserialize;
 use sha2::Sha256;
 
-use crate::runtime::llm::{StreamDelta, TokenDelta, TokenDeltaTransport};
-use crate::runtime::session::wire::{WireDecisionRequest, WireDecisionResponse, WireTrigger};
+use crate::protocol::{
+    DecisionRequest, DecisionResponse, DecisionTrigger, StreamDelta, TokenDelta,
+};
+use crate::runtime::llm::TokenDeltaTransport;
 use crate::worker::push::{PushError, PushTransport, TransportConstructor};
 use crate::worker::WorkerDecisionRequest;
 
@@ -45,12 +47,11 @@ impl PushTransport for HttpPushTransport {
         &self,
         decision: &WorkerDecisionRequest,
         token_delta_transport: Arc<dyn TokenDeltaTransport>,
-    ) -> Result<WireDecisionResponse, PushError> {
-        let body =
-            serde_json::to_vec(&WireDecisionRequest::from(decision)).map_err(|e| PushError {
-                message: format!("failed to serialize decision: {e}"),
-                retryable: false,
-            })?;
+    ) -> Result<DecisionResponse, PushError> {
+        let body = serde_json::to_vec(&DecisionRequest::from(decision)).map_err(|e| PushError {
+            message: format!("failed to serialize decision: {e}"),
+            retryable: false,
+        })?;
 
         let mut builder = self
             .http
@@ -143,7 +144,7 @@ async fn read_sse_response<S, B, E>(
     stream: S,
     decision: &WorkerDecisionRequest,
     token_delta_transport: Arc<dyn TokenDeltaTransport>,
-) -> Result<WireDecisionResponse, PushError>
+) -> Result<DecisionResponse, PushError>
 where
     S: futures_util::Stream<Item = Result<B, E>>,
     B: AsRef<[u8]>,
@@ -205,7 +206,7 @@ async fn publish_worker_delta(
     token_delta_transport: &Arc<dyn TokenDeltaTransport>,
     seq: &mut u32,
 ) -> Result<(), PushError> {
-    let WireTrigger::LlmExecute {
+    let DecisionTrigger::LlmExecute {
         id: call_id,
         attempt,
         stream,
@@ -256,8 +257,7 @@ mod tests {
 
     use tokio::sync::mpsc;
 
-    use crate::runtime::llm::{LlmRequest, TokenDelta};
-    use crate::runtime::owner::SessionOwner;
+    use crate::protocol::{LlmRequest, SessionOwner};
     use crate::runtime::span::SpanContext;
 
     #[derive(Default)]
@@ -285,7 +285,7 @@ mod tests {
                 id: Some("user-1".to_string()),
                 metadata: Default::default(),
             },
-            trigger: WireTrigger::LlmExecute {
+            trigger: DecisionTrigger::LlmExecute {
                 id: "llm-1".to_string(),
                 request: LlmRequest {
                     model: "test-model".to_string(),

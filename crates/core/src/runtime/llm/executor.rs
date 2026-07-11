@@ -4,13 +4,14 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::protocol::{ErrorCode, StreamDelta, TokenDelta};
 use crate::providers::memory_queue::TaskQueue;
 use crate::runtime::aggregate::{execute, Caller, ConflictRetry, ExecuteInput};
 use crate::runtime::event_store::EventStore;
 use crate::runtime::session::command::CommandPayload;
 use crate::runtime::session::state::SessionState;
 
-use super::{CallContext, ErrorCode, LlmProviderTrait, LlmTask, TokenDelta, TokenDeltaTransport};
+use super::{CallContext, LlmProviderTrait, LlmTask, TokenDeltaTransport};
 
 pub fn spawn_llm_task_executor(
     store: Arc<dyn EventStore>,
@@ -117,7 +118,7 @@ pub fn spawn_llm_task_executor(
 fn spawn_delta_pump(
     task: &LlmTask,
     transport: Arc<dyn TokenDeltaTransport>,
-    mut rx: mpsc::UnboundedReceiver<super::StreamDelta>,
+    mut rx: mpsc::UnboundedReceiver<StreamDelta>,
 ) -> JoinHandle<()> {
     let template = TokenDelta {
         root_session_id: task

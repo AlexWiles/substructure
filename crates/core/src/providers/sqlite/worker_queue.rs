@@ -156,9 +156,7 @@ fn do_dequeue(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::llm::LlmRequest;
-    use crate::runtime::owner::SessionOwner;
-    use crate::runtime::session::wire::WireTrigger;
+    use crate::protocol::{DecisionTrigger, LlmRequest, SessionOwner};
     use crate::runtime::span::SpanContext;
     use uuid::Uuid;
 
@@ -172,7 +170,7 @@ mod tests {
                 id: Some("user-1".to_string()),
                 metadata: Default::default(),
             },
-            trigger: WireTrigger::LlmExecute {
+            trigger: DecisionTrigger::LlmExecute {
                 id: "llm-1".to_string(),
                 request: LlmRequest {
                     model: "test-model".to_string(),

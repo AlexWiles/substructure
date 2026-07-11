@@ -4,18 +4,17 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::agent_config::AgentConfig;
-use super::decision::DecisionTrigger;
+use super::decision::Trigger;
 use super::events::*;
-use super::message::{Message, Role};
-use super::wire::WireMessage;
 use rust_decimal::Decimal;
 
+use crate::protocol::{
+    AgentConfig, DraftMessage, Effect, EffectDetail, EffectStatus, InterruptOrigin, LlmHandler,
+    LlmRequest, LlmTool, Message, MessageTree, Node, ReasoningConfig, RetryPolicy, Role,
+    SessionOwner, ToolHandler, WorkerState,
+};
 use crate::runtime::aggregate::ApplyContext;
-use crate::runtime::llm::{LlmRequest, LlmTool, ReasoningConfig};
-use crate::runtime::owner::SessionOwner;
-use crate::runtime::retry::{RetryPolicy, RetryState};
-use crate::runtime::worker::WorkerState;
+use crate::runtime::retry::RetryState;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -30,16 +29,6 @@ pub enum SessionStatus {
     },
     /// Agent loop finished. Waiting for next user input.
     Done,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EffectStatus {
-    Pending,
-    Completed,
-    Failed,
-    RetryScheduled,
-    Queued,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,10 +120,10 @@ pub struct LlmCallSpec {
 
 impl LlmCallSpec {
     pub fn to_request(&self, messages: Vec<Message>) -> LlmRequest {
-        self.to_wire_request(messages.into_iter().map(WireMessage::from).collect())
+        self.to_wire_request(messages.into_iter().map(DraftMessage::from).collect())
     }
 
-    pub fn to_wire_request(&self, messages: Vec<WireMessage>) -> LlmRequest {
+    pub fn to_wire_request(&self, messages: Vec<DraftMessage>) -> LlmRequest {
         LlmRequest {
             model: self.model.clone(),
             messages,
@@ -252,43 +241,9 @@ pub(crate) fn compact_push<V: Anchored>(versions: &mut Vec<V>, new: V) {
 pub struct WorkerDecisionState {
     pub decision_id: String,
     pub tracking: EffectTracking,
-    pub trigger: DecisionTrigger,
+    pub trigger: Trigger,
     #[serde(default)]
     pub source_event_sequence: u64,
-}
-
-// In-flight effects (Pending or RetryScheduled) surfaced on each worker decision.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Effect {
-    pub id: String,
-    pub status: EffectStatus,
-    pub attempt: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deadline: Option<DateTime<Utc>>,
-    /// The tree node the effect was requested at.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub anchor: Option<String>,
-    #[serde(flatten)]
-    pub detail: EffectDetail,
-}
-
-/// Kind-specific fields, tagged by `kind` on the wire.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum EffectDetail {
-    ToolCall {
-        name: String,
-        arguments: String,
-        handler: ToolHandler,
-    },
-    SubAgent {
-        agent_id: String,
-        session_id: String,
-    },
-    LlmCall {
-        handler: LlmHandler,
-        stream: bool,
-    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -365,7 +320,7 @@ impl DerivedState {
             .filter(|d| {
                 matches!(
                     d.trigger,
-                    DecisionTrigger::ToolFinished { .. } | DecisionTrigger::SubAgentFinished { .. }
+                    Trigger::ToolFinished { .. } | Trigger::SubAgentFinished { .. }
                 )
             })
             .count();
@@ -509,7 +464,7 @@ impl SessionState {
                     .messages
                     .iter()
                     .cloned()
-                    .map(WireMessage::record)
+                    .map(DraftMessage::record)
                     .collect();
                 let spec = LlmCallSpec::from(&payload.request);
                 if let Some(existing) = self.llm_calls.get_mut(&payload.call_id) {
@@ -1021,8 +976,7 @@ impl SessionState {
 #[cfg(test)]
 mod open_llm_calls_tests {
     use super::*;
-    use crate::runtime::retry::RetryPolicy;
-    use crate::runtime::session::message::{ToolCall, ToolCallFunction};
+    use crate::protocol::{NewMessage, ToolCall, ToolCallFunction};
 
     fn node(message: Message, parent_id: Option<&str>) -> Node {
         Node::Message(NewMessage {
@@ -1119,6 +1073,7 @@ mod state_version_tests {
     use serde_json::json;
 
     use super::*;
+    use crate::protocol::NewMessage;
 
     fn message_node(id: &str, parent_id: Option<&str>) -> Node {
         Node::Message(NewMessage {
@@ -1220,6 +1175,7 @@ mod state_version_tests {
 #[cfg(test)]
 mod agent_version_tests {
     use super::*;
+    use crate::protocol::NewMessage;
 
     fn message_node(id: &str, parent_id: Option<&str>) -> Node {
         Node::Message(NewMessage {

@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use super::wire::WireMessage;
+use crate::protocol::DraftMessage;
 
 /// A message the reconcile pass would record as a new node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,7 +21,7 @@ pub struct PlannedWrite {
 /// as a fresh node so the new branch stays a chain instead of grafting back
 /// onto the old one. The writes are therefore the contiguous suffix that starts
 /// at the news boundary.
-pub fn plan_reconcile(known: &HashSet<&str>, messages: &[WireMessage]) -> Vec<PlannedWrite> {
+pub fn plan_reconcile(known: &HashSet<&str>, messages: &[DraftMessage]) -> Vec<PlannedWrite> {
     let mut writes = Vec::new();
     let mut news_started = false;
     for (index, msg) in messages.iter().enumerate() {
@@ -40,7 +40,7 @@ pub fn plan_reconcile(known: &HashSet<&str>, messages: &[WireMessage]) -> Vec<Pl
 
 /// Index where the news begins: the first message reconcile would write, or the
 /// list length when nothing is new.
-pub fn news_start(known: &HashSet<&str>, messages: &[WireMessage]) -> usize {
+pub fn news_start(known: &HashSet<&str>, messages: &[DraftMessage]) -> usize {
     plan_reconcile(known, messages)
         .first()
         .map(|w| w.index)
@@ -50,10 +50,10 @@ pub fn news_start(known: &HashSet<&str>, messages: &[WireMessage]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::session::message::{Content, Role};
+    use crate::protocol::{Content, Role};
 
-    fn msg(id: &str) -> WireMessage {
-        WireMessage {
+    fn msg(id: &str) -> DraftMessage {
+        DraftMessage {
             id: (!id.is_empty()).then(|| id.to_string()),
             role: Role::User,
             content: Some(Content::Text(String::new())),

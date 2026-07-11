@@ -4,20 +4,12 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::protocol::RetryPolicy;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RetryState {
     pub attempts: u32,
     pub next_at: Option<DateTime<Utc>>,
-}
-
-/// Fully-resolved retry policy — no optional fields. Stored on call state and
-/// read directly by retry logic.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RetryPolicy {
-    pub timeout_secs: Option<u32>,
-    pub max_retries: u32,
-    pub backoff_base_secs: u32,
-    pub backoff_max_secs: u32,
 }
 
 impl RetryPolicy {

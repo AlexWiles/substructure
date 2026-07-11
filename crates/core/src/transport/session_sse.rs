@@ -3,7 +3,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::event_store::Event;
-use crate::llm::TokenDelta;
+use crate::protocol::TokenDelta;
 
 /// Terminates when `event_rx` closes (Turn scopes auto-close on
 /// `turn.completed`). Delta-side closure is ignored — the transport outlives

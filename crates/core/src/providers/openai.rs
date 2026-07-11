@@ -7,12 +7,11 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_stream::StreamExt;
 
-use crate::llm::{
-    CallContext, ErrorCode, LlmCallError, LlmCallable, LlmProviderTrait, LlmRequest, LlmResponse,
-    LlmTool, ReasoningEffort, StreamDelta, ToolCallChunk,
+use crate::llm::{CallContext, LlmCallError, LlmCallable, LlmProviderTrait};
+use crate::protocol::{
+    ErrorCode, LlmRequest, LlmResponse, LlmTool, ReasoningEffort, SessionOwner, StreamDelta,
+    ToolCall, ToolCallChunk, ToolCallFunction,
 };
-use crate::owner::SessionOwner;
-use crate::session::message::{ToolCall, ToolCallFunction};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
@@ -49,7 +48,7 @@ impl From<&LlmTool> for WireTool {
 #[derive(Serialize)]
 struct WireBody<'a> {
     model: &'a str,
-    messages: &'a [crate::session::wire::WireMessage],
+    messages: &'a [crate::protocol::DraftMessage],
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<WireTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -515,14 +514,12 @@ impl LlmProviderTrait for OpenAiProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::ReasoningConfig;
-    use crate::session::message::{Content, Role};
-    use crate::session::wire::WireMessage;
+    use crate::protocol::{Content, DraftMessage, ReasoningConfig, Role};
 
     fn req(model: &str) -> LlmRequest {
         LlmRequest {
             model: model.to_string(),
-            messages: vec![WireMessage {
+            messages: vec![DraftMessage {
                 id: None,
                 role: Role::User,
                 content: Some(Content::Text("hi".to_string())),

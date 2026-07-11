@@ -25,46 +25,36 @@
 
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::agent_config::AgentConfig;
-use super::events::{LlmHandler, ToolHandler};
-use super::message::{Content, Message, Role, ToolCall};
 use super::state::LlmCallState;
 use super::tool_contract::{declared_tool, DeclaredTool};
-use super::wire::{WireAction, WireMessage, WireTrigger};
-use crate::runtime::llm::ErrorCode;
-use crate::runtime::retry::RetryPolicy;
-
-/// The decision an SDK agent loop would author for a trigger. `messages` is the
-/// full conversation view with the trigger's implied message appended, so echoing
-/// it reconciles as a plain append.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Proposal {
-    pub messages: Vec<WireMessage>,
-    pub actions: Vec<WireAction>,
-}
+use crate::protocol::{
+    AgentConfig, Content, DecisionAction, DecisionProposal, DecisionTrigger, DraftMessage,
+    ErrorCode, LlmHandler, Message, RetryPolicy, Role, ToolCall, ToolHandler,
+};
 
 pub fn propose(
-    trigger: &WireTrigger,
+    trigger: &DecisionTrigger,
     transcript: &[Message],
     llm_calls: &HashMap<String, LlmCallState>,
     pending_calls: usize,
     config: Option<&AgentConfig>,
     decision_id: &str,
-) -> Option<Proposal> {
+) -> Option<DecisionProposal> {
     match trigger {
         // The engine can now author the agent's identity: record the client's
         // view and prompt the model per the config. No config ⇒ None (fail-fast).
-        WireTrigger::ClientTranscript { messages, .. } => config.map(|c| client_turn(messages, c)),
-        WireTrigger::LlmFinished {
+        DecisionTrigger::ClientTranscript { messages, .. } => {
+            config.map(|c| client_turn(messages, c))
+        }
+        DecisionTrigger::LlmFinished {
             ok: true,
             message: Some(message),
             truncated: false,
             ..
         } => Some(llm_finished(message, transcript, config, decision_id)),
-        WireTrigger::LlmFinished {
+        DecisionTrigger::LlmFinished {
             id,
             ok,
             truncated,
@@ -78,7 +68,7 @@ pub fn propose(
             *truncated,
             transcript,
         )),
-        WireTrigger::ToolFinished {
+        DecisionTrigger::ToolFinished {
             id,
             ok,
             name,
@@ -94,7 +84,7 @@ pub fn propose(
             llm_calls,
             pending_calls,
         ),
-        WireTrigger::SubAgentFinished {
+        DecisionTrigger::SubAgentFinished {
             id,
             ok,
             agent_id,
@@ -111,7 +101,7 @@ pub fn propose(
             llm_calls,
             pending_calls,
         ),
-        WireTrigger::ToolExecute {
+        DecisionTrigger::ToolExecute {
             id, name, input, ..
         } => match declared_tool(id, name, transcript, llm_calls) {
             DeclaredTool::Undeclared => {
@@ -123,7 +113,7 @@ pub fn propose(
         },
         // The worker declares its `agent` config here; a truthy empty proposal
         // would short-circuit proposed-first workers before their config branch runs.
-        WireTrigger::SessionStart => None,
+        DecisionTrigger::SessionStart => None,
         _ => None,
     }
 }
@@ -132,14 +122,14 @@ pub fn propose(
 /// config — or, when the model stopped calling tools, end the turn with the
 /// message content.
 fn llm_finished(
-    message: &WireMessage,
+    message: &DraftMessage,
     transcript: &[Message],
     config: Option<&AgentConfig>,
     decision_id: &str,
-) -> Proposal {
+) -> DecisionProposal {
     let tool_calls = message.tool_calls.as_deref().unwrap_or_default();
     let actions = if tool_calls.is_empty() {
-        vec![WireAction::Done {
+        vec![DecisionAction::Done {
             data: serde_json::to_value(&message.content).unwrap_or_default(),
         }]
     } else {
@@ -148,7 +138,7 @@ fn llm_finished(
             .flat_map(|call| route_tool_call(call, config, decision_id))
             .collect()
     };
-    Proposal {
+    DecisionProposal {
         messages: appended(transcript, message.clone()),
         actions,
     }
@@ -162,17 +152,17 @@ fn route_tool_call(
     call: &ToolCall,
     config: Option<&AgentConfig>,
     decision_id: &str,
-) -> Vec<WireAction> {
+) -> Vec<DecisionAction> {
     if let Some(sub) = config.and_then(|c| c.sub_agent(&call.function.name)) {
         let session_id = child_session_id(decision_id, &call.id);
         return vec![
-            WireAction::SpawnSubAgent {
+            DecisionAction::SpawnSubAgent {
                 session_id: session_id.clone(),
                 agent_id: sub.id.clone(),
                 tool_call_id: call.id.clone(),
                 retry: RetryPolicy::no_retry(),
             },
-            WireAction::SendMessage {
+            DecisionAction::SendMessage {
                 session_id,
                 message: delegation_message(&call.function.arguments),
             },
@@ -182,10 +172,10 @@ fn route_tool_call(
         .and_then(|c| c.tool(&call.function.name))
         .and_then(|t| t.handler.clone())
         .unwrap_or(ToolHandler::Worker);
-    vec![WireAction::CallTool {
+    vec![DecisionAction::CallTool {
         id: Some(call.id.clone()),
         name: call.function.name.clone(),
-        arguments: call.function.arguments.clone(),
+        arguments: serde_json::Value::String(call.function.arguments.clone()),
         handler,
         retry: RetryPolicy::no_retry(),
     }]
@@ -193,7 +183,7 @@ fn route_tool_call(
 
 /// The user message that opens a delegated child session: the tool call's
 /// `message` argument when present, else the raw arguments verbatim.
-fn delegation_message(arguments: &str) -> WireMessage {
+fn delegation_message(arguments: &str) -> DraftMessage {
     let content = serde_json::from_str::<serde_json::Value>(arguments)
         .ok()
         .and_then(|v| {
@@ -202,7 +192,7 @@ fn delegation_message(arguments: &str) -> WireMessage {
                 .map(str::to_string)
         })
         .unwrap_or_else(|| arguments.to_string());
-    WireMessage {
+    DraftMessage {
         id: None,
         role: Role::User,
         content: Some(Content::Text(content)),
@@ -227,10 +217,10 @@ fn child_session_id(decision_id: &str, tool_call_id: &str) -> String {
 
 /// Record the client's view and prompt the model per the config: model, tools,
 /// stream, and retry from the config, with `[system?] + view` as the prompt.
-fn client_turn(view: &[WireMessage], config: &AgentConfig) -> Proposal {
-    Proposal {
+fn client_turn(view: &[DraftMessage], config: &AgentConfig) -> DecisionProposal {
+    DecisionProposal {
         messages: view.to_vec(),
-        actions: vec![WireAction::CallLlm {
+        actions: vec![DecisionAction::CallLlm {
             id: None,
             model: Some(config.model.clone()),
             messages: Some(config.prompt_for(view)),
@@ -255,15 +245,15 @@ fn llm_failed(
     code: &Option<ErrorCode>,
     truncated: bool,
     transcript: &[Message],
-) -> Proposal {
+) -> DecisionProposal {
     let reason = match error {
         Some(error) => format!("llm call failed: {error}"),
         None if truncated => "llm call truncated".to_string(),
         None => "llm call failed".to_string(),
     };
-    Proposal {
+    DecisionProposal {
         messages: recorded(transcript),
-        actions: vec![WireAction::Interrupt {
+        actions: vec![DecisionAction::Interrupt {
             interrupt_id: None,
             reason,
             payload: serde_json::json!({
@@ -281,10 +271,10 @@ fn llm_failed(
 /// the failure flows back to the model, which can repair the call. A worker
 /// that treats `arguments` as an arbitrary string channel, or serves names it
 /// never declared, ignores the proposal and answers itself.
-fn tool_error(id: &str, error: String, transcript: &[Message]) -> Proposal {
-    Proposal {
+fn tool_error(id: &str, error: String, transcript: &[Message]) -> DecisionProposal {
+    DecisionProposal {
         messages: recorded(transcript),
-        actions: vec![WireAction::ToolError {
+        actions: vec![DecisionAction::ToolError {
             id: Some(id.to_string()),
             attempt: None,
             error,
@@ -306,8 +296,8 @@ fn tool_finished(
     transcript: &[Message],
     llm_calls: &HashMap<String, LlmCallState>,
     pending_calls: usize,
-) -> Option<Proposal> {
-    let tool_message = WireMessage {
+) -> Option<DecisionProposal> {
+    let tool_message = DraftMessage {
         id: None,
         role: Role::Tool,
         content: Some(Content::Text(content.to_string())),
@@ -320,7 +310,7 @@ fn tool_finished(
     } else {
         vec![reissue(id, &tool_message, transcript, llm_calls)?]
     };
-    Some(Proposal {
+    Some(DecisionProposal {
         messages: appended(transcript, tool_message),
         actions,
     })
@@ -333,10 +323,10 @@ fn tool_finished(
 /// assistant message, recorded under its llm.call's id.
 fn reissue(
     tool_call_id: &str,
-    tool_message: &WireMessage,
+    tool_message: &DraftMessage,
     transcript: &[Message],
     llm_calls: &HashMap<String, LlmCallState>,
-) -> Option<WireAction> {
+) -> Option<DecisionAction> {
     let assistant_at = transcript.iter().rposition(|m| {
         m.tool_calls
             .as_deref()
@@ -346,19 +336,23 @@ fn reissue(
     })?;
     let call = llm_calls.get(&transcript[assistant_at].id)?;
 
-    let mut messages: Vec<WireMessage> =
-        call.prompt.iter().cloned().map(WireMessage::from).collect();
+    let mut messages: Vec<DraftMessage> = call
+        .prompt
+        .iter()
+        .cloned()
+        .map(DraftMessage::from)
+        .collect();
     messages.extend(
         transcript[assistant_at..]
             .iter()
             .cloned()
-            .map(WireMessage::from),
+            .map(DraftMessage::from),
     );
     messages.push(tool_message.clone());
 
     // Every field is explicit from the stored spec, so the seam merges nothing:
     // this preserves any per-turn override (model, prompt shaping) for the loop.
-    Some(WireAction::CallLlm {
+    Some(DecisionAction::CallLlm {
         id: None,
         model: Some(call.spec.model.clone()),
         messages: Some(messages),
@@ -372,11 +366,11 @@ fn reissue(
     })
 }
 
-fn recorded(transcript: &[Message]) -> Vec<WireMessage> {
-    transcript.iter().cloned().map(WireMessage::from).collect()
+fn recorded(transcript: &[Message]) -> Vec<DraftMessage> {
+    transcript.iter().cloned().map(DraftMessage::from).collect()
 }
 
-fn appended(transcript: &[Message], message: WireMessage) -> Vec<WireMessage> {
+fn appended(transcript: &[Message], message: DraftMessage) -> Vec<DraftMessage> {
     let mut messages = recorded(transcript);
     messages.push(message);
     messages
@@ -386,13 +380,9 @@ fn appended(transcript: &[Message], message: WireMessage) -> Vec<WireMessage> {
 mod tests {
     use chrono::Utc;
 
-    use super::super::agent_config::{AgentTool, SubAgent};
     use super::*;
-    use crate::runtime::llm::LlmRequest;
-    use crate::runtime::session::events::LlmHandler;
-    use crate::runtime::session::message::{ToolCall, ToolCallFunction};
+    use crate::protocol::{AgentTool, LlmRequest, SubAgent, ToolCallFunction, ToolInput};
     use crate::runtime::session::state::{EffectTracking, LlmCallSpec};
-    use crate::runtime::session::tool_contract::ToolInput;
 
     fn msg(id: &str, role: Role, text: &str) -> Message {
         Message {
@@ -446,8 +436,8 @@ mod tests {
         }
     }
 
-    fn llm_finished_trigger(message: WireMessage, ok: bool, truncated: bool) -> WireTrigger {
-        WireTrigger::LlmFinished {
+    fn llm_finished_trigger(message: DraftMessage, ok: bool, truncated: bool) -> DecisionTrigger {
+        DecisionTrigger::LlmFinished {
             id: "call-1".to_string(),
             ok,
             message: Some(message),
@@ -460,8 +450,8 @@ mod tests {
         }
     }
 
-    fn tool_finished_trigger(id: &str, name: &str, outcome: Result<&str, &str>) -> WireTrigger {
-        WireTrigger::ToolFinished {
+    fn tool_finished_trigger(id: &str, name: &str, outcome: Result<&str, &str>) -> DecisionTrigger {
+        DecisionTrigger::ToolFinished {
             id: id.to_string(),
             ok: outcome.is_ok(),
             name: name.to_string(),
@@ -470,9 +460,9 @@ mod tests {
         }
     }
 
-    fn reissued_request(proposal: &Proposal) -> (LlmRequest, bool, LlmHandler) {
+    fn reissued_request(proposal: &DecisionProposal) -> (LlmRequest, bool, LlmHandler) {
         match &proposal.actions[..] {
-            [WireAction::CallLlm {
+            [DecisionAction::CallLlm {
                 id: None,
                 model,
                 messages,
@@ -501,7 +491,7 @@ mod tests {
     #[test]
     fn llm_finished_with_tool_calls_proposes_dispatch() {
         let transcript = vec![msg("u1", Role::User, "hi")];
-        let assistant = WireMessage::from(assistant_with_calls(
+        let assistant = DraftMessage::from(assistant_with_calls(
             "call-1",
             &[("tc-1", "get_time"), ("tc-2", "get_weather")],
         ));
@@ -528,7 +518,7 @@ mod tests {
             .actions
             .iter()
             .map(|a| match a {
-                WireAction::CallTool {
+                DecisionAction::CallTool {
                     id: Some(id),
                     name,
                     handler: ToolHandler::Worker,
@@ -546,7 +536,7 @@ mod tests {
     #[test]
     fn llm_finished_without_tool_calls_proposes_done() {
         let transcript = vec![msg("u1", Role::User, "hi")];
-        let assistant = WireMessage::from(msg("call-1", Role::Assistant, "hello"));
+        let assistant = DraftMessage::from(msg("call-1", Role::Assistant, "hello"));
 
         let p = propose(
             &llm_finished_trigger(assistant, true, false),
@@ -559,7 +549,7 @@ mod tests {
         .expect("proposes");
 
         match &p.actions[..] {
-            [WireAction::Done { data }] => assert_eq!(data, &serde_json::json!("hello")),
+            [DecisionAction::Done { data }] => assert_eq!(data, &serde_json::json!("hello")),
             other => panic!("expected done with the message content; got {other:?}"),
         }
     }
@@ -567,7 +557,7 @@ mod tests {
     #[test]
     fn failed_or_truncated_llm_finished_proposes_interrupt() {
         let transcript = vec![msg("u1", Role::User, "hi")];
-        let assistant = WireMessage::from(msg("call-1", Role::Assistant, "partial"));
+        let assistant = DraftMessage::from(msg("call-1", Role::Assistant, "partial"));
         for (trigger, reason) in [
             (
                 llm_finished_trigger(assistant.clone(), false, false),
@@ -582,7 +572,7 @@ mod tests {
                 propose(&trigger, &transcript, &HashMap::new(), 0, None, "d0").expect("proposes");
             assert_eq!(p.messages.len(), 1, "nothing recorded, not even a partial");
             match &p.actions[..] {
-                [WireAction::Interrupt {
+                [DecisionAction::Interrupt {
                     reason: r, payload, ..
                 }] => {
                     assert!(r.starts_with(reason), "got reason {r:?}");
@@ -596,7 +586,7 @@ mod tests {
 
     #[test]
     fn a_terminal_llm_error_carries_its_context_in_the_interrupt() {
-        let trigger = WireTrigger::LlmFinished {
+        let trigger = DecisionTrigger::LlmFinished {
             id: "call-1".to_string(),
             ok: false,
             message: None,
@@ -609,7 +599,7 @@ mod tests {
         };
         let p = propose(&trigger, &[], &HashMap::new(), 0, None, "d0").expect("proposes");
         match &p.actions[..] {
-            [WireAction::Interrupt {
+            [DecisionAction::Interrupt {
                 reason, payload, ..
             }] => {
                 assert_eq!(reason, "llm call failed: rate limited");
@@ -627,7 +617,7 @@ mod tests {
             assistant_with_calls("call-1", &[("tc-1", "researcher")]),
         ];
         let llm_calls = HashMap::from([("call-1".to_string(), call_state("call-1", vec![]))]);
-        let trigger = WireTrigger::SubAgentFinished {
+        let trigger = DecisionTrigger::SubAgentFinished {
             id: "tc-1".to_string(),
             ok: true,
             session_id: "child".to_string(),
@@ -650,9 +640,9 @@ mod tests {
         assert_eq!(request.model, "test-model");
     }
 
-    fn expect_tool_error(p: &Proposal) -> (&str, &str) {
+    fn expect_tool_error(p: &DecisionProposal) -> (&str, &str) {
         match &p.actions[..] {
-            [WireAction::ToolError {
+            [DecisionAction::ToolError {
                 id: Some(id),
                 error,
                 retryable: false,
@@ -673,7 +663,7 @@ mod tests {
                 error: "expected value at line 1 column 1".to_string(),
             },
         ] {
-            let trigger = WireTrigger::ToolExecute {
+            let trigger = DecisionTrigger::ToolExecute {
                 id: "tc-1".to_string(),
                 name: "get_time".to_string(),
                 arguments: "not json".to_string(),
@@ -698,14 +688,14 @@ mod tests {
             assistant_with_calls("call-1", &[("tc-1", "hallucinated")]),
         ];
         let mut call = call_state("call-1", vec![]);
-        call.spec.tools = Some(vec![crate::runtime::llm::LlmTool {
+        call.spec.tools = Some(vec![crate::protocol::LlmTool {
             name: "get_time".to_string(),
             description: "d".to_string(),
             input: None,
             output: None,
         }]);
         let llm_calls = HashMap::from([("call-1".to_string(), call)]);
-        let trigger = WireTrigger::ToolExecute {
+        let trigger = DecisionTrigger::ToolExecute {
             id: "tc-1".to_string(),
             name: "hallucinated".to_string(),
             arguments: "{}".to_string(),
@@ -834,11 +824,11 @@ mod tests {
     #[test]
     fn must_answer_triggers_carry_no_proposal() {
         let triggers = [
-            WireTrigger::ClientTranscript {
+            DecisionTrigger::ClientTranscript {
                 messages: vec![],
                 new_from: 0,
             },
-            WireTrigger::ToolExecute {
+            DecisionTrigger::ToolExecute {
                 id: "tc-1".to_string(),
                 name: "get_time".to_string(),
                 arguments: "{}".to_string(),
@@ -857,7 +847,7 @@ mod tests {
     #[test]
     fn session_start_carries_no_proposal() {
         assert!(propose(
-            &WireTrigger::SessionStart,
+            &DecisionTrigger::SessionStart,
             &[],
             &HashMap::new(),
             0,
@@ -893,9 +883,9 @@ mod tests {
 
     #[test]
     fn client_transcript_proposes_the_configured_llm_call() {
-        let view = vec![WireMessage::from(msg("u1", Role::User, "hi"))];
+        let view = vec![DraftMessage::from(msg("u1", Role::User, "hi"))];
         let cfg = agent_cfg();
-        let trigger = WireTrigger::ClientTranscript {
+        let trigger = DecisionTrigger::ClientTranscript {
             messages: view.clone(),
             new_from: 0,
         };
@@ -903,7 +893,7 @@ mod tests {
             .expect("config ⇒ a proposal");
         assert_eq!(p.messages.len(), 1, "records the client view");
         match &p.actions[..] {
-            [WireAction::CallLlm {
+            [DecisionAction::CallLlm {
                 model,
                 messages,
                 stream,
@@ -934,8 +924,8 @@ mod tests {
 
     #[test]
     fn no_config_still_fails_fast_on_client_messages() {
-        let view = vec![WireMessage::from(msg("u1", Role::User, "hi"))];
-        let trigger = WireTrigger::ClientTranscript {
+        let view = vec![DraftMessage::from(msg("u1", Role::User, "hi"))];
+        let trigger = DecisionTrigger::ClientTranscript {
             messages: view,
             new_from: 0,
         };
@@ -944,7 +934,7 @@ mod tests {
 
     #[test]
     fn tool_calls_route_per_config() {
-        let assistant = WireMessage::from(assistant_with_calls(
+        let assistant = DraftMessage::from(assistant_with_calls(
             "call-1",
             &[
                 ("tc-a", "researcher"),
@@ -964,15 +954,15 @@ mod tests {
         )
         .expect("proposes");
         match &p.actions[..] {
-            [WireAction::SpawnSubAgent {
+            [DecisionAction::SpawnSubAgent {
                 agent_id,
                 tool_call_id,
                 session_id,
                 ..
-            }, WireAction::SendMessage {
+            }, DecisionAction::SendMessage {
                 session_id: msg_session,
                 ..
-            }, WireAction::CallTool { handler: hb, .. }, WireAction::CallTool { handler: hc, .. }] =>
+            }, DecisionAction::CallTool { handler: hb, .. }, DecisionAction::CallTool { handler: hc, .. }] =>
             {
                 assert_eq!(agent_id.as_str(), "researcher");
                 assert_eq!(tool_call_id.as_str(), "tc-a");
@@ -995,7 +985,7 @@ mod tests {
         assistant.tool_calls.as_mut().unwrap()[0].function.arguments =
             r#"{"message":"find X"}"#.to_string();
         let p = propose(
-            &llm_finished_trigger(WireMessage::from(assistant), true, false),
+            &llm_finished_trigger(DraftMessage::from(assistant), true, false),
             &[msg("u1", Role::User, "hi")],
             &HashMap::new(),
             0,
@@ -1004,7 +994,7 @@ mod tests {
         )
         .expect("proposes");
         match &p.actions[..] {
-            [WireAction::SpawnSubAgent { session_id, .. }, WireAction::SendMessage {
+            [DecisionAction::SpawnSubAgent { session_id, .. }, DecisionAction::SendMessage {
                 session_id: to,
                 message,
             }] => {

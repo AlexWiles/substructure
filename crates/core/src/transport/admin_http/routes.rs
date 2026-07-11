@@ -9,7 +9,7 @@ use serde::Deserialize;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::event_store::AggregateSort;
-use crate::session::events::MessageTree;
+use crate::protocol::MessageTree;
 use crate::session::index::{SessionCursor, SessionFilter};
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use crate::transport::ag_ui::snapshot::snapshot_events;

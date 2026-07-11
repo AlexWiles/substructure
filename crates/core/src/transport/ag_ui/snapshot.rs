@@ -1,6 +1,6 @@
 use crate::event_store::Event;
-use crate::session::events::{EventPayload, MessageTree, SessionInterrupted};
-use crate::session::message::{Content, ContentPart, Message, Role};
+use crate::protocol::{Content, ContentPart, Message, MessageTree, Role};
+use crate::session::events::{EventPayload, SessionInterrupted};
 
 use super::events::{AgUiEvent, AgUiInterrupt, RunOutcome, SnapshotMessage};
 
@@ -95,8 +95,7 @@ fn content_text(content: Option<Content>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::events::{NewMessage, Node};
-    use crate::session::message::{Content, Message, Role, ToolCall, ToolCallFunction};
+    use crate::protocol::{NewMessage, Node, ToolCall, ToolCallFunction};
     use crate::span::SpanContext;
     use chrono::{DateTime, Utc};
     use serde_json::{json, Value};

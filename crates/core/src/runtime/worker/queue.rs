@@ -2,16 +2,12 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::WorkerState;
+use crate::protocol::{
+    AgentConfig, DecisionProposal, DecisionTrigger, DraftMessage, Effect, Message, MessageTree,
+    SessionOwner, WorkerState,
+};
 use crate::runtime::aggregate::Caller;
-use crate::runtime::owner::SessionOwner;
-use crate::runtime::session::agent_config::AgentConfig;
 use crate::runtime::session::decision::Action;
-use crate::runtime::session::events::MessageTree;
-use crate::runtime::session::message::Message;
-use crate::runtime::session::propose::Proposal;
-use crate::runtime::session::state::Effect;
-use crate::runtime::session::wire::{WireMessage, WireTrigger};
 use crate::runtime::span::SpanContext;
 
 /// Wire format sent to workers (via poll or push) when a decision is needed.
@@ -21,12 +17,12 @@ pub struct WorkerDecisionRequest {
     pub decision_id: String,
     pub agent_id: String,
     pub identity: SessionOwner,
-    pub trigger: WireTrigger,
+    pub trigger: DecisionTrigger,
     /// The engine-derived default continuation for `trigger`; `None` when the
     /// trigger needs worker knowledge. Advisory — the worker accepts by echoing
     /// it (amended or verbatim) as its decision.
     #[serde(default)]
-    pub proposed: Option<Proposal>,
+    pub proposed: Option<DecisionProposal>,
     pub state: WorkerState,
     /// The agent config resolved for the active path; `None` when none is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -70,7 +66,7 @@ pub struct SubmitDecision {
     pub session_id: String,
     pub caller: Caller,
     pub decision_id: String,
-    pub transcript: Vec<WireMessage>,
+    pub transcript: Vec<DraftMessage>,
     pub actions: Vec<Action>,
     /// `None` = no opinion, keep the current state.
     pub state: Option<WorkerState>,

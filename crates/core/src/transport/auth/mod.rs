@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use axum::http::HeaderMap;
 
-use crate::owner::SessionOwner;
+use crate::protocol::SessionOwner;
 use crate::Caller;
 
 mod resolvers;

@@ -16,12 +16,11 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_stream::StreamExt;
 
-use crate::llm::{
-    CallContext, ErrorCode, LlmCallError, LlmCallable, LlmProviderTrait, LlmRequest, LlmResponse,
-    ReasoningEffort, StreamDelta, ToolCallChunk,
+use crate::llm::{CallContext, LlmCallError, LlmCallable, LlmProviderTrait};
+use crate::protocol::{
+    Content, ContentPart, ErrorCode, LlmRequest, LlmResponse, ReasoningEffort, Role, SessionOwner,
+    StreamDelta, ToolCall, ToolCallChunk, ToolCallFunction,
 };
-use crate::owner::SessionOwner;
-use crate::session::message::{Content, ContentPart, Role, ToolCall, ToolCallFunction};
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const DEFAULT_VERSION: &str = "2023-06-01";
@@ -764,12 +763,11 @@ impl LlmProviderTrait for AnthropicProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::{LlmRequest, LlmTool, ReasoningConfig};
-    use crate::session::wire::WireMessage;
+    use crate::protocol::{DraftMessage, LlmTool, ReasoningConfig};
     use serde_json::json;
 
-    fn msg(role: Role, content: Option<&str>) -> WireMessage {
-        WireMessage {
+    fn msg(role: Role, content: Option<&str>) -> DraftMessage {
+        DraftMessage {
             id: None,
             role,
             content: content.map(|c| Content::Text(c.to_string())),
@@ -790,7 +788,7 @@ mod tests {
         }
     }
 
-    fn req(messages: Vec<WireMessage>) -> LlmRequest {
+    fn req(messages: Vec<DraftMessage>) -> LlmRequest {
         LlmRequest {
             model: "claude-opus-4-8".to_string(),
             messages,

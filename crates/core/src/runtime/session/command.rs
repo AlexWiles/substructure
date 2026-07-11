@@ -3,21 +3,17 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 
-use super::agent_config::AgentConfig;
-use super::decision::{Action, DecisionTrigger};
+use super::decision::{Action, Trigger};
 use super::events::*;
-use super::message::{Content, ContentPart, ImageUrl, Role};
 use super::reconcile::plan_reconcile;
-use super::state::{
-    json_to_string, new_call_id, EffectStatus, EffectTracking, SessionState, SessionStatus,
-};
+use super::state::{json_to_string, new_call_id, EffectTracking, SessionState, SessionStatus};
 use super::tool_contract::{declared_tool, output_violation, DeclaredTool};
-use super::wire::{WireClientMessage, WireClientMessages, WireClientPayload, WireMessage};
+use crate::protocol::{
+    AgentConfig, ClientMessage, ClientMessages, ClientPayload, Content, ContentPart, DraftMessage,
+    EffectStatus, ErrorCode, ImageUrl, InterruptOrigin, LlmHandler, LlmRequest, LlmResponse,
+    NewMessage, RetryPolicy, Role, SessionOwner, ToolHandler, WorkerState,
+};
 use crate::runtime::aggregate::Caller;
-use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse};
-use crate::runtime::owner::SessionOwner;
-use crate::runtime::retry::RetryPolicy;
-use crate::runtime::worker::WorkerState;
 
 #[derive(Debug, Clone)]
 pub enum CommandPayload {
@@ -28,11 +24,11 @@ pub enum CommandPayload {
         worker_retry: RetryPolicy,
     },
     SubmitClientPayload {
-        payload: WireClientPayload,
+        payload: ClientPayload,
         turn_id: Option<String>,
     },
     SendMessage {
-        message: WireMessage,
+        message: DraftMessage,
         #[allow(dead_code)]
         stream: bool,
         turn_id: Option<String>,
@@ -110,7 +106,7 @@ pub enum CommandPayload {
     },
     SubmitWorkerDecision {
         decision_id: String,
-        transcript: Vec<WireMessage>,
+        transcript: Vec<DraftMessage>,
         actions: Vec<Action>,
         /// `None` = no opinion, keep the current state.
         state: Option<WorkerState>,
@@ -284,7 +280,7 @@ impl SessionState {
                 // The session's first decision: the worker declares its identity
                 // before any client input. A brand-new session has no pending
                 // decision, so this is requested (not queued) directly.
-                let start = self.emit_decision_request(&events, DecisionTrigger::SessionStart);
+                let start = self.emit_decision_request(&events, Trigger::SessionStart);
                 events.push(start);
                 Ok(events)
             }
@@ -300,7 +296,7 @@ impl SessionState {
     // Executes the plan from `plan_reconcile` — the one interpreter of "what
     // recording this list writes" — so submit-time classification and delivery
     // annotation can't drift from what actually lands in the tree.
-    fn reconcile_transcript(&self, transcript: Vec<WireMessage>) -> Vec<EventPayload> {
+    fn reconcile_transcript(&self, transcript: Vec<DraftMessage>) -> Vec<EventPayload> {
         let known: std::collections::HashSet<&str> = self.nodes.iter().map(|n| n.id()).collect();
         let plan = plan_reconcile(&known, &transcript);
         let mut events = Vec::with_capacity(plan.len());
@@ -359,7 +355,7 @@ impl SessionState {
         };
         self.emit_decision_request(
             batch,
-            DecisionTrigger::ToolFinished {
+            Trigger::ToolFinished {
                 id: tool_call_id,
                 ok: !is_error,
                 name,
@@ -385,7 +381,7 @@ impl SessionState {
         };
         self.emit_decision_request(
             batch,
-            DecisionTrigger::SubAgentFinished {
+            Trigger::SubAgentFinished {
                 id: tool_call_id,
                 ok: !is_error,
                 session_id,
@@ -397,16 +393,16 @@ impl SessionState {
     }
 
     /// Whether the decision's effect is anchored off the path to `leaf`.
-    fn stale_decision(&self, leaf: Option<&str>, trigger: &DecisionTrigger) -> bool {
+    fn stale_decision(&self, leaf: Option<&str>, trigger: &Trigger) -> bool {
         let anchor = match trigger {
-            DecisionTrigger::ToolFinished { id, .. } | DecisionTrigger::ToolExecute { id, .. } => {
+            Trigger::ToolFinished { id, .. } | Trigger::ToolExecute { id, .. } => {
                 self.tool_calls.get(id).and_then(|c| c.anchor.as_deref())
             }
-            DecisionTrigger::SubAgentFinished { session_id, .. } => self
+            Trigger::SubAgentFinished { session_id, .. } => self
                 .sub_agent_calls
                 .get(session_id)
                 .and_then(|c| c.anchor.as_deref()),
-            DecisionTrigger::LlmFinished { id, .. } | DecisionTrigger::LlmExecute { id, .. } => {
+            Trigger::LlmFinished { id, .. } | Trigger::LlmExecute { id, .. } => {
                 self.llm_calls.get(id).and_then(|c| c.anchor.as_deref())
             }
             _ => return false,
@@ -510,7 +506,7 @@ impl SessionState {
     }
 
     /// `(tool_call_id, name, content)` for a transcript tool message answering a pending client tool call.
-    fn pending_client_result(&self, m: &WireMessage) -> Option<(String, String, String)> {
+    fn pending_client_result(&self, m: &DraftMessage) -> Option<(String, String, String)> {
         if m.role != Role::Tool {
             return None;
         }
@@ -556,7 +552,7 @@ impl SessionState {
     /// IS that node's echo, so it adopts the node's id and the tree sees a
     /// resend rather than a fork. Identification, not deletion — nothing is
     /// dropped, so the reconcile plan stays coherent.
-    fn normalize_client_view(&self, messages: Vec<WireMessage>) -> Vec<WireMessage> {
+    fn normalize_client_view(&self, messages: Vec<DraftMessage>) -> Vec<DraftMessage> {
         let known: std::collections::HashSet<&str> = self.nodes.iter().map(|n| n.id()).collect();
         let on_path: std::collections::HashSet<&str> = self
             .head_id
@@ -573,7 +569,7 @@ impl SessionState {
                         .as_deref()
                         .and_then(|tcid| self.recorded_result_node(tcid, &on_path))
                     {
-                        return WireMessage {
+                        return DraftMessage {
                             id: Some(node_id),
                             ..m
                         };
@@ -584,11 +580,7 @@ impl SessionState {
             .collect()
     }
 
-    fn emit_decision_request(
-        &self,
-        batch: &[EventPayload],
-        trigger: DecisionTrigger,
-    ) -> EventPayload {
+    fn emit_decision_request(&self, batch: &[EventPayload], trigger: Trigger) -> EventPayload {
         let queued = self.has_pending_worker_decision()
             || matches!(self.status, SessionStatus::Interrupted { .. })
             || batch
@@ -641,21 +633,19 @@ impl SessionState {
                 }
 
                 match payload {
-                    WireClientPayload::Message(WireClientMessage { message, stream: _ }) => {
+                    ClientPayload::Message(ClientMessage { message, stream: _ }) => {
                         if matches!(self.status, SessionStatus::Interrupted { .. })
                             && message.role == Role::User
                         {
                             return Err(SessionError::SessionInterrupted);
                         }
                         if message.role == Role::User {
-                            let request = self.emit_decision_request(
-                                &events,
-                                DecisionTrigger::ClientMessage { message },
-                            );
+                            let request = self
+                                .emit_decision_request(&events, Trigger::ClientMessage { message });
                             events.push(request);
                         }
                     }
-                    WireClientPayload::Messages(WireClientMessages {
+                    ClientPayload::Messages(ClientMessages {
                         messages,
                         stream: _,
                     }) => {
@@ -739,7 +729,7 @@ impl SessionState {
                             }
                             let request = self.emit_decision_request(
                                 &events,
-                                DecisionTrigger::ClientTranscript {
+                                Trigger::ClientTranscript {
                                     messages,
                                     new_from: 0,
                                 },
@@ -747,13 +737,13 @@ impl SessionState {
                             events.push(request);
                         }
                     }
-                    WireClientPayload::Action(action) => {
+                    ClientPayload::Action(action) => {
                         if matches!(self.status, SessionStatus::Interrupted { .. }) {
                             return Err(SessionError::SessionInterrupted);
                         }
                         let request = self.emit_decision_request(
                             &events,
-                            DecisionTrigger::ClientAction {
+                            Trigger::ClientAction {
                                 name: action.name,
                                 args: action.args,
                             },
@@ -795,10 +785,8 @@ impl SessionState {
                             events.push(EventPayload::TurnStarted(TurnStarted { turn_id }));
                         }
                         if message.role == Role::User {
-                            let request = self.emit_decision_request(
-                                &events,
-                                DecisionTrigger::ClientMessage { message },
-                            );
+                            let request = self
+                                .emit_decision_request(&events, Trigger::ClientMessage { message });
                             events.push(request);
                         }
                         Ok(events)
@@ -828,7 +816,7 @@ impl SessionState {
                         messages: request
                             .messages
                             .into_iter()
-                            .map(|m| WireMessage::from(m.record()))
+                            .map(|m| DraftMessage::from(m.record()))
                             .collect(),
                         ..request
                     };
@@ -844,7 +832,7 @@ impl SessionState {
                     if handler == LlmHandler::Worker {
                         let execute = self.emit_decision_request(
                             &events,
-                            DecisionTrigger::LlmExecute {
+                            Trigger::LlmExecute {
                                 id: call_id,
                                 request,
                                 stream,
@@ -908,7 +896,7 @@ impl SessionState {
                         // the id the client was already streamed — AG-UI keys the
                         // assistant message on the call id — so a client's
                         // full-view echo matches this node instead of forking.
-                        let message = WireMessage {
+                        let message = DraftMessage {
                             id: Some(call_id.clone()),
                             role: Role::Assistant,
                             content,
@@ -923,7 +911,7 @@ impl SessionState {
                         })];
                         let settle = self.emit_decision_request(
                             &events,
-                            DecisionTrigger::llm_ok(call_id, message, truncated, usage, cost),
+                            Trigger::llm_ok(call_id, message, truncated, usage, cost),
                         );
                         events.push(settle);
                         Ok(events)
@@ -978,7 +966,7 @@ impl SessionState {
                 {
                     let settle = self.emit_decision_request(
                         &events,
-                        DecisionTrigger::llm_err(call_id, error, code, detail),
+                        Trigger::llm_err(call_id, error, code, detail),
                     );
                     events.push(settle);
                 }
@@ -1007,7 +995,7 @@ impl SessionState {
                         if handler == ToolHandler::Worker {
                             let execute = self.emit_decision_request(
                                 &events,
-                                DecisionTrigger::ToolExecute {
+                                Trigger::ToolExecute {
                                     id: tool_call_id,
                                     name,
                                     arguments,
@@ -1250,7 +1238,7 @@ impl SessionState {
                             }),
                             EventPayload::WorkerDecisionRequested(WorkerDecisionRequested {
                                 decision_id: new_call_id(),
-                                trigger: DecisionTrigger::InterruptResumed {
+                                trigger: Trigger::InterruptResumed {
                                     interrupt_id,
                                     payload,
                                 },
@@ -1657,7 +1645,7 @@ impl SessionState {
                         if call.handler == LlmHandler::Worker {
                             let execute = self.emit_decision_request(
                                 &events,
-                                DecisionTrigger::LlmExecute {
+                                Trigger::LlmExecute {
                                     id: call.call_id.clone(),
                                     request,
                                     stream: call.stream,
@@ -1689,7 +1677,7 @@ impl SessionState {
                         if tc.handler == ToolHandler::Worker {
                             let execute = self.emit_decision_request(
                                 &events,
-                                DecisionTrigger::ToolExecute {
+                                Trigger::ToolExecute {
                                     id: tc.tool_call_id.clone(),
                                     name: tc.name.clone(),
                                     arguments: tc.arguments.clone(),
@@ -1804,15 +1792,9 @@ mod tests {
     use chrono::Utc;
 
     use super::*;
+    use crate::protocol::Message;
     use crate::runtime::aggregate::{Aggregate, Caller, CommitContext};
-    use crate::runtime::llm::{LlmRequest, LlmResponse};
-    use crate::runtime::owner::SessionOwner;
-    use crate::runtime::retry::RetryPolicy;
-    use crate::runtime::session::decision::{Action, DecisionTrigger};
-    use crate::runtime::session::events::{EventPayload, LlmHandler, ToolHandler};
-    use crate::runtime::session::message::{Content, Message, Role};
-    use crate::runtime::session::state::{EffectStatus, SessionState, SessionStatus};
-    use crate::runtime::session::wire::WireClientPayload;
+    use crate::runtime::session::events::EventPayload;
     use crate::runtime::span::SpanContext;
 
     /// Run a command through the handler and commit the resulting events, like production `execute`.
@@ -1896,7 +1878,7 @@ mod tests {
             .state
             .worker_decisions
             .values()
-            .find(|d| matches!(d.trigger, DecisionTrigger::SessionStart))
+            .find(|d| matches!(d.trigger, Trigger::SessionStart))
             .map(|d| d.decision_id.clone())
             .expect("a pending session.start decision");
         dispatch(
@@ -2047,8 +2029,7 @@ mod tests {
     /// to the point where the tool call is in flight, and settle it with
     /// `result`. Returns the settle's events.
     fn settle_with_output_contract(result: &str) -> (Aggregate<SessionState>, Vec<EventPayload>) {
-        use crate::runtime::llm::LlmTool;
-        use crate::runtime::session::message::{ToolCall, ToolCallFunction};
+        use crate::protocol::{LlmTool, ToolCall, ToolCallFunction};
 
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
         dispatch(
@@ -2115,7 +2096,7 @@ mod tests {
             &mut agg,
             CommandPayload::SubmitWorkerDecision {
                 decision_id,
-                transcript: vec![WireMessage {
+                transcript: vec![DraftMessage {
                     id: Some("call-1".to_string()),
                     role: Role::Assistant,
                     content: None,
@@ -2158,7 +2139,7 @@ mod tests {
         assert!(
             decision_with(&events, |t| matches!(
                 t,
-                DecisionTrigger::ToolFinished { id, ok: false, error: Some(e), .. }
+                Trigger::ToolFinished { id, ok: false, error: Some(e), .. }
                     if id == "tc-1" && e.contains("tool output violated its declared schema")
             ))
             .is_some(),
@@ -2401,8 +2382,8 @@ mod tests {
     #[test]
     fn submit_client_payload_with_active_turn_id_is_rejected() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
-        let payload = WireClientPayload::Message(WireClientMessage {
-            message: WireMessage {
+        let payload = ClientPayload::Message(ClientMessage {
+            message: DraftMessage {
                 id: None,
                 role: Role::User,
                 content: Some(Content::Text("hello".to_string())),
@@ -2449,8 +2430,8 @@ mod tests {
         let setup_events = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: WireClientPayload::Message(WireClientMessage {
-                    message: WireMessage {
+                payload: ClientPayload::Message(ClientMessage {
+                    message: DraftMessage {
                         id: None,
                         role: Role::User,
                         content: Some(Content::Text("hi".to_string())),
@@ -2519,8 +2500,8 @@ mod tests {
         let setup_events = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: WireClientPayload::Message(WireClientMessage {
-                    message: WireMessage {
+                payload: ClientPayload::Message(ClientMessage {
+                    message: DraftMessage {
                         id: None,
                         role: Role::User,
                         content: Some(Content::Text("hi".to_string())),
@@ -2603,8 +2584,8 @@ mod tests {
             },
         );
 
-        let user_message = WireClientPayload::Message(WireClientMessage {
-            message: WireMessage {
+        let user_message = ClientPayload::Message(ClientMessage {
+            message: DraftMessage {
                 id: None,
                 role: Role::User,
                 content: Some(Content::Text("hello".to_string())),
@@ -2668,7 +2649,7 @@ mod tests {
         let events = dispatch(
             &mut agg,
             CommandPayload::SendMessage {
-                message: WireMessage {
+                message: DraftMessage {
                     id: None,
                     role: Role::User,
                     content: Some(Content::Text("hi".to_string())),
@@ -2789,8 +2770,8 @@ mod tests {
         assert_eq!(call.tracking.status, EffectStatus::Pending);
     }
 
-    fn node_msg(id: &str, role: Role, content: &str) -> WireMessage {
-        WireMessage {
+    fn node_msg(id: &str, role: Role, content: &str) -> DraftMessage {
+        DraftMessage {
             id: (!id.is_empty()).then(|| id.to_string()),
             role,
             content: Some(Content::Text(content.into())),
@@ -2800,7 +2781,7 @@ mod tests {
         }
     }
 
-    fn request_with(messages: Vec<WireMessage>) -> LlmRequest {
+    fn request_with(messages: Vec<DraftMessage>) -> LlmRequest {
         LlmRequest {
             model: "test-model".to_string(),
             messages,
@@ -2812,11 +2793,11 @@ mod tests {
     }
 
     /// Drive a worker `Append` action onto the tree via a user-message decision.
-    fn append_via_worker(agg: &mut Aggregate<SessionState>, transcript: Vec<WireMessage>) {
+    fn append_via_worker(agg: &mut Aggregate<SessionState>, transcript: Vec<DraftMessage>) {
         let setup = dispatch(
             agg,
             CommandPayload::SubmitClientPayload {
-                payload: WireClientPayload::Message(WireClientMessage {
+                payload: ClientPayload::Message(ClientMessage {
                     message: node_msg("seed", Role::User, "seed"),
                     stream: false,
                 }),
@@ -2887,7 +2868,7 @@ mod tests {
         let events = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: WireClientPayload::Messages(WireClientMessages {
+                payload: ClientPayload::Messages(ClientMessages {
                     messages: vec![
                         node_msg("c1", Role::User, "hi"),
                         node_msg("a1", Role::Assistant, "hello"),
@@ -2914,7 +2895,7 @@ mod tests {
             })
             .expect("a decision request");
         match trigger {
-            DecisionTrigger::ClientTranscript { messages, .. } => {
+            Trigger::ClientTranscript { messages, .. } => {
                 assert_eq!(
                     messages.iter().map(|m| m.id.as_deref()).collect::<Vec<_>>(),
                     vec![Some("c1"), Some("a1"), Some("c2")]
@@ -2924,8 +2905,8 @@ mod tests {
         }
     }
 
-    fn tool_msg(tool_call_id: &str, content: &str) -> WireMessage {
-        WireMessage {
+    fn tool_msg(tool_call_id: &str, content: &str) -> DraftMessage {
+        DraftMessage {
             id: None,
             role: Role::Tool,
             content: Some(Content::Text(content.into())),
@@ -2935,8 +2916,8 @@ mod tests {
         }
     }
 
-    fn tool_node(id: &str, tool_call_id: &str, content: &str) -> WireMessage {
-        WireMessage {
+    fn tool_node(id: &str, tool_call_id: &str, content: &str) -> DraftMessage {
+        DraftMessage {
             id: Some(id.into()),
             ..tool_msg(tool_call_id, content)
         }
@@ -2944,11 +2925,11 @@ mod tests {
 
     /// Record `transcript` into the tree via one worker decision, giving tests
     /// exact control over recorded ids (reconcile keeps explicit unknown ids).
-    fn seed_tree(agg: &mut Aggregate<SessionState>, transcript: Vec<WireMessage>) {
+    fn seed_tree(agg: &mut Aggregate<SessionState>, transcript: Vec<DraftMessage>) {
         let events = dispatch(
             agg,
             CommandPayload::SubmitClientPayload {
-                payload: WireClientPayload::Message(WireClientMessage {
+                payload: ClientPayload::Message(ClientMessage {
                     message: node_msg("", Role::User, "seed"),
                     stream: false,
                 }),
@@ -2971,7 +2952,7 @@ mod tests {
     }
 
     /// The messages carried by the (fired or queued) `client.messages` decision.
-    fn transcript_messages(events: &[EventPayload]) -> Option<Vec<WireMessage>> {
+    fn transcript_messages(events: &[EventPayload]) -> Option<Vec<DraftMessage>> {
         events.iter().find_map(|e| {
             let trigger = match e {
                 EventPayload::WorkerDecisionRequested(p) => &p.trigger,
@@ -2979,7 +2960,7 @@ mod tests {
                 _ => return None,
             };
             match trigger {
-                DecisionTrigger::ClientTranscript { messages, .. } => Some(messages.clone()),
+                Trigger::ClientTranscript { messages, .. } => Some(messages.clone()),
                 _ => None,
             }
         })
@@ -2987,12 +2968,12 @@ mod tests {
 
     fn submit_messages(
         agg: &mut Aggregate<SessionState>,
-        messages: Vec<WireMessage>,
+        messages: Vec<DraftMessage>,
     ) -> Vec<EventPayload> {
         dispatch(
             agg,
             CommandPayload::SubmitClientPayload {
-                payload: WireClientPayload::Messages(WireClientMessages {
+                payload: ClientPayload::Messages(ClientMessages {
                     messages,
                     stream: false,
                 }),
@@ -3016,11 +2997,7 @@ mod tests {
             .any(|e| matches!(e, EventPayload::ToolCallCompleted(_))));
         assert_eq!(fired_tool_result(&events), vec!["tc-1".to_string()]);
         assert!(
-            decision_with(&events, |t| matches!(
-                t,
-                DecisionTrigger::ClientTranscript { .. }
-            ))
-            .is_none(),
+            decision_with(&events, |t| matches!(t, Trigger::ClientTranscript { .. })).is_none(),
             "the fast path fires tool.finished, not a transcript; got {events:?}"
         );
 
@@ -3069,7 +3046,7 @@ mod tests {
             .filter_map(|e| match e {
                 EventPayload::ToolCallCompleted(_) => Some("complete"),
                 EventPayload::WorkerDecisionRequested(p)
-                    if matches!(p.trigger, DecisionTrigger::ClientTranscript { .. }) =>
+                    if matches!(p.trigger, Trigger::ClientTranscript { .. }) =>
                 {
                     Some("live")
                 }
@@ -3104,11 +3081,7 @@ mod tests {
             "nothing to complete; got {echo:?}"
         );
         assert!(
-            decision_with(&echo, |t| matches!(
-                t,
-                DecisionTrigger::ClientTranscript { .. }
-            ))
-            .is_some(),
+            decision_with(&echo, |t| matches!(t, Trigger::ClientTranscript { .. })).is_some(),
             "the submission still delivers as a transcript decision; got {echo:?}"
         );
     }
@@ -3133,7 +3106,7 @@ mod tests {
                 matches!(
                     e,
                     EventPayload::WorkerDecisionRequested(p)
-                        if matches!(p.trigger, DecisionTrigger::ClientTranscript { .. })
+                        if matches!(p.trigger, Trigger::ClientTranscript { .. })
                 )
             })
             .count();
@@ -3172,7 +3145,7 @@ mod tests {
             events.iter().any(|e| matches!(
                 e,
                 EventPayload::DecisionRequestQueued(p)
-                    if matches!(p.trigger, DecisionTrigger::ToolFinished { .. })
+                    if matches!(p.trigger, Trigger::ToolFinished { .. })
             )),
             "the decision queues until resume; got {events:?}"
         );
@@ -3198,7 +3171,7 @@ mod tests {
             .state
             .handle(
                 CommandPayload::SubmitClientPayload {
-                    payload: WireClientPayload::Messages(WireClientMessages {
+                    payload: ClientPayload::Messages(ClientMessages {
                         messages: vec![node_msg("", Role::User, "hello")],
                         stream: false,
                     }),
@@ -3421,7 +3394,7 @@ mod tests {
             events.iter().any(|e| matches!(
                 e,
                 EventPayload::DecisionRequestQueued(p)
-                    if matches!(p.trigger, DecisionTrigger::ClientTranscript { .. })
+                    if matches!(p.trigger, Trigger::ClientTranscript { .. })
             )),
             "the bedrock transcript queues until resume; got {events:?}"
         );
@@ -3438,7 +3411,7 @@ mod tests {
         let first = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: WireClientPayload::Message(WireClientMessage {
+                payload: ClientPayload::Message(ClientMessage {
                     message: node_msg("", Role::User, "A"),
                     stream: false,
                 }),
@@ -3449,12 +3422,12 @@ mod tests {
         assert!(first
             .iter()
             .any(|e| matches!(e, EventPayload::WorkerDecisionRequested(p)
-                if matches!(p.trigger, DecisionTrigger::ClientMessage { .. }))));
+                if matches!(p.trigger, Trigger::ClientMessage { .. }))));
 
         let second = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: WireClientPayload::Message(WireClientMessage {
+                payload: ClientPayload::Message(ClientMessage {
                     message: node_msg("", Role::User, "B"),
                     stream: false,
                 }),
@@ -3466,7 +3439,7 @@ mod tests {
             second
                 .iter()
                 .any(|e| matches!(e, EventPayload::DecisionRequestQueued(p)
-                    if matches!(p.trigger, DecisionTrigger::ClientMessage { .. }))),
+                    if matches!(p.trigger, Trigger::ClientMessage { .. }))),
             "the stored trigger keeps the bare message; got {second:?}"
         );
     }
@@ -3477,7 +3450,7 @@ mod tests {
         let events = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: WireClientPayload::Message(WireClientMessage {
+                payload: ClientPayload::Message(ClientMessage {
                     message: node_msg("", Role::User, "hi"),
                     stream: false,
                 }),
@@ -3508,7 +3481,7 @@ mod tests {
         let events = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: WireClientPayload::Message(WireClientMessage {
+                payload: ClientPayload::Message(ClientMessage {
                     message: node_msg("", Role::User, "again"),
                     stream: false,
                 }),
@@ -3618,7 +3591,7 @@ mod tests {
         assert!(
             decision_with(&events, |t| matches!(
                 t,
-                DecisionTrigger::LlmFinished { id, ok: true, .. } if id == "llm-1"
+                Trigger::LlmFinished { id, ok: true, .. } if id == "llm-1"
             ))
             .is_some(),
             "completion fires an llm.finished trigger; got {events:?}"
@@ -3639,7 +3612,7 @@ mod tests {
             .iter()
             .find_map(|e| match e {
                 EventPayload::WorkerDecisionRequested(p) => match &p.trigger {
-                    DecisionTrigger::LlmFinished {
+                    Trigger::LlmFinished {
                         message: Some(m), ..
                     } => m.id.clone(),
                     _ => None,
@@ -3679,7 +3652,7 @@ mod tests {
             .iter()
             .find_map(|e| match e {
                 EventPayload::WorkerDecisionRequested(p) => match &p.trigger {
-                    DecisionTrigger::LlmFinished {
+                    Trigger::LlmFinished {
                         message: Some(m), ..
                     } => Some((p.decision_id.clone(), m.clone())),
                     _ => None,
@@ -3902,7 +3875,7 @@ mod tests {
         assert!(
             matches!(
                 trigger,
-                DecisionTrigger::LlmExecute { id, .. } if id == "llm-1"
+                Trigger::LlmExecute { id, .. } if id == "llm-1"
             ),
             "expected an llm.execute trigger for the llm call; got {trigger:?}"
         );
@@ -3998,7 +3971,7 @@ mod tests {
         assert!(
             decision_with(&events, |t| matches!(
                 t,
-                DecisionTrigger::LlmFinished { id, ok: true, .. } if id == "llm-1"
+                Trigger::LlmFinished { id, ok: true, .. } if id == "llm-1"
             ))
             .is_some(),
             "completion fires an llm.finished trigger; got {events:?}"
@@ -4081,7 +4054,7 @@ mod tests {
         assert!(
             matches!(
                 trigger,
-                DecisionTrigger::ToolFinished { id, ok: false, .. } if id == "tc-1"
+                Trigger::ToolFinished { id, ok: false, .. } if id == "tc-1"
             ),
             "expected an errored tool.finished for tc-1; got {trigger:?}"
         );
@@ -4313,8 +4286,7 @@ mod tests {
                     _ => return None,
                 };
                 let tool_call_id = match trigger {
-                    DecisionTrigger::ToolFinished { id, .. }
-                    | DecisionTrigger::SubAgentFinished { id, .. } => id,
+                    Trigger::ToolFinished { id, .. } | Trigger::SubAgentFinished { id, .. } => id,
                     _ => return None,
                 };
                 seen.insert(decision_id.clone())
@@ -4323,10 +4295,7 @@ mod tests {
             .collect()
     }
 
-    fn decision_with(
-        events: &[EventPayload],
-        pred: impl Fn(&DecisionTrigger) -> bool,
-    ) -> Option<String> {
+    fn decision_with(events: &[EventPayload], pred: impl Fn(&Trigger) -> bool) -> Option<String> {
         events.iter().find_map(|e| {
             let (id, trigger) = match e {
                 EventPayload::WorkerDecisionRequested(p) => (&p.decision_id, &p.trigger),
@@ -4364,8 +4333,8 @@ mod tests {
         let setup = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: WireClientPayload::Message(WireClientMessage {
-                    message: WireMessage {
+                payload: ClientPayload::Message(ClientMessage {
+                    message: DraftMessage {
                         id: None,
                         role: Role::User,
                         content: Some(Content::Text("go".to_string())),
@@ -4379,10 +4348,8 @@ mod tests {
             },
             &system(),
         );
-        let decision_id = decision_with(&setup, |t| {
-            matches!(t, DecisionTrigger::ClientMessage { .. })
-        })
-        .expect("user message decision");
+        let decision_id = decision_with(&setup, |t| matches!(t, Trigger::ClientMessage { .. }))
+            .expect("user message decision");
 
         let dispatched = dispatch(
             &mut agg,
@@ -4401,10 +4368,8 @@ mod tests {
             },
             &machine(),
         );
-        let exec = decision_with(&dispatched, |t| {
-            matches!(t, DecisionTrigger::ToolExecute { .. })
-        })
-        .expect("tool.execute decision");
+        let exec = decision_with(&dispatched, |t| matches!(t, Trigger::ToolExecute { .. }))
+            .expect("tool.execute decision");
 
         let completed = dispatch(
             &mut agg,
@@ -4495,8 +4460,8 @@ mod tests {
         let setup = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: WireClientPayload::Message(WireClientMessage {
-                    message: WireMessage {
+                payload: ClientPayload::Message(ClientMessage {
+                    message: DraftMessage {
                         id: None,
                         role: Role::User,
                         content: Some(Content::Text("go".to_string())),
@@ -4560,7 +4525,7 @@ mod tests {
             events.iter().any(|e| matches!(
                 e,
                 EventPayload::WorkerDecisionRequested(p)
-                    if matches!(p.trigger, DecisionTrigger::ToolExecute { .. })
+                    if matches!(p.trigger, Trigger::ToolExecute { .. })
             )),
             "tool's tool.execute decision dispatched; got {events:?}"
         );
@@ -4978,7 +4943,7 @@ mod tests {
             .state
             .handle(
                 CommandPayload::SubmitClientPayload {
-                    payload: WireClientPayload::Action(crate::session::wire::WireClientAction {
+                    payload: ClientPayload::Action(crate::protocol::ClientAction {
                         name: "refresh".to_string(),
                         args: None,
                     }),
@@ -5001,8 +4966,8 @@ mod tests {
         let setup_events = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: WireClientPayload::Message(WireClientMessage {
-                    message: WireMessage {
+                payload: ClientPayload::Message(ClientMessage {
+                    message: DraftMessage {
                         id: None,
                         role: Role::User,
                         content: Some(Content::Text("hi".to_string())),
@@ -5153,8 +5118,8 @@ mod tests {
         let setup_events = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: WireClientPayload::Message(WireClientMessage {
-                    message: WireMessage {
+                payload: ClientPayload::Message(ClientMessage {
+                    message: DraftMessage {
                         id: None,
                         role: Role::User,
                         content: Some(Content::Text("hi".to_string())),
@@ -5244,8 +5209,8 @@ mod tests {
         let setup_events = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: WireClientPayload::Message(WireClientMessage {
-                    message: WireMessage {
+                payload: ClientPayload::Message(ClientMessage {
+                    message: DraftMessage {
                         id: None,
                         role: Role::User,
                         content: Some(Content::Text("crawl the site".to_string())),
@@ -5342,7 +5307,7 @@ mod tests {
             .iter()
             .find_map(|e| match e {
                 EventPayload::WorkerDecisionRequested(p)
-                    if matches!(p.trigger, DecisionTrigger::InterruptResumed { .. }) =>
+                    if matches!(p.trigger, Trigger::InterruptResumed { .. }) =>
                 {
                     Some(p.decision_id.clone())
                 }
@@ -5369,7 +5334,7 @@ mod tests {
             })
             .expect("queued decision should promote after the resumed decision completes");
         assert!(
-            matches!(trigger, DecisionTrigger::ToolFinished { .. }),
+            matches!(trigger, Trigger::ToolFinished { .. }),
             "expected a tool.finished trigger; got {trigger:?}"
         );
     }
@@ -5380,8 +5345,8 @@ mod tests {
         let setup_events = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: WireClientPayload::Message(WireClientMessage {
-                    message: WireMessage {
+                payload: ClientPayload::Message(ClientMessage {
+                    message: DraftMessage {
                         id: None,
                         role: Role::User,
                         content: Some(Content::Text("send the email".to_string())),
@@ -5452,7 +5417,7 @@ mod tests {
             })
             .expect("resume should request a worker decision");
         match trigger {
-            DecisionTrigger::InterruptResumed {
+            Trigger::InterruptResumed {
                 interrupt_id,
                 payload,
             } => {
@@ -5469,8 +5434,8 @@ mod tests {
         let setup_events = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: WireClientPayload::Message(WireClientMessage {
-                    message: WireMessage {
+                payload: ClientPayload::Message(ClientMessage {
+                    message: DraftMessage {
                         id: None,
                         role: Role::User,
                         content: Some(Content::Text("hi".to_string())),
@@ -5639,7 +5604,7 @@ mod tests {
         let setup = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: WireClientPayload::Message(WireClientMessage {
+                payload: ClientPayload::Message(ClientMessage {
                     message: node_msg("", Role::User, "hi"),
                     stream: false,
                 }),
@@ -5647,10 +5612,8 @@ mod tests {
             },
             &system(),
         );
-        let decision_id = decision_with(&setup, |t| {
-            matches!(t, DecisionTrigger::ClientMessage { .. })
-        })
-        .expect("user message decision");
+        let decision_id = decision_with(&setup, |t| matches!(t, Trigger::ClientMessage { .. }))
+            .expect("user message decision");
 
         let events = dispatch(
             &mut agg,
@@ -5705,7 +5668,7 @@ mod tests {
     fn submit_decision(
         agg: &mut Aggregate<SessionState>,
         decision_id: String,
-        transcript: Vec<WireMessage>,
+        transcript: Vec<DraftMessage>,
         actions: Vec<Action>,
     ) -> Vec<EventPayload> {
         dispatch(
@@ -5741,14 +5704,14 @@ mod tests {
 
     /// The transcript the runtime would hand a decision requested right now:
     /// the root→head path, exactly as `try_extract` materializes it.
-    fn delivered_transcript(agg: &Aggregate<SessionState>) -> Vec<WireMessage> {
+    fn delivered_transcript(agg: &Aggregate<SessionState>) -> Vec<DraftMessage> {
         agg.state
             .head_id
             .as_deref()
             .map(|h| agg.state.message_tree().path_to(h))
             .unwrap_or_default()
             .into_iter()
-            .map(WireMessage::from)
+            .map(DraftMessage::from)
             .collect()
     }
 
@@ -5761,7 +5724,7 @@ mod tests {
     }
 
     /// The single live (pending) decision — its id and trigger.
-    fn live_decision(agg: &Aggregate<SessionState>) -> (String, DecisionTrigger) {
+    fn live_decision(agg: &Aggregate<SessionState>) -> (String, Trigger) {
         agg.state
             .worker_decisions
             .values()
@@ -5778,7 +5741,7 @@ mod tests {
     fn record_bases(
         events: &[EventPayload],
         agg: &Aggregate<SessionState>,
-        bases: &mut HashMap<String, Vec<WireMessage>>,
+        bases: &mut HashMap<String, Vec<DraftMessage>>,
     ) {
         let frozen = delivered_transcript(agg);
         for e in events {
@@ -5794,10 +5757,10 @@ mod tests {
     /// result; finishes append their result node to the frozen base.
     fn drive_worker(
         agg: &mut Aggregate<SessionState>,
-        bases: &mut HashMap<String, Vec<WireMessage>>,
+        bases: &mut HashMap<String, Vec<DraftMessage>>,
     ) {
         for _ in 0..128 {
-            let mut live: Vec<(String, DecisionTrigger)> = agg
+            let mut live: Vec<(String, Trigger)> = agg
                 .state
                 .worker_decisions
                 .values()
@@ -5817,10 +5780,10 @@ mod tests {
 
             let base = bases.get(&id).cloned().unwrap_or_default();
             let events = match trigger {
-                DecisionTrigger::ToolExecute { id: tid, .. } => {
+                Trigger::ToolExecute { id: tid, .. } => {
                     submit_decision(agg, id, vec![], vec![tool_result_action(&tid)])
                 }
-                DecisionTrigger::ToolFinished { id: tid, name, .. } => {
+                Trigger::ToolFinished { id: tid, name, .. } => {
                     let mut answer = base;
                     answer.push(tool_msg(&tid, &format!("done-{name}")));
                     submit_decision(agg, id, answer, vec![])
@@ -5879,7 +5842,7 @@ mod tests {
     #[test]
     fn parallel_tool_finishes_keep_results_on_one_path() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
-        let mut bases: HashMap<String, Vec<WireMessage>> = HashMap::new();
+        let mut bases: HashMap<String, Vec<DraftMessage>> = HashMap::new();
 
         // Record [user, assistant] and fan out into two worker-handled tool
         // calls in one batch — the shape a parallel tool call produces.
@@ -5950,7 +5913,7 @@ mod tests {
         // with the second still queued, so it must report pending work, or it
         // would prompt now against a transcript missing the second result.
         let (finish_first, trigger) = live_decision(&agg);
-        assert!(matches!(trigger, DecisionTrigger::ToolFinished { .. }));
+        assert!(matches!(trigger, Trigger::ToolFinished { .. }));
         assert_eq!(
             agg.state.derived_state().pending_work(&finish_first),
             1,
@@ -5963,7 +5926,7 @@ mod tests {
         submit_decision(&mut agg, finish_first, answer, vec![]);
 
         let (finish_last, trigger) = live_decision(&agg);
-        assert!(matches!(trigger, DecisionTrigger::ToolFinished { .. }));
+        assert!(matches!(trigger, Trigger::ToolFinished { .. }));
         assert_eq!(
             agg.state.derived_state().pending_work(&finish_last),
             0,
@@ -6000,7 +5963,7 @@ mod tests {
         // by answering its execute with nothing — the engine leaves its call
         // Pending, just as a deferred tool or a client-handled tool would.
         let (exec_fast, t) = live_decision(&agg);
-        assert!(matches!(&t, DecisionTrigger::ToolExecute { id, .. } if id == "tc-fast"));
+        assert!(matches!(&t, Trigger::ToolExecute { id, .. } if id == "tc-fast"));
         submit_decision(
             &mut agg,
             exec_fast,
@@ -6009,13 +5972,13 @@ mod tests {
         );
 
         let (exec_deferred, t) = live_decision(&agg);
-        assert!(matches!(&t, DecisionTrigger::ToolExecute { id, .. } if id == "tc-deferred"));
+        assert!(matches!(&t, Trigger::ToolExecute { id, .. } if id == "tc-deferred"));
         submit_decision(&mut agg, exec_deferred, vec![], vec![]);
 
         // The fast tool's finish is live while the deferred call is still in
         // flight — it must report pending work and record only, not prompt.
         let (finish_fast, trigger) = live_decision(&agg);
-        assert!(matches!(trigger, DecisionTrigger::ToolFinished { .. }));
+        assert!(matches!(trigger, Trigger::ToolFinished { .. }));
         assert_eq!(
             agg.state
                 .tool_calls
@@ -6100,7 +6063,7 @@ mod tests {
         let setup = dispatch(
             agg,
             CommandPayload::SubmitClientPayload {
-                payload: WireClientPayload::Message(WireClientMessage {
+                payload: ClientPayload::Message(ClientMessage {
                     message: node_msg("seed", Role::User, "seed"),
                     stream: false,
                 }),
@@ -6140,7 +6103,7 @@ mod tests {
                     _ => return None,
                 };
                 match trigger {
-                    DecisionTrigger::LlmExecute { id, .. } if seen.insert(decision_id.clone()) => {
+                    Trigger::LlmExecute { id, .. } if seen.insert(decision_id.clone()) => {
                         Some(id.clone())
                     }
                     _ => None,
@@ -6161,7 +6124,7 @@ mod tests {
                     _ => return None,
                 };
                 match trigger {
-                    DecisionTrigger::LlmFinished { id, .. } if seen.insert(decision_id.clone()) => {
+                    Trigger::LlmFinished { id, .. } if seen.insert(decision_id.clone()) => {
                         Some(id.clone())
                     }
                     _ => None,
@@ -6447,7 +6410,7 @@ mod tests {
         let setup = dispatch(
             agg,
             CommandPayload::SubmitClientPayload {
-                payload: WireClientPayload::Message(WireClientMessage {
+                payload: ClientPayload::Message(ClientMessage {
                     message: node_msg("", Role::User, text),
                     stream: false,
                 }),
@@ -6455,16 +6418,14 @@ mod tests {
             },
             &system(),
         );
-        decision_with(&setup, |t| {
-            matches!(t, DecisionTrigger::ClientMessage { .. })
-        })
-        .expect("user message opens a decision")
+        decision_with(&setup, |t| matches!(t, Trigger::ClientMessage { .. }))
+            .expect("user message opens a decision")
     }
 
     fn submit_state(
         agg: &mut Aggregate<SessionState>,
         decision_id: String,
-        transcript: Vec<WireMessage>,
+        transcript: Vec<DraftMessage>,
         state: Option<serde_json::Value>,
     ) -> Vec<EventPayload> {
         dispatch(
@@ -6624,7 +6585,7 @@ mod tests {
     fn submit_agent(
         agg: &mut Aggregate<SessionState>,
         decision_id: String,
-        transcript: Vec<WireMessage>,
+        transcript: Vec<DraftMessage>,
         agent: Option<AgentConfig>,
     ) -> Vec<EventPayload> {
         dispatch(
@@ -6738,7 +6699,7 @@ mod tests {
                 [
                     EventPayload::SessionCreated(_),
                     EventPayload::WorkerDecisionRequested(w),
-                ] if matches!(w.trigger, DecisionTrigger::SessionStart)
+                ] if matches!(w.trigger, Trigger::SessionStart)
             ),
             "CreateSession opens session.start as the first decision; got {events:?}"
         );
@@ -6770,7 +6731,7 @@ mod tests {
         let setup = dispatch(
             &mut agg,
             CommandPayload::SubmitClientPayload {
-                payload: WireClientPayload::Message(WireClientMessage {
+                payload: ClientPayload::Message(ClientMessage {
                     message: node_msg("", Role::User, "hi"),
                     stream: false,
                 }),
@@ -6790,7 +6751,7 @@ mod tests {
             .state
             .worker_decisions
             .values()
-            .find(|d| matches!(d.trigger, DecisionTrigger::SessionStart))
+            .find(|d| matches!(d.trigger, Trigger::SessionStart))
             .map(|d| d.decision_id.clone())
             .expect("a pending session.start decision");
         let events = dispatch(
@@ -6811,7 +6772,7 @@ mod tests {
             events.iter().any(|e| matches!(
                 e,
                 EventPayload::WorkerDecisionRequested(w)
-                    if matches!(w.trigger, DecisionTrigger::ClientMessage { .. })
+                    if matches!(w.trigger, Trigger::ClientMessage { .. })
             )),
             "the queued client decision is promoted; got {events:?}"
         );
@@ -6913,7 +6874,7 @@ mod tests {
         );
     }
 
-    fn settle_decisions(events: &[EventPayload]) -> Vec<&DecisionTrigger> {
+    fn settle_decisions(events: &[EventPayload]) -> Vec<&Trigger> {
         events
             .iter()
             .filter_map(|e| {
@@ -6924,9 +6885,9 @@ mod tests {
                 };
                 matches!(
                     trigger,
-                    DecisionTrigger::ToolFinished { .. }
-                        | DecisionTrigger::SubAgentFinished { .. }
-                        | DecisionTrigger::LlmFinished { .. }
+                    Trigger::ToolFinished { .. }
+                        | Trigger::SubAgentFinished { .. }
+                        | Trigger::LlmFinished { .. }
                 )
                 .then_some(trigger)
             })
@@ -7113,10 +7074,8 @@ mod tests {
             },
             &machine(),
         );
-        let settle_id = decision_with(&events, |t| {
-            matches!(t, DecisionTrigger::ToolFinished { .. })
-        })
-        .expect("on-path settle queues behind the pending decision");
+        let settle_id = decision_with(&events, |t| matches!(t, Trigger::ToolFinished { .. }))
+            .expect("on-path settle queues behind the pending decision");
         open_decision(&mut agg, "also this");
 
         let events = submit_state(&mut agg, d2, vec![node_msg("x1", Role::User, "redo")], None);
@@ -7137,7 +7096,7 @@ mod tests {
             _ => None,
         });
         assert!(
-            matches!(promoted, Some(DecisionTrigger::ClientMessage { .. })),
+            matches!(promoted, Some(Trigger::ClientMessage { .. })),
             "the next live decision is promoted past the dropped settle; got {events:?}"
         );
         assert!(
@@ -7194,12 +7153,12 @@ mod tests {
         // t1's execute is delivered; t2's queues behind it.
         let exec_t1 = decision_with(
             &events,
-            |t| matches!(t, DecisionTrigger::ToolExecute { id, .. } if id == "t1"),
+            |t| matches!(t, Trigger::ToolExecute { id, .. } if id == "t1"),
         )
         .expect("first execute is delivered");
         let exec_t2 = decision_with(
             &events,
-            |t| matches!(t, DecisionTrigger::ToolExecute { id, .. } if id == "t2"),
+            |t| matches!(t, Trigger::ToolExecute { id, .. } if id == "t2"),
         )
         .expect("second execute queues");
 
@@ -7402,10 +7361,8 @@ mod tests {
             },
             &machine(),
         );
-        let settle_id = decision_with(&events, |t| {
-            matches!(t, DecisionTrigger::ToolFinished { .. })
-        })
-        .expect("on-path settle is delivered");
+        let settle_id = decision_with(&events, |t| matches!(t, Trigger::ToolFinished { .. }))
+            .expect("on-path settle is delivered");
         dispatch(
             &mut agg,
             CommandPayload::FailWorkerDecision {

@@ -8,11 +8,11 @@ use std::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-use crate::owner::SessionOwner;
+use crate::protocol::SessionOwner;
 use crate::session::command::SessionError;
 use crate::session::decision::{EffectResultPayload, WorkKind};
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
-use crate::session::wire::resolve_response;
+use crate::session::wire::{resolve_response, result_to_string};
 use crate::span::SpanContext;
 use crate::transport::session_sse::merge_session_stream;
 use crate::worker::SubmitDecision;
@@ -140,7 +140,9 @@ pub async fn settle_effect(
             WorkKind::ToolCall,
             id,
             attempt,
-            EffectSettlement::Result(EffectResultPayload::ToolCall { result }),
+            EffectSettlement::Result(EffectResultPayload::ToolCall {
+                result: result_to_string(result),
+            }),
         ),
         SettleEffectRequest::LlmResult {
             id,

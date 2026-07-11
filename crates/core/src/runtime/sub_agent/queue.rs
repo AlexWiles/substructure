@@ -1,9 +1,7 @@
 use rust_decimal::Decimal;
 use uuid::Uuid;
 
-use crate::runtime::owner::SessionOwner;
-use crate::runtime::retry::RetryPolicy;
-use crate::runtime::session::wire::WireMessage;
+use crate::protocol::{DraftMessage, RetryPolicy, SessionOwner};
 use crate::runtime::span::SpanContext;
 
 #[derive(Debug, Clone)]
@@ -23,7 +21,7 @@ pub enum SubAgentTask {
         source_event_id: Uuid,
         tenant_id: String,
         target_session_id: String,
-        message: WireMessage,
+        message: DraftMessage,
         span: SpanContext,
     },
     CompleteSubAgentTurn {

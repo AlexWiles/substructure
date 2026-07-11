@@ -7,11 +7,9 @@ use futures_util::stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-use crate::owner::SessionOwner;
+use crate::protocol::{ClientInput, MessageTree, SessionOwner};
 use crate::session::command::SessionError;
-use crate::session::events::MessageTree;
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
-use crate::session::wire::WireClientInput;
 use crate::transport::ag_ui::snapshot::snapshot_events;
 use crate::transport::ag_ui::translator::run_ag_ui_translation;
 use crate::transport::ag_ui::types::RunAgentInput;
@@ -202,7 +200,7 @@ pub async fn ag_ui_run(
                     session_id: session_id.clone(),
                     caller: caller.clone(),
                     owner: owner.clone(),
-                    input: WireClientInput::InterruptResume {
+                    input: ClientInput::InterruptResume {
                         interrupt_id: entry.interrupt_id,
                         payload,
                     },
@@ -222,7 +220,7 @@ pub async fn ag_ui_run(
                 session_id: session_id.clone(),
                 caller,
                 owner,
-                input: WireClientInput::Messages {
+                input: ClientInput::Messages {
                     agent_id,
                     turn_id: Some(input.run_id.clone()),
                     // Full client view so edits/branches reconcile into the tree.

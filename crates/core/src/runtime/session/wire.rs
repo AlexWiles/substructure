@@ -1,18 +1,18 @@
-//! The wire forms of the client and worker protocols and the boundaries that convert
-//! them to and from the internal representation.
+//! The boundaries that convert the wire protocol ([`crate::protocol`]) to and from
+//! the internal representation.
 //!
-//! - Inbound (client → engine): [`WireClientInput`] is the authoritative set of everything a
+//! - Inbound (client → engine): [`ClientInput`] is the authoritative set of everything a
 //!   client can send — a submit, an interrupt resume, or a client tool settle. Each variant
 //!   carries its own addressing (a submit's `agent_id`/`turn_id`; a settle's effect id), so
 //!   `Runtime::handle_client_input` dispatches it directly, mirroring `resolve_response` on the
-//!   worker side. A submit rebuilds a [`WireClientPayload`] — still what the
+//!   worker side. A submit rebuilds a [`ClientPayload`] — still what the
 //!   `SubmitClientPayload` command seam (`command.rs`) lowers to domain events, and still a
 //!   live wire type on the machine and embedded surfaces.
-//! - Inbound (worker → engine): [`WireAction`] is deserialized from untrusted worker
+//! - Inbound (worker → engine): [`DecisionAction`] is deserialized from untrusted worker
 //!   output; `resolve_response` is the single seam where it becomes the strict internal
 //!   [`Action`] the core consumes.
-//! - Outbound (engine → worker): [`WireTrigger`] is the materialized projection of the
-//!   internal [`DecisionTrigger`] a worker sees; `to_wire_trigger` is the single seam
+//! - Outbound (engine → worker): [`DecisionTrigger`] is the materialized projection of the
+//!   internal [`Trigger`] a worker sees; `to_wire_trigger` is the single seam
 //!   that produces it. It has no `ClientMessage` — that variant can never reach a worker.
 //!
 //! The outbound request also carries `proposed`, the engine-derived default
@@ -20,45 +20,21 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::agent_config::AgentConfig;
-use super::decision::{Action, DecisionTrigger};
-use super::events::{LlmHandler, MessageTree, ToolHandler};
-use super::message::{Content, Message, Role, ToolCall};
-use super::propose::Proposal;
+use super::decision::{Action, Trigger};
 use super::reconcile::news_start;
-use super::state::{new_call_id, new_message_id, Effect, LlmCallState};
-use super::tool_contract::{classify_arguments, declared_tool, DeclaredTool, ToolInput};
-use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse, LlmTool, ReasoningConfig};
-use crate::runtime::owner::SessionOwner;
-use crate::runtime::retry::RetryPolicy;
-use crate::runtime::worker::{WorkerDecisionRequest, WorkerState};
+use super::state::{new_call_id, new_message_id, LlmCallState};
+use super::tool_contract::{classify_arguments, declared_tool, DeclaredTool};
+use crate::protocol::{
+    AgentConfig, DecisionAction, DecisionRequest, DecisionResponse, DecisionTrigger, DraftMessage,
+    LlmRequest, Message, MessageTree, RetryPolicy, WorkerState,
+};
+use crate::runtime::worker::WorkerDecisionRequest;
 
-/// The wire form of a [`Message`]: `id` is optional because a client-submitted or
-/// worker-authored message is not yet recorded. `record`/`rerecord` are the seams
-/// that lower it to the internal [`Message`] (id always present) at recording time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WireMessage {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    pub role: Role,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<Content>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<ToolCall>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-}
-
-impl From<Message> for WireMessage {
+impl From<Message> for DraftMessage {
     fn from(m: Message) -> Self {
-        WireMessage {
+        DraftMessage {
             id: Some(m.id),
             role: m.role,
             content: m.content,
@@ -69,7 +45,7 @@ impl From<Message> for WireMessage {
     }
 }
 
-impl WireMessage {
+impl DraftMessage {
     /// Record with the wire id if present, else a minted one.
     pub fn record(self) -> Message {
         Message {
@@ -95,114 +71,11 @@ impl WireMessage {
     }
 }
 
-/// The body of a `client.message`: one message, optionally streamed.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WireClientMessage {
-    pub message: WireMessage,
-    #[serde(default)]
-    pub stream: bool,
-}
-
-/// The body of a `client.messages`: the client's full conversation view, optionally streamed.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WireClientMessages {
-    pub messages: Vec<WireMessage>,
-    #[serde(default)]
-    pub stream: bool,
-}
-
-/// The payload of a `client.action`: a named action with optional JSON args.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WireClientAction {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub args: Option<Value>,
-}
-
-/// The client→engine inbound *submit* wire form: an untrusted client submits a message,
-/// its full conversation view, or a named action. Lowered to domain events at the
-/// `SubmitClientPayload` command seam (`command.rs`); never persisted as-is. Carried
-/// verbatim inside [`WireClientInput`], which is the full client input surface.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum WireClientPayload {
-    #[serde(rename = "client.message")]
-    Message(WireClientMessage),
-    #[serde(rename = "client.messages")]
-    Messages(WireClientMessages),
-    #[serde(rename = "client.action")]
-    Action(WireClientAction),
-}
-
-/// Everything a client can send on the input surface: submit a message / a full view / a
-/// named action, resume an interrupt, or settle a client tool. A flat, internally-tagged
-/// union — its six tags produce serde's "unknown variant, expected one of …" error for
-/// free. `Runtime::handle_client_input` is the single seam that dispatches it (mirroring
-/// `resolve_response` on the worker side).
-///
-/// Addressing lives where it is meaningful, not in a shared envelope: `agent_id` (routes
-/// the turn, creating the session if new) and the optional idempotency `turn_id` are
-/// fields of the three submit variants only. A resume/settle addresses an interrupt/effect
-/// id and continues whatever turn is active, so it carries neither — misplacing them is
-/// unrepresentable rather than rejected. `session_id` is the one universal address and
-/// rides the envelope. A submit's body rebuilds a [`WireClientPayload`] at the seam.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum WireClientInput {
-    #[serde(rename = "client.message")]
-    Message {
-        agent_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        turn_id: Option<String>,
-        message: WireMessage,
-        #[serde(default)]
-        stream: bool,
-    },
-    #[serde(rename = "client.messages")]
-    Messages {
-        agent_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        turn_id: Option<String>,
-        messages: Vec<WireMessage>,
-        #[serde(default)]
-        stream: bool,
-    },
-    #[serde(rename = "client.action")]
-    Action {
-        agent_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        turn_id: Option<String>,
-        name: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        args: Option<Value>,
-    },
-    #[serde(rename = "interrupt.resume")]
-    InterruptResume {
-        interrupt_id: String,
-        #[serde(default)]
-        payload: Value,
-    },
-    #[serde(rename = "tool.result")]
-    ToolResult {
-        id: String,
-        #[serde(default)]
-        attempt: Option<u32>,
-        #[serde(default)]
-        result: Value,
-    },
-    #[serde(rename = "tool.error")]
-    ToolError {
-        id: String,
-        error: String,
-        retryable: bool,
-        #[serde(default)]
-        attempt: Option<u32>,
-    },
-}
-
-/// A client tool result on the wire accepts any JSON; a string passes through, `null`
-/// becomes empty, any other value is canonicalized to its JSON text.
-pub(crate) fn result_to_string(value: Value) -> String {
+/// Canonicalize a lenient JSON wire value (a tool result, tool arguments) to the
+/// strict internal string form: a string passes through, `null` becomes empty,
+/// any other value becomes its JSON text. Lets workers and clients author these
+/// fields as plain values instead of JSON-encoded-in-a-string.
+pub fn result_to_string(value: Value) -> String {
     match value {
         Value::String(s) => s,
         Value::Null => String::new(),
@@ -210,246 +83,27 @@ pub(crate) fn result_to_string(value: Value) -> String {
     }
 }
 
-/// The trigger a worker sees on the wire — the materialized projection of the internal
-/// [`DecisionTrigger`]. It has no `ClientMessage`: a bare client message is always
-/// materialized to `ClientTranscript` by `to_wire_trigger` before delivery, so an
-/// unmaterialized message can never reach a worker.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum WireTrigger {
-    /// The first decision of every session; carries no proposal.
-    #[serde(rename = "session.start")]
-    SessionStart,
-    #[serde(rename = "client.messages")]
-    ClientTranscript {
-        messages: Vec<WireMessage>,
-        #[serde(default)]
-        new_from: usize,
-    },
-    #[serde(rename = "client.action")]
-    ClientAction {
-        name: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        args: Option<serde_json::Value>,
-    },
-    /// Answer with `tool.result`/`tool.error`.
-    #[serde(rename = "tool.execute")]
-    ToolExecute {
-        id: String,
-        name: String,
-        arguments: String,
-        /// The engine's classification of `arguments` against the tool's
-        /// declared `input` schema: `valid` (with the parsed `value`),
-        /// `invalid` (value plus the violation), or `malformed` (not a JSON
-        /// object). Always on the wire.
-        input: ToolInput,
-        attempt: u32,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        deadline: Option<DateTime<Utc>>,
-    },
-    #[serde(rename = "tool.finished")]
-    ToolFinished {
-        id: String,
-        ok: bool,
-        name: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        result: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
-    },
-    /// Answer with `llm.result`/`llm.error`.
-    #[serde(rename = "llm.execute")]
-    LlmExecute {
-        id: String,
-        request: LlmRequest,
-        #[serde(default)]
-        stream: bool,
-        attempt: u32,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        deadline: Option<DateTime<Utc>>,
-    },
-    #[serde(rename = "llm.finished")]
-    LlmFinished {
-        id: String,
-        ok: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        message: Option<WireMessage>,
-        #[serde(default)]
-        truncated: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        usage: Option<serde_json::Value>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cost: Option<Decimal>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        code: Option<ErrorCode>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        detail: Option<serde_json::Value>,
-    },
-    #[serde(rename = "sub_agent.finished")]
-    SubAgentFinished {
-        id: String,
-        ok: bool,
-        session_id: String,
-        agent_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        result: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
-    },
-    #[serde(rename = "interrupt.resumed")]
-    InterruptResumed {
-        interrupt_id: String,
-        #[serde(default)]
-        payload: serde_json::Value,
-    },
-}
-
-/// The action a worker authors on the wire. Mirrors [`Action`], but a settle's effect
-/// id may be omitted: on the sync/pull paths the answered `*.execute` trigger names
-/// it, so echoing it is redundant. `resolve_response` turns this into the internal
-/// [`Action`] (id always present) at the transport boundary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum WireAction {
-    /// A flat, all-optional LLM request. `id` omitted ⇒ the engine mints one; it
-    /// becomes the assistant node's id. Omitted fields are filled from the agent
-    /// config (merge source), then engine defaults; `messages` omitted ⇒
-    /// `[config.system?] + the decision's declared view`. Explicit `messages`
-    /// suppress system injection. A bare `{"type":"llm.call"}` prompts per the
-    /// agent's identity over the current view.
-    #[serde(rename = "llm.call")]
-    CallLlm {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        model: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        messages: Option<Vec<WireMessage>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tools: Option<Vec<LlmTool>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        temperature: Option<f64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        max_completion_tokens: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reasoning: Option<ReasoningConfig>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        stream: Option<bool>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        retry: Option<RetryPolicy>,
-        /// Omitted ⇒ `server`.
-        #[serde(default)]
-        handler: LlmHandler,
-    },
-    /// `id` omitted ⇒ the engine mints one (LLM-driven tools carry the model's id).
-    #[serde(rename = "tool.call")]
-    CallTool {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        id: Option<String>,
-        name: String,
-        /// Accepts any JSON value; a non-string is canonicalized to its JSON text.
-        #[serde(deserialize_with = "string_or_json")]
-        arguments: String,
-        /// Omitted ⇒ `worker`.
-        #[serde(default)]
-        handler: ToolHandler,
-        #[serde(default = "RetryPolicy::no_retry")]
-        retry: RetryPolicy,
-    },
-    /// `id` omitted ⇒ the effect named by the answering `tool.execute` trigger.
-    #[serde(rename = "tool.result")]
-    ToolResult {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        attempt: Option<u32>,
-        /// Accepts any JSON value; a non-string is canonicalized to its JSON text.
-        #[serde(deserialize_with = "string_or_json")]
-        result: String,
-    },
-    /// `id` omitted ⇒ the effect named by the answering `llm.execute` trigger.
-    #[serde(rename = "llm.result")]
-    LlmResult {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        attempt: Option<u32>,
-        response: LlmResponse,
-    },
-    #[serde(rename = "tool.error")]
-    ToolError {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        attempt: Option<u32>,
-        error: String,
-        /// Omitted ⇒ terminal.
-        #[serde(default)]
-        retryable: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        code: Option<ErrorCode>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        detail: Option<serde_json::Value>,
-    },
-    #[serde(rename = "llm.error")]
-    LlmError {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        attempt: Option<u32>,
-        error: String,
-        /// Omitted ⇒ terminal.
-        #[serde(default)]
-        retryable: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        code: Option<ErrorCode>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        detail: Option<serde_json::Value>,
-    },
-    #[serde(rename = "sub_agent.spawn")]
-    SpawnSubAgent {
-        session_id: String,
-        agent_id: String,
-        /// The model tool-call this delegation answers — always required.
-        tool_call_id: String,
-        #[serde(default = "RetryPolicy::no_retry")]
-        retry: RetryPolicy,
-    },
-    #[serde(rename = "message.send")]
-    SendMessage {
-        session_id: String,
-        message: WireMessage,
-    },
-    /// `interrupt_id` omitted ⇒ the engine mints one to correlate the later resume.
-    #[serde(rename = "interrupt")]
-    Interrupt {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        interrupt_id: Option<String>,
-        reason: String,
-        #[serde(default)]
-        payload: serde_json::Value,
-    },
-    #[serde(rename = "done")]
-    Done {
-        #[serde(default)]
-        data: serde_json::Value,
-    },
-}
-
-/// Deserialize a string field leniently: a JSON string passes through, any
-/// other JSON value is canonicalized to its JSON text. Lets workers settle
-/// results and author tool arguments as plain values instead of
-/// JSON-encoded-in-a-string.
-pub(crate) fn string_or_json<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(match serde_json::Value::deserialize(deserializer)? {
-        serde_json::Value::String(s) => s,
-        value => value.to_string(),
-    })
+impl<'a> From<&'a WorkerDecisionRequest> for DecisionRequest<'a> {
+    fn from(r: &'a WorkerDecisionRequest) -> Self {
+        DecisionRequest {
+            session_id: &r.session_id,
+            decision_id: &r.decision_id,
+            agent_id: &r.agent_id,
+            identity: &r.identity,
+            trigger: &r.trigger,
+            proposed: &r.proposed,
+            state: &r.state,
+            agent: &r.agent,
+            calls: &r.calls,
+            pending_calls: r.pending_calls,
+            messages: &r.transcript,
+            message_tree: &r.message_tree,
+            ancestry: &r.ancestry,
+            attempts: r.attempts,
+            deadline: &r.deadline,
+            turn_id: &r.turn_id,
+        }
+    }
 }
 
 /// Which `*.execute` trigger can name an omitted settle id.
@@ -497,15 +151,15 @@ impl std::error::Error for ResolveError {}
 
 fn resolve_settle_id(
     id: Option<String>,
-    trigger: Option<&WireTrigger>,
+    trigger: Option<&DecisionTrigger>,
     want: SettleKind,
 ) -> Result<String, ResolveError> {
     if let Some(id) = id {
         return Ok(id);
     }
     match (want, trigger) {
-        (SettleKind::Tool, Some(WireTrigger::ToolExecute { id, .. })) => Ok(id.clone()),
-        (SettleKind::Llm, Some(WireTrigger::LlmExecute { id, .. })) => Ok(id.clone()),
+        (SettleKind::Tool, Some(DecisionTrigger::ToolExecute { id, .. })) => Ok(id.clone()),
+        (SettleKind::Llm, Some(DecisionTrigger::LlmExecute { id, .. })) => Ok(id.clone()),
         (want, _) => Err(ResolveError::UnresolvableSettleId {
             kind: want.as_str(),
         }),
@@ -517,7 +171,7 @@ fn resolve_settle_id(
 /// transcript and the state/agent-config writes.
 #[derive(Debug)]
 pub struct ResolvedResponse {
-    pub messages: Vec<WireMessage>,
+    pub messages: Vec<DraftMessage>,
     pub actions: Vec<Action>,
     pub state: Option<WorkerState>,
     pub agent: Option<AgentConfig>,
@@ -533,11 +187,11 @@ pub struct ResolvedResponse {
 /// resolved for this decision). The declared view for an omitted-`messages`
 /// `llm.call` is the response's `messages`.
 pub fn resolve_response(
-    response: WireDecisionResponse,
+    response: DecisionResponse,
     echoed_config: Option<&AgentConfig>,
-    trigger: Option<&WireTrigger>,
+    trigger: Option<&DecisionTrigger>,
 ) -> Result<ResolvedResponse, ResolveError> {
-    let WireDecisionResponse {
+    let DecisionResponse {
         messages,
         actions,
         state,
@@ -556,16 +210,16 @@ pub fn resolve_response(
 /// Lower each wire action to its internal [`Action`]. `view` is the response's
 /// declared transcript, used to fill an omitted-`messages` `llm.call`.
 fn lower_actions(
-    actions: Vec<WireAction>,
-    view: &[WireMessage],
+    actions: Vec<DecisionAction>,
+    view: &[DraftMessage],
     config: Option<&AgentConfig>,
-    trigger: Option<&WireTrigger>,
+    trigger: Option<&DecisionTrigger>,
 ) -> Result<Vec<Action>, ResolveError> {
     actions
         .into_iter()
         .map(|action| {
             Ok(match action {
-                WireAction::CallLlm {
+                DecisionAction::CallLlm {
                     id,
                     model,
                     messages,
@@ -606,7 +260,7 @@ fn lower_actions(
                         handler,
                     }
                 }
-                WireAction::CallTool {
+                DecisionAction::CallTool {
                     id,
                     name,
                     arguments,
@@ -615,20 +269,20 @@ fn lower_actions(
                 } => Action::CallTool {
                     id: id.unwrap_or_else(new_call_id),
                     name,
-                    arguments,
+                    arguments: result_to_string(arguments),
                     handler,
                     retry,
                 },
-                WireAction::ToolResult {
+                DecisionAction::ToolResult {
                     id,
                     attempt,
                     result,
                 } => Action::ToolResult {
                     id: resolve_settle_id(id, trigger, SettleKind::Tool)?,
                     attempt,
-                    result,
+                    result: result_to_string(result),
                 },
-                WireAction::LlmResult {
+                DecisionAction::LlmResult {
                     id,
                     attempt,
                     response,
@@ -637,7 +291,7 @@ fn lower_actions(
                     attempt,
                     response,
                 },
-                WireAction::ToolError {
+                DecisionAction::ToolError {
                     id,
                     attempt,
                     error,
@@ -652,7 +306,7 @@ fn lower_actions(
                     code,
                     detail,
                 },
-                WireAction::LlmError {
+                DecisionAction::LlmError {
                     id,
                     attempt,
                     error,
@@ -667,7 +321,7 @@ fn lower_actions(
                     code,
                     detail,
                 },
-                WireAction::SpawnSubAgent {
+                DecisionAction::SpawnSubAgent {
                     session_id,
                     agent_id,
                     tool_call_id,
@@ -678,14 +332,14 @@ fn lower_actions(
                     tool_call_id,
                     retry,
                 },
-                WireAction::SendMessage {
+                DecisionAction::SendMessage {
                     session_id,
                     message,
                 } => Action::SendMessage {
                     session_id,
                     message,
                 },
-                WireAction::Interrupt {
+                DecisionAction::Interrupt {
                     interrupt_id,
                     reason,
                     payload,
@@ -694,13 +348,13 @@ fn lower_actions(
                     reason,
                     payload,
                 },
-                WireAction::Done { data } => Action::Done { data },
+                DecisionAction::Done { data } => Action::Done { data },
             })
         })
         .collect()
 }
 
-/// Project an internal [`DecisionTrigger`] to the [`WireTrigger`] a worker sees. A bare
+/// Project an internal [`Trigger`] to the [`DecisionTrigger`] a worker sees. A bare
 /// `ClientMessage` becomes a full proposed transcript; a `ClientTranscript` has its
 /// `new_from` recomputed against the frozen tree; a `ToolExecute` has its arguments
 /// classified against the tool's declared `input` schema (resolved from
@@ -708,28 +362,31 @@ fn lower_actions(
 /// decision is pending, so the result is stable across redeliveries and matches
 /// what reconciling the echo will write.
 pub fn to_wire_trigger(
-    trigger: DecisionTrigger,
+    trigger: Trigger,
     active_path: &[Message],
     tree: &MessageTree,
     open_llm_calls: &HashMap<String, LlmCallState>,
-) -> WireTrigger {
+) -> DecisionTrigger {
     match trigger {
-        DecisionTrigger::SessionStart => WireTrigger::SessionStart,
-        DecisionTrigger::ClientMessage { message } => {
-            let mut messages: Vec<WireMessage> =
-                active_path.iter().cloned().map(WireMessage::from).collect();
+        Trigger::SessionStart => DecisionTrigger::SessionStart,
+        Trigger::ClientMessage { message } => {
+            let mut messages: Vec<DraftMessage> = active_path
+                .iter()
+                .cloned()
+                .map(DraftMessage::from)
+                .collect();
             let new_from = messages.len();
             messages.push(message);
-            WireTrigger::ClientTranscript { messages, new_from }
+            DecisionTrigger::ClientTranscript { messages, new_from }
         }
-        DecisionTrigger::ClientTranscript { messages, .. } => {
+        Trigger::ClientTranscript { messages, .. } => {
             let known: std::collections::HashSet<&str> =
                 tree.nodes.iter().map(|n| n.id()).collect();
             let new_from = news_start(&known, &messages);
-            WireTrigger::ClientTranscript { messages, new_from }
+            DecisionTrigger::ClientTranscript { messages, new_from }
         }
-        DecisionTrigger::ClientAction { name, args } => WireTrigger::ClientAction { name, args },
-        DecisionTrigger::ToolExecute {
+        Trigger::ClientAction { name, args } => DecisionTrigger::ClientAction { name, args },
+        Trigger::ToolExecute {
             id,
             name,
             arguments,
@@ -741,7 +398,7 @@ pub fn to_wire_trigger(
                 _ => None,
             };
             let input = classify_arguments(&arguments, schema);
-            WireTrigger::ToolExecute {
+            DecisionTrigger::ToolExecute {
                 id,
                 name,
                 arguments,
@@ -750,40 +407,40 @@ pub fn to_wire_trigger(
                 deadline,
             }
         }
-        DecisionTrigger::LlmExecute {
+        Trigger::LlmExecute {
             id,
             request,
             stream,
             attempt,
             deadline,
-        } => WireTrigger::LlmExecute {
+        } => DecisionTrigger::LlmExecute {
             id,
             request,
             stream,
             attempt,
             deadline,
         },
-        DecisionTrigger::ToolFinished {
+        Trigger::ToolFinished {
             id,
             ok,
             name,
             result,
             error,
-        } => WireTrigger::ToolFinished {
+        } => DecisionTrigger::ToolFinished {
             id,
             ok,
             name,
             result,
             error,
         },
-        DecisionTrigger::SubAgentFinished {
+        Trigger::SubAgentFinished {
             id,
             ok,
             session_id,
             agent_id,
             result,
             error,
-        } => WireTrigger::SubAgentFinished {
+        } => DecisionTrigger::SubAgentFinished {
             id,
             ok,
             session_id,
@@ -791,7 +448,7 @@ pub fn to_wire_trigger(
             result,
             error,
         },
-        DecisionTrigger::LlmFinished {
+        Trigger::LlmFinished {
             id,
             ok,
             message,
@@ -801,7 +458,7 @@ pub fn to_wire_trigger(
             error,
             code,
             detail,
-        } => WireTrigger::LlmFinished {
+        } => DecisionTrigger::LlmFinished {
             id,
             ok,
             message,
@@ -812,90 +469,32 @@ pub fn to_wire_trigger(
             code,
             detail,
         },
-        DecisionTrigger::InterruptResumed {
+        Trigger::InterruptResumed {
             interrupt_id,
             payload,
-        } => WireTrigger::InterruptResumed {
+        } => DecisionTrigger::InterruptResumed {
             interrupt_id,
             payload,
         },
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WireDecisionResponse {
-    #[serde(default)]
-    pub messages: Vec<WireMessage>,
-    #[serde(default)]
-    pub actions: Vec<WireAction>,
-    /// Omitted or `null` keeps the current state; clear with a non-null empty value.
-    #[serde(default)]
-    pub state: Option<WorkerState>,
-    /// A new agent config write; omitted keeps the current config.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent: Option<AgentConfig>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct WireDecisionRequest<'a> {
-    pub session_id: &'a str,
-    pub decision_id: &'a str,
-    pub agent_id: &'a str,
-    pub identity: &'a SessionOwner,
-    pub trigger: &'a WireTrigger,
-    /// The engine's default continuation for `trigger` (`null` when it needs
-    /// worker knowledge). Advisory: accept by echoing it as the decision.
-    pub proposed: &'a Option<Proposal>,
-    pub state: &'a WorkerState,
-    /// The agent config resolved for the active path (`null` when none is set).
-    pub agent: &'a Option<AgentConfig>,
-    pub calls: &'a [Effect],
-    /// Count of in-flight `tool_call`/`sub_agent` calls.
-    pub pending_calls: usize,
-    pub messages: &'a [Message],
-    pub message_tree: &'a MessageTree,
-    pub ancestry: &'a [String],
-    pub attempts: u32,
-    pub deadline: &'a Option<DateTime<Utc>>,
-    pub turn_id: &'a Option<String>,
-}
-
-impl<'a> From<&'a WorkerDecisionRequest> for WireDecisionRequest<'a> {
-    fn from(r: &'a WorkerDecisionRequest) -> Self {
-        WireDecisionRequest {
-            session_id: &r.session_id,
-            decision_id: &r.decision_id,
-            agent_id: &r.agent_id,
-            identity: &r.identity,
-            trigger: &r.trigger,
-            proposed: &r.proposed,
-            state: &r.state,
-            agent: &r.agent,
-            calls: &r.calls,
-            pending_calls: r.pending_calls,
-            messages: &r.transcript,
-            message_tree: &r.message_tree,
-            ancestry: &r.ancestry,
-            attempts: r.attempts,
-            deadline: &r.deadline,
-            turn_id: &r.turn_id,
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::session::events::{NewMessage, Node};
-    use crate::runtime::session::message::{Content, Role};
+    use crate::protocol::{
+        ClientInput, ClientPayload, Content, LlmHandler, NewMessage, Node, Role, ToolCall,
+        ToolCallFunction, ToolHandler, ToolInput,
+    };
+    use crate::runtime::session::state::LlmCallSpec;
 
     /// Lower just `actions` (no messages/config) through the response seam.
     fn resolve_test_actions(
-        actions: Vec<WireAction>,
-        trigger: Option<&WireTrigger>,
+        actions: Vec<DecisionAction>,
+        trigger: Option<&DecisionTrigger>,
     ) -> Result<Vec<Action>, ResolveError> {
         resolve_response(
-            WireDecisionResponse {
+            DecisionResponse {
                 messages: vec![],
                 actions,
                 state: None,
@@ -910,10 +509,10 @@ mod tests {
     #[test]
     fn call_id_is_minted_when_omitted() {
         let actions = resolve_test_actions(
-            vec![WireAction::CallTool {
+            vec![DecisionAction::CallTool {
                 id: None,
                 name: "do_thing".to_string(),
-                arguments: "{}".to_string(),
+                arguments: serde_json::json!({}),
                 handler: ToolHandler::Worker,
                 retry: RetryPolicy::no_retry(),
             }],
@@ -928,7 +527,7 @@ mod tests {
 
     #[test]
     fn omitted_settle_id_is_filled_from_the_answered_execute() {
-        let trigger = WireTrigger::ToolExecute {
+        let trigger = DecisionTrigger::ToolExecute {
             id: "eff-1".to_string(),
             name: "do_thing".to_string(),
             arguments: "{}".to_string(),
@@ -939,10 +538,10 @@ mod tests {
             deadline: None,
         };
         let actions = resolve_test_actions(
-            vec![WireAction::ToolResult {
+            vec![DecisionAction::ToolResult {
                 id: None,
                 attempt: None,
-                result: "ok".to_string(),
+                result: serde_json::json!("ok"),
             }],
             Some(&trigger),
         )
@@ -956,10 +555,10 @@ mod tests {
     #[test]
     fn omitted_settle_id_without_a_matching_execute_is_an_error() {
         let err = resolve_test_actions(
-            vec![WireAction::ToolResult {
+            vec![DecisionAction::ToolResult {
                 id: None,
                 attempt: None,
-                result: "ok".to_string(),
+                result: serde_json::json!("ok"),
             }],
             None,
         )
@@ -978,8 +577,8 @@ mod tests {
         }
     }
 
-    fn user_wire(text: &str) -> WireMessage {
-        WireMessage {
+    fn user_wire(text: &str) -> DraftMessage {
+        DraftMessage {
             id: None,
             role: Role::User,
             content: Some(Content::Text(text.to_string())),
@@ -989,8 +588,8 @@ mod tests {
         }
     }
 
-    fn bare_llm_call() -> WireAction {
-        WireAction::CallLlm {
+    fn bare_llm_call() -> DecisionAction {
+        DecisionAction::CallLlm {
             id: None,
             model: None,
             messages: None,
@@ -1005,13 +604,13 @@ mod tests {
     }
 
     fn resolve_one_call(
-        call: WireAction,
-        view: Vec<WireMessage>,
+        call: DecisionAction,
+        view: Vec<DraftMessage>,
         echoed: Option<&AgentConfig>,
         response_agent: Option<AgentConfig>,
     ) -> Result<Action, ResolveError> {
         let r = resolve_response(
-            WireDecisionResponse {
+            DecisionResponse {
                 messages: view,
                 actions: vec![call],
                 state: None,
@@ -1047,7 +646,7 @@ mod tests {
     #[test]
     fn explicit_messages_suppress_system_injection() {
         let config = cfg("m1", Some("be nice"));
-        let call = WireAction::CallLlm {
+        let call = DecisionAction::CallLlm {
             id: None,
             model: None,
             messages: Some(vec![user_wire("only me")]),
@@ -1076,7 +675,7 @@ mod tests {
     #[test]
     fn explicit_model_overrides_config() {
         let config = cfg("base", None);
-        let call = WireAction::CallLlm {
+        let call = DecisionAction::CallLlm {
             id: None,
             model: Some("override".to_string()),
             messages: None,
@@ -1148,15 +747,15 @@ mod tests {
         }
     }
 
-    fn transcript_of(trigger: WireTrigger) -> (Vec<WireMessage>, usize) {
+    fn transcript_of(trigger: DecisionTrigger) -> (Vec<DraftMessage>, usize) {
         match trigger {
-            WireTrigger::ClientTranscript { messages, new_from } => (messages, new_from),
+            DecisionTrigger::ClientTranscript { messages, new_from } => (messages, new_from),
             t => panic!("expected a client.messages trigger; got {t:?}"),
         }
     }
 
-    fn wire_view(messages: &[Message]) -> Vec<WireMessage> {
-        messages.iter().cloned().map(WireMessage::from).collect()
+    fn wire_view(messages: &[Message]) -> Vec<DraftMessage> {
+        messages.iter().cloned().map(DraftMessage::from).collect()
     }
 
     #[test]
@@ -1168,7 +767,7 @@ mod tests {
         let tree = linear_tree(&path);
 
         let (messages, new_from) = transcript_of(to_wire_trigger(
-            DecisionTrigger::ClientMessage {
+            Trigger::ClientMessage {
                 message: msg("u2", Role::User, "more").into(),
             },
             &path,
@@ -1197,7 +796,7 @@ mod tests {
         ]);
 
         let (_, new_from) = transcript_of(to_wire_trigger(
-            DecisionTrigger::ClientTranscript {
+            Trigger::ClientTranscript {
                 messages: view,
                 new_from: 0,
             },
@@ -1220,7 +819,7 @@ mod tests {
         let view = wire_view(&[msg("u1", Role::User, "hi"), msg("e1", Role::User, "edited")]);
 
         let (_, new_from) = transcript_of(to_wire_trigger(
-            DecisionTrigger::ClientTranscript {
+            Trigger::ClientTranscript {
                 messages: view,
                 new_from: 0,
             },
@@ -1240,7 +839,7 @@ mod tests {
         let tree = linear_tree(&path);
 
         let (_, new_from) = transcript_of(to_wire_trigger(
-            DecisionTrigger::ClientTranscript {
+            Trigger::ClientTranscript {
                 messages: wire_view(&path),
                 new_from: 0,
             },
@@ -1255,7 +854,7 @@ mod tests {
     fn annotates_an_idless_view_as_all_new() {
         let path = vec![msg("u1", Role::User, "hi")];
         let tree = linear_tree(&path);
-        let idless = |text: &str| WireMessage {
+        let idless = |text: &str| DraftMessage {
             id: None,
             role: Role::User,
             content: Some(Content::Text(text.to_string())),
@@ -1266,7 +865,7 @@ mod tests {
         let view = vec![idless("hi"), idless("more")];
 
         let (_, new_from) = transcript_of(to_wire_trigger(
-            DecisionTrigger::ClientTranscript {
+            Trigger::ClientTranscript {
                 messages: view,
                 new_from: 0,
             },
@@ -1281,7 +880,7 @@ mod tests {
     fn passes_non_client_triggers_through() {
         let tree = MessageTree::default();
         let out = to_wire_trigger(
-            DecisionTrigger::ToolFinished {
+            Trigger::ToolFinished {
                 id: "tc-1".to_string(),
                 ok: true,
                 name: "t".to_string(),
@@ -1292,7 +891,7 @@ mod tests {
             &tree,
             &HashMap::new(),
         );
-        assert!(matches!(out, WireTrigger::ToolFinished { .. }));
+        assert!(matches!(out, DecisionTrigger::ToolFinished { .. }));
     }
 
     fn tool_execute(
@@ -1302,7 +901,7 @@ mod tests {
         open_llm_calls: &HashMap<String, LlmCallState>,
     ) -> ToolInput {
         let trigger = to_wire_trigger(
-            DecisionTrigger::ToolExecute {
+            Trigger::ToolExecute {
                 id: "tc-1".to_string(),
                 name: name.to_string(),
                 arguments: arguments.to_string(),
@@ -1314,15 +913,14 @@ mod tests {
             open_llm_calls,
         );
         match trigger {
-            WireTrigger::ToolExecute { input, .. } => input,
+            DecisionTrigger::ToolExecute { input, .. } => input,
             t => panic!("expected a tool.execute trigger; got {t:?}"),
         }
     }
 
     fn weather_call(schema: serde_json::Value) -> (Vec<Message>, HashMap<String, LlmCallState>) {
-        use crate::runtime::llm::LlmTool;
-        use crate::runtime::session::message::ToolCallFunction;
-        use crate::runtime::session::state::{EffectTracking, LlmCallSpec};
+        use crate::protocol::LlmTool;
+        use crate::runtime::session::state::EffectTracking;
 
         let assistant = Message {
             id: "call-1".to_string(),
@@ -1401,7 +999,7 @@ mod tests {
     #[test]
     fn the_input_classification_is_always_on_the_wire() {
         let trigger = to_wire_trigger(
-            DecisionTrigger::ToolExecute {
+            Trigger::ToolExecute {
                 id: "tc-1".to_string(),
                 name: "t".to_string(),
                 arguments: "not json".to_string(),
@@ -1431,7 +1029,7 @@ mod tests {
 
     #[test]
     fn action_defaults_fill_handler_and_retryable() {
-        let actions: Vec<WireAction> = serde_json::from_str(
+        let actions: Vec<DecisionAction> = serde_json::from_str(
             r#"[
                 {"type":"llm.call","request":{"model":"m","messages":[]}},
                 {"type":"tool.call","name":"t","arguments":{"city":"NYC"}},
@@ -1441,26 +1039,27 @@ mod tests {
         .expect("defaults fill");
         assert!(matches!(
             &actions[0],
-            WireAction::CallLlm {
+            DecisionAction::CallLlm {
                 handler: LlmHandler::Server,
                 ..
             }
         ));
         match &actions[1] {
-            WireAction::CallTool {
+            DecisionAction::CallTool {
                 handler, arguments, ..
             } => {
                 assert!(matches!(handler, ToolHandler::Worker));
                 assert_eq!(
-                    arguments, r#"{"city":"NYC"}"#,
-                    "object arguments canonicalize to their JSON text"
+                    arguments,
+                    &serde_json::json!({"city":"NYC"}),
+                    "object arguments ride the wire as-is; the resolve seam canonicalizes"
                 );
             }
             other => panic!("expected a tool.call; got {other:?}"),
         }
         assert!(matches!(
             &actions[2],
-            WireAction::ToolError {
+            DecisionAction::ToolError {
                 retryable: false,
                 ..
             }
@@ -1469,55 +1068,59 @@ mod tests {
 
     #[test]
     fn a_tool_result_settles_with_any_json_value() {
-        let a: WireAction =
-            serde_json::from_str(r#"{"type":"tool.result","result":{"temp":71}}"#).expect("parses");
-        match a {
-            WireAction::ToolResult { result, .. } => assert_eq!(result, r#"{"temp":71}"#),
-            other => panic!("expected a tool.result; got {other:?}"),
-        }
-        let a: WireAction =
-            serde_json::from_str(r#"{"type":"tool.result","result":"plain"}"#).expect("parses");
-        match a {
-            WireAction::ToolResult { result, .. } => assert_eq!(result, "plain"),
-            other => panic!("expected a tool.result; got {other:?}"),
-        }
+        let settle = |json: &str| {
+            let a: DecisionAction = serde_json::from_str(json).expect("parses");
+            let actions = resolve_test_actions(vec![a], None).expect("resolves");
+            match actions.into_iter().next().expect("one action") {
+                Action::ToolResult { result, .. } => result,
+                other => panic!("expected a tool.result; got {other:?}"),
+            }
+        };
+        assert_eq!(
+            settle(r#"{"type":"tool.result","id":"tc-1","result":{"temp":71}}"#),
+            r#"{"temp":71}"#
+        );
+        assert_eq!(
+            settle(r#"{"type":"tool.result","id":"tc-1","result":"plain"}"#),
+            "plain"
+        );
     }
 
     #[test]
     fn a_decision_may_omit_actions() {
-        let r: WireDecisionResponse = serde_json::from_str(r#"{"messages":[]}"#).expect("parses");
+        let r: DecisionResponse = serde_json::from_str(r#"{"messages":[]}"#).expect("parses");
         assert!(r.actions.is_empty());
     }
 
     #[test]
     fn client_input_parses_every_tag_to_its_variant() {
-        let cases: [(&str, fn(&WireClientInput) -> bool); 6] = [
+        let cases: [(&str, fn(&ClientInput) -> bool); 6] = [
             (
                 r#"{"type":"client.message","agent_id":"bot","message":{"role":"user","content":"hi"}}"#,
-                |i| matches!(i, WireClientInput::Message { .. }),
+                |i| matches!(i, ClientInput::Message { .. }),
             ),
             (
                 r#"{"type":"client.messages","agent_id":"bot","messages":[]}"#,
-                |i| matches!(i, WireClientInput::Messages { .. }),
+                |i| matches!(i, ClientInput::Messages { .. }),
             ),
             (
                 r#"{"type":"client.action","agent_id":"bot","name":"approve","args":{"ok":true}}"#,
-                |i| matches!(i, WireClientInput::Action { .. }),
+                |i| matches!(i, ClientInput::Action { .. }),
             ),
             (r#"{"type":"interrupt.resume","interrupt_id":"iid"}"#, |i| {
-                matches!(i, WireClientInput::InterruptResume { .. })
+                matches!(i, ClientInput::InterruptResume { .. })
             }),
             (
                 r#"{"type":"tool.result","id":"c1","result":{"n":1}}"#,
-                |i| matches!(i, WireClientInput::ToolResult { .. }),
+                |i| matches!(i, ClientInput::ToolResult { .. }),
             ),
             (
                 r#"{"type":"tool.error","id":"c1","error":"boom","retryable":true}"#,
-                |i| matches!(i, WireClientInput::ToolError { .. }),
+                |i| matches!(i, ClientInput::ToolError { .. }),
             ),
         ];
         for (json, is_variant) in cases {
-            let input: WireClientInput = serde_json::from_str(json).expect("parses");
+            let input: ClientInput = serde_json::from_str(json).expect("parses");
             assert!(is_variant(&input), "wrong variant for {json}");
         }
     }
@@ -1526,7 +1129,7 @@ mod tests {
     fn a_submit_without_an_agent_id_is_a_deserialize_error() {
         // `agent_id` is a required field of the submit variants, so a missing one is a
         // type error at the boundary — not a runtime check.
-        let err = serde_json::from_str::<WireClientInput>(
+        let err = serde_json::from_str::<ClientInput>(
             r#"{"type":"client.message","message":{"role":"user","content":"hi"}}"#,
         )
         .unwrap_err()
@@ -1541,18 +1144,18 @@ mod tests {
     fn a_settle_has_no_agent_or_turn_slot_to_misplace() {
         // A stray `agent_id`/`turn_id` on a settle has no field to land in, so it is
         // ignored rather than mistaken for addressing.
-        let input: WireClientInput = serde_json::from_str(
+        let input: ClientInput = serde_json::from_str(
             r#"{"type":"tool.result","id":"c1","result":"ok","agent_id":"bot","turn_id":"t1"}"#,
         )
         .expect("parses; the stray addressing fields are ignored");
-        assert!(matches!(input, WireClientInput::ToolResult { .. }));
+        assert!(matches!(input, ClientInput::ToolResult { .. }));
     }
 
     #[test]
     fn submit_payload_json_stays_flat_after_the_newtype_conversion() {
         // The `client.action` body was `#[serde(flatten)]`; the newtype variant must keep
         // `name`/`args` at the top level rather than nesting them under `action`.
-        let payload = WireClientPayload::Action(WireClientAction {
+        let payload = ClientPayload::Action(crate::protocol::ClientAction {
             name: "approve".to_string(),
             args: Some(serde_json::json!({"ok": true})),
         });
@@ -1564,7 +1167,7 @@ mod tests {
 
     #[test]
     fn unknown_client_input_tag_lists_all_six() {
-        let err = serde_json::from_str::<WireClientInput>(r#"{"type":"frob"}"#)
+        let err = serde_json::from_str::<ClientInput>(r#"{"type":"frob"}"#)
             .unwrap_err()
             .to_string();
         for tag in [
@@ -1581,11 +1184,11 @@ mod tests {
 
     #[test]
     fn interrupt_resume_uses_the_interrupt_id_field() {
-        let input: WireClientInput =
+        let input: ClientInput =
             serde_json::from_str(r#"{"type":"interrupt.resume","interrupt_id":"iid"}"#)
                 .expect("parses");
         match input {
-            WireClientInput::InterruptResume { interrupt_id, .. } => {
+            ClientInput::InterruptResume { interrupt_id, .. } => {
                 assert_eq!(interrupt_id, "iid")
             }
             other => panic!("expected interrupt.resume, got {other:?}"),

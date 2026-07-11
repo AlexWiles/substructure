@@ -8,8 +8,9 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing_subscriber::EnvFilter;
 
-use substructure_core::llm::LlmResponse;
-use substructure_core::owner::SessionOwner;
+use substructure_core::protocol::{
+    ClientPayload, DecisionRequest, DecisionResponse, LlmResponse, SessionOwner,
+};
 use substructure_core::providers::anthropic::{AnthropicConfig, AnthropicProvider};
 use substructure_core::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use substructure_core::providers::openai::{OpenAiConfig, OpenAiProvider};
@@ -19,9 +20,7 @@ use substructure_core::providers::sqlite::{
 };
 use substructure_core::providers::worker_queue::InMemoryWorkerQueue;
 use substructure_core::session::decision::{EffectResultPayload, WorkKind};
-use substructure_core::session::wire::{
-    resolve_response, WireClientPayload, WireDecisionRequest, WireDecisionResponse,
-};
+use substructure_core::session::wire::resolve_response;
 use substructure_core::span::SpanContext as CoreSpanContext;
 use substructure_core::worker::{DequeueFilter, FailDecision, SubmitDecision};
 use substructure_core::{
@@ -181,14 +180,13 @@ impl EmbeddedRuntime {
                 // `tenant_id()` borrows the whole struct.
                 let decision_tenant = decision.tenant_id().to_string();
 
-                let decision_json =
-                    match serde_json::to_string(&WireDecisionRequest::from(&decision)) {
-                        Ok(j) => j,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "failed to serialize decision");
-                            continue;
-                        }
-                    };
+                let decision_json = match serde_json::to_string(&DecisionRequest::from(&decision)) {
+                    Ok(j) => j,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to serialize decision");
+                        continue;
+                    }
+                };
 
                 let result: Result<String> =
                     match callback.call_async::<Promise<String>>(decision_json).await {
@@ -198,7 +196,7 @@ impl EmbeddedRuntime {
 
                 match result {
                     Ok(response_json) => {
-                        match serde_json::from_str::<WireDecisionResponse>(&response_json) {
+                        match serde_json::from_str::<DecisionResponse>(&response_json) {
                             Ok(submit) => {
                                 // Lower the response against the trigger it answers
                                 // and the config resolved for this decision before
@@ -318,7 +316,7 @@ impl EmbeddedRuntime {
         identity_json: String,
         turn_id: Option<String>,
     ) -> Result<SubmitPayloadResult> {
-        let payload: WireClientPayload = serde_json::from_str(&payload_json)
+        let payload: ClientPayload = serde_json::from_str(&payload_json)
             .map_err(|e| Error::from_reason(format!("invalid payloadJson: {e}")))?;
         let owner: SessionOwner = serde_json::from_str(&identity_json)
             .map_err(|e| Error::from_reason(format!("invalid identityJson: {e}")))?;
@@ -473,7 +471,7 @@ impl EmbeddedRuntime {
 
     #[napi(js_name = "emitTokenDelta", ts_args_type = "deltaJson: string")]
     pub async fn emit_token_delta(&self, delta_json: String) -> Result<()> {
-        let delta: substructure_core::runtime::llm::TokenDelta = serde_json::from_str(&delta_json)
+        let delta: substructure_core::protocol::TokenDelta = serde_json::from_str(&delta_json)
             .map_err(|e| Error::from_reason(format!("invalid deltaJson: {e}")))?;
         self.inner.token_delta_transport().publish(delta).await;
         Ok(())

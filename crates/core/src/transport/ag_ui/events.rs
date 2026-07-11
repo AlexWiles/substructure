@@ -2,7 +2,7 @@ use axum::response::sse::Event as SseEvent;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::session::message::ToolCall;
+use crate::protocol::ToolCall;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]

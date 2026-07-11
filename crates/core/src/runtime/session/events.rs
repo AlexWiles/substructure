@@ -3,14 +3,12 @@ use std::collections::{BTreeMap, HashMap};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use super::agent_config::AgentConfig;
-use super::decision::DecisionTrigger;
-use super::message::Message;
-use super::wire::WireMessage;
-use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse};
-use crate::runtime::owner::SessionOwner;
-use crate::runtime::retry::RetryPolicy;
-use crate::runtime::worker::WorkerState;
+use super::decision::Trigger;
+use crate::protocol::{
+    AgentConfig, Control, DraftMessage, ErrorCode, InterruptOrigin, LlmHandler, LlmRequest,
+    LlmResponse, Message, MessageTree, NewControl, NewMessage, Node, RetryPolicy, SessionOwner,
+    ToolHandler, WorkerState,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -86,47 +84,6 @@ pub struct SessionCreated {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionDone {}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NewMessage {
-    pub message: Message,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NewControl {
-    pub control: Control,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_id: Option<String>,
-}
-
-/// A non-conversational tree marker (interrupt/resume); filtered out of LLM prompts.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Control {
-    pub id: String,
-    pub interrupt_id: String,
-    pub kind: ControlKind,
-    #[serde(default)]
-    pub reason: String,
-    #[serde(default)]
-    pub payload: serde_json::Value,
-    pub origin: InterruptOrigin,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ControlKind {
-    Interrupt,
-    Resume,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Node {
-    Message(NewMessage),
-    Control(NewControl),
-}
-
 impl Node {
     pub fn id(&self) -> &str {
         match self {
@@ -155,14 +112,6 @@ impl Node {
             Node::Message(_) => None,
         }
     }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct MessageTree {
-    #[serde(default)]
-    pub nodes: Vec<Node>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub head_id: Option<String>,
 }
 
 impl MessageTree {
@@ -221,26 +170,6 @@ pub struct LlmCallErrored {
     pub detail: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolHandler {
-    /// Dispatched to the work queue for the worker to execute.
-    #[default]
-    Worker,
-    /// Executed by the client. Session goes Idle while waiting.
-    Client,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LlmHandler {
-    /// Server-side executor resolves the provider and makes the call.
-    #[default]
-    Server,
-    /// The worker performs the call and replies with `effect.result`/`effect.error`.
-    Worker,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentRequested {
     pub session_id: String,
@@ -290,17 +219,6 @@ pub struct ToolCallErrored {
     pub retryable: bool,
 }
 
-/// Privilege level of the caller that issued an interrupt. Derived from the
-/// authenticated `Caller`, never from request data; resuming requires a
-/// caller at or above the origin's privilege.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InterruptOrigin {
-    System,
-    Machine,
-    Frontend,
-}
-
 impl InterruptOrigin {
     pub fn privilege(self) -> u8 {
         match self {
@@ -328,7 +246,7 @@ pub struct InterruptResumed {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerDecisionRequested {
     pub decision_id: String,
-    pub trigger: DecisionTrigger,
+    pub trigger: Trigger,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -347,7 +265,7 @@ pub struct WorkerDecisionErrored {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMessageRequested {
     pub target_session_id: String,
-    pub message: WireMessage,
+    pub message: DraftMessage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -385,7 +303,7 @@ pub struct TurnCompleted {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionRequestQueued {
     pub decision_id: String,
-    pub trigger: DecisionTrigger,
+    pub trigger: Trigger,
 }
 
 /// A settle decision dropped when its branch was forked away.

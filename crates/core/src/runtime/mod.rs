@@ -6,14 +6,17 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::protocol::{
+    ClientAction, ClientInput, ClientMessage, ClientMessages, ClientPayload, ErrorCode,
+    SessionOwner, TokenDelta,
+};
 use crate::providers::memory_queue::TaskQueue;
 use aggregate::{execute, Caller, ConflictRetry, ExecuteError, ExecuteInput};
 use event_store::{Event, EventFilter, EventStore, Snapshot, StoreError};
 use llm::{
-    spawn_llm_dispatch_processor, spawn_llm_task_executor, ErrorCode, LlmProviderTrait, LlmTask,
-    TokenDelta, TokenDeltaTransport,
+    spawn_llm_dispatch_processor, spawn_llm_task_executor, LlmProviderTrait, LlmTask,
+    TokenDeltaTransport,
 };
-use owner::SessionOwner;
 use processor::ProcessorCheckpointStore;
 use retry::{NoRetryResolver, WorkerRetryResolver};
 use session::command::{CommandPayload, SessionError};
@@ -23,10 +26,7 @@ use session::index::{
 };
 use session::state::SessionState;
 use session::subscriptions::SessionSubscriptionSpec;
-use session::wire::{
-    result_to_string, WireClientAction, WireClientInput, WireClientMessage, WireClientMessages,
-    WireClientPayload,
-};
+use session::wire::result_to_string;
 use span::SpanContext;
 use sub_agent::{spawn_sub_agent_dispatch_processor, spawn_sub_agent_task_executor, SubAgentTask};
 use wake::{spawn_wake_dispatcher, spawn_wake_processor, WakeScheduleStore};
@@ -36,7 +36,6 @@ use worker::{DequeueFilter, FailDecision, SubmitDecision, WorkerDecisionRequest,
 pub mod aggregate;
 pub mod event_store;
 pub mod llm;
-pub mod owner;
 pub mod processor;
 pub mod retry;
 pub mod session;
@@ -82,7 +81,7 @@ pub struct SubmitClientPayload {
     pub caller: Caller,
     pub owner: SessionOwner,
     pub agent_id: String,
-    pub payload: WireClientPayload,
+    pub payload: ClientPayload,
     /// Caller-provided turn ID for idempotency. Auto-generated if None.
     pub turn_id: Option<String>,
 }
@@ -101,7 +100,7 @@ pub struct HandleClientInput {
     pub session_id: String,
     pub caller: Caller,
     pub owner: SessionOwner,
-    pub input: WireClientInput,
+    pub input: ClientInput,
     pub span: SpanContext,
 }
 
@@ -291,7 +290,7 @@ impl Runtime {
         // turn. The submit arms yield the payload and fall through to one submit call; the
         // rest handle their own dispatch and return.
         let (agent_id, turn_id, payload) = match input {
-            WireClientInput::Message {
+            ClientInput::Message {
                 agent_id,
                 turn_id,
                 message,
@@ -299,9 +298,9 @@ impl Runtime {
             } => (
                 agent_id,
                 turn_id,
-                WireClientPayload::Message(WireClientMessage { message, stream }),
+                ClientPayload::Message(ClientMessage { message, stream }),
             ),
-            WireClientInput::Messages {
+            ClientInput::Messages {
                 agent_id,
                 turn_id,
                 messages,
@@ -309,9 +308,9 @@ impl Runtime {
             } => (
                 agent_id,
                 turn_id,
-                WireClientPayload::Messages(WireClientMessages { messages, stream }),
+                ClientPayload::Messages(ClientMessages { messages, stream }),
             ),
-            WireClientInput::Action {
+            ClientInput::Action {
                 agent_id,
                 turn_id,
                 name,
@@ -319,9 +318,9 @@ impl Runtime {
             } => (
                 agent_id,
                 turn_id,
-                WireClientPayload::Action(WireClientAction { name, args }),
+                ClientPayload::Action(ClientAction { name, args }),
             ),
-            WireClientInput::InterruptResume {
+            ClientInput::InterruptResume {
                 interrupt_id,
                 payload,
             } => {
@@ -339,7 +338,7 @@ impl Runtime {
                     turn_id,
                 });
             }
-            WireClientInput::ToolResult {
+            ClientInput::ToolResult {
                 id,
                 attempt,
                 result,
@@ -357,7 +356,7 @@ impl Runtime {
                     )
                     .await;
             }
-            WireClientInput::ToolError {
+            ClientInput::ToolError {
                 id,
                 error,
                 retryable,

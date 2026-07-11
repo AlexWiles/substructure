@@ -8,12 +8,11 @@ use tokio_stream::StreamExt;
 
 use rust_decimal::Decimal;
 
-use crate::llm::{
-    CallContext, ErrorCode, LlmCallError, LlmCallable, LlmProviderTrait, LlmRequest, LlmResponse,
-    LlmTool, ReasoningConfig, ResponseImage, StreamDelta, ToolCallChunk,
+use crate::llm::{CallContext, LlmCallError, LlmCallable, LlmProviderTrait};
+use crate::protocol::{
+    ErrorCode, LlmRequest, LlmResponse, LlmTool, ReasoningConfig, ResponseImage, SessionOwner,
+    StreamDelta, ToolCall, ToolCallChunk, ToolCallFunction,
 };
-use crate::owner::SessionOwner;
-use crate::session::message::{ToolCall, ToolCallFunction};
 
 /// Wraps our normalized `LlmTool` with the `"type": "function"` field
 /// that the OpenAI/OpenRouter API expects.
@@ -48,7 +47,7 @@ impl From<&LlmTool> for WireTool {
 #[derive(Serialize)]
 struct WireBody<'a> {
     model: &'a str,
-    messages: &'a [crate::session::wire::WireMessage],
+    messages: &'a [crate::protocol::DraftMessage],
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<WireTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]

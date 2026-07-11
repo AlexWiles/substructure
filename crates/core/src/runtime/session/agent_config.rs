@@ -1,65 +1,12 @@
-//! The agent config: the static half of an agent's identity — model, system
-//! prompt, tools, and per-tool routing — declared as a document the engine reads.
+//! Behavior over the agent config — the static half of an agent's identity,
+//! declared as a document the engine reads. The types live in [`crate::protocol`].
 //!
 //! Unlike opaque worker `state`, this is a typed document the engine interprets:
 //! it lets the engine propose the `client.messages` LLM request (model + tools +
 //! system) that the worker would otherwise have to hand-author. It is versioned
 //! and anchored exactly like worker state (see [`AgentVersion`](super::state::AgentVersion)).
 
-use serde::{Deserialize, Serialize};
-
-use super::events::ToolHandler;
-use super::message::{Content, Role};
-use super::wire::WireMessage;
-use crate::runtime::llm::LlmTool;
-use crate::runtime::retry::RetryPolicy;
-
-/// A declared agent identity. `model` is the only required field; everything else
-/// refines the proposed LLM request the engine derives for `client.messages`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AgentConfig {
-    pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
-    #[serde(default)]
-    pub stream: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retry: Option<RetryPolicy>,
-    /// Worker- or client-executed tools the model can call.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<AgentTool>,
-    /// Sub-agents the model can delegate to. Presented to the model as tools (by
-    /// id) alongside `tools`, but each call spawns a child session rather than
-    /// executing a function.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub sub_agents: Vec<SubAgent>,
-}
-
-/// A function tool the agent offers. The model-facing contract is
-/// `name`/`description`/`input`/`output`; `handler` selects where a call runs —
-/// `Some(Client)` ⇒ client-executed, absent ⇒ worker-executed (the default).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AgentTool {
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub handler: Option<ToolHandler>,
-}
-
-/// A sub-agent the model can delegate to. Named by `id` (the child agent to spawn,
-/// and the tool name the model calls); its model-facing input is the conventional
-/// single-`message` delegation schema.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SubAgent {
-    pub id: String,
-    #[serde(default)]
-    pub description: String,
-}
+use crate::protocol::{AgentConfig, AgentTool, Content, DraftMessage, LlmTool, Role, SubAgent};
 
 impl AgentTool {
     /// The model-facing contract, with routing stripped.
@@ -121,11 +68,11 @@ impl AgentConfig {
 
     /// The prompt for a proposed call over `view`: the configured system message
     /// (if any) prepended to the view.
-    pub fn prompt_for(&self, view: &[WireMessage]) -> Vec<WireMessage> {
+    pub fn prompt_for(&self, view: &[DraftMessage]) -> Vec<DraftMessage> {
         match &self.system {
             Some(system) => {
                 let mut messages = Vec::with_capacity(view.len() + 1);
-                messages.push(WireMessage {
+                messages.push(DraftMessage {
                     id: None,
                     role: Role::System,
                     content: Some(Content::Text(system.clone())),
@@ -144,6 +91,7 @@ impl AgentConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::ToolHandler;
 
     fn sub(id: &str, description: &str) -> SubAgent {
         SubAgent {

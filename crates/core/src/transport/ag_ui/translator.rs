@@ -6,8 +6,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::events::{AgUiEvent, AgUiInterrupt, RunOutcome};
 use crate::event_store::Event;
-use crate::llm::TokenDelta;
-use crate::session::events::{EventPayload, ToolHandler};
+use crate::protocol::{TokenDelta, ToolHandler};
+use crate::session::events::EventPayload;
 
 struct ToolBatch {
     pending_client_tool_calls: HashSet<String>,
@@ -537,7 +537,7 @@ pub fn run_ag_ui_translation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::ToolCallChunk;
+    use crate::protocol::ToolCallChunk;
     use serde_json::{json, Value};
 
     fn ev(v: Value) -> EventPayload {

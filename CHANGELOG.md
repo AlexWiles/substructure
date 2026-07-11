@@ -28,10 +28,15 @@ same version.
   verifying the request HMAC before deciding.
 - Python examples lagged the node-hono set. Rewrote `python-fast-api-*` to mirror
   node-hono one-for-one, adding `-signature` and `-subagent`.
+- No example showed a client-side tool. Added `node-hono-client-tool`, whose
+  `handler: "client"` call yields the run for the client to settle.
 - Python examples had no dependency manifest. Added a pinned `requirements.txt` to
   each `python-fast-api-*` example.
 - `python3 main.py` exited immediately since the file only defined the app. Added a
   `__main__` block launching uvicorn so each `python-fast-api-*` example self-runs.
+- The wire protocol had no machine-readable spec. `schemas/protocol.schema.json`
+  (draft 2020-12, via schemars) is generated from the protocol types; a test
+  regenerates it and fails on drift.
 
 ### Changed
 
@@ -45,6 +50,16 @@ same version.
   events won't deserialize, so wipe dev databases.
 - Worker ids are optional (engine-assigned); the sync decision response drops
   `session_id`/`decision_id`.
+- **Breaking (Rust):** public wire types were scattered across runtime modules.
+  All now live logic-free in `crate::protocol`; seams and impls stay put.
+- **Breaking (Rust):** decision-flow types were `Wire`-prefixed, blurring them
+  with shared wire types. Renamed to a `Decision*` prefix (`DecisionRequest`,
+  `DecisionResponse`, `DecisionTrigger`, `DecisionAction`, `DecisionProposal`);
+  the internal `decision::DecisionTrigger` became `decision::Trigger`.
+- **Breaking (Rust):** the remaining `Wire`-prefixed protocol types were unclear.
+  Client-input types took a `Client*` prefix (`ClientInput`, `ClientPayload`,
+  `ClientMessage`, `ClientMessages`, `ClientAction`) and `WireMessage` became
+  `DraftMessage` (the id-optional, not-yet-recorded form).
 
 ## [0.1.22] - 2026-07-07
 

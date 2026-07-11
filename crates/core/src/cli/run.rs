@@ -6,10 +6,9 @@ use uuid::Uuid;
 use super::env::{EnvVars, LlmProviderArg};
 use super::pretty::PrettyPrinter;
 use super::{local, register_startup_worker, DEFAULT_TENANT};
-use crate::owner::SessionOwner;
+use crate::protocol::{ClientInput, SessionOwner};
 use crate::session::events::EventPayload;
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
-use crate::session::wire::WireClientInput;
 use crate::span::SpanContext;
 use crate::transport::ag_ui::events::AgUiEvent;
 use crate::transport::ag_ui::translator::AgUiTranslator;
@@ -93,7 +92,7 @@ impl Renderer {
 /// Parse `--input`, splicing `--agent` in as `agent_id` when the JSON didn't carry one.
 /// A submit needs `agent_id`; the other tags have no such field, so a stray key from
 /// `--agent` is simply ignored by serde.
-fn parse_input(input: &str, agent: Option<String>) -> anyhow::Result<WireClientInput> {
+fn parse_input(input: &str, agent: Option<String>) -> anyhow::Result<ClientInput> {
     let mut value: serde_json::Value =
         serde_json::from_str(input).map_err(|e| anyhow::anyhow!("invalid --input: {e}"))?;
     if let (Some(agent), Some(obj)) = (agent, value.as_object_mut()) {
@@ -370,7 +369,7 @@ mod tests {
         )
         .unwrap();
         match input {
-            WireClientInput::Message { agent_id, .. } => assert_eq!(agent_id, "bot"),
+            ClientInput::Message { agent_id, .. } => assert_eq!(agent_id, "bot"),
             other => panic!("expected client.message, got {other:?}"),
         }
     }
@@ -383,7 +382,7 @@ mod tests {
         )
         .unwrap();
         match input {
-            WireClientInput::Message { agent_id, .. } => assert_eq!(agent_id, "in-json"),
+            ClientInput::Message { agent_id, .. } => assert_eq!(agent_id, "in-json"),
             other => panic!("expected client.message, got {other:?}"),
         }
     }

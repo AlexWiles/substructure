@@ -2,27 +2,26 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use super::events::{LlmHandler, ToolHandler};
-use super::wire::WireMessage;
-use crate::runtime::llm::{ErrorCode, LlmRequest, LlmResponse};
-use crate::runtime::retry::RetryPolicy;
+use crate::protocol::{
+    DraftMessage, ErrorCode, LlmHandler, LlmRequest, LlmResponse, RetryPolicy, ToolHandler,
+};
 
 /// Engine-sent trigger; `*.finished` carries the payload when ok, else error.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
-pub enum DecisionTrigger {
+pub enum Trigger {
     /// The first decision of every session, before any client input. Carries no
     /// proposal — the worker declares its `agent` config (or returns `{}`).
     #[serde(rename = "session.start")]
     SessionStart,
     /// Internal only: materialized into `ClientTranscript` at delivery, never sent to workers.
     #[serde(rename = "client.message")]
-    ClientMessage { message: WireMessage },
+    ClientMessage { message: DraftMessage },
     /// `messages` is the full proposed conversation; `messages[new_from..]` is
     /// unrecorded (recomputed at delivery against the tree). Wire tag: `client.messages`.
     #[serde(rename = "client.messages")]
     ClientTranscript {
-        messages: Vec<WireMessage>,
+        messages: Vec<DraftMessage>,
         #[serde(default)]
         new_from: usize,
     },
@@ -80,7 +79,7 @@ pub enum DecisionTrigger {
         id: String,
         ok: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        message: Option<WireMessage>,
+        message: Option<DraftMessage>,
         /// True when finish_reason was "length" (output truncated).
         #[serde(default)]
         truncated: bool,
@@ -103,15 +102,15 @@ pub enum DecisionTrigger {
     },
 }
 
-impl DecisionTrigger {
+impl Trigger {
     pub fn llm_ok(
         id: String,
-        message: WireMessage,
+        message: DraftMessage,
         truncated: bool,
         usage: Option<serde_json::Value>,
         cost: Option<Decimal>,
     ) -> Self {
-        DecisionTrigger::LlmFinished {
+        Trigger::LlmFinished {
             id,
             ok: true,
             message: Some(message),
@@ -130,7 +129,7 @@ impl DecisionTrigger {
         code: Option<ErrorCode>,
         detail: Option<serde_json::Value>,
     ) -> Self {
-        DecisionTrigger::LlmFinished {
+        Trigger::LlmFinished {
             id,
             ok: false,
             message: None,
@@ -161,7 +160,7 @@ pub enum EffectResultPayload {
 }
 
 /// Resolved worker action — the internal, engine-facing form. Every effect id is
-/// present. Produced only by `resolve_response` from a `WireAction`; the core never
+/// present. Produced only by `resolve_response` from a `DecisionAction`; the core never
 /// deserializes this from the wire. Omitting `attempt` on a result/error settles the
 /// current attempt; echo it to fence a stale executor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -238,7 +237,7 @@ pub enum Action {
     #[serde(rename = "message.send")]
     SendMessage {
         session_id: String,
-        message: WireMessage,
+        message: DraftMessage,
     },
     /// Pause the session awaiting external input.
     #[serde(rename = "interrupt")]

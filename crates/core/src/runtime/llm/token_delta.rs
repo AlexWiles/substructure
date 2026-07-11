@@ -1,33 +1,7 @@
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 
-use super::types::ToolCallChunk;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TokenDelta {
-    /// Tenant isolation key — subscribers must match.
-    pub tenant_id: String,
-    /// Transport routing key.
-    pub root_session_id: String,
-    /// May be a sub-agent of root.
-    pub session_id: String,
-    pub agent_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn_id: Option<String>,
-    pub call_id: String,
-    pub attempt: u32,
-    /// Per-call counter, distinct from event-store sequence.
-    pub seq: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_calls: Vec<ToolCallChunk>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub finish_reason: Option<String>,
-}
+use crate::protocol::TokenDelta;
 
 #[async_trait]
 pub trait TokenDeltaTransport: Send + Sync + 'static {

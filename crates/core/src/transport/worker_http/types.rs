@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::llm::{ErrorCode, LlmResponse};
-use crate::runtime::session::wire::WireClientPayload;
-use crate::session::wire::{string_or_json, WireDecisionResponse};
+use crate::protocol::{ClientPayload, DecisionResponse, ErrorCode, LlmResponse};
 use crate::span::SpanContext;
 
 /// A decision pushed to the engine out-of-band via the submit route: the
@@ -15,7 +13,7 @@ pub struct SubmitDecisionRequest {
     #[serde(default)]
     pub span: Option<SpanContext>,
     #[serde(flatten)]
-    pub decision: WireDecisionResponse,
+    pub decision: DecisionResponse,
 }
 
 #[derive(Debug, Serialize)]
@@ -34,9 +32,8 @@ pub enum SettleEffectRequest {
         id: String,
         #[serde(default)]
         attempt: Option<u32>,
-        /// Accepts any JSON value; a non-string is canonicalized to its JSON text.
-        #[serde(deserialize_with = "string_or_json")]
-        result: String,
+        /// Any JSON value; a non-string is canonicalized to its JSON text at the route.
+        result: serde_json::Value,
     },
     #[serde(rename = "llm.result")]
     LlmResult {
@@ -98,7 +95,7 @@ pub struct MintClientTokenResponse {
 #[derive(Debug, Deserialize)]
 pub struct SubmitClientPayloadRequest {
     pub agent_id: String,
-    pub payload: WireClientPayload,
+    pub payload: ClientPayload,
     #[serde(default)]
     pub session_id: Option<String>,
     #[serde(default)]
@@ -130,7 +127,7 @@ pub struct StreamSessionEventsParams {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::wire::WireAction;
+    use crate::protocol::DecisionAction;
 
     #[test]
     fn worker_surface_settles_an_llm_result() {
@@ -162,15 +159,17 @@ mod tests {
                 {"type":"tool.call","name":"t","arguments":"{}","handler":"worker"}
             ]
         }"#;
-        let req: WireDecisionResponse =
-            serde_json::from_str(body).expect("id-less call actions parse");
+        let req: DecisionResponse = serde_json::from_str(body).expect("id-less call actions parse");
         assert!(matches!(
             req.actions.as_slice(),
-            [WireAction::CallLlm { .. }, WireAction::CallTool { .. }]
+            [
+                DecisionAction::CallLlm { .. },
+                DecisionAction::CallTool { .. }
+            ]
         ));
         for a in &req.actions {
             let id = match a {
-                WireAction::CallLlm { id, .. } | WireAction::CallTool { id, .. } => id,
+                DecisionAction::CallLlm { id, .. } | DecisionAction::CallTool { id, .. } => id,
                 _ => unreachable!(),
             };
             assert!(

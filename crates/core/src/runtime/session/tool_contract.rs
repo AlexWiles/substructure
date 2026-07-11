@@ -21,29 +21,8 @@
 
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
-
-use super::message::Message;
 use super::state::LlmCallState;
-use crate::runtime::llm::LlmTool;
-
-/// The engine's classification of a tool call's arguments, delivered on the
-/// `tool.execute` trigger alongside the raw `arguments` string. Always on the
-/// wire — absence never carries meaning.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "lowercase")]
-pub enum ToolInput {
-    /// Parsed and, when the tool declares an `input` schema, conforming to it.
-    /// `value` is exactly the parsed `arguments` — the engine never mutates it.
-    Valid { value: serde_json::Value },
-    /// Parsed to an object that violates the declared `input` schema.
-    Invalid {
-        value: serde_json::Value,
-        error: String,
-    },
-    /// Not a JSON object: malformed JSON or a non-object value.
-    Malformed { error: String },
-}
+use crate::protocol::{LlmTool, Message, ToolInput};
 
 impl ToolInput {
     /// The error text for a non-valid classification.
@@ -164,9 +143,7 @@ fn schema_violations(schema: &serde_json::Value, value: &serde_json::Value) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::retry::RetryPolicy;
-    use crate::runtime::session::events::LlmHandler;
-    use crate::runtime::session::message::{Role, ToolCall, ToolCallFunction};
+    use crate::protocol::{LlmHandler, RetryPolicy, Role, ToolCall, ToolCallFunction};
     use crate::runtime::session::state::{EffectTracking, LlmCallSpec};
 
     fn city_schema() -> serde_json::Value {

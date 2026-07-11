@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::runtime::session::wire::WireClientInput;
+use crate::protocol::ClientInput;
 
 /// The one client input request body. `input` is the tagged union of everything a client
 /// can send, carrying its own addressing (a submit's `agent_id`/`turn_id`; a settle's effect
@@ -9,7 +9,7 @@ use crate::runtime::session::wire::WireClientInput;
 pub struct ClientInputRequest {
     #[serde(default)]
     pub session_id: Option<String>,
-    pub input: WireClientInput,
+    pub input: ClientInput,
 }
 
 #[derive(Debug, Serialize)]
@@ -55,7 +55,7 @@ mod tests {
     #[test]
     fn client_input_rejects_llm_result() {
         // The client surface answers client tools only; `llm.result` is not a
-        // `WireClientInput` variant, so it must not deserialize.
+        // `ClientInput` variant, so it must not deserialize.
         let body =
             r#"{"input":{"type":"llm.result","id":"llm-1","attempt":0,"response":{"model":"m"}}}"#;
         assert!(
