@@ -3,15 +3,15 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 
-use super::decision::{Action, Trigger};
+use super::decision::{Action, LlmHandler, ToolHandler, Trigger};
 use super::events::*;
 use super::reconcile::plan_reconcile;
 use super::state::{json_to_string, new_call_id, EffectTracking, SessionState, SessionStatus};
 use super::tool_contract::{declared_tool, output_violation, DeclaredTool};
 use crate::protocol::{
     AgentConfig, ClientMessage, ClientMessages, ClientPayload, Content, ContentPart, DraftMessage,
-    EffectStatus, ErrorCode, ImageUrl, InterruptOrigin, LlmHandler, LlmRequest, LlmResponse,
-    NewMessage, RetryPolicy, Role, SessionOwner, ToolHandler, WorkerState,
+    EffectStatus, ErrorCode, ImageUrl, InterruptOrigin, LlmRequest, LlmResponse, NewMessage,
+    RetryPolicy, Role, SessionOwner, WorkerState,
 };
 use crate::runtime::aggregate::Caller;
 
@@ -826,7 +826,7 @@ impl SessionState {
                         request: request.clone(),
                         stream,
                         retry: retry.clone(),
-                        handler: handler.clone(),
+                        handler: handler,
                     })];
 
                     if handler == LlmHandler::Worker {
@@ -989,7 +989,7 @@ impl SessionState {
                             attempt: 0,
                             name: name.clone(),
                             arguments: arguments.clone(),
-                            handler: handler.clone(),
+                            handler: handler,
                             retry: retry.clone(),
                         })];
                         if handler == ToolHandler::Worker {
@@ -1640,7 +1640,7 @@ impl SessionState {
                             request: request.clone(),
                             stream: call.stream,
                             retry: call.tracking.retry_policy.clone(),
-                            handler: call.handler.clone(),
+                            handler: call.handler,
                         })];
                         if call.handler == LlmHandler::Worker {
                             let execute = self.emit_decision_request(
@@ -1671,7 +1671,7 @@ impl SessionState {
                             attempt: tc.tracking.retry.attempts,
                             name: tc.name.clone(),
                             arguments: tc.arguments.clone(),
-                            handler: tc.handler.clone(),
+                            handler: tc.handler,
                             retry: tc.tracking.retry_policy.clone(),
                         })];
                         if tc.handler == ToolHandler::Worker {

@@ -31,7 +31,7 @@ use super::state::LlmCallState;
 use super::tool_contract::{declared_tool, DeclaredTool};
 use crate::protocol::{
     AgentConfig, Content, DecisionAction, DecisionResponse, DecisionTrigger, DraftMessage,
-    ErrorCode, LlmHandler, Message, RetryPolicy, Role, ToolCall, ToolHandler,
+    ErrorCode, Handler, Message, RetryPolicy, Role, ToolCall,
 };
 
 pub fn propose(
@@ -169,10 +169,13 @@ fn route_tool_call(
             },
         ];
     }
-    let handler = config
+    let handler = match config
         .and_then(|c| c.tool(&call.function.name))
-        .and_then(|t| t.handler.clone())
-        .unwrap_or(ToolHandler::Worker);
+        .and_then(|t| t.handler)
+    {
+        Some(Handler::Client) => Handler::Client,
+        _ => Handler::Worker,
+    };
     vec![DecisionAction::CallTool {
         id: Some(call.id.clone()),
         name: call.function.name.clone(),
@@ -231,7 +234,7 @@ fn client_turn(view: &[DraftMessage], config: &AgentConfig) -> DecisionResponse 
             reasoning: None,
             stream: Some(config.stream),
             retry: Some(config.retry.clone().unwrap_or_else(RetryPolicy::no_retry)),
-            handler: LlmHandler::Server,
+            handler: Handler::Server,
         }],
         ..Default::default()
     }
@@ -367,7 +370,7 @@ fn reissue(
         reasoning: call.spec.reasoning.clone(),
         stream: Some(call.stream),
         retry: Some(call.tracking.retry_policy.clone()),
-        handler: call.handler.clone(),
+        handler: call.handler.into(),
     })
 }
 
@@ -387,6 +390,7 @@ mod tests {
 
     use super::*;
     use crate::protocol::{AgentTool, LlmRequest, SubAgent, ToolCallFunction, ToolInput};
+    use crate::runtime::session::decision::LlmHandler;
     use crate::runtime::session::state::{EffectTracking, LlmCallSpec};
 
     fn msg(id: &str, role: Role, text: &str) -> Message {
@@ -465,7 +469,7 @@ mod tests {
         }
     }
 
-    fn reissued_request(proposal: &DecisionResponse) -> (LlmRequest, bool, LlmHandler) {
+    fn reissued_request(proposal: &DecisionResponse) -> (LlmRequest, bool, Handler) {
         match &proposal.actions[..] {
             [DecisionAction::CallLlm {
                 id: None,
@@ -487,7 +491,7 @@ mod tests {
                     max_completion_tokens: *max_completion_tokens,
                     reasoning: reasoning.clone(),
                 };
-                (request, stream.unwrap_or(false), handler.clone())
+                (request, stream.unwrap_or(false), *handler)
             }
             other => panic!("expected a single llm.call with no id; got {other:?}"),
         }
@@ -526,7 +530,7 @@ mod tests {
                 DecisionAction::CallTool {
                     id: Some(id),
                     name,
-                    handler: ToolHandler::Worker,
+                    handler: Handler::Worker,
                     ..
                 } => (id.as_str(), name.as_str()),
                 other => panic!("expected tool.call with the model's id; got {other:?}"),
@@ -775,7 +779,7 @@ mod tests {
         assert_eq!(request.model, "test-model");
         assert_eq!(request.temperature, Some(0.5));
         assert!(stream);
-        assert!(matches!(handler, LlmHandler::Server));
+        assert!(matches!(handler, Handler::Server));
         let roles: Vec<_> = request.messages.iter().map(|m| &m.role).collect();
         assert!(
             matches!(
@@ -863,7 +867,7 @@ mod tests {
     }
 
     fn agent_cfg() -> AgentConfig {
-        let tool = |name: &str, handler: Option<ToolHandler>| AgentTool {
+        let tool = |name: &str, handler: Option<Handler>| AgentTool {
             name: name.to_string(),
             description: String::new(),
             input: None,
@@ -876,7 +880,7 @@ mod tests {
             stream: true,
             retry: None,
             tools: vec![
-                tool("confirm", Some(ToolHandler::Client)),
+                tool("confirm", Some(Handler::Client)),
                 tool("get_time", None),
             ],
             sub_agents: vec![SubAgent {
@@ -976,8 +980,8 @@ mod tests {
                     msg_session, session_id,
                     "the delegating message targets the spawned child"
                 );
-                assert_eq!(*hb, ToolHandler::Client);
-                assert_eq!(*hc, ToolHandler::Worker);
+                assert_eq!(*hb, Handler::Client);
+                assert_eq!(*hc, Handler::Worker);
             }
             other => panic!("expected agent/client/worker routing; got {other:?}"),
         }

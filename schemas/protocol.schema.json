@@ -48,7 +48,7 @@
     },
     "AgentTool": {
       "additionalProperties": false,
-      "description": "A function tool the agent offers. The model-facing contract is\n`name`/`description`/`input`/`output`; `handler` selects where a call runs —\n`Some(Client)` ⇒ client-executed, absent ⇒ worker-executed (the default).",
+      "description": "A function tool the agent offers. The model-facing contract is\n`name`/`description`/`input`/`output`; `handler` selects where a call runs —\n`Some(Client)` ⇒ client-executed, absent ⇒ worker-executed (the default).\n`server` is invalid for tools.",
       "properties": {
         "description": {
           "type": "string"
@@ -56,21 +56,37 @@
         "handler": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ToolHandler"
+              "$ref": "#/$defs/Handler"
             },
             {
               "type": "null"
             }
           ]
         },
-        "input": true,
+        "input": {},
         "name": {
           "type": "string"
         },
-        "output": true
+        "output": {}
       },
       "required": [
         "name"
+      ],
+      "type": "object"
+    },
+    "AudioData": {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "type": "string"
+        },
+        "format": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "data",
+        "format"
       ],
       "type": "object"
     },
@@ -146,7 +162,7 @@
             "agent_id": {
               "type": "string"
             },
-            "args": true,
+            "args": {},
             "name": {
               "type": "string"
             },
@@ -299,7 +315,7 @@
           "additionalProperties": false,
           "description": "The payload of a `client.action`: a named action with optional JSON args.",
           "properties": {
-            "args": true,
+            "args": {},
             "name": {
               "type": "string"
             },
@@ -315,6 +331,20 @@
           "type": "object"
         }
       ]
+    },
+    "Content": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/ContentPart"
+          },
+          "type": "array"
+        }
+      ],
+      "description": "Message content: either a plain string or an array of typed parts.\nSerializes as a raw string or array respectively (untagged)."
     },
     "ContentPart": {
       "oneOf": [
@@ -339,16 +369,7 @@
           "additionalProperties": false,
           "properties": {
             "image_url": {
-              "additionalProperties": false,
-              "properties": {
-                "url": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "url"
-              ],
-              "type": "object"
+              "$ref": "#/$defs/ImageUrl"
             },
             "type": {
               "const": "image_url",
@@ -365,20 +386,7 @@
           "additionalProperties": false,
           "properties": {
             "file": {
-              "additionalProperties": false,
-              "properties": {
-                "file_data": {
-                  "type": "string"
-                },
-                "filename": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "filename",
-                "file_data"
-              ],
-              "type": "object"
+              "$ref": "#/$defs/FileData"
             },
             "type": {
               "const": "file",
@@ -395,20 +403,7 @@
           "additionalProperties": false,
           "properties": {
             "input_audio": {
-              "additionalProperties": false,
-              "properties": {
-                "data": {
-                  "type": "string"
-                },
-                "format": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "data",
-                "format"
-              ],
-              "type": "object"
+              "$ref": "#/$defs/AudioData"
             },
             "type": {
               "const": "input_audio",
@@ -429,16 +424,7 @@
               "type": "string"
             },
             "video_url": {
-              "additionalProperties": false,
-              "properties": {
-                "url": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "url"
-              ],
-              "type": "object"
+              "$ref": "#/$defs/VideoUrl"
             }
           },
           "required": [
@@ -493,8 +479,8 @@
           "description": "A flat, all-optional LLM request. `id` omitted ⇒ the engine mints one; it\nbecomes the assistant node's id. Omitted fields are filled from the agent\nconfig (merge source), then engine defaults; `messages` omitted ⇒\n`[config.system?] + the decision's declared view`. Explicit `messages`\nsuppress system injection. A bare `{\"type\":\"llm.call\"}` prompts per the\nagent's identity over the current view.",
           "properties": {
             "handler": {
-              "$ref": "#/$defs/LlmHandler",
-              "description": "Omitted ⇒ `server`."
+              "$ref": "#/$defs/Handler",
+              "description": "`server` or `worker`; omitted ⇒ `server`."
             },
             "id": {
               "type": [
@@ -581,10 +567,10 @@
           "additionalProperties": false,
           "description": "`id` omitted ⇒ the engine mints one (LLM-driven tools carry the model's id).",
           "properties": {
-            "arguments": true,
+            "arguments": {},
             "handler": {
-              "$ref": "#/$defs/ToolHandler",
-              "description": "Omitted ⇒ `worker`."
+              "$ref": "#/$defs/Handler",
+              "description": "`worker` or `client`; omitted ⇒ `worker`."
             },
             "id": {
               "type": [
@@ -628,7 +614,7 @@
                 "null"
               ]
             },
-            "result": true,
+            "result": {},
             "type": {
               "const": "tool.result",
               "type": "string"
@@ -693,7 +679,7 @@
                 }
               ]
             },
-            "detail": true,
+            "detail": {},
             "error": {
               "type": "string"
             },
@@ -739,7 +725,7 @@
                 }
               ]
             },
-            "detail": true,
+            "detail": {},
             "error": {
               "type": "string"
             },
@@ -1046,7 +1032,7 @@
         {
           "additionalProperties": false,
           "properties": {
-            "args": true,
+            "args": {},
             "name": {
               "type": "string"
             },
@@ -1194,14 +1180,13 @@
               ]
             },
             "cost": {
-              "pattern": "^-?\\d+(\\.\\d+)?([eE]\\d+)?$",
+              "pattern": "^-?\\d+(\\.\\d+)?$",
               "type": [
                 "string",
-                "number",
                 "null"
               ]
             },
-            "detail": true,
+            "detail": {},
             "error": {
               "type": [
                 "string",
@@ -1231,7 +1216,7 @@
               "const": "llm.finished",
               "type": "string"
             },
-            "usage": true
+            "usage": {}
           },
           "required": [
             "type",
@@ -1308,18 +1293,7 @@
         "content": {
           "anyOf": [
             {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "items": {
-                    "$ref": "#/$defs/ContentPart"
-                  },
-                  "type": "array"
-                }
-              ],
-              "description": "Message content: either a plain string or an array of typed parts.\nSerializes as a raw string or array respectively (untagged)."
+              "$ref": "#/$defs/Content"
             },
             {
               "type": "null"
@@ -1363,76 +1337,23 @@
       "type": "object"
     },
     "Effect": {
-      "description": "An in-flight effect (Pending or RetryScheduled) surfaced on each worker decision.",
-      "oneOf": [
-        {
-          "properties": {
-            "arguments": {
-              "type": "string"
-            },
-            "handler": {
-              "$ref": "#/$defs/ToolHandler"
-            },
-            "kind": {
-              "const": "tool_call",
-              "type": "string"
-            },
-            "name": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "name",
-            "arguments",
-            "handler"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "agent_id": {
-              "type": "string"
-            },
-            "kind": {
-              "const": "sub_agent",
-              "type": "string"
-            },
-            "session_id": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "agent_id",
-            "session_id"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "handler": {
-              "$ref": "#/$defs/LlmHandler"
-            },
-            "kind": {
-              "const": "llm_call",
-              "type": "string"
-            },
-            "stream": {
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "kind",
-            "handler",
-            "stream"
-          ],
-          "type": "object"
-        }
-      ],
+      "additionalProperties": false,
+      "description": "An in-flight effect (Pending or RetryScheduled) surfaced on each worker decision.\nA flat envelope plus kind-specific fields: a tool call's\n`name`/`arguments`/`handler`, an LLM call's `handler`/`stream`, a\nsub-agent's `agent_id`/`session_id`.",
       "properties": {
+        "agent_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "anchor": {
           "description": "The tree node the effect was requested at.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "arguments": {
           "type": [
             "string",
             "null"
@@ -1450,91 +1371,59 @@
             "null"
           ]
         },
+        "handler": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Handler"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "id": {
           "type": "string"
         },
+        "kind": {
+          "$ref": "#/$defs/EffectKind"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "status": {
           "$ref": "#/$defs/EffectStatus"
+        },
+        "stream": {
+          "type": [
+            "boolean",
+            "null"
+          ]
         }
       },
       "required": [
         "id",
+        "kind",
         "status",
         "attempt"
       ],
       "type": "object"
     },
-    "EffectDetail": {
-      "description": "Kind-specific fields, tagged by `kind` on the wire.",
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "properties": {
-            "arguments": {
-              "type": "string"
-            },
-            "handler": {
-              "$ref": "#/$defs/ToolHandler"
-            },
-            "kind": {
-              "const": "tool_call",
-              "type": "string"
-            },
-            "name": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "name",
-            "arguments",
-            "handler"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "agent_id": {
-              "type": "string"
-            },
-            "kind": {
-              "const": "sub_agent",
-              "type": "string"
-            },
-            "session_id": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "agent_id",
-            "session_id"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "handler": {
-              "$ref": "#/$defs/LlmHandler"
-            },
-            "kind": {
-              "const": "llm_call",
-              "type": "string"
-            },
-            "stream": {
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "kind",
-            "handler",
-            "stream"
-          ],
-          "type": "object"
-        }
-      ]
+    "EffectKind": {
+      "enum": [
+        "tool_call",
+        "sub_agent",
+        "llm_call"
+      ],
+      "type": "string"
     },
     "EffectStatus": {
       "enum": [
@@ -1556,6 +1445,54 @@
       ],
       "type": "string"
     },
+    "FileData": {
+      "additionalProperties": false,
+      "properties": {
+        "file_data": {
+          "type": "string"
+        },
+        "filename": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "filename",
+        "file_data"
+      ],
+      "type": "object"
+    },
+    "Handler": {
+      "description": "Where a call runs — one wire enum so `handler` has a single type on every\nsurface. Tool calls accept `worker` (default) or `client`; LLM calls accept\n`server` (default) or `worker`. The invalid pairing (a `server` tool, a\n`client` LLM call) is rejected at the decision seam.",
+      "oneOf": [
+        {
+          "const": "server",
+          "description": "Server-side executor resolves the provider and makes the call (LLM only).",
+          "type": "string"
+        },
+        {
+          "const": "worker",
+          "description": "Dispatched to the work queue for the worker to execute.",
+          "type": "string"
+        },
+        {
+          "const": "client",
+          "description": "Executed by the client. Session goes Idle while waiting (tools only).",
+          "type": "string"
+        }
+      ]
+    },
+    "ImageUrl": {
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "type": "object"
+    },
     "InterruptOrigin": {
       "description": "Privilege level of the caller that issued an interrupt. Derived from the\nauthenticated `Caller`, never from request data; resuming requires a\ncaller at or above the origin's privilege.",
       "enum": [
@@ -1564,20 +1501,6 @@
         "frontend"
       ],
       "type": "string"
-    },
-    "LlmHandler": {
-      "oneOf": [
-        {
-          "const": "server",
-          "description": "Server-side executor resolves the provider and makes the call.",
-          "type": "string"
-        },
-        {
-          "const": "worker",
-          "description": "The worker performs the call and replies with `effect.result`/`effect.error`.",
-          "type": "string"
-        }
-      ]
     },
     "LlmRequest": {
       "additionalProperties": false,
@@ -1643,11 +1566,10 @@
           ]
         },
         "cost": {
-          "description": "Cost in dollars for this call, if the provider reports it.",
-          "pattern": "^-?\\d+(\\.\\d+)?([eE]\\d+)?$",
+          "description": "Cost in dollars for this call, if the provider reports it. A decimal\nstring on the wire.",
+          "pattern": "^-?\\d+(\\.\\d+)?$",
           "type": [
             "string",
-            "number",
             "null"
           ]
         },
@@ -1673,7 +1595,7 @@
           },
           "type": "array"
         },
-        "usage": true
+        "usage": {}
       },
       "required": [
         "model"
@@ -1709,18 +1631,7 @@
         "content": {
           "anyOf": [
             {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "items": {
-                    "$ref": "#/$defs/ContentPart"
-                  },
-                  "type": "array"
-                }
-              ],
-              "description": "Message content: either a plain string or an array of typed parts.\nSerializes as a raw string or array respectively (untagged)."
+              "$ref": "#/$defs/Content"
             },
             {
               "type": "null"
@@ -1772,59 +1683,62 @@
         },
         "nodes": {
           "items": {
-            "oneOf": [
-              {
-                "additionalProperties": false,
-                "properties": {
-                  "kind": {
-                    "const": "message",
-                    "type": "string"
-                  },
-                  "message": {
-                    "$ref": "#/$defs/Message"
-                  },
-                  "parent_id": {
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  }
-                },
-                "required": [
-                  "kind",
-                  "message"
-                ],
-                "type": "object"
-              },
-              {
-                "additionalProperties": false,
-                "properties": {
-                  "control": {
-                    "$ref": "#/$defs/Control"
-                  },
-                  "kind": {
-                    "const": "control",
-                    "type": "string"
-                  },
-                  "parent_id": {
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  }
-                },
-                "required": [
-                  "kind",
-                  "control"
-                ],
-                "type": "object"
-              }
-            ]
+            "$ref": "#/$defs/Node"
           },
           "type": "array"
         }
       },
       "type": "object"
+    },
+    "Node": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "message",
+              "type": "string"
+            },
+            "message": {
+              "$ref": "#/$defs/Message"
+            },
+            "parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "control": {
+              "$ref": "#/$defs/Control"
+            },
+            "kind": {
+              "const": "control",
+              "type": "string"
+            },
+            "parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "control"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "ReasoningConfig": {
       "additionalProperties": false,
@@ -2078,20 +1992,7 @@
       "additionalProperties": false,
       "properties": {
         "function": {
-          "additionalProperties": false,
-          "properties": {
-            "arguments": {
-              "type": "string"
-            },
-            "name": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "name",
-            "arguments"
-          ],
-          "type": "object"
+          "$ref": "#/$defs/ToolCallFunction"
         },
         "id": {
           "type": "string"
@@ -2131,19 +2032,21 @@
       ],
       "type": "object"
     },
-    "ToolHandler": {
-      "oneOf": [
-        {
-          "const": "worker",
-          "description": "Dispatched to the work queue for the worker to execute.",
+    "ToolCallFunction": {
+      "additionalProperties": false,
+      "properties": {
+        "arguments": {
           "type": "string"
         },
-        {
-          "const": "client",
-          "description": "Executed by the client. Session goes Idle while waiting.",
+        "name": {
           "type": "string"
         }
-      ]
+      },
+      "required": [
+        "name",
+        "arguments"
+      ],
+      "type": "object"
     },
     "ToolInput": {
       "description": "The engine's classification of a tool call's arguments, delivered on the\n`tool.execute` trigger alongside the raw `arguments` string. Always on the\nwire — absence never carries meaning.",
@@ -2156,7 +2059,7 @@
               "const": "valid",
               "type": "string"
             },
-            "value": true
+            "value": {}
           },
           "required": [
             "status",
@@ -2175,7 +2078,7 @@
               "const": "invalid",
               "type": "string"
             },
-            "value": true
+            "value": {}
           },
           "required": [
             "status",
@@ -2204,10 +2107,44 @@
         }
       ]
     },
+    "VideoUrl": {
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "type": "object"
+    },
     "WorkerState": {
       "description": "Opaque worker state: JSON the engine stores but never interprets."
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Substructure protocol"
+  "description": "One entry point per wire surface; every protocol type is named under $defs.",
+  "properties": {
+    "client_input": {
+      "$ref": "#/$defs/ClientInput"
+    },
+    "client_payload": {
+      "$ref": "#/$defs/ClientPayload"
+    },
+    "decision_request": {
+      "$ref": "#/$defs/DecisionRequest"
+    },
+    "decision_response": {
+      "$ref": "#/$defs/DecisionResponse"
+    },
+    "stream_delta": {
+      "$ref": "#/$defs/StreamDelta"
+    },
+    "token_delta": {
+      "$ref": "#/$defs/TokenDelta"
+    }
+  },
+  "title": "Substructure protocol",
+  "type": "object"
 }

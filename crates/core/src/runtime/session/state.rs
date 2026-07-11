@@ -4,14 +4,14 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::decision::Trigger;
+use super::decision::{LlmHandler, ToolHandler, Trigger};
 use super::events::*;
 use rust_decimal::Decimal;
 
 use crate::protocol::{
-    AgentConfig, DraftMessage, Effect, EffectDetail, EffectStatus, InterruptOrigin, LlmHandler,
-    LlmRequest, LlmTool, Message, MessageTree, Node, ReasoningConfig, RetryPolicy, Role,
-    SessionOwner, ToolHandler, WorkerState,
+    AgentConfig, DraftMessage, Effect, EffectKind, EffectStatus, InterruptOrigin, LlmRequest,
+    LlmTool, Message, MessageTree, Node, ReasoningConfig, RetryPolicy, Role, SessionOwner,
+    WorkerState,
 };
 use crate::runtime::aggregate::ApplyContext;
 use crate::runtime::retry::RetryState;
@@ -298,13 +298,11 @@ impl DerivedState {
             .calls
             .iter()
             .filter(|e| {
-                matches!(
-                    e.detail,
-                    EffectDetail::ToolCall { .. } | EffectDetail::SubAgent { .. }
-                ) && matches!(
-                    e.status,
-                    EffectStatus::Pending | EffectStatus::RetryScheduled
-                )
+                matches!(e.kind, EffectKind::ToolCall | EffectKind::SubAgent)
+                    && matches!(
+                        e.status,
+                        EffectStatus::Pending | EffectStatus::RetryScheduled
+                    )
             })
             .count();
         let unrecorded_results = self
@@ -472,7 +470,7 @@ impl SessionState {
                     existing.prompt = prompt;
                     existing.spec = spec;
                     existing.stream = payload.stream;
-                    existing.handler = payload.handler.clone();
+                    existing.handler = payload.handler;
                 } else {
                     // Applies after the same batch's NewMessage events: head_id is post-reconcile.
                     self.llm_calls.insert(
@@ -483,7 +481,7 @@ impl SessionState {
                             prompt,
                             spec,
                             stream: payload.stream,
-                            handler: payload.handler.clone(),
+                            handler: payload.handler,
                             anchor: self.head_id.clone(),
                         },
                     );
@@ -518,7 +516,7 @@ impl SessionState {
                             tool_call_id: payload.tool_call_id.clone(),
                             name: payload.name.clone(),
                             tracking: EffectTracking::new(payload.retry.clone(), now),
-                            handler: payload.handler.clone(),
+                            handler: payload.handler,
                             arguments: payload.arguments.clone(),
                             result: None,
                             is_error: false,
@@ -835,6 +833,21 @@ impl SessionState {
     pub fn effects(&self) -> Vec<Effect> {
         let in_flight =
             |s: &EffectStatus| matches!(s, EffectStatus::Pending | EffectStatus::RetryScheduled);
+        let envelope =
+            |id: &str, kind: EffectKind, t: &EffectTracking, anchor: &Option<String>| Effect {
+                id: id.to_string(),
+                kind,
+                status: t.status.clone(),
+                attempt: t.retry.attempts,
+                deadline: t.deadline,
+                anchor: anchor.clone(),
+                name: None,
+                arguments: None,
+                handler: None,
+                stream: None,
+                agent_id: None,
+                session_id: None,
+            };
 
         let mut effects: Vec<Effect> = Vec::new();
 
@@ -843,18 +856,16 @@ impl SessionState {
             .values()
             .filter(|c| in_flight(&c.tracking.status))
         {
-            effects.push(Effect {
-                id: c.tool_call_id.clone(),
-                status: c.tracking.status.clone(),
-                attempt: c.tracking.retry.attempts,
-                deadline: c.tracking.deadline,
-                anchor: c.anchor.clone(),
-                detail: EffectDetail::ToolCall {
-                    name: c.name.clone(),
-                    arguments: c.arguments.clone(),
-                    handler: c.handler.clone(),
-                },
-            });
+            let mut e = envelope(
+                &c.tool_call_id,
+                EffectKind::ToolCall,
+                &c.tracking,
+                &c.anchor,
+            );
+            e.name = Some(c.name.clone());
+            e.arguments = Some(c.arguments.clone());
+            e.handler = Some(c.handler.into());
+            effects.push(e);
         }
 
         for c in self
@@ -862,17 +873,15 @@ impl SessionState {
             .values()
             .filter(|c| in_flight(&c.tracking.status))
         {
-            effects.push(Effect {
-                id: c.tool_call_id.clone(),
-                status: c.tracking.status.clone(),
-                attempt: c.tracking.retry.attempts,
-                deadline: c.tracking.deadline,
-                anchor: c.anchor.clone(),
-                detail: EffectDetail::SubAgent {
-                    agent_id: c.agent_id.clone(),
-                    session_id: c.session_id.clone(),
-                },
-            });
+            let mut e = envelope(
+                &c.tool_call_id,
+                EffectKind::SubAgent,
+                &c.tracking,
+                &c.anchor,
+            );
+            e.agent_id = Some(c.agent_id.clone());
+            e.session_id = Some(c.session_id.clone());
+            effects.push(e);
         }
 
         for c in self
@@ -880,17 +889,10 @@ impl SessionState {
             .values()
             .filter(|c| in_flight(&c.tracking.status))
         {
-            effects.push(Effect {
-                id: c.call_id.clone(),
-                status: c.tracking.status.clone(),
-                attempt: c.tracking.retry.attempts,
-                deadline: c.tracking.deadline,
-                anchor: c.anchor.clone(),
-                detail: EffectDetail::LlmCall {
-                    handler: c.handler.clone(),
-                    stream: c.stream,
-                },
-            });
+            let mut e = envelope(&c.call_id, EffectKind::LlmCall, &c.tracking, &c.anchor);
+            e.handler = Some(c.handler.into());
+            e.stream = Some(c.stream);
+            effects.push(e);
         }
 
         effects.sort_by(|a, b| a.id.cmp(&b.id));
@@ -1287,23 +1289,28 @@ mod effect_tests {
     fn effect_serializes_flat_tagged_and_round_trips() {
         let e = Effect {
             id: "call_1".to_string(),
+            kind: EffectKind::ToolCall,
             status: EffectStatus::Pending,
             attempt: 0,
             deadline: None,
             anchor: Some("n1".to_string()),
-            detail: EffectDetail::ToolCall {
-                name: "get_weather".to_string(),
-                arguments: "{}".to_string(),
-                handler: ToolHandler::Worker,
-            },
+            name: Some("get_weather".to_string()),
+            arguments: Some("{}".to_string()),
+            handler: Some(crate::protocol::Handler::Worker),
+            stream: None,
+            agent_id: None,
+            session_id: None,
         };
         let json = serde_json::to_value(&e).unwrap();
-        // Envelope, tag, and detail all flattened onto one object.
+        // Envelope, tag, and kind-specific fields all on one flat object.
         assert_eq!(json["id"], "call_1");
         assert_eq!(json["status"], "pending");
         assert_eq!(json["kind"], "tool_call");
         assert_eq!(json["name"], "get_weather");
-        // flatten + internally-tagged enum must deserialize back to the original.
+        assert_eq!(json["handler"], "worker");
+        // Absent kinds' fields are omitted, not null.
+        assert!(json.get("stream").is_none());
+        assert!(json.get("agent_id").is_none());
         let back: Effect = serde_json::from_value(json).unwrap();
         assert_eq!(back, e);
     }

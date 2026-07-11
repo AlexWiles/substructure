@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::protocol::LlmHandler;
 use crate::providers::memory_queue::TaskQueue;
 use crate::runtime::aggregate::{AggregateState, DomainEvent};
 use crate::runtime::event_store::{Event, EventStore};
@@ -10,6 +9,7 @@ use crate::runtime::processor::{
     EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCheckpointStore,
     ProcessorError,
 };
+use crate::runtime::session::decision::LlmHandler;
 use crate::runtime::session::events::EventPayload;
 use crate::runtime::session::state::SessionState;
 

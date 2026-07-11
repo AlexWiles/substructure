@@ -31,9 +31,22 @@ same version.
 - The engine's `proposed` continuation was a separate `DecisionProposal` type, so
   echoing it back as a `DecisionResponse` was a type mismatch. Merged the two —
   `proposed` is now the `DecisionResponse` the worker echoes or replaces.
+- No typed TypeScript tools example. Added `node-hono-typescript-chat-with-tools`:
+  a Hono worker that declares tools and answers `tool.execute`, typed from
+  schema-generated `protocol.ts`.
+- No typed Python example. Added `python-fast-api-pydantic-chat-with-tools`: a
+  FastAPI tools worker whose Pydantic models are generated from the schema, so
+  requests are validated at the boundary.
+- The worker contract had no OpenAPI form for server-stub generators, validating
+  proxies, and rendered docs. `schemas/worker.openapi.json` (3.1) is generated
+  beside the JSON Schema: one `POST /`, components pruned to the worker surface.
 
 ### Changed
 
+- The protocol schema broke code generators: no roots, anonymous inlined defs,
+  `true` schemas, a flattened-union `Effect`, two `handler` enums. Roots for
+  every wire surface, named `$defs`, `{}` for any-JSON, string `cost`, a flat
+  `Effect`, and one seam-validated `handler` enum — wire format unchanged.
 - Webhook signing used two headers and a timestamp window. Simplified to a
   single `X-Substructure-Signature: sha256=<hex>` HMAC over the body,
   GitHub-style.
@@ -54,6 +67,12 @@ same version.
   Client-input types took a `Client*` prefix (`ClientInput`, `ClientPayload`,
   `ClientMessage`, `ClientMessages`, `ClientAction`) and `WireMessage` became
   `DraftMessage` (the id-optional, not-yet-recorded form).
+
+### Fixed
+
+- `--output pretty` hid the tool-call id, so a client tool couldn't be settled.
+  A client-tool yield now prints each pending call's id and a ready-to-edit
+  `tool.result` settle input.
 
 ## [0.1.22] - 2026-07-07
 

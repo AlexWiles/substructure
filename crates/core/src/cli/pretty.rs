@@ -103,16 +103,20 @@ impl PrettyPrinter {
                 self.break_line(w)?;
             }
 
-            AgUiEvent::RunFinished {
-                outcome: Some(RunOutcome::Interrupt { interrupts }),
-                ..
-            } => {
-                for it in interrupts {
-                    self.break_line(w)?;
-                    let msg = it.message.as_deref().unwrap_or("(no message)");
-                    self.write_styled(w, YELLOW, &format!("⚠ interrupt [{}]: {msg}", it.reason))?;
-                    self.newline(w)?;
+            AgUiEvent::RunFinished { outcome, .. } => {
+                if let Some(RunOutcome::Interrupt { interrupts }) = outcome {
+                    for it in interrupts {
+                        self.break_line(w)?;
+                        let msg = it.message.as_deref().unwrap_or("(no message)");
+                        self.write_styled(
+                            w,
+                            YELLOW,
+                            &format!("⚠ interrupt [{}]: {msg}", it.reason),
+                        )?;
+                        self.newline(w)?;
+                    }
                 }
+                self.render_pending_settlements(w)?;
             }
             AgUiEvent::RunError { message } => {
                 self.break_line(w)?;
@@ -123,6 +127,35 @@ impl PrettyPrinter {
             _ => {}
         }
         w.flush()
+    }
+
+    /// A client tool yields the run with no result event, so its call stays in
+    /// `tools` after every worker call and sub-agent has been removed by its
+    /// result. On finish, surface each leftover call's id and a ready-to-edit
+    /// settle input — `tool.result` requires the id, which the streamed `→`
+    /// line alone doesn't show.
+    fn render_pending_settlements(&mut self, w: &mut impl Write) -> io::Result<()> {
+        let mut pending: Vec<(String, String)> = self
+            .tools
+            .drain()
+            .map(|(id, tool)| (id, tool.name))
+            .collect();
+        pending.sort();
+        for (id, name) in pending {
+            self.break_line(w)?;
+            self.write_styled(
+                w,
+                YELLOW,
+                &format!("⧗ {name} awaiting result — settle with:"),
+            )?;
+            self.newline(w)?;
+            let hint = format!(
+                "    --input '{{\"type\":\"tool.result\",\"id\":\"{id}\",\"result\":\"...\"}}'"
+            );
+            self.write_styled(w, DIM, &hint)?;
+            self.newline(w)?;
+        }
+        Ok(())
     }
 
     /// Body text that streams verbatim; tracks whether the cursor is at the
@@ -449,5 +482,61 @@ mod tests {
             },
         ]);
         assert_eq!(out, "Let me check.\n→ get_weather {}\n");
+    }
+
+    fn run_finished() -> AgUiEvent {
+        AgUiEvent::RunFinished {
+            thread_id: "t".into(),
+            run_id: "r".into(),
+            result: None,
+            outcome: None,
+        }
+    }
+
+    #[test]
+    fn client_tool_yield_surfaces_id_to_settle() {
+        let out = render_all(vec![
+            AgUiEvent::ToolCallStart {
+                tool_call_id: "call_x".into(),
+                tool_call_name: "get_weather".into(),
+                parent_message_id: None,
+            },
+            AgUiEvent::ToolCallArgs {
+                tool_call_id: "call_x".into(),
+                delta: r#"{"city":"SF"}"#.into(),
+            },
+            AgUiEvent::ToolCallEnd {
+                tool_call_id: "call_x".into(),
+            },
+            run_finished(),
+        ]);
+        assert_eq!(
+            out,
+            "→ get_weather {\"city\":\"SF\"}\n⧗ get_weather awaiting result — settle with:\n    --input '{\"type\":\"tool.result\",\"id\":\"call_x\",\"result\":\"...\"}'\n"
+        );
+    }
+
+    #[test]
+    fn parallel_client_tools_each_surface_their_id() {
+        let mut evs = call("call_a", "get_weather");
+        evs.extend(call("call_b", "get_time"));
+        evs.push(run_finished());
+        let out = render_all(evs);
+        assert_eq!(
+            out,
+            "→ get_weather {}\n→ get_time {}\n⧗ get_weather awaiting result — settle with:\n    --input '{\"type\":\"tool.result\",\"id\":\"call_a\",\"result\":\"...\"}'\n⧗ get_time awaiting result — settle with:\n    --input '{\"type\":\"tool.result\",\"id\":\"call_b\",\"result\":\"...\"}'\n"
+        );
+    }
+
+    #[test]
+    fn settled_tools_leave_no_pending_hint() {
+        let mut evs = call("a", "get_current_time");
+        evs.push(result("a", "2026-07-10T04:14:56.322Z"));
+        evs.push(run_finished());
+        let out = render_all(evs);
+        assert_eq!(
+            out,
+            "→ get_current_time {}\n← get_current_time\n  2026-07-10T04:14:56.322Z\n"
+        );
     }
 }

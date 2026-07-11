@@ -91,7 +91,7 @@ impl AgentConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::ToolHandler;
+    use crate::protocol::Handler;
 
     fn sub(id: &str, description: &str) -> SubAgent {
         SubAgent {
@@ -100,7 +100,7 @@ mod tests {
         }
     }
 
-    fn function_tool(name: &str, handler: Option<ToolHandler>) -> AgentTool {
+    fn function_tool(name: &str, handler: Option<Handler>) -> AgentTool {
         AgentTool {
             name: name.to_string(),
             description: String::new(),
@@ -167,12 +167,12 @@ mod tests {
     #[test]
     fn lookups_keep_the_two_namespaces_distinct() {
         let cfg = config(
-            vec![function_tool("confirm", Some(ToolHandler::Client))],
+            vec![function_tool("confirm", Some(Handler::Client))],
             vec![sub("researcher", "")],
         );
         assert_eq!(
-            cfg.tool("confirm").and_then(|t| t.handler.clone()),
-            Some(ToolHandler::Client)
+            cfg.tool("confirm").and_then(|t| t.handler),
+            Some(Handler::Client)
         );
         assert!(
             cfg.tool("researcher").is_none(),

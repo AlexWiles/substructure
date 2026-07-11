@@ -2,9 +2,91 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::{
-    DraftMessage, ErrorCode, LlmHandler, LlmRequest, LlmResponse, RetryPolicy, ToolHandler,
-};
+use crate::protocol::{DraftMessage, ErrorCode, Handler, LlmRequest, LlmResponse, RetryPolicy};
+
+impl Handler {
+    /// Serde default for `llm.call`.
+    pub fn server() -> Self {
+        Handler::Server
+    }
+
+    /// Serde default for `tool.call`.
+    pub fn worker() -> Self {
+        Handler::Worker
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Handler::Server => "server",
+            Handler::Worker => "worker",
+            Handler::Client => "client",
+        }
+    }
+}
+
+/// Where a tool call runs — the engine's strict form of the wire [`Handler`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolHandler {
+    /// Dispatched to the work queue for the worker to execute.
+    #[default]
+    Worker,
+    /// Executed by the client. Session goes Idle while waiting.
+    Client,
+}
+
+/// Where an LLM call runs — the engine's strict form of the wire [`Handler`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmHandler {
+    /// Server-side executor resolves the provider and makes the call.
+    #[default]
+    Server,
+    /// The worker performs the call and replies with `effect.result`/`effect.error`.
+    Worker,
+}
+
+impl From<ToolHandler> for Handler {
+    fn from(h: ToolHandler) -> Self {
+        match h {
+            ToolHandler::Worker => Handler::Worker,
+            ToolHandler::Client => Handler::Client,
+        }
+    }
+}
+
+impl From<LlmHandler> for Handler {
+    fn from(h: LlmHandler) -> Self {
+        match h {
+            LlmHandler::Server => Handler::Server,
+            LlmHandler::Worker => Handler::Worker,
+        }
+    }
+}
+
+impl TryFrom<Handler> for ToolHandler {
+    type Error = Handler;
+
+    fn try_from(h: Handler) -> Result<Self, Handler> {
+        match h {
+            Handler::Worker => Ok(ToolHandler::Worker),
+            Handler::Client => Ok(ToolHandler::Client),
+            Handler::Server => Err(h),
+        }
+    }
+}
+
+impl TryFrom<Handler> for LlmHandler {
+    type Error = Handler;
+
+    fn try_from(h: Handler) -> Result<Self, Handler> {
+        match h {
+            Handler::Server => Ok(LlmHandler::Server),
+            Handler::Worker => Ok(LlmHandler::Worker),
+            Handler::Client => Err(h),
+        }
+    }
+}
 
 /// Engine-sent trigger; `*.finished` carries the payload when ok, else error.
 #[derive(Debug, Clone, Serialize, Deserialize)]

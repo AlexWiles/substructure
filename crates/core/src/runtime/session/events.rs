@@ -3,11 +3,11 @@ use std::collections::{BTreeMap, HashMap};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use super::decision::Trigger;
+use super::decision::{LlmHandler, ToolHandler, Trigger};
+pub use crate::protocol::EffectKind;
 use crate::protocol::{
-    AgentConfig, Control, DraftMessage, ErrorCode, InterruptOrigin, LlmHandler, LlmRequest,
-    LlmResponse, Message, MessageTree, NewControl, NewMessage, Node, RetryPolicy, SessionOwner,
-    ToolHandler, WorkerState,
+    AgentConfig, Control, DraftMessage, ErrorCode, InterruptOrigin, LlmRequest, LlmResponse,
+    Message, MessageTree, NewControl, NewMessage, Node, RetryPolicy, SessionOwner, WorkerState,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -310,14 +310,6 @@ pub struct DecisionRequestQueued {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionRequestDropped {
     pub decision_id: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EffectKind {
-    ToolCall,
-    LlmCall,
-    SubAgent,
 }
 
 /// An abandoned in-flight call. For a sub-agent, `id` is the tool call and

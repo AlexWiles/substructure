@@ -22,13 +22,13 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use super::decision::{Action, Trigger};
+use super::decision::{Action, LlmHandler, ToolHandler, Trigger};
 use super::reconcile::news_start;
 use super::state::{new_call_id, new_message_id, LlmCallState};
 use super::tool_contract::{classify_arguments, declared_tool, DeclaredTool};
 use crate::protocol::{
     AgentConfig, DecisionAction, DecisionRequest, DecisionResponse, DecisionTrigger, DraftMessage,
-    LlmRequest, Message, MessageTree, RetryPolicy, WorkerState,
+    Handler, LlmRequest, Message, MessageTree, RetryPolicy, WorkerState,
 };
 use crate::runtime::worker::WorkerDecisionRequest;
 
@@ -130,6 +130,12 @@ pub enum ResolveError {
     UnresolvableSettleId { kind: &'static str },
     /// An `llm.call` omitted `model` and no agent config supplied one.
     MissingModel,
+    /// A handler value the addressed surface does not support: `server` on a
+    /// tool, `client` on an LLM call.
+    InvalidHandler {
+        surface: &'static str,
+        handler: &'static str,
+    },
 }
 
 impl std::fmt::Display for ResolveError {
@@ -143,11 +149,30 @@ impl std::fmt::Display for ResolveError {
                 f,
                 "llm.call omitted `model` and no agent config supplies one"
             ),
+            ResolveError::InvalidHandler { surface, handler } => {
+                write!(f, "`{handler}` is not a valid handler for {surface}")
+            }
         }
     }
 }
 
 impl std::error::Error for ResolveError {}
+
+fn tool_handler(h: Handler, surface: &'static str) -> Result<ToolHandler, ResolveError> {
+    h.try_into()
+        .map_err(|h: Handler| ResolveError::InvalidHandler {
+            surface,
+            handler: h.as_str(),
+        })
+}
+
+fn llm_handler(h: Handler) -> Result<LlmHandler, ResolveError> {
+    h.try_into()
+        .map_err(|h: Handler| ResolveError::InvalidHandler {
+            surface: "llm.call",
+            handler: h.as_str(),
+        })
+}
 
 fn resolve_settle_id(
     id: Option<String>,
@@ -197,6 +222,13 @@ pub fn resolve_response(
         state,
         agent,
     } = response;
+    if let Some(cfg) = &agent {
+        for t in &cfg.tools {
+            if let Some(h) = t.handler {
+                tool_handler(h, "a declared tool")?;
+            }
+        }
+    }
     let merge_cfg = agent.as_ref().or(echoed_config);
     let resolved = lower_actions(actions, &messages, merge_cfg, trigger)?;
     Ok(ResolvedResponse {
@@ -257,7 +289,7 @@ fn lower_actions(
                         },
                         stream,
                         retry,
-                        handler,
+                        handler: llm_handler(handler)?,
                     }
                 }
                 DecisionAction::CallTool {
@@ -270,7 +302,7 @@ fn lower_actions(
                     id: id.unwrap_or_else(new_call_id),
                     name,
                     arguments: result_to_string(arguments),
-                    handler,
+                    handler: tool_handler(handler, "tool.call")?,
                     retry,
                 },
                 DecisionAction::ToolResult {
@@ -483,8 +515,8 @@ pub fn to_wire_trigger(
 mod tests {
     use super::*;
     use crate::protocol::{
-        ClientInput, ClientPayload, Content, LlmHandler, NewMessage, Node, Role, ToolCall,
-        ToolCallFunction, ToolHandler, ToolInput,
+        AgentTool, ClientInput, ClientPayload, Content, NewMessage, Node, Role, ToolCall,
+        ToolCallFunction, ToolInput,
     };
     use crate::runtime::session::state::LlmCallSpec;
 
@@ -513,7 +545,7 @@ mod tests {
                 id: None,
                 name: "do_thing".to_string(),
                 arguments: serde_json::json!({}),
-                handler: ToolHandler::Worker,
+                handler: Handler::Worker,
                 retry: RetryPolicy::no_retry(),
             }],
             None,
@@ -523,6 +555,72 @@ mod tests {
             Action::CallTool { id, .. } => assert!(!id.is_empty(), "engine mints an id"),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_invalid_handler_pairing_is_rejected_at_the_seam() {
+        let err = resolve_test_actions(
+            vec![DecisionAction::CallTool {
+                id: None,
+                name: "do_thing".to_string(),
+                arguments: serde_json::json!({}),
+                handler: Handler::Server,
+                retry: RetryPolicy::no_retry(),
+            }],
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ResolveError::InvalidHandler {
+                surface: "tool.call",
+                handler: "server"
+            }
+        );
+
+        let mut call = bare_llm_call();
+        if let DecisionAction::CallLlm { handler, model, .. } = &mut call {
+            *handler = Handler::Client;
+            *model = Some("m".to_string());
+        }
+        let err = resolve_test_actions(vec![call], None).unwrap_err();
+        assert_eq!(
+            err,
+            ResolveError::InvalidHandler {
+                surface: "llm.call",
+                handler: "client"
+            }
+        );
+    }
+
+    #[test]
+    fn a_declared_server_tool_is_rejected_at_the_seam() {
+        let mut config = cfg("m1", None);
+        config.tools.push(AgentTool {
+            name: "t".to_string(),
+            description: String::new(),
+            input: None,
+            output: None,
+            handler: Some(Handler::Server),
+        });
+        let err = resolve_response(
+            DecisionResponse {
+                messages: vec![],
+                actions: vec![],
+                state: None,
+                agent: Some(config),
+            },
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ResolveError::InvalidHandler {
+                surface: "a declared tool",
+                handler: "server"
+            }
+        );
     }
 
     #[test]
@@ -599,7 +697,7 @@ mod tests {
             reasoning: None,
             stream: None,
             retry: None,
-            handler: LlmHandler::Server,
+            handler: Handler::Server,
         }
     }
 
@@ -656,7 +754,7 @@ mod tests {
             reasoning: None,
             stream: None,
             retry: None,
-            handler: LlmHandler::Server,
+            handler: Handler::Server,
         };
         let action =
             resolve_one_call(call, vec![user_wire("the view")], Some(&config), None).unwrap();
@@ -685,7 +783,7 @@ mod tests {
             reasoning: None,
             stream: None,
             retry: None,
-            handler: LlmHandler::Server,
+            handler: Handler::Server,
         };
         let action = resolve_one_call(call, vec![], Some(&config), None).unwrap();
         match action {
@@ -954,7 +1052,7 @@ mod tests {
                 reasoning: None,
             },
             stream: false,
-            handler: LlmHandler::Server,
+            handler: crate::runtime::session::decision::LlmHandler::Server,
             anchor: None,
         };
         (
@@ -1040,7 +1138,7 @@ mod tests {
         assert!(matches!(
             &actions[0],
             DecisionAction::CallLlm {
-                handler: LlmHandler::Server,
+                handler: Handler::Server,
                 ..
             }
         ));
@@ -1048,7 +1146,7 @@ mod tests {
             DecisionAction::CallTool {
                 handler, arguments, ..
             } => {
-                assert!(matches!(handler, ToolHandler::Worker));
+                assert!(matches!(handler, Handler::Worker));
                 assert_eq!(
                     arguments,
                     &serde_json::json!({"city":"NYC"}),

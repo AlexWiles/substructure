@@ -143,7 +143,8 @@ fn schema_violations(schema: &serde_json::Value, value: &serde_json::Value) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{LlmHandler, RetryPolicy, Role, ToolCall, ToolCallFunction};
+    use crate::protocol::{RetryPolicy, Role, ToolCall, ToolCallFunction};
+    use crate::runtime::session::decision::LlmHandler;
     use crate::runtime::session::state::{EffectTracking, LlmCallSpec};
 
     fn city_schema() -> serde_json::Value {

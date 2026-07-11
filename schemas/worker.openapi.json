@@ -1,0 +1,1833 @@
+{
+  "components": {
+    "schemas": {
+      "AgentConfig": {
+        "additionalProperties": false,
+        "description": "A declared agent identity. `model` is the only required field; everything else\nrefines the proposed LLM request the engine derives for `client.messages`.",
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "retry": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RetryPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "stream": {
+            "type": "boolean"
+          },
+          "sub_agents": {
+            "description": "Sub-agents the model can delegate to. Presented to the model as tools (by\nid) alongside `tools`, but each call spawns a child session rather than\nexecuting a function.",
+            "items": {
+              "$ref": "#/components/schemas/SubAgent"
+            },
+            "type": "array"
+          },
+          "system": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tools": {
+            "description": "Worker- or client-executed tools the model can call.",
+            "items": {
+              "$ref": "#/components/schemas/AgentTool"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "type": "object"
+      },
+      "AgentTool": {
+        "additionalProperties": false,
+        "description": "A function tool the agent offers. The model-facing contract is\n`name`/`description`/`input`/`output`; `handler` selects where a call runs —\n`Some(Client)` ⇒ client-executed, absent ⇒ worker-executed (the default).\n`server` is invalid for tools.",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "handler": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Handler"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "input": {},
+          "name": {
+            "type": "string"
+          },
+          "output": {}
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "AudioData": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "type": "string"
+          },
+          "format": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "data",
+          "format"
+        ],
+        "type": "object"
+      },
+      "Content": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "items": {
+              "$ref": "#/components/schemas/ContentPart"
+            },
+            "type": "array"
+          }
+        ],
+        "description": "Message content: either a plain string or an array of typed parts.\nSerializes as a raw string or array respectively (untagged)."
+      },
+      "ContentPart": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "image_url": {
+                "$ref": "#/components/schemas/ImageUrl"
+              },
+              "type": {
+                "const": "image_url",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "image_url"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "file": {
+                "$ref": "#/components/schemas/FileData"
+              },
+              "type": {
+                "const": "file",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "file"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "input_audio": {
+                "$ref": "#/components/schemas/AudioData"
+              },
+              "type": {
+                "const": "input_audio",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "input_audio"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "video_url",
+                "type": "string"
+              },
+              "video_url": {
+                "$ref": "#/components/schemas/VideoUrl"
+              }
+            },
+            "required": [
+              "type",
+              "video_url"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "Control": {
+        "additionalProperties": false,
+        "description": "A non-conversational tree marker (interrupt/resume); filtered out of LLM prompts.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "interrupt_id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ControlKind"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/InterruptOrigin"
+          },
+          "payload": {},
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "interrupt_id",
+          "kind",
+          "origin"
+        ],
+        "type": "object"
+      },
+      "ControlKind": {
+        "enum": [
+          "interrupt",
+          "resume"
+        ],
+        "type": "string"
+      },
+      "DecisionAction": {
+        "description": "The action a worker authors on the wire. Mirrors the internal `Action`, but a\nsettle's effect id may be omitted: on the sync/pull paths the answered\n`*.execute` trigger names it, so echoing it is redundant. `resolve_response`\n(`runtime::session::wire`) turns this into the internal `Action` (id always\npresent) at the transport boundary.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "A flat, all-optional LLM request. `id` omitted ⇒ the engine mints one; it\nbecomes the assistant node's id. Omitted fields are filled from the agent\nconfig (merge source), then engine defaults; `messages` omitted ⇒\n`[config.system?] + the decision's declared view`. Explicit `messages`\nsuppress system injection. A bare `{\"type\":\"llm.call\"}` prompts per the\nagent's identity over the current view.",
+            "properties": {
+              "handler": {
+                "$ref": "#/components/schemas/Handler",
+                "description": "`server` or `worker`; omitted ⇒ `server`."
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "max_completion_tokens": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "messages": {
+                "items": {
+                  "$ref": "#/components/schemas/DraftMessage"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reasoning": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ReasoningConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "retry": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RetryPolicy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "stream": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "temperature": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "tools": {
+                "items": {
+                  "$ref": "#/components/schemas/LlmTool"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "llm.call",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "`id` omitted ⇒ the engine mints one (LLM-driven tools carry the model's id).",
+            "properties": {
+              "arguments": {},
+              "handler": {
+                "$ref": "#/components/schemas/Handler",
+                "description": "`worker` or `client`; omitted ⇒ `worker`."
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "retry": {
+                "$ref": "#/components/schemas/RetryPolicy"
+              },
+              "type": {
+                "const": "tool.call",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "name",
+              "arguments"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "`id` omitted ⇒ the effect named by the answering `tool.execute` trigger.",
+            "properties": {
+              "attempt": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "result": {},
+              "type": {
+                "const": "tool.result",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "result"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "`id` omitted ⇒ the effect named by the answering `llm.execute` trigger.",
+            "properties": {
+              "attempt": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "response": {
+                "$ref": "#/components/schemas/LlmResponse"
+              },
+              "type": {
+                "const": "llm.result",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "response"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "attempt": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "code": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ErrorCode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "detail": {},
+              "error": {
+                "type": "string"
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "retryable": {
+                "description": "Omitted ⇒ terminal.",
+                "type": "boolean"
+              },
+              "type": {
+                "const": "tool.error",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "attempt": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "code": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ErrorCode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "detail": {},
+              "error": {
+                "type": "string"
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "retryable": {
+                "description": "Omitted ⇒ terminal.",
+                "type": "boolean"
+              },
+              "type": {
+                "const": "llm.error",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "agent_id": {
+                "type": "string"
+              },
+              "retry": {
+                "$ref": "#/components/schemas/RetryPolicy"
+              },
+              "session_id": {
+                "type": "string"
+              },
+              "tool_call_id": {
+                "description": "The model tool-call this delegation answers — always required.",
+                "type": "string"
+              },
+              "type": {
+                "const": "sub_agent.spawn",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "agent_id",
+              "tool_call_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "message": {
+                "$ref": "#/components/schemas/DraftMessage"
+              },
+              "session_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "message.send",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "`interrupt_id` omitted ⇒ the engine mints one to correlate the later resume.",
+            "properties": {
+              "interrupt_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "payload": {},
+              "reason": {
+                "type": "string"
+              },
+              "type": {
+                "const": "interrupt",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "data": {},
+              "type": {
+                "const": "done",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "DecisionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "agent": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The agent config resolved for the active path (`null` when none is set)."
+          },
+          "agent_id": {
+            "type": "string"
+          },
+          "ancestry": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "attempts": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "calls": {
+            "items": {
+              "$ref": "#/components/schemas/Effect"
+            },
+            "type": "array"
+          },
+          "deadline": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "decision_id": {
+            "type": "string"
+          },
+          "identity": {
+            "$ref": "#/components/schemas/SessionOwner"
+          },
+          "message_tree": {
+            "$ref": "#/components/schemas/MessageTree"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            },
+            "type": "array"
+          },
+          "pending_calls": {
+            "description": "Count of in-flight `tool_call`/`sub_agent` calls.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "proposed": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DecisionResponse"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The engine's default continuation for `trigger` (`null` when it needs\nworker knowledge). Advisory: accept by echoing it as the decision."
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/WorkerState"
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/DecisionTrigger"
+          },
+          "turn_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "session_id",
+          "decision_id",
+          "agent_id",
+          "identity",
+          "trigger",
+          "state",
+          "calls",
+          "pending_calls",
+          "messages",
+          "message_tree",
+          "ancestry",
+          "attempts"
+        ],
+        "type": "object"
+      },
+      "DecisionResponse": {
+        "additionalProperties": false,
+        "description": "A decision: the messages/actions to author, plus optional state/agent writes.\nThe worker returns one; the engine also proposes one as the default\ncontinuation (`DecisionRequest::proposed`), which the worker echoes or amends.",
+        "properties": {
+          "actions": {
+            "items": {
+              "$ref": "#/components/schemas/DecisionAction"
+            },
+            "type": "array"
+          },
+          "agent": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A new agent config write; omitted keeps the current config."
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/DraftMessage"
+            },
+            "type": "array"
+          },
+          "state": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkerState"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Omitted or `null` keeps the current state; clear with a non-null empty value."
+          }
+        },
+        "type": "object"
+      },
+      "DecisionTrigger": {
+        "description": "The trigger a worker sees on the wire — the materialized projection of the\nengine's internal decision trigger. It has no `ClientMessage`: a bare client\nmessage is always materialized to `ClientTranscript` by `to_wire_trigger`\n(`runtime::session::wire`) before delivery, so an unmaterialized message can\nnever reach a worker.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The first decision of every session; carries no proposal.",
+            "properties": {
+              "type": {
+                "const": "session.start",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "messages": {
+                "items": {
+                  "$ref": "#/components/schemas/DraftMessage"
+                },
+                "type": "array"
+              },
+              "new_from": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "client.messages",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "messages"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "args": {},
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "const": "client.action",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Answer with `tool.result`/`tool.error`.",
+            "properties": {
+              "arguments": {
+                "type": "string"
+              },
+              "attempt": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "deadline": {
+                "format": "date-time",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "input": {
+                "$ref": "#/components/schemas/ToolInput",
+                "description": "The engine's classification of `arguments` against the tool's\ndeclared `input` schema: `valid` (with the parsed `value`),\n`invalid` (value plus the violation), or `malformed` (not a JSON\nobject). Always on the wire."
+              },
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "const": "tool.execute",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "id",
+              "name",
+              "arguments",
+              "input",
+              "attempt"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "result": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "tool.finished",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "id",
+              "ok",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Answer with `llm.result`/`llm.error`.",
+            "properties": {
+              "attempt": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "deadline": {
+                "format": "date-time",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "request": {
+                "$ref": "#/components/schemas/LlmRequest"
+              },
+              "stream": {
+                "type": "boolean"
+              },
+              "type": {
+                "const": "llm.execute",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "id",
+              "request",
+              "attempt"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ErrorCode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "cost": {
+                "pattern": "^-?\\d+(\\.\\d+)?$",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "detail": {},
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "message": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/DraftMessage"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "truncated": {
+                "type": "boolean"
+              },
+              "type": {
+                "const": "llm.finished",
+                "type": "string"
+              },
+              "usage": {}
+            },
+            "required": [
+              "type",
+              "id",
+              "ok"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "agent_id": {
+                "type": "string"
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "result": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "session_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "sub_agent.finished",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "id",
+              "ok",
+              "session_id",
+              "agent_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "interrupt_id": {
+                "type": "string"
+              },
+              "payload": {},
+              "type": {
+                "const": "interrupt.resumed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "interrupt_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "DraftMessage": {
+        "additionalProperties": false,
+        "description": "The wire form of a [`Message`]: `id` is optional because a client-submitted or\nworker-authored message is not yet recorded. `record`/`rerecord`\n(`runtime::session::wire`) are the seams that lower it to the internal\n[`Message`] (id always present) at recording time.",
+        "properties": {
+          "content": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Content"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "tool_call_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tool_calls": {
+            "items": {
+              "$ref": "#/components/schemas/ToolCall"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "role"
+        ],
+        "type": "object"
+      },
+      "Effect": {
+        "additionalProperties": false,
+        "description": "An in-flight effect (Pending or RetryScheduled) surfaced on each worker decision.\nA flat envelope plus kind-specific fields: a tool call's\n`name`/`arguments`/`handler`, an LLM call's `handler`/`stream`, a\nsub-agent's `agent_id`/`session_id`.",
+        "properties": {
+          "agent_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "anchor": {
+            "description": "The tree node the effect was requested at.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "arguments": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "attempt": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "deadline": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "handler": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Handler"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/EffectKind"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/EffectStatus"
+          },
+          "stream": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "status",
+          "attempt"
+        ],
+        "type": "object"
+      },
+      "EffectKind": {
+        "enum": [
+          "tool_call",
+          "sub_agent",
+          "llm_call"
+        ],
+        "type": "string"
+      },
+      "EffectStatus": {
+        "enum": [
+          "pending",
+          "completed",
+          "failed",
+          "retry_scheduled",
+          "queued"
+        ],
+        "type": "string"
+      },
+      "ErrorCode": {
+        "enum": [
+          "provider_error",
+          "rate_limited",
+          "refused",
+          "budget_exceeded",
+          "deadline_exceeded"
+        ],
+        "type": "string"
+      },
+      "FileData": {
+        "additionalProperties": false,
+        "properties": {
+          "file_data": {
+            "type": "string"
+          },
+          "filename": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "filename",
+          "file_data"
+        ],
+        "type": "object"
+      },
+      "Handler": {
+        "description": "Where a call runs — one wire enum so `handler` has a single type on every\nsurface. Tool calls accept `worker` (default) or `client`; LLM calls accept\n`server` (default) or `worker`. The invalid pairing (a `server` tool, a\n`client` LLM call) is rejected at the decision seam.",
+        "oneOf": [
+          {
+            "const": "server",
+            "description": "Server-side executor resolves the provider and makes the call (LLM only).",
+            "type": "string"
+          },
+          {
+            "const": "worker",
+            "description": "Dispatched to the work queue for the worker to execute.",
+            "type": "string"
+          },
+          {
+            "const": "client",
+            "description": "Executed by the client. Session goes Idle while waiting (tools only).",
+            "type": "string"
+          }
+        ]
+      },
+      "ImageUrl": {
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "InterruptOrigin": {
+        "description": "Privilege level of the caller that issued an interrupt. Derived from the\nauthenticated `Caller`, never from request data; resuming requires a\ncaller at or above the origin's privilege.",
+        "enum": [
+          "system",
+          "machine",
+          "frontend"
+        ],
+        "type": "string"
+      },
+      "LlmRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "max_completion_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/DraftMessage"
+            },
+            "type": "array"
+          },
+          "model": {
+            "type": "string"
+          },
+          "reasoning": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReasoningConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "temperature": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/LlmTool"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "model",
+          "messages"
+        ],
+        "type": "object"
+      },
+      "LlmResponse": {
+        "additionalProperties": false,
+        "description": "Normalized LLM response. Provider adapters convert their raw responses\ninto this type at the boundary.",
+        "properties": {
+          "content": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cost": {
+            "description": "Cost in dollars for this call, if the provider reports it. A decimal\nstring on the wire.",
+            "pattern": "^-?\\d+(\\.\\d+)?$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "finish_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "images": {
+            "description": "Images generated by the model.",
+            "items": {
+              "$ref": "#/components/schemas/ResponseImage"
+            },
+            "type": "array"
+          },
+          "model": {
+            "type": "string"
+          },
+          "tool_calls": {
+            "items": {
+              "$ref": "#/components/schemas/ToolCall"
+            },
+            "type": "array"
+          },
+          "usage": {}
+        },
+        "required": [
+          "model"
+        ],
+        "type": "object"
+      },
+      "LlmTool": {
+        "additionalProperties": false,
+        "description": "A tool's declared contract: flat on the wire. Providers that need\nOpenAI-style `{\"type\": \"function\", \"function\": {…}}` nesting re-wrap at\ntheir own boundary.",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "input": {
+            "description": "JSON Schema for the tool's arguments; omitted declares a no-argument\ntool. The engine validates each call's arguments against it and hands\nproviders their native form."
+          },
+          "name": {
+            "type": "string"
+          },
+          "output": {
+            "description": "JSON Schema the settled result must satisfy; never sent to the model.\nA violating result settles as a terminal tool error."
+          }
+        },
+        "required": [
+          "name",
+          "description"
+        ],
+        "type": "object"
+      },
+      "Message": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Content"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "tool_call_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tool_calls": {
+            "items": {
+              "$ref": "#/components/schemas/ToolCall"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "role"
+        ],
+        "type": "object"
+      },
+      "MessageTree": {
+        "additionalProperties": false,
+        "properties": {
+          "head_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/Node"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "Node": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "message",
+                "type": "string"
+              },
+              "message": {
+                "$ref": "#/components/schemas/Message"
+              },
+              "parent_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "control": {
+                "$ref": "#/components/schemas/Control"
+              },
+              "kind": {
+                "const": "control",
+                "type": "string"
+              },
+              "parent_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "control"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ReasoningConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "effort": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReasoningEffort"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "exclude": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "max_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ReasoningEffort": {
+        "enum": [
+          "xhigh",
+          "high",
+          "medium",
+          "low",
+          "minimal",
+          "none"
+        ],
+        "type": "string"
+      },
+      "ResponseImage": {
+        "additionalProperties": false,
+        "description": "An image returned by the model in the response.",
+        "properties": {
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "RetryPolicy": {
+        "additionalProperties": false,
+        "description": "Fully-resolved retry policy — no optional fields. Stored on call state and\nread directly by retry logic.",
+        "properties": {
+          "backoff_base_secs": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "backoff_max_secs": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_retries": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "timeout_secs": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "max_retries",
+          "backoff_base_secs",
+          "backoff_max_secs"
+        ],
+        "type": "object"
+      },
+      "Role": {
+        "enum": [
+          "system",
+          "user",
+          "assistant",
+          "tool"
+        ],
+        "type": "string"
+      },
+      "SessionOwner": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "tenant_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tenant_id"
+        ],
+        "type": "object"
+      },
+      "SubAgent": {
+        "additionalProperties": false,
+        "description": "A sub-agent the model can delegate to. Named by `id` (the child agent to spawn,\nand the tool name the model calls); its model-facing input is the conventional\nsingle-`message` delegation schema.",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "ToolCall": {
+        "additionalProperties": false,
+        "properties": {
+          "function": {
+            "$ref": "#/components/schemas/ToolCallFunction"
+          },
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "function"
+        ],
+        "type": "object"
+      },
+      "ToolCallFunction": {
+        "additionalProperties": false,
+        "properties": {
+          "arguments": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "arguments"
+        ],
+        "type": "object"
+      },
+      "ToolInput": {
+        "description": "The engine's classification of a tool call's arguments, delivered on the\n`tool.execute` trigger alongside the raw `arguments` string. Always on the\nwire — absence never carries meaning.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Parsed and, when the tool declares an `input` schema, conforming to it.\n`value` is exactly the parsed `arguments` — the engine never mutates it.",
+            "properties": {
+              "status": {
+                "const": "valid",
+                "type": "string"
+              },
+              "value": {}
+            },
+            "required": [
+              "status",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Parsed to an object that violates the declared `input` schema.",
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "status": {
+                "const": "invalid",
+                "type": "string"
+              },
+              "value": {}
+            },
+            "required": [
+              "status",
+              "value",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Not a JSON object: malformed JSON or a non-object value.",
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "status": {
+                "const": "malformed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "error"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "VideoUrl": {
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "WorkerState": {
+        "description": "Opaque worker state: JSON the engine stores but never interprets."
+      }
+    },
+    "securitySchemes": {
+      "signature": {
+        "description": "`sha256=<hex>` HMAC of the raw body; sent when the app has a signing secret.",
+        "in": "header",
+        "name": "X-Substructure-Signature",
+        "type": "apiKey"
+      }
+    }
+  },
+  "info": {
+    "description": "The decision protocol, from the worker's side: the engine POSTs a decision request describing what just happened; the worker replies with a decision — the actions to take and the conversation as it should now read. One request, one response, once per decision.",
+    "license": {
+      "name": "FSL-1.1-ALv2",
+      "url": "https://fsl.software"
+    },
+    "title": "Substructure worker",
+    "version": "0.1.22"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/": {
+      "post": {
+        "description": "Switch on `trigger.type`. When `proposed` is non-null, echoing it (amended or verbatim) accepts the engine's default continuation. An empty decision with nothing in flight parks the session.",
+        "operationId": "decide",
+        "parameters": [
+          {
+            "description": "W3C trace context.",
+            "in": "header",
+            "name": "traceparent",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecisionResponse"
+                }
+              }
+            },
+            "description": "The worker's decision."
+          },
+          "4XX": {
+            "description": "The delivery attempt fails; the engine retries per its worker retry policy."
+          }
+        },
+        "security": [
+          {},
+          {
+            "signature": []
+          }
+        ],
+        "summary": "Decide the next step for a session"
+      }
+    }
+  },
+  "servers": [
+    {
+      "description": "A local worker; the engine targets whatever `--worker-url` names.",
+      "url": "http://localhost:4444"
+    }
+  ]
+}

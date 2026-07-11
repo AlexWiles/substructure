@@ -6,7 +6,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::events::{AgUiEvent, AgUiInterrupt, RunOutcome};
 use crate::event_store::Event;
-use crate::protocol::{TokenDelta, ToolHandler};
+use crate::protocol::TokenDelta;
+use crate::runtime::session::decision::ToolHandler;
 use crate::session::events::EventPayload;
 
 struct ToolBatch {

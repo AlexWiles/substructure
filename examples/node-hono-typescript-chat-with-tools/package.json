@@ -1,0 +1,17 @@
+{
+  "name": "@substructure.ai/example-node-hono-typescript-chat-with-tools",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.0.8",
+    "hono": "4.12.28"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.2",
+    "typescript": "5.9.3"
+  }
+}
