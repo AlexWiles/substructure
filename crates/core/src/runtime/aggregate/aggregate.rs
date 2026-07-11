@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::runtime::event_store::{EventStore, Snapshot, StoreError};
+use crate::runtime::event_store::{EventStore, Snapshot, StoreError, StreamVersion};
 use crate::runtime::span::{SpanContext, TraceId};
 
 use super::state::{AggregateState, ApplyContext, DomainEvent};
@@ -61,7 +61,7 @@ impl<R: AggregateState> Aggregate<R> {
                 }
                 let agg: Self = serde_json::from_value(snapshot.data)
                     .map_err(|e| StoreError::Internal(e.to_string()))?;
-                Ok((agg, snapshot.stream_version))
+                Ok((agg, snapshot.stream_version.0))
             }
             Err(StoreError::StreamNotFound) => {
                 Ok((Self::new(id.clone(), tenant_id, R::initial(id)), 0))
@@ -144,7 +144,7 @@ impl<R: AggregateState> Aggregate<R> {
             tenant_id: self.tenant_id.clone(),
             aggregate_type: R::AGGREGATE_TYPE.to_string(),
             data: serde_json::to_value(self)?,
-            stream_version: self.stream_version,
+            stream_version: StreamVersion(self.stream_version),
             wake_at: self.wake_at,
             first_event_at: self.first_event_at,
             last_event_at: self.last_event_at,

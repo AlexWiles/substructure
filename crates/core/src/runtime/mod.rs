@@ -12,7 +12,7 @@ use crate::protocol::{
 };
 use crate::providers::memory_queue::TaskQueue;
 use aggregate::{execute, Caller, ConflictRetry, ExecuteError, ExecuteInput};
-use event_store::{Event, EventFilter, EventStore, Snapshot, StoreError};
+use event_store::{Event, EventFilter, EventStore, Snapshot, StoreError, StreamVersion};
 use llm::{
     spawn_llm_dispatch_processor, spawn_llm_task_executor, LlmProviderTrait, LlmTask,
     TokenDeltaTransport,
@@ -440,19 +440,16 @@ impl Runtime {
     }
 
     /// Unified event stream. `spec` selects which events to observe (a single
-    /// turn or the whole session); `sequence_after` optionally replays
-    /// historical events with `sequence > N` before streaming live.
+    /// turn or the whole session); `after` (a per-stream cursor) optionally
+    /// replays historical events with `stream_version > N` before streaming live.
     pub async fn stream(
         &self,
         spec: SessionSubscriptionSpec,
-        sequence_after: Option<u64>,
+        after: Option<StreamVersion>,
     ) -> Result<mpsc::Receiver<Event>, RuntimeError> {
         self.authorize_session_read(&spec.root_session_id, &spec.caller)
             .await?;
-        Ok(self
-            .session_subscriptions
-            .stream(spec, sequence_after)
-            .await)
+        Ok(self.session_subscriptions.stream(spec, after).await)
     }
 
     pub async fn authorize_session_read(
@@ -536,14 +533,14 @@ impl Runtime {
         &self,
         caller: &Caller,
         session_id: &str,
-        sequence_after: Option<u64>,
+        after: Option<StreamVersion>,
         limit: Option<usize>,
     ) -> Result<Vec<Event>, RuntimeError> {
         self.authorize_session_read(session_id, caller).await?;
         let filter = EventFilter {
             aggregate_id: Some(session_id.to_string()),
             tenant_id: Some(caller.tenant_id().to_string()),
-            sequence_after,
+            after_stream_version: after,
             limit,
             ..Default::default()
         };

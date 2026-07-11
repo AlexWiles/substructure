@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing_subscriber::EnvFilter;
 
+use substructure_core::event_store::StreamVersion;
 use substructure_core::protocol::{
     ClientPayload, DecisionRequest, DecisionResponse, LlmResponse, SessionOwner,
 };
@@ -428,14 +429,14 @@ impl EmbeddedRuntime {
     /// optionally replays historical events with `sequence > N` first.
     #[napi(
         js_name = "streamSession",
-        ts_args_type = "tenantId: string, sessionId: string, turnId: string | undefined, sequenceAfter: number | undefined, onEvent: (event: string) => void"
+        ts_args_type = "tenantId: string, sessionId: string, turnId: string | undefined, afterStreamVersion: number | undefined, onEvent: (event: string) => void"
     )]
     pub async fn stream_session(
         &self,
         tenant_id: String,
         session_id: String,
         turn_id: Option<String>,
-        sequence_after: Option<i64>,
+        after_stream_version: Option<i64>,
         on_event: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
     ) -> Result<()> {
         use substructure_core::session::subscriptions::{
@@ -450,7 +451,7 @@ impl EmbeddedRuntime {
                 None => SubscriptionScope::All,
             },
         };
-        let cursor = sequence_after.map(|n| n.max(0) as u64);
+        let cursor = after_stream_version.map(|n| StreamVersion(n.max(0) as u64));
         let mut rx = self
             .inner
             .stream(spec, cursor)

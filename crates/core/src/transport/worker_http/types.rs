@@ -121,7 +121,7 @@ pub struct StreamSessionEventsParams {
     #[serde(default)]
     pub turn_id: Option<String>,
     #[serde(default)]
-    pub sequence_after: Option<u64>,
+    pub after_stream_version: Option<u64>,
 }
 
 #[cfg(test)]

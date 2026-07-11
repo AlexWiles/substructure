@@ -22,18 +22,11 @@ same version.
   default and tool payloads accept any JSON.
 - AG-UI dropped sub-agent delegations and misordered their marker. Each now
   renders as an in-order tool call resolving to the child's answer.
-- `pretty` couldn't tell parallel tool results apart. Each now carries a
-  `← name` header pairing it to its call.
-- No example showed webhook signature checks. Added `node-hono-signature`
-  verifying the request HMAC before deciding.
-- Python examples lagged the node-hono set. Rewrote `python-fast-api-*` to mirror
-  node-hono one-for-one, adding `-signature` and `-subagent`.
-- No example showed a client-side tool. Added `node-hono-client-tool`, whose
-  `handler: "client"` call yields the run for the client to settle.
+- A per-stream replay cursor was filtered against the global sequence column, so
+  `subs run` settles and SSE resume broke on any db with prior events. Split the
+  cursor into typed `GlobalPosition`/`StreamVersion`, each filtering its own column.
 - Python examples had no dependency manifest. Added a pinned `requirements.txt` to
   each `python-fast-api-*` example.
-- `python3 main.py` exited immediately since the file only defined the app. Added a
-  `__main__` block launching uvicorn so each `python-fast-api-*` example self-runs.
 - The wire protocol had no machine-readable spec. `schemas/protocol.schema.json`
   (draft 2020-12, via schemars) is generated from the protocol types; a test
   regenerates it and fails on drift.

@@ -6,6 +6,7 @@ use uuid::Uuid;
 use super::env::{EnvVars, LlmProviderArg};
 use super::pretty::PrettyPrinter;
 use super::{local, register_startup_worker, DEFAULT_TENANT};
+use crate::event_store::StreamVersion;
 use crate::protocol::{ClientInput, SessionOwner};
 use crate::session::events::EventPayload;
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
@@ -161,11 +162,12 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
     // Token deltas are transient; subscribe before acting so none are missed.
     let mut deltas = rt.subscribe_token_deltas(&caller, &session_id).await;
 
-    // Snapshot before acting: `base_seq` bounds the stream to this invocation's
-    // events. The active-turn lookup a resume/settle needs lives in the router.
+    // Snapshot before acting: `base_seq` (the session's current stream version)
+    // bounds the replay to this invocation's events. The active-turn lookup a
+    // resume/settle needs lives in the router.
     let base_seq = match rt.get_session(DEFAULT_TENANT, &session_id).await {
         Ok((snapshot, _)) => snapshot.stream_version,
-        Err(_) => 0,
+        Err(_) => StreamVersion(0),
     };
 
     let turn_id = rt

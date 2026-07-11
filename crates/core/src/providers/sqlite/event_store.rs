@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::event_store::{
     AggregateFilter, AggregateSort, AggregateSummary, AppendInput, Event, EventFilter, EventStore,
-    Snapshot, StoreError, Version,
+    GlobalPosition, Snapshot, StoreError, StreamVersion, Version,
 };
 use crate::span::SpanContext;
 
@@ -18,17 +18,17 @@ use super::{parse_dt, sea_params, spawn_err, SqliteDb};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS events (
-    global_sequence  INTEGER PRIMARY KEY AUTOINCREMENT,
+    global_position  INTEGER PRIMARY KEY AUTOINCREMENT,
     aggregate_type   TEXT NOT NULL,
     aggregate_id     TEXT NOT NULL,
     tenant_id        TEXT NOT NULL,
-    sequence         INTEGER NOT NULL,
+    stream_version   INTEGER NOT NULL,
     occurred_at      TEXT NOT NULL,
     data             TEXT NOT NULL,
     trace_id         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_events_occurred_at ON events (occurred_at);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_events_aggregate_seq ON events (tenant_id, aggregate_id, sequence);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_events_aggregate_seq ON events (tenant_id, aggregate_id, stream_version);
 CREATE INDEX IF NOT EXISTS idx_events_aggregate ON events (tenant_id, aggregate_id);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events (aggregate_type);
 CREATE INDEX IF NOT EXISTS idx_events_trace_id ON events (trace_id);
@@ -65,10 +65,11 @@ enum Snapshots {
 #[derive(Iden)]
 enum Events {
     Table,
-    GlobalSequence,
+    GlobalPosition,
     AggregateId,
     AggregateType,
     TenantId,
+    StreamVersion,
     OccurredAt,
     #[iden = "data"]
     Data,
@@ -81,7 +82,7 @@ struct StoredEvent {
     tenant_id: String,
     aggregate_type: String,
     aggregate_id: String,
-    sequence: u64,
+    stream_version: StreamVersion,
     span: SpanContext,
     occurred_at: DateTime<Utc>,
     payload: serde_json::Value,
@@ -100,7 +101,7 @@ impl StoredEvent {
             tenant_id: event.tenant_id.clone(),
             aggregate_type: event.aggregate_type.clone(),
             aggregate_id: event.aggregate_id.clone(),
-            sequence: event.sequence,
+            stream_version: event.stream_version,
             span: event.span.clone(),
             occurred_at: event.occurred_at,
             payload: event.payload.clone(),
@@ -111,14 +112,14 @@ impl StoredEvent {
         }
     }
 
-    fn into_event(self, position: u64) -> Event {
+    fn into_event(self, global_position: u64) -> Event {
         Event {
-            position,
+            global_position: GlobalPosition(global_position),
             id: self.id,
             tenant_id: self.tenant_id,
             aggregate_type: self.aggregate_type,
             aggregate_id: self.aggregate_id,
-            sequence: self.sequence,
+            stream_version: self.stream_version,
             span: self.span,
             occurred_at: self.occurred_at,
             payload: self.payload,
@@ -165,7 +166,7 @@ impl EventStore for SqliteEventStore {
 
         let mut with_positions = events;
         for (event, position) in with_positions.iter_mut().zip(positions.into_iter()) {
-            event.position = position;
+            event.global_position = GlobalPosition(position);
         }
 
         let _ = self.tx.send(StdArc::new(with_positions));
@@ -239,7 +240,7 @@ fn do_append(conn: &mut Connection, input: AppendInput) -> Result<Vec<u64>, Stor
 
         let rows = tx
             .execute(
-                "INSERT INTO events (aggregate_type, aggregate_id, tenant_id, sequence, occurred_at, data, trace_id)
+                "INSERT INTO events (aggregate_type, aggregate_id, tenant_id, stream_version, occurred_at, data, trace_id)
                  SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7
                  WHERE (
                      (?8 = 0 AND NOT EXISTS (SELECT 1 FROM snapshots WHERE tenant_id = ?3 AND aggregate_id = ?2))
@@ -252,7 +253,7 @@ fn do_append(conn: &mut Connection, input: AppendInput) -> Result<Vec<u64>, Stor
                     snap.aggregate_type,
                     aid,
                     snap.tenant_id,
-                    event.sequence,
+                    event.stream_version.0,
                     occurred_at,
                     data,
                     trace_id,
@@ -299,7 +300,7 @@ fn do_append(conn: &mut Connection, input: AppendInput) -> Result<Vec<u64>, Stor
             aid,
             snap.aggregate_type,
             snap.tenant_id,
-            snap.stream_version,
+            snap.stream_version.0,
             snapshot_data,
             snap.wake_at.map(|t| t.to_rfc3339()),
             snap.first_event_at.map(|t| t.to_rfc3339()),
@@ -347,7 +348,7 @@ fn do_load(conn: &Connection, tenant_id: &str, aggregate_id: &str) -> Result<Sna
         tenant_id,
         aggregate_type: agg_type,
         data,
-        stream_version,
+        stream_version: StreamVersion(stream_version),
         wake_at: wake_at_str.as_deref().and_then(parse_dt),
         first_event_at: first_str.as_deref().and_then(parse_dt),
         last_event_at: last_str.as_deref().and_then(parse_dt),
@@ -430,7 +431,7 @@ fn do_list_aggregates(
             aggregate_type: agg_type,
             tenant_id: tenant,
             wake_at: wake_at_str.as_deref().and_then(parse_dt),
-            stream_version: version,
+            stream_version: StreamVersion(version),
             first_event_at: first.as_deref().and_then(parse_dt),
             last_event_at: last.as_deref().and_then(parse_dt),
         });
@@ -441,11 +442,11 @@ fn do_list_aggregates(
 
 fn do_query_events(conn: &Connection, filter: EventFilter) -> Result<Vec<Event>, StoreError> {
     let (sql, values) = Query::select()
-        .column(Events::GlobalSequence)
+        .column(Events::GlobalPosition)
         .column(Events::Data)
         .from(Events::Table)
-        .apply_if(filter.after_position, |q, pos| {
-            q.and_where(Expr::col(Events::GlobalSequence).gt(pos as i64));
+        .apply_if(filter.after_global_position, |q, pos| {
+            q.and_where(Expr::col(Events::GlobalPosition).gt(pos.0 as i64));
         })
         .apply_if(filter.aggregate_id.as_ref(), |q, id| {
             q.and_where(Expr::col(Events::AggregateId).eq(id));
@@ -459,8 +460,8 @@ fn do_query_events(conn: &Connection, filter: EventFilter) -> Result<Vec<Event>,
         .apply_if(filter.trace_id.as_ref(), |q, v| {
             q.and_where(Expr::col(Events::TraceId).eq(v));
         })
-        .apply_if(filter.sequence_after, |q, seq| {
-            q.and_where(Expr::col(Events::GlobalSequence).gt(seq as i64));
+        .apply_if(filter.after_stream_version, |q, v| {
+            q.and_where(Expr::col(Events::StreamVersion).gt(v.0 as i64));
         })
         .apply_if(filter.occurred_after, |q, after| {
             q.and_where(Expr::col(Events::OccurredAt).gt(after.to_rfc3339()));
@@ -471,7 +472,7 @@ fn do_query_events(conn: &Connection, filter: EventFilter) -> Result<Vec<Event>,
         .apply_if(filter.limit, |q, n| {
             q.limit(n as u64);
         })
-        .order_by(Events::GlobalSequence, Order::Asc)
+        .order_by(Events::GlobalPosition, Order::Asc)
         .build(SqliteQueryBuilder);
 
     let params = sea_params(values);

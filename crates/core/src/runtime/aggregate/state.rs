@@ -6,6 +6,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::runtime::event_store::Event as StoreEvent;
+use crate::runtime::event_store::{GlobalPosition, StreamVersion};
 use crate::runtime::span::SpanContext;
 
 pub struct ApplyContext {
@@ -43,7 +44,7 @@ impl<R: AggregateState> DomainEvent<R> {
             id: raw.id,
             tenant_id: raw.tenant_id.clone(),
             aggregate_id: raw.aggregate_id.clone(),
-            sequence: raw.sequence,
+            sequence: raw.stream_version.0,
             span: raw.span.clone(),
             occurred_at: raw.occurred_at,
             payload,
@@ -69,12 +70,12 @@ impl<R: AggregateState> DomainEvent<R> {
             .transpose()?;
 
         Ok(StoreEvent {
-            position: 0,
+            global_position: GlobalPosition(0),
             id: self.id,
             tenant_id: self.tenant_id,
             aggregate_type: R::AGGREGATE_TYPE.to_string(),
             aggregate_id: self.aggregate_id,
-            sequence: self.sequence,
+            stream_version: StreamVersion(self.sequence),
             span: self.span,
             occurred_at: self.occurred_at,
             payload,

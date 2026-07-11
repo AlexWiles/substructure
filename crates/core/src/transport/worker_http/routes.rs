@@ -8,6 +8,7 @@ use std::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
+use crate::event_store::StreamVersion;
 use crate::protocol::SessionOwner;
 use crate::session::command::SessionError;
 use crate::session::decision::{EffectResultPayload, WorkKind};
@@ -314,7 +315,8 @@ pub async fn stream_session_events(
         },
     };
 
-    let event_rx = match state.runtime.stream(spec, params.sequence_after).await {
+    let after = params.after_stream_version.map(StreamVersion);
+    let event_rx = match state.runtime.stream(spec, after).await {
         Ok(rx) => rx,
         Err(e) => {
             return (

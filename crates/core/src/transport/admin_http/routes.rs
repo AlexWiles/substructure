@@ -8,7 +8,7 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::event_store::AggregateSort;
+use crate::event_store::{AggregateSort, StreamVersion};
 use crate::protocol::MessageTree;
 use crate::session::index::{SessionCursor, SessionFilter};
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
@@ -123,7 +123,7 @@ pub async fn get_session(
 
 #[derive(Debug, Deserialize)]
 pub struct SessionEventsParams {
-    pub sequence_after: Option<u64>,
+    pub after_stream_version: Option<u64>,
     pub limit: Option<usize>,
 }
 
@@ -135,7 +135,12 @@ pub async fn get_session_events(
 ) -> Response {
     match state
         .runtime
-        .read_session_events(&caller, &session_id, params.sequence_after, params.limit)
+        .read_session_events(
+            &caller,
+            &session_id,
+            params.after_stream_version.map(StreamVersion),
+            params.limit,
+        )
         .await
     {
         Ok(events) => Json(events).into_response(),
@@ -158,9 +163,9 @@ pub async fn stream_session_events(
         caller,
         scope: SubscriptionScope::All,
     };
-    // Admin endpoint defaults to full-history replay (sequence_after defaults to 0).
-    let sequence_after = Some(params.sequence_after.unwrap_or(0));
-    let rx = match state.runtime.stream(spec, sequence_after).await {
+    // Admin endpoint defaults to full-history replay (cursor defaults to 0).
+    let after = Some(StreamVersion(params.after_stream_version.unwrap_or(0)));
+    let rx = match state.runtime.stream(spec, after).await {
         Ok(rx) => rx,
         Err(e) => {
             return (
@@ -178,7 +183,7 @@ pub async fn stream_session_events(
             let data = serde_json::to_string(&event).unwrap_or_default();
             Ok::<_, std::convert::Infallible>(
                 SseEvent::default()
-                    .id(event.sequence.to_string())
+                    .id(event.stream_version.0.to_string())
                     .event(event_type)
                     .data(data),
             )

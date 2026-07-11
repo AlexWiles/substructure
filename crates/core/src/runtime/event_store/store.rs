@@ -11,18 +11,30 @@ use tokio::sync::broadcast;
 
 use crate::runtime::span::SpanContext;
 
+/// Monotonic position in the store-wide event log, across every aggregate.
+/// The global cursor: use it to read or resume the whole log in commit order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct GlobalPosition(pub u64);
+
+/// Monotonic version within a single aggregate's stream. The per-stream cursor:
+/// meaningful only alongside an `aggregate_id`, since each stream numbers from 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct StreamVersion(pub u64);
+
 /// The raw event envelope persisted by the store.
 ///
 /// Payload and derived are opaque `serde_json::Value`s. Domain code works
 /// with the typed `DomainEvent<R>` and converts at the boundary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
-    pub position: u64,
+    pub global_position: GlobalPosition,
     pub id: Uuid,
     pub tenant_id: String,
     pub aggregate_type: String,
     pub aggregate_id: String,
-    pub sequence: u64,
+    pub stream_version: StreamVersion,
     pub span: SpanContext,
     pub occurred_at: DateTime<Utc>,
     pub payload: serde_json::Value,
@@ -64,7 +76,7 @@ pub struct Snapshot {
     pub tenant_id: String,
     pub aggregate_type: String,
     pub data: serde_json::Value,
-    pub stream_version: u64,
+    pub stream_version: StreamVersion,
     pub wake_at: Option<DateTime<Utc>>,
     pub first_event_at: Option<DateTime<Utc>>,
     pub last_event_at: Option<DateTime<Utc>>,
@@ -105,19 +117,23 @@ pub struct AggregateSummary {
     pub aggregate_type: String,
     pub tenant_id: String,
     pub wake_at: Option<DateTime<Utc>>,
-    pub stream_version: u64,
+    pub stream_version: StreamVersion,
     pub first_event_at: Option<DateTime<Utc>>,
     pub last_event_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct EventFilter {
-    pub after_position: Option<u64>,
+    /// Global cursor: keep events whose `global_position` is greater. Reads the
+    /// whole log in commit order; needs no `aggregate_id`.
+    pub after_global_position: Option<GlobalPosition>,
     pub aggregate_id: Option<String>,
     pub aggregate_type: Option<String>,
     pub tenant_id: Option<String>,
     pub trace_id: Option<String>,
-    pub sequence_after: Option<u64>,
+    /// Per-stream cursor: keep events whose `stream_version` is greater. Only
+    /// unambiguous with `aggregate_id` set, since versions restart per stream.
+    pub after_stream_version: Option<StreamVersion>,
     pub occurred_after: Option<DateTime<Utc>>,
     pub occurred_before: Option<DateTime<Utc>>,
     pub limit: Option<usize>,

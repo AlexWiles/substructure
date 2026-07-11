@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::runtime::aggregate::{AggregateState, Caller, DomainEvent};
-use crate::runtime::event_store::{Event, EventFilter, EventStore};
+use crate::runtime::event_store::{Event, EventFilter, EventStore, StreamVersion};
 use crate::runtime::session::events::EventPayload;
 use crate::runtime::session::state::SessionState;
 
@@ -91,28 +91,31 @@ impl SessionSubscriptions {
     }
 
     /// Unified stream: live subscription, optionally preceded by historical
-    /// replay from `sequence_after`. Works for both Turn and All specs.
+    /// replay from `after` (a per-stream cursor). Works for both Turn and All specs.
     ///
-    /// - If `sequence_after` is `None`, yields live events only.
-    /// - If `sequence_after` is `Some(n)`, replays historical events with
-    ///   `sequence > n` first, then streams live (deduped against historical).
+    /// - If `after` is `None`, yields live events only.
+    /// - If `after` is `Some(v)`, replays historical events with
+    ///   `stream_version > v` first, then streams live (deduped against historical).
     /// - For Turn specs, auto-closes when the turn completes. If historical
     ///   replay already contains the TurnCompleted event, live is skipped.
     pub async fn stream(
         &self,
         spec: SessionSubscriptionSpec,
-        sequence_after: Option<u64>,
+        after: Option<StreamVersion>,
     ) -> mpsc::Receiver<Event> {
         // Subscribe live FIRST so we don't miss anything between historical
         // load and live attach.
         let live_rx = self.subscribe(spec.clone());
 
-        let historical = match sequence_after {
+        let historical = match after {
             Some(cursor) => self.load_historical(&spec, cursor).await,
             None => Vec::new(),
         };
 
-        let max_seq = historical.last().map(|e| e.sequence).unwrap_or(0);
+        let max_seq = historical
+            .last()
+            .map(|e| e.stream_version)
+            .unwrap_or(StreamVersion(0));
 
         let (tx, rx) = mpsc::channel(64);
 
@@ -128,7 +131,7 @@ impl SessionSubscriptions {
             }
             let mut live = live_rx;
             while let Some(event) = live.recv().await {
-                if event.sequence <= max_seq {
+                if event.stream_version <= max_seq {
                     continue;
                 }
                 if tx.send(event).await.is_err() {
@@ -142,14 +145,14 @@ impl SessionSubscriptions {
     async fn load_historical(
         &self,
         spec: &SessionSubscriptionSpec,
-        sequence_after: u64,
+        after: StreamVersion,
     ) -> Vec<Event> {
         let events = self
             .store
             .query_events(&EventFilter {
                 tenant_id: Some(spec.caller.tenant_id().to_string()),
                 aggregate_id: Some(spec.root_session_id.clone()),
-                sequence_after: Some(sequence_after),
+                after_stream_version: Some(after),
                 ..Default::default()
             })
             .await

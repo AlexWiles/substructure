@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use xxhash_rust::xxh3::xxh3_64;
 
-use crate::runtime::event_store::{Event, EventFilter, EventStore};
+use crate::runtime::event_store::{Event, EventFilter, EventStore, GlobalPosition};
 
 #[derive(Debug, Clone)]
 pub struct ProcessorCheckpoint {
@@ -147,7 +147,7 @@ impl EventProcessorRunner {
             let events = match self
                 .store
                 .query_events(&EventFilter {
-                    after_position: Some(checkpoint.position),
+                    after_global_position: Some(GlobalPosition(checkpoint.position)),
                     limit: Some(self.config.batch_size),
                     ..Default::default()
                 })
@@ -200,7 +200,7 @@ impl EventProcessorRunner {
                     tracing::error!(
                         processor = processor_name,
                         shard_id = self.config.shard_id,
-                        event_position = event.position,
+                        event_position = event.global_position.0,
                         error = %err,
                         "processor apply failed"
                     );
@@ -219,7 +219,7 @@ impl EventProcessorRunner {
                 }
             }
 
-            committable_position = committable_position.max(event.position);
+            committable_position = committable_position.max(event.global_position.0);
         }
 
         if committable_position == checkpoint.position {

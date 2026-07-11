@@ -95,6 +95,7 @@ fn content_text(content: Option<Content>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event_store::{GlobalPosition, StreamVersion};
     use crate::protocol::{NewMessage, Node, ToolCall, ToolCallFunction};
     use crate::span::SpanContext;
     use chrono::{DateTime, Utc};
@@ -259,12 +260,12 @@ mod tests {
     fn lifecycle_event(id: u128, payload: Value) -> Event {
         let ts = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
         Event {
-            position: 0,
+            global_position: GlobalPosition(0),
             id: Uuid::from_u128(id),
             tenant_id: "t".into(),
             aggregate_type: "session".into(),
             aggregate_id: "s".into(),
-            sequence: id as u64,
+            stream_version: StreamVersion(id as u64),
             span: SpanContext::root(),
             occurred_at: ts,
             payload,
