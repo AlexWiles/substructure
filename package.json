@@ -17,7 +17,9 @@
     "release": "scripts/release.sh"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["lefthook"]
+    "onlyBuiltDependencies": [
+      "lefthook"
+    ]
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.10",

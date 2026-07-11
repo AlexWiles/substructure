@@ -30,7 +30,7 @@ use uuid::Uuid;
 use super::state::LlmCallState;
 use super::tool_contract::{declared_tool, DeclaredTool};
 use crate::protocol::{
-    AgentConfig, Content, DecisionAction, DecisionProposal, DecisionTrigger, DraftMessage,
+    AgentConfig, Content, DecisionAction, DecisionResponse, DecisionTrigger, DraftMessage,
     ErrorCode, LlmHandler, Message, RetryPolicy, Role, ToolCall, ToolHandler,
 };
 
@@ -41,7 +41,7 @@ pub fn propose(
     pending_calls: usize,
     config: Option<&AgentConfig>,
     decision_id: &str,
-) -> Option<DecisionProposal> {
+) -> Option<DecisionResponse> {
     match trigger {
         // The engine can now author the agent's identity: record the client's
         // view and prompt the model per the config. No config ⇒ None (fail-fast).
@@ -126,7 +126,7 @@ fn llm_finished(
     transcript: &[Message],
     config: Option<&AgentConfig>,
     decision_id: &str,
-) -> DecisionProposal {
+) -> DecisionResponse {
     let tool_calls = message.tool_calls.as_deref().unwrap_or_default();
     let actions = if tool_calls.is_empty() {
         vec![DecisionAction::Done {
@@ -138,9 +138,10 @@ fn llm_finished(
             .flat_map(|call| route_tool_call(call, config, decision_id))
             .collect()
     };
-    DecisionProposal {
+    DecisionResponse {
         messages: appended(transcript, message.clone()),
         actions,
+        ..Default::default()
     }
 }
 
@@ -217,8 +218,8 @@ fn child_session_id(decision_id: &str, tool_call_id: &str) -> String {
 
 /// Record the client's view and prompt the model per the config: model, tools,
 /// stream, and retry from the config, with `[system?] + view` as the prompt.
-fn client_turn(view: &[DraftMessage], config: &AgentConfig) -> DecisionProposal {
-    DecisionProposal {
+fn client_turn(view: &[DraftMessage], config: &AgentConfig) -> DecisionResponse {
+    DecisionResponse {
         messages: view.to_vec(),
         actions: vec![DecisionAction::CallLlm {
             id: None,
@@ -232,6 +233,7 @@ fn client_turn(view: &[DraftMessage], config: &AgentConfig) -> DecisionProposal 
             retry: Some(config.retry.clone().unwrap_or_else(RetryPolicy::no_retry)),
             handler: LlmHandler::Server,
         }],
+        ..Default::default()
     }
 }
 
@@ -245,13 +247,13 @@ fn llm_failed(
     code: &Option<ErrorCode>,
     truncated: bool,
     transcript: &[Message],
-) -> DecisionProposal {
+) -> DecisionResponse {
     let reason = match error {
         Some(error) => format!("llm call failed: {error}"),
         None if truncated => "llm call truncated".to_string(),
         None => "llm call failed".to_string(),
     };
-    DecisionProposal {
+    DecisionResponse {
         messages: recorded(transcript),
         actions: vec![DecisionAction::Interrupt {
             interrupt_id: None,
@@ -264,6 +266,7 @@ fn llm_failed(
                 "truncated": truncated,
             }),
         }],
+        ..Default::default()
     }
 }
 
@@ -271,8 +274,8 @@ fn llm_failed(
 /// the failure flows back to the model, which can repair the call. A worker
 /// that treats `arguments` as an arbitrary string channel, or serves names it
 /// never declared, ignores the proposal and answers itself.
-fn tool_error(id: &str, error: String, transcript: &[Message]) -> DecisionProposal {
-    DecisionProposal {
+fn tool_error(id: &str, error: String, transcript: &[Message]) -> DecisionResponse {
+    DecisionResponse {
         messages: recorded(transcript),
         actions: vec![DecisionAction::ToolError {
             id: Some(id.to_string()),
@@ -282,6 +285,7 @@ fn tool_error(id: &str, error: String, transcript: &[Message]) -> DecisionPropos
             code: None,
             detail: None,
         }],
+        ..Default::default()
     }
 }
 
@@ -296,7 +300,7 @@ fn tool_finished(
     transcript: &[Message],
     llm_calls: &HashMap<String, LlmCallState>,
     pending_calls: usize,
-) -> Option<DecisionProposal> {
+) -> Option<DecisionResponse> {
     let tool_message = DraftMessage {
         id: None,
         role: Role::Tool,
@@ -310,9 +314,10 @@ fn tool_finished(
     } else {
         vec![reissue(id, &tool_message, transcript, llm_calls)?]
     };
-    Some(DecisionProposal {
+    Some(DecisionResponse {
         messages: appended(transcript, tool_message),
         actions,
+        ..Default::default()
     })
 }
 
@@ -460,7 +465,7 @@ mod tests {
         }
     }
 
-    fn reissued_request(proposal: &DecisionProposal) -> (LlmRequest, bool, LlmHandler) {
+    fn reissued_request(proposal: &DecisionResponse) -> (LlmRequest, bool, LlmHandler) {
         match &proposal.actions[..] {
             [DecisionAction::CallLlm {
                 id: None,
@@ -640,7 +645,7 @@ mod tests {
         assert_eq!(request.model, "test-model");
     }
 
-    fn expect_tool_error(p: &DecisionProposal) -> (&str, &str) {
+    fn expect_tool_error(p: &DecisionResponse) -> (&str, &str) {
         match &p.actions[..] {
             [DecisionAction::ToolError {
                 id: Some(id),

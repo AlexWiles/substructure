@@ -23,6 +23,7 @@ pub enum Role {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(inline)]
 pub struct ToolCallFunction {
     pub name: String,
     pub arguments: String,
@@ -39,23 +40,27 @@ pub struct ToolCall {
 // Multimodal content parts (OpenAI/OpenRouter wire format).
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(inline)]
 pub struct ImageUrl {
     pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(inline)]
 pub struct FileData {
     pub filename: String,
     pub file_data: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(inline)]
 pub struct AudioData {
     pub data: String,
     pub format: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(inline)]
 pub struct VideoUrl {
     pub url: String,
 }
@@ -87,6 +92,7 @@ pub enum ContentPart {
 /// Serializes as a raw string or array respectively (untagged).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
+#[schemars(inline)]
 pub enum Content {
     Text(String),
     Parts(Vec<ContentPart>),
@@ -128,6 +134,7 @@ pub struct DraftMessage {
 // ── Message tree ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(inline)]
 pub struct NewMessage {
     pub message: Message,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -135,6 +142,7 @@ pub struct NewMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(inline)]
 pub struct NewControl {
     pub control: Control,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -174,6 +182,7 @@ pub enum InterruptOrigin {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[schemars(inline)]
 pub enum Node {
     Message(NewMessage),
     Control(NewControl),
@@ -497,6 +506,7 @@ pub enum ToolInput {
 
 /// The body of a `client.message`: one message, optionally streamed.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(inline)]
 pub struct ClientMessage {
     pub message: DraftMessage,
     #[serde(default)]
@@ -505,6 +515,7 @@ pub struct ClientMessage {
 
 /// The body of a `client.messages`: the client's full conversation view, optionally streamed.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(inline)]
 pub struct ClientMessages {
     pub messages: Vec<DraftMessage>,
     #[serde(default)]
@@ -513,6 +524,7 @@ pub struct ClientMessages {
 
 /// The payload of a `client.action`: a named action with optional JSON args.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(inline)]
 pub struct ClientAction {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -746,8 +758,7 @@ pub enum DecisionAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         name: String,
-        /// Any JSON value; a non-string is canonicalized to its JSON text at
-        /// the resolve seam.
+        // Any JSON value; non-strings are canonicalized to JSON text.
         arguments: Value,
         /// Omitted ⇒ `worker`.
         #[serde(default)]
@@ -762,8 +773,7 @@ pub enum DecisionAction {
         id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attempt: Option<u32>,
-        /// Any JSON value; a non-string is canonicalized to its JSON text at
-        /// the resolve seam.
+        // Any JSON value; non-strings are canonicalized to JSON text.
         result: Value,
     },
     /// `id` omitted ⇒ the effect named by the answering `llm.execute` trigger.
@@ -835,16 +845,10 @@ pub enum DecisionAction {
     },
 }
 
-/// The decision an SDK agent loop would author for a trigger. `messages` is the
-/// full conversation view with the trigger's implied message appended, so echoing
-/// it reconciles as a plain append.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct DecisionProposal {
-    pub messages: Vec<DraftMessage>,
-    pub actions: Vec<DecisionAction>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+/// A decision: the messages/actions to author, plus optional state/agent writes.
+/// The worker returns one; the engine also proposes one as the default
+/// continuation (`DecisionRequest::proposed`), which the worker echoes or amends.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct DecisionResponse {
     #[serde(default)]
     pub messages: Vec<DraftMessage>,
@@ -867,7 +871,7 @@ pub struct DecisionRequest<'a> {
     pub trigger: &'a DecisionTrigger,
     /// The engine's default continuation for `trigger` (`null` when it needs
     /// worker knowledge). Advisory: accept by echoing it as the decision.
-    pub proposed: &'a Option<DecisionProposal>,
+    pub proposed: &'a Option<DecisionResponse>,
     pub state: &'a WorkerState,
     /// The agent config resolved for the active path (`null` when none is set).
     pub agent: &'a Option<AgentConfig>,

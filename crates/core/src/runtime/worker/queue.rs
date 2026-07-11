@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::{
-    AgentConfig, DecisionProposal, DecisionTrigger, DraftMessage, Effect, Message, MessageTree,
+    AgentConfig, DecisionResponse, DecisionTrigger, DraftMessage, Effect, Message, MessageTree,
     SessionOwner, WorkerState,
 };
 use crate::runtime::aggregate::Caller;
@@ -22,7 +22,7 @@ pub struct WorkerDecisionRequest {
     /// trigger needs worker knowledge. Advisory — the worker accepts by echoing
     /// it (amended or verbatim) as its decision.
     #[serde(default)]
-    pub proposed: Option<DecisionProposal>,
+    pub proposed: Option<DecisionResponse>,
     pub state: WorkerState,
     /// The agent config resolved for the active path; `None` when none is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]

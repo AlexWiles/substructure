@@ -25,11 +25,12 @@ same version.
 - A per-stream replay cursor was filtered against the global sequence column, so
   `subs run` settles and SSE resume broke on any db with prior events. Split the
   cursor into typed `GlobalPosition`/`StreamVersion`, each filtering its own column.
-- Python examples had no dependency manifest. Added a pinned `requirements.txt` to
-  each `python-fast-api-*` example.
 - The wire protocol had no machine-readable spec. `schemas/protocol.schema.json`
   (draft 2020-12, via schemars) is generated from the protocol types; a test
   regenerates it and fails on drift.
+- The engine's `proposed` continuation was a separate `DecisionProposal` type, so
+  echoing it back as a `DecisionResponse` was a type mismatch. Merged the two —
+  `proposed` is now the `DecisionResponse` the worker echoes or replaces.
 
 ### Changed
 
