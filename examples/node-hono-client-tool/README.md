@@ -18,8 +18,8 @@ node server.mjs
 **2. Drive a session with the CLI.** Reuse one `--session` across turns.
 
 Ask something location-dependent. The model calls `get_location`, and the run
-yields to the client with the call pending. The `TOOL_CALL_START` carries
-its `toolCallId`:
+yields to the client with the call pending. Pretty output prints the pending
+call with its id and a ready-to-edit settle input:
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
@@ -27,11 +27,13 @@ subs run \
     --worker-url http://localhost:4444 \
     --agent my-agent \
     --provider anthropic \
+    --output pretty \
     --session $(uuidgen) \
     --input '{"type":"client.message","message":{"role":"user","content": "recommend a coffee shop near me"}}'
 ```
 
-Copy the continuation message and replace the input with:
+Take the printed `continue this session with` command and swap its input for the
+settle line, filling in a location:
 
 ```sh
 --input '{"type":"tool.result","id":"<toolCallId>","result":"Lisbon"}'

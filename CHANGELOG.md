@@ -37,6 +37,9 @@ same version.
 - No typed Python example. Added `python-fast-api-pydantic-chat-with-tools`: a
   FastAPI tools worker whose Pydantic models are generated from the schema, so
   requests are validated at the boundary.
+- No assistant-ui web example. Added `node-hono-assistant-ui`: a Hono worker plus
+  an assistant-ui `<Thread>` on the AG-UI runtime, streaming from the engine's
+  native AG-UI endpoint.
 - The worker contract had no OpenAPI form for server-stub generators, validating
   proxies, and rendered docs. `schemas/worker.openapi.json` (3.1) is generated
   beside the JSON Schema: one `POST /`, components pruned to the worker surface.
