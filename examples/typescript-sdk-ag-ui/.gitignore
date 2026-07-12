@@ -1,5 +1,0 @@
-.output
-dist
-.wrangler
-src/routeTree.gen.ts
-.tanstack
