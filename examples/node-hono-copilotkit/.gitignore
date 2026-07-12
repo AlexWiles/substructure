@@ -1,0 +1,8 @@
+# Dependencies
+node_modules/
+
+# Build output
+web/dist/
+
+# Environment variables
+.env

@@ -30,8 +30,8 @@ use uuid::Uuid;
 use super::state::LlmCallState;
 use super::tool_contract::{declared_tool, DeclaredTool};
 use crate::protocol::{
-    AgentConfig, Content, DecisionAction, DecisionResponse, DecisionTrigger, DraftMessage,
-    ErrorCode, Handler, Message, RetryPolicy, Role, ToolCall,
+    AgentConfig, ClientContext, Content, DecisionAction, DecisionResponse, DecisionTrigger,
+    DraftMessage, ErrorCode, Handler, Message, RetryPolicy, Role, ToolCall,
 };
 
 pub fn propose(
@@ -45,9 +45,9 @@ pub fn propose(
     match trigger {
         // The engine can now author the agent's identity: record the client's
         // view and prompt the model per the config. No config ⇒ None (fail-fast).
-        DecisionTrigger::ClientTranscript { messages, .. } => {
-            config.map(|c| client_turn(messages, c))
-        }
+        DecisionTrigger::ClientTranscript {
+            messages, client, ..
+        } => config.map(|c| client_turn(messages, c, client)),
         DecisionTrigger::LlmFinished {
             ok: true,
             message: Some(message),
@@ -220,22 +220,37 @@ fn child_session_id(decision_id: &str, tool_call_id: &str) -> String {
 }
 
 /// Record the client's view and prompt the model per the config: model, tools,
-/// stream, and retry from the config, with `[system?] + view` as the prompt.
-fn client_turn(view: &[DraftMessage], config: &AgentConfig) -> DecisionResponse {
+/// stream, and retry from the config, with `[system?] + view` as the prompt. The
+/// run's client-declared tools are layered onto the config by default; when that
+/// changes the tool set the merged config rides along as an `agent` write, so
+/// echoing the proposal both runs the turn and persists the tools for routing.
+fn client_turn(
+    view: &[DraftMessage],
+    config: &AgentConfig,
+    client: &ClientContext,
+) -> DecisionResponse {
+    let merged = config.with_client_tools(&client.tools);
+    let effective = merged.as_ref().unwrap_or(config);
     DecisionResponse {
         messages: view.to_vec(),
         actions: vec![DecisionAction::CallLlm {
             id: None,
-            model: Some(config.model.clone()),
-            messages: Some(config.prompt_for(view)),
-            tools: config.tools_as_llm(),
+            model: Some(effective.model.clone()),
+            messages: Some(effective.prompt_for(view)),
+            tools: effective.tools_as_llm(),
             temperature: None,
             max_completion_tokens: None,
             reasoning: None,
-            stream: Some(config.stream),
-            retry: Some(config.retry.clone().unwrap_or_else(RetryPolicy::no_retry)),
+            stream: Some(effective.stream),
+            retry: Some(
+                effective
+                    .retry
+                    .clone()
+                    .unwrap_or_else(RetryPolicy::no_retry),
+            ),
             handler: Handler::Server,
         }],
+        agent: merged,
         ..Default::default()
     }
 }
@@ -836,6 +851,7 @@ mod tests {
             DecisionTrigger::ClientTranscript {
                 messages: vec![],
                 new_from: 0,
+                client: ClientContext::default(),
             },
             DecisionTrigger::ToolExecute {
                 id: "tc-1".to_string(),
@@ -897,6 +913,7 @@ mod tests {
         let trigger = DecisionTrigger::ClientTranscript {
             messages: view.clone(),
             new_from: 0,
+            client: ClientContext::default(),
         };
         let p = propose(&trigger, &[], &HashMap::new(), 0, Some(&cfg), "d0")
             .expect("config ⇒ a proposal");
@@ -932,11 +949,57 @@ mod tests {
     }
 
     #[test]
+    fn client_transcript_layers_run_tools_onto_the_proposal() {
+        let view = vec![DraftMessage::from(msg("u1", Role::User, "hi"))];
+        let cfg = agent_cfg();
+        let client = ClientContext {
+            tools: vec![AgentTool {
+                name: "get_tz".to_string(),
+                description: String::new(),
+                input: None,
+                output: None,
+                handler: Some(Handler::Client),
+            }],
+            ..Default::default()
+        };
+        let trigger = DecisionTrigger::ClientTranscript {
+            messages: view.clone(),
+            new_from: 0,
+            client,
+        };
+        let p = propose(&trigger, &[], &HashMap::new(), 0, Some(&cfg), "d0")
+            .expect("config ⇒ a proposal");
+        // The run's tool rides along as an agent write, so echoing persists it for routing.
+        let agent = p.agent.as_ref().expect("a new tool ⇒ an agent write");
+        assert!(
+            agent.tool("get_tz").is_some(),
+            "run tool merged into the config"
+        );
+        // ...and the proposed llm.call offers it to the model.
+        match &p.actions[..] {
+            [DecisionAction::CallLlm { tools, .. }] => {
+                let names: Vec<_> = tools
+                    .as_ref()
+                    .expect("tools offered")
+                    .iter()
+                    .map(|t| t.name.as_str())
+                    .collect();
+                assert!(
+                    names.contains(&"get_tz"),
+                    "offered to the model; got {names:?}"
+                );
+            }
+            other => panic!("expected one llm.call; got {other:?}"),
+        }
+    }
+
+    #[test]
     fn no_config_still_fails_fast_on_client_messages() {
         let view = vec![DraftMessage::from(msg("u1", Role::User, "hi"))];
         let trigger = DecisionTrigger::ClientTranscript {
             messages: view,
             new_from: 0,
+            client: ClientContext::default(),
         };
         assert!(propose(&trigger, &[], &HashMap::new(), 0, None, "d0").is_none());
     }

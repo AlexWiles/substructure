@@ -91,6 +91,25 @@
         ],
         "type": "object"
       },
+      "ClientContext": {
+        "additionalProperties": false,
+        "description": "Inputs a client declares on its run (the AG-UI `tools`/`context`/`state`/\n`forwardedProps`), forwarded to the worker on the `client.messages` decision.\n`tools` are the browser's frontend tools, normalized to client-handled\n[`AgentTool`]s; the engine layers them onto the proposed config by default, and\nthe worker may override (e.g. whitelist) by returning its own `agent`.",
+        "properties": {
+          "context": {
+            "items": {},
+            "type": "array"
+          },
+          "forwarded_props": {},
+          "state": {},
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/AgentTool"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
       "Content": {
         "anyOf": [
           {
@@ -766,6 +785,10 @@
           {
             "additionalProperties": false,
             "properties": {
+              "client": {
+                "$ref": "#/components/schemas/ClientContext",
+                "description": "Inputs the client declared on its run; the engine layers `client.tools`\nonto the proposed config by default."
+              },
               "messages": {
                 "items": {
                   "$ref": "#/components/schemas/DraftMessage"

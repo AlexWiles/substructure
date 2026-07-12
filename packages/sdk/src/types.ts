@@ -279,6 +279,26 @@ export type LlmOutcome =
       }
     | { error: string; code?: string; detail?: unknown; message?: never };
 
+/** A tool a client declares on its run (AG-UI `tools`, normalized to the
+ *  client-handled wire tool shape). */
+export interface ClientTool {
+    name: string;
+    description?: string;
+    input?: unknown;
+    output?: unknown;
+    handler?: ToolHandler;
+}
+
+/** Inputs a client declares on its run (the AG-UI `tools`/`context`/`state`/
+ *  `forwardedProps`), forwarded to the worker on `client.messages`. The engine
+ *  layers `tools` onto the proposed config by default; a worker may override. */
+export interface ClientContext {
+    tools?: ClientTool[];
+    context?: unknown[];
+    state?: unknown;
+    forwarded_props?: unknown;
+}
+
 /** What a decision's `trigger` carries. A `sub_agent.finished`'s `id` is the
  *  tool call it answers; `session_id` is the child session. */
 export type DecisionTrigger =
@@ -287,6 +307,9 @@ export type DecisionTrigger =
           type: "client.messages";
           messages: MessageInput[];
           new_from: number;
+          /** Inputs the client declared on its run; the engine layers `client.tools`
+           *  onto the proposal by default. */
+          client?: ClientContext;
       }
     | ({ type: "client.action" } & ClientAction)
     | {

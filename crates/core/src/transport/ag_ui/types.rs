@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use crate::protocol::{Content, DraftMessage, Role, ToolCall};
+use crate::protocol::{AgentTool, ClientContext, Content, DraftMessage, Handler, Role, ToolCall};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -10,19 +10,27 @@ pub struct RunAgentInput {
     #[serde(default)]
     pub messages: Vec<AgUiMessage>,
     #[serde(default)]
-    #[allow(dead_code)]
     pub state: Option<serde_json::Value>,
     #[serde(default)]
-    #[allow(dead_code)]
-    pub tools: Vec<serde_json::Value>,
+    pub tools: Vec<AgUiTool>,
     #[serde(default)]
-    #[allow(dead_code)]
     pub context: Vec<serde_json::Value>,
     #[serde(default)]
-    #[allow(dead_code)]
     pub forwarded_props: Option<serde_json::Value>,
     #[serde(default)]
     pub resume: Vec<ResumeEntry>,
+}
+
+/// A frontend tool a client declares on its run: `{name, description, parameters}`
+/// (AG-UI shape). `parameters` is the JSON Schema for its arguments.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgUiTool {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub parameters: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -89,6 +97,28 @@ impl RunAgentInput {
                 })
             })
             .collect()
+    }
+
+    /// The client-declared run inputs the worker sees on `client.messages`. Each
+    /// frontend tool becomes a client-handled [`AgentTool`] (`parameters` → `input`);
+    /// context/state/forwardedProps pass through verbatim.
+    pub fn client_context(&self) -> ClientContext {
+        ClientContext {
+            tools: self
+                .tools
+                .iter()
+                .map(|t| AgentTool {
+                    name: t.name.clone(),
+                    description: t.description.clone(),
+                    input: t.parameters.clone(),
+                    output: None,
+                    handler: Some(Handler::Client),
+                })
+                .collect(),
+            context: self.context.clone(),
+            state: self.state.clone(),
+            forwarded_props: self.forwarded_props.clone(),
+        }
     }
 }
 
@@ -174,5 +204,42 @@ mod tests {
         assert_eq!(input.resume[0].payload, Some(json!({"approved": true})));
         assert_eq!(input.resume[1].status, ResumeStatus::Cancelled);
         assert!(input.resume[1].payload.is_none());
+    }
+
+    #[test]
+    fn client_context_normalizes_frontend_tools_and_passes_context_through() {
+        let input: RunAgentInput = serde_json::from_value(json!({
+            "threadId": "t1", "runId": "r1",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{
+                "name": "get_timezone",
+                "description": "the browser's time zone",
+                "parameters": {"type": "object", "properties": {}},
+            }],
+            "context": [{"description": "system", "value": "be nice"}],
+            "state": {"count": 1},
+            "forwardedProps": {"a": true},
+        }))
+        .unwrap();
+        let cc = input.client_context();
+        assert_eq!(cc.tools.len(), 1);
+        let tool = &cc.tools[0];
+        assert_eq!(tool.name, "get_timezone");
+        assert_eq!(
+            tool.handler,
+            Some(Handler::Client),
+            "frontend ⇒ client-handled"
+        );
+        assert_eq!(
+            tool.input,
+            Some(json!({"type": "object", "properties": {}})),
+            "AG-UI `parameters` ⇒ AgentTool `input`"
+        );
+        assert_eq!(
+            cc.context,
+            vec![json!({"description": "system", "value": "be nice"})]
+        );
+        assert_eq!(cc.state, Some(json!({"count": 1})));
+        assert_eq!(cc.forwarded_props, Some(json!({"a": true})));
     }
 }

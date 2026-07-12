@@ -58,6 +58,30 @@ impl AgentConfig {
         }
     }
 
+    /// This config with the run's client-declared tools added: each `client_tools`
+    /// entry whose name isn't already taken (by a tool or sub-agent) is appended.
+    /// `None` when nothing is added, so a steady-state turn needn't rewrite the
+    /// config. Additive only — existing tools are never removed or replaced, so a
+    /// worker-declared tool always wins its name and browser tools accumulate.
+    pub fn with_client_tools(&self, client_tools: &[AgentTool]) -> Option<AgentConfig> {
+        let mut tools = self.tools.clone();
+        for t in client_tools {
+            let taken = tools.iter().any(|e| e.name == t.name)
+                || self.sub_agents.iter().any(|s| s.id == t.name);
+            if !taken {
+                tools.push(t.clone());
+            }
+        }
+        if tools.len() == self.tools.len() {
+            None
+        } else {
+            Some(AgentConfig {
+                tools,
+                ..self.clone()
+            })
+        }
+    }
+
     pub fn tool(&self, tool_name: &str) -> Option<&AgentTool> {
         self.tools.iter().find(|t| t.name == tool_name)
     }
@@ -161,6 +185,52 @@ mod tests {
         assert_eq!(
             sub("researcher", "Find sources").to_llm_tool().description,
             "Find sources"
+        );
+    }
+
+    #[test]
+    fn with_client_tools_appends_new_tools_and_is_idempotent() {
+        let cfg = config(vec![function_tool("get_time", None)], vec![]);
+        let client = [function_tool("get_tz", Some(Handler::Client))];
+        let merged = cfg
+            .with_client_tools(&client)
+            .expect("a new tool ⇒ a rewrite");
+        assert_eq!(
+            merged
+                .tools
+                .iter()
+                .map(|t| t.name.clone())
+                .collect::<Vec<_>>(),
+            ["get_time", "get_tz"],
+            "client tools appended after config tools"
+        );
+        assert_eq!(
+            merged.tool("get_tz").and_then(|t| t.handler),
+            Some(Handler::Client)
+        );
+        assert!(
+            merged.with_client_tools(&client).is_none(),
+            "already present ⇒ no rewrite"
+        );
+        assert!(
+            cfg.with_client_tools(&[]).is_none(),
+            "nothing declared ⇒ no rewrite"
+        );
+    }
+
+    #[test]
+    fn with_client_tools_never_shadows_a_taken_name() {
+        let cfg = config(
+            vec![function_tool("confirm", Some(Handler::Client))],
+            vec![sub("researcher", "")],
+        );
+        let client = [
+            function_tool("confirm", Some(Handler::Client)),
+            function_tool("researcher", Some(Handler::Client)),
+        ];
+        assert!(
+            cfg.with_client_tools(&client).is_none(),
+            "names taken by a tool or sub-agent are skipped"
         );
     }
 

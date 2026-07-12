@@ -3,8 +3,7 @@
 A chat agent with a web frontend built on [assistant-ui](https://www.assistant-ui.com),
 served with [Hono](https://hono.dev). The browser talks to substructure's native
 **AG-UI** endpoint through assistant-ui's
-[AG-UI runtime](https://www.assistant-ui.com/docs/runtimes/ag-ui/overview) — no
-translation layer in between.
+[AG-UI runtime](https://www.assistant-ui.com/docs/runtimes/ag-ui/overview)
 
 `server.ts` does three things: it's the agent worker (the engine calls it), it mints a
 short-lived browser token, and it serves the built UI. The browser (`web/`) renders a
@@ -36,15 +35,11 @@ streams in and both tool calls render inline as cards.
 
 Two tools, one of each kind:
 
-- **`get_current_time`** runs on the **worker** (server-side): the engine sends a
-  `tool.execute`, `decide()` runs it, returns the result.
-- **`get_timezone`** runs in the **browser** (client-side): the worker only declares it
-  (`handler: "client"`, no `exec`); the engine suspends the turn while assistant-ui runs the
-  matching toolkit tool in `web/chat.tsx`, then resumes with its result. Only the
-  browser knows the user's time zone, so this has to run there.
+- **`get_current_time`** runs on the **worker** (server-side) and is declared in the worker.
+- **`get_timezone`** runs in the **browser** (client-side) and is declared in the client.
 
-`ToolFallback` in `web/chat.tsx` renders a generic card for every tool call, whichever side
-runs it.
+To restrict which client tools are honored, `decide()` can handle `client.messages` and return
+its own `agent` config with a filtered `trigger.client.tools` to override the default proposal.
 
 ## How it works
 
@@ -55,11 +50,6 @@ runs it.
   `…/api/client/ag-ui/agents/chat-agent/run`; `useAgUiRuntime({ agent })` turns the AG-UI
   SSE stream into an assistant-ui runtime; `<Thread>` renders it. The frontend tool is a
   `defineToolkit` entry registered with `useAui({ tools: Tools({ toolkit }) })`.
-
-The browser streams from the engine **directly**, so the engine must be reachable from the
-browser (dev CORS is already open). The API key never leaves the server — only the
-short-lived token does. Set `SUBSTRUCTURE_PUBLIC_URL` when the browser-facing engine URL
-differs from the server-side one.
 
 ## Regenerate types
 

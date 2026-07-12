@@ -90,6 +90,25 @@
       ],
       "type": "object"
     },
+    "ClientContext": {
+      "additionalProperties": false,
+      "description": "Inputs a client declares on its run (the AG-UI `tools`/`context`/`state`/\n`forwardedProps`), forwarded to the worker on the `client.messages` decision.\n`tools` are the browser's frontend tools, normalized to client-handled\n[`AgentTool`]s; the engine layers them onto the proposed config by default, and\nthe worker may override (e.g. whitelist) by returning its own `agent`.",
+      "properties": {
+        "context": {
+          "items": {},
+          "type": "array"
+        },
+        "forwarded_props": {},
+        "state": {},
+        "tools": {
+          "items": {
+            "$ref": "#/$defs/AgentTool"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "ClientInput": {
       "description": "Everything a client can send on the input surface: submit a message / a full view / a\nnamed action, resume an interrupt, or settle a client tool. A flat, internally-tagged\nunion — its six tags produce serde's \"unknown variant, expected one of …\" error for\nfree. `Runtime::handle_client_input` is the single seam that dispatches it (mirroring\n`resolve_response` on the worker side).\n\nAddressing lives where it is meaningful, not in a shared envelope: `agent_id` (routes\nthe turn, creating the session if new) and the optional idempotency `turn_id` are\nfields of the three submit variants only. A resume/settle addresses an interrupt/effect\nid and continues whatever turn is active, so it carries neither — misplacing them is\nunrepresentable rather than rejected. `session_id` is the one universal address and\nrides the envelope. A submit's body rebuilds a [`ClientPayload`] at the seam.",
       "oneOf": [
@@ -128,6 +147,9 @@
           "properties": {
             "agent_id": {
               "type": "string"
+            },
+            "client": {
+              "$ref": "#/$defs/ClientContext"
             },
             "messages": {
               "items": {
@@ -291,6 +313,9 @@
           "additionalProperties": false,
           "description": "The body of a `client.messages`: the client's full conversation view, optionally streamed.",
           "properties": {
+            "client": {
+              "$ref": "#/$defs/ClientContext"
+            },
             "messages": {
               "items": {
                 "$ref": "#/$defs/DraftMessage"
@@ -1007,6 +1032,10 @@
         {
           "additionalProperties": false,
           "properties": {
+            "client": {
+              "$ref": "#/$defs/ClientContext",
+              "description": "Inputs the client declared on its run; the engine layers `client.tools`\nonto the proposed config by default."
+            },
             "messages": {
               "items": {
                 "$ref": "#/$defs/DraftMessage"

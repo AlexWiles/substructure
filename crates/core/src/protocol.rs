@@ -295,6 +295,23 @@ pub struct SubAgent {
     pub description: String,
 }
 
+/// Inputs a client declares on its run (the AG-UI `tools`/`context`/`state`/
+/// `forwardedProps`), forwarded to the worker on the `client.messages` decision.
+/// `tools` are the browser's frontend tools, normalized to client-handled
+/// [`AgentTool`]s; the engine layers them onto the proposed config by default, and
+/// the worker may override (e.g. whitelist) by returning its own `agent`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ClientContext {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<AgentTool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forwarded_props: Option<Value>,
+}
+
 // ── LLM requests and responses ───────────────────────────────────────────
 
 /// A tool's declared contract: flat on the wire. Providers that need
@@ -523,6 +540,8 @@ pub struct ClientMessages {
     pub messages: Vec<DraftMessage>,
     #[serde(default)]
     pub stream: bool,
+    #[serde(default)]
+    pub client: ClientContext,
 }
 
 /// The payload of a `client.action`: a named action with optional JSON args.
@@ -582,6 +601,8 @@ pub enum ClientInput {
         messages: Vec<DraftMessage>,
         #[serde(default)]
         stream: bool,
+        #[serde(default)]
+        client: ClientContext,
     },
     #[serde(rename = "client.action")]
     Action {
@@ -634,6 +655,10 @@ pub enum DecisionTrigger {
         messages: Vec<DraftMessage>,
         #[serde(default)]
         new_from: usize,
+        /// Inputs the client declared on its run; the engine layers `client.tools`
+        /// onto the proposed config by default.
+        #[serde(default)]
+        client: ClientContext,
     },
     #[serde(rename = "client.action")]
     ClientAction {

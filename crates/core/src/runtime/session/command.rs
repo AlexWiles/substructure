@@ -648,6 +648,7 @@ impl SessionState {
                     ClientPayload::Messages(ClientMessages {
                         messages,
                         stream: _,
+                        client,
                     }) => {
                         // Fold client echoes of already-recorded results onto their
                         // nodes so the tree sees a resend, not a fork.
@@ -732,6 +733,7 @@ impl SessionState {
                                 Trigger::ClientTranscript {
                                     messages,
                                     new_from: 0,
+                                    client,
                                 },
                             );
                             events.push(request);
@@ -2875,6 +2877,7 @@ mod tests {
                         node_msg("c2", Role::User, "more"),
                     ],
                     stream: false,
+                    client: Default::default(),
                 }),
                 turn_id: None,
             },
@@ -2976,6 +2979,7 @@ mod tests {
                 payload: ClientPayload::Messages(ClientMessages {
                     messages,
                     stream: false,
+                    client: Default::default(),
                 }),
                 turn_id: None,
             },
@@ -3174,6 +3178,7 @@ mod tests {
                     payload: ClientPayload::Messages(ClientMessages {
                         messages: vec![node_msg("", Role::User, "hello")],
                         stream: false,
+                        client: Default::default(),
                     }),
                     turn_id: None,
                 },

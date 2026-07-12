@@ -305,10 +305,15 @@ impl Runtime {
                 turn_id,
                 messages,
                 stream,
+                client,
             } => (
                 agent_id,
                 turn_id,
-                ClientPayload::Messages(ClientMessages { messages, stream }),
+                ClientPayload::Messages(ClientMessages {
+                    messages,
+                    stream,
+                    client,
+                }),
             ),
             ClientInput::Action {
                 agent_id,

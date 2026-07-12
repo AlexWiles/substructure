@@ -40,9 +40,16 @@ same version.
 - No assistant-ui web example. Added `node-hono-assistant-ui`: a Hono worker plus
   an assistant-ui `<Thread>` on the AG-UI runtime, streaming from the engine's
   native AG-UI endpoint.
+- No CopilotKit web example. Added `node-hono-copilotkit`: the same worker with
+  CopilotKit's `<CopilotChat>` wired direct-to-agent, forwarding a `useFrontendTool`
+  up to the engine's native AG-UI endpoint.
 - The worker contract had no OpenAPI form for server-stub generators, validating
   proxies, and rendered docs. `schemas/worker.openapi.json` (3.1) is generated
   beside the JSON Schema: one `POST /`, components pruned to the worker surface.
+- AG-UI runs declared frontend tools/context/state the worker never saw. The
+  engine forwards them on `client.messages` as `trigger.client` and layers the
+  client tools onto the proposal by default, so browser-declared client tools work
+  without being defined in the worker (which may still override to whitelist).
 
 ### Changed
 

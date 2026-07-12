@@ -228,6 +228,8 @@ pub async fn ag_ui_run(
                     // Full client view so edits/branches reconcile into the tree.
                     messages: input.to_messages(),
                     stream: true,
+                    // Client-declared tools/context/state, forwarded to the worker.
+                    client: input.client_context(),
                 },
                 span: crate::span::SpanContext::root().child("ag_ui_run"),
             })

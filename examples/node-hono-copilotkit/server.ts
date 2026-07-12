@@ -1,7 +1,7 @@
 // A chat agent and its web UI, served with Hono. Three jobs:
 //   POST /agent  — the substructure worker; the engine calls it to make decisions
 //   GET  /token  — mint a short-lived client token for the browser
-//   GET  /*      — serve the built assistant-ui frontend (web/dist)
+//   GET  /*      — serve the built CopilotKit frontend (web/dist)
 // Protocol types in `protocol.ts` are generated from the JSON Schema (see README).
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";

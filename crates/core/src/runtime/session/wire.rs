@@ -27,8 +27,8 @@ use super::reconcile::news_start;
 use super::state::{new_call_id, new_message_id, LlmCallState};
 use super::tool_contract::{classify_arguments, declared_tool, DeclaredTool};
 use crate::protocol::{
-    AgentConfig, DecisionAction, DecisionRequest, DecisionResponse, DecisionTrigger, DraftMessage,
-    Handler, LlmRequest, Message, MessageTree, RetryPolicy, WorkerState,
+    AgentConfig, ClientContext, DecisionAction, DecisionRequest, DecisionResponse, DecisionTrigger,
+    DraftMessage, Handler, LlmRequest, Message, MessageTree, RetryPolicy, WorkerState,
 };
 use crate::runtime::worker::WorkerDecisionRequest;
 
@@ -409,13 +409,23 @@ pub fn to_wire_trigger(
                 .collect();
             let new_from = messages.len();
             messages.push(message);
-            DecisionTrigger::ClientTranscript { messages, new_from }
+            DecisionTrigger::ClientTranscript {
+                messages,
+                new_from,
+                client: ClientContext::default(),
+            }
         }
-        Trigger::ClientTranscript { messages, .. } => {
+        Trigger::ClientTranscript {
+            messages, client, ..
+        } => {
             let known: std::collections::HashSet<&str> =
                 tree.nodes.iter().map(|n| n.id()).collect();
             let new_from = news_start(&known, &messages);
-            DecisionTrigger::ClientTranscript { messages, new_from }
+            DecisionTrigger::ClientTranscript {
+                messages,
+                new_from,
+                client,
+            }
         }
         Trigger::ClientAction { name, args } => DecisionTrigger::ClientAction { name, args },
         Trigger::ToolExecute {
@@ -515,8 +525,8 @@ pub fn to_wire_trigger(
 mod tests {
     use super::*;
     use crate::protocol::{
-        AgentTool, ClientInput, ClientPayload, Content, NewMessage, Node, Role, ToolCall,
-        ToolCallFunction, ToolInput,
+        AgentTool, ClientContext, ClientInput, ClientPayload, Content, NewMessage, Node, Role,
+        ToolCall, ToolCallFunction, ToolInput,
     };
     use crate::runtime::session::state::LlmCallSpec;
 
@@ -847,7 +857,9 @@ mod tests {
 
     fn transcript_of(trigger: DecisionTrigger) -> (Vec<DraftMessage>, usize) {
         match trigger {
-            DecisionTrigger::ClientTranscript { messages, new_from } => (messages, new_from),
+            DecisionTrigger::ClientTranscript {
+                messages, new_from, ..
+            } => (messages, new_from),
             t => panic!("expected a client.messages trigger; got {t:?}"),
         }
     }
@@ -897,6 +909,7 @@ mod tests {
             Trigger::ClientTranscript {
                 messages: view,
                 new_from: 0,
+                client: ClientContext::default(),
             },
             &path,
             &tree,
@@ -920,6 +933,7 @@ mod tests {
             Trigger::ClientTranscript {
                 messages: view,
                 new_from: 0,
+                client: ClientContext::default(),
             },
             &path,
             &tree,
@@ -940,6 +954,7 @@ mod tests {
             Trigger::ClientTranscript {
                 messages: wire_view(&path),
                 new_from: 0,
+                client: ClientContext::default(),
             },
             &path,
             &tree,
@@ -966,6 +981,7 @@ mod tests {
             Trigger::ClientTranscript {
                 messages: view,
                 new_from: 0,
+                client: ClientContext::default(),
             },
             &path,
             &tree,

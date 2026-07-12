@@ -2,7 +2,9 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::{DraftMessage, ErrorCode, Handler, LlmRequest, LlmResponse, RetryPolicy};
+use crate::protocol::{
+    ClientContext, DraftMessage, ErrorCode, Handler, LlmRequest, LlmResponse, RetryPolicy,
+};
 
 impl Handler {
     /// Serde default for `llm.call`.
@@ -106,6 +108,8 @@ pub enum Trigger {
         messages: Vec<DraftMessage>,
         #[serde(default)]
         new_from: usize,
+        #[serde(default)]
+        client: ClientContext,
     },
     #[serde(rename = "client.action")]
     ClientAction {
