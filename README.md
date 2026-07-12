@@ -40,7 +40,7 @@ app.post("/", async (c) => c.json(decide(await c.req.json())));
 serve({ fetch: app.fetch, port: 4444 });
 ```
 
-Here is the same using Python and Fast API
+Here is the same using Python and Fast API, plus using tools.
 
 ```python
 from fastapi import FastAPI, Request

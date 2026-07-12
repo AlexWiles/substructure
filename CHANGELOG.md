@@ -79,6 +79,8 @@ same version.
 - Inbound AG-UI messages dropped assistant `toolCalls`, orphaning the tool
   result on the next turn and 400-ing the provider (which interrupted the
   session). `AgUiMessage` now carries `toolCalls` and `to_messages` maps them.
+- A no-arg tool call emitted no AG-UI `TOOL_CALL_ARGS`, so a client tool's
+  browser executor never fired and the chat hung. Empty arguments now emit `{}`.
 
 ## [0.1.22] - 2026-07-07
 

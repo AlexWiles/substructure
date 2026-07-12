@@ -10,6 +10,16 @@ use crate::protocol::TokenDelta;
 use crate::runtime::session::decision::ToolHandler;
 use crate::session::events::EventPayload;
 
+/// A tool call's args as an AG-UI delta. Empty args become `"{}"` so clients
+/// treat the call as complete (a no-arg call otherwise carries no delta).
+fn non_empty_args(arguments: &str) -> String {
+    if arguments.is_empty() {
+        "{}".to_string()
+    } else {
+        arguments.to_string()
+    }
+}
+
 struct ToolBatch {
     pending_client_tool_calls: HashSet<String>,
     pending_worker_tool_calls: HashSet<String>,
@@ -179,12 +189,13 @@ impl AgUiTranslator {
                 let mut out = if self.streamed_tool_calls.remove(&t.tool_call_id) {
                     self.open_tools.remove(&t.tool_call_id);
                     let mut closed = Vec::new();
-                    if !self.streamed_tool_call_args.remove(&t.tool_call_id)
-                        && !t.arguments.is_empty()
-                    {
+                    // Emit args even when empty ("{}"): AG-UI clients close the
+                    // args stream — and fire a client tool's execute — only on a
+                    // non-empty delta.
+                    if !self.streamed_tool_call_args.remove(&t.tool_call_id) {
                         closed.push(AgUiEvent::ToolCallArgs {
                             tool_call_id: t.tool_call_id.clone(),
-                            delta: t.arguments.clone(),
+                            delta: non_empty_args(&t.arguments),
                         });
                     }
                     closed.push(AgUiEvent::ToolCallEnd {
@@ -200,7 +211,7 @@ impl AgUiTranslator {
                         },
                         AgUiEvent::ToolCallArgs {
                             tool_call_id: t.tool_call_id.clone(),
-                            delta: t.arguments.clone(),
+                            delta: non_empty_args(&t.arguments),
                         },
                         AgUiEvent::ToolCallEnd {
                             tool_call_id: t.tool_call_id.clone(),
@@ -796,6 +807,27 @@ mod tests {
         let r = vals(t.on_event(tool_requested("call-1", "get_color", "{}", "worker")));
         assert_eq!(kinds(&r), ["TOOL_CALL_ARGS", "TOOL_CALL_END"]);
         assert_eq!(r[0]["delta"], "{}");
+    }
+
+    #[test]
+    fn streamed_tool_with_empty_args_emits_placeholder() {
+        // A no-arg tool call carries empty arguments; emit "{}" so AG-UI clients
+        // see a complete args stream and fire client-side execute.
+        let mut t = AgUiTranslator::new("t1".into(), "r1".into());
+        let _ = t.on_delta(tool_args_delta(
+            "c1",
+            "r1",
+            "call-1",
+            Some("get_timezone"),
+            None,
+        ));
+        let _ = t.on_event(llm_completed_with_tools("c1", &["call-1"]));
+        let r = vals(t.on_event(tool_requested("call-1", "get_timezone", "", "client")));
+        let args = r
+            .iter()
+            .find(|e| e["type"] == "TOOL_CALL_ARGS")
+            .expect("emits TOOL_CALL_ARGS");
+        assert_eq!(args["delta"], "{}");
     }
 
     #[test]
