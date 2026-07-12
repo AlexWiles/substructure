@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use crate::protocol::{Content, DraftMessage, Role};
+use crate::protocol::{Content, DraftMessage, Role, ToolCall};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -60,6 +60,10 @@ pub struct AgUiMessage {
     pub id: Option<String>,
     #[serde(default)]
     pub tool_call_id: Option<String>,
+    /// Assistant tool calls echoed back in the client view. Dropping these
+    /// orphans the matching `tool` result, which providers reject.
+    #[serde(default)]
+    pub tool_calls: Option<Vec<ToolCall>>,
 }
 
 impl RunAgentInput {
@@ -79,7 +83,7 @@ impl RunAgentInput {
                     id: m.id.clone(),
                     role,
                     content: m.content.clone().map(Content::Text),
-                    tool_calls: None,
+                    tool_calls: m.tool_calls.clone(),
                     tool_call_id: m.tool_call_id.clone(),
                     name: None,
                 })
@@ -127,6 +131,31 @@ mod tests {
         assert_eq!(msgs[3].tool_call_id.as_deref(), Some("call-1"));
         let ids: Vec<&str> = msgs.iter().map(|m| m.id.as_deref().unwrap()).collect();
         assert_eq!(ids, ["s1", "u1", "a1", "t1"]);
+    }
+
+    #[test]
+    fn to_messages_keeps_assistant_tool_calls() {
+        // A follow-up turn resends the assistant tool call + its result in the
+        // client view. Dropping `toolCalls` orphans the result and providers 400.
+        let input: RunAgentInput = serde_json::from_value(json!({
+            "threadId": "t1", "runId": "r1",
+            "messages": [
+                {"role": "user", "content": "what time is it?", "id": "u1"},
+                {"role": "assistant", "id": "a1", "toolCalls": [
+                    {"id": "call-1", "type": "function",
+                     "function": {"name": "get_current_time", "arguments": "{}"}},
+                ]},
+                {"role": "tool", "toolCallId": "call-1", "content": "2026", "id": "t1"},
+                {"role": "assistant", "content": "It's 2026.", "id": "a2"},
+            ],
+        }))
+        .unwrap();
+        let msgs = input.to_messages();
+        let calls = msgs[1].tool_calls.as_ref().expect("tool_calls preserved");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call-1");
+        assert_eq!(calls[0].function.name, "get_current_time");
+        assert_eq!(msgs[2].tool_call_id.as_deref(), Some("call-1"));
     }
 
     #[test]

@@ -76,6 +76,9 @@ same version.
 - `--output pretty` hid the tool-call id, so a client tool couldn't be settled.
   A client-tool yield now prints each pending call's id and a ready-to-edit
   `tool.result` settle input.
+- Inbound AG-UI messages dropped assistant `toolCalls`, orphaning the tool
+  result on the next turn and 400-ing the provider (which interrupted the
+  session). `AgUiMessage` now carries `toolCalls` and `to_messages` maps them.
 
 ## [0.1.22] - 2026-07-07
 
