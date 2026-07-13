@@ -11,6 +11,9 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 
 ### Added
 
+- Every example pulled in a web framework. Added `node-no-deps` and
+  `node-no-deps-tools`: the basic chat and two-tool workers served with Node's
+  built-in `http` server, zero dependencies.
 - Worker-run LLM calls forced every worker to hand-roll provider translation.
   `AgentConfig` takes `format` (`openai`/`anthropic`), so `llm.execute`
   carries the provider's native request and `llm.result`/`llm.token.delta`
