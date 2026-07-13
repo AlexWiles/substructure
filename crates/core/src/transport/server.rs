@@ -20,9 +20,15 @@ impl SubstructureServer {
         listener: TcpListener,
         shutdown: CancellationToken,
     ) -> anyhow::Result<()> {
-        let app = self
-            .router
-            .layer(tower_http::trace::TraceLayer::new_for_http());
+        let app = self.router.layer(
+            tower_http::trace::TraceLayer::new_for_http()
+                .make_span_with(
+                    tower_http::trace::DefaultMakeSpan::new().level(tracing::Level::INFO),
+                )
+                .on_response(
+                    tower_http::trace::DefaultOnResponse::new().level(tracing::Level::INFO),
+                ),
+        );
         axum::serve(listener, app)
             .with_graceful_shutdown(shutdown.cancelled_owned())
             .await?;

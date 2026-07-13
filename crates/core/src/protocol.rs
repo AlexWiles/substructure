@@ -767,6 +767,23 @@ pub enum DecisionTrigger {
     },
 }
 
+impl DecisionTrigger {
+    /// Compact wire tag for logs, without the payload.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::SessionStart => "session.start",
+            Self::ClientTranscript { .. } => "client.messages",
+            Self::ClientAction { .. } => "client.action",
+            Self::ToolExecute { .. } => "tool.execute",
+            Self::ToolFinished { .. } => "tool.finished",
+            Self::LlmExecute { .. } => "llm.execute",
+            Self::LlmFinished { .. } => "llm.finished",
+            Self::SubAgentFinished { .. } => "sub_agent.finished",
+            Self::InterruptResumed { .. } => "interrupt.resumed",
+        }
+    }
+}
+
 // ── Worker → engine ──────────────────────────────────────────────────────
 
 /// The action a worker authors on the wire. Mirrors the internal `Action`, but a

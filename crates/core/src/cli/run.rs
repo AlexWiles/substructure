@@ -48,7 +48,7 @@ pub struct RunArgs {
     /// Signing secret if the worker verifies webhook signatures.
     #[arg(long)]
     signing_secret: Option<String>,
-    /// Output mode. (Engine logs go to stderr; set RUST_LOG=warn to quiet them.)
+    /// Output mode. (Engine logs go to stderr at error level; set RUST_LOG=info for more.)
     #[arg(long, short = 'o', value_enum, default_value_t = OutputMode::AgUi)]
     output: OutputMode,
 }
@@ -134,10 +134,6 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
         }
-    }
-
-    if env.provider.is_none() {
-        tracing::warn!("no --provider set: the engine can't make LLM calls.");
     }
 
     let (rt, adapter) = local::start_engine(&args.db, env.provider).await?;

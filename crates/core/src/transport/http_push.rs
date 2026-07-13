@@ -71,15 +71,32 @@ impl PushTransport for HttpPushTransport {
             builder = builder.header("X-Substructure-Signature", format!("sha256={signature}"));
         }
 
+        let started = std::time::Instant::now();
+        tracing::info!(
+            endpoint = %self.endpoint_url,
+            decision_id = %decision.decision_id,
+            agent_id = %decision.agent_id,
+            trigger = decision.trigger.kind(),
+            "dispatching decision to worker"
+        );
+
         let resp = builder.body(body).send().await.map_err(|e| PushError {
             message: format!("HTTP request failed: {e}"),
             retryable: e.is_timeout() || e.is_connect(),
         })?;
 
-        if !resp.status().is_success() {
-            let retryable = resp.status().is_server_error();
+        let status = resp.status();
+        tracing::info!(
+            decision_id = %decision.decision_id,
+            status = status.as_u16(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "worker responded"
+        );
+
+        if !status.is_success() {
+            let retryable = status.is_server_error();
             return Err(PushError {
-                message: format!("endpoint returned {}", resp.status()),
+                message: format!("endpoint returned {status}"),
                 retryable,
             });
         }

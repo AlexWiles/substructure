@@ -11,12 +11,18 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
+    let default_level = match &cli.command {
+        Command::Run(_) => "error",
+        _ => "info",
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| default_level.into()),
         )
         .init();
 
-    let cli = Cli::parse();
     cli::run(cli.command).await
 }

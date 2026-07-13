@@ -64,6 +64,12 @@ same version.
 
 ### Changed
 
+- `serve` showed no worker traffic at `info`: outbound pushes had no success log
+  and the HTTP `TraceLayer` sat at `debug`. Outbound pushes now log dispatch and
+  response (status, latency) at `info`, and inbound requests trace at `info`.
+- The `run` command logged engine noise at `info`, and a redundant no-provider
+  warning fired in both `run` and the engine. `run` now defaults to `error`
+  (override with `RUST_LOG`) and the duplicate warning is gone.
 - An omitted settle `attempt` settled the current attempt, so a result from a
   superseded retry could resolve the wrong one. A `tool.result`/`llm.result`
   answering an `*.execute` now fences to that trigger's attempt.
