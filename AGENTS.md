@@ -6,7 +6,6 @@ crates/napi              → N-API bindings exposing core to Node
 
 ### TypeScript packages
 ```
-@substructure.ai/sdk     → TypeScript SDK: clients, worker, framework adapters
 @substructure.ai/cli     → npm wrapper shipping the Rust CLI binary
 @substructure.ai/runtime → In-process Substructure runtime for Node (napi build)
 ```

@@ -1,6 +1,6 @@
 # Releasing
 
-All three npm packages (`@substructure.ai/sdk`, `@substructure.ai/runtime`, `@substructure.ai/cli`) ship from a single tag-triggered GitHub Actions workflow at `.github/workflows/release.yml`.
+Both npm packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) ship from a single tag-triggered GitHub Actions workflow at `.github/workflows/release.yml`.
 
 ## One-time setup
 
@@ -41,7 +41,7 @@ Pushing the tag triggers `.github/workflows/release.yml`, which:
    - `aarch64-apple-darwin`, `x86_64-apple-darwin`
    - `aarch64-unknown-linux-gnu` (cross-compiled), `x86_64-unknown-linux-gnu`
 2. For each target, builds an `@substructure.ai/cli-<platform>` package directory containing the binary.
-3. Publishes everything in order: runtime platform packages → `@substructure.ai/runtime` → CLI platform packages → `@substructure.ai/cli` → `@substructure.ai/sdk`.
+3. Publishes everything in order: runtime platform packages → `@substructure.ai/runtime` → CLI platform packages → `@substructure.ai/cli`.
 
 ## Dry runs
 

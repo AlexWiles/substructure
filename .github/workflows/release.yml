@@ -212,14 +212,6 @@ jobs:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public
 
-      # ── Publish SDK ──────────────────────────────────────────────────────
-      - name: Publish SDK
-        working-directory: packages/sdk
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: pnpm publish --access public --no-git-checks
-
       # ── GitHub Release ───────────────────────────────────────────────────
       # Notes come straight from the CHANGELOG section for this version. If the
       # tag has no changelog entry, fall back to GitHub's auto-generated notes.

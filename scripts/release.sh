@@ -74,7 +74,7 @@ fi
 
 echo "Bumping $CURRENT -> $VERSION"
 
-for pkg in packages/sdk packages/cli packages/runtime; do
+for pkg in packages/cli packages/runtime; do
   npm --prefix "$pkg" version "$VERSION" --no-git-tag-version --allow-same-version >/dev/null
 done
 
@@ -101,7 +101,7 @@ node -e "
   }
 " "$VERSION"
 
-git add packages/sdk/package.json packages/cli/package.json packages/runtime/package.json \
+git add packages/cli/package.json packages/runtime/package.json \
   crates/core/Cargo.toml Cargo.lock CHANGELOG.md
 git commit -m "release $TAG"
 git tag -a "$TAG" -m "$TAG"

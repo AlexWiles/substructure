@@ -1,10 +1,12 @@
-# substructure.ai: The no-SDK AI agent engine
+# substructure.ai: Build production-ready AI agents in any language with no SDK
 
 [![cli](https://img.shields.io/npm/v/@substructure.ai/cli?label=cli)](https://www.npmjs.com/package/@substructure.ai/cli)
 
 > Substructure is under active development. APIs, CLI commands, and the wire protocol may change between releases for versions 0.1.x
 
-Substructure is an open-source engine that drives your agent loop over HTTP. It keeps sessions durable and streams AG-UI events to your clients. It's language agnostic. You don't even need an SDK.
+Substructure is an open-source engine that drives the agent loop over HTTP. It keeps sessions durable and streams AG-UI events to your frontend. Your code stays on your infrastructure. It's just HTTP, so the engine is language agnostic. You don't even need an SDK.
+
+## See it in action
 
 Here is a basic chat bot built with javascript and hono.
 ```javascript

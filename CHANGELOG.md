@@ -4,9 +4,8 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-All packages (`@substructure.ai/sdk`, `@substructure.ai/runtime`,
-`@substructure.ai/cli`) and the `substructure-core` crate release together at the
-same version.
+All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
+`substructure-core` crate release together at the same version.
 
 ## [Unreleased]
 
@@ -61,6 +60,11 @@ same version.
   engine forwards them on `client.messages` as `trigger.client` and layers the
   client tools onto the proposal by default, so browser-declared client tools work
   without being defined in the worker (which may still override to whitelist).
+
+### Removed
+
+- The TypeScript SDK duplicated the protocol every worker already speaks over
+  HTTP. Dropped `@substructure.ai/sdk`; workers use the wire protocol directly.
 
 ### Changed
 
