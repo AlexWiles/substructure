@@ -91,6 +91,15 @@ subs run \
 
 The run command spins up an engine, which communicates with your worker and streams the response back to the terminal.
 
+Next:
+
+- The [quick start](./docs/10-quick-start.md) continues from here: add a tool,
+  continue the conversation, then add a sub-agent.
+- The same agent in [Python](./examples/python-fast-api-basic), or in
+  [Go with tools and generated types](./examples/go-chat-with-tools).
+- A [full chat UI](./examples/node-hono-assistant-ui) talking to the engine
+  over AG-UI.
+
 ## Features
 
 ### Write only the logic you care about
