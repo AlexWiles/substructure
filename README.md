@@ -9,16 +9,17 @@ Substructure is an open-source engine that drives the agent loop over HTTP. It k
 
 ## Why use it
 
-- **In an existing codebase**: the agent is one route in the app you already
-  run. Tools are your own functions, with the database access and permissions
-  you already have. No new service, no framework, any language.
-- **In a new project**: the engine is most of your backend. Sessions,
-  history, streaming, and a chat-ready API are built in. You write one
-  endpoint and your tools.
-- **Long-running work**: tool calls can take hours and approvals can take
-  days. The run waits durably and picks up when the answer arrives.
-- **Durability**: every step is persisted before it runs. Deploys, crashes,
-  and restarts don't lose work in progress.
+- **In an existing codebase**: Your agent is just an HTTP endpoint. Tools
+  are functions in your codebase, so they already have your database and
+  your permissions.
+- **In a new project**: The engine already handles sessions, history,
+  streaming, and the client API. You write the agent and its tools, and
+  that's most of the backend.
+- **Long-running work**: First class support for async tools & async interrupt
+  continuation. So tools can be background jobs and human approval can wait for
+  days if needed.
+- **Durability**: Every step is saved before it runs, so a deploy, a crash or a
+  client reconnect doesn't lose anything.
 
 ## See it in action
 Two terminals.
@@ -95,8 +96,8 @@ The run command spins up an engine, which communicates with your worker and stre
 ### Write only the logic you care about
 
 At each step of the loop, the engine tells your code what it plans to do next.
-Your code can approve it or do something else. A working agent is a few lines;
-custom behavior is added one decision at a time.
+Your code can approve it or do something else. A working agent is a few lines.
+Custom behavior is added by overriding the proposed decision.
 
 Docs: [Core concepts](./docs/20-concepts.md)
 
@@ -104,9 +105,7 @@ Examples: [Node](./examples/node-hono-basic), [Python](./examples/python-fast-ap
 
 ### Any language
 
-Your agent is an HTTP endpoint. If it can receive and return JSON, it works.
-There is no SDK to install, and typed bindings can be generated from the
-published JSON schema.
+Your agent is an HTTP endpoint. There is no SDK to install, and typed bindings can be generated from the published JSON schema.
 
 Docs: [Typed bindings](./docs/40-typed-bindings.md)
 
@@ -114,33 +113,25 @@ Examples: [Go](./examples/go-chat-with-tools), [Python](./examples/python-fast-a
 
 ### Crash recovery
 
-Every step is saved before it runs. If the engine or your service dies mid-run,
-the run continues where it stopped. Submitting the same message twice won't run
-the turn twice.
+Every step is saved before it runs. If the engine or your service dies mid-run, the run continues where it stopped. Submitting the same message twice won't run the turn twice. Client reconnects are handled.
 
 Docs: [Durability](./docs/110-durability.md)
 
 ### Waiting for humans
 
-An agent can stop and wait for a person to respond or approve — for minutes or
-weeks — then pick up where it left off. A waiting agent costs nothing to keep
-around.
+An agent can stop and wait for a person to respond or approve then pick up where it left off. A waiting agent costs nothing to keep around.
 
 Docs: [Interrupts](./docs/140-interrupts.md)
 
 ### Tools that take hours
 
-A tool doesn't have to answer right away. Your service can acknowledge the
-call, do the work on its own schedule and report the result later. The run
-waits and resumes when the answer arrives.
+A tool doesn't have to answer right away. Your service can acknowledge the call, do the work on its own schedule and report the result later. The run waits and resumes when the answer arrives.
 
 Docs: [Deferred tools](./docs/130-deferred-tools.md)
 
 ### Full chat support
 
-History, editing, regeneration, and branching are built into the engine. You
-don't build a chat backend. Users can edit an earlier message and go a new
-direction without losing the original thread.
+History, editing, regeneration, and branching are built into the engine. You don't build a chat backend. Users can edit an earlier message and go a new direction without losing the original thread.
 
 Docs: [Conversations](./docs/70-conversations.md)
 
@@ -148,8 +139,7 @@ Examples: [Node](./examples/node-hono-plan-mode), [Python](./examples/python-fas
 
 ### Works with existing chat UIs
 
-The engine streams AG-UI events directly, so frontends like assistant-ui and
-CopilotKit connect to it with no adapter or backend glue.
+The engine streams AG-UI events directly, so frontends like assistant-ui and CopilotKit connect to it.
 
 Docs: [AG-UI](./docs/100-ag-ui.md)
 
@@ -157,8 +147,7 @@ Examples: [assistant-ui](./examples/node-hono-assistant-ui), [CopilotKit](./exam
 
 ### Tools that run in the browser
 
-A tool can execute in the user's browser instead of on your server. The run
-pauses until the browser answers, then continues.
+A tool can execute in the user's browser instead of on your server. The run pauses until the browser answers, then continues.
 
 Docs: [Client-side tools](./docs/90-client-tools.md)
 
@@ -166,9 +155,7 @@ Examples: [Node](./examples/node-hono-client-tool)
 
 ### Agent state without a database
 
-The engine stores your agent's working state next to the conversation. Your
-code gets it on every request and can write back changes — per-conversation
-memory with nothing extra to set up.
+The engine stores your agent's working state next to the conversation. Your code gets it on every request and can write back changes.
 
 Docs: [Agent state](./docs/60-state.md)
 
@@ -176,8 +163,7 @@ Examples: [Node](./examples/node-hono-plan-mode), [Python](./examples/python-fas
 
 ### Sub-agents
 
-An agent can hand work to other agents. Each one runs in its own session, and
-the cost and token usage roll up to the parent.
+An agent can hand work to other agents. Each one runs in its own session, and the cost and token usage roll up to the parent.
 
 Docs: [Sub-agents](./docs/80-sub-agents.md)
 
@@ -185,9 +171,7 @@ Examples: [Node](./examples/node-hono-subagent), [Python](./examples/python-fast
 
 ### Any LLM
 
-The engine can call Anthropic, OpenAI, or OpenRouter with your keys or you can
-make the LLM calls yourself, through your own gateway or a provider the engine
-doesn't know about right inside your worker.
+The engine can call Anthropic, OpenAI, or OpenRouter with your keys or you can make the LLM calls yourself, through your own gateway or a provider the engine doesn't know about right inside your worker.
 
 Docs: [LLMs](./docs/50-llms.md)
 
@@ -195,16 +179,13 @@ Examples: [Node + Anthropic](./examples/node-hono-anthropic), [Node + OpenAI](./
 
 ### Retries and timeouts
 
-Set a timeout and retry policy on any tool or LLM call. The engine enforces
-them, including across restarts.
+Set a timeout and retry policy on any tool or LLM call. The engine enforces them, including across restarts.
 
 Docs: [Retries and timeouts](./docs/120-retries.md)
 
 ### Validated tool calls
 
-Give a tool an input and output schema and the engine checks every call against
-it. Malformed calls go back to the model to fix itself instead of reaching your
-code.
+Give a tool an input and output schema and the engine checks every call against it. Malformed calls go back to the model to fix itself instead of reaching your code.
 
 Docs: [Tool calls](./docs/30-tools.md)
 
