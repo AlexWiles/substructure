@@ -263,6 +263,7 @@ mod tests {
             name: None,
         };
         let call = LlmCallState {
+            format: None,
             call_id: "call-1".to_string(),
             tracking: EffectTracking::new(RetryPolicy::no_retry(), chrono::Utc::now()),
             prompt: vec![],

@@ -57,7 +57,8 @@ struct WireBody<'a> {
     max_completion_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<&'static str>,
-    stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
 }
 
 fn effort_str(e: ReasoningEffort) -> &'static str {
@@ -80,7 +81,9 @@ fn is_reasoning_model(model: &str) -> bool {
 }
 
 impl<'a> WireBody<'a> {
-    fn build(request: &'a LlmRequest, stream: bool) -> Self {
+    /// `stream: None` omits the field so the body is valid input for both the
+    /// create and stream calls a worker might make.
+    fn build(request: &'a LlmRequest, stream: Option<bool>) -> Self {
         let reasoning_effort = request
             .reasoning
             .as_ref()
@@ -225,6 +228,134 @@ struct ToolCallAccum {
     arguments: String,
 }
 
+// ── Worker-format seam ───────────────────────────────────────────────────
+
+/// The Chat Completions body for `request`, `stream` omitted.
+pub(crate) fn request_to_wire(request: &LlmRequest) -> serde_json::Value {
+    serde_json::to_value(WireBody::build(request, None)).unwrap_or_default()
+}
+
+/// A raw Chat Completions response → the neutral `LlmResponse`.
+pub(crate) fn response_from_wire(value: serde_json::Value) -> Result<LlmResponse, String> {
+    serde_json::from_value::<ChatCompletionResponse>(value)
+        .map(ChatCompletionResponse::into_llm_response)
+        .map_err(|e| format!("invalid openai response: {e}"))
+}
+
+/// Folds Chat Completions stream chunks into `StreamDelta`s and the final
+/// response. Shared by the server-side SSE loop and the worker-format delta
+/// seam (`providers::format`).
+#[derive(Default)]
+pub(crate) struct StreamParser {
+    content: String,
+    tool_calls: Vec<ToolCallAccum>,
+    finish_reason: Option<String>,
+    model: Option<String>,
+    usage: Option<serde_json::Value>,
+}
+
+impl StreamParser {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fold one raw chunk payload; `[DONE]` and unknown payloads yield nothing.
+    pub(crate) fn parse_data(&mut self, data: &str) -> Vec<StreamDelta> {
+        if data == "[DONE]" {
+            return Vec::new();
+        }
+        match serde_json::from_str(data) {
+            Ok(chunk) => self.on_chunk(chunk),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn on_chunk(&mut self, chunk: StreamChunkResponse) -> Vec<StreamDelta> {
+        let mut deltas = Vec::new();
+        if !chunk.model.is_empty() {
+            self.model = Some(chunk.model);
+        }
+        if let Some(u) = chunk.usage {
+            self.usage = Some(u);
+        }
+
+        for choice in chunk.choices {
+            if let Some(ref text) = choice.delta.content {
+                self.content.push_str(text);
+                deltas.push(StreamDelta {
+                    text: Some(text.clone()),
+                    ..Default::default()
+                });
+            }
+
+            if let Some(tc_deltas) = choice.delta.tool_calls {
+                for tc_delta in tc_deltas {
+                    while self.tool_calls.len() <= tc_delta.index {
+                        self.tool_calls.push(ToolCallAccum::default());
+                    }
+                    let accum = &mut self.tool_calls[tc_delta.index];
+                    if let Some(id) = tc_delta.id {
+                        accum.id = id;
+                    }
+                    let mut args_fragment = None;
+                    if let Some(f) = tc_delta.function {
+                        if let Some(name) = f.name {
+                            accum.name = name;
+                        }
+                        if let Some(args) = f.arguments {
+                            accum.arguments.push_str(&args);
+                            args_fragment = Some(args);
+                        }
+                    }
+                    if !accum.id.is_empty() {
+                        deltas.push(StreamDelta {
+                            tool_calls: vec![ToolCallChunk {
+                                id: accum.id.clone(),
+                                name: (!accum.name.is_empty()).then(|| accum.name.clone()),
+                                arguments: args_fragment,
+                            }],
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+
+            if let Some(reason) = choice.finish_reason {
+                self.finish_reason = Some(reason.clone());
+                deltas.push(StreamDelta {
+                    finish_reason: Some(reason),
+                    ..Default::default()
+                });
+            }
+        }
+        deltas
+    }
+
+    fn into_response(self, fallback_model: &str) -> LlmResponse {
+        LlmResponse {
+            model: self.model.unwrap_or_else(|| fallback_model.to_string()),
+            content: (!self.content.is_empty()).then_some(self.content),
+            tool_calls: self
+                .tool_calls
+                .into_iter()
+                .filter(|tc| !tc.id.is_empty())
+                .map(|tc| ToolCall {
+                    id: tc.id,
+                    call_type: "function".to_string(),
+                    function: ToolCallFunction {
+                        name: tc.name,
+                        arguments: tc.arguments,
+                    },
+                })
+                .collect(),
+            finish_reason: self.finish_reason,
+            usage: self.usage,
+            cost: None,
+            images: Vec::new(),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct OpenAiConfig {
     pub base_url: String,
@@ -279,7 +410,7 @@ impl OpenAiClient {
         request: &LlmRequest,
         stream: bool,
     ) -> Result<reqwest::Response, LlmCallError> {
-        let wire = WireBody::build(request, stream);
+        let wire = WireBody::build(request, Some(stream));
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
 
         self.http
@@ -364,11 +495,7 @@ impl LlmCallable for OpenAiClient {
             return Err(classify_error(status, &body));
         }
 
-        let mut content = String::new();
-        let mut tool_calls: Vec<ToolCallAccum> = Vec::new();
-        let mut finish_reason: Option<String> = None;
-        let mut model = request.model.clone();
-        let mut usage: Option<serde_json::Value> = None;
+        let mut parser = StreamParser::new();
 
         let byte_stream = resp.bytes_stream();
         let mut stream =
@@ -401,94 +528,13 @@ impl LlmCallable for OpenAiClient {
                     break;
                 }
 
-                let chunk: StreamChunkResponse = match serde_json::from_str(data) {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                };
-
-                if !chunk.model.is_empty() {
-                    model = chunk.model;
-                }
-                if let Some(u) = chunk.usage {
-                    usage = Some(u);
-                }
-
-                for choice in chunk.choices {
-                    if let Some(ref text) = choice.delta.content {
-                        content.push_str(text);
-                        let _ = chunk_tx.send(StreamDelta {
-                            text: Some(text.clone()),
-                            ..Default::default()
-                        });
-                    }
-
-                    if let Some(tc_deltas) = choice.delta.tool_calls {
-                        for tc_delta in tc_deltas {
-                            while tool_calls.len() <= tc_delta.index {
-                                tool_calls.push(ToolCallAccum::default());
-                            }
-                            let accum = &mut tool_calls[tc_delta.index];
-                            if let Some(id) = tc_delta.id {
-                                accum.id = id;
-                            }
-                            let mut args_fragment = None;
-                            if let Some(f) = tc_delta.function {
-                                if let Some(name) = f.name {
-                                    accum.name = name;
-                                }
-                                if let Some(args) = f.arguments {
-                                    accum.arguments.push_str(&args);
-                                    args_fragment = Some(args);
-                                }
-                            }
-                            if !accum.id.is_empty() {
-                                let _ = chunk_tx.send(StreamDelta {
-                                    tool_calls: vec![ToolCallChunk {
-                                        id: accum.id.clone(),
-                                        name: (!accum.name.is_empty()).then(|| accum.name.clone()),
-                                        arguments: args_fragment,
-                                    }],
-                                    ..Default::default()
-                                });
-                            }
-                        }
-                    }
-
-                    if let Some(reason) = choice.finish_reason {
-                        finish_reason = Some(reason.clone());
-                        let _ = chunk_tx.send(StreamDelta {
-                            finish_reason: Some(reason),
-                            ..Default::default()
-                        });
-                    }
+                for delta in parser.parse_data(data) {
+                    let _ = chunk_tx.send(delta);
                 }
             }
         }
 
-        Ok(LlmResponse {
-            model,
-            content: if content.is_empty() {
-                None
-            } else {
-                Some(content)
-            },
-            tool_calls: tool_calls
-                .into_iter()
-                .filter(|tc| !tc.id.is_empty())
-                .map(|tc| ToolCall {
-                    id: tc.id,
-                    call_type: "function".to_string(),
-                    function: ToolCallFunction {
-                        name: tc.name,
-                        arguments: tc.arguments,
-                    },
-                })
-                .collect(),
-            finish_reason,
-            usage,
-            cost: None,
-            images: Vec::new(),
-        })
+        Ok(parser.into_response(&request.model))
     }
 }
 
@@ -543,7 +589,7 @@ mod tests {
             exclude: None,
             enabled: None,
         });
-        let v = serde_json::to_value(WireBody::build(&r, false)).unwrap();
+        let v = serde_json::to_value(WireBody::build(&r, Some(false))).unwrap();
         assert_eq!(v["reasoning_effort"], "high");
         assert!(v.get("temperature").is_none());
         assert_eq!(v["max_completion_tokens"], 500);
@@ -552,14 +598,14 @@ mod tests {
 
     #[test]
     fn reasoning_model_without_explicit_effort_still_strips_temperature() {
-        let v = serde_json::to_value(WireBody::build(&req("gpt-5.4-mini"), false)).unwrap();
+        let v = serde_json::to_value(WireBody::build(&req("gpt-5.4-mini"), Some(false))).unwrap();
         assert!(v.get("temperature").is_none());
         assert!(v.get("reasoning_effort").is_none());
     }
 
     #[test]
     fn non_reasoning_model_keeps_temperature() {
-        let v = serde_json::to_value(WireBody::build(&req("gpt-4o"), false)).unwrap();
+        let v = serde_json::to_value(WireBody::build(&req("gpt-4o"), Some(false))).unwrap();
         assert_eq!(v["temperature"], 0.7);
         assert!(v.get("reasoning_effort").is_none());
     }

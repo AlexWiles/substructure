@@ -136,9 +136,11 @@ mod tests {
 
     fn config(tools: Vec<AgentTool>, sub_agents: Vec<SubAgent>) -> AgentConfig {
         AgentConfig {
+            format: None,
             model: "m".to_string(),
             system: None,
             stream: false,
+            handler: None,
             retry: None,
             tools,
             sub_agents,

@@ -28,7 +28,8 @@ use super::state::{new_call_id, new_message_id, LlmCallState};
 use super::tool_contract::{classify_arguments, declared_tool, DeclaredTool};
 use crate::protocol::{
     AgentConfig, ClientContext, DecisionAction, DecisionRequest, DecisionResponse, DecisionTrigger,
-    DraftMessage, Handler, LlmRequest, Message, MessageTree, RetryPolicy, WorkerState,
+    DraftMessage, Handler, LlmFormat, LlmRequest, LlmResponse, Message, MessageTree, RetryPolicy,
+    WorkerState,
 };
 use crate::runtime::worker::WorkerDecisionRequest;
 
@@ -136,6 +137,10 @@ pub enum ResolveError {
         surface: &'static str,
         handler: &'static str,
     },
+    /// A config declared `format` without `handler: worker`.
+    FormatRequiresWorkerHandler,
+    /// An `llm.result` response that doesn't parse in the call's format.
+    InvalidLlmResponse { message: String },
 }
 
 impl std::fmt::Display for ResolveError {
@@ -151,6 +156,12 @@ impl std::fmt::Display for ResolveError {
             ),
             ResolveError::InvalidHandler { surface, handler } => {
                 write!(f, "`{handler}` is not a valid handler for {surface}")
+            }
+            ResolveError::FormatRequiresWorkerHandler => {
+                write!(f, "`format` requires `handler: worker`")
+            }
+            ResolveError::InvalidLlmResponse { message } => {
+                write!(f, "llm.result response does not parse: {message}")
             }
         }
     }
@@ -174,21 +185,49 @@ fn llm_handler(h: Handler) -> Result<LlmHandler, ResolveError> {
         })
 }
 
-fn resolve_settle_id(
+/// Resolve a settle's `id` and `attempt` against the `*.execute` trigger it
+/// answers. An omitted `id` is filled from the trigger (an error out-of-band,
+/// where there is none). An omitted `attempt` is fenced to the trigger's attempt
+/// on the answer path, so a settle targets the exact attempt it ran — a stale
+/// executor whose attempt has since been superseded no longer settles the wrong
+/// one. Out-of-band (no trigger), an omitted attempt stays `None`: settle current.
+fn resolve_settle(
     id: Option<String>,
+    attempt: Option<u32>,
     trigger: Option<&DecisionTrigger>,
     want: SettleKind,
-) -> Result<String, ResolveError> {
-    if let Some(id) = id {
-        return Ok(id);
+) -> Result<(String, Option<u32>), ResolveError> {
+    let answered = match (want, trigger) {
+        (SettleKind::Tool, Some(DecisionTrigger::ToolExecute { id, attempt, .. })) => {
+            Some((id, *attempt))
+        }
+        (SettleKind::Llm, Some(DecisionTrigger::LlmExecute { id, attempt, .. })) => {
+            Some((id, *attempt))
+        }
+        _ => None,
+    };
+    let id = match id {
+        Some(id) => id,
+        None => answered
+            .map(|(id, _)| id.clone())
+            .ok_or(ResolveError::UnresolvableSettleId {
+                kind: want.as_str(),
+            })?,
+    };
+    Ok((id, attempt.or(answered.map(|(_, attempt)| attempt))))
+}
+
+/// An `llm.result` response value → the neutral `LlmResponse`: parsed with the
+/// answered call's provider format when one was declared, else deserialized as-is.
+fn parse_llm_response(
+    response: Value,
+    format: Option<LlmFormat>,
+) -> Result<LlmResponse, ResolveError> {
+    match format {
+        Some(f) => f.response_from_wire(response),
+        None => serde_json::from_value(response).map_err(|e| e.to_string()),
     }
-    match (want, trigger) {
-        (SettleKind::Tool, Some(DecisionTrigger::ToolExecute { id, .. })) => Ok(id.clone()),
-        (SettleKind::Llm, Some(DecisionTrigger::LlmExecute { id, .. })) => Ok(id.clone()),
-        (want, _) => Err(ResolveError::UnresolvableSettleId {
-            kind: want.as_str(),
-        }),
-    }
+    .map_err(|message| ResolveError::InvalidLlmResponse { message })
 }
 
 /// The internal, fully-resolved form of a worker decision response: canonical
@@ -223,6 +262,12 @@ pub fn resolve_response(
         agent,
     } = response;
     if let Some(cfg) = &agent {
+        if let Some(h) = cfg.handler {
+            llm_handler(h)?;
+        }
+        if cfg.format.is_some() && cfg.handler != Some(Handler::Worker) {
+            return Err(ResolveError::FormatRequiresWorkerHandler);
+        }
         for t in &cfg.tools {
             if let Some(h) = t.handler {
                 tool_handler(h, "a declared tool")?;
@@ -277,6 +322,12 @@ fn lower_actions(
                     let retry = retry
                         .or_else(|| config.and_then(|c| c.retry.clone()))
                         .unwrap_or_else(RetryPolicy::no_retry);
+                    let handler = llm_handler(handler)?;
+                    // The format shapes the worker wire only; a server call is neutral.
+                    let format = match handler {
+                        LlmHandler::Worker => config.and_then(|c| c.format),
+                        LlmHandler::Server => None,
+                    };
                     Action::CallLlm {
                         id: id.unwrap_or_else(new_call_id),
                         request: LlmRequest {
@@ -289,7 +340,8 @@ fn lower_actions(
                         },
                         stream,
                         retry,
-                        handler: llm_handler(handler)?,
+                        handler,
+                        format,
                     }
                 }
                 DecisionAction::CallTool {
@@ -309,20 +361,34 @@ fn lower_actions(
                     id,
                     attempt,
                     result,
-                } => Action::ToolResult {
-                    id: resolve_settle_id(id, trigger, SettleKind::Tool)?,
-                    attempt,
-                    result: result_to_string(result),
-                },
+                } => {
+                    let (id, attempt) = resolve_settle(id, attempt, trigger, SettleKind::Tool)?;
+                    Action::ToolResult {
+                        id,
+                        attempt,
+                        result: result_to_string(result),
+                    }
+                }
                 DecisionAction::LlmResult {
                     id,
                     attempt,
                     response,
-                } => Action::LlmResult {
-                    id: resolve_settle_id(id, trigger, SettleKind::Llm)?,
-                    attempt,
-                    response,
-                },
+                } => {
+                    let (id, attempt) = resolve_settle(id, attempt, trigger, SettleKind::Llm)?;
+                    let format = match trigger {
+                        Some(DecisionTrigger::LlmExecute {
+                            id: answered,
+                            format,
+                            ..
+                        }) if *answered == id => *format,
+                        _ => None,
+                    };
+                    Action::LlmResult {
+                        id,
+                        attempt,
+                        response: parse_llm_response(response, format)?,
+                    }
+                }
                 DecisionAction::ToolError {
                     id,
                     attempt,
@@ -330,14 +396,17 @@ fn lower_actions(
                     retryable,
                     code,
                     detail,
-                } => Action::ToolError {
-                    id: resolve_settle_id(id, trigger, SettleKind::Tool)?,
-                    attempt,
-                    error,
-                    retryable,
-                    code,
-                    detail,
-                },
+                } => {
+                    let (id, attempt) = resolve_settle(id, attempt, trigger, SettleKind::Tool)?;
+                    Action::ToolError {
+                        id,
+                        attempt,
+                        error,
+                        retryable,
+                        code,
+                        detail,
+                    }
+                }
                 DecisionAction::LlmError {
                     id,
                     attempt,
@@ -345,14 +414,17 @@ fn lower_actions(
                     retryable,
                     code,
                     detail,
-                } => Action::LlmError {
-                    id: resolve_settle_id(id, trigger, SettleKind::Llm)?,
-                    attempt,
-                    error,
-                    retryable,
-                    code,
-                    detail,
-                },
+                } => {
+                    let (id, attempt) = resolve_settle(id, attempt, trigger, SettleKind::Llm)?;
+                    Action::LlmError {
+                        id,
+                        attempt,
+                        error,
+                        retryable,
+                        code,
+                        detail,
+                    }
+                }
                 DecisionAction::SpawnSubAgent {
                     session_id,
                     agent_id,
@@ -452,12 +524,17 @@ pub fn to_wire_trigger(
         Trigger::LlmExecute {
             id,
             request,
+            format,
             stream,
             attempt,
             deadline,
         } => DecisionTrigger::LlmExecute {
             id,
-            request,
+            request: match format {
+                Some(f) => f.request_to_wire(&request),
+                None => serde_json::to_value(&request).unwrap_or_default(),
+            },
+            format,
             stream,
             attempt,
             deadline,
@@ -661,6 +738,83 @@ mod tests {
     }
 
     #[test]
+    fn omitted_settle_attempt_is_fenced_to_the_answered_execute() {
+        let trigger = DecisionTrigger::ToolExecute {
+            id: "eff-1".to_string(),
+            name: "do_thing".to_string(),
+            arguments: "{}".to_string(),
+            input: ToolInput::Valid {
+                value: serde_json::json!({}),
+            },
+            attempt: 2,
+            deadline: None,
+        };
+        let resolved = |attempt| {
+            resolve_test_actions(
+                vec![DecisionAction::ToolResult {
+                    id: None,
+                    attempt,
+                    result: serde_json::json!("ok"),
+                }],
+                Some(&trigger),
+            )
+            .expect("resolves")
+        };
+        // Omitted ⇒ fenced to the trigger's attempt, not left unfenced.
+        match &resolved(None)[0] {
+            Action::ToolResult { attempt, .. } => assert_eq!(*attempt, Some(2)),
+            other => panic!("unexpected: {other:?}"),
+        }
+        // Explicit ⇒ preserved verbatim (fence a specific attempt).
+        match &resolved(Some(0))[0] {
+            Action::ToolResult { attempt, .. } => assert_eq!(*attempt, Some(0)),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn out_of_band_omitted_attempt_stays_current() {
+        // No answering trigger: an omitted attempt settles the current one (None).
+        let actions = resolve_test_actions(
+            vec![DecisionAction::ToolResult {
+                id: Some("eff-1".to_string()),
+                attempt: None,
+                result: serde_json::json!("ok"),
+            }],
+            None,
+        )
+        .expect("resolves");
+        match &actions[0] {
+            Action::ToolResult { attempt, .. } => assert_eq!(*attempt, None),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_config_client_handler_is_rejected_at_the_seam() {
+        let mut config = cfg("m1", None);
+        config.handler = Some(Handler::Client);
+        let err = resolve_response(
+            DecisionResponse {
+                messages: vec![],
+                actions: vec![],
+                state: None,
+                agent: Some(config),
+            },
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ResolveError::InvalidHandler {
+                surface: "llm.call",
+                handler: "client"
+            }
+        );
+    }
+
+    #[test]
     fn omitted_settle_id_without_a_matching_execute_is_an_error() {
         let err = resolve_test_actions(
             vec![DecisionAction::ToolResult {
@@ -674,11 +828,194 @@ mod tests {
         assert_eq!(err, ResolveError::UnresolvableSettleId { kind: "tool" });
     }
 
+    #[test]
+    fn a_format_without_a_worker_handler_is_rejected_at_the_seam() {
+        // Absent handler (⇒ server) and explicit server both reject.
+        for handler in [None, Some(Handler::Server)] {
+            let mut config = cfg("m1", None);
+            config.handler = handler;
+            config.format = Some(LlmFormat::Anthropic);
+            let err = resolve_response(
+                DecisionResponse {
+                    messages: vec![],
+                    actions: vec![],
+                    state: None,
+                    agent: Some(config),
+                },
+                None,
+                None,
+            )
+            .unwrap_err();
+            assert_eq!(err, ResolveError::FormatRequiresWorkerHandler);
+        }
+    }
+
+    #[test]
+    fn a_worker_call_inherits_the_config_format_and_a_server_call_does_not() {
+        let mut config = cfg("m1", None);
+        config.handler = Some(Handler::Worker);
+        config.format = Some(LlmFormat::Anthropic);
+
+        let mut worker_call = bare_llm_call();
+        if let DecisionAction::CallLlm { handler, .. } = &mut worker_call {
+            *handler = Handler::Worker;
+        }
+        match resolve_one_call(worker_call, vec![user_wire("hi")], Some(&config), None).unwrap() {
+            Action::CallLlm { format, .. } => assert_eq!(format, Some(LlmFormat::Anthropic)),
+            other => panic!("expected llm.call; got {other:?}"),
+        }
+        // An explicit server call under the same config stays neutral.
+        match resolve_one_call(bare_llm_call(), vec![user_wire("hi")], Some(&config), None).unwrap()
+        {
+            Action::CallLlm { format, .. } => assert_eq!(format, None),
+            other => panic!("expected llm.call; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_format_execute_carries_the_provider_native_request() {
+        let request = LlmRequest {
+            model: "claude-haiku-4-5".to_string(),
+            messages: vec![
+                DraftMessage {
+                    id: None,
+                    role: Role::System,
+                    content: Some(Content::Text("be nice".to_string())),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    name: None,
+                },
+                user_wire("hi"),
+            ],
+            tools: None,
+            temperature: None,
+            max_completion_tokens: None,
+            reasoning: None,
+        };
+        let wire = to_wire_trigger(
+            Trigger::LlmExecute {
+                id: "llm-1".to_string(),
+                request: request.clone(),
+                format: Some(LlmFormat::Anthropic),
+                stream: true,
+                attempt: 0,
+                deadline: None,
+            },
+            &[],
+            &MessageTree::default(),
+            &HashMap::new(),
+        );
+        match wire {
+            DecisionTrigger::LlmExecute {
+                request, format, ..
+            } => {
+                assert_eq!(format, Some(LlmFormat::Anthropic));
+                assert_eq!(request["system"], "be nice");
+                assert_eq!(request["messages"][0]["content"][0]["text"], "hi");
+                assert!(
+                    request.get("stream").is_none(),
+                    "the trigger's stream flag is authoritative"
+                );
+            }
+            t => panic!("expected llm.execute; got {t:?}"),
+        }
+
+        // No format ⇒ the neutral LlmRequest JSON, verbatim.
+        let wire = to_wire_trigger(
+            Trigger::LlmExecute {
+                id: "llm-1".to_string(),
+                request: request.clone(),
+                format: None,
+                stream: true,
+                attempt: 0,
+                deadline: None,
+            },
+            &[],
+            &MessageTree::default(),
+            &HashMap::new(),
+        );
+        match wire {
+            DecisionTrigger::LlmExecute {
+                request: wired,
+                format,
+                ..
+            } => {
+                assert_eq!(format, None);
+                assert_eq!(wired, serde_json::to_value(&request).unwrap());
+            }
+            t => panic!("expected llm.execute; got {t:?}"),
+        }
+    }
+
+    fn format_execute_trigger(format: Option<LlmFormat>) -> DecisionTrigger {
+        DecisionTrigger::LlmExecute {
+            id: "llm-1".to_string(),
+            request: serde_json::json!({}),
+            format,
+            stream: false,
+            attempt: 0,
+            deadline: None,
+        }
+    }
+
+    #[test]
+    fn a_raw_response_answering_a_format_execute_is_translated() {
+        let trigger = format_execute_trigger(Some(LlmFormat::Anthropic));
+        let actions = resolve_test_actions(
+            vec![DecisionAction::LlmResult {
+                id: None,
+                attempt: None,
+                response: serde_json::json!({
+                    "model": "claude-haiku-4-5",
+                    "content": [
+                        {"type": "text", "text": "hello"},
+                        {"type": "tool_use", "id": "tu_1", "name": "get_weather", "input": {"city": "NYC"}}
+                    ],
+                    "stop_reason": "tool_use",
+                    "usage": {"input_tokens": 1, "output_tokens": 2}
+                }),
+            }],
+            Some(&trigger),
+        )
+        .expect("resolves");
+        match &actions[0] {
+            Action::LlmResult { id, response, .. } => {
+                assert_eq!(id, "llm-1");
+                assert_eq!(response.content.as_deref(), Some("hello"));
+                assert_eq!(response.tool_calls[0].function.name, "get_weather");
+                assert_eq!(response.finish_reason.as_deref(), Some("tool_calls"));
+            }
+            other => panic!("expected llm.result; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unparseable_llm_result_is_a_resolve_error() {
+        for format in [Some(LlmFormat::Anthropic), None] {
+            let trigger = format_execute_trigger(format);
+            let err = resolve_test_actions(
+                vec![DecisionAction::LlmResult {
+                    id: None,
+                    attempt: None,
+                    response: serde_json::json!(42),
+                }],
+                Some(&trigger),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(err, ResolveError::InvalidLlmResponse { .. }),
+                "got {err:?}"
+            );
+        }
+    }
+
     fn cfg(model: &str, system: Option<&str>) -> AgentConfig {
         AgentConfig {
+            format: None,
             model: model.to_string(),
             system: system.map(str::to_string),
             stream: true,
+            handler: None,
             retry: None,
             tools: Vec::new(),
             sub_agents: Vec::new(),
@@ -1052,6 +1389,7 @@ mod tests {
             name: None,
         };
         let call = LlmCallState {
+            format: None,
             call_id: "call-1".to_string(),
             tracking: EffectTracking::new(RetryPolicy::no_retry(), chrono::Utc::now()),
             prompt: vec![],

@@ -6,8 +6,9 @@ use serde::{Deserialize, Serialize};
 use super::decision::{LlmHandler, ToolHandler, Trigger};
 pub use crate::protocol::EffectKind;
 use crate::protocol::{
-    AgentConfig, Control, DraftMessage, ErrorCode, InterruptOrigin, LlmRequest, LlmResponse,
-    Message, MessageTree, NewControl, NewMessage, Node, RetryPolicy, SessionOwner, WorkerState,
+    AgentConfig, Control, DraftMessage, ErrorCode, InterruptOrigin, LlmFormat, LlmRequest,
+    LlmResponse, Message, MessageTree, NewControl, NewMessage, Node, RetryPolicy, SessionOwner,
+    WorkerState,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,6 +145,8 @@ pub struct LlmCallRequested {
     pub retry: RetryPolicy,
     #[serde(default)]
     pub handler: LlmHandler,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<LlmFormat>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

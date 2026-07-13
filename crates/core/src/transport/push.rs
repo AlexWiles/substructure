@@ -6,7 +6,7 @@ use tokio::task::JoinHandle;
 
 use crate::session::wire::resolve_response;
 use crate::worker::push::{PushRegistrationRecord, PushRegistry};
-use crate::worker::{DequeueFilter, SubmitDecision};
+use crate::worker::{DequeueFilter, FailDecision, SubmitDecision, WorkerDecisionRequest};
 use crate::{Caller, Runtime};
 
 pub struct PushAdapter {
@@ -117,6 +117,8 @@ impl PushAdapter {
                                         error = %e,
                                         "unresolvable worker decision"
                                     );
+                                    record_failure(&runtime, &decision, &tenant_id, e.to_string())
+                                        .await;
                                     return;
                                 }
                             };
@@ -146,6 +148,7 @@ impl PushAdapter {
                                 error = %e,
                                 "push dispatch failed"
                             );
+                            record_failure(&runtime, &decision, &tenant_id, e.message).await;
                         }
                     }
                 });
@@ -153,5 +156,36 @@ impl PushAdapter {
         });
 
         handles.insert(tid, handle);
+    }
+}
+
+/// Record the failure now: the queue never redelivers a dequeued decision and a
+/// pending one has no deadline under the default no-retry policy, so an
+/// unrecorded failure hangs its turn forever. `retryable: true` leaves recovery
+/// to the session's worker retry policy.
+async fn record_failure(
+    runtime: &Runtime,
+    decision: &WorkerDecisionRequest,
+    tenant_id: &str,
+    error: String,
+) {
+    let failed = runtime
+        .fail_decision(FailDecision {
+            session_id: decision.session_id.clone(),
+            caller: Caller::System {
+                tenant_id: tenant_id.to_string(),
+            },
+            decision_id: decision.decision_id.clone(),
+            error,
+            retryable: true,
+            span: decision.span.child("push_fail_decision"),
+        })
+        .await;
+    if let Err(e) = failed {
+        tracing::warn!(
+            decision_id = %decision.decision_id,
+            error = %e,
+            "recording worker decision failure failed"
+        );
     }
 }

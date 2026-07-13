@@ -3,7 +3,8 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::{
-    ClientContext, DraftMessage, ErrorCode, Handler, LlmRequest, LlmResponse, RetryPolicy,
+    ClientContext, DraftMessage, ErrorCode, Handler, LlmFormat, LlmRequest, LlmResponse,
+    RetryPolicy,
 };
 
 impl Handler {
@@ -132,6 +133,8 @@ pub enum Trigger {
     LlmExecute {
         id: String,
         request: LlmRequest,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<LlmFormat>,
         #[serde(default)]
         stream: bool,
         attempt: u32,
@@ -247,8 +250,9 @@ pub enum EffectResultPayload {
 
 /// Resolved worker action — the internal, engine-facing form. Every effect id is
 /// present. Produced only by `resolve_response` from a `DecisionAction`; the core never
-/// deserializes this from the wire. Omitting `attempt` on a result/error settles the
-/// current attempt; echo it to fence a stale executor.
+/// deserializes this from the wire. An omitted `attempt` on a result/error is filled
+/// from the `*.execute` trigger being answered, so it fences to the attempt that ran;
+/// out-of-band (no trigger) it stays `None`, settling the current attempt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Action {
@@ -262,6 +266,9 @@ pub enum Action {
         #[serde(default = "RetryPolicy::no_retry")]
         retry: RetryPolicy,
         handler: LlmHandler,
+        /// The config's `format`, resolved at the seam (worker calls only).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<LlmFormat>,
     },
     #[serde(rename = "tool.call")]
     CallTool {

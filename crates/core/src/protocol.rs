@@ -215,6 +215,19 @@ pub enum Handler {
     Client,
 }
 
+/// The wire shape of a worker-handled LLM call. Absent ⇒ the engine's neutral
+/// format. Set ⇒ `llm.execute` carries the provider's native request body, and
+/// `llm.result`/`llm.token.delta` accept the provider's native response and
+/// stream events. Requires `handler: worker`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmFormat {
+    /// OpenAI Chat Completions.
+    Openai,
+    /// Anthropic Messages API.
+    Anthropic,
+}
+
 // ── Retry ────────────────────────────────────────────────────────────────
 
 /// Fully-resolved retry policy — no optional fields. Stored on call state and
@@ -256,6 +269,15 @@ pub struct AgentConfig {
     pub system: Option<String>,
     #[serde(default)]
     pub stream: bool,
+    /// Where the proposed LLM call runs: `Some(Worker)` ⇒ the worker executes it
+    /// (answering `llm.execute`); absent or `Some(Server)` ⇒ the engine's
+    /// server-side provider. `client` is invalid and rejected at the decision seam.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handler: Option<Handler>,
+    /// Provider wire format for worker-handled calls; requires `handler:
+    /// worker`. Absent ⇒ the neutral format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<LlmFormat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetryPolicy>,
     /// Worker- or client-executed tools the model can call.
@@ -695,7 +717,11 @@ pub enum DecisionTrigger {
     #[serde(rename = "llm.execute")]
     LlmExecute {
         id: String,
-        request: LlmRequest,
+        /// The neutral `LlmRequest` JSON, or the provider's native request body
+        /// when `format` is set.
+        request: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<LlmFormat>,
         #[serde(default)]
         stream: bool,
         attempt: u32,
@@ -795,7 +821,8 @@ pub enum DecisionAction {
         #[serde(default = "RetryPolicy::no_retry")]
         retry: RetryPolicy,
     },
-    /// `id` omitted ⇒ the effect named by the answering `tool.execute` trigger.
+    /// `id`/`attempt` omitted ⇒ taken from the answering `tool.execute` trigger,
+    /// fencing the result to the attempt that ran.
     #[serde(rename = "tool.result")]
     ToolResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -805,14 +832,17 @@ pub enum DecisionAction {
         // Any JSON value; non-strings are canonicalized to JSON text.
         result: Value,
     },
-    /// `id` omitted ⇒ the effect named by the answering `llm.execute` trigger.
+    /// `id`/`attempt` omitted ⇒ taken from the answering `llm.execute` trigger,
+    /// fencing the result to the attempt that ran.
     #[serde(rename = "llm.result")]
     LlmResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attempt: Option<u32>,
-        response: LlmResponse,
+        /// A neutral `LlmResponse`, or the provider's native response when the
+        /// answered `llm.execute` carried a `format`.
+        response: Value,
     },
     #[serde(rename = "tool.error")]
     ToolError {

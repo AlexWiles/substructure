@@ -41,7 +41,8 @@ struct AnthropicBody {
     thinking: Option<Thinking>,
     #[serde(skip_serializing_if = "Option::is_none")]
     output_config: Option<OutputConfig>,
-    stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -166,7 +167,13 @@ fn push_turn(turns: &mut Vec<AnthropicMessage>, role: &'static str, blocks: Vec<
     });
 }
 
-fn build_body(request: &LlmRequest, default_max_tokens: u64, stream: bool) -> AnthropicBody {
+/// `stream: None` omits the field so the body is valid input for both the
+/// create and stream calls a worker might make.
+fn build_body(
+    request: &LlmRequest,
+    default_max_tokens: u64,
+    stream: Option<bool>,
+) -> AnthropicBody {
     let mut system_parts: Vec<String> = Vec::new();
     let mut turns: Vec<AnthropicMessage> = Vec::new();
 
@@ -329,6 +336,20 @@ impl MessagesResponse {
     }
 }
 
+// ── Worker-format seam ───────────────────────────────────────────────────
+
+/// The Messages API body for `request`, `stream` omitted.
+pub(crate) fn request_to_wire(request: &LlmRequest) -> serde_json::Value {
+    serde_json::to_value(build_body(request, DEFAULT_MAX_TOKENS, None)).unwrap_or_default()
+}
+
+/// A raw Messages API response → the neutral `LlmResponse`.
+pub(crate) fn response_from_wire(value: serde_json::Value) -> Result<LlmResponse, String> {
+    serde_json::from_value::<MessagesResponse>(value)
+        .map(MessagesResponse::into_llm_response)
+        .map_err(|e| format!("invalid anthropic response: {e}"))
+}
+
 // ── Streaming events ─────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -427,6 +448,156 @@ enum BlockAccum {
     },
 }
 
+/// Folds Messages API stream events into `StreamDelta`s and the final
+/// response. Shared by the server-side SSE loop and the worker-format delta
+/// seam (`providers::format`).
+#[derive(Default)]
+pub(crate) struct StreamParser {
+    content: String,
+    blocks: Vec<BlockAccum>,
+    finish_reason: Option<String>,
+    model: Option<String>,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+}
+
+impl StreamParser {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fold one raw event payload; unknown or non-streaming events yield nothing.
+    /// Errors are the worker's to surface, so an error event yields nothing too.
+    pub(crate) fn parse_data(&mut self, data: &str) -> Vec<StreamDelta> {
+        serde_json::from_str(data)
+            .ok()
+            .and_then(|event| self.on_event(event).ok().flatten())
+            .into_iter()
+            .collect()
+    }
+
+    fn on_event(&mut self, event: StreamEvent) -> Result<Option<StreamDelta>, LlmCallError> {
+        match event {
+            StreamEvent::MessageStart { message } => {
+                if !message.model.is_empty() {
+                    self.model = Some(message.model);
+                }
+                if let Some(u) = message.usage {
+                    self.input_tokens = u.input_tokens.or(self.input_tokens);
+                }
+                Ok(None)
+            }
+            StreamEvent::ContentBlockStart {
+                index,
+                content_block,
+            } => {
+                while self.blocks.len() <= index {
+                    self.blocks.push(BlockAccum::Passthrough);
+                }
+                self.blocks[index] = match content_block {
+                    StreamContentBlock::ToolUse { id, name } => BlockAccum::ToolUse {
+                        id,
+                        name,
+                        arguments: String::new(),
+                    },
+                    StreamContentBlock::Other => BlockAccum::Passthrough,
+                };
+                Ok(None)
+            }
+            StreamEvent::ContentBlockDelta { index, delta } => Ok(match delta {
+                StreamBlockDelta::TextDelta { text } => {
+                    self.content.push_str(&text);
+                    Some(StreamDelta {
+                        text: Some(text),
+                        ..Default::default()
+                    })
+                }
+                StreamBlockDelta::ThinkingDelta { thinking } => {
+                    (!thinking.is_empty()).then(|| StreamDelta {
+                        reasoning: Some(thinking),
+                        ..Default::default()
+                    })
+                }
+                StreamBlockDelta::InputJsonDelta { partial_json } => {
+                    if let Some(BlockAccum::ToolUse {
+                        id,
+                        name,
+                        arguments,
+                    }) = self.blocks.get_mut(index)
+                    {
+                        arguments.push_str(&partial_json);
+                        Some(StreamDelta {
+                            tool_calls: vec![ToolCallChunk {
+                                id: id.clone(),
+                                name: (!name.is_empty()).then(|| name.clone()),
+                                arguments: Some(partial_json),
+                            }],
+                            ..Default::default()
+                        })
+                    } else {
+                        None
+                    }
+                }
+                StreamBlockDelta::Other => None,
+            }),
+            StreamEvent::MessageDelta { delta, usage } => {
+                if let Some(u) = usage {
+                    self.output_tokens = u.output_tokens.or(self.output_tokens);
+                }
+                Ok(delta.stop_reason.map(|reason| {
+                    let mapped = map_stop_reason(&reason);
+                    self.finish_reason = Some(mapped.clone());
+                    StreamDelta {
+                        finish_reason: Some(mapped),
+                        ..Default::default()
+                    }
+                }))
+            }
+            StreamEvent::Error { error } => Err(LlmCallError {
+                message: format!(
+                    "Anthropic stream error ({}): {}",
+                    error.error_type, error.message
+                ),
+                retryable: matches!(error.error_type.as_str(), "overloaded_error" | "api_error"),
+                code: Some(ErrorCode::ProviderError),
+                detail: None,
+            }),
+            StreamEvent::ContentBlockStop {}
+            | StreamEvent::MessageStop {}
+            | StreamEvent::Ping {}
+            | StreamEvent::Unknown => Ok(None),
+        }
+    }
+
+    fn into_response(self, fallback_model: &str) -> LlmResponse {
+        let tool_calls = self
+            .blocks
+            .into_iter()
+            .filter_map(|b| match b {
+                BlockAccum::ToolUse {
+                    id,
+                    name,
+                    arguments,
+                } if !id.is_empty() => Some(ToolCall {
+                    id,
+                    call_type: "function".to_string(),
+                    function: ToolCallFunction { name, arguments },
+                }),
+                _ => None,
+            })
+            .collect();
+        LlmResponse {
+            model: self.model.unwrap_or_else(|| fallback_model.to_string()),
+            content: (!self.content.is_empty()).then_some(self.content),
+            tool_calls,
+            finish_reason: self.finish_reason,
+            usage: build_usage(self.input_tokens, self.output_tokens),
+            cost: None,
+            images: Vec::new(),
+        }
+    }
+}
+
 // ── Config / client ──────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -487,7 +658,7 @@ impl AnthropicClient {
         request: &LlmRequest,
         stream: bool,
     ) -> Result<reqwest::Response, LlmCallError> {
-        let body = build_body(request, self.default_max_tokens, stream);
+        let body = build_body(request, self.default_max_tokens, Some(stream));
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
 
         self.http
@@ -580,12 +751,7 @@ impl LlmCallable for AnthropicClient {
             return Err(classify_error(status, &body));
         }
 
-        let mut content = String::new();
-        let mut blocks: Vec<BlockAccum> = Vec::new();
-        let mut finish_reason: Option<String> = None;
-        let mut model = request.model.clone();
-        let mut input_tokens: Option<u64> = None;
-        let mut output_tokens: Option<u64> = None;
+        let mut parser = StreamParser::new();
 
         let byte_stream = resp.bytes_stream();
         let mut stream =
@@ -617,127 +783,13 @@ impl LlmCallable for AnthropicClient {
                     Err(_) => continue,
                 };
 
-                match event {
-                    StreamEvent::MessageStart { message } => {
-                        if !message.model.is_empty() {
-                            model = message.model;
-                        }
-                        if let Some(u) = message.usage {
-                            input_tokens = u.input_tokens.or(input_tokens);
-                        }
-                    }
-                    StreamEvent::ContentBlockStart {
-                        index,
-                        content_block,
-                    } => {
-                        while blocks.len() <= index {
-                            blocks.push(BlockAccum::Passthrough);
-                        }
-                        blocks[index] = match content_block {
-                            StreamContentBlock::ToolUse { id, name } => BlockAccum::ToolUse {
-                                id,
-                                name,
-                                arguments: String::new(),
-                            },
-                            StreamContentBlock::Other => BlockAccum::Passthrough,
-                        };
-                    }
-                    StreamEvent::ContentBlockDelta { index, delta } => match delta {
-                        StreamBlockDelta::TextDelta { text } => {
-                            content.push_str(&text);
-                            let _ = chunk_tx.send(StreamDelta {
-                                text: Some(text),
-                                ..Default::default()
-                            });
-                        }
-                        StreamBlockDelta::ThinkingDelta { thinking } => {
-                            if !thinking.is_empty() {
-                                let _ = chunk_tx.send(StreamDelta {
-                                    reasoning: Some(thinking),
-                                    ..Default::default()
-                                });
-                            }
-                        }
-                        StreamBlockDelta::InputJsonDelta { partial_json } => {
-                            if let Some(BlockAccum::ToolUse {
-                                id,
-                                name,
-                                arguments,
-                            }) = blocks.get_mut(index)
-                            {
-                                arguments.push_str(&partial_json);
-                                let _ = chunk_tx.send(StreamDelta {
-                                    tool_calls: vec![ToolCallChunk {
-                                        id: id.clone(),
-                                        name: (!name.is_empty()).then(|| name.clone()),
-                                        arguments: Some(partial_json),
-                                    }],
-                                    ..Default::default()
-                                });
-                            }
-                        }
-                        StreamBlockDelta::Other => {}
-                    },
-                    StreamEvent::MessageDelta { delta, usage } => {
-                        if let Some(reason) = delta.stop_reason {
-                            let mapped = map_stop_reason(&reason);
-                            finish_reason = Some(mapped.clone());
-                            let _ = chunk_tx.send(StreamDelta {
-                                finish_reason: Some(mapped),
-                                ..Default::default()
-                            });
-                        }
-                        if let Some(u) = usage {
-                            output_tokens = u.output_tokens.or(output_tokens);
-                        }
-                    }
-                    StreamEvent::Error { error } => {
-                        return Err(LlmCallError {
-                            message: format!(
-                                "Anthropic stream error ({}): {}",
-                                error.error_type, error.message
-                            ),
-                            retryable: matches!(
-                                error.error_type.as_str(),
-                                "overloaded_error" | "api_error"
-                            ),
-                            code: Some(ErrorCode::ProviderError),
-                            detail: None,
-                        });
-                    }
-                    StreamEvent::ContentBlockStop {}
-                    | StreamEvent::MessageStop {}
-                    | StreamEvent::Ping {}
-                    | StreamEvent::Unknown => {}
+                if let Some(delta) = parser.on_event(event)? {
+                    let _ = chunk_tx.send(delta);
                 }
             }
         }
 
-        let tool_calls = blocks
-            .into_iter()
-            .filter_map(|b| match b {
-                BlockAccum::ToolUse {
-                    id,
-                    name,
-                    arguments,
-                } if !id.is_empty() => Some(ToolCall {
-                    id,
-                    call_type: "function".to_string(),
-                    function: ToolCallFunction { name, arguments },
-                }),
-                _ => None,
-            })
-            .collect();
-
-        Ok(LlmResponse {
-            model,
-            content: (!content.is_empty()).then_some(content),
-            tool_calls,
-            finish_reason,
-            usage: build_usage(input_tokens, output_tokens),
-            cost: None,
-            images: Vec::new(),
-        })
+        Ok(parser.into_response(&request.model))
     }
 }
 
@@ -807,7 +859,7 @@ mod tests {
                 msg(Role::User, Some("hi")),
             ]),
             4096,
-            false,
+            Some(false),
         );
         let v = serde_json::to_value(&body).unwrap();
         assert_eq!(v["system"], "be nice");
@@ -838,7 +890,7 @@ mod tests {
                 result_2,
             ]),
             4096,
-            false,
+            Some(false),
         );
         let v = serde_json::to_value(&body).unwrap();
 
@@ -881,7 +933,7 @@ mod tests {
             exclude: None,
             enabled: None,
         });
-        let v = serde_json::to_value(build_body(&r, 4096, true)).unwrap();
+        let v = serde_json::to_value(build_body(&r, 4096, Some(true))).unwrap();
         assert_eq!(v["max_tokens"], 1000);
         assert_eq!(v["tools"][0]["name"], "f");
         assert_eq!(v["tools"][0]["input_schema"]["type"], "object");

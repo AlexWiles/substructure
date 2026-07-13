@@ -12,6 +12,17 @@ same version.
 
 ### Added
 
+- Worker-run LLM calls forced every worker to hand-roll provider translation.
+  `AgentConfig` takes `format` (`openai`/`anthropic`), so `llm.execute`
+  carries the provider's native request and `llm.result`/`llm.token.delta`
+  accept its native response and stream events.
+- A worker running its own LLM calls had to intercept `client.messages` and flip
+  each proposed call to `handler: worker`. `AgentConfig` takes a `handler`,
+  so the engine proposes worker-run calls straight from the config.
+- No plain example showed a worker making its own streaming LLM calls. Added
+  `node-hono-{anthropic,openai}` (Hono, TypeScript) and
+  `python-fast-api-{anthropic,openai}` (FastAPI): workers that run the provider
+  call themselves and stream tokens back, no SDK.
 - Native Anthropic and OpenAI LLM providers.
 - `run` CLI command sends input to the engine.
 - Workers authored every decision. Requests now carry `proposed`, the engine's
@@ -53,6 +64,9 @@ same version.
 
 ### Changed
 
+- An omitted settle `attempt` settled the current attempt, so a result from a
+  superseded retry could resolve the wrong one. A `tool.result`/`llm.result`
+  answering an `*.execute` now fences to that trigger's attempt.
 - The protocol schema broke code generators: no roots, anonymous inlined defs,
   `true` schemas, a flattened-union `Effect`, two `handler` enums. Roots for
   every wire surface, named `$defs`, `{}` for any-JSON, string `cost`, a flat
@@ -80,6 +94,13 @@ same version.
 
 ### Fixed
 
+- Engine-derived turns passed client-sent system messages into the prompt and
+  transcript, a prompt-injection vector. `client.messages` system messages are
+  now dropped, matching the SDK loop.
+- An unresolvable or undeliverable pushed decision was only logged, hanging the
+  turn forever under the default no-retry policy. The push adapter now records
+  the failure immediately with its real cause, leaving recovery to the retry
+  policy.
 - `--output pretty` hid the tool-call id, so a client tool couldn't be settled.
   A client-tool yield now prints each pending call's id and a ready-to-edit
   `tool.result` settle input.

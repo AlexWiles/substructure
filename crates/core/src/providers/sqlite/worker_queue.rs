@@ -172,14 +172,16 @@ mod tests {
             },
             trigger: DecisionTrigger::LlmExecute {
                 id: "llm-1".to_string(),
-                request: LlmRequest {
+                request: serde_json::to_value(LlmRequest {
                     model: "test-model".to_string(),
                     messages: vec![],
                     tools: None,
                     temperature: None,
                     max_completion_tokens: None,
                     reasoning: None,
-                },
+                })
+                .unwrap(),
+                format: None,
                 stream: true,
                 attempt: 0,
                 deadline: None,

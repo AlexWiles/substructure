@@ -13,6 +13,7 @@ use sha2::Sha256;
 use crate::protocol::{
     DecisionRequest, DecisionResponse, DecisionTrigger, StreamDelta, TokenDelta,
 };
+use crate::providers::format::DeltaParser;
 use crate::runtime::llm::TokenDeltaTransport;
 use crate::worker::push::{PushError, PushTransport, TransportConstructor};
 use crate::worker::WorkerDecisionRequest;
@@ -152,6 +153,13 @@ where
 {
     let mut events = Box::pin(stream.eventsource());
     let mut seq: u32 = 0;
+    // A declared format ⇒ delta frames are raw provider events.
+    let mut parser: Option<DeltaParser> = match &decision.trigger {
+        DecisionTrigger::LlmExecute {
+            format: Some(f), ..
+        } => Some(f.delta_parser()),
+        _ => None,
+    };
 
     while let Some(event) = events.next().await {
         let event = event.map_err(|e| PushError {
@@ -160,14 +168,22 @@ where
         })?;
 
         match event.event.as_str() {
-            "llm.token.delta" => {
-                let delta: StreamDelta =
-                    serde_json::from_str(&event.data).map_err(|e| PushError {
-                        message: format!("failed to parse llm.token.delta frame: {e}"),
-                        retryable: false,
-                    })?;
-                publish_worker_delta(decision, delta, &token_delta_transport, &mut seq).await?;
-            }
+            "llm.token.delta" => match parser.as_mut() {
+                Some(p) => {
+                    for delta in p.parse_data(&event.data) {
+                        publish_worker_delta(decision, delta, &token_delta_transport, &mut seq)
+                            .await?;
+                    }
+                }
+                None => {
+                    let delta: StreamDelta =
+                        serde_json::from_str(&event.data).map_err(|e| PushError {
+                            message: format!("failed to parse llm.token.delta frame: {e}"),
+                            retryable: false,
+                        })?;
+                    publish_worker_delta(decision, delta, &token_delta_transport, &mut seq).await?;
+                }
+            },
             "decision.result" => {
                 return serde_json::from_str(&event.data).map_err(|e| PushError {
                     message: format!("failed to parse decision.result frame: {e}"),
@@ -287,14 +303,16 @@ mod tests {
             },
             trigger: DecisionTrigger::LlmExecute {
                 id: "llm-1".to_string(),
-                request: LlmRequest {
+                request: serde_json::to_value(LlmRequest {
                     model: "test-model".to_string(),
                     messages: vec![],
                     tools: None,
                     temperature: None,
                     max_completion_tokens: None,
                     reasoning: None,
-                },
+                })
+                .unwrap(),
+                format: None,
                 stream: true,
                 attempt: 0,
                 deadline: None,
@@ -344,6 +362,31 @@ mod tests {
         assert_eq!(deltas[0].call_id, "llm-1");
         assert_eq!(deltas[0].root_session_id, "sess-1");
         assert_eq!(deltas[1].reasoning.as_deref(), Some("hmm"));
+        assert_eq!(deltas[1].seq, 1);
+    }
+
+    #[tokio::test]
+    async fn a_format_execute_streams_raw_provider_events() {
+        let transport = Arc::new(RecordingTransport::default());
+        let mut decision = streaming_decision();
+        if let DecisionTrigger::LlmExecute { format, .. } = &mut decision.trigger {
+            *format = Some(crate::protocol::LlmFormat::Anthropic);
+        }
+        let body = "event: llm.token.delta\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"m\"}}\n\n\
+                    event: llm.token.delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n\
+                    event: llm.token.delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n\
+                    event: decision.result\ndata: {\"actions\":[]}\n\n";
+
+        let submit = read_sse_response(chunked(body), &decision, transport.clone())
+            .await
+            .expect("should parse the stream");
+        assert!(submit.actions.is_empty());
+
+        let deltas = transport.deltas.lock().unwrap();
+        assert_eq!(deltas.len(), 2, "message_start streams nothing");
+        assert_eq!(deltas[0].text.as_deref(), Some("hi"));
+        assert_eq!(deltas[0].seq, 0);
+        assert_eq!(deltas[1].finish_reason.as_deref(), Some("stop"));
         assert_eq!(deltas[1].seq, 1);
     }
 

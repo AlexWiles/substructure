@@ -9,9 +9,9 @@ use super::events::*;
 use rust_decimal::Decimal;
 
 use crate::protocol::{
-    AgentConfig, DraftMessage, Effect, EffectKind, EffectStatus, InterruptOrigin, LlmRequest,
-    LlmTool, Message, MessageTree, Node, ReasoningConfig, RetryPolicy, Role, SessionOwner,
-    WorkerState,
+    AgentConfig, DraftMessage, Effect, EffectKind, EffectStatus, InterruptOrigin, LlmFormat,
+    LlmRequest, LlmTool, Message, MessageTree, Node, ReasoningConfig, RetryPolicy, Role,
+    SessionOwner, WorkerState,
 };
 use crate::runtime::aggregate::ApplyContext;
 use crate::runtime::retry::RetryState;
@@ -99,6 +99,8 @@ pub struct LlmCallState {
     pub stream: bool,
     #[serde(default)]
     pub handler: LlmHandler,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<LlmFormat>,
     /// The active head when the effect was first requested; retries keep it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<String>,
@@ -471,6 +473,7 @@ impl SessionState {
                     existing.spec = spec;
                     existing.stream = payload.stream;
                     existing.handler = payload.handler;
+                    existing.format = payload.format;
                 } else {
                     // Applies after the same batch's NewMessage events: head_id is post-reconcile.
                     self.llm_calls.insert(
@@ -482,6 +485,7 @@ impl SessionState {
                             spec,
                             stream: payload.stream,
                             handler: payload.handler,
+                            format: payload.format,
                             anchor: self.head_id.clone(),
                         },
                     );
@@ -1029,6 +1033,7 @@ mod open_llm_calls_tests {
 
     fn call_state(call_id: &str) -> LlmCallState {
         LlmCallState {
+            format: None,
             call_id: call_id.to_string(),
             tracking: EffectTracking::new(RetryPolicy::no_retry(), Utc::now()),
             prompt: vec![],
@@ -1205,9 +1210,11 @@ mod agent_version_tests {
 
     fn config(model: &str) -> AgentConfig {
         AgentConfig {
+            format: None,
             model: model.to_string(),
             system: None,
             stream: false,
+            handler: None,
             retry: None,
             tools: Vec::new(),
             sub_agents: Vec::new(),

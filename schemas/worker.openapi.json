@@ -5,6 +5,28 @@
         "additionalProperties": false,
         "description": "A declared agent identity. `model` is the only required field; everything else\nrefines the proposed LLM request the engine derives for `client.messages`.",
         "properties": {
+          "format": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LlmFormat"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider wire format for worker-handled calls; requires `handler:\nworker`. Absent ⇒ the neutral format."
+          },
+          "handler": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Handler"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where the proposed LLM call runs: `Some(Worker)` ⇒ the worker executes it\n(answering `llm.execute`); absent or `Some(Server)` ⇒ the engine's\nserver-side provider. `client` is invalid and rejected at the decision seam."
+          },
           "model": {
             "type": "string"
           },
@@ -376,7 +398,7 @@
           },
           {
             "additionalProperties": false,
-            "description": "`id` omitted ⇒ the effect named by the answering `tool.execute` trigger.",
+            "description": "`id`/`attempt` omitted ⇒ taken from the answering `tool.execute` trigger,\nfencing the result to the attempt that ran.",
             "properties": {
               "attempt": {
                 "format": "uint32",
@@ -406,7 +428,7 @@
           },
           {
             "additionalProperties": false,
-            "description": "`id` omitted ⇒ the effect named by the answering `llm.execute` trigger.",
+            "description": "`id`/`attempt` omitted ⇒ taken from the answering `llm.execute` trigger,\nfencing the result to the attempt that ran.",
             "properties": {
               "attempt": {
                 "format": "uint32",
@@ -423,7 +445,7 @@
                 ]
               },
               "response": {
-                "$ref": "#/components/schemas/LlmResponse"
+                "description": "A neutral `LlmResponse`, or the provider's native response when the\nanswered `llm.execute` carried a `format`."
               },
               "type": {
                 "const": "llm.result",
@@ -926,11 +948,21 @@
                   "null"
                 ]
               },
+              "format": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/LlmFormat"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "id": {
                 "type": "string"
               },
               "request": {
-                "$ref": "#/components/schemas/LlmRequest"
+                "description": "The neutral `LlmRequest` JSON, or the provider's native request body\nwhen `format` is set."
               },
               "stream": {
                 "type": "boolean"
@@ -1284,105 +1316,20 @@
         ],
         "type": "string"
       },
-      "LlmRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "max_completion_tokens": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "messages": {
-            "items": {
-              "$ref": "#/components/schemas/DraftMessage"
-            },
-            "type": "array"
-          },
-          "model": {
+      "LlmFormat": {
+        "description": "The wire shape of a worker-handled LLM call. Absent ⇒ the engine's neutral\nformat. Set ⇒ `llm.execute` carries the provider's native request body, and\n`llm.result`/`llm.token.delta` accept the provider's native response and\nstream events. Requires `handler: worker`.",
+        "oneOf": [
+          {
+            "const": "openai",
+            "description": "OpenAI Chat Completions.",
             "type": "string"
           },
-          "reasoning": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ReasoningConfig"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "temperature": {
-            "format": "double",
-            "type": [
-              "number",
-              "null"
-            ]
-          },
-          "tools": {
-            "items": {
-              "$ref": "#/components/schemas/LlmTool"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
+          {
+            "const": "anthropic",
+            "description": "Anthropic Messages API.",
+            "type": "string"
           }
-        },
-        "required": [
-          "model",
-          "messages"
-        ],
-        "type": "object"
-      },
-      "LlmResponse": {
-        "additionalProperties": false,
-        "description": "Normalized LLM response. Provider adapters convert their raw responses\ninto this type at the boundary.",
-        "properties": {
-          "content": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "cost": {
-            "description": "Cost in dollars for this call, if the provider reports it. A decimal\nstring on the wire.",
-            "pattern": "^-?\\d+(\\.\\d+)?$",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "finish_reason": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "images": {
-            "description": "Images generated by the model.",
-            "items": {
-              "$ref": "#/components/schemas/ResponseImage"
-            },
-            "type": "array"
-          },
-          "model": {
-            "type": "string"
-          },
-          "tool_calls": {
-            "items": {
-              "$ref": "#/components/schemas/ToolCall"
-            },
-            "type": "array"
-          },
-          "usage": {}
-        },
-        "required": [
-          "model"
-        ],
-        "type": "object"
+        ]
       },
       "LlmTool": {
         "additionalProperties": false,
@@ -1568,19 +1515,6 @@
           "none"
         ],
         "type": "string"
-      },
-      "ResponseImage": {
-        "additionalProperties": false,
-        "description": "An image returned by the model in the response.",
-        "properties": {
-          "url": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "url"
-        ],
-        "type": "object"
       },
       "RetryPolicy": {
         "additionalProperties": false,

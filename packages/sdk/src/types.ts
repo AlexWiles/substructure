@@ -194,6 +194,13 @@ export type ToolHandler = "worker" | "client";
 
 export type LlmHandler = "server" | "worker";
 
+/** The wire shape of a worker-handled LLM call, declared by the agent config's
+ *  `format`. Absent ⇒ the engine's neutral format. Set ⇒ `llm.execute`
+ *  carries the provider's native request body, and `llm.result` /
+ *  `llm.token.delta` accept the provider's native response and stream events.
+ *  Requires `handler: "worker"`. */
+export type LlmFormat = "openai" | "anthropic";
+
 export interface ToolResult {
     tool_call_id: string;
     name: string;
@@ -324,7 +331,16 @@ export type DecisionTrigger =
           attempt: number;
           deadline?: DateTime;
       }
-    | { type: "llm.execute"; id: string; request: LlmRequest; stream: boolean; attempt: number; deadline?: DateTime }
+    | {
+          type: "llm.execute";
+          id: string;
+          /** The neutral `LlmRequest`, or the provider's native request body when `format` is set. */
+          request: LlmRequest | Record<string, unknown>;
+          format?: LlmFormat;
+          stream: boolean;
+          attempt: number;
+          deadline?: DateTime;
+      }
     | { type: "tool.finished"; id: string; ok: boolean; name: string; result?: string; error?: string }
     | {
           type: "sub_agent.finished";
@@ -382,7 +398,14 @@ export type WorkerAction =
           result: unknown;
           attempt?: number;
       }
-    | { type: "llm.result"; id?: string; response: LlmResponse; attempt?: number }
+    | {
+          type: "llm.result";
+          id?: string;
+          /** A neutral `LlmResponse`, or the provider's native response when the
+           *  answered `llm.execute` carried a `format`. */
+          response: LlmResponse | Record<string, unknown>;
+          attempt?: number;
+      }
     | {
           type: "tool.error";
           id?: string;

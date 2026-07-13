@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod format;
 pub mod memory_queue;
 pub mod openai;
 pub mod openrouter;

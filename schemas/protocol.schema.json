@@ -4,6 +4,28 @@
       "additionalProperties": false,
       "description": "A declared agent identity. `model` is the only required field; everything else\nrefines the proposed LLM request the engine derives for `client.messages`.",
       "properties": {
+        "format": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LlmFormat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Provider wire format for worker-handled calls; requires `handler:\nworker`. Absent ⇒ the neutral format."
+        },
+        "handler": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Handler"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where the proposed LLM call runs: `Some(Worker)` ⇒ the worker executes it\n(answering `llm.execute`); absent or `Some(Server)` ⇒ the engine's\nserver-side provider. `client` is invalid and rejected at the decision seam."
+        },
         "model": {
           "type": "string"
         },
@@ -623,7 +645,7 @@
         },
         {
           "additionalProperties": false,
-          "description": "`id` omitted ⇒ the effect named by the answering `tool.execute` trigger.",
+          "description": "`id`/`attempt` omitted ⇒ taken from the answering `tool.execute` trigger,\nfencing the result to the attempt that ran.",
           "properties": {
             "attempt": {
               "format": "uint32",
@@ -653,7 +675,7 @@
         },
         {
           "additionalProperties": false,
-          "description": "`id` omitted ⇒ the effect named by the answering `llm.execute` trigger.",
+          "description": "`id`/`attempt` omitted ⇒ taken from the answering `llm.execute` trigger,\nfencing the result to the attempt that ran.",
           "properties": {
             "attempt": {
               "format": "uint32",
@@ -670,7 +692,7 @@
               ]
             },
             "response": {
-              "$ref": "#/$defs/LlmResponse"
+              "description": "A neutral `LlmResponse`, or the provider's native response when the\nanswered `llm.execute` carried a `format`."
             },
             "type": {
               "const": "llm.result",
@@ -1173,11 +1195,21 @@
                 "null"
               ]
             },
+            "format": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/LlmFormat"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "id": {
               "type": "string"
             },
             "request": {
-              "$ref": "#/$defs/LlmRequest"
+              "description": "The neutral `LlmRequest` JSON, or the provider's native request body\nwhen `format` is set."
             },
             "stream": {
               "type": "boolean"
@@ -1530,6 +1562,21 @@
         "frontend"
       ],
       "type": "string"
+    },
+    "LlmFormat": {
+      "description": "The wire shape of a worker-handled LLM call. Absent ⇒ the engine's neutral\nformat. Set ⇒ `llm.execute` carries the provider's native request body, and\n`llm.result`/`llm.token.delta` accept the provider's native response and\nstream events. Requires `handler: worker`.",
+      "oneOf": [
+        {
+          "const": "openai",
+          "description": "OpenAI Chat Completions.",
+          "type": "string"
+        },
+        {
+          "const": "anthropic",
+          "description": "Anthropic Messages API.",
+          "type": "string"
+        }
+      ]
     },
     "LlmRequest": {
       "additionalProperties": false,

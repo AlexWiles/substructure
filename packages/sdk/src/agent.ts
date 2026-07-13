@@ -1,5 +1,5 @@
 import type { Agent, Llm, NamedAgent, ToolDef } from "./core";
-import type { LlmTool, Message, MessageInput, RetryPolicy, WorkerAction } from "./types";
+import type { LlmRequest, LlmTool, Message, MessageInput, RetryPolicy, WorkerAction } from "./types";
 
 // ── agent(config): the default tool/sub-agent loop ───────────────────────────
 
@@ -95,8 +95,10 @@ export function toolLoop<S = unknown>(config: LoopConfig): Agent<S> {
             }
             case "llm.execute": {
                 try {
+                    // The loop declares no `format`, so the request is always neutral.
+                    const request = d.trigger.request as LlmRequest;
                     // biome-ignore lint/style/noNonNullAssertion: the Llm union guarantees a worker LLM has `run`
-                    const response = await config.llm.run!(d.trigger.request, { emitDelta: d.emitDelta });
+                    const response = await config.llm.run!(request, { emitDelta: d.emitDelta });
                     const action: WorkerAction = {
                         type: "llm.result",
                         id: d.trigger.id,

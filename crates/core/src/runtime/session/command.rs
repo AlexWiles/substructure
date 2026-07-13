@@ -10,8 +10,8 @@ use super::state::{json_to_string, new_call_id, EffectTracking, SessionState, Se
 use super::tool_contract::{declared_tool, output_violation, DeclaredTool};
 use crate::protocol::{
     AgentConfig, ClientMessage, ClientMessages, ClientPayload, Content, ContentPart, DraftMessage,
-    EffectStatus, ErrorCode, ImageUrl, InterruptOrigin, LlmRequest, LlmResponse, NewMessage,
-    RetryPolicy, Role, SessionOwner, WorkerState,
+    EffectStatus, ErrorCode, ImageUrl, InterruptOrigin, LlmFormat, LlmRequest, LlmResponse,
+    NewMessage, RetryPolicy, Role, SessionOwner, WorkerState,
 };
 use crate::runtime::aggregate::Caller;
 
@@ -40,6 +40,7 @@ pub enum CommandPayload {
         stream: bool,
         retry: RetryPolicy,
         handler: LlmHandler,
+        format: Option<LlmFormat>,
     },
     CompleteLlmCall {
         call_id: String,
@@ -802,6 +803,7 @@ impl SessionState {
                 stream,
                 retry,
                 handler,
+                format,
             } => {
                 Self::ensure_internal(caller)?;
 
@@ -829,6 +831,7 @@ impl SessionState {
                         stream,
                         retry: retry.clone(),
                         handler: handler,
+                        format,
                     })];
 
                     if handler == LlmHandler::Worker {
@@ -837,6 +840,7 @@ impl SessionState {
                             Trigger::LlmExecute {
                                 id: call_id,
                                 request,
+                                format,
                                 stream,
                                 attempt: 0,
                                 deadline: retry.deadline(chrono::Utc::now()),
@@ -1353,6 +1357,7 @@ impl SessionState {
                             stream,
                             retry,
                             handler,
+                            format,
                         } => self.handle(
                             CommandPayload::RequestLlmCall {
                                 call_id: id,
@@ -1360,6 +1365,7 @@ impl SessionState {
                                 stream,
                                 retry,
                                 handler,
+                                format,
                             },
                             &system,
                         ),
@@ -1643,6 +1649,7 @@ impl SessionState {
                             stream: call.stream,
                             retry: call.tracking.retry_policy.clone(),
                             handler: call.handler,
+                            format: call.format,
                         })];
                         if call.handler == LlmHandler::Worker {
                             let execute = self.emit_decision_request(
@@ -1650,6 +1657,7 @@ impl SessionState {
                                 Trigger::LlmExecute {
                                     id: call.call_id.clone(),
                                     request,
+                                    format: call.format,
                                     stream: call.stream,
                                     attempt: call.tracking.retry.attempts,
                                     deadline: call.tracking.retry_policy.deadline(now),
@@ -2037,6 +2045,7 @@ mod tests {
         dispatch(
             &mut agg,
             CommandPayload::RequestLlmCall {
+                format: None,
                 call_id: "call-1".to_string(),
                 request: LlmRequest {
                     model: "test-model".to_string(),
@@ -2746,6 +2755,7 @@ mod tests {
         let events = dispatch(
             &mut agg,
             CommandPayload::RequestLlmCall {
+                format: None,
                 call_id: "llm-1".to_string(),
                 request: LlmRequest {
                     model: "test-model".to_string(),
@@ -2833,6 +2843,7 @@ mod tests {
         let events = dispatch(
             &mut agg,
             CommandPayload::RequestLlmCall {
+                format: None,
                 call_id: "llm-1".to_string(),
                 request: request_with(vec![
                     node_msg("sys", Role::System, "be helpful"),
@@ -3545,6 +3556,7 @@ mod tests {
         dispatch(
             &mut agg,
             CommandPayload::RequestLlmCall {
+                format: None,
                 call_id: "llm-1".to_string(),
                 request: LlmRequest {
                     model: "test-model".to_string(),
@@ -3706,6 +3718,7 @@ mod tests {
         dispatch(
             &mut agg,
             CommandPayload::RequestLlmCall {
+                format: None,
                 call_id: "llm-1".to_string(),
                 request: LlmRequest {
                     model: "test-model".to_string(),
@@ -3774,6 +3787,7 @@ mod tests {
         dispatch(
             &mut agg,
             CommandPayload::RequestLlmCall {
+                format: None,
                 call_id: "llm-1".to_string(),
                 request: request_with(vec![
                     node_msg("sys", Role::System, "sys prompt"),
@@ -3849,6 +3863,7 @@ mod tests {
         let events = dispatch(
             &mut agg,
             CommandPayload::RequestLlmCall {
+                format: None,
                 call_id: "llm-1".to_string(),
                 request: test_llm_request(),
                 stream: false,
@@ -3895,6 +3910,7 @@ mod tests {
         let events = dispatch(
             &mut agg,
             CommandPayload::RequestLlmCall {
+                format: None,
                 call_id: "llm-1".to_string(),
                 request: test_llm_request(),
                 stream: false,
@@ -3920,6 +3936,7 @@ mod tests {
         let request_events = dispatch(
             &mut agg,
             CommandPayload::RequestLlmCall {
+                format: None,
                 call_id: "llm-1".to_string(),
                 request: test_llm_request(),
                 stream: false,
@@ -5093,6 +5110,7 @@ mod tests {
                 transcript: vec![node_msg("u1", Role::User, "hi")],
                 actions: vec![
                     Action::CallLlm {
+                        format: None,
                         id: "llm-1".to_string(),
                         request: request_with(vec![]),
                         stream: false,
@@ -6005,6 +6023,7 @@ mod tests {
 
     fn call_llm_action(id: &str, handler: LlmHandler) -> Action {
         Action::CallLlm {
+            format: None,
             id: id.to_string(),
             request: request_with(vec![]),
             stream: false,
@@ -6033,6 +6052,7 @@ mod tests {
         dispatch(
             agg,
             CommandPayload::RequestLlmCall {
+                format: None,
                 call_id: id.to_string(),
                 request: request_with(vec![]),
                 stream: false,
@@ -6578,9 +6598,11 @@ mod tests {
 
     fn agent_config(model: &str) -> AgentConfig {
         AgentConfig {
+            format: None,
             model: model.to_string(),
             system: None,
             stream: true,
+            handler: None,
             retry: None,
             tools: Vec::new(),
             sub_agents: Vec::new(),
