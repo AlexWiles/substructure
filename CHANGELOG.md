@@ -11,6 +11,24 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 
 ### Added
 
+- The tool-call docs were a stub. Wrote `docs/30-tools.md`: declaration, the
+  `tool.*` triggers and their proposals, and the related actions.
+- The client-side-tools docs were a stub. Wrote `docs/90-client-tools.md`:
+  declaring `handler: "client"` tools, the round trip, settling, and
+  client-contributed tools.
+- The deferred-tools docs were a stub. Wrote `docs/130-deferred-tools.md`:
+  leaving a `tool.execute` unsettled, waiting, settling out of band, and
+  timeouts.
+- The remaining docs were stubs. Wrote `docs/40-typed-bindings.md`,
+  `50-llms.md`, `60-state.md`, `70-conversations.md`, `80-sub-agents.md`,
+  `100-ag-ui.md`, `110-durability.md`, `120-retries.md`, `140-interrupts.md`,
+  and `160-cli.md`.
+- Cloud setup had no guide. Wrote `docs/170-cloud.md`: sign in, create an app,
+  wire the webhook, and set secrets via the CLI.
+- Auth was undocumented. Wrote `docs/180-auth.md`: the caller model, client
+  tokens, session identity and ownership, and worker request signing.
+- The HTTP API was undocumented. Wrote `docs/190-api.md`: the client, machine,
+  admin, and cloud surfaces with their routes, auth, and bodies.
 - Every example pulled in a web framework. Added `node-no-deps` and
   `node-no-deps-tools`: the basic chat and two-tool workers served with Node's
   built-in `http` server, zero dependencies.
@@ -71,6 +89,12 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 
 ### Changed
 
+- `DecisionRequest.identity` exposed the session's `tenant_id` to the worker,
+  which it cannot act on. The worker now receives a `WorkerIdentity` of `id`
+  and `metadata` only; the tenant stays internal for queue routing.
+- The `interrupt.resume` input and `interrupt.resumed` trigger duplicated the
+  same `{ interrupt_id, payload }` fields. Both now share an `InterruptResumption`
+  struct; the wire format is unchanged.
 - `serve` showed no worker traffic at `info`: outbound pushes had no success log
   and the HTTP `TraceLayer` sat at `debug`. Outbound pushes now log dispatch and
   response (status, latency) at `info`, and inbound requests trace at `info`.

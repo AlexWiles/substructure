@@ -1,5 +1,6 @@
 ---
 title: Protocol
+group: Reference
 ---
 
 The wire reference. The engine and your worker exchange JSON over HTTP.
@@ -35,7 +36,7 @@ type DecisionRequest = {
     session_id: string
     decision_id: string
     agent_id: string
-    identity: SessionOwner
+    identity: WorkerIdentity
     trigger: Trigger
     proposed: DecisionResponse | null
     state: unknown              // your agent state, stored verbatim
@@ -50,8 +51,7 @@ type DecisionRequest = {
     turn_id: string | null      // the turn's idempotency id
 }
 
-type SessionOwner = {
-    tenant_id: string
+type WorkerIdentity = {   // the session owner, without the tenant
     id?: string
     metadata?: Record<string, string>
 }
@@ -150,7 +150,7 @@ type Trigger =
           result?: string
           error?: string
       }
-    | { type: "interrupt.resumed"; interrupt_id: string; payload: unknown }
+    | { type: "interrupt.resumed"; interrupt_id: string; payload?: unknown }
 
 type ToolInput =
     | { status: "valid"; value: unknown }     // parsed, conforms to the tool's input schema

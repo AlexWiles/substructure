@@ -28,8 +28,8 @@ use super::state::{new_call_id, new_message_id, LlmCallState};
 use super::tool_contract::{classify_arguments, declared_tool, DeclaredTool};
 use crate::protocol::{
     AgentConfig, ClientContext, DecisionAction, DecisionRequest, DecisionResponse, DecisionTrigger,
-    DraftMessage, Handler, LlmFormat, LlmRequest, LlmResponse, Message, MessageTree, RetryPolicy,
-    WorkerState,
+    DraftMessage, Handler, InterruptResumption, LlmFormat, LlmRequest, LlmResponse, Message,
+    MessageTree, RetryPolicy, WorkerIdentity, WorkerState,
 };
 use crate::runtime::worker::WorkerDecisionRequest;
 
@@ -90,7 +90,10 @@ impl<'a> From<&'a WorkerDecisionRequest> for DecisionRequest<'a> {
             session_id: &r.session_id,
             decision_id: &r.decision_id,
             agent_id: &r.agent_id,
-            identity: &r.identity,
+            identity: WorkerIdentity {
+                id: r.identity.id.clone(),
+                metadata: r.identity.metadata.clone(),
+            },
             trigger: &r.trigger,
             proposed: &r.proposed,
             state: &r.state,
@@ -592,8 +595,10 @@ pub fn to_wire_trigger(
             interrupt_id,
             payload,
         } => DecisionTrigger::InterruptResumed {
-            interrupt_id,
-            payload,
+            resumption: InterruptResumption {
+                interrupt_id,
+                payload,
+            },
         },
     }
 }
@@ -1640,7 +1645,9 @@ mod tests {
             serde_json::from_str(r#"{"type":"interrupt.resume","interrupt_id":"iid"}"#)
                 .expect("parses");
         match input {
-            ClientInput::InterruptResume { interrupt_id, .. } => {
+            ClientInput::InterruptResume {
+                resumption: InterruptResumption { interrupt_id, .. },
+            } => {
                 assert_eq!(interrupt_id, "iid")
             }
             other => panic!("expected interrupt.resume, got {other:?}"),

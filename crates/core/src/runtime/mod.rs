@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::protocol::{
     ClientAction, ClientInput, ClientMessage, ClientMessages, ClientPayload, ErrorCode,
-    SessionOwner, TokenDelta,
+    InterruptResumption, SessionOwner, TokenDelta,
 };
 use crate::providers::memory_queue::TaskQueue;
 use aggregate::{execute, Caller, ConflictRetry, ExecuteError, ExecuteInput};
@@ -326,8 +326,11 @@ impl Runtime {
                 ClientPayload::Action(ClientAction { name, args }),
             ),
             ClientInput::InterruptResume {
-                interrupt_id,
-                payload,
+                resumption:
+                    InterruptResumption {
+                        interrupt_id,
+                        payload,
+                    },
             } => {
                 let turn_id = self.active_turn_id(&caller, &session_id).await?;
                 self.resume_interrupt(ResumeInterruptInput {

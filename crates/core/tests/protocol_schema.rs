@@ -94,7 +94,7 @@ fn protocol_schema() -> serde_json::Value {
         p::MessageTree,
         p::Handler,
         p::RetryPolicy,
-        p::SessionOwner,
+        p::WorkerIdentity,
         p::WorkerState,
         p::AgentConfig,
         p::AgentTool,

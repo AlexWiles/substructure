@@ -8,7 +8,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use crate::event_store::StreamVersion;
-use crate::protocol::{ClientInput, MessageTree, SessionOwner};
+use crate::protocol::{ClientInput, InterruptResumption, MessageTree, SessionOwner};
 use crate::session::command::SessionError;
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use crate::transport::ag_ui::snapshot::snapshot_events;
@@ -203,8 +203,10 @@ pub async fn ag_ui_run(
                     caller: caller.clone(),
                     owner: owner.clone(),
                     input: ClientInput::InterruptResume {
-                        interrupt_id: entry.interrupt_id,
-                        payload,
+                        resumption: InterruptResumption {
+                            interrupt_id: entry.interrupt_id,
+                            payload,
+                        },
                     },
                     span: crate::span::SpanContext::root().child("ag_ui_resume"),
                 })

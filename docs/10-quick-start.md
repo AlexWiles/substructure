@@ -1,5 +1,6 @@
 ---
 title: Quick start
+group: Getting started
 ---
 
 Build a chat agent, talk to it, give it a tool, pick the conversation back

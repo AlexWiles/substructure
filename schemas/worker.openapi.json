@@ -686,7 +686,7 @@
             "type": "string"
           },
           "identity": {
-            "$ref": "#/components/schemas/SessionOwner"
+            "$ref": "#/components/schemas/WorkerIdentity"
           },
           "message_tree": {
             "$ref": "#/components/schemas/MessageTree"
@@ -1082,6 +1082,7 @@
           },
           {
             "additionalProperties": false,
+            "description": "The body of an interrupt resume: which interrupt, and the payload delivered\nto the worker. Shared by the [`ClientInput::InterruptResume`] input and the\n[`DecisionTrigger::InterruptResumed`] trigger.",
             "properties": {
               "interrupt_id": {
                 "type": "string"
@@ -1560,30 +1561,6 @@
         ],
         "type": "string"
       },
-      "SessionOwner": {
-        "additionalProperties": false,
-        "properties": {
-          "id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "metadata": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "type": "object"
-          },
-          "tenant_id": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "tenant_id"
-        ],
-        "type": "object"
-      },
       "SubAgent": {
         "additionalProperties": false,
         "description": "A sub-agent the model can delegate to. Named by `id` (the child agent to spawn,\nand the tool name the model calls); its model-facing input is the conventional\nsingle-`message` delegation schema.",
@@ -1705,6 +1682,25 @@
         "required": [
           "url"
         ],
+        "type": "object"
+      },
+      "WorkerIdentity": {
+        "additionalProperties": false,
+        "description": "The owner as delivered to the worker on `DecisionRequest.identity`: the\nsubject and its metadata, without the tenant. The tenant scopes the session\ninternally but is not sent to the worker.",
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          }
+        },
         "type": "object"
       },
       "WorkerState": {

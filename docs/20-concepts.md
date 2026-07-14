@@ -1,5 +1,6 @@
 ---
 title: Core concepts
+group: Getting started
 ---
 
 The vocabulary the rest of the docs assume.

@@ -1,7 +1,7 @@
 //! The public protocol: every type that crosses the client or worker wire.
 //! Types only — no logic. Conversions and seams live with the engine
 //! (`runtime::session::wire`, `runtime::session::propose`, …). Every type
-//! derives [`JsonSchema`]; `subs schema` emits the combined JSON Schema.
+//! derives [`JsonSchema`]; the schemas under `schemas/` are generated from them.
 
 use std::collections::HashMap;
 
@@ -245,6 +245,17 @@ pub struct RetryPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SessionOwner {
     pub tenant_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub metadata: HashMap<String, String>,
+}
+
+/// The owner as delivered to the worker on `DecisionRequest.identity`: the
+/// subject and its metadata, without the tenant. The tenant scopes the session
+/// internally but is not sent to the worker.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WorkerIdentity {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -637,9 +648,8 @@ pub enum ClientInput {
     },
     #[serde(rename = "interrupt.resume")]
     InterruptResume {
-        interrupt_id: String,
-        #[serde(default)]
-        payload: Value,
+        #[serde(flatten)]
+        resumption: InterruptResumption,
     },
     #[serde(rename = "tool.result")]
     ToolResult {
@@ -657,6 +667,16 @@ pub enum ClientInput {
         #[serde(default)]
         attempt: Option<u32>,
     },
+}
+
+/// The body of an interrupt resume: which interrupt, and the payload delivered
+/// to the worker. Shared by the [`ClientInput::InterruptResume`] input and the
+/// [`DecisionTrigger::InterruptResumed`] trigger.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct InterruptResumption {
+    pub interrupt_id: String,
+    #[serde(default)]
+    pub payload: Value,
 }
 
 // ── Engine → worker ──────────────────────────────────────────────────────
@@ -761,9 +781,8 @@ pub enum DecisionTrigger {
     },
     #[serde(rename = "interrupt.resumed")]
     InterruptResumed {
-        interrupt_id: String,
-        #[serde(default)]
-        payload: Value,
+        #[serde(flatten)]
+        resumption: InterruptResumption,
     },
 }
 
@@ -943,7 +962,7 @@ pub struct DecisionRequest<'a> {
     pub session_id: &'a str,
     pub decision_id: &'a str,
     pub agent_id: &'a str,
-    pub identity: &'a SessionOwner,
+    pub identity: WorkerIdentity,
     pub trigger: &'a DecisionTrigger,
     /// The engine's default continuation for `trigger` (`null` when it needs
     /// worker knowledge). Advisory: accept by echoing it as the decision.

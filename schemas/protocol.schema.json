@@ -230,6 +230,7 @@
         },
         {
           "additionalProperties": false,
+          "description": "The body of an interrupt resume: which interrupt, and the payload delivered\nto the worker. Shared by the [`ClientInput::InterruptResume`] input and the\n[`DecisionTrigger::InterruptResumed`] trigger.",
           "properties": {
             "interrupt_id": {
               "type": "string"
@@ -933,7 +934,7 @@
           "type": "string"
         },
         "identity": {
-          "$ref": "#/$defs/SessionOwner"
+          "$ref": "#/$defs/WorkerIdentity"
         },
         "message_tree": {
           "$ref": "#/$defs/MessageTree"
@@ -1329,6 +1330,7 @@
         },
         {
           "additionalProperties": false,
+          "description": "The body of an interrupt resume: which interrupt, and the payload delivered\nto the worker. Shared by the [`ClientInput::InterruptResume`] input and the\n[`DecisionTrigger::InterruptResumed`] trigger.",
           "properties": {
             "interrupt_id": {
               "type": "string"
@@ -1920,30 +1922,6 @@
       ],
       "type": "string"
     },
-    "SessionOwner": {
-      "additionalProperties": false,
-      "properties": {
-        "id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "metadata": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "type": "object"
-        },
-        "tenant_id": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "tenant_id"
-      ],
-      "type": "object"
-    },
     "StreamDelta": {
       "additionalProperties": false,
       "properties": {
@@ -2193,6 +2171,25 @@
       "required": [
         "url"
       ],
+      "type": "object"
+    },
+    "WorkerIdentity": {
+      "additionalProperties": false,
+      "description": "The owner as delivered to the worker on `DecisionRequest.identity`: the\nsubject and its metadata, without the tenant. The tenant scopes the session\ninternally but is not sent to the worker.",
+      "properties": {
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metadata": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        }
+      },
       "type": "object"
     },
     "WorkerState": {
