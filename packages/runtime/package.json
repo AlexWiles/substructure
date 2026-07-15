@@ -50,9 +50,9 @@
     "prepublish:platforms": "napi prepublish -t npm"
   },
   "optionalDependencies": {
-    "@substructure.ai/runtime-darwin-arm64": "0.1.22",
-    "@substructure.ai/runtime-darwin-x64": "0.1.22",
-    "@substructure.ai/runtime-linux-arm64-gnu": "0.1.22",
-    "@substructure.ai/runtime-linux-x64-gnu": "0.1.22"
+    "@substructure.ai/runtime-darwin-arm64": "0.2.0",
+    "@substructure.ai/runtime-darwin-x64": "0.2.0",
+    "@substructure.ai/runtime-linux-arm64-gnu": "0.2.0",
+    "@substructure.ai/runtime-linux-x64-gnu": "0.2.0"
   }
 }

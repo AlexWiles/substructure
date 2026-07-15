@@ -9,6 +9,18 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 
 ## [Unreleased]
 
+### Fixed
+
+- The 0.2.0 packages pinned their platform `optionalDependencies` to a nonexistent
+  0.1.22, so a clean install could not resolve the native binary. Bumped the pins
+  to the release version.
+
+### Changed
+
+- The npm CLI wrapper booted Node on every command. A postinstall hardlinks the
+  native binary over the shim so `subs` execs it directly, falling back to the Node
+  shim when postinstall is skipped.
+
 ## [0.2.0] - 2026-07-15
 
 ### Changed
