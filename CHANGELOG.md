@@ -9,6 +9,12 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 
 ## [Unreleased]
 
+### Changed
+
+- Code generators named protocol types after the referencing property, producing
+  mangled names like `DecisionResponseClass`. Added `#[schemars(title)]` to every
+  wire type so each `$defs` entry carries its own name.
+
 ## [0.2.1] - 2026-07-15
 
 ### Fixed

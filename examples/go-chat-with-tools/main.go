@@ -31,7 +31,7 @@ var tools = []tool{
 	},
 }
 
-func decide(req DecisionRequest) *DecisionResponseClass {
+func decide(req DecisionRequest) *DecisionResponse {
 	if req.Trigger.Type == SessionStart {
 		// The engine will use this agent config to generate proposed actions.
 		stream := true
@@ -40,8 +40,8 @@ func decide(req DecisionRequest) *DecisionResponseClass {
 			description := t.description
 			agentTools[i] = AgentTool{Name: t.name, Description: &description}
 		}
-		return &DecisionResponseClass{
-			Agent: &AgentClass{
+		return &DecisionResponse{
+			Agent: &AgentConfig{
 				Model:  "claude-haiku-4-5-20251001",
 				Stream: &stream,
 				Tools:  agentTools,
@@ -53,8 +53,8 @@ func decide(req DecisionRequest) *DecisionResponseClass {
 	if req.Trigger.Type == ToolExecute && req.Trigger.Name != nil {
 		for _, t := range tools {
 			if t.name == *req.Trigger.Name {
-				return &DecisionResponseClass{
-					Actions: []ActionElement{{Type: FluffyToolResult, Result: t.exec()}},
+				return &DecisionResponse{
+					Actions: []DecisionAction{{Type: FluffyToolResult, Result: t.exec()}},
 				}
 			}
 		}

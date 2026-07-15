@@ -98,6 +98,21 @@ class DecisionAction3(BaseModel):
     type: Literal['tool.result']
 
 
+class DecisionAction4(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    attempt: Annotated[int | None, Field(ge=0)] = None
+    id: str | None = None
+    response: Annotated[
+        Any,
+        Field(
+            description="A neutral `LlmResponse`, or the provider's native response when the\nanswered `llm.execute` carried a `format`."
+        ),
+    ]
+    type: Literal['llm.result']
+
+
 class DecisionAction9(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
@@ -215,6 +230,11 @@ class InterruptOrigin(Enum):
     frontend = 'frontend'
 
 
+class LlmFormat(Enum):
+    openai = 'openai'
+    anthropic = 'anthropic'
+
+
 class LlmTool(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
@@ -266,15 +286,6 @@ class Role(Enum):
     user = 'user'
     assistant = 'assistant'
     tool = 'tool'
-
-
-class SessionOwner(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    id: str | None = None
-    metadata: dict[str, str] | None = None
-    tenant_id: str
 
 
 class SubAgent(BaseModel):
@@ -334,6 +345,14 @@ class VideoUrl(BaseModel):
     url: str
 
 
+class WorkerIdentity(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    id: str | None = None
+    metadata: dict[str, str] | None = None
+
+
 class AgentTool(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
@@ -343,6 +362,16 @@ class AgentTool(BaseModel):
     input: Any | None = None
     name: str
     output: Any | None = None
+
+
+class ClientContext(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    context: list[Any] | None = None
+    forwarded_props: Any | None = None
+    state: Any | None = None
+    tools: list[AgentTool] | None = None
 
 
 class ContentPart2(BaseModel):
@@ -448,11 +477,30 @@ class DecisionTrigger4(BaseModel):
     input: Annotated[
         ToolInput1 | ToolInput2 | ToolInput3,
         Field(
-            description="The engine's classification of `arguments` against the tool's\ndeclared `input` schema: `valid` (with the parsed `value`),\n`invalid` (value plus the violation), or `malformed` (not a JSON\nobject). Always on the wire."
+            description="The engine's classification of `arguments` against the tool's\ndeclared `input` schema: `valid` (with the parsed `value`),\n`invalid` (value plus the violation), or `malformed` (not a JSON\nobject). Always on the wire.",
+            title='ToolInput',
         ),
     ]
     name: str
     type: Literal['tool.execute']
+
+
+class DecisionTrigger6(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    attempt: Annotated[int, Field(ge=0)]
+    deadline: AwareDatetime | None = None
+    format: LlmFormat | None = None
+    id: str
+    request: Annotated[
+        Any,
+        Field(
+            description="The neutral `LlmRequest` JSON, or the provider's native request body\nwhen `format` is set."
+        ),
+    ]
+    stream: bool | None = None
+    type: Literal['llm.execute']
 
 
 class Effect(BaseModel):
@@ -542,6 +590,18 @@ class AgentConfig(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
+    format: Annotated[
+        LlmFormat | None,
+        Field(
+            description='Provider wire format for worker-handled calls; requires `handler:\nworker`. Absent ⇒ the neutral format.'
+        ),
+    ] = None
+    handler: Annotated[
+        Handler | None,
+        Field(
+            description="Where the proposed LLM call runs: `Some(Worker)` ⇒ the worker executes it\n(answering `llm.execute`); absent or `Some(Server)` ⇒ the engine's\nserver-side provider. `client` is invalid and rejected at the decision seam."
+        ),
+    ] = None
     model: str
     retry: RetryPolicy | None = None
     stream: bool | None = None
@@ -648,6 +708,7 @@ class ClientInput2(BaseModel):
         extra='forbid',
     )
     agent_id: str
+    client: ClientContext | None = None
     messages: list[DraftMessage]
     stream: bool | None = None
     turn_id: str | None = None
@@ -667,6 +728,7 @@ class ClientPayload2(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
+    client: ClientContext | None = None
     messages: list[DraftMessage]
     stream: bool | None = None
     type: Literal['client.messages']
@@ -689,16 +751,6 @@ class DecisionAction1(BaseModel):
     temperature: float | None = None
     tools: list[LlmTool] | None = None
     type: Literal['llm.call']
-
-
-class DecisionAction4(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    attempt: Annotated[int | None, Field(ge=0)] = None
-    id: str | None = None
-    response: LlmResponse
-    type: Literal['llm.result']
 
 
 class DecisionAction8(BaseModel):
@@ -748,21 +800,15 @@ class DecisionTrigger2(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
+    client: Annotated[
+        ClientContext | None,
+        Field(
+            description='Inputs the client declared on its run; the engine layers `client.tools`\nonto the proposed config by default.'
+        ),
+    ] = None
     messages: list[DraftMessage]
     new_from: Annotated[int | None, Field(ge=0)] = None
     type: Literal['client.messages']
-
-
-class DecisionTrigger6(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    attempt: Annotated[int, Field(ge=0)]
-    deadline: AwareDatetime | None = None
-    id: str
-    request: LlmRequest
-    stream: bool | None = None
-    type: Literal['llm.execute']
 
 
 class DecisionTrigger7(BaseModel):
@@ -805,7 +851,7 @@ class DecisionRequest(BaseModel):
     calls: list[Effect]
     deadline: AwareDatetime | None = None
     decision_id: str
-    identity: SessionOwner
+    identity: WorkerIdentity
     message_tree: MessageTree
     messages: list[Message]
     pending_calls: Annotated[
@@ -822,7 +868,8 @@ class DecisionRequest(BaseModel):
     state: Annotated[
         Any,
         Field(
-            description='Opaque worker state: JSON the engine stores but never interprets.'
+            description='Opaque worker state: JSON the engine stores but never interprets.',
+            title='WorkerState',
         ),
     ]
     trigger: Annotated[
@@ -836,7 +883,8 @@ class DecisionRequest(BaseModel):
         | DecisionTrigger8
         | DecisionTrigger9,
         Field(
-            description="The trigger a worker sees on the wire — the materialized projection of the\nengine's internal decision trigger. It has no `ClientMessage`: a bare client\nmessage is always materialized to `ClientTranscript` by `to_wire_trigger`\n(`runtime::session::wire`) before delivery, so an unmaterialized message can\nnever reach a worker."
+            description="The trigger a worker sees on the wire — the materialized projection of the\nengine's internal decision trigger. It has no `ClientMessage`: a bare client\nmessage is always materialized to `ClientTranscript` by `to_wire_trigger`\n(`runtime::session::wire`) before delivery, so an unmaterialized message can\nnever reach a worker.",
+            title='DecisionTrigger',
         ),
     ]
     turn_id: str | None = None
@@ -852,13 +900,15 @@ class SubstructureProtocol(BaseModel):
         | ClientInput6
         | None,
         Field(
-            description='Everything a client can send on the input surface: submit a message / a full view / a\nnamed action, resume an interrupt, or settle a client tool. A flat, internally-tagged\nunion — its six tags produce serde\'s "unknown variant, expected one of …" error for\nfree. `Runtime::handle_client_input` is the single seam that dispatches it (mirroring\n`resolve_response` on the worker side).\n\nAddressing lives where it is meaningful, not in a shared envelope: `agent_id` (routes\nthe turn, creating the session if new) and the optional idempotency `turn_id` are\nfields of the three submit variants only. A resume/settle addresses an interrupt/effect\nid and continues whatever turn is active, so it carries neither — misplacing them is\nunrepresentable rather than rejected. `session_id` is the one universal address and\nrides the envelope. A submit\'s body rebuilds a [`ClientPayload`] at the seam.'
+            description='Everything a client can send on the input surface: submit a message / a full view / a\nnamed action, resume an interrupt, or settle a client tool. A flat, internally-tagged\nunion — its six tags produce serde\'s "unknown variant, expected one of …" error for\nfree. `Runtime::handle_client_input` is the single seam that dispatches it (mirroring\n`resolve_response` on the worker side).\n\nAddressing lives where it is meaningful, not in a shared envelope: `agent_id` (routes\nthe turn, creating the session if new) and the optional idempotency `turn_id` are\nfields of the three submit variants only. A resume/settle addresses an interrupt/effect\nid and continues whatever turn is active, so it carries neither — misplacing them is\nunrepresentable rather than rejected. `session_id` is the one universal address and\nrides the envelope. A submit\'s body rebuilds a [`ClientPayload`] at the seam.',
+            title='ClientInput',
         ),
     ] = None
     client_payload: Annotated[
         ClientPayload1 | ClientPayload2 | ClientPayload3 | None,
         Field(
-            description='The client→engine inbound *submit* wire form: an untrusted client submits a message,\nits full conversation view, or a named action. Lowered to domain events at the\n`SubmitClientPayload` command seam (`runtime::session::command`); never persisted\nas-is. Carried verbatim inside [`ClientInput`], which is the full client input\nsurface.'
+            description='The client→engine inbound *submit* wire form: an untrusted client submits a message,\nits full conversation view, or a named action. Lowered to domain events at the\n`SubmitClientPayload` command seam (`runtime::session::command`); never persisted\nas-is. Carried verbatim inside [`ClientInput`], which is the full client input\nsurface.',
+            title='ClientPayload',
         ),
     ] = None
     decision_request: DecisionRequest | None = None

@@ -5,7 +5,7 @@ export interface Protocol {
     client_input?: ClientInput;
     client_payload?: ClientPayload;
     decision_request?: DecisionRequest;
-    decision_response?: DecisionResponseClass;
+    decision_response?: DecisionResponse;
     stream_delta?: StreamDelta;
     token_delta?: TokenDelta;
     [property: string]: any;
@@ -24,14 +24,19 @@ export interface Protocol {
  * id and continues whatever turn is active, so it carries neither — misplacing them is
  * unrepresentable rather than rejected. `session_id` is the one universal address and
  * rides the envelope. A submit's body rebuilds a [`ClientPayload`] at the seam.
+ *
+ * The body of an interrupt resume: which interrupt, and the payload delivered
+ * to the worker. Shared by the [`ClientInput::InterruptResume`] input and the
+ * [`DecisionTrigger::InterruptResumed`] trigger.
  */
 export interface ClientInput {
     agent_id?: string;
-    message?: ClientInputMessage;
+    message?: DraftMessage;
     stream?: boolean;
     turn_id?: null | string;
     type: ClientInputType;
-    messages?: ClientInputMessage[];
+    client?: ClientContext;
+    messages?: DraftMessage[];
     args?: any;
     name?: string;
     interrupt_id?: string;
@@ -44,30 +49,79 @@ export interface ClientInput {
 }
 
 /**
+ * Inputs a client declares on its run (the AG-UI `tools`/`context`/`state`/
+ * `forwardedProps`), forwarded to the worker on the `client.messages` decision.
+ * `tools` are the browser's frontend tools, normalized to client-handled
+ * [`AgentTool`]s; the engine layers them onto the proposed config by default, and
+ * the worker may override (e.g. whitelist) by returning its own `agent`.
+ *
+ * Inputs the client declared on its run; the engine layers `client.tools`
+ * onto the proposed config by default.
+ */
+export interface ClientContext {
+    context?: any[];
+    forwarded_props?: any;
+    state?: any;
+    tools?: AgentTool[];
+}
+
+/**
+ * A function tool the agent offers. The model-facing contract is
+ * `name`/`description`/`input`/`output`; `handler` selects where a call runs —
+ * `Some(Client)` ⇒ client-executed, absent ⇒ worker-executed (the default).
+ * `server` is invalid for tools.
+ */
+export interface AgentTool {
+    description?: string;
+    handler?: Handler | null;
+    input?: any;
+    name: string;
+    output?: any;
+}
+
+/**
+ * Server-side executor resolves the provider and makes the call (LLM only).
+ *
+ * Dispatched to the work queue for the worker to execute.
+ *
+ * Executed by the client. Session goes Idle while waiting (tools only).
+ *
+ * Where a call runs — one wire enum so `handler` has a single type on every
+ * surface. Tool calls accept `worker` (default) or `client`; LLM calls accept
+ * `server` (default) or `worker`. The invalid pairing (a `server` tool, a
+ * `client` LLM call) is rejected at the decision seam.
+ *
+ * `server` or `worker`; omitted ⇒ `server`.
+ *
+ * `worker` or `client`; omitted ⇒ `worker`.
+ */
+export type Handler = "server" | "worker" | "client";
+
+/**
  * The wire form of a [`Message`]: `id` is optional because a client-submitted or
  * worker-authored message is not yet recorded. `record`/`rerecord`
  * (`runtime::session::wire`) are the seams that lower it to the internal
  * [`Message`] (id always present) at recording time.
  */
-export interface ClientInputMessage {
-    content?: ContentElement[] | null | string;
+export interface DraftMessage {
+    content?: ContentPart[] | null | string;
     id?: null | string;
     name?: null | string;
     role: Role;
     tool_call_id?: null | string;
-    tool_calls?: MessageToolCall[] | null;
+    tool_calls?: ToolCall[] | null;
 }
 
-export interface ContentElement {
+export interface ContentPart {
     text?: string;
-    type: ContentType;
+    type: ContentPartType;
     image_url?: ImageURL;
-    file?: File;
-    input_audio?: InputAudio;
+    file?: FileData;
+    input_audio?: AudioData;
     video_url?: VideoURL;
 }
 
-export interface File {
+export interface FileData {
     file_data: string;
     filename: string;
 }
@@ -76,12 +130,12 @@ export interface ImageURL {
     url: string;
 }
 
-export interface InputAudio {
+export interface AudioData {
     data: string;
     format: string;
 }
 
-export type ContentType = "text" | "image_url" | "file" | "input_audio" | "video_url";
+export type ContentPartType = "text" | "image_url" | "file" | "input_audio" | "video_url";
 
 export interface VideoURL {
     url: string;
@@ -89,13 +143,13 @@ export interface VideoURL {
 
 export type Role = "system" | "user" | "assistant" | "tool";
 
-export interface MessageToolCall {
-    function: Function;
+export interface ToolCall {
+    function: ToolCallFunction;
     id: string;
     type: string;
 }
 
-export interface Function {
+export interface ToolCallFunction {
     arguments: string;
     name: string;
 }
@@ -123,10 +177,11 @@ export type ClientInputType =
  * The payload of a `client.action`: a named action with optional JSON args.
  */
 export interface ClientPayload {
-    message?: ClientInputMessage;
+    message?: DraftMessage;
     stream?: boolean;
     type: ClientPayloadType;
-    messages?: ClientInputMessage[];
+    client?: ClientContext;
+    messages?: DraftMessage[];
     args?: any;
     name?: string;
 }
@@ -137,16 +192,16 @@ export interface DecisionRequest {
     /**
      * The agent config resolved for the active path (`null` when none is set).
      */
-    agent?: AgentClass | null;
+    agent?: AgentConfig | null;
     agent_id: string;
     ancestry: string[];
     attempts: number;
-    calls: CallElement[];
+    calls: Effect[];
     deadline?: Date | null;
     decision_id: string;
-    identity: Identity;
+    identity: WorkerIdentity;
     message_tree: MessageTree;
-    messages: NodeMessage[];
+    messages: Message[];
     /**
      * Count of in-flight `tool_call`/`sub_agent` calls.
      */
@@ -155,10 +210,10 @@ export interface DecisionRequest {
      * The engine's default continuation for `trigger` (`null` when it needs
      * worker knowledge). Advisory: accept by echoing it as the decision.
      */
-    proposed?: DecisionResponseClass | null;
+    proposed?: DecisionResponse | null;
     session_id: string;
     state: any;
-    trigger: Trigger;
+    trigger: DecisionTrigger;
     turn_id?: null | string;
 }
 
@@ -166,16 +221,27 @@ export interface DecisionRequest {
  * A declared agent identity. `model` is the only required field; everything else
  * refines the proposed LLM request the engine derives for `client.messages`.
  */
-export interface AgentClass {
+export interface AgentConfig {
+    /**
+     * Provider wire format for worker-handled calls; requires `handler:
+     * worker`. Absent ⇒ the neutral format.
+     */
+    format?: LlmFormat | null;
+    /**
+     * Where the proposed LLM call runs: `Some(Worker)` ⇒ the worker executes it
+     * (answering `llm.execute`); absent or `Some(Server)` ⇒ the engine's
+     * server-side provider. `client` is invalid and rejected at the decision seam.
+     */
+    handler?: Handler | null;
     model: string;
-    retry?: RetryClass | null;
+    retry?: RetryPolicy | null;
     stream?: boolean;
     /**
      * Sub-agents the model can delegate to. Presented to the model as tools (by
      * id) alongside `tools`, but each call spawns a child session rather than
      * executing a function.
      */
-    sub_agents?: SubAgentElement[];
+    sub_agents?: SubAgent[];
     system?: null | string;
     /**
      * Worker- or client-executed tools the model can call.
@@ -184,10 +250,17 @@ export interface AgentClass {
 }
 
 /**
+ * OpenAI Chat Completions.
+ *
+ * Anthropic Messages API.
+ */
+export type LlmFormat = "openai" | "anthropic";
+
+/**
  * Fully-resolved retry policy — no optional fields. Stored on call state and
  * read directly by retry logic.
  */
-export interface RetryClass {
+export interface RetryPolicy {
     backoff_base_secs: number;
     backoff_max_secs: number;
     max_retries: number;
@@ -199,42 +272,10 @@ export interface RetryClass {
  * and the tool name the model calls); its model-facing input is the conventional
  * single-`message` delegation schema.
  */
-export interface SubAgentElement {
+export interface SubAgent {
     description?: string;
     id: string;
 }
-
-/**
- * A function tool the agent offers. The model-facing contract is
- * `name`/`description`/`input`/`output`; `handler` selects where a call runs —
- * `Some(Client)` ⇒ client-executed, absent ⇒ worker-executed (the default).
- * `server` is invalid for tools.
- */
-export interface AgentTool {
-    description?: string;
-    handler?: HandlerEnum | null;
-    input?: any;
-    name: string;
-    output?: any;
-}
-
-/**
- * Server-side executor resolves the provider and makes the call (LLM only).
- *
- * Dispatched to the work queue for the worker to execute.
- *
- * Executed by the client. Session goes Idle while waiting (tools only).
- *
- * Where a call runs — one wire enum so `handler` has a single type on every
- * surface. Tool calls accept `worker` (default) or `client`; LLM calls accept
- * `server` (default) or `worker`. The invalid pairing (a `server` tool, a
- * `client` LLM call) is rejected at the decision seam.
- *
- * `server` or `worker`; omitted ⇒ `server`.
- *
- * `worker` or `client`; omitted ⇒ `worker`.
- */
-export type HandlerEnum = "server" | "worker" | "client";
 
 /**
  * An in-flight effect (Pending or RetryScheduled) surfaced on each worker decision.
@@ -242,7 +283,7 @@ export type HandlerEnum = "server" | "worker" | "client";
  * `name`/`arguments`/`handler`, an LLM call's `handler`/`stream`, a
  * sub-agent's `agent_id`/`session_id`.
  */
-export interface CallElement {
+export interface Effect {
     agent_id?: null | string;
     /**
      * The tree node the effect was requested at.
@@ -251,33 +292,37 @@ export interface CallElement {
     arguments?: null | string;
     attempt: number;
     deadline?: Date | null;
-    handler?: HandlerEnum | null;
+    handler?: Handler | null;
     id: string;
-    kind: CallKind;
+    kind: EffectKind;
     name?: null | string;
     session_id?: null | string;
-    status: CallStatus;
+    status: EffectStatus;
     stream?: boolean | null;
 }
 
-export type CallKind = "tool_call" | "sub_agent" | "llm_call";
+export type EffectKind = "tool_call" | "sub_agent" | "llm_call";
 
-export type CallStatus = "pending" | "completed" | "failed" | "retry_scheduled" | "queued";
+export type EffectStatus = "pending" | "completed" | "failed" | "retry_scheduled" | "queued";
 
-export interface Identity {
+/**
+ * The owner as delivered to the worker on `DecisionRequest.identity`: the
+ * subject and its metadata, without the tenant. The tenant scopes the session
+ * internally but is not sent to the worker.
+ */
+export interface WorkerIdentity {
     id?: null | string;
     metadata?: { [key: string]: string };
-    tenant_id: string;
 }
 
 export interface MessageTree {
     head_id?: null | string;
-    nodes?: NodeElement[];
+    nodes?: Node[];
 }
 
-export interface NodeElement {
-    kind: NodeKind;
-    message?: NodeMessage;
+export interface Node {
+    kind: Kind;
+    message?: Message;
     parent_id?: null | string;
     control?: Control;
 }
@@ -289,7 +334,7 @@ export interface Control {
     id: string;
     interrupt_id: string;
     kind: ControlKind;
-    origin: Origin;
+    origin: InterruptOrigin;
     payload?: any;
     reason?: string;
 }
@@ -301,17 +346,17 @@ export type ControlKind = "interrupt" | "resume";
  * authenticated `Caller`, never from request data; resuming requires a
  * caller at or above the origin's privilege.
  */
-export type Origin = "system" | "machine" | "frontend";
+export type InterruptOrigin = "system" | "machine" | "frontend";
 
-export type NodeKind = "message" | "control";
+export type Kind = "message" | "control";
 
-export interface NodeMessage {
-    content?: ContentElement[] | null | string;
+export interface Message {
+    content?: ContentPart[] | null | string;
     id: string;
     name?: null | string;
     role: Role;
     tool_call_id?: null | string;
-    tool_calls?: MessageToolCall[] | null;
+    tool_calls?: ToolCall[] | null;
 }
 
 /**
@@ -319,13 +364,13 @@ export interface NodeMessage {
  * The worker returns one; the engine also proposes one as the default
  * continuation (`DecisionRequest::proposed`), which the worker echoes or amends.
  */
-export interface DecisionResponseClass {
-    actions?: ActionElement[];
+export interface DecisionResponse {
+    actions?: DecisionAction[];
     /**
      * A new agent config write; omitted keeps the current config.
      */
-    agent?: AgentClass | null;
-    messages?: ClientInputMessage[];
+    agent?: AgentConfig | null;
+    messages?: DraftMessage[];
     /**
      * Omitted or `null` keeps the current state; clear with a non-null empty value.
      */
@@ -348,35 +393,41 @@ export interface DecisionResponseClass {
  *
  * `id` omitted ⇒ the engine mints one (LLM-driven tools carry the model's id).
  *
- * `id` omitted ⇒ the effect named by the answering `tool.execute` trigger.
+ * `id`/`attempt` omitted ⇒ taken from the answering `tool.execute` trigger,
+ * fencing the result to the attempt that ran.
  *
- * `id` omitted ⇒ the effect named by the answering `llm.execute` trigger.
+ * `id`/`attempt` omitted ⇒ taken from the answering `llm.execute` trigger,
+ * fencing the result to the attempt that ran.
  *
  * `interrupt_id` omitted ⇒ the engine mints one to correlate the later resume.
  */
-export interface ActionElement {
+export interface DecisionAction {
     /**
      * `server` or `worker`; omitted ⇒ `server`.
      *
      * `worker` or `client`; omitted ⇒ `worker`.
      */
-    handler?: HandlerEnum;
+    handler?: Handler;
     id?: null | string;
     max_completion_tokens?: number | null;
-    messages?: ClientInputMessage[] | null;
+    messages?: DraftMessage[] | null;
     model?: null | string;
-    reasoning?: ReasoningClass | null;
-    retry?: RetryClass | null;
+    reasoning?: ReasoningConfig | null;
+    retry?: RetryPolicy | null;
     stream?: boolean | null;
     temperature?: number | null;
-    tools?: ActionTool[] | null;
-    type: ActionType;
+    tools?: LlmTool[] | null;
+    type: DecisionActionType;
     arguments?: any;
     name?: string;
     attempt?: number | null;
     result?: any;
-    response?: Response;
-    code?: CodeEnum | null;
+    /**
+     * A neutral `LlmResponse`, or the provider's native response when the
+     * answered `llm.execute` carried a `format`.
+     */
+    response?: any;
+    code?: ErrorCode | null;
     detail?: any;
     error?: string;
     /**
@@ -389,58 +440,30 @@ export interface ActionElement {
      * The model tool-call this delegation answers — always required.
      */
     tool_call_id?: string;
-    message?: ClientInputMessage;
+    message?: DraftMessage;
     interrupt_id?: null | string;
     payload?: any;
     reason?: string;
     data?: any;
 }
 
-export type CodeEnum = "provider_error" | "rate_limited" | "refused" | "budget_exceeded" | "deadline_exceeded";
+export type ErrorCode = "provider_error" | "rate_limited" | "refused" | "budget_exceeded" | "deadline_exceeded";
 
-export interface ReasoningClass {
-    effort?: EffortEnum | null;
+export interface ReasoningConfig {
+    effort?: ReasoningEffort | null;
     enabled?: boolean | null;
     exclude?: boolean | null;
     max_tokens?: number | null;
 }
 
-export type EffortEnum = "xhigh" | "high" | "medium" | "low" | "minimal" | "none";
-
-/**
- * Normalized LLM response. Provider adapters convert their raw responses
- * into this type at the boundary.
- */
-export interface Response {
-    content?: null | string;
-    /**
-     * Cost in dollars for this call, if the provider reports it. A decimal
-     * string on the wire.
-     */
-    cost?: null | string;
-    finish_reason?: null | string;
-    /**
-     * Images generated by the model.
-     */
-    images?: ImageElement[];
-    model: string;
-    tool_calls?: MessageToolCall[];
-    usage?: any;
-}
-
-/**
- * An image returned by the model in the response.
- */
-export interface ImageElement {
-    url: string;
-}
+export type ReasoningEffort = "xhigh" | "high" | "medium" | "low" | "minimal" | "none";
 
 /**
  * A tool's declared contract: flat on the wire. Providers that need
  * OpenAI-style `{"type": "function", "function": {…}}` nesting re-wrap at
  * their own boundary.
  */
-export interface ActionTool {
+export interface LlmTool {
     description: string;
     /**
      * JSON Schema for the tool's arguments; omitted declares a no-argument
@@ -456,7 +479,7 @@ export interface ActionTool {
     output?: any;
 }
 
-export type ActionType =
+export type DecisionActionType =
     | "llm.call"
     | "tool.call"
     | "tool.result"
@@ -480,10 +503,19 @@ export type ActionType =
  * Answer with `tool.result`/`tool.error`.
  *
  * Answer with `llm.result`/`llm.error`.
+ *
+ * The body of an interrupt resume: which interrupt, and the payload delivered
+ * to the worker. Shared by the [`ClientInput::InterruptResume`] input and the
+ * [`DecisionTrigger::InterruptResumed`] trigger.
  */
-export interface Trigger {
-    type: TriggerType;
-    messages?: ClientInputMessage[];
+export interface DecisionTrigger {
+    type: DecisionTriggerType;
+    /**
+     * Inputs the client declared on its run; the engine layers `client.tools`
+     * onto the proposed config by default.
+     */
+    client?: ClientContext;
+    messages?: DraftMessage[];
     new_from?: number;
     args?: any;
     name?: string;
@@ -497,16 +529,21 @@ export interface Trigger {
      * `invalid` (value plus the violation), or `malformed` (not a JSON
      * object). Always on the wire.
      */
-    input?: Input;
+    input?: ToolInput;
     error?: null | string;
     ok?: boolean;
     result?: null | string;
-    request?: Request;
+    format?: LlmFormat | null;
+    /**
+     * The neutral `LlmRequest` JSON, or the provider's native request body
+     * when `format` is set.
+     */
+    request?: any;
     stream?: boolean;
-    code?: CodeEnum | null;
+    code?: ErrorCode | null;
     cost?: null | string;
     detail?: any;
-    message?: ClientInputMessage | null;
+    message?: DraftMessage | null;
     truncated?: boolean;
     usage?: any;
     agent_id?: string;
@@ -532,24 +569,15 @@ export interface Trigger {
  *
  * Not a JSON object: malformed JSON or a non-object value.
  */
-export interface Input {
-    status: InputStatus;
+export interface ToolInput {
+    status: Status;
     value?: any;
     error?: string;
 }
 
-export type InputStatus = "valid" | "invalid" | "malformed";
+export type Status = "valid" | "invalid" | "malformed";
 
-export interface Request {
-    max_completion_tokens?: number | null;
-    messages: ClientInputMessage[];
-    model: string;
-    reasoning?: ReasoningClass | null;
-    temperature?: number | null;
-    tools?: ActionTool[] | null;
-}
-
-export type TriggerType =
+export type DecisionTriggerType =
     | "session.start"
     | "client.messages"
     | "client.action"
@@ -564,10 +592,10 @@ export interface StreamDelta {
     finish_reason?: null | string;
     reasoning?: null | string;
     text?: null | string;
-    tool_calls?: StreamDeltaToolCall[];
+    tool_calls?: ToolCallChunk[];
 }
 
-export interface StreamDeltaToolCall {
+export interface ToolCallChunk {
     arguments?: null | string;
     id: string;
     name?: null | string;
@@ -596,6 +624,6 @@ export interface TokenDelta {
      */
     tenant_id: string;
     text?: null | string;
-    tool_calls?: StreamDeltaToolCall[];
+    tool_calls?: ToolCallChunk[];
     turn_id?: null | string;
 }

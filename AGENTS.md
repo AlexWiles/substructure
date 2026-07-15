@@ -14,5 +14,5 @@ crates/napi              → N-API bindings exposing core to Node
 Keep comments to an absolute minimum and use as few words as possible.
 
 ### CHANGELOG.md:
-Keep CHANGELOG.md up to date. There should be a maximum of two sentences per entry. First sentence states the problem in as few words as possible. Second sentence states the solution in as few words as possible.
+Keep CHANGELOG.md up to date. There should be a maximum of two sentences per entry. First sentence states the problem in as few words as possible. Second sentence states the solution in as few words as possible. Only for code changes. Not for docs updates or examples.
 

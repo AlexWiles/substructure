@@ -2,7 +2,7 @@
 // schemas/protocol.schema.json (see README).
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
-import type { DecisionRequest, DecisionResponseClass } from "./protocol.ts";
+import type { DecisionRequest, DecisionResponse } from "./protocol.ts";
 
 const tools = [
     {
@@ -17,7 +17,7 @@ const tools = [
     },
 ];
 
-function decide({ trigger, proposed }: DecisionRequest): DecisionResponseClass | null {
+function decide({ trigger, proposed }: DecisionRequest): DecisionResponse | null {
     if (trigger.type === "session.start") {
         // The engine will use this agent config to generate proposed actions.
         return {

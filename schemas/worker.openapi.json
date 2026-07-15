@@ -67,6 +67,7 @@
         "required": [
           "model"
         ],
+        "title": "AgentConfig",
         "type": "object"
       },
       "AgentTool": {
@@ -95,6 +96,7 @@
         "required": [
           "name"
         ],
+        "title": "AgentTool",
         "type": "object"
       },
       "AudioData": {
@@ -111,6 +113,7 @@
           "data",
           "format"
         ],
+        "title": "AudioData",
         "type": "object"
       },
       "ClientContext": {
@@ -130,6 +133,7 @@
             "type": "array"
           }
         },
+        "title": "ClientContext",
         "type": "object"
       },
       "Content": {
@@ -144,7 +148,8 @@
             "type": "array"
           }
         ],
-        "description": "Message content: either a plain string or an array of typed parts.\nSerializes as a raw string or array respectively (untagged)."
+        "description": "Message content: either a plain string or an array of typed parts.\nSerializes as a raw string or array respectively (untagged).",
+        "title": "Content"
       },
       "ContentPart": {
         "oneOf": [
@@ -233,7 +238,8 @@
             ],
             "type": "object"
           }
-        ]
+        ],
+        "title": "ContentPart"
       },
       "Control": {
         "additionalProperties": false,
@@ -262,6 +268,7 @@
           "kind",
           "origin"
         ],
+        "title": "Control",
         "type": "object"
       },
       "ControlKind": {
@@ -269,6 +276,7 @@
           "interrupt",
           "resume"
         ],
+        "title": "ControlKind",
         "type": "string"
       },
       "DecisionAction": {
@@ -639,7 +647,8 @@
             ],
             "type": "object"
           }
-        ]
+        ],
+        "title": "DecisionAction"
       },
       "DecisionRequest": {
         "additionalProperties": false,
@@ -744,6 +753,7 @@
           "ancestry",
           "attempts"
         ],
+        "title": "DecisionRequest",
         "type": "object"
       },
       "DecisionResponse": {
@@ -785,6 +795,7 @@
             "description": "Omitted or `null` keeps the current state; clear with a non-null empty value."
           }
         },
+        "title": "DecisionResponse",
         "type": "object"
       },
       "DecisionTrigger": {
@@ -1099,7 +1110,8 @@
             ],
             "type": "object"
           }
-        ]
+        ],
+        "title": "DecisionTrigger"
       },
       "DraftMessage": {
         "additionalProperties": false,
@@ -1149,6 +1161,7 @@
         "required": [
           "role"
         ],
+        "title": "DraftMessage",
         "type": "object"
       },
       "Effect": {
@@ -1230,6 +1243,7 @@
           "status",
           "attempt"
         ],
+        "title": "Effect",
         "type": "object"
       },
       "EffectKind": {
@@ -1238,6 +1252,7 @@
           "sub_agent",
           "llm_call"
         ],
+        "title": "EffectKind",
         "type": "string"
       },
       "EffectStatus": {
@@ -1248,6 +1263,7 @@
           "retry_scheduled",
           "queued"
         ],
+        "title": "EffectStatus",
         "type": "string"
       },
       "ErrorCode": {
@@ -1258,6 +1274,7 @@
           "budget_exceeded",
           "deadline_exceeded"
         ],
+        "title": "ErrorCode",
         "type": "string"
       },
       "FileData": {
@@ -1274,6 +1291,7 @@
           "filename",
           "file_data"
         ],
+        "title": "FileData",
         "type": "object"
       },
       "Handler": {
@@ -1294,7 +1312,8 @@
             "description": "Executed by the client. Session goes Idle while waiting (tools only).",
             "type": "string"
           }
-        ]
+        ],
+        "title": "Handler"
       },
       "ImageUrl": {
         "additionalProperties": false,
@@ -1306,6 +1325,7 @@
         "required": [
           "url"
         ],
+        "title": "ImageUrl",
         "type": "object"
       },
       "InterruptOrigin": {
@@ -1315,6 +1335,7 @@
           "machine",
           "frontend"
         ],
+        "title": "InterruptOrigin",
         "type": "string"
       },
       "LlmFormat": {
@@ -1330,7 +1351,8 @@
             "description": "Anthropic Messages API.",
             "type": "string"
           }
-        ]
+        ],
+        "title": "LlmFormat"
       },
       "LlmTool": {
         "additionalProperties": false,
@@ -1353,6 +1375,7 @@
           "name",
           "description"
         ],
+        "title": "LlmTool",
         "type": "object"
       },
       "Message": {
@@ -1400,6 +1423,7 @@
           "id",
           "role"
         ],
+        "title": "Message",
         "type": "object"
       },
       "MessageTree": {
@@ -1418,6 +1442,7 @@
             "type": "array"
           }
         },
+        "title": "MessageTree",
         "type": "object"
       },
       "Node": {
@@ -1468,7 +1493,8 @@
             ],
             "type": "object"
           }
-        ]
+        ],
+        "title": "Node"
       },
       "ReasoningConfig": {
         "additionalProperties": false,
@@ -1504,6 +1530,7 @@
             ]
           }
         },
+        "title": "ReasoningConfig",
         "type": "object"
       },
       "ReasoningEffort": {
@@ -1515,6 +1542,7 @@
           "minimal",
           "none"
         ],
+        "title": "ReasoningEffort",
         "type": "string"
       },
       "RetryPolicy": {
@@ -1550,6 +1578,7 @@
           "backoff_base_secs",
           "backoff_max_secs"
         ],
+        "title": "RetryPolicy",
         "type": "object"
       },
       "Role": {
@@ -1559,6 +1588,7 @@
           "assistant",
           "tool"
         ],
+        "title": "Role",
         "type": "string"
       },
       "SubAgent": {
@@ -1575,6 +1605,7 @@
         "required": [
           "id"
         ],
+        "title": "SubAgent",
         "type": "object"
       },
       "ToolCall": {
@@ -1595,6 +1626,7 @@
           "type",
           "function"
         ],
+        "title": "ToolCall",
         "type": "object"
       },
       "ToolCallFunction": {
@@ -1611,6 +1643,7 @@
           "name",
           "arguments"
         ],
+        "title": "ToolCallFunction",
         "type": "object"
       },
       "ToolInput": {
@@ -1670,7 +1703,8 @@
             ],
             "type": "object"
           }
-        ]
+        ],
+        "title": "ToolInput"
       },
       "VideoUrl": {
         "additionalProperties": false,
@@ -1682,6 +1716,7 @@
         "required": [
           "url"
         ],
+        "title": "VideoUrl",
         "type": "object"
       },
       "WorkerIdentity": {
@@ -1701,10 +1736,12 @@
             "type": "object"
           }
         },
+        "title": "WorkerIdentity",
         "type": "object"
       },
       "WorkerState": {
-        "description": "Opaque worker state: JSON the engine stores but never interprets."
+        "description": "Opaque worker state: JSON the engine stores but never interprets.",
+        "title": "WorkerState"
       }
     },
     "securitySchemes": {
@@ -1723,7 +1760,7 @@
       "url": "https://fsl.software"
     },
     "title": "Substructure worker",
-    "version": "0.1.22"
+    "version": "0.2.1"
   },
   "openapi": "3.1.0",
   "paths": {

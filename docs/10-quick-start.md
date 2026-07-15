@@ -218,6 +218,7 @@ rolled up to the parent.
 
 ## Next
 
+- [Quick start (cloud)](./15-quick-start-cloud.md): run this worker against the hosted engine.
 - [Core concepts](./20-concepts.md): sessions, turns, triggers, decisions.
 - [Tool calls](./30-tools.md): schemas, validation, and where tools run.
 - [Sub-agents](./80-sub-agents.md): delegation, child sessions, cost roll-up.

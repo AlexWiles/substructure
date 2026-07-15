@@ -8,12 +8,12 @@ import (
 	"net/http"
 )
 
-func decide(req DecisionRequest) *DecisionResponseClass {
+func decide(req DecisionRequest) *DecisionResponse {
 	if req.Trigger.Type == SessionStart {
 		// The engine will use this agent config to generate proposed actions.
 		stream := true
-		return &DecisionResponseClass{
-			Agent: &AgentClass{
+		return &DecisionResponse{
+			Agent: &AgentConfig{
 				Model:  "claude-haiku-4-5-20251001",
 				Stream: &stream,
 			},

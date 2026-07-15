@@ -4,7 +4,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
-import type { DecisionRequest, DecisionResponseClass } from "./protocol.ts";
+import type { DecisionRequest, DecisionResponse } from "./protocol.ts";
 
 const anthropic = new Anthropic();
 
@@ -14,7 +14,7 @@ app.post("/", async (c) => {
 
     // Declare the agent; format makes the engine speak Anthropic on this wire.
     if (trigger.type === "session.start") {
-        const decision: DecisionResponseClass = {
+        const decision: DecisionResponse = {
             agent: {
                 model: "claude-haiku-4-5-20251001",
                 stream: true,

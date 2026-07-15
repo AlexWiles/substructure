@@ -5,7 +5,7 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import OpenAI from "openai";
 import type { ChatCompletionStreamParams } from "openai/lib/ChatCompletionStream";
-import type { DecisionRequest, DecisionResponseClass } from "./protocol.ts";
+import type { DecisionRequest, DecisionResponse } from "./protocol.ts";
 
 const openai = new OpenAI();
 
@@ -15,7 +15,7 @@ app.post("/", async (c) => {
 
     // Declare the agent; format makes the engine speak OpenAI on this wire.
     if (trigger.type === "session.start") {
-        const decision: DecisionResponseClass = {
+        const decision: DecisionResponse = {
             agent: {
                 model: "gpt-5-nano",
                 stream: true,

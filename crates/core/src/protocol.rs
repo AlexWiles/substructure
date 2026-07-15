@@ -24,6 +24,7 @@ fn decimal_string_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema 
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
+#[schemars(title = "Role")]
 pub enum Role {
     System,
     User,
@@ -32,12 +33,14 @@ pub enum Role {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "ToolCallFunction")]
 pub struct ToolCallFunction {
     pub name: String,
     pub arguments: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "ToolCall")]
 pub struct ToolCall {
     pub id: String,
     #[serde(rename = "type")]
@@ -48,29 +51,34 @@ pub struct ToolCall {
 // Multimodal content parts (OpenAI/OpenRouter wire format).
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "ImageUrl")]
 pub struct ImageUrl {
     pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "FileData")]
 pub struct FileData {
     pub filename: String,
     pub file_data: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "AudioData")]
 pub struct AudioData {
     pub data: String,
     pub format: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "VideoUrl")]
 pub struct VideoUrl {
     pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[schemars(title = "ContentPart")]
 pub enum ContentPart {
     Text {
         text: String,
@@ -96,12 +104,14 @@ pub enum ContentPart {
 /// Serializes as a raw string or array respectively (untagged).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
+#[schemars(title = "Content")]
 pub enum Content {
     Text(String),
     Parts(Vec<ContentPart>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "Message")]
 pub struct Message {
     pub id: String,
     pub role: Role,
@@ -120,6 +130,7 @@ pub struct Message {
 /// (`runtime::session::wire`) are the seams that lower it to the internal
 /// [`Message`] (id always present) at recording time.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "DraftMessage")]
 pub struct DraftMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -154,6 +165,7 @@ pub struct NewControl {
 
 /// A non-conversational tree marker (interrupt/resume); filtered out of LLM prompts.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "Control")]
 pub struct Control {
     pub id: String,
     pub interrupt_id: String,
@@ -167,6 +179,7 @@ pub struct Control {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[schemars(title = "ControlKind")]
 pub enum ControlKind {
     Interrupt,
     Resume,
@@ -177,6 +190,7 @@ pub enum ControlKind {
 /// caller at or above the origin's privilege.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[schemars(title = "InterruptOrigin")]
 pub enum InterruptOrigin {
     System,
     Machine,
@@ -185,12 +199,14 @@ pub enum InterruptOrigin {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[schemars(title = "Node")]
 pub enum Node {
     Message(NewMessage),
     Control(NewControl),
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "MessageTree")]
 pub struct MessageTree {
     #[serde(default)]
     pub nodes: Vec<Node>,
@@ -206,6 +222,7 @@ pub struct MessageTree {
 /// `client` LLM call) is rejected at the decision seam.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[schemars(title = "Handler")]
 pub enum Handler {
     /// Server-side executor resolves the provider and makes the call (LLM only).
     Server,
@@ -221,6 +238,7 @@ pub enum Handler {
 /// stream events. Requires `handler: worker`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[schemars(title = "LlmFormat")]
 pub enum LlmFormat {
     /// OpenAI Chat Completions.
     Openai,
@@ -233,6 +251,7 @@ pub enum LlmFormat {
 /// Fully-resolved retry policy — no optional fields. Stored on call state and
 /// read directly by retry logic.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "RetryPolicy")]
 pub struct RetryPolicy {
     pub timeout_secs: Option<u32>,
     pub max_retries: u32,
@@ -255,6 +274,7 @@ pub struct SessionOwner {
 /// subject and its metadata, without the tenant. The tenant scopes the session
 /// internally but is not sent to the worker.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "WorkerIdentity")]
 pub struct WorkerIdentity {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -267,6 +287,7 @@ pub struct WorkerIdentity {
 /// Opaque worker state: JSON the engine stores but never interprets.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
+#[schemars(title = "WorkerState")]
 pub struct WorkerState(pub Value);
 
 // ── Agent config ─────────────────────────────────────────────────────────
@@ -274,6 +295,7 @@ pub struct WorkerState(pub Value);
 /// A declared agent identity. `model` is the only required field; everything else
 /// refines the proposed LLM request the engine derives for `client.messages`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "AgentConfig")]
 pub struct AgentConfig {
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -306,6 +328,7 @@ pub struct AgentConfig {
 /// `Some(Client)` ⇒ client-executed, absent ⇒ worker-executed (the default).
 /// `server` is invalid for tools.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "AgentTool")]
 pub struct AgentTool {
     pub name: String,
     #[serde(default)]
@@ -322,6 +345,7 @@ pub struct AgentTool {
 /// and the tool name the model calls); its model-facing input is the conventional
 /// single-`message` delegation schema.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "SubAgent")]
 pub struct SubAgent {
     pub id: String,
     #[serde(default)]
@@ -334,6 +358,7 @@ pub struct SubAgent {
 /// [`AgentTool`]s; the engine layers them onto the proposed config by default, and
 /// the worker may override (e.g. whitelist) by returning its own `agent`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "ClientContext")]
 pub struct ClientContext {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<AgentTool>,
@@ -351,6 +376,7 @@ pub struct ClientContext {
 /// OpenAI-style `{"type": "function", "function": {…}}` nesting re-wrap at
 /// their own boundary.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "LlmTool")]
 pub struct LlmTool {
     pub name: String,
     pub description: String,
@@ -366,6 +392,7 @@ pub struct LlmTool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "LlmRequest")]
 pub struct LlmRequest {
     pub model: String,
     pub messages: Vec<DraftMessage>,
@@ -380,6 +407,7 @@ pub struct LlmRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "ReasoningConfig")]
 pub struct ReasoningConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<ReasoningEffort>,
@@ -393,6 +421,7 @@ pub struct ReasoningConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
+#[schemars(title = "ReasoningEffort")]
 pub enum ReasoningEffort {
     Xhigh,
     High,
@@ -404,6 +433,7 @@ pub enum ReasoningEffort {
 
 /// An image returned by the model in the response.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "ResponseImage")]
 pub struct ResponseImage {
     pub url: String,
 }
@@ -411,6 +441,7 @@ pub struct ResponseImage {
 /// Normalized LLM response. Provider adapters convert their raw responses
 /// into this type at the boundary.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "LlmResponse")]
 pub struct LlmResponse {
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -433,6 +464,7 @@ pub struct LlmResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[schemars(title = "ErrorCode")]
 pub enum ErrorCode {
     ProviderError,
     RateLimited,
@@ -444,6 +476,7 @@ pub enum ErrorCode {
 // ── Streaming ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "ToolCallChunk")]
 pub struct ToolCallChunk {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -453,6 +486,7 @@ pub struct ToolCallChunk {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "StreamDelta")]
 pub struct StreamDelta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
@@ -465,6 +499,7 @@ pub struct StreamDelta {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "TokenDelta")]
 pub struct TokenDelta {
     /// Tenant isolation key — subscribers must match.
     pub tenant_id: String,
@@ -493,6 +528,7 @@ pub struct TokenDelta {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[schemars(title = "EffectStatus")]
 pub enum EffectStatus {
     Pending,
     Completed,
@@ -503,6 +539,7 @@ pub enum EffectStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[schemars(title = "EffectKind")]
 pub enum EffectKind {
     ToolCall,
     SubAgent,
@@ -514,6 +551,7 @@ pub enum EffectKind {
 /// `name`/`arguments`/`handler`, an LLM call's `handler`/`stream`, a
 /// sub-agent's `agent_id`/`session_id`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "Effect")]
 pub struct Effect {
     pub id: String,
     pub kind: EffectKind,
@@ -545,6 +583,7 @@ pub struct Effect {
 /// wire — absence never carries meaning.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "status", rename_all = "lowercase")]
+#[schemars(title = "ToolInput")]
 pub enum ToolInput {
     /// Parsed and, when the tool declares an `input` schema, conforming to it.
     /// `value` is exactly the parsed `arguments` — the engine never mutates it.
@@ -593,6 +632,7 @@ pub struct ClientAction {
 /// surface.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
+#[schemars(title = "ClientPayload")]
 pub enum ClientPayload {
     #[serde(rename = "client.message")]
     Message(ClientMessage),
@@ -616,6 +656,7 @@ pub enum ClientPayload {
 /// rides the envelope. A submit's body rebuilds a [`ClientPayload`] at the seam.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
+#[schemars(title = "ClientInput")]
 pub enum ClientInput {
     #[serde(rename = "client.message")]
     Message {
@@ -688,6 +729,7 @@ pub struct InterruptResumption {
 /// never reach a worker.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
+#[schemars(title = "DecisionTrigger")]
 pub enum DecisionTrigger {
     /// The first decision of every session; carries no proposal.
     #[serde(rename = "session.start")]
@@ -812,6 +854,7 @@ impl DecisionTrigger {
 /// present) at the transport boundary.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
+#[schemars(title = "DecisionAction")]
 pub enum DecisionAction {
     /// A flat, all-optional LLM request. `id` omitted ⇒ the engine mints one; it
     /// becomes the assistant node's id. Omitted fields are filled from the agent
@@ -944,6 +987,7 @@ pub enum DecisionAction {
 /// The worker returns one; the engine also proposes one as the default
 /// continuation (`DecisionRequest::proposed`), which the worker echoes or amends.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "DecisionResponse")]
 pub struct DecisionResponse {
     #[serde(default)]
     pub messages: Vec<DraftMessage>,
@@ -958,6 +1002,7 @@ pub struct DecisionResponse {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
+#[schemars(title = "DecisionRequest")]
 pub struct DecisionRequest<'a> {
     pub session_id: &'a str,
     pub decision_id: &'a str,

@@ -6,7 +6,7 @@
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
-import type { DecisionRequest, DecisionResponseClass } from "./protocol.ts";
+import type { DecisionRequest, DecisionResponse } from "./protocol.ts";
 
 const AGENT_ID = "chat-agent";
 const ENGINE_URL = process.env.SUBSTRUCTURE_URL ?? "http://localhost:9000";
@@ -22,7 +22,7 @@ const tools = [
     },
 ];
 
-function decide({ trigger, proposed }: DecisionRequest): DecisionResponseClass | null {
+function decide({ trigger, proposed }: DecisionRequest): DecisionResponse | null {
     // On session start, declare the agent the engine should run. We list only our
     // worker tools — the browser declares its own client tools (get_timezone; see
     // web/chat.tsx) on each run, and the engine layers them onto the proposal.
