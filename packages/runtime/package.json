@@ -1,6 +1,6 @@
 {
   "name": "@substructure.ai/runtime",
-  "version": "0.1.22",
+  "version": "0.2.0",
   "description": "In-process Substructure runtime for Node.js",
   "license": "FSL-1.1-ALv2",
   "type": "module",

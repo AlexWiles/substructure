@@ -9,6 +9,8 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-15
+
 ### Changed
 
 - **Breaking:** Pre-1.0 rework across the wire protocol, SDK, CLI, and docs. Dropped
@@ -17,4 +19,5 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
   streaming, schema-validated tool I/O and a generated protocol spec, and rewrote
   the docs and examples.
 
-[Unreleased]: https://github.com/substructureai/substructure/compare/v0.1.22...HEAD
+[Unreleased]: https://github.com/substructureai/substructure/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/substructureai/substructure/compare/v0.1.22...v0.2.0

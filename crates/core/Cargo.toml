@@ -1,6 +1,6 @@
 [package]
 name = "substructure-core"
-version = "0.1.22"
+version = "0.2.0"
 edition = "2021"
 description = "Core runtime for Substructure"
 license-file = "LICENSE"
