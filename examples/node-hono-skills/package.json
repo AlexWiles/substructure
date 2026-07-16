@@ -1,0 +1,7 @@
+{
+  "name": "@substructure.ai/example-node-hono-skills",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "node server.mjs" },
+  "dependencies": { "@hono/node-server": "2.0.8", "gray-matter": "4.0.3", "hono": "4.12.28" }
+}

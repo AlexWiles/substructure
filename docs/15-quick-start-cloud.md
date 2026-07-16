@@ -3,8 +3,6 @@ title: Quick start (cloud)
 group: Getting started
 ---
 
-The [local quick start](./10-quick-start.md) runs the engine on your machine.
-
 ## 1. Sign in and create an app
 
 ```sh
@@ -28,11 +26,10 @@ Pin the app so later commands need no `--app`:
 subs link
 ```
 
-## 2. Verify the signature in your worker
+## 2. Make sure to verify the signature in your worker
 
-The hosted engine signs every decision it POSTs with the app's signing secret. Add
-a check to the `server.mjs` worker from the local quick start, then set the secret
-in its environment:
+The hosted engine signs every decision it POSTs with the app's signing secret. Your
+worker should verify that signature before acting on a decision. Add the check:
 
 ```javascript title="server.mjs"
 import { createHmac, timingSafeEqual } from "node:crypto";
@@ -45,36 +42,30 @@ function verify(body, header) {
     const b = Buffer.from(header ?? "");
     return a.length === b.length && timingSafeEqual(a, b);
 }
+```
 
-const server = createServer((req, res) => {
-    let body = "";
-    req.on("data", (chunk) => (body += chunk));
-    req.on("end", () => {
-        if (!verify(body, req.headers["x-substructure-signature"])) {
-            res.writeHead(401).end();
-            return;
-        }
-        const decision = decide(JSON.parse(body));
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify(decision ?? null));
-    });
-});
+Then reject unsigned requests in the server's handler, before calling `decide`:
 
-server.listen(4444, () => console.log("worker listening on http://localhost:4444"));
+```javascript title="server.mjs"
+if (!verify(body, req.headers["x-substructure-signature"])) {
+    res.writeHead(401).end();
+    return;
+}
 ```
 
 The provider key stays out of this. By default the hosted engine runs the LLM
 against its own provider and bills the app, so your worker sets no `ANTHROPIC_API_KEY`.
 
-## 3. Expose the worker
+## 3. Deploy the worker
 
-The engine reaches your worker over the public internet, so it needs a URL. Deploy
-it anywhere, or for local development open a tunnel:
+The engine reaches your worker over the public internet, so deploy it wherever you
+run Node and set the signing secret in its environment:
 
 ```sh
-SUBS_SIGNING_SECRET=$(subs webhook secret) node server.mjs
-# in another terminal, tunnel port 4444 and copy the https URL
+subs webhook secret   # prints the secret; set it as SUBS_SIGNING_SECRET where the worker runs
 ```
+
+The deploy gives the worker a public HTTPS URL to point the app at.
 
 ## 4. Point the app at it
 

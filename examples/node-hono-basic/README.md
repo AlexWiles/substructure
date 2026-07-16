@@ -4,6 +4,12 @@ The most basic chattable agent, served with [Hono](https://hono.dev).
 
 ## Run
 
+Install the CLI:
+
+```sh
+npm i -g @substructure.ai/cli
+```
+
 Two terminals.
 
 **1. Start the worker**:

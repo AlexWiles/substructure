@@ -11,6 +11,12 @@ pre-built `<Thread>` wired to the engine with `useAgUiRuntime`.
 
 ## Run
 
+Install the CLI:
+
+```sh
+npm i -g @substructure.ai/cli
+```
+
 Three things: the engine, the app, the browser.
 
 **1. Start the engine** — it holds the LLM key and drives the loop:

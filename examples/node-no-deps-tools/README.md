@@ -4,6 +4,12 @@ A chattable agent with two tools, served with Node's built-in `http` server. No 
 
 ## Run
 
+Install the CLI:
+
+```sh
+npm i -g @substructure.ai/cli
+```
+
 Two terminals.
 
 **1. Start the worker**:
