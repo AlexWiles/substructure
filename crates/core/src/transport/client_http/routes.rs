@@ -8,18 +8,18 @@ use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use crate::event_store::StreamVersion;
-use crate::protocol::{ClientInput, InterruptResumption, MessageTree, SessionOwner};
+use crate::protocol::{ClientInput, InterruptResumption, SessionOwner};
 use crate::session::command::SessionError;
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use crate::transport::ag_ui::snapshot::snapshot_events;
 use crate::transport::ag_ui::translator::run_ag_ui_translation;
-use crate::transport::ag_ui::types::RunAgentInput;
+use crate::transport::ag_ui::types::{ConnectInput, RunAgentInput};
 use crate::transport::session_sse::merge_session_stream;
 use crate::{Caller, HandleClientInput, InterruptSessionInput, RuntimeError};
 
 use super::types::{
-    ClientInputRequest, ClientInputResponse, InterruptSessionRequest, InterruptSessionResponse,
-    StreamSessionEventsParams,
+    session_response, ClientInputRequest, ClientInputResponse, InterruptSessionRequest,
+    InterruptSessionResponse, StreamSessionEventsParams,
 };
 use super::ClientHttpState;
 
@@ -120,6 +120,38 @@ pub(crate) fn runtime_error_response(err: RuntimeError) -> Response {
     (status, Json(serde_json::json!({"error": message}))).into_response()
 }
 
+/// The session resource: head-resolved status, open interrupts, and the full
+/// message tree.
+pub async fn get_session(
+    State(state): State<ClientHttpState>,
+    Extension(caller): Extension<Caller>,
+    Path(session_id): Path<String>,
+) -> Response {
+    // Authorizes the read; an uncreated session has no events ⇒ 404.
+    let events = match state
+        .runtime
+        .read_session_events(&caller, &session_id, None, Some(1))
+        .await
+    {
+        Ok(events) => events,
+        Err(e) => return runtime_error_response(e),
+    };
+    if events.is_empty() {
+        return runtime_error_response(RuntimeError::Session(SessionError::SessionNotCreated));
+    }
+
+    let session = match state
+        .runtime
+        .get_session(caller.tenant_id(), &session_id)
+        .await
+    {
+        Ok((_, session)) => session,
+        Err(e) => return runtime_error_response(e),
+    };
+
+    Json(session_response(session_id, &session)).into_response()
+}
+
 pub async fn stream_session_events(
     State(state): State<ClientHttpState>,
     Extension(caller): Extension<Caller>,
@@ -188,37 +220,33 @@ pub async fn ag_ui_run(
 
     // AG-UI's input is already classified (a `resume` list vs. messages), so the inputs are
     // built directly with their addressing rather than parsed from untrusted tagged JSON.
-    let submit = if !input.resume.is_empty() {
-        // Stale interrupt ids no-op, keeping resumes idempotent.
-        let mut outcome: Result<(), RuntimeError> = Ok(());
-        for entry in input.resume.clone() {
-            let payload = serde_json::json!({
-                "status": entry.status.as_str(),
-                "payload": entry.payload.unwrap_or(serde_json::Value::Null),
-            });
-            let r = state
-                .runtime
-                .handle_client_input(HandleClientInput {
-                    session_id: session_id.clone(),
-                    caller: caller.clone(),
-                    owner: owner.clone(),
-                    input: ClientInput::InterruptResume {
-                        resumption: InterruptResumption {
-                            interrupt_id: entry.interrupt_id,
-                            payload,
-                        },
+    // Resumes apply first, then the messages view — steerAway sends both.
+    for entry in input.resume.clone() {
+        let payload = serde_json::json!({
+            "status": entry.status.as_str(),
+            "payload": entry.payload.unwrap_or(serde_json::Value::Null),
+        });
+        let r = state
+            .runtime
+            .handle_client_input(HandleClientInput {
+                session_id: session_id.clone(),
+                caller: caller.clone(),
+                owner: owner.clone(),
+                input: ClientInput::InterruptResume {
+                    resumption: InterruptResumption {
+                        interrupt_id: entry.interrupt_id,
+                        payload,
                     },
-                    span: crate::span::SpanContext::root().child("ag_ui_resume"),
-                })
-                .await;
-            if let Err(e) = r {
-                outcome = Err(e);
-                break;
-            }
+                },
+                span: crate::span::SpanContext::root().child("ag_ui_resume"),
+            })
+            .await;
+        if let Err(e) = r {
+            return runtime_error_response(e);
         }
-        outcome
-    } else {
-        state
+    }
+    if !input.to_messages().is_empty() {
+        let submit = state
             .runtime
             .handle_client_input(HandleClientInput {
                 session_id: session_id.clone(),
@@ -235,11 +263,10 @@ pub async fn ag_ui_run(
                 },
                 span: crate::span::SpanContext::root().child("ag_ui_run"),
             })
-            .await
-            .map(|_| ())
-    };
-    if let Err(e) = submit {
-        return runtime_error_response(e);
+            .await;
+        if let Err(e) = submit {
+            return runtime_error_response(e);
+        }
     }
 
     let out_rx = run_ag_ui_translation(
@@ -259,33 +286,33 @@ pub async fn ag_ui_connect(
     State(state): State<ClientHttpState>,
     Extension(caller): Extension<Caller>,
     Path(_agent_id): Path<String>,
-    Json(input): Json<RunAgentInput>,
+    Json(input): Json<ConnectInput>,
 ) -> Response {
-    // Read events to authorize and recover the active interrupt.
+    // Authorizes the read; no events ⇒ session not yet created, empty snapshot.
     let events = match state
         .runtime
-        .read_session_events(&caller, &input.thread_id, None, None)
+        .read_session_events(&caller, &input.thread_id, None, Some(1))
         .await
     {
         Ok(events) => events,
         Err(e) => return runtime_error_response(e),
     };
 
-    // No events ⇒ session not yet created; empty tree.
-    let tree = if events.is_empty() {
-        MessageTree::default()
+    let session = if events.is_empty() {
+        None
     } else {
         match state
             .runtime
             .get_session(caller.tenant_id(), &input.thread_id)
             .await
         {
-            Ok((_, session)) => session.message_tree(),
+            Ok((_, session)) => Some(session),
             Err(e) => return runtime_error_response(e),
         }
     };
 
-    let frames = snapshot_events(input.thread_id, input.run_id, &tree, &events)
+    let run_id = input.run_id.unwrap_or_else(|| Uuid::now_v7().to_string());
+    let frames = snapshot_events(input.thread_id, run_id, session.as_ref())
         .into_iter()
         .map(|ev| Ok::<_, std::convert::Infallible>(ev.to_sse()))
         .collect::<Vec<_>>();

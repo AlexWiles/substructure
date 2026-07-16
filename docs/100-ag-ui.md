@@ -27,10 +27,12 @@ is catching up.
 | `threadId` | The session. |
 | `runId` | The turn id. |
 | `messages` | The client's conversation view. |
-| `resume` | Interrupt answers, in place of messages. |
+| `resume` | Interrupt answers. |
 | `tools`, `context`, `state`, `forwardedProps` | Contributed by the frontend. |
 
-A non-empty `resume` resumes an interrupt; otherwise `messages` submit a turn.
+`resume` entries are applied first, then a non-empty `messages` view submits a
+turn. Sending both in one input is the steer-away move: the resume clears a
+pending interrupt while the view branches the conversation elsewhere.
 
 ## Events
 

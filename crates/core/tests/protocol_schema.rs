@@ -72,7 +72,7 @@ fn protocol_schema() -> serde_json::Value {
     macro_rules! register {
         ($($t:ty),* $(,)?) => { $( generator.subschema_for::<$t>(); )* };
     }
-    // Types kept `#[schemars(inline)]` (NewMessage, NewControl, ClientMessage,
+    // Types kept `#[schemars(inline)]` (NewMessage, ClientMessage,
     // ClientMessages, ClientAction) are omitted: they merge into
     // internally-tagged enum variants, where a `$ref` cannot carry the tag.
     register!(
@@ -87,10 +87,7 @@ fn protocol_schema() -> serde_json::Value {
         p::Content,
         p::Message,
         p::DraftMessage,
-        p::Control,
-        p::ControlKind,
         p::InterruptOrigin,
-        p::Node,
         p::MessageTree,
         p::Handler,
         p::RetryPolicy,
@@ -328,21 +325,28 @@ fn every_protocol_type_lands_in_defs() {
         "Handler",
         "TokenDelta",
         "Content",
-        "Node",
+        "MessageTree",
         "ToolCallFunction",
     ] {
         assert!(defs.contains_key(name), "missing $defs entry: {name}");
     }
     // Types that merge into internally-tagged enum variants stay inline: a
     // `$ref` there cannot carry the variant tag.
-    for name in ["NewMessage", "NewControl", "ClientMessage", "ClientAction"] {
+    for name in ["NewMessage", "ClientMessage", "ClientAction"] {
         assert!(
             !defs.contains_key(name),
             "expected inlined, found $defs entry: {name}"
         );
     }
-    // The two retired wire enums must not resurface.
-    for name in ["ToolHandler", "LlmHandler", "EffectDetail"] {
+    // Retired wire enums must not resurface.
+    for name in [
+        "ToolHandler",
+        "LlmHandler",
+        "EffectDetail",
+        "Control",
+        "ControlKind",
+        "Node",
+    ] {
         assert!(!defs.contains_key(name), "retired $defs entry: {name}");
     }
 }

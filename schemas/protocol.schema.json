@@ -491,44 +491,6 @@
       ],
       "title": "ContentPart"
     },
-    "Control": {
-      "additionalProperties": false,
-      "description": "A non-conversational tree marker (interrupt/resume); filtered out of LLM prompts.",
-      "properties": {
-        "id": {
-          "type": "string"
-        },
-        "interrupt_id": {
-          "type": "string"
-        },
-        "kind": {
-          "$ref": "#/$defs/ControlKind"
-        },
-        "origin": {
-          "$ref": "#/$defs/InterruptOrigin"
-        },
-        "payload": {},
-        "reason": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "id",
-        "interrupt_id",
-        "kind",
-        "origin"
-      ],
-      "title": "Control",
-      "type": "object"
-    },
-    "ControlKind": {
-      "enum": [
-        "interrupt",
-        "resume"
-      ],
-      "title": "ControlKind",
-      "type": "string"
-    },
     "DecisionAction": {
       "description": "The action a worker authors on the wire. Mirrors the internal `Action`, but a\nsettle's effect id may be omitted: on the sync/pull paths the answered\n`*.execute` trigger names it, so echoing it is redundant. `resolve_response`\n(`runtime::session::wire`) turns this into the internal `Action` (id always\npresent) at the transport boundary.",
       "oneOf": [
@@ -1789,64 +1751,28 @@
         },
         "nodes": {
           "items": {
-            "$ref": "#/$defs/Node"
+            "additionalProperties": false,
+            "properties": {
+              "message": {
+                "$ref": "#/$defs/Message"
+              },
+              "parent_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "message"
+            ],
+            "type": "object"
           },
           "type": "array"
         }
       },
       "title": "MessageTree",
       "type": "object"
-    },
-    "Node": {
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "properties": {
-            "kind": {
-              "const": "message",
-              "type": "string"
-            },
-            "message": {
-              "$ref": "#/$defs/Message"
-            },
-            "parent_id": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "kind",
-            "message"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "control": {
-              "$ref": "#/$defs/Control"
-            },
-            "kind": {
-              "const": "control",
-              "type": "string"
-            },
-            "parent_id": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "kind",
-            "control"
-          ],
-          "type": "object"
-        }
-      ],
-      "title": "Node"
     },
     "ReasoningConfig": {
       "additionalProperties": false,

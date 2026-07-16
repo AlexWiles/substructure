@@ -494,7 +494,7 @@ pub fn to_wire_trigger(
             messages, client, ..
         } => {
             let known: std::collections::HashSet<&str> =
-                tree.nodes.iter().map(|n| n.id()).collect();
+                tree.nodes.iter().map(|n| n.message.id.as_str()).collect();
             let new_from = news_start(&known, &messages);
             DecisionTrigger::ClientTranscript {
                 messages,
@@ -607,8 +607,8 @@ pub fn to_wire_trigger(
 mod tests {
     use super::*;
     use crate::protocol::{
-        AgentTool, ClientContext, ClientInput, ClientPayload, Content, NewMessage, Node, Role,
-        ToolCall, ToolCallFunction, ToolInput,
+        AgentTool, ClientContext, ClientInput, ClientPayload, Content, NewMessage, Role, ToolCall,
+        ToolCallFunction, ToolInput,
     };
     use crate::runtime::session::state::LlmCallSpec;
 
@@ -1181,14 +1181,12 @@ mod tests {
     }
 
     fn linear_tree(messages: &[Message]) -> MessageTree {
-        let nodes: Vec<Node> = messages
+        let nodes: Vec<NewMessage> = messages
             .iter()
             .enumerate()
-            .map(|(i, m)| {
-                Node::Message(NewMessage {
-                    message: m.clone(),
-                    parent_id: (i > 0).then(|| messages[i - 1].id.clone()),
-                })
+            .map(|(i, m)| NewMessage {
+                message: m.clone(),
+                parent_id: (i > 0).then(|| messages[i - 1].id.clone()),
             })
             .collect();
         MessageTree {

@@ -319,22 +319,8 @@ type Message = {
 }
 
 type MessageTree = {
-    nodes: Node[]
+    nodes: { message: Message; parent_id?: string }[]
     head_id?: string
-}
-
-type Node =
-    | { kind: "message"; message: Message; parent_id?: string }
-    | { kind: "control"; control: Control; parent_id?: string }
-
-// A non-conversational marker (interrupt/resume); never sent to the model.
-type Control = {
-    id: string
-    interrupt_id: string
-    kind: "interrupt" | "resume"
-    reason: string
-    payload: unknown
-    origin: "system" | "machine" | "frontend"
 }
 ```
 

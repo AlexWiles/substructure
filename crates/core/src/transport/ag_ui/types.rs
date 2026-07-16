@@ -21,6 +21,16 @@ pub struct RunAgentInput {
     pub resume: Vec<ResumeEntry>,
 }
 
+/// The connect body: only the thread is addressed; `runId` labels the snapshot
+/// frames when present.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectInput {
+    pub thread_id: String,
+    #[serde(default)]
+    pub run_id: Option<String>,
+}
+
 /// A frontend tool a client declares on its run: `{name, description, parameters}`
 /// (AG-UI shape). `parameters` is the JSON Schema for its arguments.
 #[derive(Debug, Deserialize)]
@@ -140,6 +150,13 @@ mod tests {
     }
 
     #[test]
+    fn connect_input_needs_only_thread_id() {
+        let input: ConnectInput = serde_json::from_value(json!({"threadId": "t1"})).unwrap();
+        assert_eq!(input.thread_id, "t1");
+        assert!(input.run_id.is_none());
+    }
+
+    #[test]
     fn to_messages_maps_known_roles_keeps_ids_drops_unknown() {
         let input: RunAgentInput = serde_json::from_value(json!({
             "threadId": "t1", "runId": "r1",
@@ -204,6 +221,24 @@ mod tests {
         assert_eq!(input.resume[0].payload, Some(json!({"approved": true})));
         assert_eq!(input.resume[1].status, ResumeStatus::Cancelled);
         assert!(input.resume[1].payload.is_none());
+    }
+
+    #[test]
+    fn parses_resume_and_messages_together() {
+        // steerAway: one run input resumes the interrupt and branches away.
+        let input: RunAgentInput = serde_json::from_value(json!({
+            "threadId": "t1", "runId": "r2",
+            "messages": [
+                {"role": "user", "content": "hi", "id": "u1"},
+                {"role": "user", "content": "actually, do this instead"},
+            ],
+            "resume": [
+                {"interruptId": "int-1", "status": "cancelled"},
+            ],
+        }))
+        .unwrap();
+        assert_eq!(input.resume.len(), 1);
+        assert_eq!(input.to_messages().len(), 2);
     }
 
     #[test]

@@ -6,9 +6,8 @@ use serde::{Deserialize, Serialize};
 use super::decision::{LlmHandler, ToolHandler, Trigger};
 pub use crate::protocol::EffectKind;
 use crate::protocol::{
-    AgentConfig, Control, DraftMessage, ErrorCode, InterruptOrigin, LlmFormat, LlmRequest,
-    LlmResponse, Message, MessageTree, NewControl, NewMessage, Node, RetryPolicy, SessionOwner,
-    WorkerState,
+    AgentConfig, DraftMessage, ErrorCode, InterruptOrigin, LlmFormat, LlmRequest, LlmResponse,
+    Message, MessageTree, NewMessage, RetryPolicy, SessionOwner, WorkerState,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,8 +17,8 @@ pub enum EventPayload {
     SessionCreated(Box<SessionCreated>),
     #[serde(rename = "message.new")]
     NewMessage(NewMessage),
-    #[serde(rename = "control.new")]
-    NewControl(NewControl),
+    #[serde(rename = "head.moved")]
+    HeadMoved(HeadMoved),
     #[serde(rename = "llm.call.requested")]
     LlmCallRequested(LlmCallRequested),
     #[serde(rename = "llm.call.completed")]
@@ -85,40 +84,21 @@ pub struct SessionCreated {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionDone {}
 
-impl Node {
-    pub fn id(&self) -> &str {
-        match self {
-            Node::Message(n) => &n.message.id,
-            Node::Control(n) => &n.control.id,
-        }
-    }
-
-    pub fn parent_id(&self) -> Option<&str> {
-        match self {
-            Node::Message(n) => n.parent_id.as_deref(),
-            Node::Control(n) => n.parent_id.as_deref(),
-        }
-    }
-
-    pub fn message(&self) -> Option<&Message> {
-        match self {
-            Node::Message(n) => Some(&n.message),
-            Node::Control(_) => None,
-        }
-    }
-
-    pub fn control(&self) -> Option<&Control> {
-        match self {
-            Node::Control(n) => Some(&n.control),
-            Node::Message(_) => None,
-        }
-    }
+/// The head moved to an existing node (truncation or branch switch); the only
+/// non-append head writer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeadMoved {
+    pub head_id: String,
 }
 
 impl MessageTree {
-    /// Root-to-`leaf` messages with control nodes filtered out; empty if `leaf` is unknown.
+    /// Root-to-`leaf` messages; empty if `leaf` is unknown.
     pub fn path_to(&self, leaf: &str) -> Vec<Message> {
-        let mut by_id: HashMap<&str, &Node> = self.nodes.iter().map(|n| (n.id(), n)).collect();
+        let mut by_id: HashMap<&str, &NewMessage> = self
+            .nodes
+            .iter()
+            .map(|n| (n.message.id.as_str(), n))
+            .collect();
         let mut path = Vec::new();
         let mut cursor = Some(leaf.to_string());
         // `remove` so a malformed parent cycle can't loop forever.
@@ -126,10 +106,8 @@ impl MessageTree {
             let Some(node) = by_id.remove(id.as_str()) else {
                 break;
             };
-            if let Some(message) = node.message() {
-                path.push(message.clone());
-            }
-            cursor = node.parent_id().map(str::to_string);
+            path.push(node.message.clone());
+            cursor = node.parent_id.clone();
         }
         path.reverse();
         path
@@ -238,6 +216,9 @@ pub struct SessionInterrupted {
     pub origin: InterruptOrigin,
     pub reason: String,
     pub payload: serde_json::Value,
+    /// Head when raised; `None` parks every path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

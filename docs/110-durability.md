@@ -44,5 +44,5 @@ stop it, come back later, and the session resumes.
 ## Next
 
 - [Deferred tools](./130-deferred-tools.md): in-flight work that survives a restart.
-- [Interrupts](./140-interrupts.md): a paused session held as durable state.
+- [Interrupts](./140-interrupts.md): a paused branch held as durable state.
 - [Retries and timeouts](./120-retries.md): deadlines and redelivery.

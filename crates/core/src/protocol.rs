@@ -155,36 +155,6 @@ pub struct NewMessage {
     pub parent_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[schemars(inline)]
-pub struct NewControl {
-    pub control: Control,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_id: Option<String>,
-}
-
-/// A non-conversational tree marker (interrupt/resume); filtered out of LLM prompts.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[schemars(title = "Control")]
-pub struct Control {
-    pub id: String,
-    pub interrupt_id: String,
-    pub kind: ControlKind,
-    #[serde(default)]
-    pub reason: String,
-    #[serde(default)]
-    pub payload: Value,
-    pub origin: InterruptOrigin,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-#[schemars(title = "ControlKind")]
-pub enum ControlKind {
-    Interrupt,
-    Resume,
-}
-
 /// Privilege level of the caller that issued an interrupt. Derived from the
 /// authenticated `Caller`, never from request data; resuming requires a
 /// caller at or above the origin's privilege.
@@ -197,19 +167,11 @@ pub enum InterruptOrigin {
     Frontend,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-#[schemars(title = "Node")]
-pub enum Node {
-    Message(NewMessage),
-    Control(NewControl),
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "MessageTree")]
 pub struct MessageTree {
     #[serde(default)]
-    pub nodes: Vec<Node>,
+    pub nodes: Vec<NewMessage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_id: Option<String>,
 }

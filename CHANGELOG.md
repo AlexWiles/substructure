@@ -9,11 +9,38 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 
 ## [Unreleased]
 
+### Added
+
+- Browsers had no way to read an existing session's history, forcing frontends to
+  scrape the AG-UI connect SSE stream. Added `GET /api/client/sessions/{session_id}`
+  returning status, open interrupts, and the full message tree as JSON.
+- Rendering history from the session's message tree forced every client to walk
+  parent pointers. `GET /api/client/sessions/{session_id}` now also returns
+  `messages`, the root→head lineage ready to render.
+
+### Fixed
+
+- Regenerating recorded the new reply onto the old branch instead of forking: a
+  truncated client view wrote nothing, so the head stayed on the abandoned leaf.
+  A decision whose view stops at an existing node now emits `head.moved`, rebasing
+  the head so the reply records as a sibling branch.
+- A client-tool round trip forked the tree when the resubmitted view raced the
+  decision recording a worker tool's result, leaving a dangling duplicate branch.
+  Tool echoes now also fold onto their recorded nodes at the decision-submit seam.
+- The AG-UI connect endpoint required a `runId` although only `threadId` is read.
+  Its body now needs `threadId` alone.
+
 ### Changed
 
 - Code generators named protocol types after the referencing property, producing
   mangled names like `DecisionResponseClass`. Added `#[schemars(title)]` to every
   wire type so each `$defs` entry carries its own name.
+- Control nodes were a vestigial tree marker with no producer, complicating every
+  tree walk. Removed `Node`/`Control`/`ControlKind`; `MessageTree.nodes` is now a
+  plain `NewMessage[]`.
+- Session-global interrupts blocked every branch and mismatched clients that pin
+  interrupts to messages, so editing away from a parked question was impossible.
+  Interrupts are now anchored to the head that raised them and the session GET returns `interrupts[]` with head-resolved `status`.
 
 ## [0.2.1] - 2026-07-15
 

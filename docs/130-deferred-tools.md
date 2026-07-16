@@ -90,4 +90,4 @@ then retries or settles as a terminal error per the policy. See
 - [Tool calls](./30-tools.md): the tool contract these build on.
 - [Client-side tools](./90-client-tools.md): the same wait, driven by the browser.
 - [Retries and timeouts](./120-retries.md): bounding a deferred call.
-- [Interrupts](./140-interrupts.md): pausing the whole session for a human.
+- [Interrupts](./140-interrupts.md): pausing the conversation for a human.

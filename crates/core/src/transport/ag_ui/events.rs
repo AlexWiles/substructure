@@ -108,11 +108,9 @@ pub struct AgUiInterrupt {
 }
 
 impl AgUiInterrupt {
-    /// Lift the AG-UI interrupt fields out of a session interrupt. The
-    /// interrupt payload's `message`, `toolCallId`, `responseSchema`,
-    /// `expiresAt` and `metadata` keys map onto the spec fields.
-    pub fn from_session(p: &crate::session::events::SessionInterrupted) -> Self {
-        let obj = p.payload.as_object();
+    /// Lift the AG-UI spec fields out of an interrupt payload.
+    fn lift(interrupt_id: &str, reason: &str, payload: &Value) -> Self {
+        let obj = payload.as_object();
         let take = |key: &str| obj.and_then(|o| o.get(key)).cloned();
         let take_str = |key: &str| {
             obj.and_then(|o| o.get(key))
@@ -120,14 +118,22 @@ impl AgUiInterrupt {
                 .map(str::to_string)
         };
         Self {
-            id: p.interrupt_id.clone(),
-            reason: p.reason.clone(),
+            id: interrupt_id.to_string(),
+            reason: reason.to_string(),
             message: take_str("message"),
             tool_call_id: take_str("toolCallId"),
             response_schema: take("responseSchema"),
             expires_at: take_str("expiresAt"),
             metadata: take("metadata"),
         }
+    }
+
+    pub fn from_session(p: &crate::session::events::SessionInterrupted) -> Self {
+        Self::lift(&p.interrupt_id, &p.reason, &p.payload)
+    }
+
+    pub fn from_open(p: &crate::session::state::OpenInterrupt) -> Self {
+        Self::lift(&p.interrupt_id, &p.reason, &p.payload)
     }
 }
 

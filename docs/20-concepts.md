@@ -64,7 +64,7 @@ The `trigger` says why the engine is asking.
 | `llm.execute` | Your worker makes this LLM call (per agent config). |
 | `llm.finished` | An LLM call settled. |
 | `sub_agent.finished` | A child session completed. |
-| `interrupt.resumed` | A paused session was resumed. |
+| `interrupt.resumed` | A paused branch was resumed. |
 
 ## Proposals
 
@@ -87,7 +87,7 @@ A decision's `actions` say what the engine should do.
 | `llm.result` / `llm.error` | Settle a worker-executed LLM call. |
 | `sub_agent.spawn` | Start a child session. |
 | `message.send` | Write a message into a session. |
-| `interrupt` | Pause the session until someone resumes it. |
+| `interrupt` | Pause the active branch until someone resumes it. |
 | `done` | End the turn. |
 
 ## Agent config

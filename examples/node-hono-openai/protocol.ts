@@ -321,34 +321,9 @@ export interface MessageTree {
 }
 
 export interface Node {
-    kind: Kind;
-    message?: Message;
+    message: Message;
     parent_id?: null | string;
-    control?: Control;
 }
-
-/**
- * A non-conversational tree marker (interrupt/resume); filtered out of LLM prompts.
- */
-export interface Control {
-    id: string;
-    interrupt_id: string;
-    kind: ControlKind;
-    origin: InterruptOrigin;
-    payload?: any;
-    reason?: string;
-}
-
-export type ControlKind = "interrupt" | "resume";
-
-/**
- * Privilege level of the caller that issued an interrupt. Derived from the
- * authenticated `Caller`, never from request data; resuming requires a
- * caller at or above the origin's privilege.
- */
-export type InterruptOrigin = "system" | "machine" | "frontend";
-
-export type Kind = "message" | "control";
 
 export interface Message {
     content?: ContentPart[] | null | string;

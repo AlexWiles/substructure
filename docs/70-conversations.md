@@ -38,6 +38,12 @@ without the last assistant reply, and a new one is recorded as a sibling.
 Resubmitting a message under its existing id changes nothing, since
 reconciliation keys on id, not content.
 
+A view that stops at an earlier node — or resends another branch's view —
+writes nothing but moves the head there (`head.moved` on the event stream);
+the next reply forks at that node, and in-flight work on the abandoned
+branch is voided. Submitting a recorded branch's view is how a client
+switches branches.
+
 ## Example
 
 An active path of `u1 → a1 → u2`. The client edits back to the first question:

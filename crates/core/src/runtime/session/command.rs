@@ -5,7 +5,7 @@ use rust_decimal::Decimal;
 
 use super::decision::{Action, LlmHandler, ToolHandler, Trigger};
 use super::events::*;
-use super::reconcile::plan_reconcile;
+use super::reconcile::{landing_leaf, plan_reconcile};
 use super::state::{json_to_string, new_call_id, EffectTracking, SessionState, SessionStatus};
 use super::tool_contract::{declared_tool, output_violation, DeclaredTool};
 use crate::protocol::{
@@ -297,8 +297,19 @@ impl SessionState {
     // Executes the plan from `plan_reconcile` — the one interpreter of "what
     // recording this list writes" — so submit-time classification and delivery
     // annotation can't drift from what actually lands in the tree.
-    fn reconcile_transcript(&self, transcript: Vec<DraftMessage>) -> Vec<EventPayload> {
-        let known: std::collections::HashSet<&str> = self.nodes.iter().map(|n| n.id()).collect();
+    //
+    // Returns the events and the post-batch head. A non-empty view writing
+    // nothing selects its leaf as the branch: the head rebases via `HeadMoved`.
+    fn reconcile_transcript(
+        &self,
+        transcript: Vec<DraftMessage>,
+    ) -> (Vec<EventPayload>, Option<String>) {
+        // Normalize again at the write seam: a view frozen into a queued trigger
+        // can race the decision that records a tool node (the echo predates it),
+        // so folding at client-submit time alone would fork the tree here.
+        let transcript = self.normalize_client_view(transcript);
+        let known: std::collections::HashSet<&str> =
+            self.nodes.iter().map(|n| n.message.id.as_str()).collect();
         let plan = plan_reconcile(&known, &transcript);
         let mut events = Vec::with_capacity(plan.len());
         let mut plan_iter = plan.iter().peekable();
@@ -326,7 +337,18 @@ impl SessionState {
                 _ => parent = msg.id,
             }
         }
-        events
+        if !events.is_empty() {
+            return (events, parent);
+        }
+        match parent {
+            Some(leaf) if self.head_id.as_deref() != Some(leaf.as_str()) => {
+                let moved = EventPayload::HeadMoved(HeadMoved {
+                    head_id: leaf.clone(),
+                });
+                (vec![moved], Some(leaf))
+            }
+            _ => (events, self.head_id.clone()),
+        }
     }
 
     /// The `output` schema the settling tool was declared with, resolved by
@@ -395,20 +417,7 @@ impl SessionState {
 
     /// Whether the decision's effect is anchored off the path to `leaf`.
     fn stale_decision(&self, leaf: Option<&str>, trigger: &Trigger) -> bool {
-        let anchor = match trigger {
-            Trigger::ToolFinished { id, .. } | Trigger::ToolExecute { id, .. } => {
-                self.tool_calls.get(id).and_then(|c| c.anchor.as_deref())
-            }
-            Trigger::SubAgentFinished { session_id, .. } => self
-                .sub_agent_calls
-                .get(session_id)
-                .and_then(|c| c.anchor.as_deref()),
-            Trigger::LlmFinished { id, .. } | Trigger::LlmExecute { id, .. } => {
-                self.llm_calls.get(id).and_then(|c| c.anchor.as_deref())
-            }
-            _ => return false,
-        };
-        !self.anchor_on_path(leaf, anchor)
+        !self.anchor_on_path(leaf, self.trigger_anchor(trigger))
     }
 
     /// Void events for every effect matching `stranded`.
@@ -447,12 +456,18 @@ impl SessionState {
         events
     }
 
-    /// Voids pending LLM calls (including this `batch`'s), sparing tools and sub-agents.
-    fn void_llm_calls_for_interrupt(&self, batch: &[EventPayload]) -> Vec<EventPayload> {
+    /// Voids pending LLM calls on the path to `leaf` (in-batch ones
+    /// unconditionally), sparing tools and sub-agents.
+    fn void_llm_calls_for_interrupt(
+        &self,
+        batch: &[EventPayload],
+        leaf: Option<&str>,
+    ) -> Vec<EventPayload> {
         let mut ids: Vec<String> = self
             .llm_calls
             .values()
             .filter(|c| c.tracking.status == EffectStatus::Pending)
+            .filter(|c| self.anchor_on_path(leaf, c.anchor.as_deref()))
             .map(|c| c.call_id.clone())
             .collect();
         ids.extend(batch.iter().filter_map(|e| match e {
@@ -533,7 +548,7 @@ impl SessionState {
     ) -> Option<String> {
         let mut best: Option<&str> = None;
         let mut best_on_path = false;
-        for m in self.nodes.iter().filter_map(|n| n.message()) {
+        for m in self.nodes.iter().map(|n| &n.message) {
             if m.role != Role::Tool || m.tool_call_id.as_deref() != Some(tool_call_id) {
                 continue;
             }
@@ -553,8 +568,9 @@ impl SessionState {
     /// IS that node's echo, so it adopts the node's id and the tree sees a
     /// resend rather than a fork. Identification, not deletion — nothing is
     /// dropped, so the reconcile plan stays coherent.
-    fn normalize_client_view(&self, messages: Vec<DraftMessage>) -> Vec<DraftMessage> {
-        let known: std::collections::HashSet<&str> = self.nodes.iter().map(|n| n.id()).collect();
+    pub fn normalize_client_view(&self, messages: Vec<DraftMessage>) -> Vec<DraftMessage> {
+        let known: std::collections::HashSet<&str> =
+            self.nodes.iter().map(|n| n.message.id.as_str()).collect();
         let on_path: std::collections::HashSet<&str> = self
             .head_id
             .as_deref()
@@ -582,8 +598,18 @@ impl SessionState {
     }
 
     fn emit_decision_request(&self, batch: &[EventPayload], trigger: Trigger) -> EventPayload {
+        self.emit_decision_request_at(batch, trigger, self.head_id.as_deref())
+    }
+
+    /// An interrupt on `gate_leaf`'s path queues the request instead of dispatching.
+    fn emit_decision_request_at(
+        &self,
+        batch: &[EventPayload],
+        trigger: Trigger,
+        gate_leaf: Option<&str>,
+    ) -> EventPayload {
         let queued = self.has_pending_worker_decision()
-            || matches!(self.status, SessionStatus::Interrupted { .. })
+            || self.active_interrupt_for(gate_leaf).is_some()
             || batch
                 .iter()
                 .any(|e| matches!(e, EventPayload::WorkerDecisionRequested(_)));
@@ -635,9 +661,7 @@ impl SessionState {
 
                 match payload {
                     ClientPayload::Message(ClientMessage { message, stream: _ }) => {
-                        if matches!(self.status, SessionStatus::Interrupted { .. })
-                            && message.role == Role::User
-                        {
+                        if self.head_parked() && message.role == Role::User {
                             return Err(SessionError::SessionInterrupted);
                         }
                         if message.role == Role::User {
@@ -674,20 +698,21 @@ impl SessionState {
                             .filter(|c| seen.insert(c.tool_call_id.clone()))
                             .collect();
 
-                        // A submission with no answers can't pass the interrupt
-                        // gate; one that answers pending work queues until resume.
-                        if completions.is_empty()
-                            && matches!(self.status, SessionStatus::Interrupted { .. })
-                        {
-                            return Err(SessionError::SessionInterrupted);
-                        }
-
                         // What recording this view would write, by the one
                         // reconcile interpreter; classification reads this plan
                         // rather than re-walking the tree.
                         let known: std::collections::HashSet<&str> =
-                            self.nodes.iter().map(|n| n.id()).collect();
+                            self.nodes.iter().map(|n| n.message.id.as_str()).collect();
                         let plan = plan_reconcile(&known, &messages);
+
+                        // Gate where the view lands: a view escaping the parked
+                        // head dispatches; answers to pending work still queue.
+                        let landing = landing_leaf(&messages, &plan);
+                        if completions.is_empty()
+                            && self.active_interrupt_for(landing.as_deref()).is_some()
+                        {
+                            return Err(SessionError::SessionInterrupted);
+                        }
 
                         // Fast path iff the view's only change is one answer to one
                         // pending call — provable from the plan: exactly one write,
@@ -729,19 +754,20 @@ impl SessionState {
                                     result: c.result,
                                 }));
                             }
-                            let request = self.emit_decision_request(
+                            let request = self.emit_decision_request_at(
                                 &events,
                                 Trigger::ClientTranscript {
                                     messages,
                                     new_from: 0,
                                     client,
                                 },
+                                landing.as_deref(),
                             );
                             events.push(request);
                         }
                     }
                     ClientPayload::Action(action) => {
-                        if matches!(self.status, SessionStatus::Interrupted { .. }) {
+                        if self.head_parked() {
                             return Err(SessionError::SessionInterrupted);
                         }
                         let request = self.emit_decision_request(
@@ -778,23 +804,19 @@ impl SessionState {
                     }
                 }
 
-                match self.status {
-                    SessionStatus::Interrupted { .. } if message.role == Role::User => {
-                        Err(SessionError::SessionInterrupted)
-                    }
-                    _ => {
-                        let mut events = Vec::new();
-                        if let Some(turn_id) = turn_id {
-                            events.push(EventPayload::TurnStarted(TurnStarted { turn_id }));
-                        }
-                        if message.role == Role::User {
-                            let request = self
-                                .emit_decision_request(&events, Trigger::ClientMessage { message });
-                            events.push(request);
-                        }
-                        Ok(events)
-                    }
+                if self.head_parked() && message.role == Role::User {
+                    return Err(SessionError::SessionInterrupted);
                 }
+                let mut events = Vec::new();
+                if let Some(turn_id) = turn_id {
+                    events.push(EventPayload::TurnStarted(TurnStarted { turn_id }));
+                }
+                if message.role == Role::User {
+                    let request =
+                        self.emit_decision_request(&events, Trigger::ClientMessage { message });
+                    events.push(request);
+                }
+                Ok(events)
             }
 
             CommandPayload::RequestLlmCall {
@@ -830,7 +852,7 @@ impl SessionState {
                         request: request.clone(),
                         stream,
                         retry: retry.clone(),
-                        handler: handler,
+                        handler,
                         format,
                     })];
 
@@ -995,7 +1017,7 @@ impl SessionState {
                             attempt: 0,
                             name: name.clone(),
                             arguments: arguments.clone(),
-                            handler: handler,
+                            handler,
                             retry: retry.clone(),
                         })];
                         if handler == ToolHandler::Worker {
@@ -1210,20 +1232,18 @@ impl SessionState {
                 payload,
             } => {
                 self.ensure_owns_session(caller)?;
-                match self.status {
-                    SessionStatus::Interrupted { .. } => Ok(vec![]),
-                    _ => {
-                        let mut events =
-                            vec![EventPayload::SessionInterrupted(SessionInterrupted {
-                                interrupt_id,
-                                origin: Self::caller_interrupt_origin(caller),
-                                reason,
-                                payload,
-                            })];
-                        events.extend(self.void_llm_calls_for_interrupt(&[]));
-                        Ok(events)
-                    }
+                if self.head_parked() {
+                    return Ok(vec![]);
                 }
+                let mut events = vec![EventPayload::SessionInterrupted(SessionInterrupted {
+                    interrupt_id,
+                    origin: Self::caller_interrupt_origin(caller),
+                    reason,
+                    payload,
+                    anchor: self.head_id.clone(),
+                })];
+                events.extend(self.void_llm_calls_for_interrupt(&[], self.head_id.as_deref()));
+                Ok(events)
             }
 
             CommandPayload::ResumeInterrupt {
@@ -1231,28 +1251,39 @@ impl SessionState {
                 payload,
             } => {
                 self.ensure_owns_session(caller)?;
-                match self.active_interrupt() {
-                    Some((id, origin)) if id == interrupt_id => {
-                        if Self::caller_interrupt_origin(caller).privilege() < origin.privilege() {
-                            return Err(SessionError::SessionAccessDenied);
-                        }
-                        // Emitted directly: emit_decision_request would queue while Interrupted.
-                        Ok(vec![
-                            EventPayload::InterruptResumed(InterruptResumed {
-                                interrupt_id: interrupt_id.clone(),
-                                payload: payload.clone(),
-                            }),
-                            EventPayload::WorkerDecisionRequested(WorkerDecisionRequested {
-                                decision_id: new_call_id(),
-                                trigger: Trigger::InterruptResumed {
-                                    interrupt_id,
-                                    payload,
-                                },
-                            }),
-                        ])
-                    }
-                    _ => Ok(vec![]),
+                let Some(open) = self.open_interrupt(&interrupt_id) else {
+                    return Ok(vec![]);
+                };
+                if Self::caller_interrupt_origin(caller).privilege() < open.origin.privilege() {
+                    return Err(SessionError::SessionAccessDenied);
                 }
+                let parked_head =
+                    self.anchor_on_path(self.head_id.as_deref(), open.anchor.as_deref());
+                let mut events = vec![EventPayload::InterruptResumed(InterruptResumed {
+                    interrupt_id: interrupt_id.clone(),
+                    payload: payload.clone(),
+                })];
+                // Trigger only when the interrupt parked the head path. Emitted
+                // directly: emit_decision_request would queue while parked.
+                if parked_head {
+                    let trigger = Trigger::InterruptResumed {
+                        interrupt_id,
+                        payload,
+                    };
+                    let decision_id = new_call_id();
+                    events.push(if self.has_pending_worker_decision() {
+                        EventPayload::DecisionRequestQueued(DecisionRequestQueued {
+                            decision_id,
+                            trigger,
+                        })
+                    } else {
+                        EventPayload::WorkerDecisionRequested(WorkerDecisionRequested {
+                            decision_id,
+                            trigger,
+                        })
+                    });
+                }
+                Ok(events)
             }
 
             CommandPayload::SubmitWorkerDecision {
@@ -1274,16 +1305,9 @@ impl SessionState {
                 let mut events: Vec<EventPayload> = vec![EventPayload::WorkerDecisionCompleted(
                     WorkerDecisionCompleted { decision_id },
                 )];
-                let reconcile = self.reconcile_transcript(transcript);
-
-                let post_head = reconcile
-                    .iter()
-                    .rev()
-                    .find_map(|e| match e {
-                        EventPayload::NewMessage(m) => Some(m.message.id.clone()),
-                        _ => None,
-                    })
-                    .or_else(|| self.head_id.clone());
+                // The head once this batch applies — `self.head_id` is stale
+                // until then, so in-batch anchors must use this instead.
+                let (reconcile, head_after) = self.reconcile_transcript(transcript);
 
                 // New nodes carry no anchor; walk to the deepest pre-existing ancestor.
                 let batch_parents: std::collections::HashMap<&str, Option<&str>> = reconcile
@@ -1295,7 +1319,7 @@ impl SessionState {
                         _ => None,
                     })
                     .collect();
-                let mut prefix_cursor = post_head.as_deref();
+                let mut prefix_cursor = head_after.as_deref();
                 let mut seen = std::collections::HashSet::new();
                 while let Some(id) = prefix_cursor {
                     if !seen.insert(id) {
@@ -1317,7 +1341,7 @@ impl SessionState {
                     if state != self.resolve_state_for(prefix_leaf.as_deref()) {
                         events.push(EventPayload::WorkerStateUpdated(WorkerStateUpdated {
                             state,
-                            anchor: post_head.clone(),
+                            anchor: head_after.clone(),
                         }));
                     }
                 }
@@ -1326,7 +1350,7 @@ impl SessionState {
                     if Some(&config) != self.resolve_agent_for(prefix_leaf.as_deref()).as_ref() {
                         events.push(EventPayload::AgentConfigUpdated(AgentConfigUpdated {
                             config,
-                            anchor: post_head,
+                            anchor: head_after.clone(),
                         }));
                     }
                 }
@@ -1408,24 +1432,33 @@ impl SessionState {
                                 message,
                             },
                         )]),
+                        // Idempotence checks prefix_leaf: head_after may be
+                        // in-batch, unwalkable.
                         Action::Interrupt {
                             interrupt_id,
                             reason,
                             payload,
-                        } => match self.status {
-                            SessionStatus::Interrupted { .. } => Ok(vec![]),
-                            _ => {
+                        } => {
+                            if self.active_interrupt_for(prefix_leaf.as_deref()).is_some() {
+                                Ok(vec![])
+                            } else {
                                 let mut sub =
                                     vec![EventPayload::SessionInterrupted(SessionInterrupted {
                                         interrupt_id,
                                         origin: InterruptOrigin::Frontend,
                                         reason,
                                         payload,
+                                        anchor: head_after.clone(),
                                     })];
-                                sub.extend(self.void_llm_calls_for_interrupt(&events));
+                                sub.extend(
+                                    self.void_llm_calls_for_interrupt(
+                                        &events,
+                                        prefix_leaf.as_deref(),
+                                    ),
+                                );
                                 Ok(sub)
                             }
-                        },
+                        }
                         Action::ToolResult {
                             id,
                             attempt,
@@ -1492,7 +1525,8 @@ impl SessionState {
                     }
                 }
 
-                // Promote the next queued decision inline, unless this batch interrupted the session.
+                // Promote the next unparked queued decision, unless this batch
+                // interrupted (its anchor is in-batch, invisible here).
                 let interrupted_in_batch = events
                     .iter()
                     .any(|e| matches!(e, EventPayload::SessionInterrupted(_)));
@@ -1511,10 +1545,13 @@ impl SessionState {
                             .queued_decisions()
                             .into_iter()
                             .filter(|d| !dropped.contains(d.decision_id.as_str()))
+                            .filter(|d| !self.decision_parked(&d.trigger))
                             .map(|d| (d.decision_id.clone(), d.trigger.clone()));
                         candidates.next().or_else(|| {
                             events.iter().find_map(|e| match e {
-                                EventPayload::DecisionRequestQueued(q) => {
+                                EventPayload::DecisionRequestQueued(q)
+                                    if !self.decision_parked(&q.trigger) =>
+                                {
                                     Some((q.decision_id.clone(), q.trigger.clone()))
                                 }
                                 _ => None,
@@ -1767,7 +1804,9 @@ impl SessionState {
         // work-queue redelivery, not re-fired.
         if !self.has_pending_worker_decision() {
             for wd in self.worker_decisions.values() {
-                if wd.tracking.status == EffectStatus::RetryScheduled {
+                if wd.tracking.status == EffectStatus::RetryScheduled
+                    && !self.decision_parked(&wd.trigger)
+                {
                     if let Some(next_at) = wd.tracking.retry.next_at {
                         if next_at <= now {
                             return Ok(vec![EventPayload::WorkerDecisionRequested(
@@ -1781,7 +1820,11 @@ impl SessionState {
                 }
             }
 
-            if let Some(wd) = self.queued_decisions().first() {
+            if let Some(wd) = self
+                .queued_decisions()
+                .into_iter()
+                .find(|d| !self.decision_parked(&d.trigger))
+            {
                 return Ok(vec![EventPayload::WorkerDecisionRequested(
                     WorkerDecisionRequested {
                         decision_id: wd.decision_id.clone(),
@@ -3232,8 +3275,12 @@ mod tests {
             Some("w1"),
             "tool echo adopts the recorded node id"
         );
-        let known: std::collections::HashSet<&str> =
-            agg.state.nodes.iter().map(|n| n.id()).collect();
+        let known: std::collections::HashSet<&str> = agg
+            .state
+            .nodes
+            .iter()
+            .map(|n| n.message.id.as_str())
+            .collect();
         let plan = plan_reconcile(&known, &messages);
         assert_eq!(
             plan.len(),
@@ -3241,6 +3288,51 @@ mod tests {
             "only the new user turn is news; got {plan:?}"
         );
         assert_eq!(plan.first().map(|w| w.index), Some(3));
+    }
+
+    #[test]
+    fn tool_echo_frozen_before_recording_folds_at_the_write_seam() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        seed_tree(
+            &mut agg,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("a1", Role::Assistant, "calling"),
+                tool_node("w1", "tc-1", "result"),
+            ],
+        );
+
+        // The client's view froze before w1 recorded (queued behind the
+        // tool.finished decision), so its echo carries a client id. The worker
+        // echoes that stale view; the write seam still folds it onto w1.
+        let d = open_decision(&mut agg, "resubmit");
+        let events = submit_state(
+            &mut agg,
+            d,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("a1", Role::Assistant, "calling"),
+                tool_node("client-tm", "tc-1", "result"),
+                node_msg("u2", Role::User, "next"),
+            ],
+            None,
+        );
+
+        let new_ids: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                EventPayload::NewMessage(m) => Some(m.message.id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(new_ids, ["u2"], "only the new turn is news; got {events:?}");
+        let tree = agg.state.message_tree();
+        let u2 = tree.nodes.iter().find(|n| n.message.id == "u2").unwrap();
+        assert_eq!(
+            u2.parent_id.as_deref(),
+            Some("w1"),
+            "no fork at the tool node"
+        );
     }
 
     #[test]
@@ -3276,8 +3368,12 @@ mod tests {
             Some("w1"),
             "the replayed tool result folds onto w1"
         );
-        let known: std::collections::HashSet<&str> =
-            agg.state.nodes.iter().map(|n| n.id()).collect();
+        let known: std::collections::HashSet<&str> = agg
+            .state
+            .nodes
+            .iter()
+            .map(|n| n.message.id.as_str())
+            .collect();
         let plan = plan_reconcile(&known, &messages);
         // News starts at the edit and doesn't stop: all four re-record onto the
         // new branch, tool result included.
@@ -3701,8 +3797,12 @@ mod tests {
             ],
         );
         let messages = transcript_messages(&events).expect("a transcript decision");
-        let known: std::collections::HashSet<&str> =
-            agg.state.nodes.iter().map(|n| n.id()).collect();
+        let known: std::collections::HashSet<&str> = agg
+            .state
+            .nodes
+            .iter()
+            .map(|n| n.message.id.as_str())
+            .collect();
         let plan = plan_reconcile(&known, &messages);
         assert_eq!(
             plan.len(),
@@ -4734,7 +4834,7 @@ mod tests {
             &machine,
         );
         assert!(matches!(
-            agg.state.status,
+            agg.state.projected_status(),
             SessionStatus::Interrupted {
                 origin: InterruptOrigin::Machine,
                 ..
@@ -4785,7 +4885,7 @@ mod tests {
             &frontend,
         );
         assert!(matches!(
-            agg.state.status,
+            agg.state.projected_status(),
             SessionStatus::Interrupted {
                 origin: InterruptOrigin::Frontend,
                 ..
@@ -5417,7 +5517,7 @@ mod tests {
             "interrupt action should emit SessionInterrupted; got {events:?}"
         );
         assert!(matches!(
-            agg.state.status,
+            agg.state.projected_status(),
             SessionStatus::Interrupted {
                 origin: InterruptOrigin::Frontend,
                 ..
@@ -6901,6 +7001,158 @@ mod tests {
         );
     }
 
+    fn head_moves(events: &[EventPayload]) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                EventPayload::HeadMoved(h) => Some(h.head_id.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn truncating_view_moves_head_and_forks_the_regenerated_reply() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d1 = open_decision(&mut agg, "hi");
+        submit_state(
+            &mut agg,
+            d1,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("a1", Role::Assistant, "hello"),
+            ],
+            None,
+        );
+        assert_eq!(agg.state.head_id.as_deref(), Some("a1"));
+
+        // Regenerate: the view stops at u1 — nothing to write, head rebases.
+        let d2 = open_decision(&mut agg, "regen");
+        let events = submit_state(&mut agg, d2, vec![node_msg("u1", Role::User, "hi")], None);
+        assert_eq!(head_moves(&events), ["u1"], "got {events:?}");
+        assert_eq!(agg.state.head_id.as_deref(), Some("u1"));
+
+        // The regenerated reply forks: a sibling of a1, not its child.
+        let d3 = open_decision(&mut agg, "next");
+        submit_state(
+            &mut agg,
+            d3,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("a2", Role::Assistant, "hello again"),
+            ],
+            None,
+        );
+        assert_eq!(agg.state.head_id.as_deref(), Some("a2"));
+        let tree = agg.state.message_tree();
+        let a2 = tree.nodes.iter().find(|n| n.message.id == "a2").unwrap();
+        assert_eq!(
+            a2.parent_id.as_deref(),
+            Some("u1"),
+            "forks at the truncation point"
+        );
+    }
+
+    #[test]
+    fn full_resend_does_not_move_the_head() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d1 = open_decision(&mut agg, "hi");
+        submit_state(
+            &mut agg,
+            d1,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("a1", Role::Assistant, "hello"),
+            ],
+            None,
+        );
+        let d2 = open_decision(&mut agg, "again");
+        let events = submit_state(
+            &mut agg,
+            d2,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("a1", Role::Assistant, "hello"),
+            ],
+            None,
+        );
+        assert!(head_moves(&events).is_empty(), "got {events:?}");
+        assert_eq!(agg.state.head_id.as_deref(), Some("a1"));
+    }
+
+    #[test]
+    fn viewless_decision_keeps_the_head() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d1 = open_decision(&mut agg, "hi");
+        submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
+        let d2 = open_decision(&mut agg, "more");
+        let events = submit_state(&mut agg, d2, vec![], None);
+        assert!(head_moves(&events).is_empty(), "got {events:?}");
+        assert_eq!(agg.state.head_id.as_deref(), Some("u1"));
+    }
+
+    #[test]
+    fn known_branch_view_switches_the_head() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d1 = open_decision(&mut agg, "hi");
+        submit_state(
+            &mut agg,
+            d1,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("a1", Role::Assistant, "hello"),
+            ],
+            None,
+        );
+        // Fork to a second branch via an edit.
+        let d2 = open_decision(&mut agg, "edit");
+        submit_state(
+            &mut agg,
+            d2,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("b1", Role::User, "hi, edited"),
+            ],
+            None,
+        );
+        assert_eq!(agg.state.head_id.as_deref(), Some("b1"));
+
+        // Submitting the first branch's view switches back to it.
+        let d3 = open_decision(&mut agg, "switch");
+        let events = submit_state(
+            &mut agg,
+            d3,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("a1", Role::Assistant, "hello"),
+            ],
+            None,
+        );
+        assert_eq!(head_moves(&events), ["a1"], "got {events:?}");
+        assert_eq!(agg.state.head_id.as_deref(), Some("a1"));
+    }
+
+    #[test]
+    fn truncation_voids_work_anchored_on_the_abandoned_branch() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d1 = open_decision(&mut agg, "hi");
+        submit_state(
+            &mut agg,
+            d1,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("a1", Role::Assistant, "hello"),
+            ],
+            None,
+        );
+        request_client_tool(&mut agg, "tc-1"); // anchored at a1
+
+        let d2 = open_decision(&mut agg, "regen");
+        let events = submit_state(&mut agg, d2, vec![node_msg("u1", Role::User, "hi")], None);
+        assert_eq!(head_moves(&events), ["u1"]);
+        assert_eq!(voided_ids(&events), ["tc-1"], "got {events:?}");
+    }
+
     fn settle_decisions(events: &[EventPayload]) -> Vec<&Trigger> {
         events
             .iter()
@@ -7423,5 +7675,574 @@ mod tests {
             &system(),
         );
         assert!(events.is_empty(), "got {events:?}");
+    }
+
+    // ── Branch-scoped interrupts ─────────────────────────────────────────
+
+    fn interrupt(agg: &mut Aggregate<SessionState>, id: &str) -> Vec<EventPayload> {
+        dispatch(
+            agg,
+            CommandPayload::Interrupt {
+                interrupt_id: id.to_string(),
+                reason: "paused".to_string(),
+                payload: serde_json::Value::Null,
+            },
+            &system(),
+        )
+    }
+
+    fn resume(agg: &mut Aggregate<SessionState>, id: &str) -> Vec<EventPayload> {
+        dispatch(
+            agg,
+            CommandPayload::ResumeInterrupt {
+                interrupt_id: id.to_string(),
+                payload: serde_json::Value::Null,
+            },
+            &system(),
+        )
+    }
+
+    /// A session with `u1 -> a1` recorded and the head at `a1`.
+    fn parked_session() -> Aggregate<SessionState> {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d1 = open_decision(&mut agg, "hi");
+        submit_state(
+            &mut agg,
+            d1,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("a1", Role::Assistant, "hello"),
+            ],
+            None,
+        );
+        interrupt(&mut agg, "int-1");
+        agg
+    }
+
+    #[test]
+    fn client_interrupt_anchors_at_the_head() {
+        let agg = parked_session();
+        let open = agg.state.open_interrupt("int-1").expect("open interrupt");
+        assert_eq!(open.anchor.as_deref(), Some("a1"));
+        assert!(agg.state.head_parked());
+    }
+
+    #[test]
+    fn edited_view_escapes_a_parked_head_and_the_interrupt_survives() {
+        let mut agg = parked_session();
+        let events = submit_messages(
+            &mut agg,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("", Role::User, "actually, do this instead"),
+            ],
+        );
+        assert!(
+            decision_with(&events, |t| matches!(t, Trigger::ClientTranscript { .. })).is_some(),
+            "the escaping view is delivered; got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::WorkerDecisionRequested(_))),
+            "dispatched live, not queued; got {events:?}"
+        );
+        assert!(
+            agg.state.open_interrupt("int-1").is_some(),
+            "the interrupt stays open on its branch"
+        );
+    }
+
+    #[test]
+    fn appending_to_a_parked_branch_is_rejected() {
+        let agg = parked_session();
+        let err = agg
+            .state
+            .handle(
+                CommandPayload::SubmitClientPayload {
+                    payload: ClientPayload::Messages(ClientMessages {
+                        messages: vec![
+                            node_msg("u1", Role::User, "hi"),
+                            node_msg("a1", Role::Assistant, "hello"),
+                            node_msg("", Role::User, "and then?"),
+                        ],
+                        stream: false,
+                        client: Default::default(),
+                    }),
+                    turn_id: None,
+                },
+                &system(),
+            )
+            .expect_err("an append lands on the parked branch");
+        assert!(matches!(err, SessionError::SessionInterrupted));
+    }
+
+    #[test]
+    fn global_interrupt_gates_all_new_views() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        interrupt(&mut agg, "int-1"); // empty tree: anchorless, global
+        assert_eq!(agg.state.open_interrupt("int-1").unwrap().anchor, None);
+        let err = agg
+            .state
+            .handle(
+                CommandPayload::SubmitClientPayload {
+                    payload: ClientPayload::Messages(ClientMessages {
+                        messages: vec![node_msg("", Role::User, "hello")],
+                        stream: false,
+                        client: Default::default(),
+                    }),
+                    turn_id: None,
+                },
+                &system(),
+            )
+            .expect_err("a global interrupt parks every path");
+        assert!(matches!(err, SessionError::SessionInterrupted));
+    }
+
+    #[test]
+    fn answer_carrying_view_is_accepted_and_queued_while_parked() {
+        let mut agg = parked_session();
+        request_client_tool(&mut agg, "tc-1"); // anchored at a1, spared by the interrupt
+        let events = submit_messages(
+            &mut agg,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("a1", Role::Assistant, "hello"),
+                tool_msg("tc-1", "the answer"),
+            ],
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::ToolCallCompleted(_))),
+            "the answer settles; got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::DecisionRequestQueued(_))),
+            "the follow-up queues until resume; got {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, EventPayload::WorkerDecisionRequested(_))),
+            "nothing dispatches while parked; got {events:?}"
+        );
+    }
+
+    /// Escape a parked `u1 -> a1` session onto a sibling branch `u1 -> e1`.
+    fn escape_to_e1(agg: &mut Aggregate<SessionState>) {
+        let events = submit_messages(
+            agg,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("e1", Role::User, "actually, do this instead"),
+            ],
+        );
+        let d = events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(p) => Some(p.decision_id.clone()),
+                _ => None,
+            })
+            .expect("the escape dispatches");
+        submit_state(
+            agg,
+            d,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("e1", Role::User, "actually, do this instead"),
+            ],
+            None,
+        );
+    }
+
+    #[test]
+    fn two_parked_branches_coexist_and_resume_independently() {
+        let mut agg = parked_session();
+        escape_to_e1(&mut agg);
+        assert_eq!(agg.state.head_id.as_deref(), Some("e1"));
+        assert!(!agg.state.head_parked(), "the new branch starts unparked");
+
+        interrupt(&mut agg, "int-2"); // anchored at e1
+        assert_eq!(agg.state.open_interrupts.len(), 2);
+        assert!(agg.state.head_parked());
+
+        let events = resume(&mut agg, "int-1");
+        assert!(
+            matches!(events.as_slice(), [EventPayload::InterruptResumed(_)]),
+            "off-head resume clears silently; got {events:?}"
+        );
+        assert!(agg.state.head_parked(), "int-2 still parks the head");
+
+        let events = resume(&mut agg, "int-2");
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    EventPayload::InterruptResumed(_),
+                    EventPayload::WorkerDecisionRequested(_),
+                ]
+            ),
+            "on-head resume fires the trigger; got {events:?}"
+        );
+        assert!(agg.state.open_interrupts.is_empty());
+        assert!(!agg.state.head_parked());
+    }
+
+    #[test]
+    fn resume_with_a_live_escape_decision_queues_the_trigger() {
+        let mut agg = parked_session();
+        // Escape dispatched but not yet submitted: a live decision.
+        submit_messages(
+            &mut agg,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("", Role::User, "meanwhile, on another branch"),
+            ],
+        );
+        assert!(agg.state.has_pending_worker_decision());
+
+        let events = resume(&mut agg, "int-1");
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    EventPayload::InterruptResumed(_),
+                    EventPayload::DecisionRequestQueued(_),
+                ]
+            ),
+            "the resume trigger queues behind the live decision; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn interrupt_voiding_is_scoped_to_the_parked_path() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let ctx = CommitContext {
+            span: SpanContext::root(),
+            occurred_at: Utc::now(),
+        };
+        let msg = |id: &str, parent: Option<&str>| {
+            EventPayload::NewMessage(NewMessage {
+                message: node_msg(id, Role::User, "m").record(),
+                parent_id: parent.map(str::to_string),
+            })
+        };
+        let llm = |id: &str| {
+            EventPayload::LlmCallRequested(LlmCallRequested {
+                call_id: id.to_string(),
+                attempt: 0,
+                request: request_with(vec![]),
+                stream: false,
+                retry: RetryPolicy::no_retry(),
+                handler: LlmHandler::Server,
+                format: None,
+            })
+        };
+        agg.commit(vec![msg("u1", None), msg("a1", Some("u1"))], &ctx);
+        agg.commit(vec![llm("L1")], &ctx); // anchored at a1
+        agg.commit(vec![msg("e1", Some("u1"))], &ctx); // head moves to the sibling
+        agg.commit(vec![llm("L2")], &ctx); // anchored at e1
+
+        let events = interrupt(&mut agg, "int-1"); // anchored at e1
+        assert_eq!(
+            voided_ids(&events),
+            vec!["L2"],
+            "voiding spares the other branch; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn worker_interrupt_anchors_at_the_post_reconcile_head() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d1 = open_decision(&mut agg, "hi");
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: d1,
+                transcript: vec![
+                    node_msg("u1", Role::User, "hi"),
+                    node_msg("x1", Role::Assistant, "confirm?"),
+                ],
+                actions: vec![Action::Interrupt {
+                    interrupt_id: "int-1".to_string(),
+                    reason: "confirmation".to_string(),
+                    payload: serde_json::Value::Null,
+                }],
+                state: None,
+                agent: None,
+            },
+            &machine(),
+        );
+        let anchor = events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::SessionInterrupted(p) => Some(p.anchor.clone()),
+                _ => None,
+            })
+            .expect("the action raises the interrupt");
+        assert_eq!(anchor.as_deref(), Some("x1"), "anchored at head_after");
+        assert_eq!(agg.state.head_id.as_deref(), Some("x1"));
+        assert!(agg.state.head_parked());
+    }
+
+    #[test]
+    fn worker_interrupt_on_an_escaped_branch_is_not_deduped_by_the_old_one() {
+        let mut agg = parked_session();
+        let events = submit_messages(
+            &mut agg,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("e1", Role::User, "other branch"),
+            ],
+        );
+        let d = events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(p) => Some(p.decision_id.clone()),
+                _ => None,
+            })
+            .expect("the escape dispatches");
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: d,
+                transcript: vec![
+                    node_msg("u1", Role::User, "hi"),
+                    node_msg("e1", Role::User, "other branch"),
+                ],
+                actions: vec![Action::Interrupt {
+                    interrupt_id: "int-2".to_string(),
+                    reason: "confirmation".to_string(),
+                    payload: serde_json::Value::Null,
+                }],
+                state: None,
+                agent: None,
+            },
+            &machine(),
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::SessionInterrupted(_))),
+            "idempotence is per-path, not per-session; got {events:?}"
+        );
+        assert_eq!(agg.state.open_interrupts.len(), 2);
+    }
+
+    #[test]
+    fn promotion_and_wake_skip_parked_branches() {
+        let mut agg = parked_session();
+        request_client_tool(&mut agg, "tc-1"); // anchored at a1
+        let events = complete_tool(&mut agg, "tc-1", "ok");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::DecisionRequestQueued(_))),
+            "the answer queues while parked; got {events:?}"
+        );
+
+        assert_eq!(agg.state.wake_at(), None, "a parked head schedules no wake");
+        let events = wake(&mut agg);
+        assert!(
+            events.is_empty(),
+            "wake does not promote a parked decision; got {events:?}"
+        );
+
+        let events = resume(&mut agg, "int-1");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::WorkerDecisionRequested(_))),
+            "resume fires the interrupt.resumed decision; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn wake_promotes_a_queued_decision_on_an_unparked_branch() {
+        let mut agg = parked_session();
+        escape_to_e1(&mut agg);
+        // Plant an anchorless queued decision: promotable from the unparked head.
+        agg.commit(
+            vec![EventPayload::DecisionRequestQueued(DecisionRequestQueued {
+                decision_id: "d-queued".to_string(),
+                trigger: Trigger::ClientMessage {
+                    message: node_msg("", Role::User, "queued"),
+                },
+            })],
+            &CommitContext {
+                span: SpanContext::root(),
+                occurred_at: Utc::now(),
+            },
+        );
+        assert!(
+            agg.state.wake_at().is_some(),
+            "a promotable queued decision wakes immediately"
+        );
+        let events = wake(&mut agg);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::WorkerDecisionRequested(_))),
+            "the off-head interrupt does not block promotion; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn anchorless_interrupt_event_replays_as_global() {
+        let payload = serde_json::json!({
+            "type": "session.interrupted",
+            "interrupt_id": "int-old",
+            "origin": "frontend",
+            "reason": "paused",
+            "payload": null,
+        });
+        let event: EventPayload = serde_json::from_value(payload).expect("old event deserializes");
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d1 = open_decision(&mut agg, "hi");
+        submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
+        agg.commit(
+            vec![event],
+            &CommitContext {
+                span: SpanContext::root(),
+                occurred_at: Utc::now(),
+            },
+        );
+        let open = agg.state.open_interrupt("int-old").expect("open");
+        assert_eq!(open.anchor, None);
+        assert!(
+            agg.state.head_parked(),
+            "an anchorless interrupt parks every path"
+        );
+    }
+
+    #[test]
+    fn escape_decision_retry_fires_while_the_head_is_parked() {
+        let mut agg = Aggregate::new(
+            "sess-1".to_string(),
+            "tenant-a".to_string(),
+            SessionState::new("sess-1".to_string()),
+        );
+        dispatch(
+            &mut agg,
+            CommandPayload::CreateSession {
+                agent_id: "agent-1".to_string(),
+                owner: SessionOwner {
+                    tenant_id: "tenant-a".to_string(),
+                    id: Some("user-1".to_string()),
+                    metadata: HashMap::new(),
+                },
+                ancestry: vec![],
+                worker_retry: RetryPolicy {
+                    timeout_secs: None,
+                    max_retries: 2,
+                    backoff_base_secs: 1,
+                    backoff_max_secs: 1,
+                },
+            },
+            &system(),
+        );
+        drain_session_start(&mut agg);
+        let d1 = open_decision(&mut agg, "hi");
+        submit_state(
+            &mut agg,
+            d1,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("a1", Role::Assistant, "hello"),
+            ],
+            None,
+        );
+        interrupt(&mut agg, "int-1");
+
+        let events = submit_messages(
+            &mut agg,
+            vec![
+                node_msg("u1", Role::User, "hi"),
+                node_msg("", Role::User, "escape"),
+            ],
+        );
+        let escape = events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(p) => Some(p.decision_id.clone()),
+                _ => None,
+            })
+            .expect("the escape dispatches while parked");
+        dispatch(
+            &mut agg,
+            CommandPayload::FailWorkerDecision {
+                decision_id: escape.clone(),
+                error: "worker flaked".to_string(),
+                retryable: true,
+            },
+            &machine(),
+        );
+
+        assert!(
+            agg.state.wake_at().is_some(),
+            "the escape's retry schedules a wake despite the parked head"
+        );
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::Wake {
+                now: Utc::now() + chrono::Duration::hours(1),
+            },
+            &system(),
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                EventPayload::WorkerDecisionRequested(p) if p.decision_id == escape
+            )),
+            "the wake re-fires the escape decision; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn parked_branch_deadlines_are_suppressed_but_live_branch_timers_run() {
+        let deadline_policy = RetryPolicy {
+            timeout_secs: Some(60),
+            max_retries: 0,
+            backoff_base_secs: 1,
+            backoff_max_secs: 1,
+        };
+        let mut agg = parked_session();
+        dispatch(
+            &mut agg,
+            CommandPayload::RequestToolCall {
+                tool_call_id: "tc-parked".to_string(),
+                name: "slow".to_string(),
+                arguments: "{}".to_string(),
+                handler: ToolHandler::Client,
+                retry: deadline_policy.clone(),
+            },
+            &system(),
+        );
+        assert_eq!(
+            agg.state.wake_at(),
+            None,
+            "a parked branch's deadline schedules nothing"
+        );
+
+        // The escape voids tc-parked; the live branch's deadline still runs.
+        escape_to_e1(&mut agg);
+        dispatch(
+            &mut agg,
+            CommandPayload::RequestToolCall {
+                tool_call_id: "tc-live".to_string(),
+                name: "slow".to_string(),
+                arguments: "{}".to_string(),
+                handler: ToolHandler::Client,
+                retry: deadline_policy,
+            },
+            &system(),
+        );
+        assert!(
+            agg.state.wake_at().is_some(),
+            "a live branch's deadline keeps running"
+        );
     }
 }

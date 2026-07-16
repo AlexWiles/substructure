@@ -47,6 +47,12 @@ pub fn news_start(known: &HashSet<&str>, messages: &[DraftMessage]) -> usize {
         .unwrap_or(messages.len())
 }
 
+/// The last known message id before the news boundary; `None` for an all-new view.
+pub fn landing_leaf(messages: &[DraftMessage], plan: &[PlannedWrite]) -> Option<String> {
+    let boundary = plan.first().map(|w| w.index).unwrap_or(messages.len());
+    messages[..boundary].last().and_then(|m| m.id.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

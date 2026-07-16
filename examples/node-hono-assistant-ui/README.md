@@ -47,16 +47,6 @@ Two tools, one of each kind:
 To restrict which client tools are honored, `decide()` can handle `client.messages` and return
 its own `agent` config with a filtered `trigger.client.tools` to override the default proposal.
 
-## How it works
-
-- **`server.ts`** — `POST /agent` is the worker: it declares the agent and both tools, and
-  runs the worker tool when the model calls it. `GET /token` mints a client token. `/*`
-  serves `web/dist`.
-- **`web/chat.tsx`** — `new HttpAgent({ url, headers })` points at
-  `…/api/client/ag-ui/agents/chat-agent/run`; `useAgUiRuntime({ agent })` turns the AG-UI
-  SSE stream into an assistant-ui runtime; `<Thread>` renders it. The frontend tool is a
-  `defineToolkit` entry registered with `useAui({ tools: Tools({ toolkit }) })`.
-
 ## Regenerate types
 
 `protocol.ts` is generated from `schemas/protocol.schema.json` and committed. To regenerate

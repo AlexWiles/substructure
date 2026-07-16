@@ -10,7 +10,7 @@ use rust_decimal::Decimal;
 
 use crate::protocol::{
     AgentConfig, DraftMessage, Effect, EffectKind, EffectStatus, InterruptOrigin, LlmFormat,
-    LlmRequest, LlmTool, Message, MessageTree, Node, ReasoningConfig, RetryPolicy, Role,
+    LlmRequest, LlmTool, Message, MessageTree, NewMessage, ReasoningConfig, RetryPolicy, Role,
     SessionOwner, WorkerState,
 };
 use crate::runtime::aggregate::ApplyContext;
@@ -21,7 +21,7 @@ use crate::runtime::retry::RetryState;
 pub enum SessionStatus {
     /// Waiting for external input: LLM responses, tool results, worker decisions.
     Idle,
-    /// Paused for external input (e.g., human approval).
+    /// Paused for external input. Never stored — projected from `open_interrupts`.
     Interrupted {
         interrupt_id: String,
         origin: InterruptOrigin,
@@ -202,10 +202,20 @@ pub struct AgentVersion {
     pub anchor: Option<String>,
 }
 
+/// An unresumed interrupt: parks paths through its anchor (`None` = every path).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenInterrupt {
+    pub interrupt_id: String,
+    pub origin: InterruptOrigin,
+    pub reason: String,
+    pub payload: serde_json::Value,
+    pub anchor: Option<String>,
+}
+
 /// A versioned, anchored document write. Both worker state and agent config
 /// resolve newest-on-path and compact by anchor identically; this shares that
 /// logic without touching either struct's serialized shape.
-pub(crate) trait Anchored {
+pub trait Anchored {
     fn anchor(&self) -> Option<&str>;
 }
 
@@ -221,8 +231,14 @@ impl Anchored for AgentVersion {
     }
 }
 
+impl Anchored for OpenInterrupt {
+    fn anchor(&self) -> Option<&str> {
+        self.anchor.as_deref()
+    }
+}
+
 /// Newest version whose anchor is on `on_path`; an unanchored version matches any path.
-pub(crate) fn resolve_on_path<'a, V: Anchored>(
+pub fn resolve_on_path<'a, V: Anchored>(
     versions: &'a [V],
     on_path: &std::collections::HashSet<&str>,
 ) -> Option<&'a V> {
@@ -234,7 +250,7 @@ pub(crate) fn resolve_on_path<'a, V: Anchored>(
 
 /// Append `new`, dropping any prior version at the same anchor: a superseded
 /// same-anchor version can never win resolution.
-pub(crate) fn compact_push<V: Anchored>(versions: &mut Vec<V>, new: V) {
+pub fn compact_push<V: Anchored>(versions: &mut Vec<V>, new: V) {
     versions.retain(|v| v.anchor() != new.anchor());
     versions.push(new);
 }
@@ -328,16 +344,16 @@ impl DerivedState {
     }
 }
 
-pub(super) fn new_call_id() -> String {
+pub fn new_call_id() -> String {
     Uuid::now_v7().to_string()
 }
 
-pub(super) fn new_message_id() -> String {
+pub fn new_message_id() -> String {
     Uuid::now_v7().to_string()
 }
 
 /// A JSON string passes through; anything else is serialized.
-pub(super) fn json_to_string(v: &serde_json::Value) -> String {
+pub fn json_to_string(v: &serde_json::Value) -> String {
     match v {
         serde_json::Value::String(s) => s.clone(),
         other => other.to_string(),
@@ -404,7 +420,10 @@ pub struct SessionState {
     pub head_id: Option<String>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub nodes: Vec<Node>,
+    pub nodes: Vec<NewMessage>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open_interrupts: Vec<OpenInterrupt>,
 }
 
 impl SessionState {
@@ -433,6 +452,7 @@ impl SessionState {
             completed_turn_ids: Vec::new(),
             head_id: None,
             nodes: Vec::new(),
+            open_interrupts: Vec::new(),
         }
     }
 
@@ -451,11 +471,10 @@ impl SessionState {
                     self.status = SessionStatus::Idle;
                 }
                 self.head_id = Some(payload.message.id.clone());
-                self.nodes.push(Node::Message(payload.clone()));
+                self.nodes.push(payload.clone());
             }
-            EventPayload::NewControl(payload) => {
-                self.head_id = Some(payload.control.id.clone());
-                self.nodes.push(Node::Control(payload.clone()));
+            EventPayload::HeadMoved(payload) => {
+                self.head_id = Some(payload.head_id.clone());
             }
             EventPayload::LlmCallRequested(payload) => {
                 self.status = SessionStatus::Idle;
@@ -581,11 +600,19 @@ impl SessionState {
                 }
             }
             EventPayload::SessionInterrupted(payload) => {
-                self.status = SessionStatus::Interrupted {
-                    interrupt_id: payload.interrupt_id.clone(),
-                    origin: payload.origin,
-                    reason: payload.reason.clone(),
-                };
+                if !self
+                    .open_interrupts
+                    .iter()
+                    .any(|i| i.interrupt_id == payload.interrupt_id)
+                {
+                    self.open_interrupts.push(OpenInterrupt {
+                        interrupt_id: payload.interrupt_id.clone(),
+                        origin: payload.origin,
+                        reason: payload.reason.clone(),
+                        payload: payload.payload.clone(),
+                        anchor: payload.anchor.clone(),
+                    });
+                }
                 // Void pending decisions so late submissions no-op; calls void via CallVoided events.
                 for wd in self.worker_decisions.values_mut() {
                     if wd.tracking.status == EffectStatus::Pending {
@@ -593,8 +620,9 @@ impl SessionState {
                     }
                 }
             }
-            EventPayload::InterruptResumed(_) => {
-                self.status = SessionStatus::Idle;
+            EventPayload::InterruptResumed(p) => {
+                self.open_interrupts
+                    .retain(|i| i.interrupt_id != p.interrupt_id);
             }
             EventPayload::WorkerDecisionRequested(p) => {
                 let retry_policy = self.worker_retry.clone().unwrap_or(RetryPolicy::no_retry());
@@ -719,15 +747,86 @@ impl SessionState {
         }
     }
 
-    pub fn active_interrupt(&self) -> Option<(&str, InterruptOrigin)> {
-        match &self.status {
-            SessionStatus::Interrupted {
-                interrupt_id,
-                origin,
-                ..
-            } => Some((interrupt_id, *origin)),
+    /// Newest open interrupt on the path to `leaf`; unanchored matches any path.
+    pub fn active_interrupt_for(&self, leaf: Option<&str>) -> Option<&OpenInterrupt> {
+        let on_path = leaf.map(|l| self.path_ids(l)).unwrap_or_default();
+        resolve_on_path(&self.open_interrupts, &on_path)
+    }
+
+    /// All open interrupts on the path to `leaf`, oldest first.
+    pub fn interrupts_for(&self, leaf: Option<&str>) -> Vec<&OpenInterrupt> {
+        let on_path = leaf.map(|l| self.path_ids(l)).unwrap_or_default();
+        self.open_interrupts
+            .iter()
+            .filter(|i| match i.anchor.as_deref() {
+                None => true,
+                Some(a) => on_path.contains(a),
+            })
+            .collect()
+    }
+
+    /// An open interrupt by id, on any path.
+    pub fn open_interrupt(&self, id: &str) -> Option<&OpenInterrupt> {
+        self.open_interrupts.iter().find(|i| i.interrupt_id == id)
+    }
+
+    /// Whether an open interrupt parks the active branch.
+    pub fn head_parked(&self) -> bool {
+        self.active_interrupt_for(self.head_id.as_deref()).is_some()
+    }
+
+    /// Stored status, overridden when an interrupt parks the head path.
+    pub fn projected_status(&self) -> SessionStatus {
+        match self.active_interrupt_for(self.head_id.as_deref()) {
+            Some(i) => SessionStatus::Interrupted {
+                interrupt_id: i.interrupt_id.clone(),
+                origin: i.origin,
+                reason: i.reason.clone(),
+            },
+            None => self.status.clone(),
+        }
+    }
+
+    /// The anchor of the effect a decision settles.
+    pub fn trigger_anchor(&self, trigger: &Trigger) -> Option<&str> {
+        match trigger {
+            Trigger::ToolFinished { id, .. } | Trigger::ToolExecute { id, .. } => {
+                self.tool_calls.get(id).and_then(|c| c.anchor.as_deref())
+            }
+            Trigger::SubAgentFinished { session_id, .. } => self
+                .sub_agent_calls
+                .get(session_id)
+                .and_then(|c| c.anchor.as_deref()),
+            Trigger::LlmFinished { id, .. } | Trigger::LlmExecute { id, .. } => {
+                self.llm_calls.get(id).and_then(|c| c.anchor.as_deref())
+            }
             _ => None,
         }
+    }
+
+    /// Whether work at `anchor` lands on a parked branch: on-head anchors gate
+    /// on the head, off-head anchors on their own path.
+    pub fn anchor_parked(&self, anchor: Option<&str>) -> bool {
+        match anchor {
+            Some(a) if !self.anchor_on_path(self.head_id.as_deref(), Some(a)) => {
+                self.active_interrupt_for(Some(a)).is_some()
+            }
+            _ => self.head_parked(),
+        }
+    }
+
+    /// Whether a decision's landing branch is parked: transcripts gate at
+    /// their landing leaf, effect settles at their anchor.
+    pub fn decision_parked(&self, trigger: &Trigger) -> bool {
+        if let Trigger::ClientTranscript { messages, .. } = trigger {
+            let messages = self.normalize_client_view(messages.clone());
+            let known: std::collections::HashSet<&str> =
+                self.nodes.iter().map(|n| n.message.id.as_str()).collect();
+            let plan = super::reconcile::plan_reconcile(&known, &messages);
+            let landing = super::reconcile::landing_leaf(&messages, &plan);
+            return self.active_interrupt_for(landing.as_deref()).is_some();
+        }
+        self.anchor_parked(self.trigger_anchor(trigger))
     }
 
     pub fn has_pending_llm(&self) -> bool {
@@ -759,38 +858,51 @@ impl SessionState {
             .any(|wd| wd.tracking.status == EffectStatus::Queued)
     }
 
+    /// Next timer, counting only work on unparked branches.
     pub fn wake_at(&self) -> Option<DateTime<Utc>> {
-        match self.status {
-            SessionStatus::Done | SessionStatus::Interrupted { .. } => return None,
-            _ => {}
+        if matches!(self.status, SessionStatus::Done) {
+            return None;
         }
-        if self.has_queued_worker_decision() && !self.has_pending_worker_decision() {
+        if !self.has_pending_worker_decision()
+            && self
+                .queued_decisions()
+                .iter()
+                .any(|d| !self.decision_parked(&d.trigger))
+        {
             return Some(Utc::now());
         }
         self.llm_calls
             .values()
+            .filter(|c| !self.anchor_parked(c.anchor.as_deref()))
             .filter_map(|c| c.tracking.earliest_wake())
             .chain(
                 self.tool_calls
                     .values()
+                    .filter(|c| !self.anchor_parked(c.anchor.as_deref()))
                     .filter_map(|c| c.tracking.earliest_wake()),
             )
             .chain(
                 self.sub_agent_calls
                     .values()
+                    .filter(|c| !self.anchor_parked(c.anchor.as_deref()))
                     .filter_map(|c| c.tracking.earliest_wake()),
             )
             .chain(
                 self.worker_decisions
                     .values()
+                    .filter(|d| !self.decision_parked(&d.trigger))
                     .filter_map(|d| d.tracking.earliest_wake()),
             )
             .min()
     }
 
-    /// All node ids (messages and controls) on the root→`leaf` chain.
-    pub(crate) fn path_ids<'a>(&'a self, leaf: &'a str) -> std::collections::HashSet<&'a str> {
-        let by_id: HashMap<&str, &Node> = self.nodes.iter().map(|n| (n.id(), n)).collect();
+    /// All message ids on the root→`leaf` chain.
+    pub fn path_ids<'a>(&'a self, leaf: &'a str) -> std::collections::HashSet<&'a str> {
+        let by_id: HashMap<&str, &NewMessage> = self
+            .nodes
+            .iter()
+            .map(|n| (n.message.id.as_str(), n))
+            .collect();
         let mut ids = std::collections::HashSet::new();
         let mut cursor = Some(leaf);
         while let Some(id) = cursor {
@@ -798,7 +910,7 @@ impl SessionState {
             if !ids.insert(id) {
                 break; // parent cycle guard
             }
-            cursor = node.parent_id();
+            cursor = node.parent_id.as_deref();
         }
         ids
     }
@@ -932,7 +1044,7 @@ impl SessionState {
         let message_tree = self.message_tree();
         let open_llm_calls = self.open_llm_calls(&message_tree);
         DerivedState {
-            status: self.status.clone(),
+            status: self.projected_status(),
             wake_at: self.wake_at(),
             calls: self.effects(),
             owner: self.owner.clone(),
@@ -984,11 +1096,11 @@ mod open_llm_calls_tests {
     use super::*;
     use crate::protocol::{NewMessage, ToolCall, ToolCallFunction};
 
-    fn node(message: Message, parent_id: Option<&str>) -> Node {
-        Node::Message(NewMessage {
+    fn node(message: Message, parent_id: Option<&str>) -> NewMessage {
+        NewMessage {
             message,
             parent_id: parent_id.map(str::to_string),
-        })
+        }
     }
 
     fn user(id: &str) -> Message {
@@ -1082,8 +1194,8 @@ mod state_version_tests {
     use super::*;
     use crate::protocol::NewMessage;
 
-    fn message_node(id: &str, parent_id: Option<&str>) -> Node {
-        Node::Message(NewMessage {
+    fn message_node(id: &str, parent_id: Option<&str>) -> NewMessage {
+        NewMessage {
             message: Message {
                 id: id.to_string(),
                 role: Role::User,
@@ -1093,7 +1205,7 @@ mod state_version_tests {
                 name: None,
             },
             parent_id: parent_id.map(str::to_string),
-        })
+        }
     }
 
     /// A session with the tree  u1 → a1 → u2  and a fork leaf  u1 → x1.
@@ -1184,8 +1296,8 @@ mod agent_version_tests {
     use super::*;
     use crate::protocol::NewMessage;
 
-    fn message_node(id: &str, parent_id: Option<&str>) -> Node {
-        Node::Message(NewMessage {
+    fn message_node(id: &str, parent_id: Option<&str>) -> NewMessage {
+        NewMessage {
             message: Message {
                 id: id.to_string(),
                 role: Role::User,
@@ -1195,7 +1307,7 @@ mod agent_version_tests {
                 name: None,
             },
             parent_id: parent_id.map(str::to_string),
-        })
+        }
     }
 
     /// A session with the tree  u1 → a1 → u2  and a fork leaf  u1 → x1.
@@ -1320,5 +1432,22 @@ mod effect_tests {
         assert!(json.get("agent_id").is_none());
         let back: Effect = serde_json::from_value(json).unwrap();
         assert_eq!(back, e);
+    }
+}
+
+#[cfg(test)]
+mod node_wire_compat_tests {
+    use crate::protocol::NewMessage;
+
+    #[test]
+    fn legacy_kind_tagged_node_json_still_deserializes() {
+        // Trees persisted before the Node union was removed carry `kind`.
+        let node: NewMessage = serde_json::from_value(serde_json::json!({
+            "kind": "message",
+            "message": {"id": "m1", "role": "user", "content": "hi"},
+            "parent_id": null,
+        }))
+        .expect("unknown fields are ignored");
+        assert_eq!(node.message.id, "m1");
     }
 }

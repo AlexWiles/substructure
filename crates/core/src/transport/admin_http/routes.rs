@@ -9,7 +9,6 @@ use serde::Deserialize;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::event_store::{AggregateSort, StreamVersion};
-use crate::protocol::MessageTree;
 use crate::session::index::{SessionCursor, SessionFilter};
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use crate::transport::ag_ui::snapshot::snapshot_events;
@@ -202,7 +201,7 @@ pub async fn connect_session_ag_ui(
 ) -> Response {
     let events = match state
         .runtime
-        .read_session_events(&caller, &session_id, None, None)
+        .read_session_events(&caller, &session_id, None, Some(1))
         .await
     {
         Ok(events) => events,
@@ -214,16 +213,16 @@ pub async fn connect_session_ag_ui(
                 .into_response()
         }
     };
-    // No events ⇒ session not yet created (fresh thread); empty tree.
-    let tree = if events.is_empty() {
-        MessageTree::default()
+    // No events ⇒ session not yet created (fresh thread); empty snapshot.
+    let session = if events.is_empty() {
+        None
     } else {
         match state
             .runtime
             .get_session(caller.tenant_id(), &session_id)
             .await
         {
-            Ok((_, session)) => session.message_tree(),
+            Ok((_, session)) => Some(session),
             Err(e) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -233,7 +232,7 @@ pub async fn connect_session_ag_ui(
             }
         }
     };
-    let frames = snapshot_events(session_id, input.run_id, &tree, &events)
+    let frames = snapshot_events(session_id, input.run_id, session.as_ref())
         .into_iter()
         .map(|e| Ok::<_, std::convert::Infallible>(e.to_sse()));
     Sse::new(futures_util::stream::iter(frames))

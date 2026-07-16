@@ -73,11 +73,14 @@ mod tests {
     use super::*;
 
     fn tmpdir() -> PathBuf {
+        // Timestamp alone collides across parallel tests; the counter disambiguates.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("subs-project-test-{nanos}"));
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("subs-project-test-{nanos}-{seq}"));
         fs::create_dir_all(&dir).unwrap();
         dir
     }

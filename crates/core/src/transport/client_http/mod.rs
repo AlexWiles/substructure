@@ -37,6 +37,10 @@ pub fn router(state: ClientHttpState) -> Router {
     Router::new()
         .route("/api/client/sessions/input", post(routes::client_input))
         .route(
+            "/api/client/sessions/{session_id}",
+            get(routes::get_session),
+        )
+        .route(
             "/api/client/sessions/{session_id}/events/stream",
             get(routes::stream_session_events),
         )

@@ -1,6 +1,5 @@
-use crate::event_store::Event;
 use crate::protocol::{Content, ContentPart, Message, MessageTree, Role};
-use crate::session::events::{EventPayload, SessionInterrupted};
+use crate::session::state::SessionState;
 
 use super::events::{AgUiEvent, AgUiInterrupt, RunOutcome, SnapshotMessage};
 
@@ -37,26 +36,22 @@ fn to_snapshot(message: Message) -> SnapshotMessage {
     }
 }
 
-fn active_interrupt(events: &[Event]) -> Option<SessionInterrupted> {
-    let mut active: Option<SessionInterrupted> = None;
-    for event in events {
-        match serde_json::from_value::<EventPayload>(event.payload.clone()) {
-            Ok(EventPayload::SessionInterrupted(p)) => active = Some(p),
-            Ok(EventPayload::InterruptResumed(_)) => active = None,
-            _ => {}
-        }
-    }
-    active
-}
-
+/// Rehydration frames: the active branch plus every open interrupt on the
+/// head path. `None` = session not created yet.
 pub fn snapshot_events(
     thread_id: String,
     run_id: String,
-    tree: &MessageTree,
-    events: &[Event],
+    session: Option<&SessionState>,
 ) -> Vec<AgUiEvent> {
-    let outcome = active_interrupt(events).map(|p| RunOutcome::Interrupt {
-        interrupts: vec![AgUiInterrupt::from_session(&p)],
+    let tree = session.map(SessionState::message_tree).unwrap_or_default();
+    let outcome = session.and_then(|s| {
+        let interrupts = s.interrupts_for(s.head_id.as_deref());
+        (!interrupts.is_empty()).then(|| RunOutcome::Interrupt {
+            interrupts: interrupts
+                .into_iter()
+                .map(AgUiInterrupt::from_open)
+                .collect(),
+        })
     });
     vec![
         AgUiEvent::RunStarted {
@@ -64,7 +59,7 @@ pub fn snapshot_events(
             run_id: run_id.clone(),
         },
         AgUiEvent::MessagesSnapshot {
-            messages: session_messages(tree),
+            messages: session_messages(&tree),
         },
         AgUiEvent::RunFinished {
             thread_id,
@@ -95,23 +90,20 @@ fn content_text(content: Option<Content>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event_store::{GlobalPosition, StreamVersion};
-    use crate::protocol::{NewMessage, Node, ToolCall, ToolCallFunction};
-    use crate::span::SpanContext;
-    use chrono::{DateTime, Utc};
+    use crate::protocol::{InterruptOrigin, NewMessage, ToolCall, ToolCallFunction};
+    use crate::session::state::OpenInterrupt;
     use serde_json::{json, Value};
-    use std::collections::HashMap;
     use uuid::Uuid;
 
-    fn node(id: u128, parent: Option<u128>, mut message: Message) -> Node {
+    fn node(id: u128, parent: Option<u128>, mut message: Message) -> NewMessage {
         message.id = Uuid::from_u128(id).to_string();
-        Node::Message(NewMessage {
+        NewMessage {
             message,
             parent_id: parent.map(|p| Uuid::from_u128(p).to_string()),
-        })
+        }
     }
 
-    fn tree(nodes: Vec<Node>, head: u128) -> MessageTree {
+    fn tree(nodes: Vec<NewMessage>, head: u128) -> MessageTree {
         MessageTree {
             nodes,
             head_id: Some(Uuid::from_u128(head).to_string()),
@@ -119,7 +111,7 @@ mod tests {
     }
 
     fn linear(messages: Vec<Message>) -> MessageTree {
-        let nodes: Vec<Node> = messages
+        let nodes: Vec<NewMessage> = messages
             .into_iter()
             .enumerate()
             .map(|(i, m)| node((i + 1) as u128, (i > 0).then(|| i as u128), m))
@@ -241,8 +233,8 @@ mod tests {
 
     #[test]
     fn snapshot_events_wrap_the_snapshot_in_a_run() {
-        let t = linear(vec![user("hi")]);
-        let out = snapshot_events("thread-1".into(), "snap-1".into(), &t, &[]);
+        let s = session_of(linear(vec![user("hi")]));
+        let out = snapshot_events("thread-1".into(), "snap-1".into(), Some(&s));
         let kinds: Vec<&str> = out.iter().map(|e| e.type_name()).collect();
         assert_eq!(kinds, ["RUN_STARTED", "MESSAGES_SNAPSHOT", "RUN_FINISHED"]);
 
@@ -257,78 +249,66 @@ mod tests {
         assert!(session_messages(&MessageTree::default()).is_empty());
     }
 
-    fn lifecycle_event(id: u128, payload: Value) -> Event {
-        let ts = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
-        Event {
-            global_position: GlobalPosition(0),
-            id: Uuid::from_u128(id),
-            tenant_id: "t".into(),
-            aggregate_type: "session".into(),
-            aggregate_id: "s".into(),
-            stream_version: StreamVersion(id as u64),
-            span: SpanContext::root(),
-            occurred_at: ts,
+    fn session_of(tree: MessageTree) -> SessionState {
+        let mut s = SessionState::new("s".to_string());
+        s.head_id = tree.head_id.clone();
+        s.nodes = tree.nodes;
+        s
+    }
+
+    fn open(id: &str, anchor: Option<&str>, payload: Value) -> OpenInterrupt {
+        OpenInterrupt {
+            interrupt_id: id.to_string(),
+            origin: InterruptOrigin::Frontend,
+            reason: "confirmation".to_string(),
             payload,
-            derived: None,
-            metadata: HashMap::new(),
-            start_time: ts,
-            end_time: ts,
+            anchor: anchor.map(str::to_string),
         }
     }
 
     #[test]
-    fn snapshot_reports_pending_interrupt() {
-        let t = linear(vec![user("send the email")]);
-        let events = vec![lifecycle_event(
-            2,
-            json!({
-                "type": "session.interrupted",
-                "interrupt_id": "int-1",
-                "origin": "frontend",
-                "reason": "confirmation",
-                "payload": {"message": "Send the email?"},
-            }),
-        )];
-        let out = snapshot_events("thread-1".into(), "snap-1".into(), &t, &events);
+    fn parked_head_reports_every_open_interrupt_on_its_path() {
+        let mut s = session_of(linear(vec![user("send the email")]));
+        let head = s.head_id.clone();
+        s.open_interrupts.push(open(
+            "int-1",
+            head.as_deref(),
+            json!({"message": "Send the email?"}),
+        ));
+        s.open_interrupts
+            .push(open("int-2", head.as_deref(), Value::Null));
+
+        let out = snapshot_events("thread-1".into(), "snap-1".into(), Some(&s));
         let finished = serde_json::to_value(&out[2]).unwrap();
         assert_eq!(finished["type"], "RUN_FINISHED");
         assert_eq!(finished["outcome"]["type"], "interrupt");
-        let interrupt = &finished["outcome"]["interrupts"][0];
-        assert_eq!(interrupt["id"], "int-1");
-        assert_eq!(interrupt["reason"], "confirmation");
-        assert_eq!(interrupt["message"], "Send the email?");
+        let interrupts = finished["outcome"]["interrupts"].as_array().unwrap();
+        assert_eq!(interrupts.len(), 2, "the client owes both a response");
+        assert_eq!(interrupts[0]["id"], "int-1");
+        assert_eq!(interrupts[0]["reason"], "confirmation");
+        assert_eq!(interrupts[0]["message"], "Send the email?");
+        assert_eq!(interrupts[1]["id"], "int-2");
     }
 
     #[test]
-    fn snapshot_omits_outcome_after_resume() {
-        let events = vec![
-            lifecycle_event(
-                1,
-                json!({
-                    "type": "session.interrupted",
-                    "interrupt_id": "int-1",
-                    "origin": "frontend",
-                    "reason": "confirmation",
-                    "payload": null,
-                }),
-            ),
-            lifecycle_event(
-                2,
-                json!({
-                    "type": "session.interrupt_resumed",
-                    "interrupt_id": "int-1",
-                    "payload": null,
-                }),
-            ),
-        ];
-        let out = snapshot_events(
-            "thread-1".into(),
-            "snap-1".into(),
-            &MessageTree::default(),
-            &events,
-        );
+    fn escaped_head_reports_no_outcome() {
+        // The interrupt is parked on an abandoned branch, off the head path.
+        let mut s = session_of(linear(vec![user("hi"), assistant_text("hello")]));
+        s.open_interrupts
+            .push(open("int-1", Some("m-elsewhere"), Value::Null));
+
+        let out = snapshot_events("thread-1".into(), "snap-1".into(), Some(&s));
         let finished = serde_json::to_value(&out[2]).unwrap();
         assert_eq!(finished["type"], "RUN_FINISHED");
+        assert!(finished.get("outcome").is_none());
+    }
+
+    #[test]
+    fn missing_session_snapshots_empty() {
+        let out = snapshot_events("thread-1".into(), "snap-1".into(), None);
+        let snapshot = serde_json::to_value(&out[1]).unwrap();
+        assert_eq!(snapshot["messages"], json!([]));
+        let finished = serde_json::to_value(&out[2]).unwrap();
         assert!(finished.get("outcome").is_none());
     }
 }
