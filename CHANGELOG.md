@@ -9,6 +9,8 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-07-17
+
 ### Changed
 
 - The engine sends an empty proposal instead of null.
@@ -60,6 +62,7 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
   streaming, schema-validated tool I/O and a generated protocol spec, and rewrote
   the docs and examples.
 
-[Unreleased]: https://github.com/substructureai/substructure/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/substructureai/substructure/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/substructureai/substructure/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/substructureai/substructure/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/substructureai/substructure/compare/v0.1.22...v0.2.0
