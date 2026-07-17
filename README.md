@@ -184,7 +184,7 @@ The engine can call Anthropic, OpenAI, or OpenRouter with your keys or you can m
 
 Docs: [LLMs](./docs/50-llms.md)
 
-Examples: [Node + Anthropic](./examples/node-hono-anthropic), [Node + OpenAI](./examples/node-hono-openai), [Python + Anthropic](./examples/python-fast-api-anthropic), [Python + OpenAI](./examples/python-fast-api-openai)
+Examples: [Node + Anthropic](./examples/node-hono-anthropic), [Node + OpenAI](./examples/node-hono-openai), [Node + OpenRouter](./examples/node-hono-openrouter), [Python + Anthropic](./examples/python-fast-api-anthropic), [Python + OpenAI](./examples/python-fast-api-openai)
 
 ### Retries and timeouts
 
