@@ -18,11 +18,11 @@ pub struct WorkerDecisionRequest {
     pub agent_id: String,
     pub identity: SessionOwner,
     pub trigger: DecisionTrigger,
-    /// The engine-derived default continuation for `trigger`; `None` when the
+    /// The engine-derived default continuation for `trigger`; empty when the
     /// trigger needs worker knowledge. Advisory — the worker accepts by echoing
     /// it (amended or verbatim) as its decision.
     #[serde(default)]
-    pub proposed: Option<DecisionResponse>,
+    pub proposed: DecisionResponse,
     pub state: WorkerState,
     /// The agent config resolved for the active path; `None` when none is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]

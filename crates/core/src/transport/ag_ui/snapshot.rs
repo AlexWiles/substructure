@@ -26,7 +26,7 @@ fn to_snapshot(message: Message) -> SnapshotMessage {
         Role::Assistant => SnapshotMessage::Assistant {
             id,
             content,
-            tool_calls: message.tool_calls.unwrap_or_default(),
+            tool_calls: message.tool_calls,
         },
         Role::Tool => SnapshotMessage::Tool {
             id,
@@ -125,7 +125,7 @@ mod tests {
             id: String::new(),
             role: Role::User,
             content: Some(Content::Text(text.into())),
-            tool_calls: None,
+            tool_calls: vec![],
             tool_call_id: None,
             name: None,
         }
@@ -136,14 +136,14 @@ mod tests {
             id: String::new(),
             role: Role::Assistant,
             content: None,
-            tool_calls: Some(vec![ToolCall {
+            tool_calls: vec![ToolCall {
                 id: call_id.into(),
                 call_type: "function".into(),
                 function: ToolCallFunction {
                     name: name.into(),
                     arguments: args.into(),
                 },
-            }]),
+            }],
             tool_call_id: None,
             name: None,
         }
@@ -154,7 +154,7 @@ mod tests {
             id: String::new(),
             role: Role::Tool,
             content: Some(Content::Text(result.into())),
-            tool_calls: None,
+            tool_calls: vec![],
             tool_call_id: Some(call_id.into()),
             name: Some("get_weather".into()),
         }
@@ -165,7 +165,7 @@ mod tests {
             id: String::new(),
             role: Role::Assistant,
             content: Some(Content::Text(text.into())),
-            tool_calls: None,
+            tool_calls: vec![],
             tool_call_id: None,
             name: None,
         }

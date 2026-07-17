@@ -1031,8 +1031,6 @@ impl SessionState {
         path.iter()
             .filter(|m| {
                 m.tool_calls
-                    .as_deref()
-                    .unwrap_or_default()
                     .iter()
                     .any(|c| !answered.contains(c.id.as_str()))
             })
@@ -1108,7 +1106,7 @@ mod open_llm_calls_tests {
             id: id.to_string(),
             role: Role::User,
             content: None,
-            tool_calls: None,
+            tool_calls: vec![],
             tool_call_id: None,
             name: None,
         }
@@ -1119,14 +1117,14 @@ mod open_llm_calls_tests {
             id: id.to_string(),
             role: Role::Assistant,
             content: None,
-            tool_calls: Some(vec![ToolCall {
+            tool_calls: vec![ToolCall {
                 id: tool_call_id.to_string(),
                 call_type: "function".to_string(),
                 function: ToolCallFunction {
                     name: "t".to_string(),
                     arguments: "{}".to_string(),
                 },
-            }]),
+            }],
             tool_call_id: None,
             name: None,
         }
@@ -1137,7 +1135,7 @@ mod open_llm_calls_tests {
             id: id.to_string(),
             role: Role::Tool,
             content: None,
-            tool_calls: None,
+            tool_calls: vec![],
             tool_call_id: Some(tool_call_id.to_string()),
             name: None,
         }
@@ -1200,7 +1198,7 @@ mod state_version_tests {
                 id: id.to_string(),
                 role: Role::User,
                 content: None,
-                tool_calls: None,
+                tool_calls: vec![],
                 tool_call_id: None,
                 name: None,
             },
@@ -1302,7 +1300,7 @@ mod agent_version_tests {
                 id: id.to_string(),
                 role: Role::User,
                 content: None,
-                tool_calls: None,
+                tool_calls: vec![],
                 tool_call_id: None,
                 name: None,
             },
@@ -1444,7 +1442,7 @@ mod node_wire_compat_tests {
         // Trees persisted before the Node union was removed carry `kind`.
         let node: NewMessage = serde_json::from_value(serde_json::json!({
             "kind": "message",
-            "message": {"id": "m1", "role": "user", "content": "hi"},
+            "message": {"id": "m1", "role": "user", "content": "hi", "tool_calls": []},
             "parent_id": null,
         }))
         .expect("unknown fields are ignored");

@@ -675,15 +675,8 @@
             "type": "integer"
           },
           "proposed": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/DecisionResponse"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The engine's default continuation for `trigger` (`null` when it needs\nworker knowledge). Advisory: accept by echoing it as the decision."
+            "$ref": "#/components/schemas/DecisionResponse",
+            "description": "The engine's default continuation for `trigger` (empty when it needs\nworker knowledge). Advisory: accept by echoing it as the decision."
           },
           "session_id": {
             "type": "string"
@@ -707,6 +700,7 @@
           "agent_id",
           "identity",
           "trigger",
+          "proposed",
           "state",
           "calls",
           "pending_calls",
@@ -802,7 +796,9 @@
             },
             "required": [
               "type",
-              "messages"
+              "messages",
+              "new_from",
+              "client"
             ],
             "type": "object"
           },
@@ -949,6 +945,7 @@
               "type",
               "id",
               "request",
+              "stream",
               "attempt"
             ],
             "type": "object"
@@ -1008,7 +1005,8 @@
             "required": [
               "type",
               "id",
-              "ok"
+              "ok",
+              "truncated"
             ],
             "type": "object"
           },
@@ -1365,15 +1363,13 @@
             "items": {
               "$ref": "#/components/schemas/ToolCall"
             },
-            "type": [
-              "array",
-              "null"
-            ]
+            "type": "array"
           }
         },
         "required": [
           "id",
-          "role"
+          "role",
+          "tool_calls"
         ],
         "title": "Message",
         "type": "object"
@@ -1409,6 +1405,9 @@
             "type": "array"
           }
         },
+        "required": [
+          "nodes"
+        ],
         "title": "MessageTree",
         "type": "object"
       },
@@ -1652,6 +1651,9 @@
             "type": "object"
           }
         },
+        "required": [
+          "metadata"
+        ],
         "title": "WorkerIdentity",
         "type": "object"
       },
@@ -1682,7 +1684,7 @@
   "paths": {
     "/": {
       "post": {
-        "description": "Switch on `trigger.type`. When `proposed` is non-null, echoing it (amended or verbatim) accepts the engine's default continuation. An empty decision with nothing in flight parks the session.",
+        "description": "Switch on `trigger.type`. Echoing `proposed` (amended or verbatim) accepts the engine's default continuation; it is empty when the engine needs worker knowledge. An empty decision with nothing in flight parks the session.",
         "operationId": "decide",
         "parameters": [
           {
@@ -1714,7 +1716,7 @@
                 }
               }
             },
-            "description": "The worker's decision."
+            "description": "The worker's decision. A `null` body is accepted as the empty decision."
           },
           "4XX": {
             "description": "The delivery attempt fails; the engine retries per its worker retry policy."

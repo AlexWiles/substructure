@@ -232,7 +232,7 @@ fn worker_openapi() -> serde_json::Value {
                 "post": {
                     "operationId": "decide",
                     "summary": "Decide the next step for a session",
-                    "description": "Switch on `trigger.type`. When `proposed` is non-null, echoing it (amended or verbatim) accepts the engine's default continuation. An empty decision with nothing in flight parks the session.",
+                    "description": "Switch on `trigger.type`. Echoing `proposed` (amended or verbatim) accepts the engine's default continuation; it is empty when the engine needs worker knowledge. An empty decision with nothing in flight parks the session.",
                     "security": [{}, { "signature": [] }],
                     "parameters": [
                         {
@@ -253,7 +253,7 @@ fn worker_openapi() -> serde_json::Value {
                     },
                     "responses": {
                         "200": {
-                            "description": "The worker's decision.",
+                            "description": "The worker's decision. A `null` body is accepted as the empty decision.",
                             "content": {
                                 "application/json": {
                                     "schema": { "$ref": "#/components/schemas/DecisionResponse" },

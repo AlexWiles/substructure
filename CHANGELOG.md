@@ -9,6 +9,17 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 
 ## [Unreleased]
 
+### Changed
+
+- `DecisionRequest.proposed` was nullable, forcing every worker to null-check
+  before echoing. The engine now always sends a proposal — empty when it needs
+  worker knowledge — so `return proposed` is a complete worker.
+- Fields the engine always emits (`Message.tool_calls`, `MessageTree.nodes`,
+  `WorkerIdentity.metadata`, `TokenDelta.tool_calls`, trigger `new_from`/`client`/
+  `stream`/`truncated`) were optional in the schema, forcing null checks in every
+  generated client. They are now required on the wire; sessions persisted by older
+  versions no longer deserialize.
+
 ### Added
 
 - Browsers had no way to read an existing session's history, forcing frontends to
@@ -20,6 +31,9 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 
 ### Fixed
 
+- A worker answering `null` — the natural "nothing to add" reply in JSON languages —
+  failed to parse and the decision retried forever. A `null` response body or
+  `decision.result` frame now reads as the empty decision.
 - Regenerating recorded the new reply onto the old branch instead of forking: a
   truncated client view wrote nothing, so the head stayed on the abandoned leaf.
   A decision whose view stops at an existing node now emits `head.moved`, rebasing

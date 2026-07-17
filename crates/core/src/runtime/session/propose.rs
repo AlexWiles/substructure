@@ -357,13 +357,9 @@ fn reissue(
     transcript: &[Message],
     llm_calls: &HashMap<String, LlmCallState>,
 ) -> Option<DecisionAction> {
-    let assistant_at = transcript.iter().rposition(|m| {
-        m.tool_calls
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .any(|c| c.id == tool_call_id)
-    })?;
+    let assistant_at = transcript
+        .iter()
+        .rposition(|m| m.tool_calls.iter().any(|c| c.id == tool_call_id))?;
     let call = llm_calls.get(&transcript[assistant_at].id)?;
 
     let mut messages: Vec<DraftMessage> = call
@@ -420,7 +416,7 @@ mod tests {
             id: id.to_string(),
             role,
             content: Some(Content::Text(text.to_string())),
-            tool_calls: None,
+            tool_calls: vec![],
             tool_call_id: None,
             name: None,
         }
@@ -431,19 +427,17 @@ mod tests {
             id: id.to_string(),
             role: Role::Assistant,
             content: None,
-            tool_calls: Some(
-                calls
-                    .iter()
-                    .map(|(call_id, name)| ToolCall {
-                        id: call_id.to_string(),
-                        call_type: "function".to_string(),
-                        function: ToolCallFunction {
-                            name: name.to_string(),
-                            arguments: "{}".to_string(),
-                        },
-                    })
-                    .collect(),
-            ),
+            tool_calls: calls
+                .iter()
+                .map(|(call_id, name)| ToolCall {
+                    id: call_id.to_string(),
+                    call_type: "function".to_string(),
+                    function: ToolCallFunction {
+                        name: name.to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                })
+                .collect(),
             tool_call_id: None,
             name: None,
         }
@@ -1142,8 +1136,7 @@ mod tests {
     fn sub_agent_spawn_forwards_the_delegating_message() {
         let mut assistant = assistant_with_calls("call-1", &[("tc-a", "researcher")]);
         // The model's tool arguments carry the delegation under `message`.
-        assistant.tool_calls.as_mut().unwrap()[0].function.arguments =
-            r#"{"message":"find X"}"#.to_string();
+        assistant.tool_calls[0].function.arguments = r#"{"message":"find X"}"#.to_string();
         let p = propose(
             &llm_finished_trigger(DraftMessage::from(assistant), true, false),
             &[msg("u1", Role::User, "hi")],

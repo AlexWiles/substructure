@@ -3,17 +3,16 @@ import {
     AssistantRuntimeProvider,
     AuiProvider,
     defineToolkit,
-    ExportedMessageRepository,
     Tools,
     type ToolCallMessagePartProps,
     useAui,
 } from "@assistant-ui/react";
-import { fromAgUiMessages, useAgUiRuntime } from "@assistant-ui/react-ag-ui";
+import { useAgUiRuntime } from "@assistant-ui/react-ag-ui";
 import { makeMarkdownText, Thread } from "@assistant-ui/react-ui";
 import "@assistant-ui/react-ui/styles/index.css";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { z } from "zod";
-import type { Message } from "../protocol";
+import { useSessionHistory } from "./history";
 
 const MarkdownText = makeMarkdownText();
 
@@ -83,33 +82,6 @@ export function Chat() {
     return <Runtime key={sessionId} session={session} sessionId={sessionId} onNewChat={newChat} />;
 }
 
-type SessionInterrupt = { interrupt_id: string; reason: string; anchor?: string | null };
-type SessionView = { messages: Message[]; interrupts?: SessionInterrupt[] };
-
-// `messages` is the active conversation, ready to fold into assistant-ui
-// messages. Interrupts parking it — no anchor, or anchored on this path — ride
-// as metadata on the newest assistant message, the one place the runtime looks
-// for pending interrupts; the converter derives interrupt UI from it.
-function toMessages({ messages, interrupts = [] }: SessionView) {
-    const onPath = new Set(messages.map((m) => m.id));
-    const parking = interrupts
-        .filter((i) => !i.anchor || onPath.has(i.anchor))
-        .map((i) => ({ id: i.interrupt_id, reason: i.reason }));
-
-    const newestAssistant = parking.length
-        ? messages.filter((m) => m.role === "assistant").at(-1)
-        : undefined;
-
-    const attached = messages
-        .map((m) => {
-            return m === newestAssistant
-                ? { ...m, metadata: { custom: { agui: { interrupts: parking } } } }
-                : m
-        });
-
-    return fromAgUiMessages(attached);
-}
-
 function Runtime({ session, sessionId, onNewChat }: { session: Session; sessionId: string; onNewChat: () => void }) {
     // threadId is the substructure session id — the engine keys the session by it.
     const agent = useMemo(
@@ -121,22 +93,9 @@ function Runtime({ session, sessionId, onNewChat }: { session: Session; sessionI
             }),
         [session, sessionId],
     );
-    // The history adapter reloads the head branch on mount; the engine already
-    // records every message, so append is a no-op.
-    const history = useMemo(
-        () => ({
-            async load() {
-                const res = await fetch(`${session.url}/api/client/sessions/${sessionId}`, {
-                    headers: { authorization: `Bearer ${session.token}` },
-                });
-                if (!res.ok) return { messages: [] }; // 404: not created yet
-                return ExportedMessageRepository.fromArray(toMessages(await res.json()));
-            },
-            async append() { },
-        }),
-        [session, sessionId],
-    );
-    const runtime = useAgUiRuntime({ agent, adapters: { history } });
+    const runtime = useAgUiRuntime({ agent });
+    // History load: imports the session's message tree — branches included.
+    useSessionHistory(runtime, { url: session.url, token: session.token, sessionId });
     return (
         <AssistantRuntimeProvider runtime={runtime}>
             <ClientTools>

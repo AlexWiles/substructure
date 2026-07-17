@@ -38,7 +38,7 @@ type DecisionRequest = {
     agent_id: string
     identity: WorkerIdentity
     trigger: Trigger
-    proposed: DecisionResponse | null
+    proposed: DecisionResponse      // empty when the engine has no default
     state: unknown              // your agent state, stored verbatim
     agent: AgentConfig | null
     calls: Call[]               // in-flight calls

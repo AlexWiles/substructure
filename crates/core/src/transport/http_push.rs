@@ -111,10 +111,15 @@ impl PushTransport for HttpPushTransport {
         let submit = if content_type.starts_with("text/event-stream") {
             read_sse_response(resp.bytes_stream(), decision, token_delta_transport).await?
         } else {
-            resp.json().await.map_err(|e| PushError {
-                message: format!("failed to parse response: {e}"),
-                retryable: false,
-            })?
+            // `null` is the empty decision — the natural "nothing to add" reply
+            // from JSON-language workers.
+            resp.json::<Option<DecisionResponse>>()
+                .await
+                .map_err(|e| PushError {
+                    message: format!("failed to parse response: {e}"),
+                    retryable: false,
+                })?
+                .unwrap_or_default()
         };
 
         Ok(submit)
@@ -202,10 +207,12 @@ where
                 }
             },
             "decision.result" => {
-                return serde_json::from_str(&event.data).map_err(|e| PushError {
-                    message: format!("failed to parse decision.result frame: {e}"),
-                    retryable: false,
-                });
+                return serde_json::from_str::<Option<DecisionResponse>>(&event.data)
+                    .map(Option::unwrap_or_default)
+                    .map_err(|e| PushError {
+                        message: format!("failed to parse decision.result frame: {e}"),
+                        retryable: false,
+                    });
             }
             "decision.error" => {
                 let err: DecisionError =
@@ -334,7 +341,7 @@ mod tests {
                 attempt: 0,
                 deadline: None,
             },
-            proposed: None,
+            proposed: DecisionResponse::default(),
             state: Default::default(),
             agent: None,
             calls: Default::default(),
@@ -380,6 +387,22 @@ mod tests {
         assert_eq!(deltas[0].root_session_id, "sess-1");
         assert_eq!(deltas[1].reasoning.as_deref(), Some("hmm"));
         assert_eq!(deltas[1].seq, 1);
+    }
+
+    #[tokio::test]
+    async fn a_null_decision_result_is_the_empty_decision() {
+        let transport = Arc::new(RecordingTransport::default());
+        let decision = streaming_decision();
+        let body = "event: decision.result\ndata: null\n\n";
+
+        let submit = read_sse_response(chunked(body), &decision, transport.clone())
+            .await
+            .expect("null parses as the empty decision");
+
+        assert!(submit.actions.is_empty());
+        assert!(submit.messages.is_empty());
+        assert!(submit.state.is_none());
+        assert!(submit.agent.is_none());
     }
 
     #[tokio::test]

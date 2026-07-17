@@ -50,7 +50,7 @@ app.post("/", async (c) => {
         });
     }
 
-    return c.json(proposed ?? null);
+    return c.json(proposed);
 });
 
 serve({ fetch: app.fetch, port: 4444 });

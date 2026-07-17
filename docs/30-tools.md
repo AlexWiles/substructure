@@ -142,7 +142,7 @@ type ToolFinished = {
 ### `tool.execute`
 
 The model called a tool; run it. `input` carries the engine's validation of
-the raw `arguments` (see [Schemas](#schemas)). `proposed` is `null` on a clean
+the raw `arguments` (see [Schemas](#schemas)). `proposed` is empty on a clean
 call, because only your worker can run the tool, so you answer with a
 `tool.result` or `tool.error`. When validation fails or the model named a tool
 you never declared, `proposed` is instead a ready-made `tool.error` to return

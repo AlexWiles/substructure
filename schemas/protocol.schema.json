@@ -925,15 +925,8 @@
           "type": "integer"
         },
         "proposed": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/DecisionResponse"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "The engine's default continuation for `trigger` (`null` when it needs\nworker knowledge). Advisory: accept by echoing it as the decision."
+          "$ref": "#/$defs/DecisionResponse",
+          "description": "The engine's default continuation for `trigger` (empty when it needs\nworker knowledge). Advisory: accept by echoing it as the decision."
         },
         "session_id": {
           "type": "string"
@@ -957,6 +950,7 @@
         "agent_id",
         "identity",
         "trigger",
+        "proposed",
         "state",
         "calls",
         "pending_calls",
@@ -1052,7 +1046,9 @@
           },
           "required": [
             "type",
-            "messages"
+            "messages",
+            "new_from",
+            "client"
           ],
           "type": "object"
         },
@@ -1199,6 +1195,7 @@
             "type",
             "id",
             "request",
+            "stream",
             "attempt"
           ],
           "type": "object"
@@ -1258,7 +1255,8 @@
           "required": [
             "type",
             "id",
-            "ok"
+            "ok",
+            "truncated"
           ],
           "type": "object"
         },
@@ -1727,15 +1725,13 @@
           "items": {
             "$ref": "#/$defs/ToolCall"
           },
-          "type": [
-            "array",
-            "null"
-          ]
+          "type": "array"
         }
       },
       "required": [
         "id",
-        "role"
+        "role",
+        "tool_calls"
       ],
       "title": "Message",
       "type": "object"
@@ -1771,6 +1767,9 @@
           "type": "array"
         }
       },
+      "required": [
+        "nodes"
+      ],
       "title": "MessageTree",
       "type": "object"
     },
@@ -2001,7 +2000,8 @@
         "agent_id",
         "call_id",
         "attempt",
-        "seq"
+        "seq",
+        "tool_calls"
       ],
       "title": "TokenDelta",
       "type": "object"
@@ -2159,6 +2159,9 @@
           "type": "object"
         }
       },
+      "required": [
+        "metadata"
+      ],
       "title": "WorkerIdentity",
       "type": "object"
     },

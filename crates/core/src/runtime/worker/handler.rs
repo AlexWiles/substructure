@@ -106,7 +106,8 @@ fn try_extract(raw: &Event) -> Option<WorkerDecisionRequest> {
         pending_calls,
         derived.agent_config.as_ref(),
         &req.decision_id,
-    );
+    )
+    .unwrap_or_default();
 
     Some(WorkerDecisionRequest {
         session_id: event.aggregate_id.clone(),

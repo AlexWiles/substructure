@@ -21,7 +21,7 @@ TOOLS = [
 ]
 
 
-def decide(req: DecisionRequest) -> DecisionResponse | None:
+def decide(req: DecisionRequest) -> DecisionResponse:
     trigger = req.trigger
 
     if trigger.type == "session.start":

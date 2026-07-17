@@ -39,7 +39,7 @@ impl From<Message> for DraftMessage {
             id: Some(m.id),
             role: m.role,
             content: m.content,
-            tool_calls: m.tool_calls,
+            tool_calls: (!m.tool_calls.is_empty()).then_some(m.tool_calls),
             tool_call_id: m.tool_call_id,
             name: m.name,
         }
@@ -53,7 +53,7 @@ impl DraftMessage {
             id: self.id.unwrap_or_else(new_message_id),
             role: self.role,
             content: self.content,
-            tool_calls: self.tool_calls,
+            tool_calls: self.tool_calls.unwrap_or_default(),
             tool_call_id: self.tool_call_id,
             name: self.name,
         }
@@ -65,7 +65,7 @@ impl DraftMessage {
             id: new_message_id(),
             role: self.role,
             content: self.content,
-            tool_calls: self.tool_calls,
+            tool_calls: self.tool_calls.unwrap_or_default(),
             tool_call_id: self.tool_call_id,
             name: self.name,
         }
@@ -1174,7 +1174,7 @@ mod tests {
             id: id.to_string(),
             role,
             content: Some(Content::Text(text.to_string())),
-            tool_calls: None,
+            tool_calls: vec![],
             tool_call_id: None,
             name: None,
         }
@@ -1380,14 +1380,14 @@ mod tests {
             id: "call-1".to_string(),
             role: Role::Assistant,
             content: None,
-            tool_calls: Some(vec![ToolCall {
+            tool_calls: vec![ToolCall {
                 id: "tc-1".to_string(),
                 call_type: "function".to_string(),
                 function: ToolCallFunction {
                     name: "get_weather".to_string(),
                     arguments: "{}".to_string(),
                 },
-            }]),
+            }],
             tool_call_id: None,
             name: None,
         };

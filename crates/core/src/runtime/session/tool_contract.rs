@@ -93,13 +93,10 @@ pub fn declared_tool<'a>(
     active_path: &[Message],
     llm_calls: &'a HashMap<String, LlmCallState>,
 ) -> DeclaredTool<'a> {
-    let assistant = active_path.iter().rev().find(|m| {
-        m.tool_calls
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .any(|c| c.id == tool_call_id)
-    });
+    let assistant = active_path
+        .iter()
+        .rev()
+        .find(|m| m.tool_calls.iter().any(|c| c.id == tool_call_id));
     let tools = assistant
         .and_then(|m| llm_calls.get(&m.id))
         .and_then(|call| call.spec.tools.as_deref());
@@ -251,14 +248,14 @@ mod tests {
             id: "call-1".to_string(),
             role: Role::Assistant,
             content: None,
-            tool_calls: Some(vec![ToolCall {
+            tool_calls: vec![ToolCall {
                 id: "tc-1".to_string(),
                 call_type: "function".to_string(),
                 function: ToolCallFunction {
                     name: "get_weather".to_string(),
                     arguments: "{}".to_string(),
                 },
-            }]),
+            }],
             tool_call_id: None,
             name: None,
         };

@@ -42,7 +42,7 @@ app.post("/", async (c) => {
         });
 
     // Accept the engine's proposal for every other decision.
-    return c.json(proposed ?? null);
+    return c.json(proposed);
 });
 
 serve({ fetch: app.fetch, port: 4444 }, () => console.log("worker listening on http://localhost:4444"));

@@ -4,7 +4,7 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import type { DecisionRequest, DecisionResponse } from "./protocol.ts";
 
-function decide({ trigger, proposed }: DecisionRequest): DecisionResponse | null {
+function decide({ trigger, proposed }: DecisionRequest): DecisionResponse {
     if (trigger.type === "session.start") {
         // The engine will use this agent config to generate proposed actions.
         return {
@@ -16,7 +16,7 @@ function decide({ trigger, proposed }: DecisionRequest): DecisionResponse | null
     }
 
     // Accept the engine's proposal for every other decision.
-    return proposed ?? null;
+    return proposed;
 }
 
 const app = new Hono();

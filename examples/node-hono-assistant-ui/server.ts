@@ -22,7 +22,7 @@ const tools = [
     },
 ];
 
-function decide({ trigger, proposed }: DecisionRequest): DecisionResponse | null {
+function decide({ trigger, proposed }: DecisionRequest): DecisionResponse {
     // On session start, declare the agent the engine should run. We list only our
     // worker tools — the browser declares its own client tools (get_timezone; see
     // web/chat.tsx) on each run, and the engine layers them onto the proposal.
@@ -47,7 +47,7 @@ function decide({ trigger, proposed }: DecisionRequest): DecisionResponse | null
 
     // Accept the engine's proposal for every other decision — including
     // `client.messages`, whose proposal already carries the browser's client tools.
-    return proposed ?? null;
+    return proposed;
 }
 
 const app = new Hono();

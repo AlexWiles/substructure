@@ -30,7 +30,7 @@ request to your worker:
     "session_id": "…",
     "agent_id": "my-agent",
     "trigger": { "type": "tool.execute", "name": "get_current_time", … },
-    "proposed": { … },   // the engine's default continuation, or null
+    "proposed": { … },   // the engine's default continuation; empty when it has none
     "state": { … },      // your agent state
     "agent": { … },      // the current agent config
     "calls": [ … ]       // in-flight tool/LLM calls
@@ -70,7 +70,7 @@ The `trigger` says why the engine is asking.
 
 For most triggers, `proposed` carries the decision an ordinary agent loop
 would make next: record the reply, dispatch the tool calls, finish the
-turn. Return it as-is to accept. `proposed` is `null` when only your worker
+turn. Return it as-is to accept. `proposed` is empty when only your worker
 knows what to do, like running one of your own tools.
 
 A worker that returns `proposed` unchanged is a complete agent.

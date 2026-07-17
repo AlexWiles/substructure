@@ -207,10 +207,10 @@ export interface DecisionRequest {
      */
     pending_calls: number;
     /**
-     * The engine's default continuation for `trigger` (`null` when it needs
+     * The engine's default continuation for `trigger` (empty when it needs
      * worker knowledge). Advisory: accept by echoing it as the decision.
      */
-    proposed?: DecisionResponse | null;
+    proposed: DecisionResponse;
     session_id: string;
     state: any;
     trigger: DecisionTrigger;
@@ -312,12 +312,12 @@ export type EffectStatus = "pending" | "completed" | "failed" | "retry_scheduled
  */
 export interface WorkerIdentity {
     id?: null | string;
-    metadata?: { [key: string]: string };
+    metadata: { [key: string]: string };
 }
 
 export interface MessageTree {
     head_id?: null | string;
-    nodes?: Node[];
+    nodes: Node[];
 }
 
 export interface Node {
@@ -331,10 +331,13 @@ export interface Message {
     name?: null | string;
     role: Role;
     tool_call_id?: null | string;
-    tool_calls?: ToolCall[] | null;
+    tool_calls: ToolCall[];
 }
 
 /**
+ * The engine's default continuation for `trigger` (empty when it needs
+ * worker knowledge). Advisory: accept by echoing it as the decision.
+ *
  * A decision: the messages/actions to author, plus optional state/agent writes.
  * The worker returns one; the engine also proposes one as the default
  * continuation (`DecisionRequest::proposed`), which the worker echoes or amends.
@@ -599,6 +602,6 @@ export interface TokenDelta {
      */
     tenant_id: string;
     text?: null | string;
-    tool_calls?: ToolCallChunk[];
+    tool_calls: ToolCallChunk[];
     turn_id?: null | string;
 }

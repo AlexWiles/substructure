@@ -156,7 +156,7 @@ fn do_dequeue(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{DecisionTrigger, LlmRequest, SessionOwner};
+    use crate::protocol::{DecisionResponse, DecisionTrigger, LlmRequest, SessionOwner};
     use crate::runtime::span::SpanContext;
     use uuid::Uuid;
 
@@ -186,7 +186,7 @@ mod tests {
                 attempt: 0,
                 deadline: None,
             },
-            proposed: None,
+            proposed: DecisionResponse::default(),
             state: Default::default(),
             agent: None,
             calls: Default::default(),

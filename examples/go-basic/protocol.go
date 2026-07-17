@@ -1,3 +1,27 @@
+// Code generated from JSON Schema using quicktype. DO NOT EDIT.
+// To parse and unparse this JSON data, add this code to your project and do:
+//
+//    protocol, err := UnmarshalProtocol(bytes)
+//    bytes, err = protocol.Marshal()
+
+package main
+
+import "bytes"
+import "errors"
+import "time"
+
+import "encoding/json"
+
+func UnmarshalProtocol(data []byte) (Protocol, error) {
+	var r Protocol
+	err := json.Unmarshal(data, &r)
+	return r, err
+}
+
+func (r *Protocol) Marshal() ([]byte, error) {
+	return json.Marshal(r)
+}
+
 // One entry point per wire surface; every protocol type is named under $defs.
 type Protocol struct {
 	ClientInput      *ClientInput      `json:"client_input,omitempty"`
@@ -143,51 +167,49 @@ type ClientPayload struct {
 	Name     *string           `json:"name,omitempty"`
 }
 
-import "time"
-
 type DecisionRequest struct {
-	// The agent config resolved for the active path (`null` when none is set).                  
-	Agent                                                                      *AgentConfig      `json:"agent"`
-	AgentID                                                                    string            `json:"agent_id"`
-	Ancestry                                                                   []string          `json:"ancestry"`
-	Attempts                                                                   int64             `json:"attempts"`
-	Calls                                                                      []Effect          `json:"calls"`
-	Deadline                                                                   *time.Time        `json:"deadline"`
-	DecisionID                                                                 string            `json:"decision_id"`
-	Identity                                                                   WorkerIdentity    `json:"identity"`
-	MessageTree                                                                MessageTree       `json:"message_tree"`
-	Messages                                                                   []Message         `json:"messages"`
-	// Count of in-flight `tool_call`/`sub_agent` calls.                                         
-	PendingCalls                                                               int64             `json:"pending_calls"`
-	// The engine's default continuation for `trigger` (`null` when it needs                     
-	// worker knowledge). Advisory: accept by echoing it as the decision.                        
-	Proposed                                                                   *DecisionResponse `json:"proposed"`
-	SessionID                                                                  string            `json:"session_id"`
-	State                                                                      interface{}       `json:"state"`
-	Trigger                                                                    DecisionTrigger   `json:"trigger"`
-	TurnID                                                                     *string           `json:"turn_id"`
+	// The agent config resolved for the active path (`null` when none is set).
+	Agent       *AgentConfig   `json:"agent"`
+	AgentID     string         `json:"agent_id"`
+	Ancestry    []string       `json:"ancestry"`
+	Attempts    int64          `json:"attempts"`
+	Calls       []Effect       `json:"calls"`
+	Deadline    *time.Time     `json:"deadline"`
+	DecisionID  string         `json:"decision_id"`
+	Identity    WorkerIdentity `json:"identity"`
+	MessageTree MessageTree    `json:"message_tree"`
+	Messages    []Message      `json:"messages"`
+	// Count of in-flight `tool_call`/`sub_agent` calls.
+	PendingCalls int64 `json:"pending_calls"`
+	// The engine's default continuation for `trigger` (empty when it needs
+	// worker knowledge). Advisory: accept by echoing it as the decision.
+	Proposed  DecisionResponse `json:"proposed"`
+	SessionID string           `json:"session_id"`
+	State     interface{}      `json:"state"`
+	Trigger   DecisionTrigger  `json:"trigger"`
+	TurnID    *string          `json:"turn_id"`
 }
 
 // A declared agent identity. `model` is the only required field; everything else
 // refines the proposed LLM request the engine derives for `client.messages`.
 type AgentConfig struct {
-	// Provider wire format for worker-handled calls; requires `handler:                             
-	// worker`. Absent ⇒ the neutral format.                                                         
-	Format                                                                         *LlmFormat        `json:"format"`
-	// Where the proposed LLM call runs: `Some(Worker)` ⇒ the worker executes it                     
-	// (answering `llm.execute`); absent or `Some(Server)` ⇒ the engine's                            
-	// server-side provider. `client` is invalid and rejected at the decision seam.                  
-	Handler                                                                        *Handler          `json:"handler"`
-	Model                                                                          string            `json:"model"`
-	Retry                                                                          *RetryPolicy      `json:"retry"`
-	Stream                                                                         *bool             `json:"stream,omitempty"`
-	// Sub-agents the model can delegate to. Presented to the model as tools (by                     
-	// id) alongside `tools`, but each call spawns a child session rather than                       
-	// executing a function.                                                                         
-	SubAgents                                                                      []SubAgentElement `json:"sub_agents,omitempty"`
-	System                                                                         *string           `json:"system"`
-	// Worker- or client-executed tools the model can call.                                          
-	Tools                                                                          []AgentTool       `json:"tools,omitempty"`
+	// Provider wire format for worker-handled calls; requires `handler:
+	// worker`. Absent ⇒ the neutral format.
+	Format *LlmFormat `json:"format"`
+	// Where the proposed LLM call runs: `Some(Worker)` ⇒ the worker executes it
+	// (answering `llm.execute`); absent or `Some(Server)` ⇒ the engine's
+	// server-side provider. `client` is invalid and rejected at the decision seam.
+	Handler *Handler     `json:"handler"`
+	Model   string       `json:"model"`
+	Retry   *RetryPolicy `json:"retry"`
+	Stream  *bool        `json:"stream,omitempty"`
+	// Sub-agents the model can delegate to. Presented to the model as tools (by
+	// id) alongside `tools`, but each call spawns a child session rather than
+	// executing a function.
+	SubAgents []SubAgentElement `json:"sub_agents,omitempty"`
+	System    *string           `json:"system"`
+	// Worker- or client-executed tools the model can call.
+	Tools []AgentTool `json:"tools,omitempty"`
 }
 
 // Fully-resolved retry policy — no optional fields. Stored on call state and
@@ -212,19 +234,19 @@ type SubAgentElement struct {
 // `name`/`arguments`/`handler`, an LLM call's `handler`/`stream`, a
 // sub-agent's `agent_id`/`session_id`.
 type Effect struct {
-	AgentID                                      *string      `json:"agent_id"`
-	// The tree node the effect was requested at.             
-	Anchor                                       *string      `json:"anchor"`
-	Arguments                                    *string      `json:"arguments"`
-	Attempt                                      int64        `json:"attempt"`
-	Deadline                                     *time.Time   `json:"deadline"`
-	Handler                                      *Handler     `json:"handler"`
-	ID                                           string       `json:"id"`
-	Kind                                         EffectKind   `json:"kind"`
-	Name                                         *string      `json:"name"`
-	SessionID                                    *string      `json:"session_id"`
-	Status                                       EffectStatus `json:"status"`
-	Stream                                       *bool        `json:"stream"`
+	AgentID *string `json:"agent_id"`
+	// The tree node the effect was requested at.
+	Anchor    *string      `json:"anchor"`
+	Arguments *string      `json:"arguments"`
+	Attempt   int64        `json:"attempt"`
+	Deadline  *time.Time   `json:"deadline"`
+	Handler   *Handler     `json:"handler"`
+	ID        string       `json:"id"`
+	Kind      EffectKind   `json:"kind"`
+	Name      *string      `json:"name"`
+	SessionID *string      `json:"session_id"`
+	Status    EffectStatus `json:"status"`
+	Stream    *bool        `json:"stream"`
 }
 
 // The owner as delivered to the worker on `DecisionRequest.identity`: the
@@ -232,12 +254,12 @@ type Effect struct {
 // internally but is not sent to the worker.
 type WorkerIdentity struct {
 	ID       *string           `json:"id"`
-	Metadata map[string]string `json:"metadata,omitempty"`
+	Metadata map[string]string `json:"metadata"`
 }
 
 type MessageTree struct {
 	HeadID *string `json:"head_id"`
-	Nodes  []Node  `json:"nodes,omitempty"`
+	Nodes  []Node  `json:"nodes"`
 }
 
 type Node struct {
@@ -254,16 +276,19 @@ type Message struct {
 	ToolCalls  []ToolCallElement `json:"tool_calls"`
 }
 
+// The engine's default continuation for `trigger` (empty when it needs
+// worker knowledge). Advisory: accept by echoing it as the decision.
+//
 // A decision: the messages/actions to author, plus optional state/agent writes.
 // The worker returns one; the engine also proposes one as the default
 // continuation (`DecisionRequest::proposed`), which the worker echoes or amends.
 type DecisionResponse struct {
-	Actions                                                                         []DecisionAction `json:"actions,omitempty"`
-	// A new agent config write; omitted keeps the current config.                                   
-	Agent                                                                           *AgentConfig     `json:"agent"`
-	Messages                                                                        []DraftMessage   `json:"messages,omitempty"`
-	// Omitted or `null` keeps the current state; clear with a non-null empty value.                 
-	State                                                                           interface{}      `json:"state"`
+	Actions []DecisionAction `json:"actions,omitempty"`
+	// A new agent config write; omitted keeps the current config.
+	Agent    *AgentConfig   `json:"agent"`
+	Messages []DraftMessage `json:"messages,omitempty"`
+	// Omitted or `null` keeps the current state; clear with a non-null empty value.
+	State interface{} `json:"state"`
 }
 
 // The action a worker authors on the wire. Mirrors the internal `Action`, but a
@@ -289,41 +314,41 @@ type DecisionResponse struct {
 //
 // `interrupt_id` omitted ⇒ the engine mints one to correlate the later resume.
 type DecisionAction struct {
-	// `server` or `worker`; omitted ⇒ `server`.                                             
-	//                                                                                       
-	// `worker` or `client`; omitted ⇒ `worker`.                                             
-	Handler                                                               *Handler           `json:"handler,omitempty"`
-	ID                                                                    *string            `json:"id"`
-	MaxCompletionTokens                                                   *int64             `json:"max_completion_tokens"`
-	Messages                                                              []DraftMessage     `json:"messages"`
-	Model                                                                 *string            `json:"model"`
-	Reasoning                                                             *ReasoningConfig   `json:"reasoning"`
-	Retry                                                                 *RetryPolicy       `json:"retry"`
-	Stream                                                                *bool              `json:"stream"`
-	Temperature                                                           *float64           `json:"temperature"`
-	Tools                                                                 []LlmTool          `json:"tools"`
-	Type                                                                  DecisionActionType `json:"type"`
-	Arguments                                                             interface{}        `json:"arguments"`
-	Name                                                                  *string            `json:"name,omitempty"`
-	Attempt                                                               *int64             `json:"attempt"`
-	Result                                                                interface{}        `json:"result"`
-	// A neutral `LlmResponse`, or the provider's native response when the                   
-	// answered `llm.execute` carried a `format`.                                            
-	Response                                                              interface{}        `json:"response"`
-	Code                                                                  *ErrorCode         `json:"code"`
-	Detail                                                                interface{}        `json:"detail"`
-	Error                                                                 *string            `json:"error,omitempty"`
-	// Omitted ⇒ terminal.                                                                   
-	Retryable                                                             *bool              `json:"retryable,omitempty"`
-	AgentID                                                               *string            `json:"agent_id,omitempty"`
-	SessionID                                                             *string            `json:"session_id,omitempty"`
-	// The model tool-call this delegation answers — always required.                        
-	ToolCallID                                                            *string            `json:"tool_call_id,omitempty"`
-	Message                                                               *DraftMessage      `json:"message,omitempty"`
-	InterruptID                                                           *string            `json:"interrupt_id"`
-	Payload                                                               interface{}        `json:"payload"`
-	Reason                                                                *string            `json:"reason,omitempty"`
-	Data                                                                  interface{}        `json:"data"`
+	// `server` or `worker`; omitted ⇒ `server`.
+	//
+	// `worker` or `client`; omitted ⇒ `worker`.
+	Handler             *Handler           `json:"handler,omitempty"`
+	ID                  *string            `json:"id"`
+	MaxCompletionTokens *int64             `json:"max_completion_tokens"`
+	Messages            []DraftMessage     `json:"messages"`
+	Model               *string            `json:"model"`
+	Reasoning           *ReasoningConfig   `json:"reasoning"`
+	Retry               *RetryPolicy       `json:"retry"`
+	Stream              *bool              `json:"stream"`
+	Temperature         *float64           `json:"temperature"`
+	Tools               []LlmTool          `json:"tools"`
+	Type                DecisionActionType `json:"type"`
+	Arguments           interface{}        `json:"arguments"`
+	Name                *string            `json:"name,omitempty"`
+	Attempt             *int64             `json:"attempt"`
+	Result              interface{}        `json:"result"`
+	// A neutral `LlmResponse`, or the provider's native response when the
+	// answered `llm.execute` carried a `format`.
+	Response interface{} `json:"response"`
+	Code     *ErrorCode  `json:"code"`
+	Detail   interface{} `json:"detail"`
+	Error    *string     `json:"error,omitempty"`
+	// Omitted ⇒ terminal.
+	Retryable *bool   `json:"retryable,omitempty"`
+	AgentID   *string `json:"agent_id,omitempty"`
+	SessionID *string `json:"session_id,omitempty"`
+	// The model tool-call this delegation answers — always required.
+	ToolCallID  *string       `json:"tool_call_id,omitempty"`
+	Message     *DraftMessage `json:"message,omitempty"`
+	InterruptID *string       `json:"interrupt_id"`
+	Payload     interface{}   `json:"payload"`
+	Reason      *string       `json:"reason,omitempty"`
+	Data        interface{}   `json:"data"`
 }
 
 type ReasoningConfig struct {
@@ -337,15 +362,15 @@ type ReasoningConfig struct {
 // OpenAI-style `{"type": "function", "function": {…}}` nesting re-wrap at
 // their own boundary.
 type LlmTool struct {
-	Description                                                             string      `json:"description"`
-	// JSON Schema for the tool's arguments; omitted declares a no-argument             
-	// tool. The engine validates each call's arguments against it and hands            
-	// providers their native form.                                                     
-	Input                                                                   interface{} `json:"input"`
-	Name                                                                    string      `json:"name"`
-	// JSON Schema the settled result must satisfy; never sent to the model.            
-	// A violating result settles as a terminal tool error.                             
-	Output                                                                  interface{} `json:"output"`
+	Description string `json:"description"`
+	// JSON Schema for the tool's arguments; omitted declares a no-argument
+	// tool. The engine validates each call's arguments against it and hands
+	// providers their native form.
+	Input interface{} `json:"input"`
+	Name  string      `json:"name"`
+	// JSON Schema the settled result must satisfy; never sent to the model.
+	// A violating result settles as a terminal tool error.
+	Output interface{} `json:"output"`
 }
 
 // The trigger a worker sees on the wire — the materialized projection of the
@@ -364,41 +389,41 @@ type LlmTool struct {
 // to the worker. Shared by the [`ClientInput::InterruptResume`] input and the
 // [`DecisionTrigger::InterruptResumed`] trigger.
 type DecisionTrigger struct {
-	Type                                                                      DecisionTriggerType `json:"type"`
-	// Inputs the client declared on its run; the engine layers `client.tools`                    
-	// onto the proposed config by default.                                                       
-	Client                                                                    *ClientContext      `json:"client,omitempty"`
-	Messages                                                                  []DraftMessage      `json:"messages,omitempty"`
-	NewFrom                                                                   *int64              `json:"new_from,omitempty"`
-	Args                                                                      interface{}         `json:"args"`
-	Name                                                                      *string             `json:"name,omitempty"`
-	Arguments                                                                 *string             `json:"arguments,omitempty"`
-	Attempt                                                                   *int64              `json:"attempt,omitempty"`
-	Deadline                                                                  *time.Time          `json:"deadline"`
-	ID                                                                        *string             `json:"id,omitempty"`
-	// The engine's classification of `arguments` against the tool's                              
-	// declared `input` schema: `valid` (with the parsed `value`),                                
-	// `invalid` (value plus the violation), or `malformed` (not a JSON                           
-	// object). Always on the wire.                                                               
-	Input                                                                     *ToolInput          `json:"input,omitempty"`
-	Error                                                                     *string             `json:"error"`
-	Ok                                                                        *bool               `json:"ok,omitempty"`
-	Result                                                                    *string             `json:"result"`
-	Format                                                                    *LlmFormat          `json:"format"`
-	// The neutral `LlmRequest` JSON, or the provider's native request body                       
-	// when `format` is set.                                                                      
-	Request                                                                   interface{}         `json:"request"`
-	Stream                                                                    *bool               `json:"stream,omitempty"`
-	Code                                                                      *ErrorCode          `json:"code"`
-	Cost                                                                      *string             `json:"cost"`
-	Detail                                                                    interface{}         `json:"detail"`
-	Message                                                                   *DraftMessage       `json:"message"`
-	Truncated                                                                 *bool               `json:"truncated,omitempty"`
-	Usage                                                                     interface{}         `json:"usage"`
-	AgentID                                                                   *string             `json:"agent_id,omitempty"`
-	SessionID                                                                 *string             `json:"session_id,omitempty"`
-	InterruptID                                                               *string             `json:"interrupt_id,omitempty"`
-	Payload                                                                   interface{}         `json:"payload"`
+	Type DecisionTriggerType `json:"type"`
+	// Inputs the client declared on its run; the engine layers `client.tools`
+	// onto the proposed config by default.
+	Client    *ClientContext `json:"client,omitempty"`
+	Messages  []DraftMessage `json:"messages,omitempty"`
+	NewFrom   *int64         `json:"new_from,omitempty"`
+	Args      interface{}    `json:"args"`
+	Name      *string        `json:"name,omitempty"`
+	Arguments *string        `json:"arguments,omitempty"`
+	Attempt   *int64         `json:"attempt,omitempty"`
+	Deadline  *time.Time     `json:"deadline"`
+	ID        *string        `json:"id,omitempty"`
+	// The engine's classification of `arguments` against the tool's
+	// declared `input` schema: `valid` (with the parsed `value`),
+	// `invalid` (value plus the violation), or `malformed` (not a JSON
+	// object). Always on the wire.
+	Input  *ToolInput `json:"input,omitempty"`
+	Error  *string    `json:"error"`
+	Ok     *bool      `json:"ok,omitempty"`
+	Result *string    `json:"result"`
+	Format *LlmFormat `json:"format"`
+	// The neutral `LlmRequest` JSON, or the provider's native request body
+	// when `format` is set.
+	Request     interface{}   `json:"request"`
+	Stream      *bool         `json:"stream,omitempty"`
+	Code        *ErrorCode    `json:"code"`
+	Cost        *string       `json:"cost"`
+	Detail      interface{}   `json:"detail"`
+	Message     *DraftMessage `json:"message"`
+	Truncated   *bool         `json:"truncated,omitempty"`
+	Usage       interface{}   `json:"usage"`
+	AgentID     *string       `json:"agent_id,omitempty"`
+	SessionID   *string       `json:"session_id,omitempty"`
+	InterruptID *string       `json:"interrupt_id,omitempty"`
+	Payload     interface{}   `json:"payload"`
 }
 
 // The engine's classification of `arguments` against the tool's
@@ -436,22 +461,22 @@ type ToolCallChunk struct {
 }
 
 type TokenDelta struct {
-	AgentID                                                 string          `json:"agent_id"`
-	Attempt                                                 int64           `json:"attempt"`
-	CallID                                                  string          `json:"call_id"`
-	FinishReason                                            *string         `json:"finish_reason"`
-	Reasoning                                               *string         `json:"reasoning"`
-	// Transport routing key.                                               
-	RootSessionID                                           string          `json:"root_session_id"`
-	// Per-call counter, distinct from event-store sequence.                
-	Seq                                                     int64           `json:"seq"`
-	// May be a sub-agent of root.                                          
-	SessionID                                               string          `json:"session_id"`
-	// Tenant isolation key — subscribers must match.                       
-	TenantID                                                string          `json:"tenant_id"`
-	Text                                                    *string         `json:"text"`
-	ToolCalls                                               []ToolCallChunk `json:"tool_calls,omitempty"`
-	TurnID                                                  *string         `json:"turn_id"`
+	AgentID      string  `json:"agent_id"`
+	Attempt      int64   `json:"attempt"`
+	CallID       string  `json:"call_id"`
+	FinishReason *string `json:"finish_reason"`
+	Reasoning    *string `json:"reasoning"`
+	// Transport routing key.
+	RootSessionID string `json:"root_session_id"`
+	// Per-call counter, distinct from event-store sequence.
+	Seq int64 `json:"seq"`
+	// May be a sub-agent of root.
+	SessionID string `json:"session_id"`
+	// Tenant isolation key — subscribers must match.
+	TenantID  string          `json:"tenant_id"`
+	Text      *string         `json:"text"`
+	ToolCalls []ToolCallChunk `json:"tool_calls"`
+	TurnID    *string         `json:"turn_id"`
 }
 
 // Server-side executor resolves the provider and makes the call (LLM only).
@@ -603,4 +628,132 @@ const (
 type Content struct {
 	ContentPartArray []ContentPart
 	String           *string
+}
+
+func (x *Content) UnmarshalJSON(data []byte) error {
+	x.ContentPartArray = nil
+	object, err := unmarshalUnion(data, nil, nil, nil, &x.String, true, &x.ContentPartArray, false, nil, false, nil, false, nil, true)
+	if err != nil {
+		return err
+	}
+	if object {
+	}
+	return nil
+}
+
+func (x *Content) MarshalJSON() ([]byte, error) {
+	return marshalUnion(nil, nil, nil, x.String, x.ContentPartArray != nil, x.ContentPartArray, false, nil, false, nil, false, nil, true)
+}
+
+func unmarshalUnion(data []byte, pi **int64, pf **float64, pb **bool, ps **string, haveArray bool, pa interface{}, haveObject bool, pc interface{}, haveMap bool, pm interface{}, haveEnum bool, pe interface{}, nullable bool) (bool, error) {
+	if pi != nil {
+		*pi = nil
+	}
+	if pf != nil {
+		*pf = nil
+	}
+	if pb != nil {
+		*pb = nil
+	}
+	if ps != nil {
+		*ps = nil
+	}
+
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	tok, err := dec.Token()
+	if err != nil {
+		return false, err
+	}
+
+	switch v := tok.(type) {
+	case json.Number:
+		if pi != nil {
+			i, err := v.Int64()
+			if err == nil {
+				*pi = &i
+				return false, nil
+			}
+		}
+		if pf != nil {
+			f, err := v.Float64()
+			if err == nil {
+				*pf = &f
+				return false, nil
+			}
+			return false, errors.New("Unparsable number")
+		}
+		return false, errors.New("Union does not contain number")
+	case float64:
+		return false, errors.New("Decoder should not return float64")
+	case bool:
+		if pb != nil {
+			*pb = &v
+			return false, nil
+		}
+		return false, errors.New("Union does not contain bool")
+	case string:
+		if haveEnum {
+			return false, json.Unmarshal(data, pe)
+		}
+		if ps != nil {
+			*ps = &v
+			return false, nil
+		}
+		return false, errors.New("Union does not contain string")
+	case nil:
+		if nullable {
+			return false, nil
+		}
+		return false, errors.New("Union does not contain null")
+	case json.Delim:
+		if v == '{' {
+			if haveObject {
+				return true, json.Unmarshal(data, pc)
+			}
+			if haveMap {
+				return false, json.Unmarshal(data, pm)
+			}
+			return false, errors.New("Union does not contain object")
+		}
+		if v == '[' {
+			if haveArray {
+				return false, json.Unmarshal(data, pa)
+			}
+			return false, errors.New("Union does not contain array")
+		}
+		return false, errors.New("Cannot handle delimiter")
+	}
+	return false, errors.New("Cannot unmarshal union")
+}
+
+func marshalUnion(pi *int64, pf *float64, pb *bool, ps *string, haveArray bool, pa interface{}, haveObject bool, pc interface{}, haveMap bool, pm interface{}, haveEnum bool, pe interface{}, nullable bool) ([]byte, error) {
+	if pi != nil {
+		return json.Marshal(*pi)
+	}
+	if pf != nil {
+		return json.Marshal(*pf)
+	}
+	if pb != nil {
+		return json.Marshal(*pb)
+	}
+	if ps != nil {
+		return json.Marshal(*ps)
+	}
+	if haveArray {
+		return json.Marshal(pa)
+	}
+	if haveObject {
+		return json.Marshal(pc)
+	}
+	if haveMap {
+		return json.Marshal(pm)
+	}
+	if haveEnum {
+		return json.Marshal(pe)
+	}
+	if nullable {
+		return json.Marshal(nil)
+	}
+	return nil, errors.New("Union must not be null")
 }

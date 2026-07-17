@@ -42,7 +42,7 @@ const server = createServer((req, res) => {
     req.on("end", () => {
         const decision = decide(JSON.parse(body));
         res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify(decision ?? null));
+        res.end(JSON.stringify(decision));
     });
 });
 

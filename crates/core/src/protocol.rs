@@ -117,8 +117,7 @@ pub struct Message {
     pub role: Role,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<Content>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<ToolCall>>,
+    pub tool_calls: Vec<ToolCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -170,7 +169,6 @@ pub enum InterruptOrigin {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "MessageTree")]
 pub struct MessageTree {
-    #[serde(default)]
     pub nodes: Vec<NewMessage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_id: Option<String>,
@@ -240,7 +238,6 @@ pub struct SessionOwner {
 pub struct WorkerIdentity {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub metadata: HashMap<String, String>,
 }
 
@@ -480,7 +477,6 @@ pub struct TokenDelta {
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallChunk>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
@@ -699,11 +695,9 @@ pub enum DecisionTrigger {
     #[serde(rename = "client.messages")]
     ClientTranscript {
         messages: Vec<DraftMessage>,
-        #[serde(default)]
         new_from: usize,
         /// Inputs the client declared on its run; the engine layers `client.tools`
         /// onto the proposed config by default.
-        #[serde(default)]
         client: ClientContext,
     },
     #[serde(rename = "client.action")]
@@ -746,7 +740,6 @@ pub enum DecisionTrigger {
         request: Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         format: Option<LlmFormat>,
-        #[serde(default)]
         stream: bool,
         attempt: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -758,7 +751,6 @@ pub enum DecisionTrigger {
         ok: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<DraftMessage>,
-        #[serde(default)]
         truncated: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<Value>,
@@ -971,9 +963,9 @@ pub struct DecisionRequest<'a> {
     pub agent_id: &'a str,
     pub identity: WorkerIdentity,
     pub trigger: &'a DecisionTrigger,
-    /// The engine's default continuation for `trigger` (`null` when it needs
+    /// The engine's default continuation for `trigger` (empty when it needs
     /// worker knowledge). Advisory: accept by echoing it as the decision.
-    pub proposed: &'a Option<DecisionResponse>,
+    pub proposed: &'a DecisionResponse,
     pub state: &'a WorkerState,
     /// The agent config resolved for the active path (`null` when none is set).
     pub agent: &'a Option<AgentConfig>,

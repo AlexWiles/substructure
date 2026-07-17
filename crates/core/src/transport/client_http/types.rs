@@ -164,7 +164,7 @@ mod tests {
                 id: id.to_string(),
                 role,
                 content: None,
-                tool_calls: None,
+                tool_calls: vec![],
                 tool_call_id: None,
                 name: None,
             },
