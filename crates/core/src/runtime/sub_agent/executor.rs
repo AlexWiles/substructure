@@ -5,10 +5,10 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::providers::memory_queue::TaskQueue;
-use crate::runtime::aggregate::{execute, Caller, ConflictRetry, ExecuteError, ExecuteInput};
 use crate::runtime::event_store::EventStore;
 use crate::runtime::session::command::{CommandPayload, SessionError};
-use crate::runtime::session::state::SessionState;
+use crate::runtime::session::{execute, ConflictRetry, ExecuteError, ExecuteInput};
+use crate::runtime::Caller;
 
 use super::SubAgentTask;
 
@@ -53,7 +53,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
             span,
             ..
         } => {
-            let create_result = execute::<SessionState>(
+            let create_result = execute(
                 store,
                 ExecuteInput {
                     aggregate_id: child_session_id.clone(),
@@ -88,7 +88,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
                 },
             };
 
-            let result = execute::<SessionState>(
+            let result = execute(
                 store,
                 ExecuteInput {
                     aggregate_id: parent_session_id.clone(),
@@ -118,7 +118,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
             span,
             ..
         } => {
-            let result = execute::<SessionState>(
+            let result = execute(
                 store,
                 ExecuteInput {
                     aggregate_id: target_session_id.clone(),
@@ -155,7 +155,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
             span,
             ..
         } => {
-            let result = execute::<SessionState>(
+            let result = execute(
                 store,
                 ExecuteInput {
                     aggregate_id: parent_session_id.clone(),
@@ -188,7 +188,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
             span,
             ..
         } => {
-            let result = execute::<SessionState>(
+            let result = execute(
                 store,
                 ExecuteInput {
                     aggregate_id: child_session_id.clone(),

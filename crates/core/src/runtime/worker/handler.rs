@@ -2,16 +2,15 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::runtime::aggregate::{AggregateState, DomainEvent};
-use crate::runtime::event_store::{Event, EventStore};
+use crate::runtime::event_store::EventStore;
 use crate::runtime::processor::{
     EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCheckpointStore,
     ProcessorError,
 };
 use crate::runtime::session::events::EventPayload;
 use crate::runtime::session::propose::propose;
-use crate::runtime::session::state::SessionState;
 use crate::runtime::session::wire::to_wire_trigger;
+use crate::runtime::session::SessionEvent;
 
 use super::{WorkerDecisionRequest, WorkerQueue};
 
@@ -31,14 +30,7 @@ impl EventProcessor for WorkerDecisionProjection {
         "worker_decision_enqueue"
     }
 
-    fn shard_key(&self, event: &Event) -> Option<String> {
-        if event.aggregate_type != SessionState::AGGREGATE_TYPE {
-            return None;
-        }
-        Some(event.aggregate_id.clone())
-    }
-
-    async fn apply(&self, event: &Event) -> Result<(), ProcessorError> {
+    async fn apply(&self, event: SessionEvent) -> Result<(), ProcessorError> {
         if let Some(decision) = try_extract(event) {
             tracing::debug!(
                 session_id = %decision.session_id,
@@ -70,11 +62,7 @@ pub fn spawn_worker_processor(
     .spawn()
 }
 
-fn try_extract(raw: &Event) -> Option<WorkerDecisionRequest> {
-    if raw.aggregate_type != SessionState::AGGREGATE_TYPE {
-        return None;
-    }
-    let event = DomainEvent::<SessionState>::from_raw(raw).ok()?;
+fn try_extract(event: SessionEvent) -> Option<WorkerDecisionRequest> {
     let req = match &event.payload {
         EventPayload::WorkerDecisionRequested(req) => req,
         _ => return None,

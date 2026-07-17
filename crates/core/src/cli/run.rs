@@ -162,7 +162,7 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
     // bounds the replay to this invocation's events. The active-turn lookup a
     // resume/settle needs lives in the router.
     let base_seq = match rt.get_session(DEFAULT_TENANT, &session_id).await {
-        Ok((snapshot, _)) => snapshot.stream_version,
+        Ok(session) => StreamVersion(session.stream_version),
         Err(_) => StreamVersion(0),
     };
 
@@ -213,9 +213,7 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
                 if raw {
                     write_json(&mut stdout, &event)?;
                 }
-                let Ok(payload) = serde_json::from_value::<EventPayload>(event.payload) else {
-                    continue;
-                };
+                let payload = event.payload;
                 // Drain queued deltas before `llm.call.completed` so no closing
                 // event outruns its last streamed fragment.
                 if matches!(payload, EventPayload::LlmCallCompleted(_)) {

@@ -5,13 +5,13 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use crate::runtime::aggregate::{AggregateState, DomainEvent};
-use crate::runtime::event_store::{AggregateSort, Event, EventStore, StoreError};
+use crate::runtime::event_store::{AggregateSort, EventStore, StoreError};
 use crate::runtime::processor::{
     EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCheckpointStore,
     ProcessorError,
 };
-use crate::runtime::session::state::{SessionState, SessionStatus};
+use crate::runtime::session::state::SessionStatus;
+use crate::runtime::session::SessionEvent;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SessionFilter {
@@ -93,21 +93,7 @@ impl EventProcessor for SessionIndexProjection {
         "session_index_v1"
     }
 
-    fn shard_key(&self, event: &Event) -> Option<String> {
-        if event.aggregate_type != SessionState::AGGREGATE_TYPE {
-            return None;
-        }
-        Some(event.aggregate_id.clone())
-    }
-
-    async fn apply(&self, event: &Event) -> Result<(), ProcessorError> {
-        if event.aggregate_type != SessionState::AGGREGATE_TYPE {
-            return Ok(());
-        }
-
-        let event = DomainEvent::<SessionState>::from_raw(event)
-            .map_err(|e| ProcessorError::Apply(e.to_string()))?;
-
+    async fn apply(&self, event: SessionEvent) -> Result<(), ProcessorError> {
         let derived = event.derived.ok_or_else(|| {
             ProcessorError::Apply("missing derived state for session event".into())
         })?;

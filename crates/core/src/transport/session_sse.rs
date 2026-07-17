@@ -2,14 +2,14 @@ use axum::response::sse::Event as SseEvent;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::event_store::Event;
 use crate::protocol::TokenDelta;
+use crate::session::SessionEvent;
 
 /// Terminates when `event_rx` closes (Turn scopes auto-close on
 /// `turn.completed`). Delta-side closure is ignored — the transport outlives
 /// any single turn.
 pub fn merge_session_stream(
-    mut event_rx: mpsc::Receiver<Event>,
+    mut event_rx: mpsc::Receiver<SessionEvent>,
     mut delta_rx: mpsc::Receiver<TokenDelta>,
     scope_turn_id: Option<String>,
     shutdown: CancellationToken,
@@ -22,10 +22,10 @@ pub fn merge_session_stream(
                 _ = shutdown.cancelled() => return,
                 ev = event_rx.recv() => match ev {
                     Some(event) => {
-                        let event_type = event.payload_type().to_owned();
+                        let event_type = event.payload_type();
                         let data = serde_json::to_string(&event).unwrap_or_default();
                         let sse = SseEvent::default()
-                            .id(event.stream_version.0.to_string())
+                            .id(event.sequence.to_string())
                             .event(event_type)
                             .data(data);
                         if out_tx.send(sse).await.is_err() {

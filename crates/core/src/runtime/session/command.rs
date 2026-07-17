@@ -13,7 +13,7 @@ use crate::protocol::{
     EffectStatus, ErrorCode, ImageUrl, InterruptOrigin, LlmFormat, LlmRequest, LlmResponse,
     NewMessage, RetryPolicy, Role, SessionOwner, WorkerState,
 };
-use crate::runtime::aggregate::Caller;
+use crate::runtime::Caller;
 
 #[derive(Debug, Clone)]
 pub enum CommandPayload {
@@ -1844,15 +1844,16 @@ mod tests {
 
     use chrono::Utc;
 
+    use super::super::aggregate::{CommitContext, SessionAggregate};
     use super::*;
     use crate::protocol::Message;
-    use crate::runtime::aggregate::{Aggregate, Caller, CommitContext};
     use crate::runtime::session::events::EventPayload;
     use crate::runtime::span::SpanContext;
+    use crate::runtime::Caller;
 
     /// Run a command through the handler and commit the resulting events, like production `execute`.
     fn dispatch(
-        agg: &mut Aggregate<SessionState>,
+        agg: &mut SessionAggregate,
         cmd: CommandPayload,
         caller: &Caller,
     ) -> Vec<EventPayload> {
@@ -1869,7 +1870,7 @@ mod tests {
     /// `session.start` decision with an empty (no-config) response so tests
     /// resume from a clean "no pending decision" state. Use
     /// [`create_session_with_config`] when a test needs an agent config set.
-    fn create_session(session_id: &str, tenant_id: &str, user_id: &str) -> Aggregate<SessionState> {
+    fn create_session(session_id: &str, tenant_id: &str, user_id: &str) -> SessionAggregate {
         create_session_with_config(session_id, tenant_id, user_id, None)
     }
 
@@ -1878,8 +1879,8 @@ mod tests {
         tenant_id: &str,
         user_id: &str,
         agent: Option<AgentConfig>,
-    ) -> Aggregate<SessionState> {
-        let mut agg = Aggregate::new(
+    ) -> SessionAggregate {
+        let mut agg = SessionAggregate::new(
             session_id.to_string(),
             tenant_id.to_string(),
             SessionState::new(session_id.to_string()),
@@ -1926,7 +1927,7 @@ mod tests {
     /// Complete the pending `session.start` decision with an empty response, for
     /// tests that build the aggregate directly (e.g. a custom `worker_retry`)
     /// instead of through [`create_session`].
-    fn drain_session_start(agg: &mut Aggregate<SessionState>) {
+    fn drain_session_start(agg: &mut SessionAggregate) {
         let start = agg
             .state
             .worker_decisions
@@ -2081,7 +2082,7 @@ mod tests {
     /// Declare a `get_weather` tool with an output contract, run its llm.call
     /// to the point where the tool call is in flight, and settle it with
     /// `result`. Returns the settle's events.
-    fn settle_with_output_contract(result: &str) -> (Aggregate<SessionState>, Vec<EventPayload>) {
+    fn settle_with_output_contract(result: &str) -> (SessionAggregate, Vec<EventPayload>) {
         use crate::protocol::{LlmTool, ToolCall, ToolCallFunction};
 
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
@@ -2848,7 +2849,7 @@ mod tests {
     }
 
     /// Drive a worker `Append` action onto the tree via a user-message decision.
-    fn append_via_worker(agg: &mut Aggregate<SessionState>, transcript: Vec<DraftMessage>) {
+    fn append_via_worker(agg: &mut SessionAggregate, transcript: Vec<DraftMessage>) {
         let setup = dispatch(
             agg,
             CommandPayload::SubmitClientPayload {
@@ -2982,7 +2983,7 @@ mod tests {
 
     /// Record `transcript` into the tree via one worker decision, giving tests
     /// exact control over recorded ids (reconcile keeps explicit unknown ids).
-    fn seed_tree(agg: &mut Aggregate<SessionState>, transcript: Vec<DraftMessage>) {
+    fn seed_tree(agg: &mut SessionAggregate, transcript: Vec<DraftMessage>) {
         let events = dispatch(
             agg,
             CommandPayload::SubmitClientPayload {
@@ -3024,7 +3025,7 @@ mod tests {
     }
 
     fn submit_messages(
-        agg: &mut Aggregate<SessionState>,
+        agg: &mut SessionAggregate,
         messages: Vec<DraftMessage>,
     ) -> Vec<EventPayload> {
         dispatch(
@@ -4362,7 +4363,7 @@ mod tests {
         }
     }
 
-    fn request_client_tool(agg: &mut Aggregate<SessionState>, id: &str) {
+    fn request_client_tool(agg: &mut SessionAggregate, id: &str) {
         dispatch(
             agg,
             CommandPayload::RequestToolCall {
@@ -4376,11 +4377,7 @@ mod tests {
         );
     }
 
-    fn complete_tool(
-        agg: &mut Aggregate<SessionState>,
-        id: &str,
-        result: &str,
-    ) -> Vec<EventPayload> {
+    fn complete_tool(agg: &mut SessionAggregate, id: &str, result: &str) -> Vec<EventPayload> {
         dispatch(
             agg,
             CommandPayload::CompleteToolCall {
@@ -4392,7 +4389,7 @@ mod tests {
         )
     }
 
-    fn wake(agg: &mut Aggregate<SessionState>) -> Vec<EventPayload> {
+    fn wake(agg: &mut SessionAggregate) -> Vec<EventPayload> {
         dispatch(agg, CommandPayload::Wake { now: Utc::now() }, &system())
     }
 
@@ -5636,7 +5633,7 @@ mod tests {
     #[test]
     fn frontend_caller_with_mismatched_tenant_on_create_session_is_denied() {
         let session_id = "sess-1".to_string();
-        let agg = Aggregate::new(
+        let agg = SessionAggregate::new(
             session_id.clone(),
             "tenant-a".to_string(),
             SessionState::new(session_id),
@@ -5678,7 +5675,7 @@ mod tests {
             tenant_id: "tenant-a".to_string(),
         };
 
-        let request = |agg: &mut Aggregate<SessionState>, id: &str| {
+        let request = |agg: &mut SessionAggregate, id: &str| {
             dispatch(
                 agg,
                 CommandPayload::RequestToolCall {
@@ -5694,7 +5691,7 @@ mod tests {
         request(&mut agg, "tc-a");
         request(&mut agg, "tc-b");
 
-        let complete = |agg: &mut Aggregate<SessionState>, id: &str| {
+        let complete = |agg: &mut SessionAggregate, id: &str| {
             dispatch(
                 agg,
                 CommandPayload::CompleteToolCall {
@@ -5789,7 +5786,7 @@ mod tests {
     // ── Parallel worker-tool results must stay on one linear path ─────────
 
     fn submit_decision(
-        agg: &mut Aggregate<SessionState>,
+        agg: &mut SessionAggregate,
         decision_id: String,
         transcript: Vec<DraftMessage>,
         actions: Vec<Action>,
@@ -5827,7 +5824,7 @@ mod tests {
 
     /// The transcript the runtime would hand a decision requested right now:
     /// the root→head path, exactly as `try_extract` materializes it.
-    fn delivered_transcript(agg: &Aggregate<SessionState>) -> Vec<DraftMessage> {
+    fn delivered_transcript(agg: &SessionAggregate) -> Vec<DraftMessage> {
         agg.state
             .head_id
             .as_deref()
@@ -5838,7 +5835,7 @@ mod tests {
             .collect()
     }
 
-    fn pending_worker_decisions(agg: &Aggregate<SessionState>) -> usize {
+    fn pending_worker_decisions(agg: &SessionAggregate) -> usize {
         agg.state
             .worker_decisions
             .values()
@@ -5847,7 +5844,7 @@ mod tests {
     }
 
     /// The single live (pending) decision — its id and trigger.
-    fn live_decision(agg: &Aggregate<SessionState>) -> (String, Trigger) {
+    fn live_decision(agg: &SessionAggregate) -> (String, Trigger) {
         agg.state
             .worker_decisions
             .values()
@@ -5863,7 +5860,7 @@ mod tests {
     /// later moves; that is why two writers promoted against the same head fork.
     fn record_bases(
         events: &[EventPayload],
-        agg: &Aggregate<SessionState>,
+        agg: &SessionAggregate,
         bases: &mut HashMap<String, Vec<DraftMessage>>,
     ) {
         let frozen = delivered_transcript(agg);
@@ -5878,10 +5875,7 @@ mod tests {
     /// answers each live decision with the transcript it was frozen, and a wake
     /// fires after every step to surface queued work. Executes reply with a
     /// result; finishes append their result node to the frozen base.
-    fn drive_worker(
-        agg: &mut Aggregate<SessionState>,
-        bases: &mut HashMap<String, Vec<DraftMessage>>,
-    ) {
+    fn drive_worker(agg: &mut SessionAggregate, bases: &mut HashMap<String, Vec<DraftMessage>>) {
         for _ in 0..128 {
             let mut live: Vec<(String, Trigger)> = agg
                 .state
@@ -6144,11 +6138,7 @@ mod tests {
         }
     }
 
-    fn request_llm(
-        agg: &mut Aggregate<SessionState>,
-        id: &str,
-        handler: LlmHandler,
-    ) -> Vec<EventPayload> {
+    fn request_llm(agg: &mut SessionAggregate, id: &str, handler: LlmHandler) -> Vec<EventPayload> {
         dispatch(
             agg,
             CommandPayload::RequestLlmCall {
@@ -6164,7 +6154,7 @@ mod tests {
     }
 
     fn complete_llm(
-        agg: &mut Aggregate<SessionState>,
+        agg: &mut SessionAggregate,
         id: &str,
         attempt: u32,
         caller: &Caller,
@@ -6181,10 +6171,7 @@ mod tests {
     }
 
     /// Open a worker decision (via a user message) and answer it with `actions`.
-    fn submit_decision_with(
-        agg: &mut Aggregate<SessionState>,
-        actions: Vec<Action>,
-    ) -> Vec<EventPayload> {
+    fn submit_decision_with(agg: &mut SessionAggregate, actions: Vec<Action>) -> Vec<EventPayload> {
         let setup = dispatch(
             agg,
             CommandPayload::SubmitClientPayload {
@@ -6531,7 +6518,7 @@ mod tests {
 
     use serde_json::json;
 
-    fn open_decision(agg: &mut Aggregate<SessionState>, text: &str) -> String {
+    fn open_decision(agg: &mut SessionAggregate, text: &str) -> String {
         let setup = dispatch(
             agg,
             CommandPayload::SubmitClientPayload {
@@ -6548,7 +6535,7 @@ mod tests {
     }
 
     fn submit_state(
-        agg: &mut Aggregate<SessionState>,
+        agg: &mut SessionAggregate,
         decision_id: String,
         transcript: Vec<DraftMessage>,
         state: Option<serde_json::Value>,
@@ -6710,7 +6697,7 @@ mod tests {
     }
 
     fn submit_agent(
-        agg: &mut Aggregate<SessionState>,
+        agg: &mut SessionAggregate,
         decision_id: String,
         transcript: Vec<DraftMessage>,
         agent: Option<AgentConfig>,
@@ -6801,7 +6788,7 @@ mod tests {
 
     #[test]
     fn create_session_emits_session_start_before_client_input() {
-        let mut agg = Aggregate::new(
+        let mut agg = SessionAggregate::new(
             "sess-1".to_string(),
             "tenant-a".to_string(),
             SessionState::new("sess-1".to_string()),
@@ -6834,7 +6821,7 @@ mod tests {
 
     #[test]
     fn session_start_config_is_visible_to_a_queued_client_decision() {
-        let mut agg = Aggregate::new(
+        let mut agg = SessionAggregate::new(
             "sess-1".to_string(),
             "tenant-a".to_string(),
             SessionState::new("sess-1".to_string()),
@@ -7600,7 +7587,7 @@ mod tests {
 
     #[test]
     fn fork_drops_a_retrying_settle_decision() {
-        let mut agg = Aggregate::new(
+        let mut agg = SessionAggregate::new(
             "sess-1".to_string(),
             "tenant-a".to_string(),
             SessionState::new("sess-1".to_string()),
@@ -7679,7 +7666,7 @@ mod tests {
 
     // ── Branch-scoped interrupts ─────────────────────────────────────────
 
-    fn interrupt(agg: &mut Aggregate<SessionState>, id: &str) -> Vec<EventPayload> {
+    fn interrupt(agg: &mut SessionAggregate, id: &str) -> Vec<EventPayload> {
         dispatch(
             agg,
             CommandPayload::Interrupt {
@@ -7691,7 +7678,7 @@ mod tests {
         )
     }
 
-    fn resume(agg: &mut Aggregate<SessionState>, id: &str) -> Vec<EventPayload> {
+    fn resume(agg: &mut SessionAggregate, id: &str) -> Vec<EventPayload> {
         dispatch(
             agg,
             CommandPayload::ResumeInterrupt {
@@ -7703,7 +7690,7 @@ mod tests {
     }
 
     /// A session with `u1 -> a1` recorded and the head at `a1`.
-    fn parked_session() -> Aggregate<SessionState> {
+    fn parked_session() -> SessionAggregate {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
         let d1 = open_decision(&mut agg, "hi");
         submit_state(
@@ -7832,7 +7819,7 @@ mod tests {
     }
 
     /// Escape a parked `u1 -> a1` session onto a sibling branch `u1 -> e1`.
-    fn escape_to_e1(agg: &mut Aggregate<SessionState>) {
+    fn escape_to_e1(agg: &mut SessionAggregate) {
         let events = submit_messages(
             agg,
             vec![
@@ -8120,7 +8107,7 @@ mod tests {
 
     #[test]
     fn escape_decision_retry_fires_while_the_head_is_parked() {
-        let mut agg = Aggregate::new(
+        let mut agg = SessionAggregate::new(
             "sess-1".to_string(),
             "tenant-a".to_string(),
             SessionState::new("sess-1".to_string()),

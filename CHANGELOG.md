@@ -9,6 +9,11 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 
 ## [Unreleased]
 
+### Changed
+
+- The generic aggregate layer only served sessions. Session-specific execution and events now replace it.
+- The event store round-tripped opaque JSON that every consumer re-parsed. The store now speaks typed session events end to end.
+
 ## [0.2.2] - 2026-07-17
 
 ### Changed

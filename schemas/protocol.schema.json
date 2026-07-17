@@ -1730,8 +1730,7 @@
       },
       "required": [
         "id",
-        "role",
-        "tool_calls"
+        "role"
       ],
       "title": "Message",
       "type": "object"

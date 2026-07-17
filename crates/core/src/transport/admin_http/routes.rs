@@ -105,11 +105,11 @@ pub async fn get_session(
         .get_session(caller.tenant_id(), &session_id)
         .await
     {
-        Ok((snapshot, state)) => Json(serde_json::json!({
-            "stream_version": snapshot.stream_version,
-            "first_event_at": snapshot.first_event_at,
-            "last_event_at": snapshot.last_event_at,
-            "state": state,
+        Ok(session) => Json(serde_json::json!({
+            "stream_version": session.stream_version,
+            "first_event_at": session.first_event_at,
+            "last_event_at": session.last_event_at,
+            "state": session.state,
         }))
         .into_response(),
         Err(e) => (
@@ -178,11 +178,11 @@ pub async fn stream_session_events(
     let stream = ReceiverStream::new(rx)
         .take_until(state.shutdown.clone().cancelled_owned())
         .map(|event| {
-            let event_type = event.payload_type().to_owned();
+            let event_type = event.payload_type();
             let data = serde_json::to_string(&event).unwrap_or_default();
             Ok::<_, std::convert::Infallible>(
                 SseEvent::default()
-                    .id(event.stream_version.0.to_string())
+                    .id(event.sequence.to_string())
                     .event(event_type)
                     .data(data),
             )
@@ -222,7 +222,7 @@ pub async fn connect_session_ag_ui(
             .get_session(caller.tenant_id(), &session_id)
             .await
         {
-            Ok((_, session)) => Some(session),
+            Ok(session) => Some(session.state),
             Err(e) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,

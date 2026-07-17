@@ -11,3 +11,6 @@ pub mod state;
 pub mod subscriptions;
 pub mod tool_contract;
 pub mod wire;
+
+pub(crate) use aggregate::{execute, ConflictRetry, ExecuteError, ExecuteInput, SESSION_TYPE};
+pub use aggregate::{NewSessionEvent, SessionAggregate, SessionEvent};

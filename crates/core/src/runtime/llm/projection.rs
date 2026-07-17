@@ -3,15 +3,14 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::providers::memory_queue::TaskQueue;
-use crate::runtime::aggregate::{AggregateState, DomainEvent};
-use crate::runtime::event_store::{Event, EventStore};
+use crate::runtime::event_store::EventStore;
 use crate::runtime::processor::{
     EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCheckpointStore,
     ProcessorError,
 };
 use crate::runtime::session::decision::LlmHandler;
 use crate::runtime::session::events::EventPayload;
-use crate::runtime::session::state::SessionState;
+use crate::runtime::session::SessionEvent;
 
 use super::LlmTask;
 
@@ -31,21 +30,7 @@ impl EventProcessor for LlmDispatchProjection {
         "llm_dispatch_v1"
     }
 
-    fn shard_key(&self, event: &Event) -> Option<String> {
-        if event.aggregate_type != SessionState::AGGREGATE_TYPE {
-            return None;
-        }
-        Some(event.aggregate_id.clone())
-    }
-
-    async fn apply(&self, raw: &Event) -> Result<(), ProcessorError> {
-        if raw.aggregate_type != SessionState::AGGREGATE_TYPE {
-            return Ok(());
-        }
-
-        let event = DomainEvent::<SessionState>::from_raw(raw)
-            .map_err(|e| ProcessorError::Apply(e.to_string()))?;
-
+    async fn apply(&self, event: SessionEvent) -> Result<(), ProcessorError> {
         let req = match &event.payload {
             EventPayload::LlmCallRequested(req) => req,
             _ => return Ok(()),
@@ -69,7 +54,7 @@ impl EventProcessor for LlmDispatchProjection {
         let ancestry = derived.ancestry.clone();
         let turn_id = derived.turn_id.clone();
 
-        let shard_key = raw.aggregate_id.clone();
+        let shard_key = event.aggregate_id.clone();
 
         let task = LlmTask {
             session_id: event.aggregate_id,

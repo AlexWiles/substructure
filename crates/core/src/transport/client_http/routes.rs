@@ -145,7 +145,7 @@ pub async fn get_session(
         .get_session(caller.tenant_id(), &session_id)
         .await
     {
-        Ok((_, session)) => session,
+        Ok(session) => session.state,
         Err(e) => return runtime_error_response(e),
     };
 
@@ -306,7 +306,7 @@ pub async fn ag_ui_connect(
             .get_session(caller.tenant_id(), &input.thread_id)
             .await
         {
-            Ok((_, session)) => Some(session),
+            Ok(session) => Some(session.state),
             Err(e) => return runtime_error_response(e),
         }
     };

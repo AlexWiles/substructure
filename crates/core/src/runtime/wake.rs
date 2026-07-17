@@ -5,17 +5,15 @@ use chrono::{DateTime, Utc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::runtime::aggregate::{
-    execute, AggregateState, Caller, ConflictRetry, DomainEvent, ExecuteInput,
-};
-use crate::runtime::event_store::{Event, EventStore};
+use crate::runtime::event_store::EventStore;
 use crate::runtime::processor::{
     EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCheckpointStore,
     ProcessorError,
 };
 use crate::runtime::session::command::CommandPayload;
-use crate::runtime::session::state::SessionState;
+use crate::runtime::session::{execute, ConflictRetry, ExecuteInput, SessionEvent};
 use crate::runtime::span::SpanContext;
+use crate::runtime::Caller;
 
 #[derive(Debug, Clone)]
 pub struct WakeScheduleItem {
@@ -57,19 +55,7 @@ impl EventProcessor for WakeScheduleProjection {
         "wake_schedule"
     }
 
-    fn shard_key(&self, event: &Event) -> Option<String> {
-        if event.aggregate_type != SessionState::AGGREGATE_TYPE {
-            return None;
-        }
-        Some(event.aggregate_id.clone())
-    }
-
-    async fn apply(&self, event: &Event) -> Result<(), ProcessorError> {
-        if event.aggregate_type != SessionState::AGGREGATE_TYPE {
-            return Ok(());
-        }
-        let event = DomainEvent::<SessionState>::from_raw(event)
-            .map_err(|e| ProcessorError::Apply(e.to_string()))?;
+    async fn apply(&self, event: SessionEvent) -> Result<(), ProcessorError> {
         match event.derived.and_then(|d| d.wake_at) {
             Some(wake_at) => self
                 .wake_store
@@ -152,7 +138,7 @@ async fn fire_due(
         Err(_) => return,
     };
     for item in due {
-        let _ = execute::<SessionState>(
+        let _ = execute(
             store.as_ref(),
             ExecuteInput {
                 aggregate_id: item.aggregate_id,
@@ -168,14 +154,8 @@ async fn fire_due(
     }
 }
 
-fn extract_wake_at(event: &Event) -> Option<DateTime<Utc>> {
-    event
-        .derived
-        .as_ref()?
-        .get("wake_at")?
-        .as_str()?
-        .parse()
-        .ok()
+fn extract_wake_at(event: &SessionEvent) -> Option<DateTime<Utc>> {
+    event.derived.as_ref()?.wake_at
 }
 
 fn chrono_to_std(d: chrono::Duration) -> Duration {

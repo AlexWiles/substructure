@@ -13,8 +13,12 @@ use crate::protocol::{
     LlmRequest, LlmTool, Message, MessageTree, NewMessage, ReasoningConfig, RetryPolicy, Role,
     SessionOwner, WorkerState,
 };
-use crate::runtime::aggregate::ApplyContext;
 use crate::runtime::retry::RetryState;
+
+pub struct ApplyContext {
+    pub occurred_at: DateTime<Utc>,
+    pub sequence: u64,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

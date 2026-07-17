@@ -1,18 +1,15 @@
-use std::collections::HashMap;
 use std::sync::Arc as StdArc;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension};
 use sea_query::{Expr, ExprTrait, Iden, Order, Query, SqliteQueryBuilder};
 use tokio::sync::broadcast;
-use uuid::Uuid;
 
 use crate::event_store::{
-    AggregateFilter, AggregateSort, AggregateSummary, AppendInput, Event, EventFilter, EventStore,
-    GlobalPosition, Snapshot, StoreError, StreamVersion, Version,
+    AggregateFilter, AggregateSort, AggregateSummary, AppendInput, EventFilter, EventStore,
+    GlobalPosition, StoreError, StreamVersion, Version,
 };
-use crate::span::SpanContext;
+use crate::runtime::session::{NewSessionEvent, SessionAggregate, SessionEvent, SESSION_TYPE};
 
 use super::{parse_dt, sea_params, spawn_err, SqliteDb};
 
@@ -76,64 +73,9 @@ enum Events {
     TraceId,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct StoredEvent {
-    id: Uuid,
-    tenant_id: String,
-    aggregate_type: String,
-    aggregate_id: String,
-    stream_version: StreamVersion,
-    span: SpanContext,
-    occurred_at: DateTime<Utc>,
-    payload: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    derived: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    metadata: HashMap<String, String>,
-    start_time: DateTime<Utc>,
-    end_time: DateTime<Utc>,
-}
-
-impl StoredEvent {
-    fn from_event(event: &Event) -> Self {
-        Self {
-            id: event.id,
-            tenant_id: event.tenant_id.clone(),
-            aggregate_type: event.aggregate_type.clone(),
-            aggregate_id: event.aggregate_id.clone(),
-            stream_version: event.stream_version,
-            span: event.span.clone(),
-            occurred_at: event.occurred_at,
-            payload: event.payload.clone(),
-            derived: event.derived.clone(),
-            metadata: event.metadata.clone(),
-            start_time: event.start_time,
-            end_time: event.end_time,
-        }
-    }
-
-    fn into_event(self, global_position: u64) -> Event {
-        Event {
-            global_position: GlobalPosition(global_position),
-            id: self.id,
-            tenant_id: self.tenant_id,
-            aggregate_type: self.aggregate_type,
-            aggregate_id: self.aggregate_id,
-            stream_version: self.stream_version,
-            span: self.span,
-            occurred_at: self.occurred_at,
-            payload: self.payload,
-            derived: self.derived,
-            metadata: self.metadata,
-            start_time: self.start_time,
-            end_time: self.end_time,
-        }
-    }
-}
-
 pub struct SqliteEventStore {
     db: SqliteDb,
-    tx: broadcast::Sender<StdArc<Vec<Event>>>,
+    tx: broadcast::Sender<StdArc<Vec<SessionEvent>>>,
 }
 
 impl SqliteEventStore {
@@ -147,33 +89,38 @@ impl SqliteEventStore {
 #[async_trait]
 impl EventStore for SqliteEventStore {
     async fn append(&self, input: AppendInput) -> Result<(), StoreError> {
-        let events = input.events.clone();
         let writer = self.db.writer.clone();
-        let positions = tokio::task::spawn_blocking(move || {
+        let (positions, input) = tokio::task::spawn_blocking(move || {
             let mut conn = writer
                 .lock()
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
-            do_append(&mut conn, input)
+            do_append(&mut conn, &input).map(|positions| (positions, input))
         })
         .await
         .map_err(spawn_err)??;
 
-        if events.len() != positions.len() {
+        if input.events.len() != positions.len() {
             return Err(StoreError::Internal(
                 "inserted event count did not match assigned positions".into(),
             ));
         }
 
-        let mut with_positions = events;
-        for (event, position) in with_positions.iter_mut().zip(positions.into_iter()) {
-            event.global_position = GlobalPosition(position);
-        }
+        let events: Vec<SessionEvent> = input
+            .events
+            .into_iter()
+            .zip(positions.into_iter())
+            .map(|(event, position)| event.into_event(GlobalPosition(position)))
+            .collect();
 
-        let _ = self.tx.send(StdArc::new(with_positions));
+        let _ = self.tx.send(StdArc::new(events));
         Ok(())
     }
 
-    async fn load(&self, tenant_id: &str, aggregate_id: &str) -> Result<Snapshot, StoreError> {
+    async fn load(
+        &self,
+        tenant_id: &str,
+        aggregate_id: &str,
+    ) -> Result<SessionAggregate, StoreError> {
         let reader = self.db.reader.clone();
         let tenant_id = tenant_id.to_string();
         let aggregate_id = aggregate_id.to_string();
@@ -199,7 +146,7 @@ impl EventStore for SqliteEventStore {
         .map_err(spawn_err)?
     }
 
-    async fn query_events(&self, filter: &EventFilter) -> Result<Vec<Event>, StoreError> {
+    async fn query_events(&self, filter: &EventFilter) -> Result<Vec<SessionEvent>, StoreError> {
         let filter = filter.clone();
         let reader = self.db.reader.clone();
         tokio::task::spawn_blocking(move || {
@@ -210,7 +157,7 @@ impl EventStore for SqliteEventStore {
         .map_err(spawn_err)?
     }
 
-    fn subscribe(&self) -> broadcast::Receiver<StdArc<Vec<Event>>> {
+    fn subscribe(&self) -> broadcast::Receiver<StdArc<Vec<SessionEvent>>> {
         self.tx.subscribe()
     }
 }
@@ -219,9 +166,9 @@ impl EventStore for SqliteEventStore {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn do_append(conn: &mut Connection, input: AppendInput) -> Result<Vec<u64>, StoreError> {
+fn do_append(conn: &mut Connection, input: &AppendInput) -> Result<Vec<u64>, StoreError> {
     let snap = &input.snapshot;
-    let aid = &snap.aggregate_id;
+    let aid = &snap.id;
     let mut positions = Vec::with_capacity(input.events.len());
     let tx = conn
         .transaction()
@@ -231,9 +178,7 @@ fn do_append(conn: &mut Connection, input: AppendInput) -> Result<Vec<u64>, Stor
         .map_err(|_| StoreError::Internal("expected_version exceeds i64".into()))?;
 
     for event in &input.events {
-        let stored = StoredEvent::from_event(event);
-        let data =
-            serde_json::to_string(&stored).map_err(|e| StoreError::Internal(e.to_string()))?;
+        let data = serde_json::to_string(event).map_err(|e| StoreError::Internal(e.to_string()))?;
         let trace_id = event.span.trace_id.to_string();
 
         let occurred_at = event.occurred_at.to_rfc3339();
@@ -250,10 +195,10 @@ fn do_append(conn: &mut Connection, input: AppendInput) -> Result<Vec<u64>, Stor
                      )
                  )",
                 rusqlite::params![
-                    snap.aggregate_type,
+                    SESSION_TYPE,
                     aid,
                     snap.tenant_id,
-                    event.stream_version.0,
+                    event.sequence,
                     occurred_at,
                     data,
                     trace_id,
@@ -285,7 +230,7 @@ fn do_append(conn: &mut Connection, input: AppendInput) -> Result<Vec<u64>, Stor
     }
 
     let snapshot_data =
-        serde_json::to_string(&snap.data).map_err(|e| StoreError::Internal(e.to_string()))?;
+        serde_json::to_string(snap).map_err(|e| StoreError::Internal(e.to_string()))?;
 
     tx.execute(
         "INSERT INTO snapshots (aggregate_id, aggregate_type, tenant_id, stream_version, data, wake_at, first_event_at, last_event_at)
@@ -298,9 +243,9 @@ fn do_append(conn: &mut Connection, input: AppendInput) -> Result<Vec<u64>, Stor
              last_event_at = excluded.last_event_at",
         rusqlite::params![
             aid,
-            snap.aggregate_type,
+            SESSION_TYPE,
             snap.tenant_id,
-            snap.stream_version.0,
+            snap.stream_version,
             snapshot_data,
             snap.wake_at.map(|t| t.to_rfc3339()),
             snap.first_event_at.map(|t| t.to_rfc3339()),
@@ -315,44 +260,23 @@ fn do_append(conn: &mut Connection, input: AppendInput) -> Result<Vec<u64>, Stor
     Ok(positions)
 }
 
-fn do_load(conn: &Connection, tenant_id: &str, aggregate_id: &str) -> Result<Snapshot, StoreError> {
-    let row = conn
+fn do_load(
+    conn: &Connection,
+    tenant_id: &str,
+    aggregate_id: &str,
+) -> Result<SessionAggregate, StoreError> {
+    let data = conn
         .query_row(
-            "SELECT aggregate_type, tenant_id, data, stream_version, wake_at, first_event_at, last_event_at FROM snapshots WHERE tenant_id = ?1 AND aggregate_id = ?2",
+            "SELECT data FROM snapshots WHERE tenant_id = ?1 AND aggregate_id = ?2",
             rusqlite::params![tenant_id, aggregate_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, u64>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                ))
-            },
+            |row| row.get::<_, String>(0),
         )
         .map_err(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => StoreError::StreamNotFound,
             other => StoreError::Internal(other.to_string()),
         })?;
 
-    let (agg_type, tenant_id, snapshot_data, stream_version, wake_at_str, first_str, last_str) =
-        row;
-
-    let data: serde_json::Value =
-        serde_json::from_str(&snapshot_data).map_err(|e| StoreError::Internal(e.to_string()))?;
-
-    Ok(Snapshot {
-        aggregate_id: aggregate_id.to_string(),
-        tenant_id,
-        aggregate_type: agg_type,
-        data,
-        stream_version: StreamVersion(stream_version),
-        wake_at: wake_at_str.as_deref().and_then(parse_dt),
-        first_event_at: first_str.as_deref().and_then(parse_dt),
-        last_event_at: last_str.as_deref().and_then(parse_dt),
-    })
+    serde_json::from_str(&data).map_err(|e| StoreError::Internal(e.to_string()))
 }
 
 fn do_list_aggregates(
@@ -440,19 +364,20 @@ fn do_list_aggregates(
     Ok(results)
 }
 
-fn do_query_events(conn: &Connection, filter: EventFilter) -> Result<Vec<Event>, StoreError> {
+fn do_query_events(
+    conn: &Connection,
+    filter: EventFilter,
+) -> Result<Vec<SessionEvent>, StoreError> {
     let (sql, values) = Query::select()
         .column(Events::GlobalPosition)
         .column(Events::Data)
         .from(Events::Table)
+        .and_where(Expr::col(Events::AggregateType).eq(SESSION_TYPE))
         .apply_if(filter.after_global_position, |q, pos| {
             q.and_where(Expr::col(Events::GlobalPosition).gt(pos.0 as i64));
         })
         .apply_if(filter.aggregate_id.as_ref(), |q, id| {
             q.and_where(Expr::col(Events::AggregateId).eq(id));
-        })
-        .apply_if(filter.aggregate_type.as_ref(), |q, v| {
-            q.and_where(Expr::col(Events::AggregateType).eq(v));
         })
         .apply_if(filter.tenant_id.as_ref(), |q, v| {
             q.and_where(Expr::col(Events::TenantId).eq(v));
@@ -491,10 +416,9 @@ fn do_query_events(conn: &Connection, filter: EventFilter) -> Result<Vec<Event>,
     let mut events = Vec::new();
     for row in rows {
         let (position, data) = row.map_err(|e| StoreError::Internal(e.to_string()))?;
-        let stored: StoredEvent =
+        let stored: NewSessionEvent =
             serde_json::from_str(&data).map_err(|e| StoreError::Internal(e.to_string()))?;
-        let event = stored.into_event(position);
-        events.push(event);
+        events.push(stored.into_event(GlobalPosition(position)));
     }
 
     Ok(events)

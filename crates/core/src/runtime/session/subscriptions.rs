@@ -2,10 +2,11 @@ use std::sync::Arc;
 
 use tokio::sync::{broadcast, mpsc};
 
-use crate::runtime::aggregate::{AggregateState, Caller, DomainEvent};
-use crate::runtime::event_store::{Event, EventFilter, EventStore, StreamVersion};
+use crate::runtime::event_store::{EventFilter, EventStore, StreamVersion};
 use crate::runtime::session::events::EventPayload;
-use crate::runtime::session::state::SessionState;
+use crate::runtime::Caller;
+
+use super::SessionEvent;
 
 /// Manages event subscriptions for sessions: live streaming, catchup replay,
 /// and combined catchup-then-live flows.
@@ -27,7 +28,7 @@ pub enum SubscriptionScope {
 }
 
 impl SessionSubscriptionSpec {
-    fn include(&self, event: &DomainEvent<SessionState>) -> bool {
+    fn include(&self, event: &SessionEvent) -> bool {
         match &self.scope {
             SubscriptionScope::Turn { turn_id } => {
                 event.derived.as_ref().and_then(|d| d.turn_id.as_deref()) == Some(turn_id.as_str())
@@ -36,7 +37,7 @@ impl SessionSubscriptionSpec {
         }
     }
 
-    fn is_terminal(&self, event: &DomainEvent<SessionState>) -> bool {
+    fn is_terminal(&self, event: &SessionEvent) -> bool {
         match &self.scope {
             SubscriptionScope::Turn { turn_id } => {
                 event.aggregate_id == self.root_session_id
@@ -55,28 +56,25 @@ impl SessionSubscriptions {
         Self { store }
     }
 
-    pub fn subscribe(&self, spec: SessionSubscriptionSpec) -> mpsc::Receiver<Event> {
+    pub fn subscribe(&self, spec: SessionSubscriptionSpec) -> mpsc::Receiver<SessionEvent> {
         let mut rx = self.store.subscribe();
-        let (tx, event_rx) = mpsc::channel::<Event>(64);
+        let (tx, event_rx) = mpsc::channel::<SessionEvent>(64);
 
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
                     Ok(batch) => {
-                        for raw in batch.iter() {
-                            if raw.tenant_id != spec.caller.tenant_id() {
+                        for event in batch.iter() {
+                            if event.tenant_id != spec.caller.tenant_id() {
                                 continue;
                             }
-                            if let Some(event) = decode_session_event(raw) {
-                                let in_scope =
-                                    belongs_to_root_session(raw, &event, &spec.root_session_id);
-                                if in_scope && spec.include(&event) {
-                                    if tx.send(raw.clone()).await.is_err() {
-                                        return;
-                                    }
-                                    if spec.is_terminal(&event) {
-                                        return;
-                                    }
+                            let in_scope = belongs_to_root_session(event, &spec.root_session_id);
+                            if in_scope && spec.include(event) {
+                                if tx.send(event.clone()).await.is_err() {
+                                    return;
+                                }
+                                if spec.is_terminal(event) {
+                                    return;
                                 }
                             }
                         }
@@ -102,7 +100,7 @@ impl SessionSubscriptions {
         &self,
         spec: SessionSubscriptionSpec,
         after: Option<StreamVersion>,
-    ) -> mpsc::Receiver<Event> {
+    ) -> mpsc::Receiver<SessionEvent> {
         // Subscribe live FIRST so we don't miss anything between historical
         // load and live attach.
         let live_rx = self.subscribe(spec.clone());
@@ -112,16 +110,13 @@ impl SessionSubscriptions {
             None => Vec::new(),
         };
 
-        let max_seq = historical
-            .last()
-            .map(|e| e.stream_version)
-            .unwrap_or(StreamVersion(0));
+        let max_seq = historical.last().map(|e| e.sequence).unwrap_or(0);
 
         let (tx, rx) = mpsc::channel(64);
 
         tokio::spawn(async move {
             for event in historical {
-                let terminal = is_turn_completed_for(&event, &spec);
+                let terminal = spec.is_terminal(&event);
                 if tx.send(event).await.is_err() {
                     return;
                 }
@@ -131,7 +126,7 @@ impl SessionSubscriptions {
             }
             let mut live = live_rx;
             while let Some(event) = live.recv().await {
-                if event.stream_version <= max_seq {
+                if event.sequence <= max_seq {
                     continue;
                 }
                 if tx.send(event).await.is_err() {
@@ -146,7 +141,7 @@ impl SessionSubscriptions {
         &self,
         spec: &SessionSubscriptionSpec,
         after: StreamVersion,
-    ) -> Vec<Event> {
+    ) -> Vec<SessionEvent> {
         let events = self
             .store
             .query_events(&EventFilter {
@@ -161,41 +156,19 @@ impl SessionSubscriptions {
     }
 }
 
-fn is_turn_completed_for(raw: &Event, spec: &SessionSubscriptionSpec) -> bool {
-    decode_session_event(raw).is_some_and(|e| spec.is_terminal(&e))
-}
-
-fn filter_by_spec(events: Vec<Event>, spec: &SessionSubscriptionSpec) -> Vec<Event> {
+fn filter_by_spec(events: Vec<SessionEvent>, spec: &SessionSubscriptionSpec) -> Vec<SessionEvent> {
     events
         .into_iter()
-        .filter(|e| {
-            if e.tenant_id != spec.caller.tenant_id() {
-                return false;
-            }
-            let Some(event) = decode_session_event(e) else {
-                return false;
-            };
-            if !belongs_to_root_session(e, &event, &spec.root_session_id) {
-                return false;
-            }
-            spec.include(&event)
+        .filter(|event| {
+            event.tenant_id == spec.caller.tenant_id()
+                && belongs_to_root_session(event, &spec.root_session_id)
+                && spec.include(event)
         })
         .collect()
 }
 
-fn decode_session_event(raw: &Event) -> Option<DomainEvent<SessionState>> {
-    if raw.aggregate_type != SessionState::AGGREGATE_TYPE {
-        return None;
-    }
-    DomainEvent::<SessionState>::from_raw(raw).ok()
-}
-
-fn belongs_to_root_session(
-    raw: &Event,
-    event: &DomainEvent<SessionState>,
-    root_session_id: &str,
-) -> bool {
-    if raw.aggregate_id == root_session_id {
+fn belongs_to_root_session(event: &SessionEvent, root_session_id: &str) -> bool {
+    if event.aggregate_id == root_session_id {
         return true;
     }
     event

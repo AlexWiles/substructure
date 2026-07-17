@@ -3,14 +3,13 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::providers::memory_queue::TaskQueue;
-use crate::runtime::aggregate::{AggregateState, DomainEvent};
-use crate::runtime::event_store::{Event, EventStore};
+use crate::runtime::event_store::EventStore;
 use crate::runtime::processor::{
     EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCheckpointStore,
     ProcessorError,
 };
 use crate::runtime::session::events::{EffectKind, EventPayload};
-use crate::runtime::session::state::SessionState;
+use crate::runtime::session::SessionEvent;
 
 use super::SubAgentTask;
 
@@ -30,22 +29,8 @@ impl EventProcessor for SubAgentDispatchProjection {
         "sub_agent_dispatch_v1"
     }
 
-    fn shard_key(&self, event: &Event) -> Option<String> {
-        if event.aggregate_type != SessionState::AGGREGATE_TYPE {
-            return None;
-        }
-        Some(event.aggregate_id.clone())
-    }
-
-    async fn apply(&self, raw: &Event) -> Result<(), ProcessorError> {
-        if raw.aggregate_type != SessionState::AGGREGATE_TYPE {
-            return Ok(());
-        }
-
-        let event = DomainEvent::<SessionState>::from_raw(raw)
-            .map_err(|e| ProcessorError::Apply(e.to_string()))?;
-
-        let shard_key = raw.aggregate_id.clone();
+    async fn apply(&self, event: SessionEvent) -> Result<(), ProcessorError> {
+        let shard_key = event.aggregate_id.clone();
 
         let task = match &event.payload {
             EventPayload::SubAgentRequested(req) => {
