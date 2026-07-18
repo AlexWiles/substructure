@@ -191,7 +191,7 @@ impl EventProcessorRunner {
 
         for event in events {
             if in_shard(
-                &event.aggregate_id,
+                &event.session_id,
                 self.config.shard_count,
                 self.config.shard_id,
             ) {

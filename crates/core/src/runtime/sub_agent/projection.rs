@@ -30,29 +30,20 @@ impl EventProcessor for SubAgentDispatchProjection {
     }
 
     async fn apply(&self, event: SessionEvent) -> Result<(), ProcessorError> {
-        let shard_key = event.aggregate_id.clone();
+        let shard_key = event.session_id.clone();
 
         let task = match &event.payload {
             EventPayload::SubAgentRequested(req) => {
-                let owner = event
-                    .derived
-                    .as_ref()
-                    .and_then(|d| d.owner.as_ref())
-                    .cloned()
-                    .ok_or_else(|| {
-                        ProcessorError::Apply("missing owner in derived state".to_string())
-                    })?;
+                let owner = event.meta.owner.clone().ok_or_else(|| {
+                    ProcessorError::Apply("missing owner in event meta".to_string())
+                })?;
 
-                let mut ancestry = event
-                    .derived
-                    .as_ref()
-                    .map(|d| d.ancestry.clone())
-                    .unwrap_or_default();
-                ancestry.push(event.aggregate_id.clone());
+                let mut ancestry = event.meta.ancestry.clone();
+                ancestry.push(event.session_id.clone());
 
                 Some(SubAgentTask::SpawnSubAgent {
                     source_event_id: event.id,
-                    parent_session_id: event.aggregate_id,
+                    parent_session_id: event.session_id,
                     tenant_id: event.tenant_id,
                     child_session_id: req.session_id.clone(),
                     agent_id: req.agent_id.clone(),
@@ -80,21 +71,17 @@ impl EventProcessor for SubAgentDispatchProjection {
                     span: event.span,
                 }),
             EventPayload::TurnCompleted(tc) => {
-                let derived = event
-                    .derived
-                    .as_ref()
-                    .ok_or_else(|| ProcessorError::Apply("missing derived state".to_string()))?;
-                let parent_session_id = match derived.ancestry.last() {
+                let parent_session_id = match event.meta.ancestry.last() {
                     Some(id) => id.clone(),
                     None => return Ok(()),
                 };
-                let agent_id = derived.agent_id.clone().unwrap_or_default();
+                let agent_id = event.meta.agent_id.clone().unwrap_or_default();
 
                 Some(SubAgentTask::CompleteSubAgentTurn {
                     source_event_id: event.id,
                     parent_session_id,
                     tenant_id: event.tenant_id,
-                    child_session_id: event.aggregate_id,
+                    child_session_id: event.session_id,
                     agent_id,
                     turn_id: tc.turn_id.clone(),
                     data: tc.data.clone(),

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tokio::sync::{broadcast, mpsc};
 
-use crate::runtime::event_store::{EventFilter, EventStore, StreamVersion};
+use crate::runtime::event_store::{EventFilter, EventStore, Seq};
 use crate::runtime::session::events::EventPayload;
 use crate::runtime::Caller;
 
@@ -31,7 +31,7 @@ impl SessionSubscriptionSpec {
     fn include(&self, event: &SessionEvent) -> bool {
         match &self.scope {
             SubscriptionScope::Turn { turn_id } => {
-                event.derived.as_ref().and_then(|d| d.turn_id.as_deref()) == Some(turn_id.as_str())
+                event.meta.turn_id.as_deref() == Some(turn_id.as_str())
             }
             SubscriptionScope::All => true,
         }
@@ -40,7 +40,7 @@ impl SessionSubscriptionSpec {
     fn is_terminal(&self, event: &SessionEvent) -> bool {
         match &self.scope {
             SubscriptionScope::Turn { turn_id } => {
-                event.aggregate_id == self.root_session_id
+                event.session_id == self.root_session_id
                     && matches!(
                         &event.payload,
                         EventPayload::TurnCompleted(tc) if tc.turn_id == *turn_id
@@ -99,7 +99,7 @@ impl SessionSubscriptions {
     pub async fn stream(
         &self,
         spec: SessionSubscriptionSpec,
-        after: Option<StreamVersion>,
+        after: Option<Seq>,
     ) -> mpsc::Receiver<SessionEvent> {
         // Subscribe live FIRST so we don't miss anything between historical
         // load and live attach.
@@ -110,7 +110,7 @@ impl SessionSubscriptions {
             None => Vec::new(),
         };
 
-        let max_seq = historical.last().map(|e| e.sequence).unwrap_or(0);
+        let max_seq = historical.last().map(|e| e.seq).unwrap_or(0);
 
         let (tx, rx) = mpsc::channel(64);
 
@@ -126,7 +126,7 @@ impl SessionSubscriptions {
             }
             let mut live = live_rx;
             while let Some(event) = live.recv().await {
-                if event.sequence <= max_seq {
+                if event.seq <= max_seq {
                     continue;
                 }
                 if tx.send(event).await.is_err() {
@@ -140,14 +140,14 @@ impl SessionSubscriptions {
     async fn load_historical(
         &self,
         spec: &SessionSubscriptionSpec,
-        after: StreamVersion,
+        after: Seq,
     ) -> Vec<SessionEvent> {
         let events = self
             .store
             .query_events(&EventFilter {
                 tenant_id: Some(spec.caller.tenant_id().to_string()),
-                aggregate_id: Some(spec.root_session_id.clone()),
-                after_stream_version: Some(after),
+                session_id: Some(spec.root_session_id.clone()),
+                after_seq: Some(after),
                 ..Default::default()
             })
             .await
@@ -168,11 +168,8 @@ fn filter_by_spec(events: Vec<SessionEvent>, spec: &SessionSubscriptionSpec) -> 
 }
 
 fn belongs_to_root_session(event: &SessionEvent, root_session_id: &str) -> bool {
-    if event.aggregate_id == root_session_id {
+    if event.session_id == root_session_id {
         return true;
     }
-    event
-        .derived
-        .as_ref()
-        .is_some_and(|d| d.ancestry.iter().any(|a| a == root_session_id))
+    event.meta.ancestry.iter().any(|a| a == root_session_id)
 }

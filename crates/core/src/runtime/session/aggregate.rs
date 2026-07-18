@@ -6,14 +6,12 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::runtime::caller::Caller;
-use crate::runtime::event_store::{AppendInput, EventStore, GlobalPosition, StoreError};
-use crate::runtime::span::{SpanContext, TraceId};
+use crate::runtime::event_store::{AppendInput, EventStore, GlobalPosition, Seq, StoreError};
+use crate::runtime::span::SpanContext;
 
 use super::command::{CommandPayload, SessionError};
 use super::events::EventPayload;
-use super::state::{ApplyContext, DerivedState, SessionState};
-
-pub(crate) const SESSION_TYPE: &str = "session";
+use super::state::{ApplyContext, EventMeta, SessionState};
 
 pub struct CommitContext {
     pub span: SpanContext,
@@ -26,14 +24,12 @@ pub struct CommitContext {
 pub struct NewSessionEvent {
     pub id: Uuid,
     pub tenant_id: String,
-    pub aggregate_id: String,
-    #[serde(rename = "stream_version")]
-    pub sequence: u64,
+    pub session_id: String,
+    pub seq: u64,
     pub span: SpanContext,
     pub occurred_at: DateTime<Utc>,
     pub payload: EventPayload,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub derived: Option<DerivedState>,
+    pub meta: EventMeta,
     /// Wall-clock bounds of the execute() call that produced this event.
     pub start_time: DateTime<Utc>,
     pub end_time: DateTime<Utc>,
@@ -45,12 +41,12 @@ impl NewSessionEvent {
             global_position,
             id: self.id,
             tenant_id: self.tenant_id,
-            aggregate_id: self.aggregate_id,
-            sequence: self.sequence,
+            session_id: self.session_id,
+            seq: self.seq,
             span: self.span,
             occurred_at: self.occurred_at,
             payload: self.payload,
-            derived: self.derived,
+            meta: self.meta,
             start_time: self.start_time,
             end_time: self.end_time,
         }
@@ -62,14 +58,12 @@ pub struct SessionEvent {
     pub global_position: GlobalPosition,
     pub id: Uuid,
     pub tenant_id: String,
-    pub aggregate_id: String,
-    #[serde(rename = "stream_version")]
-    pub sequence: u64,
+    pub session_id: String,
+    pub seq: u64,
     pub span: SpanContext,
     pub occurred_at: DateTime<Utc>,
     pub payload: EventPayload,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub derived: Option<DerivedState>,
+    pub meta: EventMeta,
     /// Wall-clock bounds of the execute() call that produced this event.
     pub start_time: DateTime<Utc>,
     pub end_time: DateTime<Utc>,
@@ -85,21 +79,15 @@ impl SessionEvent {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct SessionAggregate {
     pub id: String,
     pub tenant_id: String,
     pub state: SessionState,
     pub stream_version: u64,
-    pub last_applied: Option<u64>,
     pub first_event_at: Option<DateTime<Utc>>,
     pub last_event_at: Option<DateTime<Utc>>,
-    #[serde(default)]
     pub wake_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub label: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trace_id: Option<TraceId>,
 }
 
 impl SessionAggregate {
@@ -109,12 +97,9 @@ impl SessionAggregate {
             tenant_id,
             state,
             stream_version: 0,
-            last_applied: None,
             first_event_at: None,
             last_event_at: None,
             wake_at: None,
-            label: None,
-            trace_id: None,
         }
     }
 
@@ -122,18 +107,19 @@ impl SessionAggregate {
         store: &dyn EventStore,
         id: String,
         tenant_id: String,
-    ) -> Result<(Self, u64), StoreError> {
+    ) -> Result<(Self, Seq), StoreError> {
         match store.load(&tenant_id, &id).await {
             Ok(session) => {
                 if session.tenant_id != tenant_id {
                     return Err(StoreError::Internal("tenant mismatch".into()));
                 }
-                let expected_version = session.stream_version;
+                let expected_version = Seq(session.stream_version);
                 Ok((session, expected_version))
             }
-            Err(StoreError::StreamNotFound) => {
-                Ok((Self::new(id.clone(), tenant_id, SessionState::new(id)), 0))
-            }
+            Err(StoreError::StreamNotFound) => Ok((
+                Self::new(id.clone(), tenant_id, SessionState::new(id)),
+                Seq(0),
+            )),
             Err(error) => Err(error),
         }
     }
@@ -146,9 +132,6 @@ impl SessionAggregate {
         if events.is_empty() {
             return vec![];
         }
-        if self.trace_id.is_none() {
-            self.trace_id = Some(context.span.trace_id);
-        }
 
         let mut session_events = Vec::with_capacity(events.len());
         for payload in events {
@@ -160,22 +143,21 @@ impl SessionAggregate {
                     sequence: self.stream_version,
                 },
             );
-            self.last_applied = Some(self.stream_version);
             if self.first_event_at.is_none() {
                 self.first_event_at = Some(context.occurred_at);
             }
             self.last_event_at = Some(context.occurred_at);
             self.wake_at = self.state.wake_at();
-            self.label = self.state.agent_id.clone();
+            let meta = self.state.event_meta();
             session_events.push(NewSessionEvent {
                 id: Uuid::now_v7(),
                 tenant_id: self.tenant_id.clone(),
-                aggregate_id: self.id.clone(),
-                sequence: self.stream_version,
+                session_id: self.id.clone(),
+                seq: self.stream_version,
                 span: context.span.clone(),
                 occurred_at: context.occurred_at,
                 payload,
-                derived: Some(self.state.derived_state()),
+                meta,
                 start_time: context.occurred_at,
                 end_time: context.occurred_at,
             });
@@ -193,7 +175,7 @@ pub enum ExecuteError {
 }
 
 pub struct ExecuteInput {
-    pub aggregate_id: String,
+    pub session_id: String,
     pub caller: Caller,
     pub command: CommandPayload,
     pub span: SpanContext,
@@ -244,14 +226,16 @@ pub async fn execute(
         let command = input.command.clone();
         let (mut session, expected_version) = SessionAggregate::load_or_create(
             store,
-            input.aggregate_id.clone(),
+            input.session_id.clone(),
             input.caller.tenant_id().to_string(),
         )
         .await?;
+
         let events = session
             .state
             .handle(command, &input.caller)
             .map_err(ExecuteError::Command)?;
+
         if events.is_empty() {
             return Ok(());
         }

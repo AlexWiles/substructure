@@ -56,7 +56,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
             let create_result = execute(
                 store,
                 ExecuteInput {
-                    aggregate_id: child_session_id.clone(),
+                    session_id: child_session_id.clone(),
                     caller: Caller::System {
                         tenant_id: tenant_id.clone(),
                     },
@@ -91,7 +91,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
             let result = execute(
                 store,
                 ExecuteInput {
-                    aggregate_id: parent_session_id.clone(),
+                    session_id: parent_session_id.clone(),
                     caller: Caller::System {
                         tenant_id: tenant_id.clone(),
                     },
@@ -121,7 +121,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
             let result = execute(
                 store,
                 ExecuteInput {
-                    aggregate_id: target_session_id.clone(),
+                    session_id: target_session_id.clone(),
                     caller: Caller::System { tenant_id },
                     command: CommandPayload::SendMessage {
                         message,
@@ -158,7 +158,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
             let result = execute(
                 store,
                 ExecuteInput {
-                    aggregate_id: parent_session_id.clone(),
+                    session_id: parent_session_id.clone(),
                     caller: Caller::System { tenant_id },
                     command: CommandPayload::CompleteSubAgentTurn {
                         session_id: child_session_id,
@@ -191,7 +191,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
             let result = execute(
                 store,
                 ExecuteInput {
-                    aggregate_id: child_session_id.clone(),
+                    session_id: child_session_id.clone(),
                     caller: Caller::System { tenant_id },
                     command: CommandPayload::CancelSession,
                     span: span.child("cancel_sub_agent"),

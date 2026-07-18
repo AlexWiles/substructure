@@ -25,7 +25,7 @@ pub fn merge_session_stream(
                         let event_type = event.payload_type();
                         let data = serde_json::to_string(&event).unwrap_or_default();
                         let sse = SseEvent::default()
-                            .id(event.sequence.to_string())
+                            .id(event.seq.to_string())
                             .event(event_type)
                             .data(data);
                         if out_tx.send(sse).await.is_err() {

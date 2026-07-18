@@ -216,11 +216,39 @@ pub struct OpenInterrupt {
     pub anchor: Option<String>,
 }
 
+/// A history-log entry tagged with the seq of the event that appended it —
+/// the as-of cursor is the event's own seq, nothing stamped elsewhere.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Logged<T> {
+    pub seq: u64,
+    #[serde(flatten)]
+    pub entry: T,
+}
+
+impl<T> std::ops::Deref for Logged<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.entry
+    }
+}
+
+/// Truncate an append-only log to entries at or before `seq`.
+fn rewind_log<T>(log: &mut Vec<Logged<T>>, seq: u64) {
+    debug_assert!(log.windows(2).all(|w| w[0].seq <= w[1].seq));
+    log.truncate(log.partition_point(|e| e.seq <= seq));
+}
+
 /// A versioned, anchored document write. Both worker state and agent config
-/// resolve newest-on-path and compact by anchor identically; this shares that
-/// logic without touching either struct's serialized shape.
+/// resolve newest-on-path identically; this shares that logic without
+/// touching either struct's serialized shape.
 pub trait Anchored {
     fn anchor(&self) -> Option<&str>;
+}
+
+impl<T: Anchored> Anchored for Logged<T> {
+    fn anchor(&self) -> Option<&str> {
+        self.entry.anchor()
+    }
 }
 
 impl Anchored for StateVersion {
@@ -252,13 +280,6 @@ pub fn resolve_on_path<'a, V: Anchored>(
     })
 }
 
-/// Append `new`, dropping any prior version at the same anchor: a superseded
-/// same-anchor version can never win resolution.
-pub fn compact_push<V: Anchored>(versions: &mut Vec<V>, new: V) {
-    versions.retain(|v| v.anchor() != new.anchor());
-    versions.push(new);
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerDecisionState {
     pub decision_id: String,
@@ -268,47 +289,50 @@ pub struct WorkerDecisionState {
     pub source_event_sequence: u64,
 }
 
+/// Per-event stamp: scalars plus bounded in-flight status. History-sized
+/// state (tree, versions, prompts) lives in the store; `head_id` +
+/// `node_count` locate the as-of-event tree prefix.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DerivedState {
+pub struct EventMeta {
     pub status: SessionStatus,
-    pub wake_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub calls: Vec<Effect>,
-    pub owner: Option<SessionOwner>,
-    pub agent_id: Option<String>,
-    #[serde(default)]
-    pub worker_state: WorkerState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_config: Option<AgentConfig>,
-    #[serde(default)]
-    pub message_tree: MessageTree,
+    pub wake_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<SessionOwner>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ancestry: Vec<String>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub sub_agent_calls: HashMap<String, SubAgentCallState>,
-    /// Llm calls whose assistant message has tool calls not yet answered on the
-    /// active path — the parents a `tool.finished` proposal may re-issue. Pruned
-    /// to that window so stored prompts don't accumulate in per-event state.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub open_llm_calls: HashMap<String, LlmCallState>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub worker_decisions: HashMap<String, WorkerDecisionState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
     #[serde(default)]
     pub cost: Decimal,
     #[serde(default)]
     pub sub_agent_cost: Decimal,
-    #[serde(default)]
-    pub turn_cost: Decimal,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub turn_token_usage: BTreeMap<String, u64>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub token_usage: BTreeMap<String, u64>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub sub_agent_token_usage: BTreeMap<String, u64>,
+    /// The active branch at this event; with the event's `seq`, the full
+    /// as-of cursor for `SessionState::rewind`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calls: Vec<Effect>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<MetaDecision>,
 }
 
-impl DerivedState {
+/// A Pending/Queued decision at stamp time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetaDecision {
+    pub decision_id: String,
+    pub status: EffectStatus,
+    /// Trigger is `ToolFinished`/`SubAgentFinished`: an unrecorded result.
+    pub finished: bool,
+    pub attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<DateTime<Utc>>,
+    pub source_event_sequence: u64,
+}
+
+impl EventMeta {
     /// Outstanding parallel work the decision `decision_id` must wait for before
     /// it prompts: in-flight tool/sub-agent calls, plus other `*.finished`
     /// decisions still queued or pending — results not yet folded into the
@@ -328,20 +352,11 @@ impl DerivedState {
             })
             .count();
         let unrecorded_results = self
-            .worker_decisions
-            .values()
+            .decisions
+            .iter()
             .filter(|d| d.decision_id != decision_id)
             .filter(|d| {
-                matches!(
-                    d.tracking.status,
-                    EffectStatus::Pending | EffectStatus::Queued
-                )
-            })
-            .filter(|d| {
-                matches!(
-                    d.trigger,
-                    Trigger::ToolFinished { .. } | Trigger::SubAgentFinished { .. }
-                )
+                matches!(d.status, EffectStatus::Pending | EffectStatus::Queued) && d.finished
             })
             .count();
         in_flight_calls + unrecorded_results
@@ -393,10 +408,10 @@ pub struct SessionState {
     pub sub_agent_token_usage: BTreeMap<String, u64>,
 
     #[serde(default)]
-    pub state_versions: Vec<StateVersion>,
+    pub state_versions: Vec<Logged<StateVersion>>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub agent_versions: Vec<AgentVersion>,
+    pub agent_versions: Vec<Logged<AgentVersion>>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ancestry: Vec<String>,
@@ -424,7 +439,7 @@ pub struct SessionState {
     pub head_id: Option<String>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub nodes: Vec<NewMessage>,
+    pub nodes: Vec<Logged<NewMessage>>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub open_interrupts: Vec<OpenInterrupt>,
@@ -475,7 +490,10 @@ impl SessionState {
                     self.status = SessionStatus::Idle;
                 }
                 self.head_id = Some(payload.message.id.clone());
-                self.nodes.push(payload.clone());
+                self.nodes.push(Logged {
+                    seq: ctx.sequence,
+                    entry: payload.clone(),
+                });
             }
             EventPayload::HeadMoved(payload) => {
                 self.head_id = Some(payload.head_id.clone());
@@ -618,41 +636,36 @@ impl SessionState {
                     });
                 }
                 // Void pending decisions so late submissions no-op; calls void via CallVoided events.
-                for wd in self.worker_decisions.values_mut() {
-                    if wd.tracking.status == EffectStatus::Pending {
-                        wd.tracking.status = EffectStatus::Failed;
-                    }
-                }
+                self.worker_decisions
+                    .retain(|_, wd| wd.tracking.status != EffectStatus::Pending);
             }
             EventPayload::InterruptResumed(p) => {
                 self.open_interrupts
                     .retain(|i| i.interrupt_id != p.interrupt_id);
             }
+            // Marker: the decision (seeded by DecisionRequestQueued) goes live.
             EventPayload::WorkerDecisionRequested(p) => {
-                let retry_policy = self.worker_retry.clone().unwrap_or(RetryPolicy::no_retry());
                 if let Some(existing) = self.worker_decisions.get_mut(&p.decision_id) {
                     existing.tracking.reset_pending(now);
-                } else {
-                    self.worker_decisions.insert(
-                        p.decision_id.clone(),
-                        WorkerDecisionState {
-                            decision_id: p.decision_id.clone(),
-                            tracking: EffectTracking::new(retry_policy, now),
-                            trigger: p.trigger.clone(),
-                            source_event_sequence: ctx.sequence,
-                        },
-                    );
                 }
                 self.status = SessionStatus::Idle;
             }
+            // Settled decisions leave the map: absent reads as not-Pending, so
+            // late submissions still no-op and stored triggers don't accumulate.
             EventPayload::WorkerDecisionCompleted(p) => {
-                if let Some(wd) = self.worker_decisions.get_mut(&p.decision_id) {
-                    wd.tracking.complete();
-                }
+                self.worker_decisions.remove(&p.decision_id);
             }
             EventPayload::WorkerDecisionErrored(p) => {
-                if let Some(wd) = self.worker_decisions.get_mut(&p.decision_id) {
-                    wd.tracking.record_error(p.retryable, now);
+                let failed = self
+                    .worker_decisions
+                    .get_mut(&p.decision_id)
+                    .map(|wd| {
+                        wd.tracking.record_error(p.retryable, now);
+                        wd.tracking.status == EffectStatus::Failed
+                    })
+                    .unwrap_or(false);
+                if failed {
+                    self.worker_decisions.remove(&p.decision_id);
                 }
             }
             EventPayload::SessionMessageRequested(_) => {}
@@ -670,9 +683,7 @@ impl SessionState {
             }
             EventPayload::DecisionRequestDropped(p) => {
                 // Voided like an interrupted decision: out of the queue, never delivered.
-                if let Some(wd) = self.worker_decisions.get_mut(&p.decision_id) {
-                    wd.tracking.status = EffectStatus::Failed;
-                }
+                self.worker_decisions.remove(&p.decision_id);
             }
             EventPayload::CallVoided(p) => {
                 let tracking = match p.kind {
@@ -689,32 +700,31 @@ impl SessionState {
                     tracking.status = EffectStatus::Failed;
                 }
             }
+            // Append-only, like the tree: `resolve_on_path` scans newest-first,
+            // so superseded same-anchor writes never win resolution.
             EventPayload::WorkerStateUpdated(p) => {
-                compact_push(
-                    &mut self.state_versions,
-                    StateVersion {
+                self.state_versions.push(Logged {
+                    seq: ctx.sequence,
+                    entry: StateVersion {
                         state: p.state.clone(),
                         anchor: p.anchor.clone(),
                     },
-                );
+                });
             }
             EventPayload::AgentConfigUpdated(p) => {
-                compact_push(
-                    &mut self.agent_versions,
-                    AgentVersion {
+                self.agent_versions.push(Logged {
+                    seq: ctx.sequence,
+                    entry: AgentVersion {
                         agent: p.config.clone(),
                         anchor: p.anchor.clone(),
                     },
-                );
+                });
             }
             EventPayload::SessionCancelled => {
                 self.status = SessionStatus::Done;
                 // Terminal: void pending decisions so late submissions no-op; calls void via CallVoided events.
-                for wd in self.worker_decisions.values_mut() {
-                    if wd.tracking.status == EffectStatus::Pending {
-                        wd.tracking.status = EffectStatus::Failed;
-                    }
-                }
+                self.worker_decisions
+                    .retain(|_, wd| wd.tracking.status != EffectStatus::Pending);
             }
             EventPayload::SessionDone(_) => {
                 if !self.ancestry.is_empty() {
@@ -902,7 +912,7 @@ impl SessionState {
 
     /// All message ids on the root→`leaf` chain.
     pub fn path_ids<'a>(&'a self, leaf: &'a str) -> std::collections::HashSet<&'a str> {
-        let by_id: HashMap<&str, &NewMessage> = self
+        let by_id: HashMap<&str, &Logged<NewMessage>> = self
             .nodes
             .iter()
             .map(|n| (n.message.id.as_str(), n))
@@ -944,7 +954,7 @@ impl SessionState {
 
     pub fn message_tree(&self) -> MessageTree {
         MessageTree {
-            nodes: self.nodes.clone(),
+            nodes: self.nodes.iter().map(|n| n.entry.clone()).collect(),
             head_id: self.head_id.clone(),
         }
     }
@@ -1023,7 +1033,7 @@ impl SessionState {
     /// active path. The tree is frozen during a pending decision, so the call
     /// answering the last `tool.finished` is still open when that decision is
     /// projected — exactly when its re-issue proposal is derived.
-    fn open_llm_calls(&self, tree: &MessageTree) -> HashMap<String, LlmCallState> {
+    pub(crate) fn open_llm_calls(&self, tree: &MessageTree) -> HashMap<String, LlmCallState> {
         let Some(head) = tree.head_id.as_deref() else {
             return HashMap::new();
         };
@@ -1042,30 +1052,58 @@ impl SessionState {
             .collect()
     }
 
-    pub fn derived_state(&self) -> DerivedState {
-        let message_tree = self.message_tree();
-        let open_llm_calls = self.open_llm_calls(&message_tree);
-        DerivedState {
+    pub fn event_meta(&self) -> EventMeta {
+        let mut decisions: Vec<MetaDecision> = self
+            .worker_decisions
+            .values()
+            .filter(|d| {
+                matches!(
+                    d.tracking.status,
+                    EffectStatus::Pending | EffectStatus::Queued
+                )
+            })
+            .map(|d| MetaDecision {
+                decision_id: d.decision_id.clone(),
+                status: d.tracking.status.clone(),
+                finished: matches!(
+                    d.trigger,
+                    Trigger::ToolFinished { .. } | Trigger::SubAgentFinished { .. }
+                ),
+                attempts: d.tracking.retry.attempts,
+                deadline: d.tracking.deadline,
+                source_event_sequence: d.source_event_sequence,
+            })
+            .collect();
+
+        decisions.sort_by_key(|d| d.source_event_sequence);
+
+        EventMeta {
             status: self.projected_status(),
             wake_at: self.wake_at(),
-            calls: self.effects(),
             owner: self.owner.clone(),
             agent_id: self.agent_id.clone(),
-            worker_state: self.resolve_state_for(self.head_id.as_deref()),
-            agent_config: self.resolve_agent_for(self.head_id.as_deref()),
-            message_tree,
             ancestry: self.ancestry.clone(),
-            sub_agent_calls: self.sub_agent_calls.clone(),
-            open_llm_calls,
-            worker_decisions: self.worker_decisions.clone(),
             turn_id: self.turn_id.clone(),
             cost: self.cost,
             sub_agent_cost: self.sub_agent_cost,
-            turn_cost: self.turn_cost,
-            turn_token_usage: self.turn_token_usage.clone(),
-            token_usage: self.token_usage.clone(),
-            sub_agent_token_usage: self.sub_agent_token_usage.clone(),
+            head_id: self.head_id.clone(),
+            calls: self.effects(),
+            decisions,
         }
+    }
+
+    /// Rewind to an event: every history-shaped log is append-only and
+    /// seq-tagged, so the state at the event is the prefix of entries the
+    /// event's own seq admits. Call maps stay current (entries immutable,
+    /// path picks the as-of subset); path-dependent resolution after a
+    /// rewind is exact.
+    #[must_use]
+    pub fn rewind(mut self, seq: u64, head_id: Option<&str>) -> Self {
+        rewind_log(&mut self.nodes, seq);
+        rewind_log(&mut self.state_versions, seq);
+        rewind_log(&mut self.agent_versions, seq);
+        self.head_id = head_id.map(str::to_string);
+        self
     }
 
     fn track_usage(&mut self, usage: &Option<serde_json::Value>) {
@@ -1098,10 +1136,13 @@ mod open_llm_calls_tests {
     use super::*;
     use crate::protocol::{NewMessage, ToolCall, ToolCallFunction};
 
-    fn node(message: Message, parent_id: Option<&str>) -> NewMessage {
-        NewMessage {
-            message,
-            parent_id: parent_id.map(str::to_string),
+    fn node(message: Message, parent_id: Option<&str>) -> Logged<NewMessage> {
+        Logged {
+            seq: 0,
+            entry: NewMessage {
+                message,
+                parent_id: parent_id.map(str::to_string),
+            },
         }
     }
 
@@ -1175,7 +1216,7 @@ mod open_llm_calls_tests {
             .insert("call-1".to_string(), call_state("call-1"));
 
         assert!(
-            s.derived_state().open_llm_calls.contains_key("call-1"),
+            s.open_llm_calls(&s.message_tree()).contains_key("call-1"),
             "unanswered tool call keeps the parent open"
         );
 
@@ -1183,7 +1224,7 @@ mod open_llm_calls_tests {
             .push(node(tool_answer("t1", "tc-1"), Some("call-1")));
         s.head_id = Some("t1".to_string());
         assert!(
-            s.derived_state().open_llm_calls.is_empty(),
+            s.open_llm_calls(&s.message_tree()).is_empty(),
             "recorded answer closes the call"
         );
     }
@@ -1196,17 +1237,20 @@ mod state_version_tests {
     use super::*;
     use crate::protocol::NewMessage;
 
-    fn message_node(id: &str, parent_id: Option<&str>) -> NewMessage {
-        NewMessage {
-            message: Message {
-                id: id.to_string(),
-                role: Role::User,
-                content: None,
-                tool_calls: vec![],
-                tool_call_id: None,
-                name: None,
+    fn message_node(id: &str, parent_id: Option<&str>) -> Logged<NewMessage> {
+        Logged {
+            seq: 0,
+            entry: NewMessage {
+                message: Message {
+                    id: id.to_string(),
+                    role: Role::User,
+                    content: None,
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                    name: None,
+                },
+                parent_id: parent_id.map(str::to_string),
             },
-            parent_id: parent_id.map(str::to_string),
         }
     }
 
@@ -1220,10 +1264,13 @@ mod state_version_tests {
         s
     }
 
-    fn version(state: serde_json::Value, anchor: Option<&str>) -> StateVersion {
-        StateVersion {
-            state: WorkerState(state),
-            anchor: anchor.map(str::to_string),
+    fn version(state: serde_json::Value, anchor: Option<&str>) -> Logged<StateVersion> {
+        Logged {
+            seq: 0,
+            entry: StateVersion {
+                state: WorkerState(state),
+                anchor: anchor.map(str::to_string),
+            },
         }
     }
 
@@ -1262,7 +1309,7 @@ mod state_version_tests {
     }
 
     #[test]
-    fn same_anchor_versions_compact_to_the_newest() {
+    fn same_anchor_versions_resolve_to_the_newest() {
         let mut s = forked_session();
         s.head_id = Some("u2".to_string());
         let ctx = ApplyContext {
@@ -1278,18 +1325,64 @@ mod state_version_tests {
                 &ctx,
             );
         }
-        assert_eq!(s.state_versions.len(), 2);
+        // Append-only: superseded same-anchor writes stay but never win.
+        assert_eq!(s.state_versions.len(), 3);
         assert_eq!(s.resolve_state_for(s.head_id.as_deref()).0, json!({"v": 3}));
         assert_eq!(s.resolve_state_for(Some("x1")).0, json!({"v": 1}));
     }
 
     #[test]
     fn state_version_serializes_with_the_state_field() {
-        // Guard: generalizing the store must not rename the persisted field, or
-        // existing snapshots silently lose their versions on load.
+        // Guard: the persisted field name must not change, and the log tag
+        // flattens alongside rather than nesting.
         let v = version(json!({"v": 1}), Some("u1"));
         let value = serde_json::to_value(&v).expect("serializes");
-        assert_eq!(value, json!({"state": {"v": 1}, "anchor": "u1"}));
+        assert_eq!(value, json!({"seq": 0, "state": {"v": 1}, "anchor": "u1"}));
+    }
+
+    /// Rewinding by an event's seq restores every history log to its prefix.
+    #[test]
+    fn rewind_restores_each_log_to_the_events_prefix() {
+        let mut s = SessionState::new("sess-1".to_string());
+        let apply = |s: &mut SessionState, seq: u64, payload: EventPayload| {
+            s.apply(
+                &payload,
+                &ApplyContext {
+                    occurred_at: Utc::now(),
+                    sequence: seq,
+                },
+            );
+        };
+        let msg = |id: &str, parent: Option<&str>| {
+            EventPayload::NewMessage(NewMessage {
+                message: Message {
+                    id: id.to_string(),
+                    role: Role::User,
+                    content: None,
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                    name: None,
+                },
+                parent_id: parent.map(str::to_string),
+            })
+        };
+        let state = |v: serde_json::Value, anchor: &str| {
+            EventPayload::WorkerStateUpdated(WorkerStateUpdated {
+                state: WorkerState(v),
+                anchor: Some(anchor.to_string()),
+            })
+        };
+
+        apply(&mut s, 1, msg("u1", None));
+        apply(&mut s, 2, state(json!({"v": 1}), "u1"));
+        apply(&mut s, 3, msg("u2", Some("u1")));
+        apply(&mut s, 4, state(json!({"v": 2}), "u2"));
+
+        let s = s.rewind(2, Some("u1"));
+        assert_eq!(s.nodes.len(), 1);
+        assert_eq!(s.state_versions.len(), 1);
+        assert_eq!(s.head_id.as_deref(), Some("u1"));
+        assert_eq!(s.resolve_state_for(s.head_id.as_deref()).0, json!({"v": 1}));
     }
 }
 
@@ -1298,17 +1391,20 @@ mod agent_version_tests {
     use super::*;
     use crate::protocol::NewMessage;
 
-    fn message_node(id: &str, parent_id: Option<&str>) -> NewMessage {
-        NewMessage {
-            message: Message {
-                id: id.to_string(),
-                role: Role::User,
-                content: None,
-                tool_calls: vec![],
-                tool_call_id: None,
-                name: None,
+    fn message_node(id: &str, parent_id: Option<&str>) -> Logged<NewMessage> {
+        Logged {
+            seq: 0,
+            entry: NewMessage {
+                message: Message {
+                    id: id.to_string(),
+                    role: Role::User,
+                    content: None,
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                    name: None,
+                },
+                parent_id: parent_id.map(str::to_string),
             },
-            parent_id: parent_id.map(str::to_string),
         }
     }
 
@@ -1335,10 +1431,13 @@ mod agent_version_tests {
         }
     }
 
-    fn version(model: &str, anchor: Option<&str>) -> AgentVersion {
-        AgentVersion {
-            agent: config(model),
-            anchor: anchor.map(str::to_string),
+    fn version(model: &str, anchor: Option<&str>) -> Logged<AgentVersion> {
+        Logged {
+            seq: 0,
+            entry: AgentVersion {
+                agent: config(model),
+                anchor: anchor.map(str::to_string),
+            },
         }
     }
 
@@ -1377,7 +1476,7 @@ mod agent_version_tests {
     }
 
     #[test]
-    fn same_anchor_configs_compact_to_the_newest() {
+    fn same_anchor_configs_resolve_to_the_newest() {
         let mut s = forked_session();
         s.head_id = Some("u2".to_string());
         let ctx = ApplyContext {
@@ -1393,7 +1492,8 @@ mod agent_version_tests {
                 &ctx,
             );
         }
-        assert_eq!(s.agent_versions.len(), 2);
+        // Append-only: superseded same-anchor writes stay but never win.
+        assert_eq!(s.agent_versions.len(), 3);
         assert_eq!(
             s.resolve_agent_for(s.head_id.as_deref()),
             Some(config("m3"))

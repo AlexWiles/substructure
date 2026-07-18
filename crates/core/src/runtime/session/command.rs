@@ -282,7 +282,7 @@ impl SessionState {
                 // before any client input. A brand-new session has no pending
                 // decision, so this is requested (not queued) directly.
                 let start = self.emit_decision_request(&events, Trigger::SessionStart);
-                events.push(start);
+                events.extend(start);
                 Ok(events)
             }
             (Some(_), CommandPayload::CreateSession { .. }) => {
@@ -370,7 +370,7 @@ impl SessionState {
         name: String,
         output: String,
         is_error: bool,
-    ) -> EventPayload {
+    ) -> Vec<EventPayload> {
         let (result, error) = if is_error {
             (None, Some(output))
         } else {
@@ -396,7 +396,7 @@ impl SessionState {
         agent_id: String,
         output: String,
         is_error: bool,
-    ) -> EventPayload {
+    ) -> Vec<EventPayload> {
         let (result, error) = if is_error {
             (None, Some(output))
         } else {
@@ -597,34 +597,35 @@ impl SessionState {
             .collect()
     }
 
-    fn emit_decision_request(&self, batch: &[EventPayload], trigger: Trigger) -> EventPayload {
+    fn emit_decision_request(&self, batch: &[EventPayload], trigger: Trigger) -> Vec<EventPayload> {
         self.emit_decision_request_at(batch, trigger, self.head_id.as_deref())
     }
 
-    /// An interrupt on `gate_leaf`'s path queues the request instead of dispatching.
+    /// Every decision is created by a queued event carrying its trigger — the
+    /// single stored copy. A promotion marker follows immediately unless an
+    /// interrupt on `gate_leaf`'s path (or a live decision) parks it.
     fn emit_decision_request_at(
         &self,
         batch: &[EventPayload],
         trigger: Trigger,
         gate_leaf: Option<&str>,
-    ) -> EventPayload {
-        let queued = self.has_pending_worker_decision()
+    ) -> Vec<EventPayload> {
+        let parked = self.has_pending_worker_decision()
             || self.active_interrupt_for(gate_leaf).is_some()
             || batch
                 .iter()
                 .any(|e| matches!(e, EventPayload::WorkerDecisionRequested(_)));
         let decision_id = new_call_id();
-        if queued {
-            EventPayload::DecisionRequestQueued(DecisionRequestQueued {
-                decision_id,
-                trigger,
-            })
-        } else {
-            EventPayload::WorkerDecisionRequested(WorkerDecisionRequested {
-                decision_id,
-                trigger,
-            })
+        let mut events = vec![EventPayload::DecisionRequestQueued(DecisionRequestQueued {
+            decision_id: decision_id.clone(),
+            trigger,
+        })];
+        if !parked {
+            events.push(EventPayload::WorkerDecisionRequested(
+                WorkerDecisionRequested { decision_id },
+            ));
         }
+        events
     }
 
     fn handle_active(
@@ -667,7 +668,7 @@ impl SessionState {
                         if message.role == Role::User {
                             let request = self
                                 .emit_decision_request(&events, Trigger::ClientMessage { message });
-                            events.push(request);
+                            events.extend(request);
                         }
                     }
                     ClientPayload::Messages(ClientMessages {
@@ -738,7 +739,7 @@ impl SessionState {
                                     c.result,
                                     false,
                                 );
-                                events.push(request);
+                                events.extend(request);
                             }
                         } else {
                             // Bedrock: settle every answer silently (no
@@ -763,7 +764,7 @@ impl SessionState {
                                 },
                                 landing.as_deref(),
                             );
-                            events.push(request);
+                            events.extend(request);
                         }
                     }
                     ClientPayload::Action(action) => {
@@ -777,7 +778,7 @@ impl SessionState {
                                 args: action.args,
                             },
                         );
-                        events.push(request);
+                        events.extend(request);
                     }
                 }
 
@@ -814,7 +815,7 @@ impl SessionState {
                 if message.role == Role::User {
                     let request =
                         self.emit_decision_request(&events, Trigger::ClientMessage { message });
-                    events.push(request);
+                    events.extend(request);
                 }
                 Ok(events)
             }
@@ -868,7 +869,7 @@ impl SessionState {
                                 deadline: retry.deadline(chrono::Utc::now()),
                             },
                         );
-                        events.push(execute);
+                        events.extend(execute);
                     }
 
                     Ok(events)
@@ -941,7 +942,7 @@ impl SessionState {
                             &events,
                             Trigger::llm_ok(call_id, message, truncated, usage, cost),
                         );
-                        events.push(settle);
+                        events.extend(settle);
                         Ok(events)
                     }
                     // Late/stale settle: silent for the executor (idempotent), an error for an out-of-band caller.
@@ -996,7 +997,7 @@ impl SessionState {
                         &events,
                         Trigger::llm_err(call_id, error, code, detail),
                     );
-                    events.push(settle);
+                    events.extend(settle);
                 }
                 Ok(events)
             }
@@ -1031,7 +1032,7 @@ impl SessionState {
                                     deadline: retry.deadline(chrono::Utc::now()),
                                 },
                             );
-                            events.push(execute);
+                            events.extend(execute);
                         }
                         Ok(events)
                     }
@@ -1084,7 +1085,7 @@ impl SessionState {
                     result: result.clone(),
                 })];
                 let settle = self.emit_tool_result(&events, tool_call_id, name, result, false);
-                events.push(settle);
+                events.extend(settle);
                 Ok(events)
             }
 
@@ -1118,7 +1119,7 @@ impl SessionState {
                 })];
                 if exhausted {
                     let settle = self.emit_tool_result(&events, tool_call_id, name, error, true);
-                    events.push(settle);
+                    events.extend(settle);
                 }
                 Ok(events)
             }
@@ -1189,7 +1190,7 @@ impl SessionState {
                         error,
                         true,
                     );
-                    events.push(settle);
+                    events.extend(settle);
                 }
                 Ok(events)
             }
@@ -1222,7 +1223,7 @@ impl SessionState {
                     result,
                     false,
                 );
-                events.push(settle);
+                events.extend(settle);
                 Ok(events)
             }
 
@@ -1263,25 +1264,24 @@ impl SessionState {
                     interrupt_id: interrupt_id.clone(),
                     payload: payload.clone(),
                 })];
-                // Trigger only when the interrupt parked the head path. Emitted
-                // directly: emit_decision_request would queue while parked.
+                // Trigger only when the interrupt parked the head path. Promoted
+                // directly: emit_decision_request would park on the interrupt
+                // this batch just resumed.
                 if parked_head {
                     let trigger = Trigger::InterruptResumed {
                         interrupt_id,
                         payload,
                     };
                     let decision_id = new_call_id();
-                    events.push(if self.has_pending_worker_decision() {
-                        EventPayload::DecisionRequestQueued(DecisionRequestQueued {
-                            decision_id,
-                            trigger,
-                        })
-                    } else {
-                        EventPayload::WorkerDecisionRequested(WorkerDecisionRequested {
-                            decision_id,
-                            trigger,
-                        })
-                    });
+                    events.push(EventPayload::DecisionRequestQueued(DecisionRequestQueued {
+                        decision_id: decision_id.clone(),
+                        trigger,
+                    }));
+                    if !self.has_pending_worker_decision() {
+                        events.push(EventPayload::WorkerDecisionRequested(
+                            WorkerDecisionRequested { decision_id },
+                        ));
+                    }
                 }
                 Ok(events)
             }
@@ -1546,24 +1546,21 @@ impl SessionState {
                             .into_iter()
                             .filter(|d| !dropped.contains(d.decision_id.as_str()))
                             .filter(|d| !self.decision_parked(&d.trigger))
-                            .map(|d| (d.decision_id.clone(), d.trigger.clone()));
+                            .map(|d| d.decision_id.clone());
                         candidates.next().or_else(|| {
                             events.iter().find_map(|e| match e {
                                 EventPayload::DecisionRequestQueued(q)
                                     if !self.decision_parked(&q.trigger) =>
                                 {
-                                    Some((q.decision_id.clone(), q.trigger.clone()))
+                                    Some(q.decision_id.clone())
                                 }
                                 _ => None,
                             })
                         })
                     };
-                    if let Some((decision_id, trigger)) = promoted {
+                    if let Some(decision_id) = promoted {
                         events.push(EventPayload::WorkerDecisionRequested(
-                            WorkerDecisionRequested {
-                                decision_id,
-                                trigger,
-                            },
+                            WorkerDecisionRequested { decision_id },
                         ));
                     }
                 }
@@ -1667,7 +1664,7 @@ impl SessionState {
                         "deadline exceeded".to_string(),
                         true,
                     );
-                    events.push(settle);
+                    events.extend(settle);
                 }
                 return Ok(events);
             }
@@ -1700,7 +1697,7 @@ impl SessionState {
                                     deadline: call.tracking.retry_policy.deadline(now),
                                 },
                             );
-                            events.push(execute);
+                            events.extend(execute);
                         }
                         return Ok(events);
                     }
@@ -1732,7 +1729,7 @@ impl SessionState {
                                     deadline: tc.tracking.retry_policy.deadline(now),
                                 },
                             );
-                            events.push(execute);
+                            events.extend(execute);
                         }
                         return Ok(events);
                     }
@@ -1759,7 +1756,7 @@ impl SessionState {
                         "deadline exceeded".to_string(),
                         true,
                     );
-                    events.push(settle);
+                    events.extend(settle);
                 }
                 return Ok(events);
             }
@@ -1812,7 +1809,6 @@ impl SessionState {
                             return Ok(vec![EventPayload::WorkerDecisionRequested(
                                 WorkerDecisionRequested {
                                     decision_id: wd.decision_id.clone(),
-                                    trigger: wd.trigger.clone(),
                                 },
                             )]);
                         }
@@ -1828,7 +1824,6 @@ impl SessionState {
                 return Ok(vec![EventPayload::WorkerDecisionRequested(
                     WorkerDecisionRequested {
                         decision_id: wd.decision_id.clone(),
-                        trigger: wd.trigger.clone(),
                     },
                 )]);
             }
@@ -1984,6 +1979,7 @@ mod tests {
                 events.as_slice(),
                 [
                     EventPayload::ToolCallCompleted(_),
+                    EventPayload::DecisionRequestQueued(_),
                     EventPayload::WorkerDecisionRequested(_),
                 ]
             ),
@@ -2269,6 +2265,7 @@ mod tests {
                 events.as_slice(),
                 [
                     EventPayload::ToolCallRequested(_),
+                    EventPayload::DecisionRequestQueued(_),
                     EventPayload::WorkerDecisionRequested(_),
                 ]
             ),
@@ -2336,6 +2333,7 @@ mod tests {
                 events.as_slice(),
                 [
                     EventPayload::ToolCallCompleted(_),
+                    EventPayload::DecisionRequestQueued(_),
                     EventPayload::WorkerDecisionRequested(_),
                 ]
             ),
@@ -2724,7 +2722,10 @@ mod tests {
         assert!(
             matches!(
                 events.as_slice(),
-                [EventPayload::WorkerDecisionRequested(_)]
+                [
+                    EventPayload::DecisionRequestQueued(_),
+                    EventPayload::WorkerDecisionRequested(_)
+                ]
             ),
             "expected [WorkerDecisionRequested]; got {events:?}"
         );
@@ -2947,7 +2948,6 @@ mod tests {
         let trigger = events
             .iter()
             .find_map(|e| match e {
-                EventPayload::WorkerDecisionRequested(w) => Some(&w.trigger),
                 EventPayload::DecisionRequestQueued(q) => Some(&q.trigger),
                 _ => None,
             })
@@ -3013,7 +3013,6 @@ mod tests {
     fn transcript_messages(events: &[EventPayload]) -> Option<Vec<DraftMessage>> {
         events.iter().find_map(|e| {
             let trigger = match e {
-                EventPayload::WorkerDecisionRequested(p) => &p.trigger,
                 EventPayload::DecisionRequestQueued(p) => &p.trigger,
                 _ => return None,
             };
@@ -3104,16 +3103,12 @@ mod tests {
             .iter()
             .filter_map(|e| match e {
                 EventPayload::ToolCallCompleted(_) => Some("complete"),
-                EventPayload::WorkerDecisionRequested(p)
-                    if matches!(p.trigger, Trigger::ClientTranscript { .. }) =>
-                {
-                    Some("live")
-                }
+                EventPayload::WorkerDecisionRequested(_) => Some("live"),
                 EventPayload::DecisionRequestQueued(_) => Some("queued"),
                 _ => None,
             })
             .collect();
-        assert_eq!(sequence, vec!["complete", "complete", "live"]);
+        assert_eq!(sequence, vec!["complete", "complete", "queued", "live"]);
         assert_eq!(
             agg.state.tool_calls.get("a").unwrap().result.as_deref(),
             Some("RA")
@@ -3164,7 +3159,7 @@ mod tests {
             .filter(|e| {
                 matches!(
                     e,
-                    EventPayload::WorkerDecisionRequested(p)
+                    EventPayload::DecisionRequestQueued(p)
                         if matches!(p.trigger, Trigger::ClientTranscript { .. })
                 )
             })
@@ -3534,7 +3529,7 @@ mod tests {
         );
         assert!(first
             .iter()
-            .any(|e| matches!(e, EventPayload::WorkerDecisionRequested(p)
+            .any(|e| matches!(e, EventPayload::DecisionRequestQueued(p)
                 if matches!(p.trigger, Trigger::ClientMessage { .. }))));
 
         let second = dispatch(
@@ -3697,6 +3692,7 @@ mod tests {
                 events.as_slice(),
                 [
                     EventPayload::LlmCallCompleted(_),
+                    EventPayload::DecisionRequestQueued(_),
                     EventPayload::WorkerDecisionRequested(_),
                 ]
             ),
@@ -3725,7 +3721,7 @@ mod tests {
         let msg_id = events
             .iter()
             .find_map(|e| match e {
-                EventPayload::WorkerDecisionRequested(p) => match &p.trigger {
+                EventPayload::DecisionRequestQueued(p) => match &p.trigger {
                     Trigger::LlmFinished {
                         message: Some(m), ..
                     } => m.id.clone(),
@@ -3765,7 +3761,7 @@ mod tests {
         let (d2, assistant) = done
             .iter()
             .find_map(|e| match e {
-                EventPayload::WorkerDecisionRequested(p) => match &p.trigger {
+                EventPayload::DecisionRequestQueued(p) => match &p.trigger {
                     Trigger::LlmFinished {
                         message: Some(m), ..
                     } => Some((p.decision_id.clone(), m.clone())),
@@ -3859,6 +3855,7 @@ mod tests {
                 events.as_slice(),
                 [
                     EventPayload::LlmCallErrored(_),
+                    EventPayload::DecisionRequestQueued(_),
                     EventPayload::WorkerDecisionRequested(_),
                 ]
             ),
@@ -3981,6 +3978,7 @@ mod tests {
                 events.as_slice(),
                 [
                     EventPayload::LlmCallRequested(_),
+                    EventPayload::DecisionRequestQueued(_),
                     EventPayload::WorkerDecisionRequested(_),
                 ]
             ),
@@ -3989,7 +3987,7 @@ mod tests {
         let trigger = events
             .iter()
             .find_map(|e| match e {
-                EventPayload::WorkerDecisionRequested(p) => Some(&p.trigger),
+                EventPayload::DecisionRequestQueued(p) => Some(&p.trigger),
                 _ => None,
             })
             .expect("worker decision present");
@@ -4161,6 +4159,7 @@ mod tests {
                 events.as_slice(),
                 [
                     EventPayload::ToolCallErrored(_),
+                    EventPayload::DecisionRequestQueued(_),
                     EventPayload::WorkerDecisionRequested(_),
                 ]
             ),
@@ -4169,7 +4168,6 @@ mod tests {
         let trigger = events
             .iter()
             .find_map(|e| match e {
-                EventPayload::WorkerDecisionRequested(p) => Some(&p.trigger),
                 EventPayload::DecisionRequestQueued(p) => Some(&p.trigger),
                 _ => None,
             })
@@ -4281,6 +4279,7 @@ mod tests {
                 events.as_slice(),
                 [
                     EventPayload::SubAgentErrored(_),
+                    EventPayload::DecisionRequestQueued(_),
                     EventPayload::WorkerDecisionRequested(_),
                 ]
             ),
@@ -4333,6 +4332,7 @@ mod tests {
                 events.as_slice(),
                 [
                     EventPayload::SubAgentTurnCompleted(_),
+                    EventPayload::DecisionRequestQueued(_),
                     EventPayload::WorkerDecisionRequested(_),
                 ]
             ),
@@ -4400,7 +4400,6 @@ mod tests {
             .iter()
             .filter_map(|e| {
                 let (decision_id, trigger) = match e {
-                    EventPayload::WorkerDecisionRequested(p) => (&p.decision_id, &p.trigger),
                     EventPayload::DecisionRequestQueued(p) => (&p.decision_id, &p.trigger),
                     _ => return None,
                 };
@@ -4417,7 +4416,6 @@ mod tests {
     fn decision_with(events: &[EventPayload], pred: impl Fn(&Trigger) -> bool) -> Option<String> {
         events.iter().find_map(|e| {
             let (id, trigger) = match e {
-                EventPayload::WorkerDecisionRequested(p) => (&p.decision_id, &p.trigger),
                 EventPayload::DecisionRequestQueued(p) => (&p.decision_id, &p.trigger),
                 _ => return None,
             };
@@ -4643,7 +4641,7 @@ mod tests {
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                EventPayload::WorkerDecisionRequested(p)
+                EventPayload::DecisionRequestQueued(p)
                     if matches!(p.trigger, Trigger::ToolExecute { .. })
             )),
             "tool's tool.execute decision dispatched; got {events:?}"
@@ -4751,6 +4749,7 @@ mod tests {
                 events.as_slice(),
                 [
                     EventPayload::InterruptResumed(_),
+                    EventPayload::DecisionRequestQueued(_),
                     EventPayload::WorkerDecisionRequested(_),
                 ]
             ),
@@ -4807,6 +4806,7 @@ mod tests {
                 events.as_slice(),
                 [
                     EventPayload::InterruptResumed(_),
+                    EventPayload::DecisionRequestQueued(_),
                     EventPayload::WorkerDecisionRequested(_),
                 ]
             ),
@@ -4851,6 +4851,7 @@ mod tests {
                 events.as_slice(),
                 [
                     EventPayload::InterruptResumed(_),
+                    EventPayload::DecisionRequestQueued(_),
                     EventPayload::WorkerDecisionRequested(_),
                 ]
             ),
@@ -4902,6 +4903,7 @@ mod tests {
                 events.as_slice(),
                 [
                     EventPayload::InterruptResumed(_),
+                    EventPayload::DecisionRequestQueued(_),
                     EventPayload::WorkerDecisionRequested(_),
                 ]
             ),
@@ -5036,6 +5038,7 @@ mod tests {
                 events.as_slice(),
                 [
                     EventPayload::InterruptResumed(_),
+                    EventPayload::DecisionRequestQueued(_),
                     EventPayload::WorkerDecisionRequested(_),
                 ]
             ),
@@ -5313,6 +5316,7 @@ mod tests {
                 events.as_slice(),
                 [
                     EventPayload::InterruptResumed(_),
+                    EventPayload::DecisionRequestQueued(_),
                     EventPayload::WorkerDecisionRequested(_),
                 ]
             ),
@@ -5426,7 +5430,7 @@ mod tests {
         let resumed_decision_id = events
             .iter()
             .find_map(|e| match e {
-                EventPayload::WorkerDecisionRequested(p)
+                EventPayload::DecisionRequestQueued(p)
                     if matches!(p.trigger, Trigger::InterruptResumed { .. }) =>
                 {
                     Some(p.decision_id.clone())
@@ -5449,7 +5453,11 @@ mod tests {
         let trigger = events
             .iter()
             .find_map(|e| match e {
-                EventPayload::WorkerDecisionRequested(p) => Some(p.trigger.clone()),
+                EventPayload::WorkerDecisionRequested(p) => agg
+                    .state
+                    .worker_decisions
+                    .get(&p.decision_id)
+                    .map(|d| d.trigger.clone()),
                 _ => None,
             })
             .expect("queued decision should promote after the resumed decision completes");
@@ -5532,7 +5540,7 @@ mod tests {
         let trigger = events
             .iter()
             .find_map(|e| match e {
-                EventPayload::WorkerDecisionRequested(p) => Some(p.trigger.clone()),
+                EventPayload::DecisionRequestQueued(p) => Some(p.trigger.clone()),
                 _ => None,
             })
             .expect("resume should request a worker decision");
@@ -5595,12 +5603,10 @@ mod tests {
             matches!(events.as_slice(), [EventPayload::WorkerDecisionErrored(_)]),
             "expected [WorkerDecisionErrored]; got {events:?}"
         );
-        let wd = agg
-            .state
-            .worker_decisions
-            .get(&decision_id)
-            .expect("decision present");
-        assert_eq!(wd.tracking.status, EffectStatus::Failed);
+        assert!(
+            !agg.state.worker_decisions.contains_key(&decision_id),
+            "a settled decision leaves the map"
+        );
     }
 
     #[test]
@@ -6032,7 +6038,7 @@ mod tests {
         let (finish_first, trigger) = live_decision(&agg);
         assert!(matches!(trigger, Trigger::ToolFinished { .. }));
         assert_eq!(
-            agg.state.derived_state().pending_work(&finish_first),
+            agg.state.event_meta().pending_work(&finish_first),
             1,
             "the first finish must wait: a sibling result is still unrecorded"
         );
@@ -6045,7 +6051,7 @@ mod tests {
         let (finish_last, trigger) = live_decision(&agg);
         assert!(matches!(trigger, Trigger::ToolFinished { .. }));
         assert_eq!(
-            agg.state.derived_state().pending_work(&finish_last),
+            agg.state.event_meta().pending_work(&finish_last),
             0,
             "the last finish prompts: every result is recorded"
         );
@@ -6107,7 +6113,7 @@ mod tests {
             "the deferred call stays in flight after its execute"
         );
         assert_eq!(
-            agg.state.derived_state().pending_work(&finish_fast),
+            agg.state.event_meta().pending_work(&finish_fast),
             1,
             "the fast tool must wait: a deferred sibling is still in flight"
         );
@@ -6210,7 +6216,6 @@ mod tests {
             .iter()
             .filter_map(|e| {
                 let (decision_id, trigger) = match e {
-                    EventPayload::WorkerDecisionRequested(p) => (&p.decision_id, &p.trigger),
                     EventPayload::DecisionRequestQueued(p) => (&p.decision_id, &p.trigger),
                     _ => return None,
                 };
@@ -6231,7 +6236,6 @@ mod tests {
             .iter()
             .filter_map(|e| {
                 let (decision_id, trigger) = match e {
-                    EventPayload::WorkerDecisionRequested(p) => (&p.decision_id, &p.trigger),
                     EventPayload::DecisionRequestQueued(p) => (&p.decision_id, &p.trigger),
                     _ => return None,
                 };
@@ -6643,7 +6647,10 @@ mod tests {
             Some("a1"),
             "the version anchors to the last appended node"
         );
-        assert_eq!(agg.state.derived_state().worker_state.0, json!({"v": 1}));
+        assert_eq!(
+            agg.state.resolve_state_for(agg.state.head_id.as_deref()).0,
+            json!({"v": 1})
+        );
     }
 
     #[test]
@@ -6737,7 +6744,7 @@ mod tests {
             "the config anchors to the last appended node"
         );
         assert_eq!(
-            agg.state.derived_state().agent_config,
+            agg.state.resolve_agent_for(agg.state.head_id.as_deref()),
             Some(agent_config("m1"))
         );
 
@@ -6812,8 +6819,9 @@ mod tests {
                 events.as_slice(),
                 [
                     EventPayload::SessionCreated(_),
-                    EventPayload::WorkerDecisionRequested(w),
-                ] if matches!(w.trigger, Trigger::SessionStart)
+                    EventPayload::DecisionRequestQueued(q),
+                    EventPayload::WorkerDecisionRequested(_),
+                ] if matches!(q.trigger, Trigger::SessionStart)
             ),
             "CreateSession opens session.start as the first decision; got {events:?}"
         );
@@ -6886,12 +6894,15 @@ mod tests {
             events.iter().any(|e| matches!(
                 e,
                 EventPayload::WorkerDecisionRequested(w)
-                    if matches!(w.trigger, Trigger::ClientMessage { .. })
+                    if matches!(
+                        agg.state.worker_decisions.get(&w.decision_id).map(|d| &d.trigger),
+                        Some(Trigger::ClientMessage { .. })
+                    )
             )),
             "the queued client decision is promoted; got {events:?}"
         );
         assert_eq!(
-            agg.state.derived_state().agent_config,
+            agg.state.resolve_agent_for(agg.state.head_id.as_deref()),
             Some(agent_config("m1"))
         );
     }
@@ -6954,7 +6965,7 @@ mod tests {
         assert!(state_updates(&events).is_empty());
         assert_eq!(agg.state.head_id.as_deref(), Some("y1"));
         assert_eq!(
-            agg.state.derived_state().worker_state.0,
+            agg.state.resolve_state_for(agg.state.head_id.as_deref()).0,
             json!({"v": 1}),
             "the fork is uncontaminated by the abandoned branches"
         );
@@ -7145,7 +7156,6 @@ mod tests {
             .iter()
             .filter_map(|e| {
                 let trigger = match e {
-                    EventPayload::WorkerDecisionRequested(p) => &p.trigger,
                     EventPayload::DecisionRequestQueued(p) => &p.trigger,
                     _ => return None,
                 };
@@ -7358,7 +7368,11 @@ mod tests {
             "the stale settle is not delivered; got {events:?}"
         );
         let promoted = events.iter().find_map(|e| match e {
-            EventPayload::WorkerDecisionRequested(p) => Some(&p.trigger),
+            EventPayload::WorkerDecisionRequested(p) => agg
+                .state
+                .worker_decisions
+                .get(&p.decision_id)
+                .map(|d| &d.trigger),
             _ => None,
         });
         assert!(
@@ -7869,6 +7883,7 @@ mod tests {
                 events.as_slice(),
                 [
                     EventPayload::InterruptResumed(_),
+                    EventPayload::DecisionRequestQueued(_),
                     EventPayload::WorkerDecisionRequested(_),
                 ]
             ),

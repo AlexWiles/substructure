@@ -12,5 +12,7 @@ pub mod subscriptions;
 pub mod tool_contract;
 pub mod wire;
 
-pub(crate) use aggregate::{execute, ConflictRetry, ExecuteError, ExecuteInput, SESSION_TYPE};
+#[cfg(test)]
+pub(crate) use aggregate::CommitContext;
+pub(crate) use aggregate::{execute, ConflictRetry, ExecuteError, ExecuteInput};
 pub use aggregate::{NewSessionEvent, SessionAggregate, SessionEvent};

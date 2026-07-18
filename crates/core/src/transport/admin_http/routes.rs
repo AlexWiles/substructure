@@ -8,7 +8,8 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::event_store::{AggregateSort, StreamVersion};
+use crate::event_store::Seq;
+use crate::session::index::SessionSort;
 use crate::session::index::{SessionCursor, SessionFilter};
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use crate::transport::ag_ui::snapshot::snapshot_events;
@@ -22,7 +23,7 @@ pub struct ListSessionsParams {
     #[serde(default = "default_true")]
     pub top_level: bool,
     #[serde(default)]
-    pub sort: AggregateSort,
+    pub sort: SessionSort,
     pub limit: Option<usize>,
     pub cursor: Option<String>,
     pub session_id: Option<String>,
@@ -137,7 +138,7 @@ pub async fn get_session_events(
         .read_session_events(
             &caller,
             &session_id,
-            params.after_stream_version.map(StreamVersion),
+            params.after_stream_version.map(Seq),
             params.limit,
         )
         .await
@@ -163,7 +164,7 @@ pub async fn stream_session_events(
         scope: SubscriptionScope::All,
     };
     // Admin endpoint defaults to full-history replay (cursor defaults to 0).
-    let after = Some(StreamVersion(params.after_stream_version.unwrap_or(0)));
+    let after = Some(Seq(params.after_stream_version.unwrap_or(0)));
     let rx = match state.runtime.stream(spec, after).await {
         Ok(rx) => rx,
         Err(e) => {
@@ -182,7 +183,7 @@ pub async fn stream_session_events(
             let data = serde_json::to_string(&event).unwrap_or_default();
             Ok::<_, std::convert::Infallible>(
                 SseEvent::default()
-                    .id(event.sequence.to_string())
+                    .id(event.seq.to_string())
                     .event(event_type)
                     .data(data),
             )

@@ -159,16 +159,20 @@ mod tests {
     #[test]
     fn session_response_messages_is_the_head_lineage() {
         use crate::protocol::{Message, NewMessage, Role};
-        let node = |id: &str, role: Role, parent: Option<&str>| NewMessage {
-            message: Message {
-                id: id.to_string(),
-                role,
-                content: None,
-                tool_calls: vec![],
-                tool_call_id: None,
-                name: None,
+        use crate::runtime::session::state::Logged;
+        let node = |id: &str, role: Role, parent: Option<&str>| Logged {
+            seq: 0,
+            entry: NewMessage {
+                message: Message {
+                    id: id.to_string(),
+                    role,
+                    content: None,
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                    name: None,
+                },
+                parent_id: parent.map(str::to_string),
             },
-            parent_id: parent.map(str::to_string),
         };
         let mut s = SessionState::new("s1".to_string());
         s.status = SessionStatus::Idle;

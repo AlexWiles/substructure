@@ -11,7 +11,7 @@ use crate::protocol::{
     InterruptResumption, SessionOwner, TokenDelta,
 };
 use crate::providers::memory_queue::TaskQueue;
-use event_store::{EventFilter, EventStore, StoreError, StreamVersion};
+use event_store::{EventFilter, EventStore, Seq, StoreError};
 use llm::{
     spawn_llm_dispatch_processor, spawn_llm_task_executor, LlmProviderTrait, LlmTask,
     TokenDeltaTransport,
@@ -221,7 +221,7 @@ impl Runtime {
         let create_result = execute(
             &*self.store,
             ExecuteInput {
-                aggregate_id: session_id.clone(),
+                session_id: session_id.clone(),
                 caller: input.caller.clone(),
                 command: CommandPayload::CreateSession {
                     agent_id: input.agent_id,
@@ -245,7 +245,7 @@ impl Runtime {
         let send_result = execute(
             &*self.store,
             ExecuteInput {
-                aggregate_id: session_id.clone(),
+                session_id: session_id.clone(),
                 caller: input.caller,
                 command: CommandPayload::SubmitClientPayload {
                     payload: input.payload,
@@ -455,7 +455,7 @@ impl Runtime {
     pub async fn stream(
         &self,
         spec: SessionSubscriptionSpec,
-        after: Option<StreamVersion>,
+        after: Option<Seq>,
     ) -> Result<mpsc::Receiver<SessionEvent>, RuntimeError> {
         self.authorize_session_read(&spec.root_session_id, &spec.caller)
             .await?;
@@ -536,14 +536,14 @@ impl Runtime {
         &self,
         caller: &Caller,
         session_id: &str,
-        after: Option<StreamVersion>,
+        after: Option<Seq>,
         limit: Option<usize>,
     ) -> Result<Vec<SessionEvent>, RuntimeError> {
         self.authorize_session_read(session_id, caller).await?;
         let filter = EventFilter {
-            aggregate_id: Some(session_id.to_string()),
+            session_id: Some(session_id.to_string()),
             tenant_id: Some(caller.tenant_id().to_string()),
-            after_stream_version: after,
+            after_seq: after,
             limit,
             ..Default::default()
         };
@@ -557,7 +557,7 @@ impl Runtime {
         execute(
             &*self.store,
             ExecuteInput {
-                aggregate_id: input.session_id.clone(),
+                session_id: input.session_id.clone(),
                 caller: input.caller,
                 command: CommandPayload::SubmitWorkerDecision {
                     decision_id: input.decision_id,
@@ -617,7 +617,7 @@ impl Runtime {
         execute(
             &*self.store,
             ExecuteInput {
-                aggregate_id: input.session_id,
+                session_id: input.session_id,
                 caller: input.caller,
                 command,
                 span: input.span,
@@ -636,7 +636,7 @@ impl Runtime {
         execute(
             &*self.store,
             ExecuteInput {
-                aggregate_id: input.session_id,
+                session_id: input.session_id,
                 caller: input.caller,
                 command: CommandPayload::Interrupt {
                     interrupt_id: input.interrupt_id,
@@ -656,7 +656,7 @@ impl Runtime {
         execute(
             &*self.store,
             ExecuteInput {
-                aggregate_id: input.session_id,
+                session_id: input.session_id,
                 caller: input.caller,
                 command: CommandPayload::ResumeInterrupt {
                     interrupt_id: input.interrupt_id,
@@ -675,7 +675,7 @@ impl Runtime {
         execute(
             &*self.store,
             ExecuteInput {
-                aggregate_id: input.session_id.clone(),
+                session_id: input.session_id.clone(),
                 caller: input.caller,
                 command: CommandPayload::FailWorkerDecision {
                     decision_id: input.decision_id,

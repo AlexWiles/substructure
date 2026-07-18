@@ -90,7 +90,7 @@ pub fn spawn_llm_task_executor(
                 let result = execute(
                     store.as_ref(),
                     ExecuteInput {
-                        aggregate_id: task.session_id.clone(),
+                        session_id: task.session_id.clone(),
                         caller: Caller::System {
                             tenant_id: task.tenant_id.clone(),
                         },
