@@ -5,9 +5,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use xxhash_rust::xxh3::xxh3_64;
 
-use crate::runtime::event_store::{Event, EventFilter, EventStore, GlobalPosition};
+use crate::runtime::event_store::{EventFilter, EventStore, GlobalPosition};
+use crate::runtime::session::SessionEvent;
+use crate::shard::in_shard;
 
 #[derive(Debug, Clone)]
 pub struct ProcessorCheckpoint {
@@ -31,8 +32,7 @@ pub enum ProcessorError {
 #[async_trait]
 pub trait EventProcessor: Send + Sync + 'static {
     fn name(&self) -> &'static str;
-    fn shard_key(&self, event: &Event) -> Option<String>;
-    async fn apply(&self, event: &Event) -> Result<(), ProcessorError>;
+    async fn apply(&self, event: SessionEvent) -> Result<(), ProcessorError>;
 }
 
 #[async_trait]
@@ -185,36 +185,25 @@ impl EventProcessorRunner {
         &self,
         processor_name: &str,
         checkpoint: &mut ProcessorCheckpoint,
-        events: &[Event],
+        events: &[SessionEvent],
     ) -> Result<(), BatchProcessError> {
         let mut committable_position = checkpoint.position;
 
         for event in events {
-            if event_matches_shard(
-                event,
-                self.processor.as_ref(),
+            if in_shard(
+                &event.session_id,
                 self.config.shard_count,
                 self.config.shard_id,
             ) {
-                if let Err(err) = self.processor.apply(event).await {
-                    tracing::error!(
-                        processor = processor_name,
-                        shard_id = self.config.shard_id,
-                        event_position = event.global_position.0,
-                        error = %err,
-                        "processor apply failed"
-                    );
-
-                    if committable_position > checkpoint.position {
-                        self.commit_checkpoint_position(
-                            processor_name,
-                            checkpoint,
-                            committable_position,
-                        )
-                        .await;
-                    }
-
-                    tokio::time::sleep(self.config.error_backoff).await;
+                if let Err(err) = self.processor.apply(event.clone()).await {
+                    self.record_failure(
+                        processor_name,
+                        checkpoint,
+                        committable_position,
+                        event.global_position.0,
+                        err.to_string(),
+                    )
+                    .await;
                     return Err(BatchProcessError::ApplyFailed);
                 }
             }
@@ -296,22 +285,26 @@ impl EventProcessorRunner {
             }
         }
     }
-}
 
-fn event_matches_shard(
-    event: &Event,
-    processor: &dyn EventProcessor,
-    shard_count: u32,
-    shard_id: u32,
-) -> bool {
-    debug_assert!(shard_count > 0, "processor shard_count must be > 0");
-    let key = match processor.shard_key(event) {
-        Some(k) => k,
-        None => return false,
-    };
-    (stable_hash(&key) % u64::from(shard_count)) == u64::from(shard_id)
-}
-
-fn stable_hash(input: &str) -> u64 {
-    xxh3_64(input.as_bytes())
+    async fn record_failure(
+        &self,
+        processor_name: &str,
+        checkpoint: &mut ProcessorCheckpoint,
+        committable_position: u64,
+        event_position: u64,
+        error: String,
+    ) {
+        tracing::error!(
+            processor = processor_name,
+            shard_id = self.config.shard_id,
+            event_position,
+            error = %error,
+            "processor apply failed"
+        );
+        if committable_position > checkpoint.position {
+            self.commit_checkpoint_position(processor_name, checkpoint, committable_position)
+                .await;
+        }
+        tokio::time::sleep(self.config.error_backoff).await;
+    }
 }

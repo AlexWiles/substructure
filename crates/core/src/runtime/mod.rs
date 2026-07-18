@@ -11,8 +11,7 @@ use crate::protocol::{
     InterruptResumption, SessionOwner, TokenDelta,
 };
 use crate::providers::memory_queue::TaskQueue;
-use aggregate::{execute, Caller, ConflictRetry, ExecuteError, ExecuteInput};
-use event_store::{Event, EventFilter, EventStore, Snapshot, StoreError, StreamVersion};
+use event_store::{EventFilter, EventStore, Seq, StoreError};
 use llm::{
     spawn_llm_dispatch_processor, spawn_llm_task_executor, LlmProviderTrait, LlmTask,
     TokenDeltaTransport,
@@ -24,16 +23,16 @@ use session::decision::{EffectResultPayload, WorkKind};
 use session::index::{
     spawn_session_index_processor, SessionFilter, SessionIndexStore, SessionPage,
 };
-use session::state::SessionState;
 use session::subscriptions::SessionSubscriptionSpec;
 use session::wire::result_to_string;
+use session::{execute, ConflictRetry, ExecuteError, ExecuteInput, SessionAggregate, SessionEvent};
 use span::SpanContext;
 use sub_agent::{spawn_sub_agent_dispatch_processor, spawn_sub_agent_task_executor, SubAgentTask};
 use wake::{spawn_wake_dispatcher, spawn_wake_processor, WakeScheduleStore};
 use worker::spawn_worker_processor;
 use worker::{DequeueFilter, FailDecision, SubmitDecision, WorkerDecisionRequest, WorkerQueue};
 
-pub mod aggregate;
+mod caller;
 pub mod event_store;
 pub mod llm;
 pub mod processor;
@@ -43,6 +42,8 @@ pub mod span;
 pub mod sub_agent;
 pub mod wake;
 pub mod worker;
+
+pub use caller::Caller;
 
 pub struct RuntimeConfig {
     pub llm_executor_workers: usize,
@@ -158,8 +159,8 @@ pub enum RuntimeError {
     Internal(String),
 }
 
-impl From<ExecuteError<SessionError>> for RuntimeError {
-    fn from(e: ExecuteError<SessionError>) -> Self {
+impl From<ExecuteError> for RuntimeError {
+    fn from(e: ExecuteError) -> Self {
         match e {
             ExecuteError::Command(c) => RuntimeError::Session(c),
             other => RuntimeError::Internal(other.to_string()),
@@ -217,10 +218,10 @@ impl Runtime {
             .await;
 
         // Create session (ignore if already exists)
-        let create_result = execute::<SessionState>(
+        let create_result = execute(
             &*self.store,
             ExecuteInput {
-                aggregate_id: session_id.clone(),
+                session_id: session_id.clone(),
                 caller: input.caller.clone(),
                 command: CommandPayload::CreateSession {
                     agent_id: input.agent_id,
@@ -241,10 +242,10 @@ impl Runtime {
         }
 
         // Try to submit the payload (idempotency guard may reject)
-        let send_result = execute::<SessionState>(
+        let send_result = execute(
             &*self.store,
             ExecuteInput {
-                aggregate_id: session_id.clone(),
+                session_id: session_id.clone(),
                 caller: input.caller,
                 command: CommandPayload::SubmitClientPayload {
                     payload: input.payload,
@@ -440,7 +441,8 @@ impl Runtime {
         session_id: &str,
     ) -> Result<String, RuntimeError> {
         match self.get_session(caller.tenant_id(), session_id).await {
-            Ok((_, state)) => state
+            Ok(session) => session
+                .state
                 .turn_id
                 .ok_or(RuntimeError::Session(SessionError::NoActiveTurn)),
             Err(_) => Err(RuntimeError::Session(SessionError::NoActiveTurn)),
@@ -453,8 +455,8 @@ impl Runtime {
     pub async fn stream(
         &self,
         spec: SessionSubscriptionSpec,
-        after: Option<StreamVersion>,
-    ) -> Result<mpsc::Receiver<Event>, RuntimeError> {
+        after: Option<Seq>,
+    ) -> Result<mpsc::Receiver<SessionEvent>, RuntimeError> {
         self.authorize_session_read(&spec.root_session_id, &spec.caller)
             .await?;
         Ok(self.session_subscriptions.stream(spec, after).await)
@@ -472,17 +474,15 @@ impl Runtime {
             return Ok(());
         };
 
-        let snapshot = match self.store.load(tenant_id, session_id).await {
-            Ok(snapshot) => snapshot,
+        let session = match self.store.load(tenant_id, session_id).await {
+            Ok(session) => session,
             // An uncreated session has no owner yet — nothing to leak; the read
             // is simply empty, and the first turn binds the session to its owner.
             Err(StoreError::StreamNotFound) => return Ok(()),
             Err(e) => return Err(RuntimeError::Internal(e.to_string())),
         };
 
-        let agg: aggregate::Aggregate<SessionState> = serde_json::from_value(snapshot.data)
-            .map_err(|e| RuntimeError::Internal(e.to_string()))?;
-        let owner_id = agg.state.owner.as_ref().and_then(|o| o.id.as_deref());
+        let owner_id = session.state.owner.as_ref().and_then(|o| o.id.as_deref());
 
         if owner_id == Some(user_id.as_str()) {
             Ok(())
@@ -525,30 +525,25 @@ impl Runtime {
         &self,
         tenant_id: &str,
         session_id: &str,
-    ) -> Result<(Snapshot, SessionState), RuntimeError> {
-        let snapshot = self
-            .store
+    ) -> Result<SessionAggregate, RuntimeError> {
+        self.store
             .load(tenant_id, session_id)
             .await
-            .map_err(|e| RuntimeError::Internal(e.to_string()))?;
-        let agg: aggregate::Aggregate<SessionState> = serde_json::from_value(snapshot.data.clone())
-            .map_err(|e| RuntimeError::Internal(e.to_string()))?;
-        let state = agg.state;
-        Ok((snapshot, state))
+            .map_err(|e| RuntimeError::Internal(e.to_string()))
     }
 
     pub async fn read_session_events(
         &self,
         caller: &Caller,
         session_id: &str,
-        after: Option<StreamVersion>,
+        after: Option<Seq>,
         limit: Option<usize>,
-    ) -> Result<Vec<Event>, RuntimeError> {
+    ) -> Result<Vec<SessionEvent>, RuntimeError> {
         self.authorize_session_read(session_id, caller).await?;
         let filter = EventFilter {
-            aggregate_id: Some(session_id.to_string()),
+            session_id: Some(session_id.to_string()),
             tenant_id: Some(caller.tenant_id().to_string()),
-            after_stream_version: after,
+            after_seq: after,
             limit,
             ..Default::default()
         };
@@ -559,10 +554,10 @@ impl Runtime {
     }
 
     pub async fn submit_decision(&self, input: SubmitDecision) -> Result<(), RuntimeError> {
-        execute::<SessionState>(
+        execute(
             &*self.store,
             ExecuteInput {
-                aggregate_id: input.session_id.clone(),
+                session_id: input.session_id.clone(),
                 caller: input.caller,
                 command: CommandPayload::SubmitWorkerDecision {
                     decision_id: input.decision_id,
@@ -619,10 +614,10 @@ impl Runtime {
             },
         };
 
-        execute::<SessionState>(
+        execute(
             &*self.store,
             ExecuteInput {
-                aggregate_id: input.session_id,
+                session_id: input.session_id,
                 caller: input.caller,
                 command,
                 span: input.span,
@@ -638,10 +633,10 @@ impl Runtime {
         &self,
         input: InterruptSessionInput,
     ) -> Result<(), RuntimeError> {
-        execute::<SessionState>(
+        execute(
             &*self.store,
             ExecuteInput {
-                aggregate_id: input.session_id,
+                session_id: input.session_id,
                 caller: input.caller,
                 command: CommandPayload::Interrupt {
                     interrupt_id: input.interrupt_id,
@@ -658,10 +653,10 @@ impl Runtime {
     }
 
     pub async fn resume_interrupt(&self, input: ResumeInterruptInput) -> Result<(), RuntimeError> {
-        execute::<SessionState>(
+        execute(
             &*self.store,
             ExecuteInput {
-                aggregate_id: input.session_id,
+                session_id: input.session_id,
                 caller: input.caller,
                 command: CommandPayload::ResumeInterrupt {
                     interrupt_id: input.interrupt_id,
@@ -677,10 +672,10 @@ impl Runtime {
     }
 
     pub async fn fail_decision(&self, input: FailDecision) -> Result<(), RuntimeError> {
-        execute::<SessionState>(
+        execute(
             &*self.store,
             ExecuteInput {
-                aggregate_id: input.session_id.clone(),
+                session_id: input.session_id.clone(),
                 caller: input.caller,
                 command: CommandPayload::FailWorkerDecision {
                     decision_id: input.decision_id,

@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing_subscriber::EnvFilter;
 
-use substructure_core::event_store::StreamVersion;
+use substructure_core::event_store::Seq;
 use substructure_core::protocol::{
     ClientPayload, DecisionRequest, DecisionResponse, LlmResponse, SessionOwner,
 };
@@ -451,7 +451,7 @@ impl EmbeddedRuntime {
                 None => SubscriptionScope::All,
             },
         };
-        let cursor = after_stream_version.map(|n| StreamVersion(n.max(0) as u64));
+        let cursor = after_stream_version.map(|n| Seq(n.max(0) as u64));
         let mut rx = self
             .inner
             .stream(spec, cursor)

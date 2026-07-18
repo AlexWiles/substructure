@@ -7,7 +7,7 @@ use futures_util::stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-use crate::event_store::StreamVersion;
+use crate::event_store::Seq;
 use crate::protocol::{ClientInput, InterruptResumption, SessionOwner};
 use crate::session::command::SessionError;
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
@@ -145,7 +145,7 @@ pub async fn get_session(
         .get_session(caller.tenant_id(), &session_id)
         .await
     {
-        Ok((_, session)) => session,
+        Ok(session) => session.state,
         Err(e) => return runtime_error_response(e),
     };
 
@@ -175,7 +175,7 @@ pub async fn stream_session_events(
         },
     };
 
-    let after = params.after_stream_version.map(StreamVersion);
+    let after = params.after_stream_version.map(Seq);
     let event_rx = match state.runtime.stream(spec, after).await {
         Ok(rx) => rx,
         Err(e) => return runtime_error_response(e),
@@ -306,7 +306,7 @@ pub async fn ag_ui_connect(
             .get_session(caller.tenant_id(), &input.thread_id)
             .await
         {
-            Ok((_, session)) => Some(session),
+            Ok(session) => Some(session.state),
             Err(e) => return runtime_error_response(e),
         }
     };

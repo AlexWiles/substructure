@@ -5,13 +5,23 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use crate::runtime::aggregate::{AggregateState, DomainEvent};
-use crate::runtime::event_store::{AggregateSort, Event, EventStore, StoreError};
+use crate::runtime::event_store::{EventStore, StoreError};
 use crate::runtime::processor::{
     EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCheckpointStore,
     ProcessorError,
 };
-use crate::runtime::session::state::{SessionState, SessionStatus};
+use crate::runtime::session::state::SessionStatus;
+use crate::runtime::session::SessionEvent;
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionSort {
+    #[default]
+    LastEventDesc,
+    FirstEventAsc,
+    FirstEventDesc,
+    WakeAtAsc,
+}
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SessionFilter {
@@ -21,7 +31,7 @@ pub struct SessionFilter {
     #[serde(default)]
     pub top_level: bool,
     #[serde(default)]
-    pub sort: AggregateSort,
+    pub sort: SessionSort,
     pub limit: Option<usize>,
     pub cursor: Option<SessionCursor>,
 }
@@ -93,38 +103,22 @@ impl EventProcessor for SessionIndexProjection {
         "session_index_v1"
     }
 
-    fn shard_key(&self, event: &Event) -> Option<String> {
-        if event.aggregate_type != SessionState::AGGREGATE_TYPE {
-            return None;
-        }
-        Some(event.aggregate_id.clone())
-    }
-
-    async fn apply(&self, event: &Event) -> Result<(), ProcessorError> {
-        if event.aggregate_type != SessionState::AGGREGATE_TYPE {
-            return Ok(());
-        }
-
-        let event = DomainEvent::<SessionState>::from_raw(event)
-            .map_err(|e| ProcessorError::Apply(e.to_string()))?;
-
-        let derived = event.derived.ok_or_else(|| {
-            ProcessorError::Apply("missing derived state for session event".into())
-        })?;
+    async fn apply(&self, event: SessionEvent) -> Result<(), ProcessorError> {
+        let meta = event.meta;
 
         let record = SessionIndexRecord {
             tenant_id: event.tenant_id,
-            session_id: event.aggregate_id,
-            stream_version: event.sequence,
+            session_id: event.session_id,
+            stream_version: event.seq,
             first_event_at: Some(event.occurred_at),
             last_event_at: Some(event.occurred_at),
-            wake_at: derived.wake_at,
-            top_level: derived.ancestry.is_empty(),
-            agent_id: derived.agent_id,
-            cost: derived.cost,
-            sub_agent_cost: derived.sub_agent_cost,
-            status: derived.status,
-            turn_id: derived.turn_id,
+            wake_at: meta.wake_at,
+            top_level: meta.ancestry.is_empty(),
+            agent_id: meta.agent_id,
+            cost: meta.cost,
+            sub_agent_cost: meta.sub_agent_cost,
+            status: meta.status,
+            turn_id: meta.turn_id,
         };
 
         self.store

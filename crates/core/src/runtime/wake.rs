@@ -5,22 +5,20 @@ use chrono::{DateTime, Utc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::runtime::aggregate::{
-    execute, AggregateState, Caller, ConflictRetry, DomainEvent, ExecuteInput,
-};
-use crate::runtime::event_store::{Event, EventStore};
+use crate::runtime::event_store::EventStore;
 use crate::runtime::processor::{
     EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCheckpointStore,
     ProcessorError,
 };
 use crate::runtime::session::command::CommandPayload;
-use crate::runtime::session::state::SessionState;
+use crate::runtime::session::{execute, ConflictRetry, ExecuteInput, SessionEvent};
 use crate::runtime::span::SpanContext;
+use crate::runtime::Caller;
 
 #[derive(Debug, Clone)]
 pub struct WakeScheduleItem {
     pub tenant_id: String,
-    pub aggregate_id: String,
+    pub session_id: String,
     pub wake_at: DateTime<Utc>,
 }
 
@@ -29,10 +27,10 @@ pub trait WakeScheduleStore: Send + Sync {
     async fn upsert_wake(
         &self,
         tenant_id: &str,
-        aggregate_id: &str,
+        session_id: &str,
         wake_at: DateTime<Utc>,
     ) -> Result<(), String>;
-    async fn remove_wake(&self, tenant_id: &str, aggregate_id: &str) -> Result<(), String>;
+    async fn remove_wake(&self, tenant_id: &str, session_id: &str) -> Result<(), String>;
     async fn list_due_wakes(
         &self,
         now: DateTime<Utc>,
@@ -57,28 +55,16 @@ impl EventProcessor for WakeScheduleProjection {
         "wake_schedule"
     }
 
-    fn shard_key(&self, event: &Event) -> Option<String> {
-        if event.aggregate_type != SessionState::AGGREGATE_TYPE {
-            return None;
-        }
-        Some(event.aggregate_id.clone())
-    }
-
-    async fn apply(&self, event: &Event) -> Result<(), ProcessorError> {
-        if event.aggregate_type != SessionState::AGGREGATE_TYPE {
-            return Ok(());
-        }
-        let event = DomainEvent::<SessionState>::from_raw(event)
-            .map_err(|e| ProcessorError::Apply(e.to_string()))?;
-        match event.derived.and_then(|d| d.wake_at) {
+    async fn apply(&self, event: SessionEvent) -> Result<(), ProcessorError> {
+        match event.meta.wake_at {
             Some(wake_at) => self
                 .wake_store
-                .upsert_wake(&event.tenant_id, &event.aggregate_id, wake_at)
+                .upsert_wake(&event.tenant_id, &event.session_id, wake_at)
                 .await
                 .map_err(ProcessorError::Apply),
             None => self
                 .wake_store
-                .remove_wake(&event.tenant_id, &event.aggregate_id)
+                .remove_wake(&event.tenant_id, &event.session_id)
                 .await
                 .map_err(ProcessorError::Apply),
         }
@@ -152,10 +138,10 @@ async fn fire_due(
         Err(_) => return,
     };
     for item in due {
-        let _ = execute::<SessionState>(
+        let _ = execute(
             store.as_ref(),
             ExecuteInput {
-                aggregate_id: item.aggregate_id,
+                session_id: item.session_id,
                 caller: Caller::System {
                     tenant_id: item.tenant_id,
                 },
@@ -168,14 +154,8 @@ async fn fire_due(
     }
 }
 
-fn extract_wake_at(event: &Event) -> Option<DateTime<Utc>> {
-    event
-        .derived
-        .as_ref()?
-        .get("wake_at")?
-        .as_str()?
-        .parse()
-        .ok()
+fn extract_wake_at(event: &SessionEvent) -> Option<DateTime<Utc>> {
+    event.meta.wake_at
 }
 
 fn chrono_to_std(d: chrono::Duration) -> Duration {

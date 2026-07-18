@@ -11,3 +11,10 @@ pub mod state;
 pub mod subscriptions;
 pub mod tool_contract;
 pub mod wire;
+
+#[cfg(test)]
+pub use aggregate::CommitContext;
+pub use aggregate::{
+    execute, ConflictRetry, ExecuteError, ExecuteInput, NewSessionEvent, SessionAggregate,
+    SessionEvent,
+};

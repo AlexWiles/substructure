@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use tokio::sync::{mpsc, Mutex};
-use xxhash_rust::xxh3::xxh3_64;
+
+use crate::shard::shard_of;
 
 // ---------------------------------------------------------------------------
 // Original unsharded queue (used by WorkerQueue, etc.)
@@ -66,7 +67,7 @@ impl<T: Send + 'static> ShardedInMemoryQueue<T> {
 #[async_trait]
 impl<T: Send + 'static> TaskQueue<T> for ShardedInMemoryQueue<T> {
     async fn enqueue(&self, shard_key: &str, task: T) -> Result<(), String> {
-        let shard = (xxh3_64(shard_key.as_bytes()) % u64::from(self.shard_count)) as usize;
+        let shard = shard_of(shard_key, self.shard_count);
         self.senders[shard]
             .send(task)
             .map_err(|_| "queue closed".to_string())

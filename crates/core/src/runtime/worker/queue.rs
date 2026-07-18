@@ -6,9 +6,9 @@ use crate::protocol::{
     AgentConfig, DecisionResponse, DecisionTrigger, DraftMessage, Effect, Message, MessageTree,
     SessionOwner, WorkerState,
 };
-use crate::runtime::aggregate::Caller;
 use crate::runtime::session::decision::Action;
 use crate::runtime::span::SpanContext;
+use crate::runtime::Caller;
 
 /// Wire format sent to workers (via poll or push) when a decision is needed.
 #[derive(Debug, Clone, Serialize, Deserialize)]

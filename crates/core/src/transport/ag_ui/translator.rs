@@ -5,10 +5,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::events::{AgUiEvent, AgUiInterrupt, RunOutcome};
-use crate::event_store::Event;
 use crate::protocol::TokenDelta;
 use crate::runtime::session::decision::ToolHandler;
 use crate::session::events::EventPayload;
+use crate::session::SessionEvent;
 
 /// A tool call's args as an AG-UI delta. Empty args become `"{}"` so clients
 /// treat the call as complete (a no-arg call otherwise carries no delta).
@@ -471,7 +471,7 @@ fn tool_result(tool_call_id: String, content: String) -> AgUiEvent {
 }
 
 pub fn run_ag_ui_translation(
-    mut event_rx: mpsc::Receiver<Event>,
+    mut event_rx: mpsc::Receiver<SessionEvent>,
     mut delta_rx: mpsc::Receiver<TokenDelta>,
     thread_id: String,
     run_id: String,
@@ -494,11 +494,8 @@ pub fn run_ag_ui_translation(
                     return;
                 }
                 ev = event_rx.recv() => match ev {
-                    Some(raw) => {
-                        let payload: EventPayload = match serde_json::from_value(raw.payload) {
-                            Ok(p) => p,
-                            Err(_) => continue,
-                        };
+                    Some(event) => {
+                        let payload = event.payload;
                         // Drain queued deltas before handling `llm.call.completed`
                         // (and the tool.call.requested events that follow) so no
                         // closing event outruns its last streamed fragment.

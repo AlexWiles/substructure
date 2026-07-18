@@ -6,7 +6,7 @@ use uuid::Uuid;
 use super::env::{EnvVars, LlmProviderArg};
 use super::pretty::PrettyPrinter;
 use super::{local, register_startup_worker, DEFAULT_TENANT};
-use crate::event_store::StreamVersion;
+use crate::event_store::Seq;
 use crate::protocol::{ClientInput, SessionOwner};
 use crate::session::events::EventPayload;
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
@@ -162,8 +162,8 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
     // bounds the replay to this invocation's events. The active-turn lookup a
     // resume/settle needs lives in the router.
     let base_seq = match rt.get_session(DEFAULT_TENANT, &session_id).await {
-        Ok((snapshot, _)) => snapshot.stream_version,
-        Err(_) => StreamVersion(0),
+        Ok(session) => Seq(session.stream_version),
+        Err(_) => Seq(0),
     };
 
     let turn_id = rt
@@ -213,9 +213,7 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
                 if raw {
                     write_json(&mut stdout, &event)?;
                 }
-                let Ok(payload) = serde_json::from_value::<EventPayload>(event.payload) else {
-                    continue;
-                };
+                let payload = event.payload;
                 // Drain queued deltas before `llm.call.completed` so no closing
                 // event outruns its last streamed fragment.
                 if matches!(payload, EventPayload::LlmCallCompleted(_)) {

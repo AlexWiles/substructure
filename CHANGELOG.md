@@ -9,6 +9,13 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 
 ## [Unreleased]
 
+### Changed
+
+- The generic aggregate layer only served sessions. Session-specific execution and events now replace it.
+- The event store round-tripped opaque JSON that every consumer re-parsed. The store now speaks typed session events end to end.
+- Every event stored a full derived-state copy (message tree, prompts, decision triggers), growing storage quadratically. Events now carry a small bounded meta while the tree, anchored versions, and verbatim LLM prompts live in their own tables (new incompatible DB schema; delete existing `data.db` files).
+- Decision triggers (full transcripts and LLM requests) were duplicated across queued, promoted, and retried decision events. The trigger now rides only the creating queued event; promotions and retries are id-only markers resolved from state at delivery.
+
 ## [0.2.2] - 2026-07-17
 
 ### Changed

@@ -227,10 +227,11 @@ pub struct InterruptResumed {
     pub payload: serde_json::Value,
 }
 
+/// Promotion marker: the queued decision is now live. The trigger lives on
+/// the decision's `DecisionRequestQueued` event, which always precedes this.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerDecisionRequested {
     pub decision_id: String,
-    pub trigger: Trigger,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

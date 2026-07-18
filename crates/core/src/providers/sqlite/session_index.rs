@@ -2,7 +2,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use sea_query::{Expr, ExprTrait, Func, Iden, Order, Query, SqliteQueryBuilder};
 
-use crate::event_store::{AggregateSort, StoreError};
+use crate::event_store::StoreError;
+use crate::runtime::session::index::SessionSort;
 use crate::session::index::{
     SessionCursor, SessionFilter, SessionIndexRecord, SessionIndexStore, SessionItem, SessionPage,
 };
@@ -39,7 +40,7 @@ enum SessionIndex {
     Table,
     SessionId,
     TenantId,
-    StreamVersion,
+    Seq,
     FirstEventAt,
     LastEventAt,
     WakeAt,
@@ -108,25 +109,25 @@ fn do_list_sessions(
     let fetch_limit = filter.limit.unwrap_or(50);
 
     let (order_col, order_dir, cursor_predicate, session_id_order) = match filter.sort {
-        AggregateSort::LastEventDesc => (
+        SessionSort::LastEventDesc => (
             SessionIndex::LastEventAt,
             Order::Desc,
             "(last_event_at < ? OR (last_event_at = ? AND session_id < ?))",
             Order::Desc,
         ),
-        AggregateSort::FirstEventAsc => (
+        SessionSort::FirstEventAsc => (
             SessionIndex::FirstEventAt,
             Order::Asc,
             "(first_event_at > ? OR (first_event_at = ? AND session_id > ?))",
             Order::Asc,
         ),
-        AggregateSort::FirstEventDesc => (
+        SessionSort::FirstEventDesc => (
             SessionIndex::FirstEventAt,
             Order::Desc,
             "(first_event_at < ? OR (first_event_at = ? AND session_id < ?))",
             Order::Desc,
         ),
-        AggregateSort::WakeAtAsc => (
+        SessionSort::WakeAtAsc => (
             SessionIndex::WakeAt,
             Order::Asc,
             "(wake_at > ? OR (wake_at = ? AND session_id > ?))",
@@ -138,7 +139,7 @@ fn do_list_sessions(
         .columns([
             SessionIndex::SessionId,
             SessionIndex::TenantId,
-            SessionIndex::StreamVersion,
+            SessionIndex::Seq,
             SessionIndex::FirstEventAt,
             SessionIndex::LastEventAt,
             SessionIndex::WakeAt,
