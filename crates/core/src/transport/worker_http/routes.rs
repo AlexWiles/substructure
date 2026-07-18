@@ -315,7 +315,7 @@ pub async fn stream_session_events(
         },
     };
 
-    let after = params.after_stream_version.map(Seq);
+    let after = params.after_seq.map(Seq);
     let event_rx = match state.runtime.stream(spec, after).await {
         Ok(rx) => rx,
         Err(e) => {

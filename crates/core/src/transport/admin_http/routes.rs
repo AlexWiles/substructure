@@ -107,7 +107,7 @@ pub async fn get_session(
         .await
     {
         Ok(session) => Json(serde_json::json!({
-            "stream_version": session.stream_version,
+            "seq": session.seq,
             "first_event_at": session.first_event_at,
             "last_event_at": session.last_event_at,
             "state": session.state,
@@ -123,7 +123,7 @@ pub async fn get_session(
 
 #[derive(Debug, Deserialize)]
 pub struct SessionEventsParams {
-    pub after_stream_version: Option<u64>,
+    pub after_seq: Option<u64>,
     pub limit: Option<usize>,
 }
 
@@ -138,7 +138,7 @@ pub async fn get_session_events(
         .read_session_events(
             &caller,
             &session_id,
-            params.after_stream_version.map(Seq),
+            params.after_seq.map(Seq),
             params.limit,
         )
         .await
@@ -164,7 +164,7 @@ pub async fn stream_session_events(
         scope: SubscriptionScope::All,
     };
     // Admin endpoint defaults to full-history replay (cursor defaults to 0).
-    let after = Some(Seq(params.after_stream_version.unwrap_or(0)));
+    let after = Some(Seq(params.after_seq.unwrap_or(0)));
     let rx = match state.runtime.stream(spec, after).await {
         Ok(rx) => rx,
         Err(e) => {

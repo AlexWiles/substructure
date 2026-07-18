@@ -14,7 +14,7 @@ const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS session_index (
     tenant_id       TEXT NOT NULL,
     session_id      TEXT NOT NULL,
-    stream_version  INTEGER NOT NULL,
+    seq             INTEGER NOT NULL,
     first_event_at  TEXT,
     last_event_at   TEXT,
     wake_at         TEXT,
@@ -211,7 +211,7 @@ fn do_list_sessions(
         let (
             session_id,
             tenant_id,
-            stream_version,
+            seq,
             first_event_at,
             last_event_at,
             wake_at,
@@ -235,7 +235,7 @@ fn do_list_sessions(
         items.push(SessionItem {
             session_id,
             tenant_id,
-            stream_version,
+            seq,
             first_event_at: first_event_at.as_deref().and_then(parse_dt),
             last_event_at: last_event_at.as_deref().and_then(parse_dt),
             wake_at: wake_at.as_deref().and_then(parse_dt),
@@ -304,7 +304,7 @@ fn do_upsert_session_index(
         "INSERT INTO session_index (
             tenant_id,
             session_id,
-            stream_version,
+            seq,
             first_event_at,
             last_event_at,
             wake_at,
@@ -317,7 +317,7 @@ fn do_upsert_session_index(
             updated_at
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          ON CONFLICT(tenant_id, session_id) DO UPDATE SET
-            stream_version = excluded.stream_version,
+            seq = excluded.seq,
             first_event_at = COALESCE(session_index.first_event_at, excluded.first_event_at),
             last_event_at = excluded.last_event_at,
             wake_at = excluded.wake_at,
@@ -331,7 +331,7 @@ fn do_upsert_session_index(
         rusqlite::params![
             record.tenant_id,
             record.session_id,
-            record.stream_version,
+            record.seq,
             record.first_event_at.map(|t| t.to_rfc3339()),
             record.last_event_at.map(|t| t.to_rfc3339()),
             record.wake_at.map(|t| t.to_rfc3339()),

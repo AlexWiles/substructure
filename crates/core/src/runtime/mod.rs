@@ -451,7 +451,7 @@ impl Runtime {
 
     /// Unified event stream. `spec` selects which events to observe (a single
     /// turn or the whole session); `after` (a per-stream cursor) optionally
-    /// replays historical events with `stream_version > N` before streaming live.
+    /// replays historical events with `seq > N` before streaming live.
     pub async fn stream(
         &self,
         spec: SessionSubscriptionSpec,

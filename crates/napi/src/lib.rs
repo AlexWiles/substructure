@@ -425,18 +425,18 @@ impl EmbeddedRuntime {
 
     /// Stream events for a session. If `turnId` is provided, events are
     /// filtered to that turn and the stream auto-closes on completion;
-    /// otherwise all events for the session are streamed. `sequenceAfter`
-    /// optionally replays historical events with `sequence > N` first.
+    /// otherwise all events for the session are streamed. `afterSeq`
+    /// optionally replays historical events with `seq > N` first.
     #[napi(
         js_name = "streamSession",
-        ts_args_type = "tenantId: string, sessionId: string, turnId: string | undefined, afterStreamVersion: number | undefined, onEvent: (event: string) => void"
+        ts_args_type = "tenantId: string, sessionId: string, turnId: string | undefined, afterSeq: number | undefined, onEvent: (event: string) => void"
     )]
     pub async fn stream_session(
         &self,
         tenant_id: String,
         session_id: String,
         turn_id: Option<String>,
-        after_stream_version: Option<i64>,
+        after_seq: Option<i64>,
         on_event: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
     ) -> Result<()> {
         use substructure_core::session::subscriptions::{
@@ -451,7 +451,7 @@ impl EmbeddedRuntime {
                 None => SubscriptionScope::All,
             },
         };
-        let cursor = after_stream_version.map(|n| Seq(n.max(0) as u64));
+        let cursor = after_seq.map(|n| Seq(n.max(0) as u64));
         let mut rx = self
             .inner
             .stream(spec, cursor)

@@ -52,7 +52,7 @@ pub struct SessionPage {
 pub struct SessionItem {
     pub session_id: String,
     pub tenant_id: String,
-    pub stream_version: u64,
+    pub seq: u64,
     pub first_event_at: Option<DateTime<Utc>>,
     pub last_event_at: Option<DateTime<Utc>>,
     pub wake_at: Option<DateTime<Utc>>,
@@ -68,7 +68,7 @@ pub struct SessionItem {
 pub struct SessionIndexRecord {
     pub tenant_id: String,
     pub session_id: String,
-    pub stream_version: u64,
+    pub seq: u64,
     pub first_event_at: Option<DateTime<Utc>>,
     pub last_event_at: Option<DateTime<Utc>>,
     pub wake_at: Option<DateTime<Utc>>,
@@ -109,7 +109,7 @@ impl EventProcessor for SessionIndexProjection {
         let record = SessionIndexRecord {
             tenant_id: event.tenant_id,
             session_id: event.session_id,
-            stream_version: event.seq,
+            seq: event.seq,
             first_event_at: Some(event.occurred_at),
             last_event_at: Some(event.occurred_at),
             wake_at: meta.wake_at,

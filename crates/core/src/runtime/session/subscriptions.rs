@@ -93,7 +93,7 @@ impl SessionSubscriptions {
     ///
     /// - If `after` is `None`, yields live events only.
     /// - If `after` is `Some(v)`, replays historical events with
-    ///   `stream_version > v` first, then streams live (deduped against historical).
+    ///   `seq > v` first, then streams live (deduped against historical).
     /// - For Turn specs, auto-closes when the turn completes. If historical
     ///   replay already contains the TurnCompleted event, live is skipped.
     pub async fn stream(

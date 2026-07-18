@@ -162,7 +162,7 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
     // bounds the replay to this invocation's events. The active-turn lookup a
     // resume/settle needs lives in the router.
     let base_seq = match rt.get_session(DEFAULT_TENANT, &session_id).await {
-        Ok(session) => Seq(session.stream_version),
+        Ok(session) => Seq(session.seq),
         Err(_) => Seq(0),
     };
 

@@ -84,7 +84,7 @@ pub struct SessionAggregate {
     pub id: String,
     pub tenant_id: String,
     pub state: SessionState,
-    pub stream_version: u64,
+    pub seq: u64,
     pub first_event_at: Option<DateTime<Utc>>,
     pub last_event_at: Option<DateTime<Utc>>,
     pub wake_at: Option<DateTime<Utc>>,
@@ -96,7 +96,7 @@ impl SessionAggregate {
             id,
             tenant_id,
             state,
-            stream_version: 0,
+            seq: 0,
             first_event_at: None,
             last_event_at: None,
             wake_at: None,
@@ -113,7 +113,7 @@ impl SessionAggregate {
                 if session.tenant_id != tenant_id {
                     return Err(StoreError::Internal("tenant mismatch".into()));
                 }
-                let expected_version = Seq(session.stream_version);
+                let expected_version = Seq(session.seq);
                 Ok((session, expected_version))
             }
             Err(StoreError::StreamNotFound) => Ok((
@@ -135,12 +135,12 @@ impl SessionAggregate {
 
         let mut session_events = Vec::with_capacity(events.len());
         for payload in events {
-            self.stream_version += 1;
+            self.seq += 1;
             self.state.apply(
                 &payload,
                 &ApplyContext {
                     occurred_at: context.occurred_at,
-                    sequence: self.stream_version,
+                    sequence: self.seq,
                 },
             );
             if self.first_event_at.is_none() {
@@ -153,7 +153,7 @@ impl SessionAggregate {
                 id: Uuid::now_v7(),
                 tenant_id: self.tenant_id.clone(),
                 session_id: self.id.clone(),
-                seq: self.stream_version,
+                seq: self.seq,
                 span: context.span.clone(),
                 occurred_at: context.occurred_at,
                 payload,

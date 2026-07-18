@@ -202,7 +202,7 @@ fn do_append(conn: &mut Connection, input: &AppendInput) -> Result<Vec<u64>, Sto
         rusqlite::params![
             snap.tenant_id,
             snap.id,
-            snap.stream_version,
+            snap.seq,
             snapshot_data,
             snap.wake_at.map(|t| t.to_rfc3339()),
             snap.first_event_at.map(|t| t.to_rfc3339()),
@@ -397,7 +397,7 @@ fn do_load(
         id: session_id.to_string(),
         tenant_id: tenant_id.to_string(),
         state,
-        stream_version: seq,
+        seq,
         first_event_at: first_event_at.as_deref().and_then(parse_dt),
         last_event_at: last_event_at.as_deref().and_then(parse_dt),
         wake_at: wake_at.as_deref().and_then(parse_dt),
@@ -703,7 +703,7 @@ mod tests {
     }
 
     fn commit(agg: &mut SessionAggregate, payloads: Vec<EventPayload>) -> AppendInput {
-        let expected_version = agg.stream_version;
+        let expected_version = agg.seq;
         let events = agg.commit(
             payloads,
             &CommitContext {
@@ -745,7 +745,7 @@ mod tests {
         store.append(input).await.unwrap();
 
         let loaded = store.load("t1", "s1").await.unwrap();
-        assert_eq!(loaded.stream_version, agg.stream_version);
+        assert_eq!(loaded.seq, agg.seq);
         assert_eq!(
             serde_json::to_value(&loaded.state).unwrap(),
             serde_json::to_value(&agg.state).unwrap(),
@@ -864,7 +864,7 @@ mod tests {
         assert!(matches!(err, StoreError::VersionConflict { .. }));
 
         let loaded = store.load("t1", "s1").await.unwrap();
-        assert_eq!(loaded.stream_version, agg.stream_version);
+        assert_eq!(loaded.seq, agg.seq);
         assert_eq!(loaded.state.nodes.len(), 1);
         let events = store.query_events(&EventFilter::default()).await.unwrap();
         assert_eq!(events.len(), 3);

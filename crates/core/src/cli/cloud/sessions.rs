@@ -140,7 +140,7 @@ async fn events(cmd: EventsCommand) -> Result<()> {
 
     if cmd.stream {
         let path = format!(
-            "/api/v1/apps/{app}/sessions/{session_id}/events/stream?sequence_after={}",
+            "/api/v1/apps/{app}/sessions/{session_id}/events/stream?after_seq={}",
             cmd.from
         );
         return ctx
@@ -156,7 +156,7 @@ async fn events(cmd: EventsCommand) -> Result<()> {
     let events: Vec<Box<RawValue>> = ctx
         .client
         .get(&format!(
-            "/api/v1/apps/{app}/sessions/{session_id}/events?sequence_after={}",
+            "/api/v1/apps/{app}/sessions/{session_id}/events?after_seq={}",
             cmd.from
         ))
         .await?;
