@@ -14,9 +14,15 @@ pub struct SessionSubscriptions {
     store: Arc<dyn EventStore>,
 }
 
+/// Selects one session's events. Streams are strictly single-session — a
+/// sub-agent runs as its own session with its own stream, and the parent's
+/// log carries only the `sub_agent.*` boundary events. A client that wants
+/// child detail opens a second stream with the child's session id (carried
+/// by `sub_agent.requested`). This keeps `seq` unique and monotonic per
+/// stream, so it doubles as the SSE frame id and resume cursor.
 #[derive(Debug, Clone)]
 pub struct SessionSubscriptionSpec {
-    pub root_session_id: String,
+    pub session_id: String,
     pub caller: Caller,
     pub scope: SubscriptionScope,
 }
@@ -40,7 +46,7 @@ impl SessionSubscriptionSpec {
     fn is_terminal(&self, event: &SessionEvent) -> bool {
         match &self.scope {
             SubscriptionScope::Turn { turn_id } => {
-                event.session_id == self.root_session_id
+                event.session_id == self.session_id
                     && matches!(
                         &event.payload,
                         EventPayload::TurnCompleted(tc) if tc.turn_id == *turn_id
@@ -68,7 +74,7 @@ impl SessionSubscriptions {
                             if event.tenant_id != spec.caller.tenant_id() {
                                 continue;
                             }
-                            let in_scope = belongs_to_root_session(event, &spec.root_session_id);
+                            let in_scope = event.session_id == spec.session_id;
                             if in_scope && spec.include(event) {
                                 if tx.send(event.clone()).await.is_err() {
                                     return;
@@ -146,7 +152,7 @@ impl SessionSubscriptions {
             .store
             .query_events(&EventFilter {
                 tenant_id: Some(spec.caller.tenant_id().to_string()),
-                session_id: Some(spec.root_session_id.clone()),
+                session_id: Some(spec.session_id.clone()),
                 after_seq: Some(after),
                 ..Default::default()
             })
@@ -161,15 +167,8 @@ fn filter_by_spec(events: Vec<SessionEvent>, spec: &SessionSubscriptionSpec) -> 
         .into_iter()
         .filter(|event| {
             event.tenant_id == spec.caller.tenant_id()
-                && belongs_to_root_session(event, &spec.root_session_id)
+                && event.session_id == spec.session_id
                 && spec.include(event)
         })
         .collect()
-}
-
-fn belongs_to_root_session(event: &SessionEvent, root_session_id: &str) -> bool {
-    if event.session_id == root_session_id {
-        return true;
-    }
-    event.meta.ancestry.iter().any(|a| a == root_session_id)
 }

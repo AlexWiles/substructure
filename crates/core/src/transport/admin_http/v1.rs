@@ -117,8 +117,9 @@ async fn stream_session_events(
     caller: Extension<Caller>,
     Path((_app, session_id)): Path<(String, String)>,
     params: Query<SessionEventsParams>,
+    headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    routes::stream_session_events(state, caller, Path(session_id), params).await
+    routes::stream_session_events(state, caller, Path(session_id), params, headers).await
 }
 
 async fn get_worker(State(state): State<V1State>) -> impl IntoResponse {

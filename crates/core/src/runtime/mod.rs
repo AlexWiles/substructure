@@ -457,7 +457,7 @@ impl Runtime {
         spec: SessionSubscriptionSpec,
         after: Option<Seq>,
     ) -> Result<mpsc::Receiver<SessionEvent>, RuntimeError> {
-        self.authorize_session_read(&spec.root_session_id, &spec.caller)
+        self.authorize_session_read(&spec.session_id, &spec.caller)
             .await?;
         Ok(self.session_subscriptions.stream(spec, after).await)
     }

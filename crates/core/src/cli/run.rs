@@ -180,7 +180,7 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
     let mut events = rt
         .stream(
             SessionSubscriptionSpec {
-                root_session_id: session_id.clone(),
+                session_id: session_id.clone(),
                 caller,
                 scope: SubscriptionScope::Turn {
                     turn_id: turn_id.clone(),

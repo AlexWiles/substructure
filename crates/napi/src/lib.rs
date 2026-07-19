@@ -444,7 +444,7 @@ impl EmbeddedRuntime {
         };
 
         let spec = SessionSubscriptionSpec {
-            root_session_id: session_id,
+            session_id,
             caller: Caller::System { tenant_id },
             scope: match turn_id {
                 Some(tid) => SubscriptionScope::Turn { turn_id: tid },

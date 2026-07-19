@@ -1,5 +1,5 @@
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
@@ -14,6 +14,7 @@ use crate::session::index::{SessionCursor, SessionFilter};
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use crate::transport::ag_ui::snapshot::snapshot_events;
 use crate::transport::ag_ui::types::RunAgentInput;
+use crate::transport::session_sse::resume_cursor;
 use crate::Caller;
 
 use super::AdminHttpState;
@@ -157,14 +158,15 @@ pub async fn stream_session_events(
     Extension(caller): Extension<Caller>,
     Path(session_id): Path<String>,
     Query(params): Query<SessionEventsParams>,
+    headers: HeaderMap,
 ) -> Response {
     let spec = SessionSubscriptionSpec {
-        root_session_id: session_id,
+        session_id,
         caller,
         scope: SubscriptionScope::All,
     };
     // Admin endpoint defaults to full-history replay (cursor defaults to 0).
-    let after = Some(Seq(params.after_seq.unwrap_or(0)));
+    let after = Some(resume_cursor(&headers, params.after_seq).unwrap_or(Seq(0)));
     let rx = match state.runtime.stream(spec, after).await {
         Ok(rx) => rx,
         Err(e) => {

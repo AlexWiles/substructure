@@ -1,5 +1,5 @@
 use axum::extract::{Extension, Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -8,14 +8,13 @@ use std::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-use crate::event_store::Seq;
 use crate::protocol::SessionOwner;
 use crate::session::command::SessionError;
 use crate::session::decision::{EffectResultPayload, WorkKind};
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use crate::session::wire::{resolve_response, result_to_string};
 use crate::span::SpanContext;
-use crate::transport::session_sse::merge_session_stream;
+use crate::transport::session_sse::{merge_session_stream, resume_cursor};
 use crate::worker::SubmitDecision;
 use crate::{Caller, EffectSettlement, RuntimeError, SettleEffectInput, SubmitClientPayload};
 
@@ -299,6 +298,7 @@ pub async fn stream_session_events(
     Extension(caller): Extension<Caller>,
     Path(session_id): Path<String>,
     Query(params): Query<StreamSessionEventsParams>,
+    headers: HeaderMap,
 ) -> Response {
     let root_session_id = session_id.clone();
     let scope_turn_id = params.turn_id.clone();
@@ -307,7 +307,7 @@ pub async fn stream_session_events(
         .subscribe_token_deltas(&caller, &root_session_id)
         .await;
     let spec = SessionSubscriptionSpec {
-        root_session_id: session_id,
+        session_id,
         caller,
         scope: match params.turn_id {
             Some(turn_id) => SubscriptionScope::Turn { turn_id },
@@ -315,7 +315,7 @@ pub async fn stream_session_events(
         },
     };
 
-    let after = params.after_seq.map(Seq);
+    let after = resume_cursor(&headers, params.after_seq);
     let event_rx = match state.runtime.stream(spec, after).await {
         Ok(rx) => rx,
         Err(e) => {

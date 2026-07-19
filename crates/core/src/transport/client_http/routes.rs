@@ -1,5 +1,5 @@
 use axum::extract::{Extension, Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -7,14 +7,13 @@ use futures_util::stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-use crate::event_store::Seq;
 use crate::protocol::{ClientInput, InterruptResumption, SessionOwner};
 use crate::session::command::SessionError;
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use crate::transport::ag_ui::snapshot::snapshot_events;
 use crate::transport::ag_ui::translator::run_ag_ui_translation;
 use crate::transport::ag_ui::types::{ConnectInput, RunAgentInput};
-use crate::transport::session_sse::merge_session_stream;
+use crate::transport::session_sse::{merge_session_stream, resume_cursor};
 use crate::{Caller, HandleClientInput, InterruptSessionInput, RuntimeError};
 
 use super::types::{
@@ -157,6 +156,7 @@ pub async fn stream_session_events(
     Extension(caller): Extension<Caller>,
     Path(session_id): Path<String>,
     Query(params): Query<StreamSessionEventsParams>,
+    headers: HeaderMap,
 ) -> Response {
     let root_session_id = session_id.clone();
     let scope_turn_id = params.turn_id.clone();
@@ -167,7 +167,7 @@ pub async fn stream_session_events(
         .await;
 
     let spec = SessionSubscriptionSpec {
-        root_session_id: session_id,
+        session_id,
         caller,
         scope: match params.turn_id {
             Some(turn_id) => SubscriptionScope::Turn { turn_id },
@@ -175,7 +175,7 @@ pub async fn stream_session_events(
         },
     };
 
-    let after = params.after_seq.map(Seq);
+    let after = resume_cursor(&headers, params.after_seq);
     let event_rx = match state.runtime.stream(spec, after).await {
         Ok(rx) => rx,
         Err(e) => return runtime_error_response(e),
@@ -207,7 +207,7 @@ pub async fn ag_ui_run(
     let spec = SessionSubscriptionSpec {
         scope: SubscriptionScope::All,
         caller: caller.clone(),
-        root_session_id: session_id.clone(),
+        session_id: session_id.clone(),
     };
     let event_rx = match state.runtime.stream(spec, None).await {
         Ok(rx) => rx,

@@ -1,9 +1,23 @@
+use axum::http::HeaderMap;
 use axum::response::sse::Event as SseEvent;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::event_store::Seq;
 use crate::protocol::TokenDelta;
 use crate::session::SessionEvent;
+
+/// The resume cursor for a stream request. A reconnecting EventSource
+/// re-requests the original URL — whose `after_seq` is stale by then — and
+/// sends the id of the last frame it saw as a `Last-Event-ID` header, so the
+/// header, when present and parseable, wins over the query param.
+pub fn resume_cursor(headers: &HeaderMap, after_seq: Option<u64>) -> Option<Seq> {
+    let last_event_id = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok());
+    last_event_id.or(after_seq).map(Seq)
+}
 
 /// Terminates when `event_rx` closes (Turn scopes auto-close on
 /// `turn.completed`). Delta-side closure is ignored — the transport outlives
