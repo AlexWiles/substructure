@@ -200,6 +200,12 @@ Docs: [Tool calls](./docs/30-tools.md)
 
 Examples: [Node](./examples/node-hono-tools), [Python](./examples/python-fast-api-tools), [Go](./examples/go-chat-with-tools)
 
+### MCP servers
+
+Your worker can connect to an MCP server, expose its tools to the model, and forward each call back to it. The engine never needs to know MCP exists.
+
+Examples: [Node](./examples/node-hono-mcp), [Python](./examples/python-fast-api-mcp), [Go](./examples/go-mcp)
+
 ## The system pieces
 
 - **Server:** The engine that drives the agent loop, written in Rust. It can be run locally on your machine, embedded in process, or as a cloud hosted version available at [https://app.substructure.ai](https://app.substructure.ai). The server drives the loop, handles durability, retries, llm calls (optionally), realtime streaming, subagent supervision and more.
