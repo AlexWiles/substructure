@@ -1,30 +1,33 @@
 # node-hono-mcp
 
-An agent whose tools come from an [MCP](https://modelcontextprotocol.io) server,
-served with [Hono](https://hono.dev).
+This example is an agent. Its tools come from an [MCP](https://modelcontextprotocol.io)
+server. The agent uses [Hono](https://hono.dev) to serve the worker.
 
-The worker connects to an MCP server over stdio, exposes its tools to the model,
-and forwards each tool call back to the MCP server. Here it runs the filesystem
-server scoped to this directory; swap the command for any MCP server.
+The worker connects to an MCP server with stdio. The worker shows the tools of
+the server to the model. The worker sends each tool call to the MCP server.
 
-## Run
+In this example, the worker starts the filesystem server. The filesystem server
+gets access to only this directory. To use a different MCP server, replace the
+command.
 
-Install the CLI:
+## How to run the example
+
+First, install the CLI:
 
 ```sh
 npm i -g @substructure.ai/cli
 ```
 
-Two terminals.
+You must use two terminals.
 
-**1. Start the worker**:
+**1. Start the worker.**
 
 ```sh
 npm install
 node server.mjs
 ```
 
-**2. Send a message with the CLI**
+**2. Send a message with the CLI.**
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
