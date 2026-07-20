@@ -9,6 +9,10 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 
 ## [Unreleased]
 
+### Fixed
+
+- A processor logged a store error at ERROR when its in-flight query was cancelled during runtime teardown. The loop now exits quietly when the cancel token is set.
+
 ### Changed
 
 - The generic aggregate layer only served sessions. Session-specific execution and events now replace it.

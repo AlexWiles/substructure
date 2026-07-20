@@ -154,6 +154,7 @@ impl EventProcessorRunner {
                 .await
             {
                 Ok(events) => events,
+                Err(_) if self.cancel.is_cancelled() => break,
                 Err(err) => {
                     tracing::error!(
                         processor = processor_name,
