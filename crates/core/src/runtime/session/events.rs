@@ -274,6 +274,9 @@ pub struct TurnStarted {
     pub turn_id: String,
 }
 
+/// The run terminal (pass 2): the turn's `turn.finished` finalizer has settled, so
+/// the turn — output plus post-turn side effects — is done. `error` is set when the
+/// finalizer failed terminally; the output is still durable but the run failed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnCompleted {
     pub turn_id: String,
@@ -283,6 +286,8 @@ pub struct TurnCompleted {
     pub turn_cost: Decimal,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub turn_token_usage: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

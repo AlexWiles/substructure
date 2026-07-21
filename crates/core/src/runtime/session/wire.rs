@@ -600,6 +600,17 @@ pub fn to_wire_trigger(
                 payload,
             },
         },
+        Trigger::TurnFinished {
+            turn_id,
+            data,
+            cost,
+            usage,
+        } => DecisionTrigger::TurnFinished {
+            turn_id,
+            data,
+            cost,
+            usage,
+        },
     }
 }
 

@@ -25,6 +25,8 @@ pub enum StoreError {
     VersionConflict { expected: Seq, actual: Seq },
     #[error("stream not found")]
     StreamNotFound,
+    #[error("store operation cancelled")]
+    Cancelled,
     #[error("internal store error: {0}")]
     Internal(String),
 }

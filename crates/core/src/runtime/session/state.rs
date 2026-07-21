@@ -73,13 +73,21 @@ impl EffectTracking {
         self.status = EffectStatus::Completed;
     }
 
+    /// Whether recording a failure now would be terminal (no further attempt):
+    /// pure, computed from the pre-failure state so callers can branch before
+    /// mutating. `record_error` reuses it to keep the two in lockstep.
+    pub fn is_terminal_failure(&self, retryable: bool) -> bool {
+        self.retry_policy.exhausted(&self.retry, retryable)
+    }
+
     pub fn record_error(&mut self, retryable: bool, now: DateTime<Utc>) {
+        let terminal = self.is_terminal_failure(retryable);
         self.retry = self.retry_policy.record_failure(&self.retry, now);
-        if retryable && self.retry.next_at.is_some() {
-            self.status = EffectStatus::RetryScheduled;
-        } else {
+        if terminal {
             self.status = EffectStatus::Failed;
             self.retry.next_at = None;
+        } else {
+            self.status = EffectStatus::RetryScheduled;
         }
     }
 
@@ -289,6 +297,19 @@ pub struct WorkerDecisionState {
     pub source_event_sequence: u64,
 }
 
+/// The frozen turn output held while its `turn.finished` finalizer runs, emitted as
+/// `TurnCompleted` once the finalizer settles (pass 2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Finalizing {
+    pub turn_id: String,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub data: serde_json::Value,
+    #[serde(default)]
+    pub cost: Decimal,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub usage: BTreeMap<String, u64>,
+}
+
 /// Per-event stamp: scalars plus bounded in-flight status. History-sized
 /// state (tree, versions, prompts) lives in the store; `head_id` +
 /// `node_count` locate the as-of-event tree prefix.
@@ -434,6 +455,12 @@ pub struct SessionState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub completed_turn_ids: Vec<String>,
 
+    /// Set while a turn's `turn.finished` finalizer is in flight; holds the frozen
+    /// output to emit as `TurnCompleted` at pass 2. Set when `turn.finished` is
+    /// queued, cleared by `TurnCompleted`. Also the pass-1/pass-2 discriminator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalizing: Option<Finalizing>,
+
     /// The active branch's leaf; advances to each appended message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_id: Option<String>,
@@ -469,6 +496,7 @@ impl SessionState {
             worker_decisions: HashMap::new(),
             turn_id: None,
             completed_turn_ids: Vec::new(),
+            finalizing: None,
             head_id: None,
             nodes: Vec::new(),
             open_interrupts: Vec::new(),
@@ -680,6 +708,22 @@ impl SessionState {
                         source_event_sequence: ctx.sequence,
                     },
                 );
+                // Queuing turn.finished (pass 1) captures the frozen output; the turn
+                // is now finalizing until TurnCompleted (pass 2).
+                if let Trigger::TurnFinished {
+                    turn_id,
+                    data,
+                    cost,
+                    usage,
+                } = &p.trigger
+                {
+                    self.finalizing = Some(Finalizing {
+                        turn_id: turn_id.clone(),
+                        data: data.clone(),
+                        cost: *cost,
+                        usage: usage.clone(),
+                    });
+                }
             }
             EventPayload::DecisionRequestDropped(p) => {
                 // Voided like an interrupted decision: out of the queue, never delivered.
@@ -757,6 +801,7 @@ impl SessionState {
                 self.data = payload.data.clone();
                 self.turn_cost = Decimal::ZERO;
                 self.turn_token_usage.clear();
+                self.finalizing = None;
             }
         }
     }

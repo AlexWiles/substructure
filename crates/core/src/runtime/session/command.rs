@@ -120,9 +120,13 @@ pub enum CommandPayload {
         retryable: bool,
     },
     CancelSession,
-    MarkDone {
+    /// The agent finished its turn: begin finalization by notifying the worker
+    /// (`turn.finished`), deferring completion.
+    FinishTurn {
         data: serde_json::Value,
     },
+    /// The finalizer settled: complete the turn (emit `TurnCompleted` + `SessionDone`).
+    CompleteTurn,
     Wake {
         now: DateTime<Utc>,
     },
@@ -626,6 +630,25 @@ impl SessionState {
             ));
         }
         events
+    }
+
+    /// Emit the run terminal from the in-flight `finalizing` output: `TurnCompleted`
+    /// (carrying `error` when the finalizer failed terminally) + `SessionDone`. Falls
+    /// back to a bare `SessionDone` if nothing is finalizing.
+    fn finalize_run(&self, error: Option<String>) -> Vec<EventPayload> {
+        match self.finalizing.clone() {
+            Some(f) => vec![
+                EventPayload::TurnCompleted(TurnCompleted {
+                    turn_id: f.turn_id,
+                    data: f.data,
+                    turn_cost: f.cost,
+                    turn_token_usage: f.usage,
+                    error,
+                }),
+                EventPayload::SessionDone(SessionDone {}),
+            ],
+            None => vec![EventPayload::SessionDone(SessionDone {})],
+        }
     }
 
     fn handle_active(
@@ -1516,8 +1539,15 @@ impl SessionState {
                             },
                             &system,
                         ),
+                        // A `done` while finalizing completes the turn; otherwise it
+                        // ends the agent's turn and starts finalization.
                         Action::Done { data } => {
-                            self.handle(CommandPayload::MarkDone { data }, &system)
+                            let cmd = if self.finalizing.is_some() {
+                                CommandPayload::CompleteTurn
+                            } else {
+                                CommandPayload::FinishTurn { data }
+                            };
+                            self.handle(cmd, &system)
                         }
                     };
                     if let Ok(sub) = sub_events {
@@ -1574,21 +1604,24 @@ impl SessionState {
                 retryable,
             } => {
                 Self::ensure_machine_or_system(caller)?;
-                match self
-                    .worker_decisions
-                    .get(&decision_id)
-                    .map(|d| &d.tracking.status)
-                {
-                    Some(&EffectStatus::Pending) => {}
+                let decision = match self.worker_decisions.get(&decision_id) {
+                    Some(d) if d.tracking.status == EffectStatus::Pending => d,
                     _ => return Ok(vec![]),
+                };
+                let finalize = matches!(decision.trigger, Trigger::TurnFinished { .. })
+                    && decision.tracking.is_terminal_failure(retryable);
+                let mut events = vec![EventPayload::WorkerDecisionErrored(WorkerDecisionErrored {
+                    decision_id,
+                    error: error.clone(),
+                    retryable,
+                })];
+                // A terminally-failed turn.finished still completes the turn, but as a
+                // failed run: the output is durable, the finalizer isn't. Retryable
+                // failures wait for redelivery via Wake.
+                if finalize {
+                    events.extend(self.finalize_run(Some(error)));
                 }
-                Ok(vec![EventPayload::WorkerDecisionErrored(
-                    WorkerDecisionErrored {
-                        decision_id,
-                        error,
-                        retryable,
-                    },
-                )])
+                Ok(events)
             }
 
             CommandPayload::CancelSession => {
@@ -1606,19 +1639,32 @@ impl SessionState {
                 Ok(events)
             }
 
-            CommandPayload::MarkDone { data } => {
+            CommandPayload::FinishTurn { data } => {
                 Self::ensure_internal(caller)?;
-                let mut events = Vec::new();
-                if let Some(turn_id) = &self.turn_id {
-                    events.push(EventPayload::TurnCompleted(TurnCompleted {
-                        turn_id: turn_id.clone(),
-                        data,
-                        turn_cost: self.turn_cost,
-                        turn_token_usage: self.turn_token_usage.clone(),
-                    }));
+                // The agent's turn is done. For an active, not-yet-finished turn,
+                // begin finalization: queue turn.finished with the frozen output and
+                // defer completion (the queued trigger sets `finalizing`, see the
+                // DecisionRequestQueued apply). Otherwise settle immediately.
+                if let Some(turn_id) = self.turn_id.clone() {
+                    if !self.completed_turn_ids.contains(&turn_id) {
+                        return Ok(self.emit_decision_request(
+                            &[],
+                            Trigger::turn_finished(
+                                turn_id,
+                                data,
+                                self.turn_cost,
+                                self.turn_token_usage.clone(),
+                            ),
+                        ));
+                    }
                 }
-                events.push(EventPayload::SessionDone(SessionDone {}));
-                Ok(events)
+                Ok(vec![EventPayload::SessionDone(SessionDone {})])
+            }
+
+            // The finalizer settled: emit the run terminal from the frozen output.
+            CommandPayload::CompleteTurn => {
+                Self::ensure_internal(caller)?;
+                Ok(self.finalize_run(None))
             }
 
             CommandPayload::Wake { now } => {
@@ -1783,13 +1829,18 @@ impl SessionState {
             if wd.tracking.status == EffectStatus::Pending
                 && wd.tracking.deadline.is_some_and(|d| d <= now)
             {
-                return Ok(vec![EventPayload::WorkerDecisionErrored(
-                    WorkerDecisionErrored {
-                        decision_id: wd.decision_id.clone(),
-                        error: "deadline exceeded".to_string(),
-                        retryable: true,
-                    },
-                )]);
+                let mut events = vec![EventPayload::WorkerDecisionErrored(WorkerDecisionErrored {
+                    decision_id: wd.decision_id.clone(),
+                    error: "deadline exceeded".to_string(),
+                    retryable: true,
+                })];
+                // A terminally-timed-out turn.finished completes the turn as a failed run.
+                if matches!(wd.trigger, Trigger::TurnFinished { .. })
+                    && wd.tracking.is_terminal_failure(true)
+                {
+                    events.extend(self.finalize_run(Some("deadline exceeded".to_string())));
+                }
+                return Ok(events);
             }
         }
 
@@ -2757,7 +2808,7 @@ mod tests {
 
         let events = dispatch(
             &mut agg,
-            CommandPayload::MarkDone {
+            CommandPayload::FinishTurn {
                 data: serde_json::Value::Null,
             },
             &Caller::System {
@@ -6506,7 +6557,7 @@ mod tests {
         request_llm(&mut agg, "llm-1", LlmHandler::Server);
         dispatch(
             &mut agg,
-            CommandPayload::MarkDone {
+            CommandPayload::FinishTurn {
                 data: serde_json::Value::Null,
             },
             &system(),
@@ -6516,6 +6567,339 @@ mod tests {
             settled_llm_ids(&events).contains(&"llm-1".to_string()),
             "a late settle after done still fires a decision; got {events:?}"
         );
+    }
+
+    // ── turn.finished notification ───────────────────────────────────────
+
+    fn create_session_with_retry(retry: RetryPolicy) -> SessionAggregate {
+        let mut agg = SessionAggregate::new(
+            "sess-1".to_string(),
+            "tenant-a".to_string(),
+            SessionState::new("sess-1".to_string()),
+        );
+        dispatch(
+            &mut agg,
+            CommandPayload::CreateSession {
+                agent_id: "agent-1".to_string(),
+                owner: SessionOwner {
+                    tenant_id: "tenant-a".to_string(),
+                    id: Some("user-1".to_string()),
+                    metadata: HashMap::new(),
+                },
+                ancestry: vec![],
+                worker_retry: retry,
+            },
+            &system(),
+        );
+        drain_session_start(&mut agg);
+        agg
+    }
+
+    /// Open a turn via a client message and answer it with `done`, driving pass 1
+    /// (TurnCompleted + a queued/promoted turn.finished decision).
+    fn drive_turn_done(
+        agg: &mut SessionAggregate,
+        turn_id: &str,
+        data: serde_json::Value,
+    ) -> Vec<EventPayload> {
+        let setup = dispatch(
+            agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Message(ClientMessage {
+                    message: node_msg("seed", Role::User, "seed"),
+                    stream: false,
+                }),
+                turn_id: Some(turn_id.to_string()),
+            },
+            &system(),
+        );
+        let d = decision_with(&setup, |t| matches!(t, Trigger::ClientMessage { .. }))
+            .expect("client message opens a decision");
+        dispatch(
+            agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: d,
+                transcript: vec![],
+                actions: vec![Action::Done { data }],
+                state: None,
+                agent: None,
+            },
+            &machine(),
+        )
+    }
+
+    fn turn_finished_decision(events: &[EventPayload]) -> Option<String> {
+        decision_with(events, |t| matches!(t, Trigger::TurnFinished { .. }))
+    }
+
+    fn has_session_done(events: &[EventPayload]) -> bool {
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::SessionDone(_)))
+    }
+
+    fn turn_completed(events: &[EventPayload]) -> Option<&TurnCompleted> {
+        events.iter().find_map(|e| match e {
+            EventPayload::TurnCompleted(tc) => Some(tc),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn turn_finished_notifies_worker_and_defers_completion() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let events = drive_turn_done(&mut agg, "t1", serde_json::json!("answer"));
+
+        // Pass 1 emits no terminal — the turn.finished trigger IS the pass-1 signal.
+        assert!(
+            turn_completed(&events).is_none(),
+            "pass 1 does not complete the turn; got {events:?}"
+        );
+        assert!(
+            !has_session_done(&events),
+            "SessionDone is deferred; got {events:?}"
+        );
+        let queued = events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::DecisionRequestQueued(p) => match &p.trigger {
+                    Trigger::TurnFinished { turn_id, data, .. } => {
+                        Some((p.decision_id.clone(), turn_id.clone(), data.clone()))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("turn.finished is queued");
+        assert_eq!(queued.1, "t1");
+        assert_eq!(queued.2, serde_json::json!("answer"), "carries turn output");
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                EventPayload::WorkerDecisionRequested(w) if w.decision_id == queued.0
+            )),
+            "the deferred decision is promoted; got {events:?}"
+        );
+        // The frozen output is captured for pass 2.
+        let f = agg.state.finalizing.as_ref().expect("finalizing set");
+        assert_eq!(f.turn_id, "t1");
+        assert_eq!(f.data, serde_json::json!("answer"));
+    }
+
+    #[test]
+    fn turn_finished_echo_completes_the_turn() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let p1 = drive_turn_done(&mut agg, "t1", serde_json::json!("answer"));
+        let tf = turn_finished_decision(&p1).expect("turn.finished queued");
+
+        let p2 = dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: tf,
+                transcript: vec![],
+                actions: vec![Action::Done {
+                    data: serde_json::Value::Null,
+                }],
+                state: None,
+                agent: None,
+            },
+            &machine(),
+        );
+
+        // Pass 2 is the run terminal: exactly one TurnCompleted (the frozen output,
+        // no error) then SessionDone.
+        let tc = turn_completed(&p2).expect("pass 2 completes the turn");
+        assert_eq!(tc.turn_id, "t1");
+        assert_eq!(
+            tc.data,
+            serde_json::json!("answer"),
+            "frozen output survives"
+        );
+        assert!(tc.error.is_none(), "a clean finalize is not an error");
+        assert_eq!(
+            p2.iter()
+                .filter(|e| matches!(e, EventPayload::TurnCompleted(_)))
+                .count(),
+            1,
+            "exactly one TurnCompleted; got {p2:?}"
+        );
+        assert!(has_session_done(&p2), "SessionDone follows; got {p2:?}");
+        assert!(
+            turn_finished_decision(&p2).is_none(),
+            "no new turn.finished queued; got {p2:?}"
+        );
+        assert_eq!(agg.state.completed_turn_ids.len(), 1);
+        assert!(agg.state.finalizing.is_none(), "finalizing cleared");
+    }
+
+    #[test]
+    fn turn_finished_worker_runs_side_effect_before_completion() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let p1 = drive_turn_done(&mut agg, "t1", serde_json::json!("answer"));
+        let tf = turn_finished_decision(&p1).expect("turn.finished queued");
+
+        let p2 = dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: tf,
+                transcript: vec![],
+                actions: vec![
+                    call_llm_action("side-1", LlmHandler::Server),
+                    Action::Done {
+                        data: serde_json::Value::Null,
+                    },
+                ],
+                state: None,
+                agent: None,
+            },
+            &machine(),
+        );
+
+        assert!(
+            p2.iter().any(|e| matches!(
+                e,
+                EventPayload::LlmCallRequested(r) if r.call_id == "side-1"
+            )),
+            "the side effect dispatches; got {p2:?}"
+        );
+        assert!(
+            turn_completed(&p2).is_some_and(|tc| tc.error.is_none()),
+            "the turn completes after the worker's own done; got {p2:?}"
+        );
+        assert!(has_session_done(&p2));
+    }
+
+    #[test]
+    fn no_turn_completes_immediately() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let events = submit_decision_with(
+            &mut agg,
+            vec![Action::Done {
+                data: serde_json::Value::Null,
+            }],
+        );
+        assert!(
+            has_session_done(&events),
+            "a turn-less session goes straight to SessionDone; got {events:?}"
+        );
+        assert!(
+            turn_finished_decision(&events).is_none(),
+            "no turn.finished without a turn; got {events:?}"
+        );
+        assert!(
+            turn_completed(&events).is_none(),
+            "no TurnCompleted without a turn; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn turn_finished_terminal_failure_completes_as_failed_run() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1"); // no-retry
+        let p1 = drive_turn_done(&mut agg, "t1", serde_json::json!("answer"));
+        let tf = turn_finished_decision(&p1).expect("turn.finished queued");
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::FailWorkerDecision {
+                decision_id: tf.clone(),
+                error: "worker crashed".to_string(),
+                retryable: false,
+            },
+            &machine(),
+        );
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::WorkerDecisionErrored(_))),
+            "the finalizer errors; got {events:?}"
+        );
+        // The run still terminates — but as a failed run carrying the error, with the
+        // output preserved.
+        let tc = turn_completed(&events).expect("a failed finalizer still completes the turn");
+        assert_eq!(tc.turn_id, "t1");
+        assert_eq!(tc.data, serde_json::json!("answer"), "output stays durable");
+        assert_eq!(tc.error.as_deref(), Some("worker crashed"));
+        assert!(has_session_done(&events));
+        assert!(!agg.state.worker_decisions.contains_key(&tf));
+        assert_eq!(agg.state.completed_turn_ids.len(), 1);
+        assert!(agg.state.finalizing.is_none(), "finalizing cleared");
+    }
+
+    #[test]
+    fn turn_finished_retryable_failure_does_not_complete() {
+        let mut agg = create_session_with_retry(RetryPolicy {
+            timeout_secs: None,
+            max_retries: 2,
+            backoff_base_secs: 1,
+            backoff_max_secs: 1,
+        });
+        let p1 = drive_turn_done(&mut agg, "t1", serde_json::json!("answer"));
+        let tf = turn_finished_decision(&p1).expect("turn.finished queued");
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::FailWorkerDecision {
+                decision_id: tf.clone(),
+                error: "transient".to_string(),
+                retryable: true,
+            },
+            &machine(),
+        );
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::WorkerDecisionErrored(_))),
+            "the failure is recorded; got {events:?}"
+        );
+        assert!(
+            turn_completed(&events).is_none() && !has_session_done(&events),
+            "a retryable failure neither completes nor settles; got {events:?}"
+        );
+        assert_eq!(
+            agg.state
+                .worker_decisions
+                .get(&tf)
+                .map(|d| d.tracking.status.clone()),
+            Some(EffectStatus::RetryScheduled),
+            "the finalizer is rescheduled for redelivery"
+        );
+        assert!(
+            agg.state.finalizing.is_some(),
+            "still finalizing pending redelivery"
+        );
+    }
+
+    #[test]
+    fn turn_finished_deadline_completes_when_exhausted() {
+        let mut agg = create_session_with_retry(RetryPolicy {
+            timeout_secs: Some(60),
+            max_retries: 0,
+            backoff_base_secs: 0,
+            backoff_max_secs: 0,
+        });
+        let p1 = drive_turn_done(&mut agg, "t1", serde_json::json!("answer"));
+        let tf = turn_finished_decision(&p1).expect("turn.finished queued");
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::Wake {
+                now: Utc::now() + chrono::Duration::hours(1),
+            },
+            &system(),
+        );
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                EventPayload::WorkerDecisionErrored(p) if p.decision_id == tf
+            )),
+            "the timed-out finalizer errors; got {events:?}"
+        );
+        let tc = turn_completed(&events).expect("a terminal timeout completes the turn");
+        assert_eq!(tc.error.as_deref(), Some("deadline exceeded"));
+        assert!(has_session_done(&events));
     }
 
     // ── Branch-scoped worker state ───────────────────────────────────────

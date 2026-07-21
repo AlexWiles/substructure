@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::protocol::{
     ClientContext, DraftMessage, ErrorCode, Handler, LlmFormat, LlmRequest, LlmResponse,
@@ -189,6 +190,18 @@ pub enum Trigger {
         #[serde(default)]
         payload: serde_json::Value,
     },
+    /// Fired after a turn completes, carrying its final output. Blocks `SessionDone`
+    /// until answered; echo the proposed `done` to finalize.
+    #[serde(rename = "turn.finished")]
+    TurnFinished {
+        turn_id: String,
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        data: serde_json::Value,
+        #[serde(default)]
+        cost: Decimal,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        usage: BTreeMap<String, u64>,
+    },
 }
 
 impl Trigger {
@@ -228,6 +241,20 @@ impl Trigger {
             error: Some(error),
             code,
             detail,
+        }
+    }
+
+    pub fn turn_finished(
+        turn_id: String,
+        data: serde_json::Value,
+        cost: Decimal,
+        usage: BTreeMap<String, u64>,
+    ) -> Self {
+        Trigger::TurnFinished {
+            turn_id,
+            data,
+            cost,
+            usage,
         }
     }
 }

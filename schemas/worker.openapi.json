@@ -1069,6 +1069,40 @@
               "interrupt_id"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Fired after a turn completes, carrying its final output; blocks the session\ngoing idle until answered. Echo the proposed `done` to finalize.",
+            "properties": {
+              "cost": {
+                "pattern": "^-?\\d+(\\.\\d+)?$",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "data": {},
+              "turn_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "turn.finished",
+                "type": "string"
+              },
+              "usage": {
+                "additionalProperties": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "type",
+              "turn_id"
+            ],
+            "type": "object"
           }
         ],
         "title": "DecisionTrigger"

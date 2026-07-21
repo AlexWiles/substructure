@@ -11,6 +11,8 @@
 //! `done`; a `tool.execute` that fails its contract — an undeclared name, or
 //! arguments the declared `input` schema rejects — answers with a
 //! `tool.error`, so the failure flows back to a model that can repair the call.
+//! `turn.finished` proposes a bare `done`, so an echoing worker transparently
+//! settles the turn's deferred `SessionDone`.
 //!
 //! A proposal is advice, not authority: the engine never applies one, so the
 //! worker remains the sole author of every decision. Triggers that need worker
@@ -111,6 +113,15 @@ pub fn propose(
                 tool_error(id, format!("invalid tool arguments: {error}"), transcript)
             }),
         },
+        // Acknowledge and finish: echoing this settles the deferred `SessionDone`
+        // without re-emitting `TurnCompleted` (pass 2 skips it), so `data` is null.
+        DecisionTrigger::TurnFinished { .. } => Some(DecisionResponse {
+            messages: recorded(transcript),
+            actions: vec![DecisionAction::Done {
+                data: serde_json::Value::Null,
+            }],
+            ..Default::default()
+        }),
         // The worker declares its `agent` config here; a truthy empty proposal
         // would short-circuit proposed-first workers before their config branch runs.
         DecisionTrigger::SessionStart => None,
@@ -486,6 +497,15 @@ mod tests {
         }
     }
 
+    fn turn_finished_trigger(turn_id: &str, data: serde_json::Value) -> DecisionTrigger {
+        DecisionTrigger::TurnFinished {
+            turn_id: turn_id.to_string(),
+            data,
+            cost: rust_decimal::Decimal::ZERO,
+            usage: std::collections::BTreeMap::new(),
+        }
+    }
+
     fn reissued_request(proposal: &DecisionResponse) -> (LlmRequest, bool, Handler) {
         match &proposal.actions[..] {
             [DecisionAction::CallLlm {
@@ -577,6 +597,37 @@ mod tests {
         match &p.actions[..] {
             [DecisionAction::Done { data }] => assert_eq!(data, &serde_json::json!("hello")),
             other => panic!("expected done with the message content; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn turn_finished_proposes_acknowledge_done() {
+        let transcript = vec![
+            msg("u1", Role::User, "hi"),
+            msg("a1", Role::Assistant, "hello"),
+        ];
+
+        let p = propose(
+            &turn_finished_trigger("t1", serde_json::json!("hello")),
+            &transcript,
+            &HashMap::new(),
+            0,
+            None,
+            "d0",
+        )
+        .expect("proposes");
+
+        assert_eq!(
+            p.messages
+                .iter()
+                .map(|m| m.id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("u1"), Some("a1")],
+            "transcript echoed unchanged"
+        );
+        match &p.actions[..] {
+            [DecisionAction::Done { data }] => assert_eq!(data, &serde_json::Value::Null),
+            other => panic!("expected a bare done; got {other:?}"),
         }
     }
 

@@ -107,6 +107,9 @@ pub(crate) fn parse_dt(s: &str) -> Option<DateTime<Utc>> {
 }
 
 pub(crate) fn spawn_err(e: tokio::task::JoinError) -> StoreError {
+    if e.is_cancelled() {
+        return StoreError::Cancelled;
+    }
     StoreError::Internal(format!("spawn_blocking: {e}"))
 }
 

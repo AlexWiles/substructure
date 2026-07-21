@@ -9,9 +9,13 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 
 ## [Unreleased]
 
+### Added
+
+- Workers had no hook to run side effects (e.g. post a result) after a turn. Added a `turn.finished` engine→worker trigger carrying the turn's frozen output; the turn completes (`turn.completed` / `RUN_FINISHED`) only once the worker's finalizer settles, and a terminal finalizer failure completes the run as failed.
+
 ### Fixed
 
-- A processor logged a store error at ERROR when its in-flight query was cancelled during runtime teardown. The loop now exits quietly when the cancel token is set.
+- A processor logged a store error at ERROR when its in-flight query was cancelled during runtime teardown, even before its cancel token was set. `spawn_blocking` join-cancellation now maps to `StoreError::Cancelled`, which the loop treats as a clean shutdown break.
 
 ### Changed
 

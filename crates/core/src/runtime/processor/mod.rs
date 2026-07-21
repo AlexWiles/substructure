@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::runtime::event_store::{EventFilter, EventStore, GlobalPosition};
+use crate::runtime::event_store::{EventFilter, EventStore, GlobalPosition, StoreError};
 use crate::runtime::session::SessionEvent;
 use crate::shard::in_shard;
 
@@ -155,6 +155,7 @@ impl EventProcessorRunner {
             {
                 Ok(events) => events,
                 Err(_) if self.cancel.is_cancelled() => break,
+                Err(StoreError::Cancelled) => break,
                 Err(err) => {
                     tracing::error!(
                         processor = processor_name,

@@ -3,7 +3,7 @@
 //! (`runtime::session::wire`, `runtime::session::propose`, …). Every type
 //! derives [`JsonSchema`]; the schemas under `schemas/` are generated from them.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -781,6 +781,19 @@ pub enum DecisionTrigger {
         #[serde(flatten)]
         resumption: InterruptResumption,
     },
+    /// Fired after a turn completes, carrying its final output; blocks the session
+    /// going idle until answered. Echo the proposed `done` to finalize.
+    #[serde(rename = "turn.finished")]
+    TurnFinished {
+        turn_id: String,
+        #[serde(default, skip_serializing_if = "Value::is_null")]
+        data: Value,
+        #[serde(default)]
+        #[schemars(schema_with = "decimal_string_schema")]
+        cost: Decimal,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        usage: BTreeMap<String, u64>,
+    },
 }
 
 impl DecisionTrigger {
@@ -796,6 +809,7 @@ impl DecisionTrigger {
             Self::LlmFinished { .. } => "llm.finished",
             Self::SubAgentFinished { .. } => "sub_agent.finished",
             Self::InterruptResumed { .. } => "interrupt.resumed",
+            Self::TurnFinished { .. } => "turn.finished",
         }
     }
 }

@@ -325,6 +325,10 @@ impl AgUiTranslator {
                 out
             }
             EventPayload::TurnCompleted(t) => {
+                // A terminally-failed finalizer completes the turn as a failed run.
+                if let Some(err) = t.error {
+                    return self.finalize_error(err);
+                }
                 let mut out = self.close_all_open();
                 out.push(AgUiEvent::RunFinished {
                     thread_id: self.thread_id.clone(),
