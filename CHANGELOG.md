@@ -9,6 +9,8 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-07-22
+
 ### Added
 
 - Workers had no hook to run side effects (e.g. post a result) after a turn. Added a `turn.finished` engine→worker trigger carrying the turn's frozen output; the turn completes (`turn.completed` / `RUN_FINISHED`) only once the worker's finalizer settles, and a terminal finalizer failure completes the run as failed.
@@ -77,7 +79,8 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
   streaming, schema-validated tool I/O and a generated protocol spec, and rewrote
   the docs and examples.
 
-[Unreleased]: https://github.com/substructureai/substructure/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/substructureai/substructure/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/substructureai/substructure/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/substructureai/substructure/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/substructureai/substructure/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/substructureai/substructure/compare/v0.1.22...v0.2.0
