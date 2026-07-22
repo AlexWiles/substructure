@@ -118,7 +118,7 @@ Your agent is an HTTP endpoint. There is no SDK to install, and typed bindings c
 
 Docs: [Typed bindings](./docs/40-typed-bindings.md)
 
-Examples: [Go](./examples/go-chat-with-tools), [Python](./examples/python-fast-api-pydantic-chat-with-tools), [TypeScript](./examples/node-hono-typescript-chat-with-tools)
+Examples: [Go](./examples/go-chat-with-tools), [Python](./examples/python-fast-api-pydantic-chat-with-tools), [TypeScript](./examples/node-hono-typescript-chat-with-tools), [Elixir](./examples/elixir-plug-chat-with-tools)
 
 ### Crash recovery
 

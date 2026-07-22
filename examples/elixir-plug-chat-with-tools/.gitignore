@@ -1,0 +1,6 @@
+/_build/
+/deps/
+/cover/
+*.ez
+worker-*.tar
+erl_crash.dump
