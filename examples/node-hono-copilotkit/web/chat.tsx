@@ -18,13 +18,35 @@ function TimezoneTool() {
         render: ({ name, status, result }) => {
             const done = status === "complete";
             return (
-                <div style={{ margin: "6px 0", border: "1px solid rgba(120,120,120,0.25)", borderRadius: 8, padding: "8px 10px", fontSize: 13 }}>
+                <div
+                    style={{
+                        margin: "6px 0",
+                        border: "1px solid rgba(120,120,120,0.25)",
+                        borderRadius: 8,
+                        padding: "8px 10px",
+                        fontSize: 13,
+                    }}
+                >
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <span style={{ flex: "none", width: 7, height: 7, borderRadius: "50%", background: done ? "#22c55e" : "#f59e0b" }} />
+                        <span
+                            style={{
+                                flex: "none",
+                                width: 7,
+                                height: 7,
+                                borderRadius: "50%",
+                                background: done ? "#22c55e" : "#f59e0b",
+                            }}
+                        />
                         <code>{name}</code>
                         {!done && <span style={{ opacity: 0.6 }}>running…</span>}
                     </div>
-                    {done && <pre style={{ margin: "6px 0 0", whiteSpace: "pre-wrap", wordBreak: "break-word", opacity: 0.8 }}>{result}</pre>}
+                    {done && (
+                        <pre
+                            style={{ margin: "6px 0 0", whiteSpace: "pre-wrap", wordBreak: "break-word", opacity: 0.8 }}
+                        >
+                            {result}
+                        </pre>
+                    )}
                 </div>
             );
         },
@@ -49,7 +71,7 @@ function ChatUI({ session }: { session: Session }) {
     const agent = useMemo(
         () =>
             new HttpAgent({
-                url: `${session.url}/api/client/ag-ui/agents/${session.agentId}/run`,
+                url: `${session.url}/api/channels/ag-ui/agents/${session.agentId}/run`,
                 headers: { Authorization: `Bearer ${session.token}` },
             }),
         [session],
@@ -58,7 +80,10 @@ function ChatUI({ session }: { session: Session }) {
         <CopilotKit agents__unsafe_dev_only={{ [session.agentId]: agent }}>
             <TimezoneTool />
             <main style={{ height: "100dvh" }}>
-                <CopilotChat agentId={session.agentId} labels={{ chatInputPlaceholder: "what time is it in my time zone?" }} />
+                <CopilotChat
+                    agentId={session.agentId}
+                    labels={{ chatInputPlaceholder: "what time is it in my time zone?" }}
+                />
             </main>
         </CopilotKit>
     );

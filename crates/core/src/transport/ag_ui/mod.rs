@@ -1,3 +1,4 @@
+pub mod channel;
 pub mod events;
 pub mod snapshot;
 pub mod translator;

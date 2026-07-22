@@ -1,7 +1,9 @@
 pub mod admin_http;
 pub mod ag_ui;
 pub mod auth;
+pub mod channel;
 pub mod client_http;
+pub mod http;
 pub mod http_push;
 pub mod push;
 pub mod server;

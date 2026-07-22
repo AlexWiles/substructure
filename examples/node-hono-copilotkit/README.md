@@ -56,7 +56,7 @@ own `agent` config with a filtered `trigger.client.tools` to override the defaul
 - **`server.ts`** — `POST /agent` is the worker: it declares the agent and the worker tool, and
   runs it when the model calls it. `GET /token` mints a client token. `/*` serves `web/dist`.
 - **`web/chat.tsx`** — `new HttpAgent({ url, headers })` points at
-  `…/api/client/ag-ui/agents/chat-agent/run`; `<CopilotKit agents__unsafe_dev_only={{ … }}>`
+  `…/api/channels/ag-ui/agents/chat-agent/run`; `<CopilotKit agents__unsafe_dev_only={{ … }}>`
   connects the browser straight to it (no runtime), and `<CopilotChat agentId="chat-agent">`
   renders the thread. The frontend tool is a `useFrontendTool` entry with a `render`.
 

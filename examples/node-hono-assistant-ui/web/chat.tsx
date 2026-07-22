@@ -20,10 +20,29 @@ function ToolFallback({ toolName, argsText, result, isError, status }: ToolCallM
     const done = status.type === "complete" || status.type === "incomplete";
     const args = argsText && argsText !== "{}" ? `(${argsText})` : "";
     return (
-        <div style={{ margin: "6px 0", border: "1px solid rgba(120,120,120,0.25)", borderRadius: 8, padding: "8px 10px", fontSize: 13 }}>
+        <div
+            style={{
+                margin: "6px 0",
+                border: "1px solid rgba(120,120,120,0.25)",
+                borderRadius: 8,
+                padding: "8px 10px",
+                fontSize: 13,
+            }}
+        >
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ flex: "none", width: 7, height: 7, borderRadius: "50%", background: isError ? "#ef4444" : done ? "#22c55e" : "#f59e0b" }} />
-                <code>{toolName}{args}</code>
+                <span
+                    style={{
+                        flex: "none",
+                        width: 7,
+                        height: 7,
+                        borderRadius: "50%",
+                        background: isError ? "#ef4444" : done ? "#22c55e" : "#f59e0b",
+                    }}
+                />
+                <code>
+                    {toolName}
+                    {args}
+                </code>
                 {!done && <span style={{ opacity: 0.6 }}>running…</span>}
             </div>
             {result !== undefined && (
@@ -87,7 +106,7 @@ function Runtime({ session, sessionId, onNewChat }: { session: Session; sessionI
     const agent = useMemo(
         () =>
             new HttpAgent({
-                url: `${session.url}/api/client/ag-ui/agents/${session.agentId}/run`,
+                url: `${session.url}/api/channels/ag-ui/agents/${session.agentId}/run`,
                 headers: { Authorization: `Bearer ${session.token}` },
                 threadId: sessionId,
             }),

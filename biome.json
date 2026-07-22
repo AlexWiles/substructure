@@ -14,8 +14,8 @@
     },
     "files": {
         "includes": [
-            "packages/**/*.ts",
-            "examples/**/*.ts"
+            "packages/**/*.{ts,tsx}",
+            "examples/**/*.{ts,tsx}"
         ]
     }
 }

@@ -9,6 +9,10 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 
 ## [Unreleased]
 
+### Changed
+
+- Introduce a channel abstraction.
+
 ## [0.2.3] - 2026-07-22
 
 ### Added

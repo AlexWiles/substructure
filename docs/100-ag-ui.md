@@ -11,12 +11,15 @@ frontends like CopilotKit and assistant-ui connect to an agent directly.
 Each agent is served at an AG-UI run endpoint:
 
 ```
-POST /api/client/ag-ui/agents/{agent_id}/run
+POST /api/channels/ag-ui/agents/{agent_id}/run
 ```
 
 It takes a `RunAgentInput` and returns the AG-UI event stream over SSE. A
 companion `.../connect` replays the conversation as a snapshot for a client that
 is catching up.
+
+AG-UI is a channel — a pluggable session frontend. Every channel's routes live
+under `/api/channels/{kind}`.
 
 ## Input
 
@@ -54,7 +57,7 @@ run so the browser can execute it, then the client resubmits with the result.
 same endpoint:
 
 ```
-${url}/api/client/ag-ui/agents/${agentId}/run
+${url}/api/channels/ag-ui/agents/${agentId}/run
 ```
 
 Each declares a worker tool and a browser tool, showing both sides in one UI.

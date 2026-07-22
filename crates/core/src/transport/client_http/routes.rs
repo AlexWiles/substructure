@@ -7,12 +7,10 @@ use futures_util::stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-use crate::protocol::{ClientInput, InterruptResumption, SessionOwner};
+use crate::protocol::SessionOwner;
 use crate::session::command::SessionError;
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
-use crate::transport::ag_ui::snapshot::snapshot_events;
-use crate::transport::ag_ui::translator::run_ag_ui_translation;
-use crate::transport::ag_ui::types::{ConnectInput, RunAgentInput};
+use crate::transport::http::runtime_error_response;
 use crate::transport::session_sse::{merge_session_stream, resume_cursor};
 use crate::{Caller, HandleClientInput, InterruptSessionInput, RuntimeError};
 
@@ -90,35 +88,6 @@ pub async fn interrupt_session(
     }
 }
 
-/// Map RuntimeError variants to HTTP status codes for the client API.
-pub(crate) fn runtime_error_status(err: &RuntimeError) -> (StatusCode, String) {
-    let status = match err {
-        RuntimeError::Session(
-            SessionError::MissingSubject
-            | SessionError::SessionAccessDenied
-            | SessionError::EffectWrongHandler,
-        ) => StatusCode::FORBIDDEN,
-        RuntimeError::Session(SessionError::EffectNotFound | SessionError::SessionNotCreated) => {
-            StatusCode::NOT_FOUND
-        }
-        RuntimeError::Session(
-            SessionError::EffectNotPending
-            | SessionError::EffectAttemptMismatch
-            | SessionError::SessionInterrupted
-            | SessionError::TurnAlreadyActive { .. }
-            | SessionError::TurnAlreadyCompleted { .. }
-            | SessionError::NoActiveTurn,
-        ) => StatusCode::CONFLICT,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
-    };
-    (status, err.to_string())
-}
-
-pub(crate) fn runtime_error_response(err: RuntimeError) -> Response {
-    let (status, message) = runtime_error_status(&err);
-    (status, Json(serde_json::json!({"error": message}))).into_response()
-}
-
 /// The session resource: head-resolved status, open interrupts, and the full
 /// message tree.
 pub async fn get_session(
@@ -187,167 +156,4 @@ pub async fn stream_session_events(
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response()
-}
-
-pub async fn ag_ui_run(
-    State(state): State<ClientHttpState>,
-    Extension(caller): Extension<Caller>,
-    Extension(owner): Extension<SessionOwner>,
-    Path(agent_id): Path<String>,
-    Json(input): Json<RunAgentInput>,
-) -> Response {
-    let session_id = input.thread_id.clone();
-
-    // Passthrough; the core classifies new turn vs. client tool results.
-    if input.resume.is_empty() && input.to_messages().is_empty() {
-        let body = serde_json::json!({"error": "no messages or resume in RunAgentInput"});
-        return (StatusCode::BAD_REQUEST, Json(body)).into_response();
-    }
-
-    let spec = SessionSubscriptionSpec {
-        scope: SubscriptionScope::All,
-        caller: caller.clone(),
-        session_id: session_id.clone(),
-    };
-    let event_rx = match state.runtime.stream(spec, None).await {
-        Ok(rx) => rx,
-        Err(e) => return runtime_error_response(e),
-    };
-    let delta_rx = state
-        .runtime
-        .subscribe_token_deltas(&caller, &session_id)
-        .await;
-
-    // AG-UI's input is already classified (a `resume` list vs. messages), so the inputs are
-    // built directly with their addressing rather than parsed from untrusted tagged JSON.
-    // Resumes apply first, then the messages view — steerAway sends both.
-    for entry in input.resume.clone() {
-        let payload = serde_json::json!({
-            "status": entry.status.as_str(),
-            "payload": entry.payload.unwrap_or(serde_json::Value::Null),
-        });
-        let r = state
-            .runtime
-            .handle_client_input(HandleClientInput {
-                session_id: session_id.clone(),
-                caller: caller.clone(),
-                owner: owner.clone(),
-                input: ClientInput::InterruptResume {
-                    resumption: InterruptResumption {
-                        interrupt_id: entry.interrupt_id,
-                        payload,
-                    },
-                },
-                span: crate::span::SpanContext::root().child("ag_ui_resume"),
-            })
-            .await;
-        if let Err(e) = r {
-            return runtime_error_response(e);
-        }
-    }
-    if !input.to_messages().is_empty() {
-        let submit = state
-            .runtime
-            .handle_client_input(HandleClientInput {
-                session_id: session_id.clone(),
-                caller,
-                owner,
-                input: ClientInput::Messages {
-                    agent_id,
-                    turn_id: Some(input.run_id.clone()),
-                    // Full client view so edits/branches reconcile into the tree.
-                    messages: input.to_messages(),
-                    stream: true,
-                    // Client-declared tools/context/state, forwarded to the worker.
-                    client: input.client_context(),
-                },
-                span: crate::span::SpanContext::root().child("ag_ui_run"),
-            })
-            .await;
-        if let Err(e) = submit {
-            return runtime_error_response(e);
-        }
-    }
-
-    let out_rx = run_ag_ui_translation(
-        event_rx,
-        delta_rx,
-        input.thread_id,
-        input.run_id,
-        state.shutdown.clone(),
-    );
-    let stream = ReceiverStream::new(out_rx).map(Ok::<_, std::convert::Infallible>);
-    Sse::new(stream)
-        .keep_alive(KeepAlive::default())
-        .into_response()
-}
-
-pub async fn ag_ui_connect(
-    State(state): State<ClientHttpState>,
-    Extension(caller): Extension<Caller>,
-    Path(_agent_id): Path<String>,
-    Json(input): Json<ConnectInput>,
-) -> Response {
-    // Authorizes the read; no events ⇒ session not yet created, empty snapshot.
-    let events = match state
-        .runtime
-        .read_session_events(&caller, &input.thread_id, None, Some(1))
-        .await
-    {
-        Ok(events) => events,
-        Err(e) => return runtime_error_response(e),
-    };
-
-    let session = if events.is_empty() {
-        None
-    } else {
-        match state
-            .runtime
-            .get_session(caller.tenant_id(), &input.thread_id)
-            .await
-        {
-            Ok(session) => Some(session.state),
-            Err(e) => return runtime_error_response(e),
-        }
-    };
-
-    let run_id = input.run_id.unwrap_or_else(|| Uuid::now_v7().to_string());
-    let frames = snapshot_events(input.thread_id, run_id, session.as_ref())
-        .into_iter()
-        .map(|ev| Ok::<_, std::convert::Infallible>(ev.to_sse()))
-        .collect::<Vec<_>>();
-
-    Sse::new(futures_util::stream::iter(frames))
-        .keep_alive(KeepAlive::default())
-        .into_response()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn status_of(err: SessionError) -> StatusCode {
-        runtime_error_status(&RuntimeError::Session(err)).0
-    }
-
-    #[test]
-    fn effect_settle_errors_map_to_expected_statuses() {
-        assert_eq!(
-            status_of(SessionError::EffectNotFound),
-            StatusCode::NOT_FOUND
-        );
-        assert_eq!(
-            status_of(SessionError::EffectWrongHandler),
-            StatusCode::FORBIDDEN
-        );
-        assert_eq!(
-            status_of(SessionError::EffectNotPending),
-            StatusCode::CONFLICT
-        );
-        assert_eq!(
-            status_of(SessionError::EffectAttemptMismatch),
-            StatusCode::CONFLICT
-        );
-        assert_eq!(status_of(SessionError::NoActiveTurn), StatusCode::CONFLICT);
-    }
 }

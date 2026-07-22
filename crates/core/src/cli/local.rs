@@ -17,6 +17,8 @@ use crate::providers::sqlite::{
 };
 use crate::sub_agent::SubAgentTask;
 use crate::transport::admin_http::{self, AdminHttpState};
+use crate::transport::ag_ui::channel::AgUiChannel;
+use crate::transport::channel::{start_channels, Channel, ChannelContext};
 use crate::transport::client_http::{self, ClientHttpState};
 use crate::transport::http_push::http_transport;
 use crate::transport::push::PushAdapter;
@@ -112,7 +114,7 @@ async fn start_server(
     );
     let client_routes = client_http::router(ClientHttpState {
         runtime: rt.clone(),
-        auth: auth.client,
+        auth: auth.client.clone(),
         shutdown: shutdown.clone(),
     });
     let worker_routes = worker_http::router(WorkerHttpState {
@@ -122,8 +124,12 @@ async fn start_server(
         shutdown: shutdown.clone(),
     });
 
-    let server =
-        SubstructureServer::new(vec![admin_routes, client_routes, worker_routes, v1_routes]);
+    let channels: Vec<Arc<dyn Channel>> = vec![Arc::new(AgUiChannel::new(auth.client))];
+    let channel_ctx = ChannelContext::new(rt.clone(), shutdown.clone());
+
+    let mut routers = vec![admin_routes, client_routes, worker_routes, v1_routes];
+    routers.extend(start_channels(channels, channel_ctx));
+    let server = SubstructureServer::new(routers);
 
     let addr = format!("{host}:{port}");
     if dev {
