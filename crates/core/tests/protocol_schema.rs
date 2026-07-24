@@ -88,6 +88,11 @@ fn protocol_schema() -> serde_json::Value {
         p::Message,
         p::DraftMessage,
         p::InterruptOrigin,
+        p::InterruptPayload,
+        p::InterruptOption,
+        p::InterruptResolution,
+        p::ResumeStatus,
+        p::InterruptResponder,
         p::MessageTree,
         p::Handler,
         p::RetryPolicy,
@@ -133,6 +138,10 @@ fn protocol_schema() -> serde_json::Value {
             "client_payload": { "$ref": "#/$defs/ClientPayload" },
             "token_delta": { "$ref": "#/$defs/TokenDelta" },
             "stream_delta": { "$ref": "#/$defs/StreamDelta" },
+            // Offered vocabulary, not a wire surface: the interrupt payload
+            // convention rides opaque payloads but is typed for workers.
+            "interrupt_payload": { "$ref": "#/$defs/InterruptPayload" },
+            "interrupt_resolution": { "$ref": "#/$defs/InterruptResolution" },
         },
         "$defs": defs,
     })

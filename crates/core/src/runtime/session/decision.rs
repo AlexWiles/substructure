@@ -100,9 +100,15 @@ pub enum Trigger {
     /// proposal — the worker declares its `agent` config (or returns `{}`).
     #[serde(rename = "session.start")]
     SessionStart,
-    /// Internal only: materialized into `ClientTranscript` at delivery, never sent to workers.
+    /// Internal only: materialized into `ClientTranscript` against the active
+    /// path at delivery, never sent to workers. Late binding is the point — a
+    /// queued append lands after whatever turn beat it instead of forking.
     #[serde(rename = "client.message")]
-    ClientMessage { message: DraftMessage },
+    ClientMessage {
+        messages: Vec<DraftMessage>,
+        #[serde(default)]
+        client: ClientContext,
+    },
     /// `messages` is the full proposed conversation; `messages[new_from..]` is
     /// unrecorded (recomputed at delivery against the tree). Wire tag: `client.messages`.
     #[serde(rename = "client.messages")]

@@ -20,6 +20,7 @@ app.post("/", async (c) => {
                 stream: true,
                 handler: "worker",
                 format: "anthropic",
+                system: "Reply using slack compatible mrkdwn",
             },
         };
         return c.json(decision);

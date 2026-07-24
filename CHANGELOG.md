@@ -9,6 +9,11 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 
 ## [Unreleased]
 
+### Added
+
+- Add a slack adapter
+- New `client.append` command. submits just the new messages; the view is composed against the session head at delivery.
+
 ### Changed
 
 - Introduce a channel abstraction.

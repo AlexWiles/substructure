@@ -82,10 +82,16 @@ async fn run(
     // built directly with their addressing rather than parsed from untrusted tagged JSON.
     // Resumes apply first, then the messages view — steerAway sends both.
     for entry in input.resume.clone() {
-        let payload = serde_json::json!({
-            "status": entry.status.as_str(),
-            "payload": entry.payload.unwrap_or(serde_json::Value::Null),
-        });
+        let payload = serde_json::to_value(crate::protocol::InterruptResolution {
+            status: entry.status,
+            payload: entry.payload.unwrap_or(serde_json::Value::Null),
+            responder: Some(crate::protocol::InterruptResponder {
+                channel: "ag-ui".to_string(),
+                user: None,
+                label: None,
+            }),
+        })
+        .unwrap_or_default();
         let r = ctx
             .handle_client_input(HandleClientInput {
                 session_id: session_id.clone(),

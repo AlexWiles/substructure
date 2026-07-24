@@ -22,7 +22,8 @@ function decide({ trigger, proposed }) {
             agent: {
                 model: "claude-haiku-4-5-20251001",
                 stream: true,
-                tools: tools.map(({ name, description }) => ({ name, description }))
+                tools: tools.map(({ name, description }) => ({ name, description })),
+                system: "Please answer is slack compatible mrkdwn"
             }
         };
     }

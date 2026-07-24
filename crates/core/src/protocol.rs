@@ -575,6 +575,20 @@ pub struct ClientMessages {
     pub client: ClientContext,
 }
 
+/// The body of a `client.append`: messages appended at the session head. The
+/// view is composed against the active path at delivery, so a queued append
+/// lands after whatever turn beat it — it can never fork the tree. Messages
+/// whose ids are already recorded are dropped.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(inline)]
+pub struct ClientAppend {
+    pub messages: Vec<DraftMessage>,
+    #[serde(default)]
+    pub stream: bool,
+    #[serde(default)]
+    pub client: ClientContext,
+}
+
 /// The payload of a `client.action`: a named action with optional JSON args.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[schemars(inline)]
@@ -585,7 +599,7 @@ pub struct ClientAction {
 }
 
 /// The client→engine inbound *submit* wire form: an untrusted client submits a message,
-/// its full conversation view, or a named action. Lowered to domain events at the
+/// its full conversation view, an append batch, or a named action. Lowered to domain events at the
 /// `SubmitClientPayload` command seam (`runtime::session::command`); never persisted
 /// as-is. Carried verbatim inside [`ClientInput`], which is the full client input
 /// surface.
@@ -597,19 +611,21 @@ pub enum ClientPayload {
     Message(ClientMessage),
     #[serde(rename = "client.messages")]
     Messages(ClientMessages),
+    #[serde(rename = "client.append")]
+    Append(ClientAppend),
     #[serde(rename = "client.action")]
     Action(ClientAction),
 }
 
-/// Everything a client can send on the input surface: submit a message / a full view / a
-/// named action, resume an interrupt, or settle a client tool. A flat, internally-tagged
-/// union — its six tags produce serde's "unknown variant, expected one of …" error for
-/// free. `Runtime::handle_client_input` is the single seam that dispatches it (mirroring
-/// `resolve_response` on the worker side).
+/// Everything a client can send on the input surface: submit a message / a full view / an
+/// append batch / a named action, resume an interrupt, or settle a client tool. A flat,
+/// internally-tagged union — its seven tags produce serde's "unknown variant, expected one
+/// of …" error for free. `Runtime::handle_client_input` is the single seam that dispatches
+/// it (mirroring `resolve_response` on the worker side).
 ///
 /// Addressing lives where it is meaningful, not in a shared envelope: `agent_id` (routes
 /// the turn, creating the session if new) and the optional idempotency `turn_id` are
-/// fields of the three submit variants only. A resume/settle addresses an interrupt/effect
+/// fields of the four submit variants only. A resume/settle addresses an interrupt/effect
 /// id and continues whatever turn is active, so it carries neither — misplacing them is
 /// unrepresentable rather than rejected. `session_id` is the one universal address and
 /// rides the envelope. A submit's body rebuilds a [`ClientPayload`] at the seam.
@@ -628,6 +644,17 @@ pub enum ClientInput {
     },
     #[serde(rename = "client.messages")]
     Messages {
+        agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        messages: Vec<DraftMessage>,
+        #[serde(default)]
+        stream: bool,
+        #[serde(default)]
+        client: ClientContext,
+    },
+    #[serde(rename = "client.append")]
+    Append {
         agent_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         turn_id: Option<String>,
@@ -677,6 +704,89 @@ pub struct InterruptResumption {
     pub interrupt_id: String,
     #[serde(default)]
     pub payload: Value,
+}
+
+// ── Interrupt payload convention ─────────────────────────────────────────
+//
+// Offered vocabulary, never enforced: interrupt payloads stay opaque on the
+// wire, but a payload shaped like the AG-UI Interrupt renders in every
+// channel (Slack buttons, the AG-UI Interrupt object), and resumes authored
+// by channels arrive as an [`InterruptResolution`]. Top-level keys come from
+// the AG-UI spec; everything convention-specific rides `metadata`, which is
+// client-visible by definition — anything private belongs in worker state,
+// not the payload. Workers should treat an unrecognized resolution as their
+// safe default — a resume can carry any payload.
+
+/// An interrupt payload following the AG-UI Interrupt shape (spec spelling;
+/// `id` and `reason` live on the interrupt itself).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[schemars(title = "InterruptPayload")]
+pub struct InterruptPayload {
+    /// Markdown; channels down-convert. Without it, channels fall back to
+    /// the interrupt's `reason`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Binds the interrupt to a prior tool call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// JSON Schema for the expected resolution payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_schema: Option<Value>,
+    /// RFC 3339; display only until engine TTLs land.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    /// Free-form, delivered to clients verbatim. `metadata.options`
+    /// ([`InterruptOption`] list) renders as Slack buttons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
+}
+
+/// One enumerated response under `metadata.options` (Slack: a button). A
+/// click resumes with the option's `value` as the resolution payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "InterruptOption")]
+pub struct InterruptOption {
+    pub label: String,
+    /// Delivered verbatim as the resolution's `payload`; worker vocabulary.
+    pub value: Value,
+    /// `primary` or `danger`; anything else renders plain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
+}
+
+/// A channel-authored resume payload: the AG-UI resume shape
+/// (`{status, payload}`) plus a provenance stamp.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "InterruptResolution")]
+pub struct InterruptResolution {
+    pub status: ResumeStatus,
+    #[serde(default)]
+    pub payload: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub responder: Option<InterruptResponder>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[schemars(title = "ResumeStatus")]
+pub enum ResumeStatus {
+    Resolved,
+    Cancelled,
+}
+
+/// Who resolved it, stamped by the channel — never by the requester.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "InterruptResponder")]
+pub struct InterruptResponder {
+    /// The channel kind, e.g. `slack`, `ag-ui`.
+    pub channel: String,
+    /// Channel-native user id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// The chosen option's label, when the resolution was a pick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 // ── Engine → worker ──────────────────────────────────────────────────────

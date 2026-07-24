@@ -6,21 +6,23 @@ export interface Protocol {
     client_payload?: ClientPayload;
     decision_request?: DecisionRequest;
     decision_response?: DecisionResponse;
+    interrupt_payload?: InterruptPayload;
+    interrupt_resolution?: InterruptResolution;
     stream_delta?: StreamDelta;
     token_delta?: TokenDelta;
-    [property: string]: any;
+    [property: string]: unknown;
 }
 
 /**
- * Everything a client can send on the input surface: submit a message / a full view / a
- * named action, resume an interrupt, or settle a client tool. A flat, internally-tagged
- * union — its six tags produce serde's "unknown variant, expected one of …" error for
- * free. `Runtime::handle_client_input` is the single seam that dispatches it (mirroring
- * `resolve_response` on the worker side).
+ * Everything a client can send on the input surface: submit a message / a full view / an
+ * append batch / a named action, resume an interrupt, or settle a client tool. A flat,
+ * internally-tagged union — its seven tags produce serde's "unknown variant, expected one
+ * of …" error for free. `Runtime::handle_client_input` is the single seam that dispatches
+ * it (mirroring `resolve_response` on the worker side).
  *
  * Addressing lives where it is meaningful, not in a shared envelope: `agent_id` (routes
  * the turn, creating the session if new) and the optional idempotency `turn_id` are
- * fields of the three submit variants only. A resume/settle addresses an interrupt/effect
+ * fields of the four submit variants only. A resume/settle addresses an interrupt/effect
  * id and continues whatever turn is active, so it carries neither — misplacing them is
  * unrepresentable rather than rejected. `session_id` is the one universal address and
  * rides the envelope. A submit's body rebuilds a [`ClientPayload`] at the seam.
@@ -37,13 +39,13 @@ export interface ClientInput {
     type: ClientInputType;
     client?: ClientContext;
     messages?: DraftMessage[];
-    args?: any;
+    args?: unknown;
     name?: string;
     interrupt_id?: string;
-    payload?: any;
+    payload?: unknown;
     attempt?: number | null;
     id?: string;
-    result?: any;
+    result?: unknown;
     error?: string;
     retryable?: boolean;
 }
@@ -59,9 +61,9 @@ export interface ClientInput {
  * onto the proposed config by default.
  */
 export interface ClientContext {
-    context?: any[];
-    forwarded_props?: any;
-    state?: any;
+    context?: unknown[];
+    forwarded_props?: unknown;
+    state?: unknown;
     tools?: AgentTool[];
 }
 
@@ -74,9 +76,9 @@ export interface ClientContext {
 export interface AgentTool {
     description?: string;
     handler?: Handler | null;
-    input?: any;
+    input?: unknown;
     name: string;
-    output?: any;
+    output?: unknown;
 }
 
 /**
@@ -157,6 +159,7 @@ export interface ToolCallFunction {
 export type ClientInputType =
     | "client.message"
     | "client.messages"
+    | "client.append"
     | "client.action"
     | "interrupt.resume"
     | "tool.result"
@@ -164,7 +167,8 @@ export type ClientInputType =
 
 /**
  * The client→engine inbound *submit* wire form: an untrusted client submits a message,
- * its full conversation view, or a named action. Lowered to domain events at the
+ * its full conversation view, an append batch, or a named action. Lowered to domain events
+ * at the
  * `SubmitClientPayload` command seam (`runtime::session::command`); never persisted
  * as-is. Carried verbatim inside [`ClientInput`], which is the full client input
  * surface.
@@ -174,6 +178,11 @@ export type ClientInputType =
  * The body of a `client.messages`: the client's full conversation view, optionally
  * streamed.
  *
+ * The body of a `client.append`: messages appended at the session head. The
+ * view is composed against the active path at delivery, so a queued append
+ * lands after whatever turn beat it — it can never fork the tree. Messages
+ * whose ids are already recorded are dropped.
+ *
  * The payload of a `client.action`: a named action with optional JSON args.
  */
 export interface ClientPayload {
@@ -182,11 +191,11 @@ export interface ClientPayload {
     type: ClientPayloadType;
     client?: ClientContext;
     messages?: DraftMessage[];
-    args?: any;
+    args?: unknown;
     name?: string;
 }
 
-export type ClientPayloadType = "client.message" | "client.messages" | "client.action";
+export type ClientPayloadType = "client.message" | "client.messages" | "client.append" | "client.action";
 
 export interface DecisionRequest {
     /**
@@ -212,7 +221,7 @@ export interface DecisionRequest {
      */
     proposed: DecisionResponse;
     session_id: string;
-    state: any;
+    state: unknown;
     trigger: DecisionTrigger;
     turn_id?: null | string;
 }
@@ -331,7 +340,7 @@ export interface Message {
     name?: null | string;
     role: Role;
     tool_call_id?: null | string;
-    tool_calls: ToolCall[];
+    tool_calls?: ToolCall[];
 }
 
 /**
@@ -352,7 +361,7 @@ export interface DecisionResponse {
     /**
      * Omitted or `null` keeps the current state; clear with a non-null empty value.
      */
-    state?: any;
+    state?: unknown;
 }
 
 /**
@@ -396,17 +405,17 @@ export interface DecisionAction {
     temperature?: number | null;
     tools?: LlmTool[] | null;
     type: DecisionActionType;
-    arguments?: any;
+    arguments?: unknown;
     name?: string;
     attempt?: number | null;
-    result?: any;
+    result?: unknown;
     /**
      * A neutral `LlmResponse`, or the provider's native response when the
      * answered `llm.execute` carried a `format`.
      */
-    response?: any;
+    response?: unknown;
     code?: ErrorCode | null;
-    detail?: any;
+    detail?: unknown;
     error?: string;
     /**
      * Omitted ⇒ terminal.
@@ -420,9 +429,9 @@ export interface DecisionAction {
     tool_call_id?: string;
     message?: DraftMessage;
     interrupt_id?: null | string;
-    payload?: any;
+    payload?: unknown;
     reason?: string;
-    data?: any;
+    data?: unknown;
 }
 
 export type ErrorCode = "provider_error" | "rate_limited" | "refused" | "budget_exceeded" | "deadline_exceeded";
@@ -448,13 +457,13 @@ export interface LlmTool {
      * tool. The engine validates each call's arguments against it and hands
      * providers their native form.
      */
-    input?: any;
+    input?: unknown;
     name: string;
     /**
      * JSON Schema the settled result must satisfy; never sent to the model.
      * A violating result settles as a terminal tool error.
      */
-    output?: any;
+    output?: unknown;
 }
 
 export type DecisionActionType =
@@ -485,6 +494,9 @@ export type DecisionActionType =
  * The body of an interrupt resume: which interrupt, and the payload delivered
  * to the worker. Shared by the [`ClientInput::InterruptResume`] input and the
  * [`DecisionTrigger::InterruptResumed`] trigger.
+ *
+ * Fired after a turn completes, carrying its final output; blocks the session
+ * going idle until answered. Echo the proposed `done` to finalize.
  */
 export interface DecisionTrigger {
     type: DecisionTriggerType;
@@ -495,7 +507,7 @@ export interface DecisionTrigger {
     client?: ClientContext;
     messages?: DraftMessage[];
     new_from?: number;
-    args?: any;
+    args?: unknown;
     name?: string;
     arguments?: string;
     attempt?: number;
@@ -516,18 +528,20 @@ export interface DecisionTrigger {
      * The neutral `LlmRequest` JSON, or the provider's native request body
      * when `format` is set.
      */
-    request?: any;
+    request?: unknown;
     stream?: boolean;
     code?: ErrorCode | null;
     cost?: null | string;
-    detail?: any;
+    detail?: unknown;
     message?: DraftMessage | null;
     truncated?: boolean;
-    usage?: any;
+    usage?: unknown;
     agent_id?: string;
     session_id?: string;
     interrupt_id?: string;
-    payload?: any;
+    payload?: unknown;
+    data?: unknown;
+    turn_id?: string;
 }
 
 /**
@@ -549,7 +563,7 @@ export interface DecisionTrigger {
  */
 export interface ToolInput {
     status: Status;
-    value?: any;
+    value?: unknown;
     error?: string;
 }
 
@@ -564,7 +578,67 @@ export type DecisionTriggerType =
     | "llm.execute"
     | "llm.finished"
     | "sub_agent.finished"
-    | "interrupt.resumed";
+    | "interrupt.resumed"
+    | "turn.finished";
+
+/**
+ * An interrupt payload following the AG-UI Interrupt shape (spec spelling;
+ * `id` and `reason` live on the interrupt itself).
+ */
+export interface InterruptPayload {
+    /**
+     * RFC 3339; display only until engine TTLs land.
+     */
+    expiresAt?: null | string;
+    /**
+     * Markdown; channels down-convert. Without it, channels fall back to
+     * the interrupt's `reason`.
+     */
+    message?: null | string;
+    /**
+     * Free-form, delivered to clients verbatim. `metadata.options`
+     * ([`InterruptOption`] list) renders as Slack buttons.
+     */
+    metadata?: unknown;
+    /**
+     * JSON Schema for the expected resolution payload.
+     */
+    responseSchema?: unknown;
+    /**
+     * Binds the interrupt to a prior tool call.
+     */
+    toolCallId?: null | string;
+}
+
+/**
+ * A channel-authored resume payload: the AG-UI resume shape
+ * (`{status, payload}`) plus a provenance stamp.
+ */
+export interface InterruptResolution {
+    payload?: unknown;
+    responder?: InterruptResponder | null;
+    status: ResumeStatus;
+}
+
+/**
+ * Who resolved it, stamped by the channel — never by the requester.
+ */
+export interface InterruptResponder {
+    /**
+     * The channel kind, e.g. `slack`, `ag-ui`.
+     */
+    channel: string;
+    /**
+     * The chosen option's label, when the resolution was a pick.
+     */
+    label?: null | string;
+    /**
+     * Channel-native user id.
+     */
+    user?: null | string;
+}
+
+export type ResumeStatus = "resolved" | "cancelled";
 
 export interface StreamDelta {
     finish_reason?: null | string;

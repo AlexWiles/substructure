@@ -27,9 +27,9 @@ use super::reconcile::news_start;
 use super::state::{new_call_id, new_message_id, LlmCallState};
 use super::tool_contract::{classify_arguments, declared_tool, DeclaredTool};
 use crate::protocol::{
-    AgentConfig, ClientContext, DecisionAction, DecisionRequest, DecisionResponse, DecisionTrigger,
-    DraftMessage, Handler, InterruptResumption, LlmFormat, LlmRequest, LlmResponse, Message,
-    MessageTree, RetryPolicy, WorkerIdentity, WorkerState,
+    AgentConfig, DecisionAction, DecisionRequest, DecisionResponse, DecisionTrigger, DraftMessage,
+    Handler, InterruptResumption, LlmFormat, LlmRequest, LlmResponse, Message, MessageTree,
+    RetryPolicy, WorkerIdentity, WorkerState,
 };
 use crate::runtime::worker::WorkerDecisionRequest;
 
@@ -476,18 +476,27 @@ pub fn to_wire_trigger(
 ) -> DecisionTrigger {
     match trigger {
         Trigger::SessionStart => DecisionTrigger::SessionStart,
-        Trigger::ClientMessage { message } => {
-            let mut messages: Vec<DraftMessage> = active_path
+        Trigger::ClientMessage { messages, client } => {
+            let known: std::collections::HashSet<&str> =
+                tree.nodes.iter().map(|n| n.message.id.as_str()).collect();
+            let mut view: Vec<DraftMessage> = active_path
                 .iter()
                 .cloned()
                 .map(DraftMessage::from)
                 .collect();
-            let new_from = messages.len();
-            messages.push(message);
+            let new_from = view.len();
+            // Already-recorded ids are dropped: an append is "ensure these
+            // are at the head", and a duplicate would land the news on its
+            // old node instead of the head.
+            view.extend(
+                messages
+                    .into_iter()
+                    .filter(|m| m.id.as_deref().is_none_or(|id| !known.contains(id))),
+            );
             DecisionTrigger::ClientTranscript {
-                messages,
+                messages: view,
                 new_from,
-                client: ClientContext::default(),
+                client,
             }
         }
         Trigger::ClientTranscript {
@@ -1229,7 +1238,8 @@ mod tests {
 
         let (messages, new_from) = transcript_of(to_wire_trigger(
             Trigger::ClientMessage {
-                message: msg("u2", Role::User, "more").into(),
+                messages: vec![msg("u2", Role::User, "more").into()],
+                client: ClientContext::default(),
             },
             &path,
             &tree,
@@ -1239,6 +1249,37 @@ mod tests {
         assert_eq!(
             messages.iter().map(|m| m.id.as_deref()).collect::<Vec<_>>(),
             vec![Some("u1"), Some("a1"), Some("u2")]
+        );
+        assert_eq!(new_from, 2);
+    }
+
+    #[test]
+    fn materializes_an_append_batch_dropping_recorded_ids() {
+        let path = vec![
+            msg("u1", Role::User, "hi"),
+            msg("a1", Role::Assistant, "yo"),
+        ];
+        let tree = linear_tree(&path);
+
+        // "a1" is already recorded: dropped, so the news lands on the head
+        // instead of folding back onto its old node.
+        let (messages, new_from) = transcript_of(to_wire_trigger(
+            Trigger::ClientMessage {
+                messages: vec![
+                    msg("a1", Role::Assistant, "yo").into(),
+                    msg("u2", Role::User, "more").into(),
+                    msg("u3", Role::User, "and more").into(),
+                ],
+                client: ClientContext::default(),
+            },
+            &path,
+            &tree,
+            &HashMap::new(),
+        ));
+
+        assert_eq!(
+            messages.iter().map(|m| m.id.as_deref()).collect::<Vec<_>>(),
+            vec![Some("u1"), Some("a1"), Some("u2"), Some("u3")]
         );
         assert_eq!(new_from, 2);
     }
@@ -1560,7 +1601,7 @@ mod tests {
 
     #[test]
     fn client_input_parses_every_tag_to_its_variant() {
-        let cases: [(&str, fn(&ClientInput) -> bool); 6] = [
+        let cases: [(&str, fn(&ClientInput) -> bool); 7] = [
             (
                 r#"{"type":"client.message","agent_id":"bot","message":{"role":"user","content":"hi"}}"#,
                 |i| matches!(i, ClientInput::Message { .. }),
@@ -1568,6 +1609,10 @@ mod tests {
             (
                 r#"{"type":"client.messages","agent_id":"bot","messages":[]}"#,
                 |i| matches!(i, ClientInput::Messages { .. }),
+            ),
+            (
+                r#"{"type":"client.append","agent_id":"bot","messages":[]}"#,
+                |i| matches!(i, ClientInput::Append { .. }),
             ),
             (
                 r#"{"type":"client.action","agent_id":"bot","name":"approve","args":{"ok":true}}"#,
@@ -1632,13 +1677,14 @@ mod tests {
     }
 
     #[test]
-    fn unknown_client_input_tag_lists_all_six() {
+    fn unknown_client_input_tag_lists_all_seven() {
         let err = serde_json::from_str::<ClientInput>(r#"{"type":"frob"}"#)
             .unwrap_err()
             .to_string();
         for tag in [
             "client.message",
             "client.messages",
+            "client.append",
             "client.action",
             "interrupt.resume",
             "tool.result",

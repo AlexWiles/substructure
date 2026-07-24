@@ -7,8 +7,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::protocol::{
-    ClientAction, ClientInput, ClientMessage, ClientMessages, ClientPayload, ErrorCode,
-    InterruptResumption, SessionOwner, TokenDelta,
+    ClientAction, ClientAppend, ClientInput, ClientMessage, ClientMessages, ClientPayload,
+    ErrorCode, InterruptResumption, SessionOwner, TokenDelta,
 };
 use crate::providers::memory_queue::TaskQueue;
 use event_store::{EventFilter, EventStore, Seq, StoreError};
@@ -16,7 +16,9 @@ use llm::{
     spawn_llm_dispatch_processor, spawn_llm_task_executor, LlmProviderTrait, LlmTask,
     TokenDeltaTransport,
 };
-use processor::ProcessorCheckpointStore;
+use processor::{
+    EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCheckpointStore,
+};
 use retry::{NoRetryResolver, WorkerRetryResolver};
 use session::command::{CommandPayload, SessionError};
 use session::decision::{EffectResultPayload, WorkKind};
@@ -71,6 +73,7 @@ pub struct Runtime {
     session_index: Arc<dyn SessionIndexStore>,
     session_subscriptions: session::subscriptions::SessionSubscriptions,
     token_delta_transport: Arc<dyn TokenDeltaTransport>,
+    checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
     cancel: CancellationToken,
     handles: tokio::sync::Mutex<Vec<JoinHandle<()>>>,
     shutdown_timeout: Duration,
@@ -316,6 +319,21 @@ impl Runtime {
                     client,
                 }),
             ),
+            ClientInput::Append {
+                agent_id,
+                turn_id,
+                messages,
+                stream,
+                client,
+            } => (
+                agent_id,
+                turn_id,
+                ClientPayload::Append(ClientAppend {
+                    messages,
+                    stream,
+                    client,
+                }),
+            ),
             ClientInput::Action {
                 agent_id,
                 turn_id,
@@ -489,6 +507,53 @@ impl Runtime {
         } else {
             Err(RuntimeError::Session(SessionError::SessionAccessDenied))
         }
+    }
+
+    /// Attach a durable event processor, joined into runtime shutdown. With
+    /// `start_at_tail`, a never-committed checkpoint is initialized at the log
+    /// head so a new processor renders the future, not the whole history.
+    pub async fn spawn_processor(
+        &self,
+        processor: Arc<dyn EventProcessor>,
+        config: EventProcessorRunnerConfig,
+        start_at_tail: bool,
+    ) -> Result<(), RuntimeError> {
+        if start_at_tail {
+            let checkpoint = self
+                .checkpoint_store
+                .load_checkpoint(processor.name(), config.shard_id)
+                .await
+                .map_err(|e| RuntimeError::Internal(e.to_string()))?;
+            if checkpoint.version == 0 {
+                let tail = self
+                    .store
+                    .max_global_position()
+                    .await
+                    .map_err(|e| RuntimeError::Internal(e.to_string()))?;
+                // A lost CAS means another owner initialized it; either way the
+                // runner reloads the committed checkpoint.
+                let _ = self
+                    .checkpoint_store
+                    .compare_and_set_checkpoint(
+                        processor.name(),
+                        config.shard_id,
+                        checkpoint.version,
+                        tail.0,
+                        config.owner_id.as_deref(),
+                    )
+                    .await;
+            }
+        }
+        let handle = EventProcessorRunner::new(
+            self.store.clone(),
+            self.checkpoint_store.clone(),
+            processor,
+            config,
+            self.cancel.clone(),
+        )
+        .spawn();
+        self.handles.lock().await.push(handle);
+        Ok(())
     }
 
     pub async fn subscribe_token_deltas(
@@ -754,7 +819,7 @@ pub fn start(
     );
     let wake_processor_handle = spawn_wake_processor(
         store.clone(),
-        checkpoint_store,
+        checkpoint_store.clone(),
         wake_store.clone(),
         cancel.clone(),
     );
@@ -784,6 +849,7 @@ pub fn start(
         session_index: session_index_store,
         session_subscriptions,
         token_delta_transport,
+        checkpoint_store,
         cancel,
         handles: tokio::sync::Mutex::new(handles),
         shutdown_timeout: config.shutdown_timeout,

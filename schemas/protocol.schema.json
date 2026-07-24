@@ -136,7 +136,7 @@
       "type": "object"
     },
     "ClientInput": {
-      "description": "Everything a client can send on the input surface: submit a message / a full view / a\nnamed action, resume an interrupt, or settle a client tool. A flat, internally-tagged\nunion — its six tags produce serde's \"unknown variant, expected one of …\" error for\nfree. `Runtime::handle_client_input` is the single seam that dispatches it (mirroring\n`resolve_response` on the worker side).\n\nAddressing lives where it is meaningful, not in a shared envelope: `agent_id` (routes\nthe turn, creating the session if new) and the optional idempotency `turn_id` are\nfields of the three submit variants only. A resume/settle addresses an interrupt/effect\nid and continues whatever turn is active, so it carries neither — misplacing them is\nunrepresentable rather than rejected. `session_id` is the one universal address and\nrides the envelope. A submit's body rebuilds a [`ClientPayload`] at the seam.",
+      "description": "Everything a client can send on the input surface: submit a message / a full view / an\nappend batch / a named action, resume an interrupt, or settle a client tool. A flat,\ninternally-tagged union — its seven tags produce serde's \"unknown variant, expected one\nof …\" error for free. `Runtime::handle_client_input` is the single seam that dispatches\nit (mirroring `resolve_response` on the worker side).\n\nAddressing lives where it is meaningful, not in a shared envelope: `agent_id` (routes\nthe turn, creating the session if new) and the optional idempotency `turn_id` are\nfields of the four submit variants only. A resume/settle addresses an interrupt/effect\nid and continues whatever turn is active, so it carries neither — misplacing them is\nunrepresentable rather than rejected. `session_id` is the one universal address and\nrides the envelope. A submit's body rebuilds a [`ClientPayload`] at the seam.",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -194,6 +194,42 @@
             },
             "type": {
               "const": "client.messages",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "agent_id",
+            "messages"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "agent_id": {
+              "type": "string"
+            },
+            "client": {
+              "$ref": "#/$defs/ClientContext"
+            },
+            "messages": {
+              "items": {
+                "$ref": "#/$defs/DraftMessage"
+              },
+              "type": "array"
+            },
+            "stream": {
+              "type": "boolean"
+            },
+            "turn_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "client.append",
               "type": "string"
             }
           },
@@ -314,7 +350,7 @@
       "title": "ClientInput"
     },
     "ClientPayload": {
-      "description": "The client→engine inbound *submit* wire form: an untrusted client submits a message,\nits full conversation view, or a named action. Lowered to domain events at the\n`SubmitClientPayload` command seam (`runtime::session::command`); never persisted\nas-is. Carried verbatim inside [`ClientInput`], which is the full client input\nsurface.",
+      "description": "The client→engine inbound *submit* wire form: an untrusted client submits a message,\nits full conversation view, an append batch, or a named action. Lowered to domain events at the\n`SubmitClientPayload` command seam (`runtime::session::command`); never persisted\nas-is. Carried verbatim inside [`ClientInput`], which is the full client input\nsurface.",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -355,6 +391,33 @@
             },
             "type": {
               "const": "client.messages",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "messages"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The body of a `client.append`: messages appended at the session head. The\nview is composed against the active path at delivery, so a queued append\nlands after whatever turn beat it — it can never fork the tree. Messages\nwhose ids are already recorded are dropped.",
+          "properties": {
+            "client": {
+              "$ref": "#/$defs/ClientContext"
+            },
+            "messages": {
+              "items": {
+                "$ref": "#/$defs/DraftMessage"
+              },
+              "type": "array"
+            },
+            "stream": {
+              "type": "boolean"
+            },
+            "type": {
+              "const": "client.append",
               "type": "string"
             }
           },
@@ -1572,6 +1635,31 @@
       "title": "ImageUrl",
       "type": "object"
     },
+    "InterruptOption": {
+      "additionalProperties": false,
+      "description": "One enumerated response under `metadata.options` (Slack: a button). A\nclick resumes with the option's `value` as the resolution payload.",
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "style": {
+          "description": "`primary` or `danger`; anything else renders plain.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "description": "Delivered verbatim as the resolution's `payload`; worker vocabulary."
+        }
+      },
+      "required": [
+        "label",
+        "value"
+      ],
+      "title": "InterruptOption",
+      "type": "object"
+    },
     "InterruptOrigin": {
       "description": "Privilege level of the caller that issued an interrupt. Derived from the\nauthenticated `Caller`, never from request data; resuming requires a\ncaller at or above the origin's privilege.",
       "enum": [
@@ -1581,6 +1669,95 @@
       ],
       "title": "InterruptOrigin",
       "type": "string"
+    },
+    "InterruptPayload": {
+      "additionalProperties": false,
+      "description": "An interrupt payload following the AG-UI Interrupt shape (spec spelling;\n`id` and `reason` live on the interrupt itself).",
+      "properties": {
+        "expiresAt": {
+          "description": "RFC 3339; display only until engine TTLs land.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "Markdown; channels down-convert. Without it, channels fall back to\nthe interrupt's `reason`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metadata": {
+          "description": "Free-form, delivered to clients verbatim. `metadata.options`\n([`InterruptOption`] list) renders as Slack buttons."
+        },
+        "responseSchema": {
+          "description": "JSON Schema for the expected resolution payload."
+        },
+        "toolCallId": {
+          "description": "Binds the interrupt to a prior tool call.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "InterruptPayload",
+      "type": "object"
+    },
+    "InterruptResolution": {
+      "additionalProperties": false,
+      "description": "A channel-authored resume payload: the AG-UI resume shape\n(`{status, payload}`) plus a provenance stamp.",
+      "properties": {
+        "payload": {},
+        "responder": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InterruptResponder"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/ResumeStatus"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "InterruptResolution",
+      "type": "object"
+    },
+    "InterruptResponder": {
+      "additionalProperties": false,
+      "description": "Who resolved it, stamped by the channel — never by the requester.",
+      "properties": {
+        "channel": {
+          "description": "The channel kind, e.g. `slack`, `ag-ui`.",
+          "type": "string"
+        },
+        "label": {
+          "description": "The chosen option's label, when the resolution was a pick.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "user": {
+          "description": "Channel-native user id.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "channel"
+      ],
+      "title": "InterruptResponder",
+      "type": "object"
     },
     "LlmFormat": {
       "description": "The wire shape of a worker-handled LLM call. Absent ⇒ the engine's neutral\nformat. Set ⇒ `llm.execute` carries the provider's native request body, and\n`llm.result`/`llm.token.delta` accept the provider's native response and\nstream events. Requires `handler: worker`.",
@@ -1868,6 +2045,14 @@
       ],
       "title": "ResponseImage",
       "type": "object"
+    },
+    "ResumeStatus": {
+      "enum": [
+        "resolved",
+        "cancelled"
+      ],
+      "title": "ResumeStatus",
+      "type": "string"
     },
     "RetryPolicy": {
       "additionalProperties": false,
@@ -2217,6 +2402,12 @@
     },
     "decision_response": {
       "$ref": "#/$defs/DecisionResponse"
+    },
+    "interrupt_payload": {
+      "$ref": "#/$defs/InterruptPayload"
+    },
+    "interrupt_resolution": {
+      "$ref": "#/$defs/InterruptResolution"
     },
     "stream_delta": {
       "$ref": "#/$defs/StreamDelta"

@@ -1,6 +1,8 @@
 use serde::Deserialize;
 
-use crate::protocol::{AgentTool, ClientContext, Content, DraftMessage, Handler, Role, ToolCall};
+use crate::protocol::{
+    AgentTool, ClientContext, Content, DraftMessage, Handler, ResumeStatus, Role, ToolCall,
+};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,22 +52,6 @@ pub struct ResumeEntry {
     pub status: ResumeStatus,
     #[serde(default)]
     pub payload: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ResumeStatus {
-    Resolved,
-    Cancelled,
-}
-
-impl ResumeStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ResumeStatus::Resolved => "resolved",
-            ResumeStatus::Cancelled => "cancelled",
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]

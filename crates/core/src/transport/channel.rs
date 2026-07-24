@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::event_store::Seq;
+use crate::processor::{EventProcessor, EventProcessorRunnerConfig};
 use crate::protocol::TokenDelta;
 use crate::session::subscriptions::SessionSubscriptionSpec;
 use crate::session::{SessionAggregate, SessionEvent};
@@ -68,6 +69,19 @@ impl ChannelContext {
         session_id: &str,
     ) -> Result<SessionAggregate, RuntimeError> {
         self.runtime.get_session(tenant_id, session_id).await
+    }
+
+    /// A durable, checkpointed consumer of the event log — how a channel
+    /// renders turns it must not lose across restarts.
+    pub async fn spawn_processor(
+        &self,
+        processor: Arc<dyn EventProcessor>,
+        config: EventProcessorRunnerConfig,
+        start_at_tail: bool,
+    ) -> Result<(), RuntimeError> {
+        self.runtime
+            .spawn_processor(processor, config, start_at_tail)
+            .await
     }
 }
 

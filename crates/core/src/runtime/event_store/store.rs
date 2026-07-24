@@ -70,6 +70,9 @@ pub trait EventStore: Send + Sync {
     /// fail with `StoreError` on an undecodable stored event.
     async fn query_events(&self, filter: &EventFilter) -> Result<Vec<SessionEvent>, StoreError>;
 
+    /// The highest assigned global position, 0 when the log is empty.
+    async fn max_global_position(&self) -> Result<GlobalPosition, StoreError>;
+
     /// Subscribe to new events as they are appended.
     fn subscribe(&self) -> broadcast::Receiver<Arc<Vec<SessionEvent>>>;
 }

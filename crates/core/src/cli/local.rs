@@ -5,7 +5,7 @@ use tokio::net::TcpListener;
 
 use crate::cli::auth::AuthWiring;
 use crate::cli::env::{EnvVars, LlmProviderArg, ProviderEnv};
-use crate::cli::register_startup_worker;
+use crate::cli::{register_startup_worker, DEFAULT_TENANT};
 use crate::llm::{LlmProviderTrait, LlmTask};
 use crate::providers::anthropic::{AnthropicConfig, AnthropicProvider};
 use crate::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
@@ -23,6 +23,7 @@ use crate::transport::client_http::{self, ClientHttpState};
 use crate::transport::http_push::http_transport;
 use crate::transport::push::PushAdapter;
 use crate::transport::server::SubstructureServer;
+use crate::transport::slack::SlackChannel;
 use crate::transport::worker_http::{self, WorkerHttpState};
 use crate::worker::push::{PushRegistry, TransportRegistry};
 use crate::{start, Runtime, RuntimeConfig};
@@ -49,33 +50,37 @@ pub struct ServeArgs {
     /// Disable client and worker authentication. For local development only.
     #[arg(long)]
     dev: bool,
+    /// Serve a Slack Socket Mode bot driving this agent. Requires
+    /// SLACK_APP_TOKEN and SLACK_BOT_TOKEN.
+    #[arg(long, value_name = "AGENT_ID")]
+    slack_agent: Option<String>,
 }
 
 pub async fn serve(args: ServeArgs) -> anyhow::Result<()> {
-    start_server(
-        args.host,
-        args.port,
-        args.db,
-        args.worker_url,
-        args.signing_secret,
-        args.provider,
-        args.dev,
-    )
-    .await
+    start_server(args).await
 }
 
-async fn start_server(
-    host: String,
-    port: u16,
-    db_path: String,
-    worker_url: Option<String>,
-    signing_secret: Option<String>,
-    provider: Option<LlmProviderArg>,
-    dev: bool,
-) -> anyhow::Result<()> {
+async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
+    let ServeArgs {
+        host,
+        port,
+        db: db_path,
+        worker_url,
+        signing_secret,
+        provider,
+        dev,
+        slack_agent,
+    } = args;
     let env = match EnvVars::load(provider, dev) {
         Ok(e) => e,
         Err(_) => std::process::exit(2),
+    };
+    let slack = match slack_agent {
+        Some(agent_id) => match SlackChannel::from_env(agent_id, DEFAULT_TENANT.to_string()) {
+            Ok(s) => Some(s),
+            Err(()) => std::process::exit(2),
+        },
+        None => None,
     };
 
     let (rt, adapter) = start_engine(&db_path, env.provider).await?;
@@ -124,7 +129,11 @@ async fn start_server(
         shutdown: shutdown.clone(),
     });
 
-    let channels: Vec<Arc<dyn Channel>> = vec![Arc::new(AgUiChannel::new(auth.client))];
+    let mut channels: Vec<Arc<dyn Channel>> = vec![Arc::new(AgUiChannel::new(auth.client))];
+    if let Some(slack) = slack {
+        tracing::info!(agent_id = %slack.agent_id(), "slack channel enabled");
+        channels.push(Arc::new(slack));
+    }
     let channel_ctx = ChannelContext::new(rt.clone(), shutdown.clone());
 
     let mut routers = vec![admin_routes, client_routes, worker_routes, v1_routes];

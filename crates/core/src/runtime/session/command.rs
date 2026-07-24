@@ -9,9 +9,9 @@ use super::reconcile::{landing_leaf, plan_reconcile};
 use super::state::{json_to_string, new_call_id, EffectTracking, SessionState, SessionStatus};
 use super::tool_contract::{declared_tool, output_violation, DeclaredTool};
 use crate::protocol::{
-    AgentConfig, ClientMessage, ClientMessages, ClientPayload, Content, ContentPart, DraftMessage,
-    EffectStatus, ErrorCode, ImageUrl, InterruptOrigin, LlmFormat, LlmRequest, LlmResponse,
-    NewMessage, RetryPolicy, Role, SessionOwner, WorkerState,
+    AgentConfig, ClientAppend, ClientContext, ClientMessage, ClientMessages, ClientPayload,
+    Content, ContentPart, DraftMessage, EffectStatus, ErrorCode, ImageUrl, InterruptOrigin,
+    LlmFormat, LlmRequest, LlmResponse, NewMessage, RetryPolicy, Role, SessionOwner, WorkerState,
 };
 use crate::runtime::Caller;
 
@@ -689,10 +689,29 @@ impl SessionState {
                             return Err(SessionError::SessionInterrupted);
                         }
                         if message.role == Role::User {
-                            let request = self
-                                .emit_decision_request(&events, Trigger::ClientMessage { message });
+                            let request = self.emit_decision_request(
+                                &events,
+                                Trigger::ClientMessage {
+                                    messages: vec![message],
+                                    client: ClientContext::default(),
+                                },
+                            );
                             events.extend(request);
                         }
+                    }
+                    ClientPayload::Append(ClientAppend {
+                        messages,
+                        stream: _,
+                        client,
+                    }) => {
+                        if self.head_parked() && messages.iter().any(|m| m.role == Role::User) {
+                            return Err(SessionError::SessionInterrupted);
+                        }
+                        let request = self.emit_decision_request(
+                            &events,
+                            Trigger::ClientMessage { messages, client },
+                        );
+                        events.extend(request);
                     }
                     ClientPayload::Messages(ClientMessages {
                         messages,
@@ -728,6 +747,14 @@ impl SessionState {
                         let known: std::collections::HashSet<&str> =
                             self.nodes.iter().map(|n| n.message.id.as_str()).collect();
                         let plan = plan_reconcile(&known, &messages);
+                        // Sharing no prefix with a non-empty tree is almost
+                        // always a lost or mis-built client view, not an
+                        // intentional fork.
+                        if plan.first().map(|w| w.index) == Some(0) && !self.nodes.is_empty() {
+                            tracing::warn!(
+                                "client view shares no prefix with the session; recording will fork at the root"
+                            );
+                        }
 
                         // Gate where the view lands: a view escaping the parked
                         // head dispatches; answers to pending work still queue.
@@ -836,8 +863,13 @@ impl SessionState {
                     events.push(EventPayload::TurnStarted(TurnStarted { turn_id }));
                 }
                 if message.role == Role::User {
-                    let request =
-                        self.emit_decision_request(&events, Trigger::ClientMessage { message });
+                    let request = self.emit_decision_request(
+                        &events,
+                        Trigger::ClientMessage {
+                            messages: vec![message],
+                            client: ClientContext::default(),
+                        },
+                    );
                     events.extend(request);
                 }
                 Ok(events)
@@ -3011,6 +3043,50 @@ mod tests {
                 );
             }
             t => panic!("expected a UserTranscript trigger; got {t:?}"),
+        }
+    }
+
+    #[test]
+    fn submit_append_queues_the_batch_as_a_client_message_trigger() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Append(ClientAppend {
+                    messages: vec![
+                        node_msg("c1", Role::User, "hi"),
+                        node_msg("c2", Role::User, "more"),
+                    ],
+                    stream: false,
+                    client: Default::default(),
+                }),
+                turn_id: None,
+            },
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
+        );
+
+        // Nothing records at submit; the batch rides the trigger and
+        // materializes against the path at delivery.
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, EventPayload::NewMessage(_))));
+        let trigger = events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::DecisionRequestQueued(q) => Some(&q.trigger),
+                _ => None,
+            })
+            .expect("a decision request");
+        match trigger {
+            Trigger::ClientMessage { messages, .. } => {
+                assert_eq!(
+                    messages.iter().map(|m| m.id.as_deref()).collect::<Vec<_>>(),
+                    vec![Some("c1"), Some("c2")]
+                );
+            }
+            t => panic!("expected a ClientMessage trigger; got {t:?}"),
         }
     }
 
@@ -8455,7 +8531,8 @@ mod tests {
             vec![EventPayload::DecisionRequestQueued(DecisionRequestQueued {
                 decision_id: "d-queued".to_string(),
                 trigger: Trigger::ClientMessage {
-                    message: node_msg("", Role::User, "queued"),
+                    messages: vec![node_msg("", Role::User, "queued")],
+                    client: ClientContext::default(),
                 },
             })],
             &CommitContext {

@@ -108,15 +108,12 @@ pub struct AgUiInterrupt {
 }
 
 impl AgUiInterrupt {
-    /// Lift the AG-UI spec fields out of an interrupt payload.
+    /// Lift the AG-UI spec fields out of an interrupt payload — the payload
+    /// convention is the spec shape, so this is a plain field read.
     fn lift(interrupt_id: &str, reason: &str, payload: &Value) -> Self {
         let obj = payload.as_object();
         let take = |key: &str| obj.and_then(|o| o.get(key)).cloned();
-        let take_str = |key: &str| {
-            obj.and_then(|o| o.get(key))
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        };
+        let take_str = |key: &str| take(key)?.as_str().map(str::to_string);
         Self {
             id: interrupt_id.to_string(),
             reason: reason.to_string(),

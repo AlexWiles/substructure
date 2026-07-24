@@ -165,6 +165,22 @@ impl EventStore for SqliteEventStore {
         .map_err(spawn_err)?
     }
 
+    async fn max_global_position(&self) -> Result<GlobalPosition, StoreError> {
+        let reader = self.db.reader.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = reader.open()?;
+            conn.query_row(
+                "SELECT COALESCE(MAX(global_position), 0) FROM events",
+                [],
+                |row| row.get::<_, u64>(0),
+            )
+            .map(GlobalPosition)
+            .map_err(internal)
+        })
+        .await
+        .map_err(spawn_err)?
+    }
+
     fn subscribe(&self) -> broadcast::Receiver<StdArc<Vec<SessionEvent>>> {
         self.tx.subscribe()
     }

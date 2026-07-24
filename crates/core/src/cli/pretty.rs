@@ -108,10 +108,11 @@ impl PrettyPrinter {
                     for it in interrupts {
                         self.break_line(w)?;
                         let msg = it.message.as_deref().unwrap_or("(no message)");
+                        // The id is what an `interrupt.resume` input needs.
                         self.write_styled(
                             w,
                             YELLOW,
-                            &format!("⚠ interrupt [{}]: {msg}", it.reason),
+                            &format!("⚠ interrupt {} [{}]: {msg}", it.id, it.reason),
                         )?;
                         self.newline(w)?;
                     }
@@ -450,7 +451,7 @@ mod tests {
                 }],
             }),
         }]);
-        assert_eq!(out, "⚠ interrupt [confirmation]: Send the email?\n");
+        assert_eq!(out, "⚠ interrupt int-1 [confirmation]: Send the email?\n");
     }
 
     #[test]
