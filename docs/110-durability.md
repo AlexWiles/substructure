@@ -38,7 +38,7 @@ tree by id, so a reconnect re-records nothing.
 
 ## Storage
 
-The engine persists through a pluggable store. The CLI uses SQLite in `data.db`;
+The engine persists through a pluggable store. The CLI uses SQLite in `substructure.db`;
 stop it, come back later, and the session resumes.
 
 ## Next

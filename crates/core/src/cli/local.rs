@@ -34,7 +34,7 @@ pub struct ServeArgs {
     host: String,
     #[arg(long, default_value_t = 8080)]
     port: u16,
-    #[arg(long, default_value = "data.db")]
+    #[arg(long, default_value = "substructure.db")]
     db: String,
     /// Pre-register an HTTP worker at startup.
     #[arg(long)]

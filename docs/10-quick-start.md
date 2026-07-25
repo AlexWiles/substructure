@@ -142,7 +142,7 @@ subs run \
     --input '{"type":"client.message","message":{"role":"user","content": "what was my first question?"}}'
 ```
 
-The agent remembers. The whole session is persisted in `data.db`: messages,
+The agent remembers. The whole session is persisted in `substructure.db`: messages,
 tool calls, results. Stop everything, come back tomorrow, and it still
 resumes.
 

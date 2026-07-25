@@ -17,6 +17,7 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 ### Changed
 
 - Introduce a channel abstraction.
+- The default CLI database file `data.db` was generically named. Renamed to `substructure.db`.
 
 ## [0.2.3] - 2026-07-22
 

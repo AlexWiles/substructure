@@ -43,7 +43,7 @@ pub struct RunArgs {
     #[arg(long, value_enum)]
     provider: Option<LlmProviderArg>,
     /// SQLite dev database path.
-    #[arg(long, default_value = "data.db")]
+    #[arg(long, default_value = "substructure.db")]
     db: String,
     /// Signing secret if the worker verifies webhook signatures.
     #[arg(long)]
@@ -295,7 +295,7 @@ fn resume_command(
     if let Some(output) = output.filter(|o| *o != "ag-ui") {
         cmd.push_str(&format!(" --output {output}"));
     }
-    if db != "data.db" {
+    if db != "substructure.db" {
         cmd.push_str(&format!(" --db {db}"));
     }
     cmd.push_str(
@@ -317,7 +317,7 @@ mod tests {
             Some("my-agent"),
             Some("anthropic"),
             Some("ag-ui"),
-            "data.db",
+            "substructure.db",
         );
         assert_eq!(
             cmd,
@@ -327,7 +327,7 @@ mod tests {
 
     #[test]
     fn resume_command_uses_the_given_program_name() {
-        let cmd = resume_command("renamed-cli", "s", "w", None, None, None, "data.db");
+        let cmd = resume_command("renamed-cli", "s", "w", None, None, None, "substructure.db");
         assert!(cmd.starts_with("renamed-cli run "), "{cmd}");
     }
 
@@ -350,10 +350,26 @@ mod tests {
 
     #[test]
     fn resume_command_echoes_non_default_output_and_omits_the_default() {
-        let pretty = resume_command("subs", "s", "w", None, None, Some("pretty"), "data.db");
+        let pretty = resume_command(
+            "subs",
+            "s",
+            "w",
+            None,
+            None,
+            Some("pretty"),
+            "substructure.db",
+        );
         assert!(pretty.contains(" --output pretty"), "{pretty}");
 
-        let default = resume_command("subs", "s", "w", None, None, Some("ag-ui"), "data.db");
+        let default = resume_command(
+            "subs",
+            "s",
+            "w",
+            None,
+            None,
+            Some("ag-ui"),
+            "substructure.db",
+        );
         assert!(!default.contains("--output"), "{default}");
     }
 
