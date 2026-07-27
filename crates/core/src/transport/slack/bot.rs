@@ -35,7 +35,9 @@ const STATUS_REFRESH: Duration = Duration::from_secs(90);
 /// One Slack install.
 pub struct Workspace {
     pub bot_token: String,
-    /// Must be unique for each install.
+    /// Must be unique for each install, not for each team: session ids carry
+    /// only the channel and thread, so two of our apps in one workspace share
+    /// a tenant's sessions and stream rows.
     pub tenant_id: String,
     pub agent_id: String,
     identity: tokio::sync::OnceCell<Identity>,
@@ -60,10 +62,17 @@ struct Identity {
 }
 
 /// Maps an event to its install; `None` for an unknown install.
-/// `by_tenant` must return the same workspace that `by_team` supplies.
+/// `by_tenant` must return the same workspace that `by_install` supplies.
 #[async_trait::async_trait]
 pub trait WorkspaceResolver: Send + Sync {
-    async fn by_team(&self, team_id: Option<&str>) -> Option<Arc<Workspace>>;
+    /// An install is a team and an app: one workspace can hold more than one
+    /// of our apps, so the team alone is ambiguous. `app_id` is the event's
+    /// `api_app_id`.
+    async fn by_install(
+        &self,
+        team_id: Option<&str>,
+        app_id: Option<&str>,
+    ) -> Option<Arc<Workspace>>;
     async fn by_tenant(&self, tenant_id: &str) -> Option<Arc<Workspace>>;
 }
 
@@ -278,8 +287,13 @@ impl SlackBot {
         };
         // The delivered workspace, not the asker's team.
         let team = payload["team_id"].as_str();
-        let Some(ws) = self.resolver.by_team(team).await else {
-            tracing::warn!(team = %team.unwrap_or(""), "slack: event for unknown workspace");
+        let app = payload["api_app_id"].as_str();
+        let Some(ws) = self.resolver.by_install(team, app).await else {
+            tracing::warn!(
+                team = %team.unwrap_or(""),
+                app = %app.unwrap_or(""),
+                "slack: event for unknown workspace"
+            );
             return;
         };
         self.submit(&ctx, &ws, inbound).await;
@@ -297,8 +311,13 @@ impl SlackBot {
         let team = payload["team"]["id"]
             .as_str()
             .or_else(|| payload["user"]["team_id"].as_str());
-        let Some(ws) = self.resolver.by_team(team).await else {
-            tracing::warn!(team = %team.unwrap_or(""), "slack: click for unknown workspace");
+        let app = payload["api_app_id"].as_str();
+        let Some(ws) = self.resolver.by_install(team, app).await else {
+            tracing::warn!(
+                team = %team.unwrap_or(""),
+                app = %app.unwrap_or(""),
+                "slack: click for unknown workspace"
+            );
             return;
         };
         self.resolve_click(&ctx, &ws, click).await;

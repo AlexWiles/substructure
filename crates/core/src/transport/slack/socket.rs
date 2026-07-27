@@ -44,7 +44,11 @@ struct StaticResolver(Arc<Workspace>);
 
 #[async_trait::async_trait]
 impl WorkspaceResolver for StaticResolver {
-    async fn by_team(&self, _team_id: Option<&str>) -> Option<Arc<Workspace>> {
+    async fn by_install(
+        &self,
+        _team_id: Option<&str>,
+        _app_id: Option<&str>,
+    ) -> Option<Arc<Workspace>> {
         Some(self.0.clone())
     }
 
