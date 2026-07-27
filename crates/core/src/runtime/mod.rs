@@ -19,7 +19,7 @@ use llm::{
 use processor::{
     EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCheckpointStore,
 };
-use retry::{NoRetryResolver, WorkerRetryResolver};
+use retry::{DefaultWorkerRetryResolver, WorkerRetryResolver};
 use session::command::{CommandPayload, SessionError};
 use session::decision::{EffectResultPayload, WorkKind};
 use session::index::{
@@ -30,7 +30,7 @@ use session::wire::result_to_string;
 use session::{execute, ConflictRetry, ExecuteError, ExecuteInput, SessionAggregate, SessionEvent};
 use span::SpanContext;
 use sub_agent::{spawn_sub_agent_dispatch_processor, spawn_sub_agent_task_executor, SubAgentTask};
-use wake::{spawn_wake_dispatcher, spawn_wake_processor, WakeScheduleStore};
+use wake::{spawn_boot_reconciler, spawn_wake_dispatcher, spawn_wake_processor, WakeScheduleStore};
 use worker::spawn_worker_processor;
 use worker::{DequeueFilter, FailDecision, SubmitDecision, WorkerDecisionRequest, WorkerQueue};
 
@@ -62,7 +62,7 @@ impl Default for RuntimeConfig {
             sub_agent_executor_workers: 2,
             wake_poll_interval: std::time::Duration::from_secs(30),
             shutdown_timeout: std::time::Duration::from_secs(5),
-            worker_retry_resolver: Arc::new(NoRetryResolver),
+            worker_retry_resolver: Arc::new(DefaultWorkerRetryResolver),
         }
     }
 }
@@ -826,10 +826,15 @@ pub fn start(
 
     let wake_dispatcher_handle = spawn_wake_dispatcher(
         store.clone(),
-        wake_store,
+        wake_store.clone(),
         config.wake_poll_interval,
         cancel.clone(),
     );
+
+    // After the dispatcher: its event subscription must exist before the
+    // reconciler commits failures, or their retry timers oversleep to the
+    // fallback poll.
+    let boot_reconciler_handle = spawn_boot_reconciler(store.clone(), wake_store);
 
     let session_subscriptions = session::subscriptions::SessionSubscriptions::new(store.clone());
 
@@ -838,6 +843,7 @@ pub fn start(
         worker_handle,
         session_index_processor_handle,
         wake_processor_handle,
+        boot_reconciler_handle,
         wake_dispatcher_handle,
     ];
     handles.extend(llm_handles);

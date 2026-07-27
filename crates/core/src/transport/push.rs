@@ -117,8 +117,14 @@ impl PushAdapter {
                                         error = %e,
                                         "unresolvable worker decision"
                                     );
-                                    record_failure(&runtime, &decision, &tenant_id, e.to_string())
-                                        .await;
+                                    record_failure(
+                                        &runtime,
+                                        &decision,
+                                        &tenant_id,
+                                        e.to_string(),
+                                        false,
+                                    )
+                                    .await;
                                     return;
                                 }
                             };
@@ -148,7 +154,8 @@ impl PushAdapter {
                                 error = %e,
                                 "push dispatch failed"
                             );
-                            record_failure(&runtime, &decision, &tenant_id, e.message).await;
+                            record_failure(&runtime, &decision, &tenant_id, e.message, e.retryable)
+                                .await;
                         }
                     }
                 });
@@ -159,15 +166,16 @@ impl PushAdapter {
     }
 }
 
-/// Record the failure now: the queue never redelivers a dequeued decision and a
-/// pending one has no deadline under the default no-retry policy, so an
-/// unrecorded failure hangs its turn forever. `retryable: true` leaves recovery
-/// to the session's worker retry policy.
+/// Record the failure now: the queue never redelivers a dequeued decision, so an
+/// unrecorded failure hangs its turn until the decision's deadline. `retryable`
+/// comes from the transport — a 4xx or an unparseable reply won't get better on a
+/// second attempt, so retrying it only delays the terminal.
 async fn record_failure(
     runtime: &Runtime,
     decision: &WorkerDecisionRequest,
     tenant_id: &str,
     error: String,
+    retryable: bool,
 ) {
     let failed = runtime
         .fail_decision(FailDecision {
@@ -177,7 +185,7 @@ async fn record_failure(
             },
             decision_id: decision.decision_id.clone(),
             error,
-            retryable: true,
+            retryable,
             span: decision.span.child("push_fail_decision"),
         })
         .await;

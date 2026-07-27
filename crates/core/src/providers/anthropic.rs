@@ -646,7 +646,7 @@ impl AnthropicClient {
             headers.insert(HeaderName::from_static("anthropic-version"), v);
         }
         Self {
-            http: Client::new(),
+            http: crate::providers::http_client(),
             base_url: config.base_url,
             headers,
             default_max_tokens: config.max_tokens,

@@ -23,20 +23,26 @@ type HmacSha256 = Hmac<Sha256>;
 pub struct HttpPushTransport {
     http: Client,
     endpoint_url: String,
-    timeout: Duration,
+    /// Max silence, not total duration: request → first response, and between
+    /// SSE events / body reads. A total timeout would kill long token streams;
+    /// total duration is the decision deadline's job.
+    idle_timeout: Duration,
     signing_secret: Option<String>,
 }
 
 impl HttpPushTransport {
     pub fn new(
         endpoint_url: String,
-        timeout: Option<Duration>,
+        idle_timeout: Option<Duration>,
         signing_secret: Option<String>,
     ) -> Self {
         Self {
-            http: Client::new(),
+            http: Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .build()
+                .unwrap_or_default(),
             endpoint_url,
-            timeout: timeout.unwrap_or(Duration::from_secs(30)),
+            idle_timeout: idle_timeout.unwrap_or(Duration::from_secs(60)),
             signing_secret,
         }
     }
@@ -59,8 +65,7 @@ impl PushTransport for HttpPushTransport {
             .post(&self.endpoint_url)
             .header("Content-Type", "application/json")
             .header(ACCEPT, "text/event-stream, application/json")
-            .header("traceparent", decision.span.traceparent())
-            .timeout(self.timeout);
+            .header("traceparent", decision.span.traceparent());
 
         if let Some(ref secret) = self.signing_secret {
             let mut mac =
@@ -80,10 +85,16 @@ impl PushTransport for HttpPushTransport {
             "dispatching decision to worker"
         );
 
-        let resp = builder.body(body).send().await.map_err(|e| PushError {
-            message: format!("HTTP request failed: {e}"),
-            retryable: e.is_timeout() || e.is_connect(),
-        })?;
+        let resp = tokio::time::timeout(self.idle_timeout, builder.body(body).send())
+            .await
+            .map_err(|_| PushError {
+                message: format!("no response within {:?}", self.idle_timeout),
+                retryable: true,
+            })?
+            .map_err(|e| PushError {
+                message: format!("HTTP request failed: {e}"),
+                retryable: e.is_timeout() || e.is_connect(),
+            })?;
 
         let status = resp.status();
         tracing::info!(
@@ -109,12 +120,22 @@ impl PushTransport for HttpPushTransport {
             .to_ascii_lowercase();
 
         let submit = if content_type.starts_with("text/event-stream") {
-            read_sse_response(resp.bytes_stream(), decision, token_delta_transport).await?
+            read_sse_response(
+                resp.bytes_stream(),
+                decision,
+                token_delta_transport,
+                Some(self.idle_timeout),
+            )
+            .await?
         } else {
             // `null` is the empty decision — the natural "nothing to add" reply
             // from JSON-language workers.
-            resp.json::<Option<DecisionResponse>>()
+            tokio::time::timeout(self.idle_timeout, resp.json::<Option<DecisionResponse>>())
                 .await
+                .map_err(|_| PushError {
+                    message: format!("no response body within {:?}", self.idle_timeout),
+                    retryable: true,
+                })?
                 .map_err(|e| PushError {
                     message: format!("failed to parse response: {e}"),
                     retryable: false,
@@ -129,6 +150,7 @@ impl PushTransport for HttpPushTransport {
 #[derive(Deserialize)]
 struct HttpTransportConfig {
     endpoint_url: String,
+    /// Idle timeout: max silence before/between response reads.
     #[serde(default)]
     timeout_secs: Option<u64>,
     #[serde(default)]
@@ -163,10 +185,12 @@ fn retryable_default() -> bool {
 }
 
 /// Republishes streamed token deltas and returns the terminal decision.
+/// `idle_timeout` bounds the silence between events, not the stream's length.
 async fn read_sse_response<S, B, E>(
     stream: S,
     decision: &WorkerDecisionRequest,
     token_delta_transport: Arc<dyn TokenDeltaTransport>,
+    idle_timeout: Option<Duration>,
 ) -> Result<DecisionResponse, PushError>
 where
     S: futures_util::Stream<Item = Result<B, E>>,
@@ -183,7 +207,17 @@ where
         _ => None,
     };
 
-    while let Some(event) = events.next().await {
+    loop {
+        let next = match idle_timeout {
+            Some(t) => tokio::time::timeout(t, events.next())
+                .await
+                .map_err(|_| PushError {
+                    message: format!("no stream event within {t:?}"),
+                    retryable: true,
+                })?,
+            None => events.next().await,
+        };
+        let Some(event) = next else { break };
         let event = event.map_err(|e| PushError {
             message: format!("failed to read streaming worker response: {e}"),
             retryable: true,
@@ -371,7 +405,7 @@ mod tests {
                     event: llm.token.delta\ndata: {\"reasoning\":\"hmm\"}\n\n\
                     event: decision.result\ndata: {\"actions\":[],\"state\":\"\"}\n\n";
 
-        let submit = read_sse_response(chunked(body), &decision, transport.clone())
+        let submit = read_sse_response(chunked(body), &decision, transport.clone(), None)
             .await
             .expect("should parse the stream");
 
@@ -395,7 +429,7 @@ mod tests {
         let decision = streaming_decision();
         let body = "event: decision.result\ndata: null\n\n";
 
-        let submit = read_sse_response(chunked(body), &decision, transport.clone())
+        let submit = read_sse_response(chunked(body), &decision, transport.clone(), None)
             .await
             .expect("null parses as the empty decision");
 
@@ -417,7 +451,7 @@ mod tests {
                     event: llm.token.delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n\
                     event: decision.result\ndata: {\"actions\":[]}\n\n";
 
-        let submit = read_sse_response(chunked(body), &decision, transport.clone())
+        let submit = read_sse_response(chunked(body), &decision, transport.clone(), None)
             .await
             .expect("should parse the stream");
         assert!(submit.actions.is_empty());
@@ -435,7 +469,7 @@ mod tests {
         let transport = Arc::new(RecordingTransport::default());
         let decision = streaming_decision();
         let body = "event: surprise\ndata: {}\n\n";
-        let err = read_sse_response(chunked(body), &decision, transport)
+        let err = read_sse_response(chunked(body), &decision, transport, None)
             .await
             .expect_err("unknown event should error");
         assert!(!err.retryable, "unknown event is not retryable");
@@ -447,7 +481,7 @@ mod tests {
         let decision = streaming_decision();
         let body =
             "event: decision.error\ndata: {\"message\":\"handler threw\",\"retryable\":false}\n\n";
-        let err = read_sse_response(chunked(body), &decision, transport)
+        let err = read_sse_response(chunked(body), &decision, transport, None)
             .await
             .expect_err("a decision.error frame should fail the read");
         assert_eq!(err.message, "handler threw");
@@ -459,7 +493,7 @@ mod tests {
         let transport = Arc::new(RecordingTransport::default());
         let decision = streaming_decision();
         let body = "event: decision.error\ndata: {\"message\":\"boom\"}\n\n";
-        let err = read_sse_response(chunked(body), &decision, transport)
+        let err = read_sse_response(chunked(body), &decision, transport, None)
             .await
             .expect_err("a decision.error frame should fail the read");
         assert!(err.retryable);
@@ -470,7 +504,7 @@ mod tests {
         let transport = Arc::new(RecordingTransport::default());
         let decision = streaming_decision();
         let body = "event: llm.token.delta\ndata: {\"text\":\"hi\"}\n\n";
-        let err = read_sse_response(chunked(body), &decision, transport)
+        let err = read_sse_response(chunked(body), &decision, transport, None)
             .await
             .expect_err("stream without decision.result should error");
         assert!(err.retryable, "an interrupted stream is retryable");

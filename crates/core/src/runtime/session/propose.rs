@@ -269,7 +269,7 @@ fn client_turn(
                 effective
                     .retry
                     .clone()
-                    .unwrap_or_else(RetryPolicy::no_retry),
+                    .unwrap_or_else(RetryPolicy::llm_default),
             ),
             handler: effective.handler.unwrap_or(Handler::Server),
         }],

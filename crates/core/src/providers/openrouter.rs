@@ -242,7 +242,7 @@ pub struct OpenRouterClient {
 impl OpenRouterClient {
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
         Self {
-            http: Client::new(),
+            http: crate::providers::http_client(),
             config: OpenRouterConfig {
                 base_url: base_url.into(),
                 api_key: api_key.into(),
@@ -252,7 +252,7 @@ impl OpenRouterClient {
 
     pub fn from_config(config: OpenRouterConfig) -> Self {
         Self {
-            http: Client::new(),
+            http: crate::providers::http_client(),
             config,
         }
     }

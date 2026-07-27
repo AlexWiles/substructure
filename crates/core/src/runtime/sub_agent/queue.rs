@@ -34,6 +34,9 @@ pub enum SubAgentTask {
         data: serde_json::Value,
         cost: Decimal,
         token_usage: std::collections::BTreeMap<String, u64>,
+        /// Set when the child's turn ended as a failed run; settles the parent's
+        /// delegation as an error instead of an empty result.
+        error: Option<String>,
         span: SpanContext,
     },
     CancelSubAgent {

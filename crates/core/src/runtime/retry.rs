@@ -22,6 +22,32 @@ impl RetryPolicy {
         }
     }
 
+    /// The default for worker decisions. A dequeued decision is never redelivered,
+    /// so one lost between dispatch and reply — a dead push loop, a restart — has no
+    /// recovery path but its deadline. Deciding replays durable state and submits are
+    /// idempotent by decision id, so retries are safe; they ride out worker deploys
+    /// and transient transport failures instead of failing the run.
+    pub fn worker_default() -> Self {
+        RetryPolicy {
+            timeout_secs: Some(300),
+            max_retries: 10,
+            backoff_base_secs: 2,
+            backoff_max_secs: 60,
+        }
+    }
+
+    /// The default for LLM calls when neither the action nor the agent config sets
+    /// a policy. Bounds a hung provider connection and retries the failures the
+    /// providers classify retryable (429/5xx/connect/timeout).
+    pub fn llm_default() -> Self {
+        RetryPolicy {
+            timeout_secs: Some(180),
+            max_retries: 5,
+            backoff_base_secs: 2,
+            backoff_max_secs: 30,
+        }
+    }
+
     /// Compute the deadline from a start time. Returns None if no timeout is set.
     pub fn deadline(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
         self.timeout_secs
@@ -69,5 +95,14 @@ pub struct NoRetryResolver;
 impl WorkerRetryResolver for NoRetryResolver {
     async fn resolve(&self, _tenant_id: &str) -> RetryPolicy {
         RetryPolicy::no_retry()
+    }
+}
+
+pub struct DefaultWorkerRetryResolver;
+
+#[async_trait]
+impl WorkerRetryResolver for DefaultWorkerRetryResolver {
+    async fn resolve(&self, _tenant_id: &str) -> RetryPolicy {
+        RetryPolicy::worker_default()
     }
 }

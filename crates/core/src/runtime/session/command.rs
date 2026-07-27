@@ -130,6 +130,11 @@ pub enum CommandPayload {
     Wake {
         now: DateTime<Utc>,
     },
+    /// Boot-time recovery: fail in-flight work whose executor died with the
+    /// process — pending worker decisions (reply rides the severed dispatch) and
+    /// pending server-handled LLM calls (the awaiting future is gone) — so their
+    /// retry policies re-issue now instead of at the deadline.
+    ReconcileDispatch,
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -635,9 +640,20 @@ impl SessionState {
         events
     }
 
-    /// A terminally-failed `session.start` can never resolve a config, so no
-    /// queued decision can run: drop them all rather than promote a configless
-    /// turn that settles as a silent no-op.
+    /// A failed `session.start` left the session with no config, so the client's
+    /// decision can't run against it. Re-queue the start ahead of that decision:
+    /// `queued_decisions` orders by arrival and `has_unsettled_session_start`
+    /// parks the rest, so the retry runs first and the message follows it once a
+    /// config lands. Recovery is the next message, not a reset — fix the worker
+    /// and say something.
+    fn restart_session(&self, batch: &[EventPayload]) -> Vec<EventPayload> {
+        self.emit_decision_request(batch, Trigger::SessionStart)
+    }
+
+    /// The run is over, so nothing queued can still run: drop them all rather
+    /// than promote a decision whose turn already ended. After a terminally-failed
+    /// `session.start` this is also the only correct move — no config was ever
+    /// resolved, so a promoted turn would settle as a silent no-op.
     fn drop_queued_decisions(&self) -> Vec<EventPayload> {
         self.queued_decisions()
             .into_iter()
@@ -666,6 +682,42 @@ impl SessionState {
             ],
             None => vec![EventPayload::SessionDone(SessionDone {})],
         }
+    }
+
+    /// The run terminal for a terminally-failed decision. `TurnCompleted` is the
+    /// only terminal every consumer watches, so a failure that never reaches it
+    /// strands the turn open forever: no reply, no error, no timeout. Void what
+    /// was in flight, drop what was queued, then end the turn as a failed run.
+    fn fail_run(&self, error: String) -> Vec<EventPayload> {
+        // The finalizer itself failed: the frozen output is already held, and
+        // `finalize_run` reports it against the turn that produced it.
+        if self.finalizing.is_some() {
+            return self.finalize_run(Some(error));
+        }
+        let mut events = self.void_effects(|tracking, _| {
+            matches!(
+                tracking.status,
+                EffectStatus::Pending | EffectStatus::RetryScheduled
+            )
+        });
+        events.extend(self.drop_queued_decisions());
+        // No turn to end — a `session.start` that failed before any client input.
+        // The decision's error event is the whole record.
+        let Some(turn_id) = self.turn_id.clone() else {
+            return events;
+        };
+        if self.completed_turn_ids.contains(&turn_id) {
+            return events;
+        }
+        events.push(EventPayload::TurnCompleted(TurnCompleted {
+            turn_id,
+            data: serde_json::Value::Null,
+            turn_cost: self.turn_cost,
+            turn_token_usage: self.turn_token_usage.clone(),
+            error: Some(error),
+        }));
+        events.push(EventPayload::SessionDone(SessionDone {}));
+        events
     }
 
     fn handle_active(
@@ -702,11 +754,12 @@ impl SessionState {
 
                 match payload {
                     ClientPayload::Message(ClientMessage { message, stream: _ }) => {
-                        if self.session_start_failed && message.role == Role::User {
-                            return Err(SessionError::SessionStartFailed);
-                        }
                         if self.head_parked() && message.role == Role::User {
                             return Err(SessionError::SessionInterrupted);
+                        }
+                        if self.session_start_failed && message.role == Role::User {
+                            let restart = self.restart_session(&events);
+                            events.extend(restart);
                         }
                         if message.role == Role::User {
                             let request = self.emit_decision_request(
@@ -724,13 +777,14 @@ impl SessionState {
                         stream: _,
                         client,
                     }) => {
+                        if self.head_parked() && messages.iter().any(|m| m.role == Role::User) {
+                            return Err(SessionError::SessionInterrupted);
+                        }
                         if self.session_start_failed
                             && messages.iter().any(|m| m.role == Role::User)
                         {
-                            return Err(SessionError::SessionStartFailed);
-                        }
-                        if self.head_parked() && messages.iter().any(|m| m.role == Role::User) {
-                            return Err(SessionError::SessionInterrupted);
+                            let restart = self.restart_session(&events);
+                            events.extend(restart);
                         }
                         let request = self.emit_decision_request(
                             &events,
@@ -1666,21 +1720,17 @@ impl SessionState {
                     _ => return Ok(vec![]),
                 };
                 let terminal = decision.tracking.is_terminal_failure(retryable);
-                let finalize = matches!(decision.trigger, Trigger::TurnFinished { .. }) && terminal;
-                let start_failed = matches!(decision.trigger, Trigger::SessionStart) && terminal;
                 let mut events = vec![EventPayload::WorkerDecisionErrored(WorkerDecisionErrored {
                     decision_id,
                     error: error.clone(),
                     retryable,
                 })];
-                // A terminally-failed turn.finished still completes the turn, but as a
-                // failed run: the output is durable, the finalizer isn't. Retryable
-                // failures wait for redelivery via Wake.
-                if finalize {
-                    events.extend(self.finalize_run(Some(error)));
-                }
-                if start_failed {
-                    events.extend(self.drop_queued_decisions());
+                // Any terminally-failed decision ends the run — a turn whose driving
+                // decision is dead can never settle on its own. A failed turn.finished
+                // still completes its turn: the output is durable, the finalizer isn't.
+                // Retryable failures wait for redelivery via Wake.
+                if terminal {
+                    events.extend(self.fail_run(error));
                 }
                 Ok(events)
             }
@@ -1732,7 +1782,59 @@ impl SessionState {
                 Self::ensure_internal(caller)?;
                 self.handle_wake(now)
             }
+
+            CommandPayload::ReconcileDispatch => {
+                Self::ensure_internal(caller)?;
+                self.handle_reconcile_dispatch()
+            }
         }
+    }
+
+    /// Fail every in-flight effect orphaned by a process death. Pull-dispatched
+    /// decisions are not provably orphaned (the worker may still submit); failing
+    /// them is safe — a late submit no-ops — at worst re-running the handler.
+    /// Worker tool calls are never touched: their async settle may still arrive.
+    fn handle_reconcile_dispatch(&self) -> Result<Vec<EventPayload>, SessionError> {
+        const LOST: &str = "dispatch lost on engine restart";
+        let mut events = vec![];
+        for wd in self.worker_decisions.values() {
+            if wd.tracking.status == EffectStatus::Pending {
+                let terminal = wd.tracking.is_terminal_failure(true);
+                events.push(EventPayload::WorkerDecisionErrored(WorkerDecisionErrored {
+                    decision_id: wd.decision_id.clone(),
+                    error: LOST.to_string(),
+                    retryable: true,
+                }));
+                if terminal {
+                    events.extend(self.fail_run(LOST.to_string()));
+                    return Ok(events);
+                }
+            }
+        }
+        for call in self.llm_calls.values() {
+            if call.handler == LlmHandler::Server && call.tracking.status == EffectStatus::Pending {
+                events.push(EventPayload::LlmCallErrored(LlmCallErrored {
+                    call_id: call.call_id.clone(),
+                    attempt: call.tracking.retry.attempts,
+                    error: LOST.to_string(),
+                    retryable: true,
+                    code: None,
+                    detail: None,
+                }));
+                if call
+                    .tracking
+                    .retry_policy
+                    .exhausted(&call.tracking.retry, true)
+                {
+                    let settle = self.emit_decision_request(
+                        &events,
+                        Trigger::llm_err(call.call_id.clone(), LOST.to_string(), None, None),
+                    );
+                    events.extend(settle);
+                }
+            }
+        }
+        Ok(events)
     }
 
     fn handle_wake(&self, now: DateTime<Utc>) -> Result<Vec<EventPayload>, SessionError> {
@@ -1895,16 +1997,9 @@ impl SessionState {
                     error: "deadline exceeded".to_string(),
                     retryable: true,
                 })];
-                // A terminally-timed-out turn.finished completes the turn as a failed run.
-                if matches!(wd.trigger, Trigger::TurnFinished { .. })
-                    && wd.tracking.is_terminal_failure(true)
-                {
-                    events.extend(self.finalize_run(Some("deadline exceeded".to_string())));
-                }
-                if matches!(wd.trigger, Trigger::SessionStart)
-                    && wd.tracking.is_terminal_failure(true)
-                {
-                    events.extend(self.drop_queued_decisions());
+                // A terminal timeout ends the run, same as a terminal error.
+                if wd.tracking.is_terminal_failure(true) {
+                    events.extend(self.fail_run("deadline exceeded".to_string()));
                 }
                 return Ok(events);
             }
@@ -2911,6 +3006,118 @@ mod tests {
         assert!(
             events.is_empty(),
             "wake on idle session should be a no-op; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn reconcile_dispatch_with_nothing_pending_is_noop() {
+        let agg = create_session("sess-1", "tenant-a", "user-1");
+
+        let events = agg
+            .state
+            .handle(
+                CommandPayload::ReconcileDispatch,
+                &Caller::System {
+                    tenant_id: "tenant-a".to_string(),
+                },
+            )
+            .expect("reconcile should succeed");
+
+        assert!(
+            events.is_empty(),
+            "reconcile on idle session should be a no-op; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn reconcile_dispatch_schedules_a_retry_for_a_pending_decision() {
+        let mut agg = create_session_with_retry(RetryPolicy::worker_default());
+        let setup = dispatch(
+            &mut agg,
+            CommandPayload::SendMessage {
+                message: node_msg("", Role::User, "hi"),
+                stream: false,
+                turn_id: None,
+                parent_id: None,
+            },
+            &system(),
+        );
+        let decision_id = setup
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(p) => Some(p.decision_id.clone()),
+                _ => None,
+            })
+            .expect("message requests a decision");
+
+        let events = dispatch(&mut agg, CommandPayload::ReconcileDispatch, &system());
+
+        assert!(
+            matches!(events.as_slice(), [EventPayload::WorkerDecisionErrored(_)]),
+            "expected [WorkerDecisionErrored]; got {events:?}"
+        );
+        let wd = agg.state.worker_decisions.get(&decision_id).expect("kept");
+        assert_eq!(wd.tracking.status, EffectStatus::RetryScheduled);
+        assert!(wd.tracking.retry.next_at.is_some(), "a retry is scheduled");
+    }
+
+    #[test]
+    fn reconcile_dispatch_without_retries_fails_the_run() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        dispatch(
+            &mut agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Message(ClientMessage {
+                    message: node_msg("", Role::User, "hi"),
+                    stream: false,
+                }),
+                turn_id: Some("turn-1".to_string()),
+            },
+            &system(),
+        );
+
+        let events = dispatch(&mut agg, CommandPayload::ReconcileDispatch, &system());
+
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    EventPayload::WorkerDecisionErrored(_),
+                    EventPayload::TurnCompleted(_),
+                    EventPayload::SessionDone(_)
+                ]
+            ),
+            "a no-retry policy makes reconcile terminal; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn reconcile_dispatch_retries_a_pending_server_llm_call() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        dispatch(
+            &mut agg,
+            CommandPayload::RequestLlmCall {
+                format: None,
+                call_id: "llm-1".to_string(),
+                request: request_with(vec![]),
+                stream: false,
+                retry: RetryPolicy::llm_default(),
+                handler: LlmHandler::Server,
+            },
+            &system(),
+        );
+
+        let events = dispatch(&mut agg, CommandPayload::ReconcileDispatch, &system());
+
+        assert!(
+            matches!(events.as_slice(), [EventPayload::LlmCallErrored(_)]),
+            "expected [LlmCallErrored]; got {events:?}"
+        );
+        let call = agg.state.llm_calls.get("llm-1").expect("kept");
+        assert_eq!(call.tracking.status, EffectStatus::RetryScheduled);
+        assert!(
+            call.tracking.retry.next_at.is_some(),
+            "a retry is scheduled"
         );
     }
 
@@ -5764,9 +5971,25 @@ mod tests {
             },
         );
 
+        // A terminal failure also ends the run: the turn it was driving can never
+        // settle on its own, and TurnCompleted is the only terminal consumers watch.
         assert!(
-            matches!(events.as_slice(), [EventPayload::WorkerDecisionErrored(_)]),
-            "expected [WorkerDecisionErrored]; got {events:?}"
+            matches!(
+                events.as_slice(),
+                [
+                    EventPayload::WorkerDecisionErrored(_),
+                    EventPayload::TurnCompleted(_),
+                    EventPayload::SessionDone(_)
+                ]
+            ),
+            "expected [WorkerDecisionErrored, TurnCompleted, SessionDone]; got {events:?}"
+        );
+        let completed = turn_completed(&events).expect("the turn ends");
+        assert_eq!(completed.turn_id, "turn-1");
+        assert_eq!(
+            completed.error.as_deref(),
+            Some("worker offline"),
+            "the turn carries the failure; got {completed:?}"
         );
         assert!(
             !agg.state.worker_decisions.contains_key(&decision_id),
@@ -7536,7 +7759,7 @@ mod tests {
     /// turn that settles as a silent no-op, and new work must be refused with
     /// a typed error, not swallowed. Recovery is the retry policy's job.
     #[test]
-    fn terminal_session_start_failure_refuses_new_work() {
+    fn terminal_session_start_failure_restarts_on_the_next_message() {
         let mut agg = SessionAggregate::new(
             "sess-1".to_string(),
             "tenant-a".to_string(),
@@ -7594,6 +7817,12 @@ mod tests {
                 .any(|e| matches!(e, EventPayload::WorkerDecisionErrored(_))),
             "the failure is recorded; got {events:?}"
         );
+        // No turn was ever started, so there is no run to end — the error event
+        // is the whole record. A TurnCompleted here would invent a turn.
+        assert!(
+            turn_completed(&events).is_none(),
+            "no turn to complete without one started; got {events:?}"
+        );
 
         // The queued decision can never resolve a config: promoting it runs the
         // turn configless and settles it as a silent no-op.
@@ -7607,9 +7836,10 @@ mod tests {
              failed terminally; got {events:?}"
         );
 
-        // New user messages are refused loudly, not accepted into a session
-        // that can never run them.
-        let refused = agg.state.handle(
+        // The next user message retries the start rather than bouncing: fix the
+        // worker, say something, and the session picks up where it died.
+        let retried = dispatch(
+            &mut agg,
             CommandPayload::SubmitClientPayload {
                 payload: ClientPayload::Message(ClientMessage {
                     message: node_msg("", Role::User, "hello again"),
@@ -7619,10 +7849,47 @@ mod tests {
             },
             &system(),
         );
+        let restart = decision_with(&retried, |t| matches!(t, Trigger::SessionStart))
+            .expect("a new user message re-queues session.start");
+        let follow_up = decision_with(&retried, |t| matches!(t, Trigger::ClientMessage { .. }))
+            .expect("the message queues too");
         assert!(
-            matches!(refused, Err(SessionError::SessionStartFailed)),
-            "a user message after terminal session.start failure is refused; \
-             got {refused:?}"
+            retried.iter().any(|e| matches!(
+                e,
+                EventPayload::WorkerDecisionRequested(w) if w.decision_id == restart
+            )),
+            "the restart is promoted; got {retried:?}"
+        );
+        assert!(
+            !retried.iter().any(|e| matches!(
+                e,
+                EventPayload::WorkerDecisionRequested(w) if w.decision_id == follow_up
+            )),
+            "the message parks behind the restart; got {retried:?}"
+        );
+
+        // The restart lands a config, and the message runs against it.
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: restart,
+                transcript: vec![],
+                actions: vec![],
+                state: None,
+                agent: Some(agent_config("m1")),
+            },
+            &machine(),
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                EventPayload::WorkerDecisionRequested(w) if w.decision_id == follow_up
+            )),
+            "the recovered session promotes the waiting message; got {events:?}"
+        );
+        assert!(
+            !agg.state.session_start_failed,
+            "the session is no longer poisoned"
         );
     }
 

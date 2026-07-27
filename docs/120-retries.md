@@ -19,8 +19,11 @@ type RetryPolicy = {
 ```
 
 Attach a policy to a `tool.call`, `llm.call`, or `sub_agent.spawn` action, or
-set `retry` on the agent config for its LLM calls. The default is no retry and
-no timeout. Engine-proposed tool and sub-agent calls take that default, so a
+set `retry` on the agent config for its LLM calls. LLM calls default to a 180s
+timeout and 5 attempts; worker decisions default to a 300s deadline and 10
+attempts, so a lost decision or a transient worker failure retries instead of
+hanging or failing the run. Tool and sub-agent calls default to no retry and
+no timeout — the engine cannot vouch for a tool's idempotency, so a
 model-driven tool call retries only if your worker adds a policy.
 
 ## Timeouts

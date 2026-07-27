@@ -152,22 +152,33 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
             data,
             cost,
             token_usage,
+            error,
             span,
             ..
         } => {
+            // A child whose run failed settles the delegation as an error; its
+            // empty output is not an answer.
+            let command = match error {
+                Some(error) => CommandPayload::FailSubAgent {
+                    session_id: child_session_id,
+                    error,
+                    retryable: false,
+                },
+                None => CommandPayload::CompleteSubAgentTurn {
+                    session_id: child_session_id,
+                    agent_id,
+                    turn_id,
+                    data,
+                    cost,
+                    token_usage,
+                },
+            };
             let result = execute(
                 store,
                 ExecuteInput {
                     session_id: parent_session_id.clone(),
                     caller: Caller::System { tenant_id },
-                    command: CommandPayload::CompleteSubAgentTurn {
-                        session_id: child_session_id,
-                        agent_id,
-                        turn_id,
-                        data,
-                        cost,
-                        token_usage,
-                    },
+                    command,
                     span: span.child("sub_agent_turn_complete"),
                 },
                 &ConflictRetry::default(),

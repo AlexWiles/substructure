@@ -11,19 +11,18 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 
 ### Fixed
 
-- New decisions now park behind an unsettled `session.start`, and its retry is re-delivered first.
-- After `session.start` failed terminally, the session idled forever, silently no-oping every message. Queued decisions are now dropped and user payloads refused with `SessionStartFailed`.
-- The engine now proposes an `agent.unconfigured` interrupt, so a blind echo pauses  a misconfigured session.
+- Failed decisions now retry or end the run with the error.
+- Decisions and LLM calls have default timeouts and retries.
+- The push transport no longer cuts long streams.
+- A failed sub-agent and an unconfigured session now report errors.
 
 ### Added
 
-- Add a slack adapter
+- Add a Slack adapter and a channel abstraction.
 
 ### Changed
 
-- The Slack adapter duplicated its text-clipping three times, plumbed raw mutex locks and `(channel, thread_ts)` pairs through every method, and mixed three error conventions. Collapsed clipping to one `clip`, moved the stream slots behind a `Streams` registry, threaded a `Thread` address type, and unified on one `Error`.
-- Introduce a channel abstraction.
-- The default CLI database file `data.db` was generically named. Renamed to `substructure.db`.
+- Rename the default database file to `substructure.db`.
 
 ## [0.2.3] - 2026-07-22
 

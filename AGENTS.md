@@ -14,5 +14,5 @@ crates/napi              → N-API bindings exposing core to Node
 Keep comments to an absolute minimum and use as few words as possible.
 
 ### CHANGELOG.md:
-Keep CHANGELOG.md up to date. There should be a maximum of two sentences per entry. First sentence states the problem in as few words as possible. Second sentence states the solution in as few words as possible. Only for code changes. Not for docs updates or examples.
+Keep CHANGELOG.md current. Write one short sentence for each item. Write what changed, not why or how. The reader skims the list; details live in the code and the commits. Compare each item to the last release, not to the last commit. If a change only modifies something added after the last release, do not write an item. If related changes tell one story, write one item. Write items only for changes to the code. Do not write items for changes to the documents or to the examples. Write all items in ASD-STE100. Example items: "Failed decisions now retry or end the run with the error." "Add a Slack adapter."
 

@@ -708,6 +708,11 @@ impl SessionState {
             }
             EventPayload::SessionMessageRequested(_) => {}
             EventPayload::DecisionRequestQueued(p) => {
+                // A re-queued start clears the poison: the session gets another
+                // chance at a config, so client input is accepted again.
+                if matches!(p.trigger, Trigger::SessionStart) {
+                    self.session_start_failed = false;
+                }
                 let retry_policy = self.worker_retry.clone().unwrap_or(RetryPolicy::no_retry());
                 self.worker_decisions.insert(
                     p.decision_id.clone(),

@@ -324,7 +324,7 @@ fn lower_actions(
                     let stream = stream.or_else(|| config.map(|c| c.stream)).unwrap_or(false);
                     let retry = retry
                         .or_else(|| config.and_then(|c| c.retry.clone()))
-                        .unwrap_or_else(RetryPolicy::no_retry);
+                        .unwrap_or_else(RetryPolicy::llm_default);
                     let handler = llm_handler(handler)?;
                     // The format shapes the worker wire only; a server call is neutral.
                     let format = match handler {

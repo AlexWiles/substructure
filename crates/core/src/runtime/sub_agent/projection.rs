@@ -87,6 +87,7 @@ impl EventProcessor for SubAgentDispatchProjection {
                     data: tc.data.clone(),
                     cost: tc.turn_cost,
                     token_usage: tc.turn_token_usage.clone(),
+                    error: tc.error.clone(),
                     span: event.span,
                 })
             }

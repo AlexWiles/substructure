@@ -17,10 +17,12 @@ durable first.
 
 ## Recovery
 
-An unanswered decision stays pending and is redelivered; a call past its
-deadline fails and retries per its policy. Because every step was committed
-first, a restarted engine or worker continues where it stopped rather than
-redoing finished work.
+A call or decision past its deadline fails and retries per its policy —
+decisions default to ten attempts, so a worker deploy or transient failure is
+ridden out rather than surfaced. A restarted engine fails its own in-flight
+dispatches immediately and re-issues them, instead of waiting out their
+deadlines. Because every step was committed first, a restarted engine or
+worker continues where it stopped rather than redoing finished work.
 
 ## Idempotency
 

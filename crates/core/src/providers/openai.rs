@@ -398,7 +398,7 @@ impl OpenAiClient {
             }
         }
         Self {
-            http: Client::new(),
+            http: crate::providers::http_client(),
             base_url: config.base_url,
             api_key: config.api_key,
             extra_headers,
