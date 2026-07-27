@@ -9,13 +9,19 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 
 ## [Unreleased]
 
+### Fixed
+
+- New decisions now park behind an unsettled `session.start`, and its retry is re-delivered first.
+- After `session.start` failed terminally, the session idled forever, silently no-oping every message. Queued decisions are now dropped and user payloads refused with `SessionStartFailed`.
+- The engine now proposes an `agent.unconfigured` interrupt, so a blind echo pauses  a misconfigured session.
+
 ### Added
 
 - Add a slack adapter
-- New `client.append` command. submits just the new messages; the view is composed against the session head at delivery.
 
 ### Changed
 
+- The Slack adapter duplicated its text-clipping three times, plumbed raw mutex locks and `(channel, thread_ts)` pairs through every method, and mixed three error conventions. Collapsed clipping to one `clip`, moved the stream slots behind a `Streams` registry, threaded a `Thread` address type, and unified on one `Error`.
 - Introduce a channel abstraction.
 - The default CLI database file `data.db` was generically named. Renamed to `substructure.db`.
 

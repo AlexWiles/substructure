@@ -140,6 +140,8 @@ pub enum SessionError {
     SessionAlreadyCreated,
     #[error("session is interrupted")]
     SessionInterrupted,
+    #[error("session start failed")]
+    SessionStartFailed,
     #[error("turn already active: {turn_id}")]
     TurnAlreadyActive { turn_id: String },
     #[error("turn already completed: {turn_id}")]
@@ -615,6 +617,7 @@ impl SessionState {
         gate_leaf: Option<&str>,
     ) -> Vec<EventPayload> {
         let parked = self.has_pending_worker_decision()
+            || self.has_unsettled_session_start()
             || self.active_interrupt_for(gate_leaf).is_some()
             || batch
                 .iter()
@@ -630,6 +633,20 @@ impl SessionState {
             ));
         }
         events
+    }
+
+    /// A terminally-failed `session.start` can never resolve a config, so no
+    /// queued decision can run: drop them all rather than promote a configless
+    /// turn that settles as a silent no-op.
+    fn drop_queued_decisions(&self) -> Vec<EventPayload> {
+        self.queued_decisions()
+            .into_iter()
+            .map(|d| {
+                EventPayload::DecisionRequestDropped(DecisionRequestDropped {
+                    decision_id: d.decision_id.clone(),
+                })
+            })
+            .collect()
     }
 
     /// Emit the run terminal from the in-flight `finalizing` output: `TurnCompleted`
@@ -685,6 +702,9 @@ impl SessionState {
 
                 match payload {
                     ClientPayload::Message(ClientMessage { message, stream: _ }) => {
+                        if self.session_start_failed && message.role == Role::User {
+                            return Err(SessionError::SessionStartFailed);
+                        }
                         if self.head_parked() && message.role == Role::User {
                             return Err(SessionError::SessionInterrupted);
                         }
@@ -704,6 +724,11 @@ impl SessionState {
                         stream: _,
                         client,
                     }) => {
+                        if self.session_start_failed
+                            && messages.iter().any(|m| m.role == Role::User)
+                        {
+                            return Err(SessionError::SessionStartFailed);
+                        }
                         if self.head_parked() && messages.iter().any(|m| m.role == Role::User) {
                             return Err(SessionError::SessionInterrupted);
                         }
@@ -1332,7 +1357,7 @@ impl SessionState {
                         decision_id: decision_id.clone(),
                         trigger,
                     }));
-                    if !self.has_pending_worker_decision() {
+                    if !self.has_pending_worker_decision() && !self.has_unsettled_session_start() {
                         events.push(EventPayload::WorkerDecisionRequested(
                             WorkerDecisionRequested { decision_id },
                         ));
@@ -1640,8 +1665,9 @@ impl SessionState {
                     Some(d) if d.tracking.status == EffectStatus::Pending => d,
                     _ => return Ok(vec![]),
                 };
-                let finalize = matches!(decision.trigger, Trigger::TurnFinished { .. })
-                    && decision.tracking.is_terminal_failure(retryable);
+                let terminal = decision.tracking.is_terminal_failure(retryable);
+                let finalize = matches!(decision.trigger, Trigger::TurnFinished { .. }) && terminal;
+                let start_failed = matches!(decision.trigger, Trigger::SessionStart) && terminal;
                 let mut events = vec![EventPayload::WorkerDecisionErrored(WorkerDecisionErrored {
                     decision_id,
                     error: error.clone(),
@@ -1652,6 +1678,9 @@ impl SessionState {
                 // failures wait for redelivery via Wake.
                 if finalize {
                     events.extend(self.finalize_run(Some(error)));
+                }
+                if start_failed {
+                    events.extend(self.drop_queued_decisions());
                 }
                 Ok(events)
             }
@@ -1872,6 +1901,11 @@ impl SessionState {
                 {
                     events.extend(self.finalize_run(Some("deadline exceeded".to_string())));
                 }
+                if matches!(wd.trigger, Trigger::SessionStart)
+                    && wd.tracking.is_terminal_failure(true)
+                {
+                    events.extend(self.drop_queued_decisions());
+                }
                 return Ok(events);
             }
         }
@@ -1899,16 +1933,20 @@ impl SessionState {
                 }
             }
 
-            if let Some(wd) = self
-                .queued_decisions()
-                .into_iter()
-                .find(|d| !self.decision_parked(&d.trigger))
-            {
-                return Ok(vec![EventPayload::WorkerDecisionRequested(
-                    WorkerDecisionRequested {
-                        decision_id: wd.decision_id.clone(),
-                    },
-                )]);
+            // An unsettled session.start owns the slot until it settles:
+            // queued decisions wait for its retry even before it is due.
+            if !self.has_unsettled_session_start() {
+                if let Some(wd) = self
+                    .queued_decisions()
+                    .into_iter()
+                    .find(|d| !self.decision_parked(&d.trigger))
+                {
+                    return Ok(vec![EventPayload::WorkerDecisionRequested(
+                        WorkerDecisionRequested {
+                            decision_id: wd.decision_id.clone(),
+                        },
+                    )]);
+                }
             }
         }
 
@@ -7364,6 +7402,227 @@ mod tests {
         assert_eq!(
             agg.state.resolve_agent_for(agg.state.head_id.as_deref()),
             Some(agent_config("m1"))
+        );
+    }
+
+    /// `session.start` is unsettled while RetryScheduled, not just while
+    /// Pending: a client message arriving between failure and retry must park
+    /// behind it, or the turn runs configless and the retry is starved by the
+    /// now-live client decision.
+    #[test]
+    fn client_message_parks_while_session_start_retry_is_scheduled() {
+        let mut agg = SessionAggregate::new(
+            "sess-1".to_string(),
+            "tenant-a".to_string(),
+            SessionState::new("sess-1".to_string()),
+        );
+        let created = dispatch(
+            &mut agg,
+            CommandPayload::CreateSession {
+                agent_id: "agent-1".to_string(),
+                owner: SessionOwner {
+                    tenant_id: "tenant-a".to_string(),
+                    id: Some("user-1".to_string()),
+                    metadata: HashMap::new(),
+                },
+                ancestry: vec![],
+                worker_retry: RetryPolicy {
+                    timeout_secs: None,
+                    max_retries: 2,
+                    backoff_base_secs: 1,
+                    backoff_max_secs: 1,
+                },
+            },
+            &system(),
+        );
+        let start = created
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(w) => Some(w.decision_id.clone()),
+                _ => None,
+            })
+            .expect("CreateSession opens a session.start decision");
+
+        dispatch(
+            &mut agg,
+            CommandPayload::FailWorkerDecision {
+                decision_id: start.clone(),
+                error: "transient".to_string(),
+                retryable: true,
+            },
+            &machine(),
+        );
+        assert_eq!(
+            agg.state
+                .worker_decisions
+                .get(&start)
+                .map(|d| d.tracking.status.clone()),
+            Some(EffectStatus::RetryScheduled),
+            "session.start is rescheduled, not settled"
+        );
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Message(ClientMessage {
+                    message: node_msg("", Role::User, "hi"),
+                    stream: false,
+                }),
+                turn_id: None,
+            },
+            &system(),
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::DecisionRequestQueued(_))),
+            "the client decision queues; got {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, EventPayload::WorkerDecisionRequested(_))),
+            "the client decision parks behind the scheduled session.start retry, \
+             exactly as it does while session.start is Pending; got {events:?}"
+        );
+
+        // The due retry re-delivers session.start ahead of the queued client
+        // decision — the reverse order starves the retry behind live traffic.
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::Wake {
+                now: Utc::now() + chrono::Duration::hours(1),
+            },
+            &system(),
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                EventPayload::WorkerDecisionRequested(w) if w.decision_id == start
+            )),
+            "the wake re-delivers session.start first; got {events:?}"
+        );
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: start,
+                transcript: vec![],
+                actions: vec![],
+                state: None,
+                agent: Some(agent_config("m1")),
+            },
+            &machine(),
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                EventPayload::WorkerDecisionRequested(w)
+                    if matches!(
+                        agg.state.worker_decisions.get(&w.decision_id).map(|d| &d.trigger),
+                        Some(Trigger::ClientMessage { .. })
+                    )
+            )),
+            "the queued client decision is promoted; got {events:?}"
+        );
+        assert_eq!(
+            agg.state.resolve_agent_for(agg.state.head_id.as_deref()),
+            Some(agent_config("m1"))
+        );
+    }
+
+    /// A terminally-failed `session.start` leaves the session unable to ever
+    /// configure a turn. Parked work must not be promoted into a configless
+    /// turn that settles as a silent no-op, and new work must be refused with
+    /// a typed error, not swallowed. Recovery is the retry policy's job.
+    #[test]
+    fn terminal_session_start_failure_refuses_new_work() {
+        let mut agg = SessionAggregate::new(
+            "sess-1".to_string(),
+            "tenant-a".to_string(),
+            SessionState::new("sess-1".to_string()),
+        );
+        let created = dispatch(
+            &mut agg,
+            CommandPayload::CreateSession {
+                agent_id: "agent-1".to_string(),
+                owner: SessionOwner {
+                    tenant_id: "tenant-a".to_string(),
+                    id: Some("user-1".to_string()),
+                    metadata: HashMap::new(),
+                },
+                ancestry: vec![],
+                worker_retry: RetryPolicy::no_retry(),
+            },
+            &system(),
+        );
+        let start = created
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(w) => Some(w.decision_id.clone()),
+                _ => None,
+            })
+            .expect("CreateSession opens a session.start decision");
+
+        // A message arrives while session.start is pending: it queues behind it.
+        let queued = dispatch(
+            &mut agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Message(ClientMessage {
+                    message: node_msg("", Role::User, "hi"),
+                    stream: false,
+                }),
+                turn_id: None,
+            },
+            &system(),
+        );
+        let queued_id = decision_with(&queued, |t| matches!(t, Trigger::ClientMessage { .. }))
+            .expect("the client decision queues behind session.start");
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::FailWorkerDecision {
+                decision_id: start,
+                error: "worker crashed".to_string(),
+                retryable: false,
+            },
+            &machine(),
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::WorkerDecisionErrored(_))),
+            "the failure is recorded; got {events:?}"
+        );
+
+        // The queued decision can never resolve a config: promoting it runs the
+        // turn configless and settles it as a silent no-op.
+        let events = wake(&mut agg);
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                EventPayload::WorkerDecisionRequested(w) if w.decision_id == queued_id
+            )),
+            "a queued client decision must not be promoted after session.start \
+             failed terminally; got {events:?}"
+        );
+
+        // New user messages are refused loudly, not accepted into a session
+        // that can never run them.
+        let refused = agg.state.handle(
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Message(ClientMessage {
+                    message: node_msg("", Role::User, "hello again"),
+                    stream: false,
+                }),
+                turn_id: None,
+            },
+            &system(),
+        );
+        assert!(
+            matches!(refused, Err(SessionError::SessionStartFailed)),
+            "a user message after terminal session.start failure is refused; \
+             got {refused:?}"
         );
     }
 

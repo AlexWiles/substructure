@@ -470,6 +470,11 @@ pub struct SessionState {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub open_interrupts: Vec<OpenInterrupt>,
+
+    /// `session.start` failed terminally: no config can ever be resolved, so
+    /// user payloads are refused and queued decisions are dropped.
+    #[serde(default)]
+    pub session_start_failed: bool,
 }
 
 impl SessionState {
@@ -500,6 +505,7 @@ impl SessionState {
             head_id: None,
             nodes: Vec::new(),
             open_interrupts: Vec::new(),
+            session_start_failed: false,
         }
     }
 
@@ -693,7 +699,11 @@ impl SessionState {
                     })
                     .unwrap_or(false);
                 if failed {
-                    self.worker_decisions.remove(&p.decision_id);
+                    if let Some(wd) = self.worker_decisions.remove(&p.decision_id) {
+                        if matches!(wd.trigger, Trigger::SessionStart) {
+                            self.session_start_failed = true;
+                        }
+                    }
                 }
             }
             EventPayload::SessionMessageRequested(_) => {}
@@ -898,6 +908,20 @@ impl SessionState {
         self.worker_decisions
             .values()
             .any(|wd| wd.tracking.status == EffectStatus::Pending)
+    }
+
+    /// `session.start` is every turn's prerequisite: its decision writes the
+    /// config that parameterizes them. Unsettled — live or awaiting a retry —
+    /// it parks all other decisions; unlike a sibling settle, a prerequisite
+    /// cannot be superseded by a fork.
+    pub fn has_unsettled_session_start(&self) -> bool {
+        self.worker_decisions.values().any(|wd| {
+            matches!(wd.trigger, Trigger::SessionStart)
+                && matches!(
+                    wd.tracking.status,
+                    EffectStatus::Pending | EffectStatus::RetryScheduled
+                )
+        })
     }
 
     /// All queued decisions in arrival order.

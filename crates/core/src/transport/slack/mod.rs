@@ -1,719 +1,32 @@
-use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+mod activity;
+mod bot;
+mod socket;
+mod webhook;
 
-use futures_util::{SinkExt, StreamExt};
+pub use bot::{SlackBot, Workspace, WorkspaceResolver};
+pub use socket::{MissingEnv, SlackChannel};
+pub use webhook::webhook_router;
+
 use serde_json::Value;
-use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-use crate::processor::{EventProcessor, EventProcessorRunnerConfig, ProcessorError};
-use crate::protocol::{
-    ClientInput, Content, DraftMessage, InterruptOption, InterruptPayload, InterruptResolution,
-    InterruptResponder, InterruptResumption, ResumeStatus, Role, SessionOwner,
-};
-use crate::session::command::SessionError;
-use crate::session::events::EventPayload;
-use crate::session::SessionEvent;
-use crate::transport::channel::{Channel, ChannelContext};
-use crate::{Caller, HandleClientInput, RuntimeError};
+use crate::protocol::{Content, DraftMessage, InterruptOption, InterruptPayload, Role};
 
-const RECONNECT_DELAY: Duration = Duration::from_secs(3);
-
-/// Slack Socket Mode bot. A channel mention or a DM message submits a turn
-/// for the configured agent — the thread is the session, everywhere: a
-/// top-level DM message starts a thread and the bot answers in it.
-/// Replies are posted by a checkpointed processor watching the event log, so
-/// a completion survives a restart; the event is acked only after the submit
-/// is durably recorded, so Slack redelivers what a crash swallows (the
-/// deterministic turn id dedupes the replay).
-/// An interrupt whose payload follows the AG-UI Interrupt shape posts its
-/// `message` (with `metadata.options` as buttons); a click resumes the
-/// interrupt with the chosen option's value.
-#[derive(Clone)]
-pub struct SlackChannel {
-    agent_id: String,
-    app_token: String,
-    bot_token: String,
-    tenant_id: String,
-    api_base: String,
-    http: reqwest::Client,
-    /// Set by `run`; lets the outbound processor read sessions.
-    ctx: Arc<OnceLock<ChannelContext>>,
-}
-
-impl SlackChannel {
-    pub fn new(
-        agent_id: String,
-        app_token: String,
-        bot_token: String,
-        tenant_id: String,
-        api_base: String,
-    ) -> Self {
-        Self {
-            agent_id,
-            app_token,
-            bot_token,
-            tenant_id,
-            api_base,
-            http: reqwest::Client::new(),
-            ctx: Arc::new(OnceLock::new()),
-        }
-    }
-
-    pub fn agent_id(&self) -> &str {
-        &self.agent_id
-    }
-
-    /// SLACK_APP_TOKEN and SLACK_BOT_TOKEN, reported EnvVars-style when
-    /// missing. SLACK_API_BASE overrides the Slack API origin (tests).
-    pub fn from_env(agent_id: String, tenant_id: String) -> Result<Self, ()> {
-        let specs = [
-            (
-                "SLACK_APP_TOKEN",
-                "App-level token with connections:write, for Socket Mode (xapp-…)",
-            ),
-            (
-                "SLACK_BOT_TOKEN",
-                "Bot token with app_mentions:read, chat:write, channels:history, im:history (xoxb-…)",
-            ),
-        ];
-        let mut values = Vec::new();
-        let mut missing = Vec::new();
-        for (name, desc) in specs {
-            match std::env::var(name) {
-                Ok(v) => values.push(v),
-                Err(_) => missing.push((name, desc)),
-            }
-        }
-        if !missing.is_empty() {
-            eprintln!("error: missing required environment variable(s):");
-            for (name, desc) in &missing {
-                eprintln!("  - {name}: {desc}");
-            }
-            eprintln!("\nSet them and try again, e.g.:");
-            for (name, _) in &missing {
-                eprintln!("  export {name}=...");
-            }
-            return Err(());
-        }
-        let mut it = values.into_iter();
-        let api_base =
-            std::env::var("SLACK_API_BASE").unwrap_or_else(|_| "https://slack.com/api".to_string());
-        Ok(Self::new(
-            agent_id,
-            it.next().unwrap(),
-            it.next().unwrap(),
-            tenant_id,
-            api_base,
-        ))
-    }
-
-    async fn connections_open(&self) -> anyhow::Result<String> {
-        let resp: Value = self
-            .http
-            .post(format!("{}/apps.connections.open", self.api_base))
-            .bearer_auth(&self.app_token)
-            .send()
-            .await?
-            .json()
-            .await?;
-        if resp["ok"].as_bool() != Some(true) {
-            anyhow::bail!("apps.connections.open failed: {}", resp["error"]);
-        }
-        resp["url"]
-            .as_str()
-            .map(str::to_string)
-            .ok_or_else(|| anyhow::anyhow!("apps.connections.open returned no url"))
-    }
-
-    async fn connect_and_listen(&self, ctx: &ChannelContext) -> anyhow::Result<()> {
-        let url = self.connections_open().await?;
-        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await?;
-        tracing::info!("slack socket connected");
-
-        while let Some(msg) = ws.next().await {
-            match msg? {
-                WsMessage::Ping(p) => ws.send(WsMessage::Pong(p)).await?,
-                WsMessage::Text(text) => {
-                    let envelope: Value = match serde_json::from_str(text.as_str()) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-                    if envelope["type"].as_str() == Some("events_api") {
-                        let payload = &envelope["payload"];
-                        if let Some(inbound) = app_mention(payload).or_else(|| dm_message(payload))
-                        {
-                            self.submit(ctx, inbound).await;
-                        }
-                    }
-                    if envelope["type"].as_str() == Some("interactive") {
-                        if let Some(click) = block_action(&envelope["payload"]) {
-                            self.resolve_click(ctx, click).await;
-                        }
-                    }
-                    // Ack after the submit: an unacked event is redelivered.
-                    if let Some(id) = envelope["envelope_id"].as_str() {
-                        let ack = serde_json::json!({ "envelope_id": id }).to_string();
-                        ws.send(WsMessage::text(ack)).await?;
-                    }
-                    // Slack rotates sockets; reconnect via a fresh url.
-                    if envelope["type"].as_str() == Some("disconnect") {
-                        return Ok(());
-                    }
-                }
-                _ => {}
-            }
-        }
-        Ok(())
-    }
-
-    /// The thread past `oldest` (exclusive), or the whole thread from the
-    /// top. One page; a first fetch past 200 messages loses its tail.
-    async fn fetch_thread(
-        &self,
-        channel: &str,
-        thread_ts: &str,
-        oldest: Option<&str>,
-    ) -> anyhow::Result<Vec<SlackMsg>> {
-        let mut url = format!(
-            "{}/conversations.replies?channel={channel}&ts={thread_ts}&limit=200&include_all_metadata=true",
-            self.api_base
-        );
-        if let Some(oldest) = oldest {
-            url.push_str(&format!("&oldest={oldest}"));
-        }
-        let resp: Value = self
-            .http
-            .get(url)
-            .bearer_auth(&self.bot_token)
-            .send()
-            .await?
-            .json()
-            .await?;
-        if resp["ok"].as_bool() != Some(true) {
-            anyhow::bail!("conversations.replies failed: {}", resp["error"]);
-        }
-        Ok(parse_replies(&resp))
-    }
-
-    /// The session's active path, or empty when it doesn't resolve.
-    async fn session_path(&self, session_id: &str) -> Vec<crate::protocol::Message> {
-        let Some(ctx) = self.ctx.get() else {
-            return Vec::new();
-        };
-        match ctx.get_session(&self.tenant_id, session_id).await {
-            Ok(session) => {
-                let tree = session.state.message_tree();
-                match &tree.head_id {
-                    Some(head) => tree.path_to(head),
-                    None => Vec::new(),
-                }
-            }
-            Err(_) => Vec::new(),
-        }
-    }
-
-    async fn submit(&self, ctx: &ChannelContext, inbound: Inbound) {
-        let session_id = format!("slack:{}:{}", inbound.channel, inbound.thread_ts);
-        // Deterministic per Slack message, so a redelivery dedupes.
-        let turn_id = Some(format!("slack:{}:{}", inbound.channel, inbound.ts));
-
-        // The recorded path is the cursor: its highest `slack:{ts}` id marks
-        // how far into the thread the session has seen, so the fetch is just
-        // the delta.
-        let path = self.session_path(&session_id).await;
-        let cursor = path
-            .iter()
-            .filter_map(|m| m.id.strip_prefix("slack:"))
-            .max();
-
-        // The fetched delta appends at the head — materialized against the
-        // path at delivery, so a message queued behind an active turn lands
-        // after its reply instead of forking. Without a usable fetch, append
-        // the message alone with a note that context may be missing.
-        let input = match self
-            .fetch_thread(&inbound.channel, &inbound.thread_ts, cursor)
-            .await
-        {
-            Ok(thread) => ClientInput::Append {
-                agent_id: self.agent_id.clone(),
-                turn_id: turn_id.clone(),
-                messages: build_batch(&path, &thread, &inbound),
-                stream: false,
-                client: Default::default(),
-            },
-            Err(e) => {
-                let hint = if !e.to_string().contains("missing_scope") {
-                    ""
-                } else if inbound.channel.starts_with('D') {
-                    " (bot token lacks im:history?)"
-                } else {
-                    " (bot token lacks channels:history?)"
-                };
-                tracing::warn!(error = %e, "slack: history fetch failed{hint}; appending message only");
-                ClientInput::Message {
-                    agent_id: self.agent_id.clone(),
-                    turn_id: turn_id.clone(),
-                    message: draft(
-                        &format!("slack:{}", inbound.ts),
-                        Role::User,
-                        format!(
-                            "<@{}>: {}\n\n[note: the Slack conversation could not be fetched — \
-                             earlier messages may be missing from your context]",
-                            inbound.user, inbound.text
-                        ),
-                    ),
-                    stream: false,
-                }
-            }
-        };
-        let submitted = ctx
-            .handle_client_input(HandleClientInput {
-                session_id: session_id.clone(),
-                caller: Caller::System {
-                    tenant_id: self.tenant_id.clone(),
-                },
-                owner: SessionOwner {
-                    tenant_id: self.tenant_id.clone(),
-                    id: Some(format!("slack:{}", inbound.user)),
-                    metadata: HashMap::from([
-                        ("slack_channel".into(), inbound.channel.clone()),
-                        ("slack_thread_ts".into(), inbound.thread_ts.clone()),
-                    ]),
-                },
-                input,
-                span: crate::span::SpanContext::root().child("slack_inbound"),
-            })
-            .await;
-        match submitted {
-            Ok(_) => {}
-            // A redelivered message whose turn already ran (or is running),
-            // or a message while a prompt is pending — the thread delta
-            // carries it into the next turn after the resume.
-            Err(RuntimeError::Session(
-                SessionError::TurnAlreadyActive { .. }
-                | SessionError::TurnAlreadyCompleted { .. }
-                | SessionError::SessionInterrupted,
-            )) => {}
-            Err(e) => {
-                let meta = ReplyMeta {
-                    turn_id,
-                    session_id: Some(session_id),
-                    ..Default::default()
-                };
-                if let Err(post) = self
-                    .post(
-                        &inbound.channel,
-                        &inbound.thread_ts,
-                        &format!("Error: {e}"),
-                        &meta,
-                    )
-                    .await
-                {
-                    tracing::warn!(error = %post, "slack: failed to post submit error");
-                }
-            }
-        }
-    }
-
-    async fn post(
-        &self,
-        channel: &str,
-        thread_ts: &str,
-        text: &str,
-        meta: &ReplyMeta,
-    ) -> Result<(), PostError> {
-        self.post_blocks(channel, thread_ts, text, vec![section_block(text)], meta)
-            .await
-    }
-
-    async fn post_blocks(
-        &self,
-        channel: &str,
-        thread_ts: &str,
-        text: &str,
-        blocks: Vec<Value>,
-        meta: &ReplyMeta,
-    ) -> Result<(), PostError> {
-        self.api_call(
-            "chat.postMessage",
-            serde_json::json!({
-                "channel": channel,
-                "thread_ts": thread_ts,
-                // Notification fallback; the blocks carry the rendered reply.
-                "text": text,
-                "blocks": blocks,
-                // Round-trips on fetches: maps the message back to its engine ids.
-                "metadata": {
-                    "event_type": REPLY_EVENT_TYPE,
-                    "event_payload": meta,
-                },
-            }),
-        )
-        .await
-    }
-
-    async fn update(
-        &self,
-        channel: &str,
-        ts: &str,
-        text: &str,
-        blocks: Vec<Value>,
-        meta: &ReplyMeta,
-    ) -> Result<(), PostError> {
-        self.api_call(
-            "chat.update",
-            serde_json::json!({
-                "channel": channel,
-                "ts": ts,
-                "text": text,
-                "blocks": blocks,
-                "metadata": {
-                    "event_type": REPLY_EVENT_TYPE,
-                    "event_payload": meta,
-                },
-            }),
-        )
-        .await
-    }
-
-    async fn api_call(&self, method: &str, body: Value) -> Result<(), PostError> {
-        let resp = self
-            .http
-            .post(format!("{}/{method}", self.api_base))
-            .bearer_auth(&self.bot_token)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| PostError::Retryable(e.to_string()))?;
-        let status = resp.status();
-        if status.is_server_error() || status.as_u16() == 429 {
-            return Err(PostError::Retryable(format!("http {status}")));
-        }
-        let v: Value = resp
-            .json()
-            .await
-            .map_err(|e| PostError::Retryable(e.to_string()))?;
-        if v["ok"].as_bool() == Some(true) {
-            return Ok(());
-        }
-        let error = v["error"].as_str().unwrap_or("unknown_error").to_string();
-        match error.as_str() {
-            "rate_limited" | "ratelimited" | "internal_error" | "service_unavailable" => {
-                Err(PostError::Retryable(error))
-            }
-            _ => Err(PostError::Terminal(error)),
-        }
-    }
-
-    /// Resolve a clicked option against the recorded interrupt — the value
-    /// comes from the stored payload, not the wire — and resume with it. The
-    /// prompt message settles when the resume's event lands; a click on an
-    /// already-resolved prompt just strips its stale buttons.
-    async fn resolve_click(&self, ctx: &ChannelContext, click: Click) {
-        let session_id = format!("slack:{}:{}", click.channel, click.thread_ts);
-        let open = match ctx.get_session(&self.tenant_id, &session_id).await {
-            Ok(session) => session
-                .state
-                .open_interrupts
-                .iter()
-                .find(|i| i.interrupt_id == click.interrupt_id)
-                .map(|i| i.payload.clone()),
-            Err(e) => {
-                tracing::warn!(error = %e, %session_id, "slack: click on unreadable session");
-                return;
-            }
-        };
-        let Some(payload) = open else {
-            let meta = ReplyMeta {
-                interrupt_id: Some(click.interrupt_id),
-                session_id: Some(session_id),
-                ..Default::default()
-            };
-            let text = format!("{}\n\n(no longer active)", click.message_text);
-            let cleared = self
-                .update(
-                    &click.channel,
-                    &click.message_ts,
-                    &text,
-                    vec![section_block(&text)],
-                    &meta,
-                )
-                .await;
-            if let Err(e) = cleared {
-                tracing::warn!(error = %e, "slack: failed to clear stale prompt");
-            }
-            return;
-        };
-        let option = display_of(&payload).and_then(|d| d.options.into_iter().nth(click.option));
-        let Some(option) = option else {
-            tracing::warn!(
-                interrupt_id = %click.interrupt_id,
-                option = click.option,
-                "slack: click has no matching option"
-            );
-            return;
-        };
-        let resumed = ctx
-            .handle_client_input(HandleClientInput {
-                session_id: session_id.clone(),
-                caller: Caller::System {
-                    tenant_id: self.tenant_id.clone(),
-                },
-                // Resumes never touch ownership; addressing only.
-                owner: SessionOwner {
-                    tenant_id: self.tenant_id.clone(),
-                    id: None,
-                    metadata: HashMap::new(),
-                },
-                input: ClientInput::InterruptResume {
-                    resumption: InterruptResumption {
-                        interrupt_id: click.interrupt_id,
-                        payload: serde_json::to_value(InterruptResolution {
-                            status: ResumeStatus::Resolved,
-                            payload: option.value,
-                            responder: Some(InterruptResponder {
-                                channel: "slack".to_string(),
-                                user: Some(click.user),
-                                label: Some(option.label),
-                            }),
-                        })
-                        .unwrap_or_default(),
-                    },
-                },
-                span: crate::span::SpanContext::root().child("slack_click"),
-            })
-            .await;
-        if let Err(e) = resumed {
-            tracing::warn!(error = %e, %session_id, "slack: interrupt resume failed");
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl Channel for SlackChannel {
-    fn kind(&self) -> &'static str {
-        "slack"
-    }
-
-    async fn run(&self, ctx: ChannelContext) {
-        let _ = self.ctx.set(ctx.clone());
-        let spawned = ctx
-            .spawn_processor(
-                Arc::new(self.clone()),
-                EventProcessorRunnerConfig {
-                    owner_id: Some("slack_outbound".to_string()),
-                    ..Default::default()
-                },
-                // A new deployment must not replay history into Slack.
-                true,
-            )
-            .await;
-        if let Err(e) = spawned {
-            tracing::error!(error = %e, "slack: failed to start outbound processor");
-            return;
-        }
-
-        loop {
-            tokio::select! {
-                _ = ctx.shutdown.cancelled() => return,
-                r = self.connect_and_listen(&ctx) => {
-                    if let Err(e) = r {
-                        tracing::warn!(error = %e, "slack socket error");
-                    }
-                }
-            }
-            tokio::select! {
-                _ = ctx.shutdown.cancelled() => return,
-                _ = tokio::time::sleep(RECONNECT_DELAY) => {}
-            }
-        }
-    }
-}
-
-/// Durable outbound side: everything a reply needs is recoverable from the
-/// event log — the session id encodes the destination, the event carries the
-/// text. At-least-once: a crash between post and checkpoint may repost.
-#[async_trait::async_trait]
-impl EventProcessor for SlackChannel {
-    fn name(&self) -> &'static str {
-        "slack_outbound_v1"
-    }
-
-    async fn apply(&self, event: SessionEvent) -> Result<(), ProcessorError> {
-        if event.tenant_id != self.tenant_id {
-            return Ok(());
-        }
-        let Some((channel_id, thread_ts)) = slack_session(&event.session_id) else {
-            return Ok(());
-        };
-        let result = match &event.payload {
-            EventPayload::TurnCompleted(t) => {
-                self.post_turn(channel_id, thread_ts, &event.session_id, t)
-                    .await
-            }
-            EventPayload::SessionInterrupted(p) => {
-                self.post_interrupt(channel_id, thread_ts, &event.session_id, p)
-                    .await
-            }
-            EventPayload::InterruptResumed(p) => self.settle_prompt(channel_id, thread_ts, p).await,
-            _ => return Ok(()),
-        };
-        match result {
-            Ok(()) => Ok(()),
-            // Erring would wedge the processor on this event forever.
-            Err(PostError::Terminal(e)) => {
-                tracing::warn!(session_id = %event.session_id, error = %e, "slack: dropping undeliverable reply");
-                Ok(())
-            }
-            Err(PostError::Retryable(e)) => Err(ProcessorError::Apply(e)),
-        }
-    }
-}
-
-impl SlackChannel {
-    async fn post_turn(
-        &self,
-        channel_id: &str,
-        thread_ts: &str,
-        session_id: &str,
-        t: &crate::session::events::TurnCompleted,
-    ) -> Result<(), PostError> {
-        // A crash between post and checkpoint redelivers the event.
-        // The reply always posts after its trigger message, whose ts
-        // the turn id carries — fetch past it and skip if the reply
-        // is already there. A failed fetch posts anyway: at-least-once.
-        let oldest = slack_session(&t.turn_id).map(|(_, ts)| ts);
-        if let Ok(thread) = self.fetch_thread(channel_id, thread_ts, oldest).await {
-            if thread.iter().any(|m| {
-                m.meta.as_ref().and_then(|r| r.turn_id.as_deref()) == Some(t.turn_id.as_str())
-            }) {
-                return Ok(());
-            }
-        }
-        // The reply's recorded node — the id fetches map back to.
-        let message_id = self
-            .session_path(session_id)
-            .await
-            .last()
-            .filter(|m| matches!(m.role, Role::Assistant))
-            .map(|m| m.id.clone());
-        let meta = ReplyMeta {
-            turn_id: Some(t.turn_id.clone()),
-            message_id,
-            session_id: Some(session_id.to_string()),
-            ..Default::default()
-        };
-        self.post(channel_id, thread_ts, &turn_result_text(t), &meta)
-            .await
-    }
-
-    /// A prompt-carrying interrupt posts as buttons, anything else as
-    /// "Paused: {reason}". Redelivery dedupes on the stamped interrupt id,
-    /// like replies dedupe on their turn id.
-    async fn post_interrupt(
-        &self,
-        channel_id: &str,
-        thread_ts: &str,
-        session_id: &str,
-        p: &crate::session::events::SessionInterrupted,
-    ) -> Result<(), PostError> {
-        if let Ok(thread) = self.fetch_thread(channel_id, thread_ts, None).await {
-            if thread.iter().any(|m| {
-                m.meta.as_ref().and_then(|r| r.interrupt_id.as_deref())
-                    == Some(p.interrupt_id.as_str())
-            }) {
-                return Ok(());
-            }
-        }
-        let meta = ReplyMeta {
-            interrupt_id: Some(p.interrupt_id.clone()),
-            session_id: Some(session_id.to_string()),
-            ..Default::default()
-        };
-        match display_of(&p.payload) {
-            Some(display) => {
-                let blocks = prompt_blocks(&display, &p.interrupt_id);
-                self.post_blocks(channel_id, thread_ts, &display.message, blocks, &meta)
-                    .await
-            }
-            // The categorical `reason` is the last resort.
-            None => {
-                self.post(
-                    channel_id,
-                    thread_ts,
-                    &format!("Paused: {}", p.reason),
-                    &meta,
-                )
-                .await
-            }
-        }
-    }
-
-    /// Close the loop on the posted prompt, whoever resumed it — a click,
-    /// the API, a timeout: strip its buttons and stamp the outcome.
-    /// Best-effort: an unfindable prompt message is not worth wedging on.
-    async fn settle_prompt(
-        &self,
-        channel_id: &str,
-        thread_ts: &str,
-        p: &crate::session::events::InterruptResumed,
-    ) -> Result<(), PostError> {
-        let Ok(thread) = self.fetch_thread(channel_id, thread_ts, None).await else {
-            tracing::warn!(interrupt_id = %p.interrupt_id, "slack: fetch failed; prompt not settled");
-            return Ok(());
-        };
-        let Some(msg) = thread.iter().find(|m| {
-            m.meta.as_ref().and_then(|r| r.interrupt_id.as_deref()) == Some(p.interrupt_id.as_str())
-        }) else {
-            return Ok(());
-        };
-        let text = format!("{}\n\n{}", msg.text, resolution_text(&p.payload));
-        let meta = ReplyMeta {
-            interrupt_id: Some(p.interrupt_id.clone()),
-            session_id: Some(format!("slack:{channel_id}:{thread_ts}")),
-            ..Default::default()
-        };
-        self.update(
-            channel_id,
-            &msg.ts,
-            &text,
-            vec![section_block(&text)],
-            &meta,
-        )
-        .await
-    }
-}
-
-enum PostError {
-    Retryable(String),
-    Terminal(String),
-}
-
-impl std::fmt::Display for PostError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PostError::Retryable(e) | PostError::Terminal(e) => write!(f, "{e}"),
-        }
-    }
-}
-
-/// A message the bot should answer: a channel mention or a DM.
+/// A message the bot must answer: a mention or a DM.
 #[derive(Debug, PartialEq)]
 struct Inbound {
     channel: String,
-    /// The parent ts: the session anchor and the reply target. A top-level
-    /// message (mention or DM) starts its thread at its own ts.
+    /// The session anchor. A top-level message starts its thread at its own ts.
     thread_ts: String,
-    /// The message's own ts; unique per message, keys the turn.
+    /// Keys the turn.
     ts: String,
     user: String,
+    /// The asker's workspace (their own for a Slack Connect guest).
+    team: Option<String>,
     text: String,
 }
 
-/// A usable `app_mention` from an `events_api` payload; bot echoes,
-/// non-mention events, and DM mentions (which arrive as `message.im` too —
-/// that path owns them) are `None`.
+/// A usable `app_mention`. A DM mention also arrives as `message.im`;
+/// that path owns it.
 fn app_mention(payload: &Value) -> Option<Inbound> {
     let event = &payload["event"];
     if event["type"].as_str() != Some("app_mention") || event["bot_id"].is_string() {
@@ -729,13 +42,21 @@ fn app_mention(payload: &Value) -> Option<Inbound> {
         thread_ts: event["thread_ts"].as_str().unwrap_or(ts).to_string(),
         ts: ts.to_string(),
         user: event["user"].as_str()?.to_string(),
+        team: asker_team(payload),
         text: event["text"].as_str()?.to_string(),
     })
 }
 
-/// A user's DM (`message` in an `im` channel); bot echoes and subtyped
-/// messages (edits, joins) are `None`. Threads always, even in a DM: a
-/// top-level message starts one at its own ts, so context stays per-thread.
+/// `user_team` for a Slack Connect guest, else the delivered workspace.
+fn asker_team(payload: &Value) -> Option<String> {
+    ["user_team", "team"]
+        .iter()
+        .find_map(|k| payload["event"][k].as_str())
+        .or_else(|| payload["team_id"].as_str())
+        .map(str::to_string)
+}
+
+/// A user's DM. Bot echoes and subtyped messages are `None`.
 fn dm_message(payload: &Value) -> Option<Inbound> {
     let event = &payload["event"];
     if event["type"].as_str() != Some("message")
@@ -751,6 +72,7 @@ fn dm_message(payload: &Value) -> Option<Inbound> {
         thread_ts: event["thread_ts"].as_str().unwrap_or(ts).to_string(),
         ts: ts.to_string(),
         user: event["user"].as_str()?.to_string(),
+        team: asker_team(payload),
         text: event["text"].as_str()?.to_string(),
     })
 }
@@ -762,8 +84,7 @@ fn slack_session(session_id: &str) -> Option<(&str, &str)> {
 
 const REPLY_EVENT_TYPE: &str = "substructure_reply";
 
-/// The engine ids stamped on a posted reply and read back on fetches — the
-/// message becomes addressable in both worlds.
+/// Engine ids stamped on a posted reply.
 #[derive(Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 struct ReplyMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -779,16 +100,15 @@ struct ReplyMeta {
 #[derive(Debug, PartialEq)]
 struct SlackMsg {
     ts: String,
-    /// The author's user id, or a bot's `bot_id` when no user rides along.
+    /// The user id, or a bot's `bot_id`.
     author: Option<String>,
-    /// This bot's reply stamp, when present.
     meta: Option<ReplyMeta>,
     text: String,
+    blocks: Vec<Value>,
 }
 
-/// Plain thread messages from a `conversations.replies` response; joins and
-/// other subtyped messages are dropped.
-fn parse_replies(resp: &Value) -> Vec<SlackMsg> {
+/// Thread messages. Drops subtyped messages and our own unstamped posts.
+fn parse_replies(resp: &Value, mine: &[String]) -> Vec<SlackMsg> {
     let Some(messages) = resp["messages"].as_array() else {
         return Vec::new();
     };
@@ -798,9 +118,17 @@ fn parse_replies(resp: &Value) -> Vec<SlackMsg> {
             if m["type"].as_str() != Some("message") || m["subtype"].is_string() {
                 return None;
             }
-            let meta = (m["metadata"]["event_type"].as_str() == Some(REPLY_EVENT_TYPE))
-                .then(|| serde_json::from_value(m["metadata"]["event_payload"].clone()).ok())
-                .flatten();
+            let meta: Option<ReplyMeta> = (m["metadata"]["event_type"].as_str()
+                == Some(REPLY_EVENT_TYPE))
+            .then(|| serde_json::from_value(m["metadata"]["event_payload"].clone()).ok())
+            .flatten();
+            let ours = ["user", "bot_id"]
+                .iter()
+                .filter_map(|k| m[k].as_str())
+                .any(|id| mine.iter().any(|m| m == id));
+            if ours && meta.is_none() {
+                return None;
+            }
             Some(SlackMsg {
                 ts: m["ts"].as_str()?.to_string(),
                 author: m["user"]
@@ -809,17 +137,31 @@ fn parse_replies(resp: &Value) -> Vec<SlackMsg> {
                     .map(str::to_string),
                 meta,
                 text: m["text"].as_str().unwrap_or_default().to_string(),
+                blocks: m["blocks"].as_array().cloned().unwrap_or_default(),
             })
         })
         .collect()
 }
 
-/// The append batch for an inbound message: fetched messages not yet on the
-/// path, as attributed user messages under `slack:{ts}`. Our own replies map
-/// back to their recorded assistant nodes via the stamped message id —
-/// skipped when already on the path, rebuilt in place as assistant messages
-/// when not (a lost session recovers from its conversation). The live
-/// message is appended when the fetch missed it (race, or an empty delta).
+/// The blocks with the buttons removed and the outcome added.
+fn settled_blocks(blocks: &[Value], text: &str, resolution: &str) -> Vec<Value> {
+    let mut settled: Vec<Value> = blocks
+        .iter()
+        .filter(|b| b["type"] != "actions")
+        .cloned()
+        .collect();
+    if settled.is_empty() {
+        settled.push(section_block(text));
+    }
+    settled.push(serde_json::json!({
+        "type": "context",
+        "elements": [{ "type": "mrkdwn", "text": resolution }],
+    }));
+    settled
+}
+
+/// The unseen thread delta as drafts. Our stamped replies map to their
+/// recorded assistant nodes.
 fn build_batch(
     path: &[crate::protocol::Message],
     thread: &[SlackMsg],
@@ -831,8 +173,7 @@ fn build_batch(
     thread.sort_by(|a, b| a.ts.cmp(&b.ts));
     for msg in thread {
         let (id, role, text) = match &msg.meta {
-            // Ours: anchor to the recorded assistant node. An id-less stamp
-            // has nothing to anchor — skip it.
+            // A stamp with no message id is skipped.
             Some(meta) => match &meta.message_id {
                 Some(id) => (id.clone(), Role::Assistant, msg.text.clone()),
                 None => continue,
@@ -871,9 +212,7 @@ fn draft(id: &str, role: Role, content: String) -> DraftMessage {
     }
 }
 
-/// The renderable half of an AG-UI-shaped interrupt payload. `message` is
-/// the gate; options ride `metadata.options` (unparseable options render a
-/// message without buttons, not a fallback).
+/// The renderable part of an AG-UI interrupt payload.
 struct Display {
     message: String,
     options: Vec<InterruptOption>,
@@ -895,9 +234,8 @@ fn display_of(payload: &Value) -> Option<Display> {
     })
 }
 
-/// Buttons carry coordinates only (interrupt id + option index); the value is
-/// read from the recorded interrupt at click time, so a click can't smuggle
-/// a value and Slack's button-value size cap never binds.
+/// A button carries only the interrupt id and the option index. The value
+/// is read from the recorded interrupt at click time.
 fn prompt_blocks(display: &Display, interrupt_id: &str) -> Vec<Value> {
     let mut blocks = vec![section_block(&display.message)];
     if !display.options.is_empty() {
@@ -940,7 +278,7 @@ fn prompt_blocks(display: &Display, interrupt_id: &str) -> Vec<Value> {
 fn section_block(text: &str) -> Value {
     serde_json::json!({
         "type": "section",
-        "text": { "type": "mrkdwn", "text": block_text(text) },
+        "text": { "type": "mrkdwn", "text": clip(text, MAX_SECTION) },
     })
 }
 
@@ -951,10 +289,10 @@ struct Click {
     option: usize,
     user: String,
     channel: String,
-    /// The prompt message the buttons live on, and its thread.
     message_ts: String,
     thread_ts: String,
     message_text: String,
+    message_blocks: Vec<Value>,
 }
 
 fn block_action(payload: &Value) -> Option<Click> {
@@ -978,10 +316,13 @@ fn block_action(payload: &Value) -> Option<Click> {
             .as_str()
             .unwrap_or_default()
             .to_string(),
+        message_blocks: payload["message"]["blocks"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default(),
     })
 }
 
-/// How a resolution renders on the settled prompt.
 fn resolution_text(payload: &Value) -> String {
     if payload["expired"].as_bool() == Some(true) {
         return "⏱ Expired".to_string();
@@ -999,15 +340,23 @@ fn resolution_text(payload: &Value) -> String {
     }
 }
 
-/// A section block caps mrkdwn text at 3000 chars; overflow would fail the
-/// whole post terminally, so truncate the block (the `text` fallback keeps
-/// the full reply).
-fn block_text(text: &str) -> String {
-    const MAX: usize = 3000;
-    if text.chars().count() <= MAX {
+fn with_footer(text: &str, footer: Option<&str>) -> String {
+    match footer {
+        Some(footer) => format!("{text}\n\n_{footer}_"),
+        None => text.to_string(),
+    }
+}
+
+/// Over the cap, `chat.postMessage` fails with `msg_too_long`.
+const MAX_FALLBACK: usize = 4_000;
+const MAX_MARKDOWN: usize = 12_000;
+const MAX_SECTION: usize = 3_000;
+
+fn clip(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
         return text.to_string();
     }
-    let cut: String = text.chars().take(MAX - 1).collect();
+    let cut: String = text.chars().take(max - 1).collect();
     format!("{cut}…")
 }
 
@@ -1047,6 +396,7 @@ mod tests {
                 thread_ts: "1.0".into(),
                 ts: "2.0".into(),
                 user: "U1".into(),
+                team: None,
                 text: "<@UBOT> what is up".into(),
             })
         );
@@ -1081,6 +431,7 @@ mod tests {
                 thread_ts: "5.0".into(),
                 ts: "5.0".into(),
                 user: "U1".into(),
+                team: None,
                 text: "hi there".into(),
             })
         );
@@ -1134,8 +485,7 @@ mod tests {
 
     #[test]
     fn dm_mention_defers_to_its_message_event() {
-        // A mention inside a DM fires both app_mention and message.im; only
-        // the message path may claim it or two sessions would race.
+        // A DM mention fires both events; only the message path claims it.
         let payload = envelope_payload(serde_json::json!({
             "type": "app_mention",
             "user": "U1",
@@ -1198,6 +548,7 @@ mod tests {
             author: Some(author.into()),
             meta: None,
             text: text.into(),
+            blocks: Vec::new(),
         }
     }
 
@@ -1212,6 +563,7 @@ mod tests {
                 ..Default::default()
             }),
             text: text.into(),
+            blocks: Vec::new(),
         }
     }
 
@@ -1221,6 +573,7 @@ mod tests {
             thread_ts: "1.0".into(),
             ts: ts.into(),
             user: "U2".into(),
+            team: None,
             text: "<@UBOT> go".into(),
         }
     }
@@ -1236,7 +589,7 @@ mod tests {
             { "type": "message", "bot_id": "B9", "text": "other bot", "ts": "4.0" },
             { "type": "file", "ts": "5.0" },
         ]});
-        let msgs = parse_replies(&resp);
+        let msgs = parse_replies(&resp, &["B1".into()]);
         assert_eq!(msgs.len(), 3);
         assert!(msgs[0].meta.is_none());
         let meta = msgs[1].meta.as_ref().unwrap();
@@ -1244,6 +597,20 @@ mod tests {
         assert_eq!(meta.message_id.as_deref(), Some("uuid-a1"));
         assert!(msgs[2].meta.is_none());
         assert_eq!(msgs[2].author.as_deref(), Some("B9"));
+    }
+
+    #[test]
+    fn our_own_unstamped_posts_are_not_conversation() {
+        // An in-flight stream has no stamp; it is not conversation.
+        let resp = serde_json::json!({ "ok": true, "messages": [
+            { "type": "message", "user": "U1", "text": "parent", "ts": "1.0" },
+            { "type": "message", "user": "UBOT", "bot_id": "B1", "text": "🔄 working", "ts": "2.0" },
+        ]});
+        let msgs = parse_replies(&resp, &["UBOT".into(), "B1".into()]);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].ts, "1.0");
+        // No identity: no filter.
+        assert_eq!(parse_replies(&resp, &[]).len(), 2);
     }
 
     #[test]
@@ -1284,14 +651,15 @@ mod tests {
 
     #[test]
     fn unstamped_and_duplicate_stamped_replies_do_not_duplicate() {
-        // An old-style stamp with no message id has nothing to anchor: skip.
+        // A stamp with no message id is skipped.
         let unmapped = SlackMsg {
             ts: "2.5".into(),
             author: Some("UBOT".into()),
             meta: Some(ReplyMeta::default()),
             text: "reply".into(),
+            blocks: Vec::new(),
         };
-        // A double post (pre-dedupe crash) stamps the same id twice: one node.
+        // A double post with the same id becomes one node.
         let thread = vec![
             unmapped,
             ours_msg("2.6", "uuid-a1", "how about: subs"),
@@ -1341,10 +709,10 @@ mod tests {
             serde_json::json!({ "decision": "deny" })
         );
 
-        // No message, nothing to render.
+        // No message: nothing to render.
         assert!(display_of(&serde_json::json!({ "custom": "x" })).is_none());
         assert!(display_of(&serde_json::json!(null)).is_none());
-        // Options are optional or unparseable: the message still renders.
+        // Bad options: the message still renders.
         assert!(display_of(&serde_json::json!({ "message": "hold" }))
             .unwrap()
             .options
@@ -1378,7 +746,7 @@ mod tests {
             serde_json::json!({ "interrupt_id": "int-1", "option": 0 })
         );
         assert_eq!(buttons[0]["style"], "primary");
-        // Unknown styles are dropped, not forwarded to Slack.
+        // Unknown styles are dropped.
         assert!(buttons[1].get("style").is_none());
         assert!(blocks[2]["elements"][0]["text"]
             .as_str()
@@ -1411,6 +779,7 @@ mod tests {
                 message_ts: "8.0".into(),
                 thread_ts: "5.0".into(),
                 message_text: "Run it?".into(),
+                message_blocks: Vec::new(),
             })
         );
         // A prompt on a top-level message anchors its own thread.
@@ -1424,10 +793,31 @@ mod tests {
         let mut wrong_type = payload.clone();
         wrong_type["type"] = "view_submission".into();
         assert_eq!(block_action(&wrong_type), None);
-        // A foreign button whose value isn't our coordinates is not a click.
+        // A foreign button value is not a click.
         let mut foreign = payload;
         foreign["actions"][0]["value"] = "not json".into();
         assert_eq!(block_action(&foreign), None);
+    }
+
+    #[test]
+    fn settling_spends_the_buttons_and_keeps_the_turn() {
+        // Keep the task cards when the buttons go.
+        let blocks = vec![
+            serde_json::json!({ "type": "task_card", "task_id": "tc1", "title": "search_web" }),
+            section_block("Run `send_email`?"),
+            serde_json::json!({ "type": "actions", "elements": [{ "type": "button" }] }),
+        ];
+        let settled = settled_blocks(&blocks, "Run `send_email`?", "✅ Approve — <@U9>");
+        assert_eq!(settled.len(), 3);
+        assert_eq!(settled[0]["type"], "task_card");
+        assert_eq!(settled[1]["type"], "section");
+        assert_eq!(settled[2]["elements"][0]["text"], "✅ Approve — <@U9>");
+        assert!(settled.iter().all(|b| b["type"] != "actions"));
+
+        // A message with no blocks still settles.
+        let bare = settled_blocks(&[], "Run it?", "✖ Cancelled");
+        assert_eq!(bare[0]["text"]["text"], "Run it?");
+        assert_eq!(bare[1]["elements"][0]["text"], "✖ Cancelled");
     }
 
     #[test]
@@ -1457,8 +847,7 @@ mod tests {
 
     #[test]
     fn prompt_posts_are_stamped_but_never_join_the_batch() {
-        // A prompt stamp has an interrupt id but no message id: nothing to
-        // anchor in the transcript, so batches skip it.
+        // A prompt stamp has no message id; batches skip it.
         let prompt_post = SlackMsg {
             ts: "6.0".into(),
             author: Some("UBOT".into()),
@@ -1468,6 +857,7 @@ mod tests {
                 ..Default::default()
             }),
             text: "Run it?".into(),
+            blocks: Vec::new(),
         };
         let batch = build_batch(&[], &[prompt_post], &mention_at("9.0"));
         assert_eq!(batch.len(), 1);
@@ -1475,12 +865,23 @@ mod tests {
     }
 
     #[test]
-    fn block_text_truncates_at_the_section_limit() {
-        assert_eq!(block_text("short"), "short");
-        let long = "é".repeat(3500);
-        let out = block_text(&long);
-        assert_eq!(out.chars().count(), 3000);
-        assert!(out.ends_with('…'));
+    fn text_is_clipped_to_each_slack_limit() {
+        assert_eq!(clip("short", MAX_FALLBACK), "short");
+        for max in [MAX_FALLBACK, MAX_MARKDOWN, MAX_SECTION] {
+            let out = clip(&"é".repeat(max + 500), max);
+            assert_eq!(out.chars().count(), max);
+            assert!(out.ends_with('…'));
+        }
+        // A section block clips at its own limit.
+        let long = "é".repeat(MAX_SECTION + 500);
+        assert_eq!(
+            section_block(&long)["text"]["text"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count(),
+            MAX_SECTION
+        );
     }
 
     #[test]

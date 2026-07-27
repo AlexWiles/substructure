@@ -15,11 +15,13 @@
 //! settles the turn's deferred `SessionDone`.
 //!
 //! A proposal is advice, not authority: the engine never applies one, so the
-//! worker remains the sole author of every decision. Triggers that need worker
-//! knowledge (`client.messages` — the LLM request is the agent's identity;
-//! `tool.execute` for a declared tool with valid arguments — the computation
-//! itself) carry no proposal, so a worker that echoes blindly fails fast
-//! instead of stalling the session.
+//! worker remains the sole author of every decision. `tool.execute` for a
+//! declared tool with valid arguments — the computation itself — needs worker
+//! knowledge and carries no proposal. `client.messages` needs the agent's
+//! identity: with a config the engine prompts the model per it; without one it
+//! proposes an interrupt (`agent.unconfigured`), so a worker that echoes
+//! blindly pauses the session loudly instead of settling the turn as a silent
+//! no-op.
 //!
 //! Like [`to_wire_trigger`](super::wire::to_wire_trigger), derivation is a pure
 //! function of state frozen while the decision is pending, so redeliveries carry
@@ -46,10 +48,13 @@ pub fn propose(
 ) -> Option<DecisionResponse> {
     match trigger {
         // The engine can now author the agent's identity: record the client's
-        // view and prompt the model per the config. No config ⇒ None (fail-fast).
+        // view and prompt the model per the config. No config ⇒ interrupt.
         DecisionTrigger::ClientTranscript {
             messages, client, ..
-        } => config.map(|c| client_turn(messages, c, client)),
+        } => Some(match config {
+            Some(c) => client_turn(messages, c, client),
+            None => unconfigured(messages),
+        }),
         DecisionTrigger::LlmFinished {
             ok: true,
             message: Some(message),
@@ -269,6 +274,25 @@ fn client_turn(
             handler: effective.handler.unwrap_or(Handler::Server),
         }],
         agent: merged,
+        ..Default::default()
+    }
+}
+
+/// Pause the session: with no config the engine cannot author the turn, and an
+/// echoed empty proposal would settle it as a silent no-op — the message
+/// recorded but never answered. The client view is still recorded.
+fn unconfigured(view: &[DraftMessage]) -> DecisionResponse {
+    DecisionResponse {
+        messages: view
+            .iter()
+            .filter(|m| m.role != Role::System)
+            .cloned()
+            .collect(),
+        actions: vec![DecisionAction::Interrupt {
+            interrupt_id: None,
+            reason: "no agent config: cannot author the turn".to_string(),
+            payload: serde_json::json!({ "type": "agent.unconfigured" }),
+        }],
         ..Default::default()
     }
 }
@@ -900,26 +924,17 @@ mod tests {
 
     #[test]
     fn must_answer_triggers_carry_no_proposal() {
-        let triggers = [
-            DecisionTrigger::ClientTranscript {
-                messages: vec![],
-                new_from: 0,
-                client: ClientContext::default(),
+        let trigger = DecisionTrigger::ToolExecute {
+            id: "tc-1".to_string(),
+            name: "get_time".to_string(),
+            arguments: "{}".to_string(),
+            input: ToolInput::Valid {
+                value: serde_json::json!({}),
             },
-            DecisionTrigger::ToolExecute {
-                id: "tc-1".to_string(),
-                name: "get_time".to_string(),
-                arguments: "{}".to_string(),
-                input: ToolInput::Valid {
-                    value: serde_json::json!({}),
-                },
-                attempt: 0,
-                deadline: None,
-            },
-        ];
-        for trigger in triggers {
-            assert!(propose(&trigger, &[], &HashMap::new(), 0, None, "d0").is_none());
-        }
+            attempt: 0,
+            deadline: None,
+        };
+        assert!(propose(&trigger, &[], &HashMap::new(), 0, None, "d0").is_none());
     }
 
     #[test]
@@ -1127,14 +1142,32 @@ mod tests {
     }
 
     #[test]
-    fn no_config_still_fails_fast_on_client_messages() {
-        let view = vec![DraftMessage::from(msg("u1", Role::User, "hi"))];
+    fn no_config_client_messages_propose_an_interrupt() {
+        let view = vec![
+            DraftMessage::from(msg("s1", Role::System, "injected")),
+            DraftMessage::from(msg("u1", Role::User, "hi")),
+        ];
         let trigger = DecisionTrigger::ClientTranscript {
             messages: view,
             new_from: 0,
             client: ClientContext::default(),
         };
-        assert!(propose(&trigger, &[], &HashMap::new(), 0, None, "d0").is_none());
+        let p = propose(&trigger, &[], &HashMap::new(), 0, None, "d0")
+            .expect("no config still proposes");
+        assert!(
+            p.messages.iter().all(|m| m.role != Role::System),
+            "client system message not recorded"
+        );
+        assert_eq!(p.messages.len(), 1, "records the client view");
+        match &p.actions[..] {
+            [DecisionAction::Interrupt {
+                reason, payload, ..
+            }] => {
+                assert!(reason.contains("no agent config"), "got reason {reason:?}");
+                assert_eq!(payload["type"], serde_json::json!("agent.unconfigured"));
+            }
+            other => panic!("expected one interrupt; got {other:?}"),
+        }
     }
 
     #[test]

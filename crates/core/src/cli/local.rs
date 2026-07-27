@@ -78,7 +78,10 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
     let slack = match slack_agent {
         Some(agent_id) => match SlackChannel::from_env(agent_id, DEFAULT_TENANT.to_string()) {
             Ok(s) => Some(s),
-            Err(()) => std::process::exit(2),
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(2)
+            }
         },
         None => None,
     };

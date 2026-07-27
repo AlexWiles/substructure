@@ -22,6 +22,7 @@ features:
   bot_user:
     display_name: substructure.ai
     always_online: true
+  agent_view: {}
 oauth_config:
   scopes:
     bot:
@@ -29,6 +30,7 @@ oauth_config:
       - app_mentions:read
       - channels:history
       - chat:write
+      - assistant:write
   pkce_enabled: false
 settings:
   event_subscriptions:
@@ -43,7 +45,9 @@ settings:
   is_mcp_enabled: false
 ```
 
-And get the app token and a bot token.
+And get the app token and a bot token. `agent_view` enables the Agents
+feature (the **Agents** tab in app settings), which adds `assistant:write` —
+what the bot needs to stream a turn's progress.
 
 ## Run
 
@@ -61,13 +65,58 @@ subs serve --dev --worker-url http://localhost:4444 --slack-agent my-agent
 | --- | --- |
 | Thread (channel or DM) | Session `slack:{channel}:{thread_ts}` |
 | Mention / DM message | One turn (`client.append`: the unseen thread delta) |
-| Reply | The turn result, posted to the thread |
+| Task card | A tool call or sub-agent run |
+| Reply | The turn result, closing the turn's message |
 
-The bot posts once, when the turn completes — no token streaming. An
-interrupt posts `Paused: {reason}`, or a button prompt (below). Every
+A turn is one message: it opens on the first task card, its tool calls stream
+in as more cards while it runs, and the result finalizes it. Until there is a
+card to show, the thread carries Slack's own status indicator instead
+([`assistant.threads.setStatus`](https://docs.slack.dev/reference/methods/assistant.threads.setStatus/)) —
+`substructure.ai is thinking…`, chrome rather than a message, and the same
+call in a DM as in a channel. It goes up the moment the mention lands,
+alongside the history fetch, and comes back down when the turn ends. Slack
+drops a status after two minutes, so a turn still thinking has it re-set.
+An interrupt closes the message early —
+`Paused: {reason}`, or a button prompt (below), lands in the message with
+the cards it interrupted, and work after the resume opens a fresh one. Every
 conversation is a thread: a top-level DM message (or unthreaded mention)
 starts one at its own ts, and follow-ups inside the thread continue that
 session.
+
+## Activity
+
+Each tool call and sub-agent run is a
+[task card](https://docs.slack.dev/reference/block-kit/blocks/task-card-block/)
+carrying its name, state and duration — collapsed by default, so a long run
+stays one line until expanded. Cards are keyed by the engine's call id, so a
+redelivered event sets a card rather than adding one. What the model says on
+its way to a call streams as its own text ahead of that call's card; a
+response with nothing left to call is the turn's answer, which the reply
+carries already.
+
+While the turn runs a card carries only its name, state and duration —
+Slack caps a streaming task chunk at 256 characters. When the turn finishes
+the message is rebuilt out of blocks, where a card's `details` and `output`
+are rich text: each call arrives with its arguments and its result.
+
+A message holds 50 blocks and 40,000 characters, and a card costs one block
+plus whatever it carries. A turn bigger than that gives up its oldest calls
+one at a time until the rest fit, and stands them on a single line —
+`… 253 earlier steps`. Every card that survives keeps everything it carried.
+Twenty-odd chatty calls exhaust the characters long before fifty calls
+exhaust the blocks; the streamed message carried all of them either way,
+only the rebuild has a budget to keep.
+
+Cards are derived from the event log, never accumulated: each append folds
+the turn's events and sends only what changed. Progress is best-effort — an
+append Slack refuses abandons the stream, and the turn's reply posts as its
+own message instead. The same fallback covers a restart mid-turn: a stream
+carries no metadata until `chat.stopStream`, so an interrupted process can't
+re-attach to one. The reply itself is unaffected, and still lands exactly
+once.
+
+Appends are paced at one per second across all sessions, so a burst of tool
+calls coalesces into the next tick.
 
 ## Interrupt prompts
 
@@ -116,8 +165,13 @@ resolution as its safe default, since a resume can also arrive from the API
 with any payload. Both shapes are typed in the protocol schema
 (`InterruptPayload`, `InterruptResolution`), so generated worker types
 include them.
-Once resumed — by a click, the API, or a timeout — the prompt message loses
-its buttons and shows the outcome. Prompt posts are stamped with their
+A prompt closes the turn's streaming message rather than holding a stream
+open behind it: an approval may wait indefinitely, and a stream may not.
+So the prompt sits under the cards that led to it, and the work that follows
+the resume streams into a new message.
+Once resumed — by a click, the API, or a timeout — the prompt loses its
+buttons and shows the outcome, cards and all: the edit drops the buttons
+and adds the outcome, and leaves every other block alone. Prompt posts are stamped with their
 interrupt id, so redeliveries dedupe and never join the transcript. Messages
 sent while a prompt is pending are not lost: they ride the thread delta into
 the next turn. See the
@@ -133,7 +187,9 @@ fetches only the thread past the highest recorded `slack:{ts}` id
 session at delivery, so a message that arrives while a turn is running lands
 after its reply instead of forking. Fetched messages record under
 `slack:{ts}`, so redeliveries reconcile instead of duplicating. Users
-appear as `<@U…>: text` user messages. The bot stamps each reply's Slack
+appear as `<@U…>: text` user messages; the bot's own unstamped posts (a
+stream still in flight) are skipped, so progress never reads as
+conversation. The bot stamps each reply's Slack
 metadata with the engine ids behind it (message, session, turn), so a fetch
 maps its own replies back to their recorded assistant nodes — skipped when
 already on the path, rebuilt in place when not: a lost database recovers the
@@ -148,6 +204,19 @@ event is acked only once its turn is recorded — Slack redelivers unacked
 events, and the turn id dedupes the replay. Before posting, the processor
 checks the thread for the turn's stamped reply, so a crash between post and
 checkpoint doesn't answer twice.
+
+## Reuse: webhooks and multiple workspaces
+
+The bot's behavior lives in `SlackBot`, resolved per workspace — Socket Mode
+is one thin transport over it. An embedding crate can run the same bot over
+the Events API instead: implement `WorkspaceResolver` (team → bot token,
+tenant, agent — one tenant per install, since `slack:{channel}:{ts}` ids are
+only unique per workspace), mount `webhook_router` (signature-verified
+`/events` and `/interactions`, `url_verification` answered), and call
+`SlackBot::start`. Behavior is identical by construction: both transports
+parse deliveries down to the same payloads and hand them to the same bot.
+Run exactly one `SlackBot` per process — the outbound processor keeps a
+single named checkpoint.
 
 ## Next
 

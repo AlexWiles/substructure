@@ -154,3 +154,206 @@ async fn extract(
         turn_id: meta.turn_id.clone(),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use chrono::Utc;
+    use tokio::sync::broadcast;
+
+    use super::extract;
+    use crate::protocol::{
+        AgentConfig, ClientMessage, ClientPayload, Content, DraftMessage, RetryPolicy, Role,
+        SessionOwner,
+    };
+    use crate::runtime::event_store::{
+        AppendInput, EventFilter, EventStore, GlobalPosition, StoreError,
+    };
+    use crate::runtime::session::command::CommandPayload;
+    use crate::runtime::session::events::EventPayload;
+    use crate::runtime::session::state::SessionState;
+    use crate::runtime::session::{CommitContext, NewSessionEvent, SessionAggregate, SessionEvent};
+    use crate::runtime::span::SpanContext;
+    use crate::runtime::Caller;
+
+    /// Read-only store serving one hydrated session, as `extract` loads it.
+    struct FrozenStore {
+        session: SessionAggregate,
+        events: broadcast::Sender<Arc<Vec<SessionEvent>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl EventStore for FrozenStore {
+        async fn append(&self, _input: AppendInput) -> Result<(), StoreError> {
+            Err(StoreError::Internal("read-only test store".into()))
+        }
+
+        async fn load(
+            &self,
+            _tenant_id: &str,
+            _session_id: &str,
+        ) -> Result<SessionAggregate, StoreError> {
+            Ok(self.session.clone())
+        }
+
+        async fn query_events(
+            &self,
+            _filter: &EventFilter,
+        ) -> Result<Vec<SessionEvent>, StoreError> {
+            Ok(vec![])
+        }
+
+        async fn max_global_position(&self) -> Result<GlobalPosition, StoreError> {
+            Ok(GlobalPosition(0))
+        }
+
+        fn subscribe(&self) -> broadcast::Receiver<Arc<Vec<SessionEvent>>> {
+            self.events.subscribe()
+        }
+    }
+
+    fn dispatch(
+        agg: &mut SessionAggregate,
+        cmd: CommandPayload,
+        caller: &Caller,
+    ) -> Vec<NewSessionEvent> {
+        let events = agg.state.handle(cmd, caller).expect("setup command failed");
+        agg.commit(
+            events,
+            &CommitContext {
+                span: SpanContext::root(),
+                occurred_at: Utc::now(),
+            },
+        )
+    }
+
+    fn system() -> Caller {
+        Caller::System {
+            tenant_id: "tenant-a".to_string(),
+        }
+    }
+
+    fn user_msg(text: &str) -> DraftMessage {
+        DraftMessage {
+            id: None,
+            role: Role::User,
+            content: Some(Content::Text(text.into())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    /// Drive a real session to a live client.message decision (session.start
+    /// settled with `agent`), run `extract` on its promotion event, and return
+    /// the serialized wire request.
+    async fn wire_request_for_client_message(agent: Option<AgentConfig>) -> serde_json::Value {
+        let mut agg = SessionAggregate::new(
+            "sess-1".to_string(),
+            "tenant-a".to_string(),
+            SessionState::new("sess-1".to_string()),
+        );
+        let created = dispatch(
+            &mut agg,
+            CommandPayload::CreateSession {
+                agent_id: "agent-1".to_string(),
+                owner: SessionOwner {
+                    tenant_id: "tenant-a".to_string(),
+                    id: Some("user-1".to_string()),
+                    metadata: HashMap::new(),
+                },
+                ancestry: vec![],
+                worker_retry: RetryPolicy::no_retry(),
+            },
+            &system(),
+        );
+        let start = created
+            .iter()
+            .find_map(|e| match &e.payload {
+                EventPayload::WorkerDecisionRequested(w) => Some(w.decision_id.clone()),
+                _ => None,
+            })
+            .expect("CreateSession opens a session.start decision");
+        dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: start,
+                transcript: vec![],
+                actions: vec![],
+                state: None,
+                agent,
+            },
+            &system(),
+        );
+        let event = dispatch(
+            &mut agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Message(ClientMessage {
+                    message: user_msg("hi"),
+                    stream: false,
+                }),
+                turn_id: None,
+            },
+            &system(),
+        )
+        .into_iter()
+        .find(|e| matches!(e.payload, EventPayload::WorkerDecisionRequested(_)))
+        .expect("the client decision goes live")
+        .into_event(GlobalPosition(1));
+
+        let store = FrozenStore {
+            session: agg,
+            events: broadcast::channel(1).0,
+        };
+        let req = extract(&store, event)
+            .await
+            .expect("extract succeeds")
+            .expect("a deliverable request");
+        serde_json::to_value(&req).expect("wire request serializes")
+    }
+
+    /// `proposed` is always present — but never a silent no-op. With no config
+    /// the engine cannot author the turn, and an empty proposal echoed by a
+    /// blind worker settles the decision as a no-op: the user's message is
+    /// dropped with no model call, no error, no terminal event. The proposal
+    /// for this case is an interrupt (worker-echoed, like `llm.failed`), so an
+    /// echoing worker pauses the session loudly instead.
+    #[tokio::test]
+    async fn no_config_client_message_proposes_an_interrupt() {
+        let wire = wire_request_for_client_message(None).await;
+        let actions = wire["proposed"]["actions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            actions.iter().any(|a| a["type"] == "interrupt"),
+            "with no config the proposal pauses the session so a blind echoer \
+             fails loudly instead of submitting a silent no-op; got {}",
+            wire["proposed"]
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_client_message_still_carries_a_proposal() {
+        let wire = wire_request_for_client_message(Some(AgentConfig {
+            format: None,
+            model: "m1".to_string(),
+            system: None,
+            stream: true,
+            handler: None,
+            retry: None,
+            tools: Vec::new(),
+            sub_agents: Vec::new(),
+        }))
+        .await;
+        assert!(
+            wire["proposed"]["actions"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty()),
+            "a configured client.message proposes the LLM continuation; got {}",
+            wire["proposed"]
+        );
+    }
+}
