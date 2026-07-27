@@ -48,6 +48,7 @@ impl WorkspaceResolver for StaticResolver {
         &self,
         _team_id: Option<&str>,
         _app_id: Option<&str>,
+        _channel: &str,
     ) -> Option<Arc<Workspace>> {
         Some(self.0.clone())
     }

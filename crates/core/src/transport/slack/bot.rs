@@ -67,11 +67,13 @@ struct Identity {
 pub trait WorkspaceResolver: Send + Sync {
     /// An install is a team and an app: one workspace can hold more than one
     /// of our apps, so the team alone is ambiguous. `app_id` is the event's
-    /// `api_app_id`.
+    /// `api_app_id`. `channel` is the event's channel, so one install can
+    /// serve a different tenant per channel.
     async fn by_install(
         &self,
         team_id: Option<&str>,
         app_id: Option<&str>,
+        channel: &str,
     ) -> Option<Arc<Workspace>>;
     async fn by_tenant(&self, tenant_id: &str) -> Option<Arc<Workspace>>;
 }
@@ -288,10 +290,11 @@ impl SlackBot {
         // The delivered workspace, not the asker's team.
         let team = payload["team_id"].as_str();
         let app = payload["api_app_id"].as_str();
-        let Some(ws) = self.resolver.by_install(team, app).await else {
+        let Some(ws) = self.resolver.by_install(team, app, &inbound.channel).await else {
             tracing::warn!(
                 team = %team.unwrap_or(""),
                 app = %app.unwrap_or(""),
+                channel = %inbound.channel,
                 "slack: event for unknown workspace"
             );
             return;
@@ -312,10 +315,11 @@ impl SlackBot {
             .as_str()
             .or_else(|| payload["user"]["team_id"].as_str());
         let app = payload["api_app_id"].as_str();
-        let Some(ws) = self.resolver.by_install(team, app).await else {
+        let Some(ws) = self.resolver.by_install(team, app, &click.channel).await else {
             tracing::warn!(
                 team = %team.unwrap_or(""),
                 app = %app.unwrap_or(""),
+                channel = %click.channel,
                 "slack: click for unknown workspace"
             );
             return;
