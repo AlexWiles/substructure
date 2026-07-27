@@ -96,8 +96,9 @@ fn verified(secret: &str, headers: &HeaderMap, body: &[u8], now: i64) -> bool {
     if (now - ts).abs() > MAX_SKEW_SECS {
         return false;
     }
-    let mut mac =
-        <Hmac<Sha256>>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+    let Ok(mut mac) = <Hmac<Sha256>>::new_from_slice(secret.as_bytes()) else {
+        return false;
+    };
     mac.update(format!("v0:{timestamp}:").as_bytes());
     mac.update(body);
     let expected = format!("v0={}", hex::encode(mac.finalize().into_bytes()));

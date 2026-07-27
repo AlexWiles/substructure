@@ -1,10 +1,12 @@
 mod activity;
 mod bot;
 mod socket;
+mod state;
 mod webhook;
 
 pub use bot::{SlackBot, Workspace, WorkspaceResolver};
 pub use socket::{MissingEnv, SlackChannel};
+pub use state::StreamStore;
 pub use webhook::webhook_router;
 
 use serde_json::Value;
@@ -105,6 +107,25 @@ struct SlackMsg {
     meta: Option<ReplyMeta>,
     text: String,
     blocks: Vec<Value>,
+}
+
+/// The last message of ours in `resp` with no reply stamp: an open stream's
+/// message, since a stamp only lands when a message settles.
+fn unstamped_ours(resp: &Value, ours: &[String]) -> Option<String> {
+    let messages = resp["messages"].as_array()?;
+    messages
+        .iter()
+        .filter(|m| {
+            m["type"].as_str() == Some("message")
+                && m["metadata"]["event_type"].as_str() != Some(REPLY_EVENT_TYPE)
+                && ["user", "bot_id"]
+                    .iter()
+                    .filter_map(|k| m[k].as_str())
+                    .any(|id| ours.iter().any(|o| o == id))
+        })
+        .filter_map(|m| m["ts"].as_str())
+        .next_back()
+        .map(str::to_string)
 }
 
 /// Thread messages. Drops subtyped messages and our own unstamped posts.
@@ -356,7 +377,7 @@ fn clip(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
     }
-    let cut: String = text.chars().take(max - 1).collect();
+    let cut: String = text.chars().take(max.saturating_sub(1)).collect();
     format!("{cut}…")
 }
 
@@ -597,6 +618,24 @@ mod tests {
         assert_eq!(meta.message_id.as_deref(), Some("uuid-a1"));
         assert!(msgs[2].meta.is_none());
         assert_eq!(msgs[2].author.as_deref(), Some("B9"));
+    }
+
+    #[test]
+    fn the_orphaned_stream_is_our_last_unstamped_message() {
+        let resp = serde_json::json!({ "ok": true, "messages": [
+            { "type": "message", "user": "U1", "text": "asker", "ts": "1.0" },
+            { "type": "message", "bot_id": "B1", "text": "old reply", "ts": "2.0",
+              "metadata": { "event_type": "substructure_reply", "event_payload": { "turn_id": "t0" } } },
+            { "type": "message", "bot_id": "B1", "text": "streaming…", "ts": "3.0" },
+            { "type": "message", "bot_id": "B9", "text": "other bot", "ts": "4.0" },
+        ]});
+        // The stamped reply and the foreign bot are not candidates.
+        assert_eq!(
+            unstamped_ours(&resp, &["B1".into()]),
+            Some("3.0".to_string())
+        );
+        // Without an identity nothing can be claimed.
+        assert_eq!(unstamped_ours(&resp, &[]), None);
     }
 
     #[test]

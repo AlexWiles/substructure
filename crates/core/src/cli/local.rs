@@ -23,7 +23,7 @@ use crate::transport::client_http::{self, ClientHttpState};
 use crate::transport::http_push::http_transport;
 use crate::transport::push::PushAdapter;
 use crate::transport::server::SubstructureServer;
-use crate::transport::slack::SlackChannel;
+use crate::transport::slack::{SlackChannel, StreamStore};
 use crate::transport::worker_http::{self, WorkerHttpState};
 use crate::worker::push::{PushRegistry, TransportRegistry};
 use crate::{start, Runtime, RuntimeConfig};
@@ -75,18 +75,22 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
         Ok(e) => e,
         Err(_) => std::process::exit(2),
     };
+    let db = SqliteDb::open(&db_path, std::time::Duration::from_secs(5))?;
     let slack = match slack_agent {
-        Some(agent_id) => match SlackChannel::from_env(agent_id, DEFAULT_TENANT.to_string()) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                eprintln!("error: {e}");
-                std::process::exit(2)
+        Some(agent_id) => {
+            let store = StreamStore::new(db.clone())?;
+            match SlackChannel::from_env(agent_id, DEFAULT_TENANT.to_string(), Some(store)) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(2)
+                }
             }
-        },
+        }
         None => None,
     };
 
-    let (rt, adapter) = start_engine(&db_path, env.provider).await?;
+    let (rt, adapter) = start_engine(db, env.provider).await?;
 
     let auth = match env.auth {
         Some(a) => AuthWiring::from_env(a)?,
@@ -160,11 +164,9 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
 /// started push adapter. Shared by `serve` (which then mounts HTTP routers) and
 /// `run` (which drives a single turn without any HTTP server).
 pub(crate) async fn start_engine(
-    db_path: &str,
+    db: SqliteDb,
     provider_env: Option<ProviderEnv>,
 ) -> anyhow::Result<(Arc<Runtime>, Arc<PushAdapter>)> {
-    let db = SqliteDb::open(db_path, std::time::Duration::from_secs(5))?;
-
     let event_store = Arc::new(SqliteEventStore::new(db.clone())?);
     let worker_queue = Arc::new(SqliteWorkerQueue::new(db.clone())?);
     let checkpoint_store = Arc::new(SqliteCheckpointStore::new(db.clone())?);

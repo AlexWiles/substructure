@@ -8,6 +8,7 @@ use super::pretty::PrettyPrinter;
 use super::{local, register_startup_worker, DEFAULT_TENANT};
 use crate::event_store::Seq;
 use crate::protocol::{ClientInput, SessionOwner};
+use crate::providers::sqlite::SqliteDb;
 use crate::session::events::EventPayload;
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use crate::span::SpanContext;
@@ -136,7 +137,8 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
         }
     }
 
-    let (rt, adapter) = local::start_engine(&args.db, env.provider).await?;
+    let db = SqliteDb::open(&args.db, std::time::Duration::from_secs(5))?;
+    let (rt, adapter) = local::start_engine(db, env.provider).await?;
 
     let worker_url = args
         .worker_url

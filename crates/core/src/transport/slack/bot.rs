@@ -1,15 +1,17 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 use serde_json::Value;
 use tokio::sync::Notify;
 
 use super::activity::{self, TurnActivity};
+use super::state::StreamStore;
 use super::{
     app_mention, block_action, build_batch, clip, display_of, dm_message, draft, prompt_blocks,
-    resolution_text, section_block, settled_blocks, slack_session, turn_result_text, with_footer,
-    Click, Inbound, ReplyMeta, MAX_FALLBACK, MAX_MARKDOWN, REPLY_EVENT_TYPE,
+    resolution_text, section_block, settled_blocks, slack_session, turn_result_text,
+    unstamped_ours, with_footer, Click, Inbound, ReplyMeta, MAX_FALLBACK, MAX_MARKDOWN,
+    REPLY_EVENT_TYPE,
 };
 use crate::event_store::Seq;
 use crate::processor::{EventProcessor, EventProcessorRunnerConfig, ProcessorError};
@@ -97,8 +99,9 @@ impl Thread {
     }
 }
 
-/// The live streaming message for the session's current turn. A restarted
-/// process cannot attach to an open stream.
+/// The live streaming message for the session's current turn. The durable
+/// half lives in [`StreamStore`]; a restarted process rebuilds this slot and
+/// keeps appending to the same message.
 #[derive(Clone)]
 struct Stream {
     tenant_id: String,
@@ -114,12 +117,19 @@ struct Stream {
     sent: HashMap<String, Value>,
     /// Slack rejected the stream. Post the reply instead.
     dead: bool,
+    /// The store row's version; the fence against a second writer.
+    version: u64,
 }
 
 impl Stream {
     fn key(&self) -> StreamKey {
         StreamKey::new(&self.tenant_id, &self.session_id)
     }
+}
+
+/// A poisoned lock guards only bookkeeping; keep serving.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// The open streams, and the sessions whose activity is not yet rendered.
@@ -132,36 +142,38 @@ struct Streams {
 
 impl Streams {
     fn insert(&self, stream: Stream) {
-        self.open.lock().unwrap().insert(stream.key(), stream);
+        lock(&self.open).insert(stream.key(), stream);
     }
 
     fn remove(&self, key: &StreamKey) {
-        self.open.lock().unwrap().remove(key);
+        lock(&self.open).remove(key);
     }
 
     /// Remove the slot; the worker cannot append after this.
     fn take(&self, key: &StreamKey) -> Option<Stream> {
-        self.open.lock().unwrap().remove(key).filter(|s| !s.dead)
+        lock(&self.open).remove(key).filter(|s| !s.dead)
     }
 
-    fn live(&self, key: &StreamKey) -> Option<Stream> {
-        self.open
-            .lock()
-            .unwrap()
-            .get(key)
-            .filter(|s| !s.dead)
-            .cloned()
+    fn get(&self, key: &StreamKey) -> Option<Stream> {
+        lock(&self.open).get(key).cloned()
     }
 
     fn kill(&self, key: &StreamKey) {
-        if let Some(stream) = self.open.lock().unwrap().get_mut(key) {
+        if let Some(stream) = lock(&self.open).get_mut(key) {
             stream.dead = true;
         }
     }
 
     /// Record what was sent, unless the turn ended during the append.
-    fn commit(&self, key: &StreamKey, turn_id: &str, ts: String, sent: Vec<(String, Value)>) {
-        let mut open = self.open.lock().unwrap();
+    fn commit(
+        &self,
+        key: &StreamKey,
+        turn_id: &str,
+        ts: String,
+        version: u64,
+        sent: Vec<(String, Value)>,
+    ) {
+        let mut open = lock(&self.open);
         let Some(stream) = open.get_mut(key) else {
             return;
         };
@@ -169,14 +181,13 @@ impl Streams {
             return;
         }
         stream.ts = Some(ts);
+        stream.version = version;
         stream.sent.extend(sent);
     }
 
     /// Live turns with no card yet.
     fn waiting(&self) -> Vec<StreamKey> {
-        self.open
-            .lock()
-            .unwrap()
+        lock(&self.open)
             .values()
             .filter(|s| !s.dead && s.ts.is_none())
             .map(Stream::key)
@@ -184,12 +195,12 @@ impl Streams {
     }
 
     fn mark_dirty(&self, key: StreamKey) {
-        self.dirty.lock().unwrap().insert(key);
+        lock(&self.dirty).insert(key);
         self.notify.notify_one();
     }
 
     fn take_dirty(&self) -> Option<StreamKey> {
-        let mut dirty = self.dirty.lock().unwrap();
+        let mut dirty = lock(&self.dirty);
         let key = dirty.iter().next().cloned()?;
         dirty.remove(&key);
         Some(key)
@@ -212,16 +223,24 @@ pub struct SlackBot {
     http: reqwest::Client,
     ctx: Arc<OnceLock<ChannelContext>>,
     streams: Arc<Streams>,
+    store: Option<Arc<StreamStore>>,
 }
 
 impl SlackBot {
-    pub fn new(resolver: Arc<dyn WorkspaceResolver>, api_base: String) -> Self {
+    /// `store` holds durable stream state: a restart resumes open streaming
+    /// messages in place. Without one a restart orphans them.
+    pub fn new(
+        resolver: Arc<dyn WorkspaceResolver>,
+        api_base: String,
+        store: Option<StreamStore>,
+    ) -> Self {
         Self {
             resolver,
             api_base,
             http: reqwest::Client::new(),
             ctx: Arc::new(OnceLock::new()),
             streams: Arc::new(Streams::default()),
+            store: store.map(Arc::new),
         }
     }
 
@@ -317,6 +336,18 @@ impl SlackBot {
         thread: &Thread,
         oldest: Option<&str>,
     ) -> Result<Vec<super::SlackMsg>, Error> {
+        let resp = self.fetch_replies_raw(ws, thread, oldest).await?;
+        let ours = self.identity(ws).await.map_or(&[][..], |i| &i.ours);
+        Ok(super::parse_replies(&resp, ours))
+    }
+
+    /// One raw `conversations.replies` page after `oldest` (exclusive).
+    async fn fetch_replies_raw(
+        &self,
+        ws: &Workspace,
+        thread: &Thread,
+        oldest: Option<&str>,
+    ) -> Result<Value, Error> {
         let (channel, thread_ts) = (&thread.channel, &thread.ts);
         let mut url = format!(
             "{}/conversations.replies?channel={channel}&ts={thread_ts}&limit=200&include_all_metadata=true",
@@ -338,8 +369,7 @@ impl SlackBot {
         if resp["ok"].as_bool() != Some(true) {
             return Err(Error::from_response(&resp));
         }
-        let ours = self.identity(ws).await.map_or(&[][..], |i| &i.ours);
-        Ok(super::parse_replies(&resp, ours))
+        Ok(resp)
     }
 
     /// The session's active path, or empty.
@@ -740,7 +770,10 @@ impl EventProcessor for SlackBot {
             return Ok(());
         };
         let thread = Thread::new(channel_id, thread_ts);
-        self.track(&event);
+        // The row lands before the checkpoint commits: a lost write replays.
+        if let Err(e) = self.track(&ws, &event).await {
+            return Err(ProcessorError::Apply(e.to_string()));
+        }
         // Clear the indicator before the final message.
         if matches!(
             &event.payload,
@@ -750,16 +783,36 @@ impl EventProcessor for SlackBot {
         }
         let result = match &event.payload {
             EventPayload::TurnCompleted(t) => {
-                self.complete_turn(&ws, &thread, &event.session_id, t, event.occurred_at)
-                    .await
+                self.complete_turn(
+                    &ws,
+                    &thread,
+                    &event.session_id,
+                    t,
+                    event.occurred_at,
+                    event.seq,
+                )
+                .await
             }
             EventPayload::SessionInterrupted(p) => {
-                self.post_interrupt(&ws, &thread, &event.session_id, p)
+                self.post_interrupt(&ws, &thread, &event.session_id, p, event.seq)
                     .await
             }
             EventPayload::InterruptResumed(p) => self.settle_prompt(&ws, &thread, p).await,
             _ => return Ok(()),
         };
+        // The turn is settled (or undeliverable) either way: drop its row.
+        if matches!(result, Ok(()) | Err(Error::Terminal(_))) {
+            if let (EventPayload::TurnCompleted(t), Some(store)) =
+                (&event.payload, self.store.as_deref())
+            {
+                if let Err(e) = store
+                    .clear_turn(&event.tenant_id, &event.session_id, &t.turn_id)
+                    .await
+                {
+                    tracing::warn!(session_id = %event.session_id, error = %e, "slack: stream state not cleared");
+                }
+            }
+        }
         match result {
             Ok(()) => Ok(()),
             // A terminal error must not block the processor.
@@ -773,7 +826,8 @@ impl EventProcessor for SlackBot {
 }
 
 impl SlackBot {
-    /// Post the answer into the live stream, or as a new message.
+    /// Post the answer into the live stream, or as a new message. A lost
+    /// slot (restart, failover) is rebuilt from the store first.
     async fn complete_turn(
         &self,
         ws: &Workspace,
@@ -781,11 +835,16 @@ impl SlackBot {
         session_id: &str,
         t: &crate::session::events::TurnCompleted,
         at: chrono::DateTime<chrono::Utc>,
+        seq: u64,
     ) -> Result<(), Error> {
-        let live = self
-            .streams
-            .take(&StreamKey::new(&ws.tenant_id, session_id))
-            .filter(|s| s.turn_id == t.turn_id);
+        let key = StreamKey::new(&ws.tenant_id, session_id);
+        let live = match self.streams.take(&key).filter(|s| s.turn_id == t.turn_id) {
+            Some(live) => Some(live),
+            None => self
+                .recover(ws, &key, seq)
+                .await
+                .filter(|s| s.turn_id == t.turn_id),
+        };
         let footer = live.as_ref().map(|s| activity::elapsed(s.started_at, at));
         let Some(ts) = live.as_ref().and_then(|s| s.ts.clone()) else {
             return self
@@ -821,6 +880,25 @@ impl SlackBot {
                     }
                 }
                 Ok(())
+            }
+            // The stream is gone (expired, or already stopped) but the
+            // message remains: finalize it in place, not as an orphan.
+            Err(e) if e.code() == "message_not_in_streaming_state" => {
+                let blocks = self
+                    .expanded_blocks(ws, live.as_ref(), &answer, footer.as_deref())
+                    .await
+                    .unwrap_or_else(|| vec![section_block(&text)]);
+                match self
+                    .update(ws, &thread.channel, &ts, &text, blocks, &meta)
+                    .await
+                {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        tracing::warn!(error = %e, %session_id, "slack: in-place finalize failed; posting reply");
+                        self.post_turn(ws, thread, session_id, t, footer.as_deref())
+                            .await
+                    }
+                }
             }
             // Do not lose the answer to a bad stream.
             Err(e) => {
@@ -892,6 +970,7 @@ impl SlackBot {
         thread: &Thread,
         session_id: &str,
         p: &crate::session::events::SessionInterrupted,
+        seq: u64,
     ) -> Result<(), Error> {
         if let Ok(replies) = self.fetch_thread(ws, thread, None).await {
             if replies.iter().any(|m| {
@@ -918,22 +997,38 @@ impl SlackBot {
             }
         };
         // A prompt can wait for a long time; do not hold the stream open.
-        let open = self
-            .streams
-            .take(&StreamKey::new(&ws.tenant_id, session_id));
-        if let Some(ts) = open.as_ref().and_then(|s| s.ts.as_deref()) {
-            let chunk = serde_json::json!({ "type": "blocks", "blocks": blocks.clone() });
-            match self
-                .stop_stream(ws, &thread.channel, ts, chunk, &meta)
-                .await
-            {
-                Ok(()) => return Ok(()),
-                Err(e) => {
-                    tracing::warn!(error = %e, %session_id, "slack: prompt into stream failed; posting it")
+        let key = StreamKey::new(&ws.tenant_id, session_id);
+        let open = match self.streams.take(&key) {
+            Some(open) => Some(open),
+            None => self.recover(ws, &key, seq).await,
+        };
+        let posted = 'post: {
+            if let Some(ts) = open.as_ref().and_then(|s| s.ts.as_deref()) {
+                let chunk = serde_json::json!({ "type": "blocks", "blocks": blocks.clone() });
+                match self
+                    .stop_stream(ws, &thread.channel, ts, chunk, &meta)
+                    .await
+                {
+                    Ok(()) => break 'post Ok(()),
+                    Err(e) => {
+                        tracing::warn!(error = %e, %session_id, "slack: prompt into stream failed; posting it")
+                    }
+                }
+            }
+            self.post_blocks(ws, thread, &text, blocks, &meta).await
+        };
+        // The prompt owns the message now; the stream row is spent.
+        if posted.is_ok() {
+            if let (Some(store), Some(open)) = (self.store.as_deref(), &open) {
+                if let Err(e) = store
+                    .clear_turn(&ws.tenant_id, session_id, &open.turn_id)
+                    .await
+                {
+                    tracing::warn!(%session_id, error = %e, "slack: stream state not cleared");
                 }
             }
         }
-        self.post_blocks(ws, thread, &text, blocks, &meta).await
+        posted
     }
 
     /// Remove the prompt's buttons and add the outcome. Best-effort.
@@ -968,7 +1063,9 @@ impl SlackBot {
 
 /// Activity: events mark a session dirty; one worker renders the cards.
 impl SlackBot {
-    fn track(&self, event: &SessionEvent) {
+    /// Track the turn's slot; durable when a store is attached. A store
+    /// failure is retryable so the row always lands before the checkpoint.
+    async fn track(&self, ws: &Workspace, event: &SessionEvent) -> Result<(), Error> {
         let key = StreamKey::new(&event.tenant_id, &event.session_id);
         match &event.payload {
             EventPayload::TurnStarted(t) => {
@@ -978,7 +1075,7 @@ impl SlackBot {
                     .and_then(|id| id.strip_prefix("slack:"))
                     .map(str::to_string);
                 let recipient_team = owner.and_then(|o| o.metadata.get("slack_team")).cloned();
-                self.streams.insert(Stream {
+                let mut stream = Stream {
                     tenant_id: event.tenant_id.clone(),
                     session_id: event.session_id.clone(),
                     turn_id: t.turn_id.clone(),
@@ -989,7 +1086,29 @@ impl SlackBot {
                     ts: None,
                     sent: HashMap::new(),
                     dead: false,
-                });
+                    version: 0,
+                };
+                if let Some(store) = self.store.as_deref() {
+                    let slot = store
+                        .upsert_turn(
+                            &event.tenant_id,
+                            &event.session_id,
+                            &t.turn_id,
+                            event.seq,
+                            event.occurred_at,
+                        )
+                        .await
+                        .map_err(|e| Error::Retryable(e.to_string()))?;
+                    stream.version = slot.version;
+                    // A replayed start after a restart: pick the open
+                    // stream back up instead of opening a second one.
+                    if slot.resumed {
+                        if let Some(recovered) = self.recover(ws, &key, event.seq).await {
+                            stream = recovered;
+                        }
+                    }
+                }
+                self.streams.insert(stream);
             }
             EventPayload::ToolCallRequested(_)
             | EventPayload::ToolCallCompleted(_)
@@ -1000,11 +1119,17 @@ impl SlackBot {
             // A cancelled turn frees its slot.
             EventPayload::SessionCancelled => {
                 self.streams.remove(&key);
-                return;
+                if let Some(store) = self.store.as_deref() {
+                    if let Err(e) = store.clear(&event.tenant_id, &event.session_id).await {
+                        tracing::warn!(session_id = %event.session_id, error = %e, "slack: stream state not cleared");
+                    }
+                }
+                return Ok(());
             }
-            _ => return,
+            _ => return Ok(()),
         }
         self.streams.mark_dirty(key);
+        Ok(())
     }
 
     /// One worker; the tick is the global append budget.
@@ -1051,8 +1176,18 @@ impl SlackBot {
             return;
         };
         let thread = Thread::new(channel, thread_ts);
-        let Some(open) = self.streams.live(key) else {
-            return;
+        // A missing slot after a restart rebuilds from the store; a dead
+        // one stays dead.
+        let open = match self.streams.get(key) {
+            Some(open) if open.dead => return,
+            Some(open) => open,
+            None => match self.recover(ws, key, u64::MAX).await {
+                Some(recovered) => {
+                    self.streams.insert(recovered.clone());
+                    recovered
+                }
+                None => return,
+            },
         };
         let caller = Caller::System {
             tenant_id: ws.tenant_id.clone(),
@@ -1083,26 +1218,42 @@ impl SlackBot {
             return;
         }
 
-        let ts = match open.ts {
-            Some(ts) => ts,
-            None => match self
-                .start_stream(
-                    ws,
-                    &thread,
-                    open.recipient.as_deref(),
-                    open.recipient_team.as_deref(),
-                )
-                .await
-            {
-                Ok(ts) => ts,
-                Err(e) => return self.kill_stream(key, e),
-            },
+        let (ts, version) = match open.ts.clone() {
+            Some(ts) => (ts, open.version),
+            None => {
+                let ts = match self
+                    .start_stream(
+                        ws,
+                        &thread,
+                        open.recipient.as_deref(),
+                        open.recipient_team.as_deref(),
+                    )
+                    .await
+                {
+                    Ok(ts) => ts,
+                    Err(e) => return self.kill_stream(key, e),
+                };
+                match self.persist_ts(&open, &ts).await {
+                    TsPersist::Kept(version) => (ts, version),
+                    // Another writer opened this turn's stream first.
+                    TsPersist::Adopted(theirs, version) => {
+                        self.delete_message(ws, channel, &ts).await;
+                        (theirs, version)
+                    }
+                    TsPersist::TurnOver => {
+                        self.delete_message(ws, channel, &ts).await;
+                        self.streams.remove(key);
+                        return;
+                    }
+                }
+            }
         };
         let chunks = changed.iter().map(|(_, c)| c.clone()).collect();
         if let Err(e) = self.append_stream(ws, channel, &ts, chunks).await {
             return self.kill_stream(key, e);
         }
-        self.streams.commit(key, &open.turn_id, ts, changed);
+        self.streams
+            .commit(key, &open.turn_id, ts, version, changed);
     }
 
     /// The finished turn rendered as blocks, ready to replace the stream.
@@ -1135,6 +1286,177 @@ impl SlackBot {
         tracing::warn!(error = %error, session_id = %key.session_id, "slack: activity stream failed");
         self.streams.kill(key);
     }
+
+    /// Rebuild a lost slot from its durable row: the log replays the cards,
+    /// the row carries the message. `before` bounds the staleness scan; the
+    /// caller's own redelivered event sits at it.
+    async fn recover(&self, ws: &Workspace, key: &StreamKey, before: u64) -> Option<Stream> {
+        let (store, ctx) = (self.store.as_deref()?, self.ctx.get()?);
+        let row = store
+            .load(&key.tenant_id, &key.session_id)
+            .await
+            .ok()
+            .flatten()?;
+        let caller = Caller::System {
+            tenant_id: key.tenant_id.clone(),
+        };
+        let events = ctx
+            .read_session_events(&caller, &key.session_id, Some(Seq(row.start_seq)), None)
+            .await
+            .ok()?;
+        for event in events.iter().filter(|e| e.seq < before) {
+            match &event.payload {
+                // The turn is over; the row is leftover.
+                EventPayload::TurnStarted(_) | EventPayload::SessionCancelled => {
+                    let _ = store
+                        .clear_turn(&key.tenant_id, &key.session_id, &row.turn_id)
+                        .await;
+                    return None;
+                }
+                EventPayload::TurnCompleted(t) if t.turn_id == row.turn_id => {
+                    let _ = store
+                        .clear_turn(&key.tenant_id, &key.session_id, &row.turn_id)
+                        .await;
+                    return None;
+                }
+                // A prompt may own the message now; never write over it.
+                EventPayload::SessionInterrupted(_) => return None,
+                _ => {}
+            }
+        }
+        // Cards set by id and can repeat; only appended text cannot. Seed
+        // it as sent — a chunk lost mid-crash reappears at finalize.
+        let sent: HashMap<String, Value> = TurnActivity::fold(&events, Some(row.turn_id.clone()))
+            .map(|turn| {
+                turn.chunks()
+                    .into_iter()
+                    .filter(|(id, _)| id.starts_with("say:"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let owner = events.iter().rev().find_map(|e| e.meta.owner.as_ref());
+        let recipient = owner
+            .and_then(|o| o.id.as_deref())
+            .and_then(|id| id.strip_prefix("slack:"))
+            .map(str::to_string);
+        let recipient_team = owner.and_then(|o| o.metadata.get("slack_team")).cloned();
+        let mut stream = Stream {
+            tenant_id: key.tenant_id.clone(),
+            session_id: key.session_id.clone(),
+            turn_id: row.turn_id,
+            start_seq: row.start_seq,
+            started_at: row.started_at,
+            recipient,
+            recipient_team,
+            ts: row.ts,
+            sent,
+            dead: false,
+            version: row.version,
+        };
+        if stream.ts.is_none() {
+            self.heal_ts(ws, key, &mut stream).await;
+        }
+        Some(stream)
+    }
+
+    /// A crash can beat the record after `chat.startStream`. The thread
+    /// knows: stamps land only when a message settles, so the orphan is our
+    /// last unstamped message after the turn's trigger.
+    async fn heal_ts(&self, ws: &Workspace, key: &StreamKey, stream: &mut Stream) {
+        let Some((_, trigger)) = slack_session(&stream.turn_id) else {
+            return;
+        };
+        let Some((channel, thread_ts)) = slack_session(&key.session_id) else {
+            return;
+        };
+        let thread = Thread::new(channel, thread_ts);
+        let Ok(resp) = self.fetch_replies_raw(ws, &thread, Some(trigger)).await else {
+            return;
+        };
+        let ours = self
+            .identity(ws)
+            .await
+            .map(|i| i.ours.clone())
+            .unwrap_or_default();
+        let Some(ts) = unstamped_ours(&resp, &ours) else {
+            return;
+        };
+        if let Some(store) = self.store.as_deref() {
+            let recorded = store
+                .set_ts(
+                    &key.tenant_id,
+                    &key.session_id,
+                    &stream.turn_id,
+                    &ts,
+                    stream.version,
+                )
+                .await;
+            if matches!(recorded, Ok(true)) {
+                stream.version += 1;
+            }
+        }
+        stream.ts = Some(ts);
+    }
+
+    /// Record the new stream's ts. Losing the version fence means another
+    /// writer opened one first; theirs comes back.
+    async fn persist_ts(&self, open: &Stream, ts: &str) -> TsPersist {
+        let Some(store) = self.store.as_deref() else {
+            return TsPersist::Kept(open.version);
+        };
+        let mut expected = open.version;
+        for _ in 0..2 {
+            match store
+                .set_ts(
+                    &open.tenant_id,
+                    &open.session_id,
+                    &open.turn_id,
+                    ts,
+                    expected,
+                )
+                .await
+            {
+                Ok(true) => return TsPersist::Kept(expected + 1),
+                Ok(false) => match store.load(&open.tenant_id, &open.session_id).await {
+                    Ok(Some(row)) if row.turn_id == open.turn_id => match row.ts {
+                        Some(theirs) if theirs != ts => {
+                            return TsPersist::Adopted(theirs, row.version)
+                        }
+                        Some(_) => return TsPersist::Kept(row.version),
+                        None => expected = row.version,
+                    },
+                    Ok(_) => return TsPersist::TurnOver,
+                    Err(e) => {
+                        tracing::warn!(session_id = %open.session_id, error = %e, "slack: stream ts unrecorded");
+                        return TsPersist::Kept(open.version);
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(session_id = %open.session_id, error = %e, "slack: stream ts unrecorded");
+                    return TsPersist::Kept(open.version);
+                }
+            }
+        }
+        TsPersist::Kept(expected)
+    }
+
+    /// Remove a message we should not have kept. Best-effort.
+    async fn delete_message(&self, ws: &Workspace, channel: &str, ts: &str) {
+        let body = serde_json::json!({ "channel": channel, "ts": ts });
+        if let Err(e) = self.api_call(ws, "chat.delete", body).await {
+            tracing::warn!(error = %e, "slack: duplicate stream not deleted");
+        }
+    }
+}
+
+/// How recording a fresh stream's ts settled.
+enum TsPersist {
+    /// Ours, at this row version.
+    Kept(u64),
+    /// A concurrent writer won; use their message.
+    Adopted(String, u64),
+    /// The row is gone or re-owned: the turn ended under us.
+    TurnOver,
 }
 
 #[derive(Debug, thiserror::Error)]
