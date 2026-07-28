@@ -17,7 +17,7 @@ each raw stream chunk goes back as an `llm.token.delta`, and the final
 completion answers the `llm.result` verbatim. No translation code in the
 worker.
 
-The engine can also call OpenRouter itself (`subs run --provider openrouter`);
+The engine can also call OpenRouter itself (`subs run --llm-provider openrouter`);
 run it on the worker instead when you want to hold the key, pick models per
 request, or add headers the engine doesn't know about.
 
@@ -39,7 +39,7 @@ npm install
 node server.ts
 ```
 
-**2. Send a message with the CLI** (no `--provider`, the worker owns the LLM):
+**2. Send a message with the CLI** (no `--llm-provider`, the worker owns the LLM):
 
 ```sh
 subs run \

@@ -62,10 +62,16 @@ pub async fn run(cmd: LinkCommand) -> Result<()> {
         }
     };
 
+    // Relinking rewrites the file, so everything link does not own — the
+    // connections and engine settings for this tree — is carried across.
+    let existing = project_config::load_explicit(&target)
+        .map(|f| f.config)
+        .unwrap_or_default();
     let project = ProjectConfig {
         org: Some(org.clone()),
         app: app.clone(),
         url: cmd.globals.url.clone(),
+        ..existing
     };
     project_config::write(&target, &project)?;
 

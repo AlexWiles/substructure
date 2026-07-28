@@ -6,6 +6,8 @@ use uuid::Uuid;
 
 use super::decision::{LlmHandler, ToolHandler, Trigger};
 use super::events::*;
+use crate::connectors::{filter, RemoteTool};
+use crate::protocol::{ConnectorTool, Handler};
 use rust_decimal::Decimal;
 
 use crate::protocol::{
@@ -168,6 +170,9 @@ pub struct ToolCallState {
     pub tracking: EffectTracking,
     #[serde(default)]
     pub handler: ToolHandler,
+    /// The connection and remote name for a `Server` call; `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<ConnectorTarget>,
     /// Original arguments, stored for retries and crash recovery.
     #[serde(default)]
     pub arguments: String,
@@ -196,6 +201,45 @@ pub struct SubAgentCallState {
     /// The active head when the effect was first requested; retries keep it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<String>,
+}
+
+/// One connection's fetched tool list.
+///
+/// Unanchored, and deliberately not rewound with the tree: what a connection
+/// offered at a sequence is a fact about the remote, not about a branch. So a
+/// fork back to an older head reuses the offer instead of refetching, the same
+/// way the call maps stay current across a rewind.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorSyncState {
+    pub connection_id: String,
+    pub tracking: EffectTracking,
+    /// Every tool the connection offered, unfiltered. Empty until it settles.
+    #[serde(default)]
+    pub tools: Vec<RemoteTool>,
+    /// The prefix its tools expand under, frozen at fetch time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    /// Why the last attempt failed; `Some` only while the fetch is unsettled or
+    /// terminally failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub needs_reauth: bool,
+}
+
+impl ConnectorSyncState {
+    /// Whether the offer is usable — settled, and settled successfully.
+    pub fn is_ready(&self) -> bool {
+        self.tracking.status == EffectStatus::Completed
+    }
+
+    /// Whether the fetch is still going to produce something.
+    pub fn is_in_flight(&self) -> bool {
+        matches!(
+            self.tracking.status,
+            EffectStatus::Pending | EffectStatus::RetryScheduled
+        )
+    }
 }
 
 /// Anchored worker-state write; current state is resolved, not stored.
@@ -448,6 +492,13 @@ pub struct SessionState {
     pub sub_agent_calls: HashMap<String, SubAgentCallState>,
     pub worker_decisions: HashMap<String, WorkerDecisionState>,
 
+    /// Fetched tool lists, keyed by connection id. Keyed on the connection
+    /// rather than on the agent version that asked for it, so a config rewritten
+    /// for unrelated reasons — a client tool appearing, a branch switch — costs
+    /// no round trip.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub connector_syncs: HashMap<String, ConnectorSyncState>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
 
@@ -499,6 +550,7 @@ impl SessionState {
             tool_calls: HashMap::new(),
             sub_agent_calls: HashMap::new(),
             worker_decisions: HashMap::new(),
+            connector_syncs: HashMap::new(),
             turn_id: None,
             completed_turn_ids: Vec::new(),
             finalizing: None,
@@ -596,6 +648,7 @@ impl SessionState {
                             name: payload.name.clone(),
                             tracking: EffectTracking::new(payload.retry.clone(), now),
                             handler: payload.handler,
+                            target: payload.target.clone(),
                             arguments: payload.arguments.clone(),
                             result: None,
                             is_error: false,
@@ -754,9 +807,44 @@ impl SessionState {
                         .as_ref()
                         .and_then(|sid| self.sub_agent_calls.get_mut(sid))
                         .map(|c| &mut c.tracking),
+                    // A fetch belongs to the connection, not to the branch that
+                    // asked for it, so a fork never abandons one.
+                    EffectKind::ConnectorSync => None,
                 };
                 if let Some(tracking) = tracking {
                     tracking.status = EffectStatus::Failed;
+                }
+            }
+            EventPayload::ConnectorSyncRequested(p) => {
+                let entry = self
+                    .connector_syncs
+                    .entry(p.connection_id.clone())
+                    .or_insert_with(|| ConnectorSyncState {
+                        connection_id: p.connection_id.clone(),
+                        tracking: EffectTracking::new(p.retry.clone(), now),
+                        tools: Vec::new(),
+                        prefix: None,
+                        error: None,
+                        needs_reauth: false,
+                    });
+                // A retry re-arms the same entry rather than starting a new one:
+                // one connection, one fetch, however many attempts.
+                entry.tracking.reset_pending(now);
+            }
+            EventPayload::ConnectorSyncCompleted(p) => {
+                if let Some(sync) = self.connector_syncs.get_mut(&p.connection_id) {
+                    sync.tracking.complete();
+                    sync.tools = p.tools.clone();
+                    sync.prefix = p.prefix.clone();
+                    sync.error = None;
+                    sync.needs_reauth = false;
+                }
+            }
+            EventPayload::ConnectorSyncErrored(p) => {
+                if let Some(sync) = self.connector_syncs.get_mut(&p.connection_id) {
+                    sync.tracking.record_error(p.retryable, now);
+                    sync.error = Some(p.error.clone());
+                    sync.needs_reauth = p.needs_reauth;
                 }
             }
             // Append-only, like the tree: `resolve_on_path` scans newest-first,
@@ -975,6 +1063,13 @@ impl SessionState {
                     .filter(|c| !self.anchor_parked(c.anchor.as_deref()))
                     .filter_map(|c| c.tracking.earliest_wake()),
             )
+            // Unanchored, so never parked: a hung fetch must still time out, or
+            // the decisions waiting on it park forever.
+            .chain(
+                self.connector_syncs
+                    .values()
+                    .filter_map(|c| c.tracking.earliest_wake()),
+            )
             .chain(
                 self.worker_decisions
                     .values()
@@ -1017,6 +1112,101 @@ impl SessionState {
         resolve_on_path(&self.state_versions, &on_path)
             .map(|v| v.state.clone())
             .unwrap_or_default()
+    }
+
+    /// Where a call to `name` runs, per the config in force on the current path.
+    ///
+    /// Derived rather than declared: a tool the config marks `handler: client`
+    /// runs on the client, a name a connector resolved runs on the engine, and
+    /// everything else — including a name nothing declares — runs on the worker,
+    /// which is where an undeclared name gets its contract error.
+    ///
+    /// A declared tool is checked first, matching `merge`: a name the config
+    /// claims is never taken by a connector.
+    pub fn tool_handler_for(&self, name: &str) -> ToolHandler {
+        let config = self.resolve_agent_for(self.head_id.as_deref());
+        match config.as_ref().and_then(|c| c.tool(name)) {
+            Some(t) => match t.handler {
+                Some(Handler::Client) => ToolHandler::Client,
+                _ => ToolHandler::Worker,
+            },
+            None if self.connector_tool_for(name).is_some() => ToolHandler::Server,
+            None => ToolHandler::Worker,
+        }
+    }
+
+    /// The connector tool `name` resolves to on the current path, if any. The
+    /// executor reads `connector`/`remote_name` off this to place the call.
+    pub fn connector_tool_for(&self, name: &str) -> Option<ConnectorTool> {
+        self.connector_tools(self.head_id.as_deref())
+            .tools
+            .into_iter()
+            .find(|t| t.name == name)
+    }
+
+    /// The connector tools in force on the path to `leaf`, derived by filtering
+    /// each fetched offer through the config's `McpServer` entry.
+    ///
+    /// Pure, and recomputed rather than stored: the offer is the recorded fact,
+    /// so editing a filter or flipping `prefix_tools` re-derives without another
+    /// round trip. `collisions` reports every name dropped for clashing with a
+    /// declared tool, a sub-agent, or another connector.
+    pub fn connector_tools(&self, leaf: Option<&str>) -> filter::Merged {
+        let Some(config) = self.resolve_agent_for(leaf) else {
+            return filter::Merged {
+                tools: Vec::new(),
+                collisions: Vec::new(),
+            };
+        };
+        self.connector_tools_for_config(&config)
+    }
+
+    pub fn connector_tools_for_config(&self, config: &AgentConfig) -> filter::Merged {
+        let resolutions = config.mcp.iter().filter_map(|connector| {
+            let sync = self.connector_syncs.get(&connector.id)?;
+            sync.is_ready()
+                .then(|| filter::resolve(connector, &sync.tools, sync.prefix.as_deref()))
+        });
+        let taken: Vec<&str> = config
+            .tools
+            .iter()
+            .map(|t| t.name.as_str())
+            .chain(config.sub_agents.iter().map(|s| s.id.as_str()))
+            .collect();
+        filter::merge(resolutions, taken)
+    }
+
+    /// Connections the config in force on `leaf` names but has never fetched.
+    /// Each needs a `connector.sync.requested` before the model can be prompted.
+    pub fn unsynced_connectors(&self, leaf: Option<&str>) -> Vec<String> {
+        let Some(config) = self.resolve_agent_for(leaf) else {
+            return Vec::new();
+        };
+        config
+            .mcp
+            .iter()
+            .filter(|c| !self.connector_syncs.contains_key(&c.id))
+            .map(|c| c.id.clone())
+            .collect()
+    }
+
+    /// Whether a fetch the config on `leaf` depends on is still unsettled. A
+    /// decision that would prompt the model parks behind this, the same way it
+    /// parks behind an unsettled `session.start` — the config names a connection
+    /// whose tools are not known yet, so the turn cannot be authored against it.
+    ///
+    /// A terminally failed fetch is settled, so it never parks anything: the
+    /// engine unblocks and the worker decides whether a missing connector is
+    /// fatal.
+    pub fn has_pending_connector_sync(&self, leaf: Option<&str>) -> bool {
+        let Some(config) = self.resolve_agent_for(leaf) else {
+            return false;
+        };
+        config.mcp.iter().any(|c| {
+            self.connector_syncs
+                .get(&c.id)
+                .is_some_and(ConnectorSyncState::is_in_flight)
+        })
     }
 
     /// Newest agent config whose anchor is on the path to `leaf`; unanchored matches
@@ -1096,6 +1286,20 @@ impl SessionState {
             let mut e = envelope(&c.call_id, EffectKind::LlmCall, &c.tracking, &c.anchor);
             e.handler = Some(c.handler.into());
             e.stream = Some(c.stream);
+            effects.push(e);
+        }
+
+        // Surfaced so a worker sees a fetch in flight rather than inferring it
+        // from a decision that has not arrived. Unanchored: a fetch belongs to
+        // the connection, not to a branch.
+        for c in self.connector_syncs.values().filter(|c| c.is_in_flight()) {
+            let mut e = envelope(
+                &c.connection_id,
+                EffectKind::ConnectorSync,
+                &c.tracking,
+                &None,
+            );
+            e.name = Some(c.connection_id.clone());
             effects.push(e);
         }
 
@@ -1502,6 +1706,7 @@ mod agent_version_tests {
             retry: None,
             tools: Vec::new(),
             sub_agents: Vec::new(),
+            mcp: Vec::new(),
         }
     }
 

@@ -197,7 +197,6 @@ type Action =
           id?: string             // omitted: the engine mints one
           name: string
           arguments: unknown
-          handler?: "worker" | "client"  // default worker
           retry?: RetryPolicy     // default: no retry
       }
     | {
@@ -263,6 +262,7 @@ type AgentConfig = {
     retry?: RetryPolicy
     tools?: AgentTool[]
     sub_agents?: SubAgent[]
+    mcp?: McpServer[]
 }
 
 type AgentTool = {
@@ -277,6 +277,19 @@ type AgentTool = {
 type SubAgent = {
     id: string                  // the agent to spawn, and the tool name the model sees
     description?: string
+}
+
+type McpServer = {
+    id: string                  // a connection the engine holds; never a URL
+    tools?: McpTools            // omitted: every tool the connection grants
+}
+
+type McpTools = {
+    include?: string[]          // globs over the tool's name on the connection
+    exclude?: string[]
+    read_only?: boolean         // capability predicates read MCP annotations;
+    non_destructive?: boolean   // an unannotated tool fails them
+    idempotent?: boolean
 }
 
 type RetryPolicy = {

@@ -34,7 +34,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 subs run \
     --worker-url http://localhost:4444 \
     --agent my-agent \
-    --provider anthropic \
+    --llm-provider anthropic \
     --output pretty \
     --input '{"type":"client.message","message":{"role":"user","content": "what files are in this directory?"}}'
 ```

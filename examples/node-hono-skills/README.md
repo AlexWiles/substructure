@@ -40,7 +40,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 subs run \
     --worker-url http://localhost:4444 \
     --agent skills \
-    --provider anthropic \
+    --llm-provider anthropic \
     --output pretty \
     --session skills-demo \
     --input '{"type":"client.message","message":{"role":"user","content":"how far is 42 km in miles?"}}'

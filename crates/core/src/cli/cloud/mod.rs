@@ -10,7 +10,7 @@ pub mod open;
 pub mod orgs;
 mod pickers;
 mod print;
-mod project_config;
+pub(crate) mod project_config;
 pub mod sessions;
 pub mod telemetry;
 pub mod webhook;

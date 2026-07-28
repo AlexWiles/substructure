@@ -1,0 +1,16 @@
+{
+    "name": "@substructure.ai/example-node-hono-connectors",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "start": "node server.mjs",
+        "mcp": "node mcp-server.mjs"
+    },
+    "dependencies": {
+        "@hono/node-server": "2.0.8",
+        "@modelcontextprotocol/sdk": "1.29.0",
+        "express": "5.1.0",
+        "hono": "4.12.28",
+        "zod": "3.25.76"
+    }
+}

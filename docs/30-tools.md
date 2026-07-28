@@ -162,7 +162,6 @@ type ToolCall = {
     id?: string                 // omitted: the engine mints one
     name: string
     arguments: unknown
-    handler?: "worker" | "client"  // default worker
     retry?: RetryPolicy         // default: no retry
 }
 
@@ -187,8 +186,12 @@ type ToolError = {
 ### `tool.call`
 
 Dispatch a tool call. The engine proposes these for the model's calls, and
-your worker can issue one directly. `handler` routes it to your `worker` or
-the `client`; `retry` bounds the attempts.
+your worker can issue one directly. `retry` bounds the attempts.
+
+Where the call runs follows from its name: a tool you declared `handler:
+"client"` runs on the client, anything else runs on your worker. The engine
+resolves this against the config in force and freezes it onto the call, so a
+config change can't reroute a call already in flight.
 
 ### `tool.result`
 
@@ -208,4 +211,5 @@ Full types in [Protocol](./150-protocol.md).
 
 - [Client-side tools](./90-client-tools.md): tools that run in the browser.
 - [Sub-agents](./80-sub-agents.md): delegation as a tool call.
+- [Connectors](./85-connectors.md): tools the engine runs against a service.
 - [Retries](./120-retries.md): timeouts and backoff.

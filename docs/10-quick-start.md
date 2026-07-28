@@ -64,7 +64,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 subs run \
     --worker-url http://localhost:4444 \
     --agent my-agent \
-    --provider anthropic \
+    --llm-provider anthropic \
     --output pretty \
     --input '{"type":"client.message","message":{"role":"user","content": "hi"}}'
 ```
@@ -112,7 +112,7 @@ Restart the worker and ask a question that needs the tool:
 subs run \
     --worker-url http://localhost:4444 \
     --agent my-agent \
-    --provider anthropic \
+    --llm-provider anthropic \
     --output pretty \
     --input '{"type":"client.message","message":{"role":"user","content": "what time is it?"}}'
 ```
@@ -137,7 +137,7 @@ subs run \
     --session <session-id> \
     --worker-url http://localhost:4444 \
     --agent my-agent \
-    --provider anthropic \
+    --llm-provider anthropic \
     --output pretty \
     --input '{"type":"client.message","message":{"role":"user","content": "what was my first question?"}}'
 ```
@@ -207,7 +207,7 @@ conversation that uses both:
 subs run \
     --worker-url http://localhost:4444 \
     --agent my-agent \
-    --provider anthropic \
+    --llm-provider anthropic \
     --output pretty \
     --input '{"type":"client.message","message":{"role":"user","content": "what time is it? have the poet write a haiku about it"}}'
 ```

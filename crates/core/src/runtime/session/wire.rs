@@ -180,6 +180,19 @@ fn tool_handler(h: Handler, surface: &'static str) -> Result<ToolHandler, Resolv
         })
 }
 
+/// A tool a worker declares runs on the worker or the client, never on the
+/// engine. Engine-executed tools come from a connector, which the worker names
+/// by id in `connectors`, so `server` here is always a mistake.
+fn declared_tool_handler(h: Handler) -> Result<ToolHandler, ResolveError> {
+    match h {
+        Handler::Server => Err(ResolveError::InvalidHandler {
+            surface: "a declared tool",
+            handler: h.as_str(),
+        }),
+        _ => tool_handler(h, "a declared tool"),
+    }
+}
+
 fn llm_handler(h: Handler) -> Result<LlmHandler, ResolveError> {
     h.try_into()
         .map_err(|h: Handler| ResolveError::InvalidHandler {
@@ -273,7 +286,7 @@ pub fn resolve_response(
         }
         for t in &cfg.tools {
             if let Some(h) = t.handler {
-                tool_handler(h, "a declared tool")?;
+                declared_tool_handler(h)?;
             }
         }
     }
@@ -351,13 +364,11 @@ fn lower_actions(
                     id,
                     name,
                     arguments,
-                    handler,
                     retry,
                 } => Action::CallTool {
                     id: id.unwrap_or_else(new_call_id),
                     name,
                     arguments: result_to_string(arguments),
-                    handler: tool_handler(handler, "tool.call")?,
                     retry,
                 },
                 DecisionAction::ToolResult {
@@ -657,7 +668,6 @@ mod tests {
                 id: None,
                 name: "do_thing".to_string(),
                 arguments: serde_json::json!({}),
-                handler: Handler::Worker,
                 retry: RetryPolicy::no_retry(),
             }],
             None,
@@ -671,25 +681,6 @@ mod tests {
 
     #[test]
     fn the_invalid_handler_pairing_is_rejected_at_the_seam() {
-        let err = resolve_test_actions(
-            vec![DecisionAction::CallTool {
-                id: None,
-                name: "do_thing".to_string(),
-                arguments: serde_json::json!({}),
-                handler: Handler::Server,
-                retry: RetryPolicy::no_retry(),
-            }],
-            None,
-        )
-        .unwrap_err();
-        assert_eq!(
-            err,
-            ResolveError::InvalidHandler {
-                surface: "tool.call",
-                handler: "server"
-            }
-        );
-
         let mut call = bare_llm_call();
         if let DecisionAction::CallLlm { handler, model, .. } = &mut call {
             *handler = Handler::Client;
@@ -731,7 +722,8 @@ mod tests {
             ResolveError::InvalidHandler {
                 surface: "a declared tool",
                 handler: "server"
-            }
+            },
+            "engine-executed tools come from a connector, never from a declaration"
         );
     }
 
@@ -1044,6 +1036,7 @@ mod tests {
             retry: None,
             tools: Vec::new(),
             sub_agents: Vec::new(),
+            mcp: Vec::new(),
         }
     }
 
@@ -1552,10 +1545,7 @@ mod tests {
             }
         ));
         match &actions[1] {
-            DecisionAction::CallTool {
-                handler, arguments, ..
-            } => {
-                assert!(matches!(handler, Handler::Worker));
+            DecisionAction::CallTool { arguments, .. } => {
                 assert_eq!(
                     arguments,
                     &serde_json::json!({"city":"NYC"}),

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -5,10 +6,31 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::cli::env::LlmProviderArg;
+use crate::connectors::registry::ConnectionSpec;
+use crate::protocol::ConnectorProtocol;
+
 pub const FILENAME: &str = "substructure.toml";
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-#[serde(default)]
+/// A project's settings: which cloud app it targets, what `subs run` and `subs
+/// serve` would otherwise take on argv, and the connections a local engine can
+/// reach.
+///
+/// Precedence for anything the CLI also accepts as a flag is
+/// **flag > environment > this > default**, so pinning something here never
+/// takes an override away.
+///
+/// Per-invocation arguments are deliberately absent: `--input`, `--session`, and
+/// `--config` itself say what one run is doing, not how the project is set up.
+/// Secrets are absent for the same reason they are absent from `[mcp]` —
+/// a committed file must not be able to hold one, so the signing secret is named
+/// rather than written.
+///
+/// `deny_unknown_fields` so a misspelled key is a parse error rather than a
+/// setting that silently does nothing. `connectors` is declared last because
+/// TOML puts every bare key above the first table.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct ProjectConfig {
     pub org: Option<String>,
     pub app: Option<String>,
@@ -17,6 +39,79 @@ pub struct ProjectConfig {
     /// commands unless a `--url` flag or `$SUBS_API_URL` overrides it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Worker endpoint the engine POSTs decisions to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_url: Option<String>,
+    /// LLM provider for engine-executed calls: `anthropic`, `openai`, `openrouter`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub llm_provider: Option<LlmProviderArg>,
+    /// SQLite database path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub db: Option<String>,
+    /// Default agent id for `subs run`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// Output mode for `subs run`: `ag-ui`, `jsonl`, or `pretty`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// Environment variable holding the worker signing secret. Named, never
+    /// written — same rule as a connection's `token_env`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signing_secret_env: Option<String>,
+    /// Log filter for `subs run` and `subs serve`, in `RUST_LOG` syntax:
+    /// a bare level (`info`) or per-target directives
+    /// (`substructure_core=debug,warn`). `$RUST_LOG` still wins.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log: Option<String>,
+    /// Bind address for `subs serve`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// Disable client and worker authentication. Local development only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dev: Option<bool>,
+    /// Agent id for the Slack Socket Mode bot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slack_agent: Option<String>,
+    /// MCP servers a local engine can reach, keyed by the id an agent config
+    /// names. The cloud reads these from its own registry instead; the agent
+    /// config is identical either way.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub mcp: BTreeMap<String, ConnectionSpec>,
+}
+
+impl ProjectConfig {
+    /// Every connection this project declares, keyed by the id an agent names.
+    ///
+    /// The one place the per-protocol sections become one registry, and so the
+    /// one place a second protocol is added: `[a2a]` folds in here with its own
+    /// `ConnectorProtocol`, and ids must stay unique across sections because an
+    /// agent references a bare id and tool names are prefixed from it. With a
+    /// single section today a duplicate cannot be expressed, so there is nothing
+    /// yet to reject.
+    pub fn connections(&self) -> BTreeMap<String, ConnectionSpec> {
+        self.mcp
+            .iter()
+            .map(|(id, spec)| {
+                let spec = ConnectionSpec {
+                    protocol: ConnectorProtocol::Mcp,
+                    ..spec.clone()
+                };
+                (id.clone(), spec)
+            })
+            .collect()
+    }
+}
+
+/// The project file for `path`, or the nearest one above the working directory.
+/// An explicit path that does not resolve is an error; discovery finding nothing
+/// is not.
+pub fn resolve(path: Option<&Path>) -> Result<Option<ProjectConfig>> {
+    match path {
+        Some(p) => load_explicit(p).map(|f| Some(f.config)),
+        None => find().map(|f| f.map(|f| f.config)),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +178,80 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("subs-project-test-{nanos}-{seq}"));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn settings_parse_from_the_top_level() {
+        let cfg: ProjectConfig = toml::from_str(
+            r#"
+            org = "acme"
+            worker_url = "http://localhost:4444"
+            llm_provider = "anthropic"
+            port = 9000
+            dev = true
+            log = "substructure_core=debug,warn"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.worker_url.as_deref(), Some("http://localhost:4444"));
+        assert_eq!(cfg.llm_provider, Some(LlmProviderArg::Anthropic));
+        assert_eq!(cfg.port, Some(9000));
+        assert_eq!(cfg.dev, Some(true));
+        assert_eq!(cfg.log.as_deref(), Some("substructure_core=debug,warn"));
+        // Absent is absent, not a default the flag would then have to beat.
+        assert_eq!(cfg.db, None);
+        assert_eq!(cfg.host, None);
+    }
+
+    #[test]
+    fn unset_settings_are_not_written_back() {
+        let cfg: ProjectConfig = toml::from_str("org = \"acme\"\n").unwrap();
+        let out = toml::to_string_pretty(&cfg).unwrap();
+        assert_eq!(out.trim(), "org = \"acme\"", "got {out}");
+    }
+
+    #[test]
+    fn mcp_serializes_after_the_bare_keys() {
+        // TOML puts every bare key above the first table, so a setting declared
+        // after `mcp` would be written inside `[mcp.x]`.
+        let cfg: ProjectConfig = toml::from_str(
+            "org = \"acme\"\nport = 9000\n\n[mcp.sentry]\nurl = \"https://x/mcp\"\n",
+        )
+        .unwrap();
+        let out = toml::to_string_pretty(&cfg).unwrap();
+        let round: ProjectConfig = toml::from_str(&out).unwrap();
+        assert_eq!(round, cfg, "written back as {out}");
+    }
+
+    #[test]
+    fn a_misspelled_key_is_a_parse_error_not_a_silent_no_op() {
+        let err = toml::from_str::<ProjectConfig>(
+            r#"
+            worker_uri = "http://localhost:4444"
+        "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("worker_uri"), "got {err}");
+    }
+
+    #[test]
+    fn an_inline_signing_secret_is_a_parse_error() {
+        let err = toml::from_str::<ProjectConfig>(
+            r#"
+            signing_secret = "s3cret"
+        "#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("signing_secret"),
+            "a committed file must not be able to hold a secret; got {err}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_config_path_that_is_missing_is_an_error() {
+        let missing = tmpdir().join("nope.toml");
+        assert!(resolve(Some(&missing)).is_err());
     }
 
     #[test]

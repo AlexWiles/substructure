@@ -29,7 +29,7 @@ pip install -r requirements.txt
 python3 main.py
 ```
 
-**2. Send a message with the CLI** (no `--provider`, the worker owns the LLM):
+**2. Send a message with the CLI** (no `--llm-provider`, the worker owns the LLM):
 
 ```sh
 subs run \

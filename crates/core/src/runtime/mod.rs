@@ -6,11 +6,13 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::connectors::registry::Connections;
 use crate::protocol::{
     ClientAction, ClientAppend, ClientInput, ClientMessage, ClientMessages, ClientPayload,
     ErrorCode, InterruptResumption, SessionOwner, TokenDelta,
 };
 use crate::providers::memory_queue::TaskQueue;
+use connector::{spawn_connector_dispatch_processor, spawn_connector_task_executor, ConnectorTask};
 use event_store::{EventFilter, EventStore, Seq, StoreError};
 use llm::{
     spawn_llm_dispatch_processor, spawn_llm_task_executor, LlmProviderTrait, LlmTask,
@@ -35,6 +37,7 @@ use worker::spawn_worker_processor;
 use worker::{DequeueFilter, FailDecision, SubmitDecision, WorkerDecisionRequest, WorkerQueue};
 
 mod caller;
+pub mod connector;
 pub mod event_store;
 pub mod llm;
 pub mod processor;
@@ -50,6 +53,7 @@ pub use caller::Caller;
 pub struct RuntimeConfig {
     pub llm_executor_workers: usize,
     pub sub_agent_executor_workers: usize,
+    pub connector_executor_workers: usize,
     pub wake_poll_interval: std::time::Duration,
     pub shutdown_timeout: std::time::Duration,
     pub worker_retry_resolver: Arc<dyn WorkerRetryResolver>,
@@ -60,6 +64,7 @@ impl Default for RuntimeConfig {
         Self {
             llm_executor_workers: 4,
             sub_agent_executor_workers: 2,
+            connector_executor_workers: 2,
             wake_poll_interval: std::time::Duration::from_secs(30),
             shutdown_timeout: std::time::Duration::from_secs(5),
             worker_retry_resolver: Arc::new(DefaultWorkerRetryResolver),
@@ -762,6 +767,8 @@ pub fn start(
     llm_provider: Option<Arc<dyn LlmProviderTrait>>,
     llm_task_queue: Arc<dyn TaskQueue<LlmTask>>,
     sub_agent_task_queue: Arc<dyn TaskQueue<SubAgentTask>>,
+    connections: Option<Arc<Connections>>,
+    connector_task_queue: Arc<dyn TaskQueue<ConnectorTask>>,
     worker_queue: Arc<dyn WorkerQueue>,
     session_index_store: Arc<dyn SessionIndexStore>,
     checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
@@ -788,6 +795,25 @@ pub fn start(
             llm_task_queue,
             token_delta_transport.clone(),
             config.llm_executor_workers,
+            cancel.clone(),
+        ));
+    }
+
+    // McpServer work only exists where connections are configured; with none,
+    // nothing can name one, so the subsystem is skipped entirely.
+    let mut connector_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    if let Some(connections) = connections {
+        connector_handles.push(spawn_connector_dispatch_processor(
+            store.clone(),
+            checkpoint_store.clone(),
+            connector_task_queue.clone(),
+            cancel.clone(),
+        ));
+        connector_handles.extend(spawn_connector_task_executor(
+            store.clone(),
+            connections,
+            connector_task_queue,
+            config.connector_executor_workers,
             cancel.clone(),
         ));
     }
@@ -847,6 +873,7 @@ pub fn start(
         wake_dispatcher_handle,
     ];
     handles.extend(llm_handles);
+    handles.extend(connector_handles);
     handles.extend(sub_agent_executor_handles);
 
     Arc::new(Runtime {

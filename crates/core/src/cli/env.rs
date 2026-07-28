@@ -1,6 +1,8 @@
 use clap::ValueEnum;
+use serde::{Deserialize, Serialize};
 
-#[derive(Copy, Clone, ValueEnum)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum LlmProviderArg {
     Openrouter,
     Anthropic,

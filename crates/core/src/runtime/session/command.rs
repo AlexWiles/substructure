@@ -6,8 +6,11 @@ use rust_decimal::Decimal;
 use super::decision::{Action, LlmHandler, ToolHandler, Trigger};
 use super::events::*;
 use super::reconcile::{landing_leaf, plan_reconcile};
-use super::state::{json_to_string, new_call_id, EffectTracking, SessionState, SessionStatus};
+use super::state::{
+    json_to_string, new_call_id, ConnectorSyncState, EffectTracking, SessionState, SessionStatus,
+};
 use super::tool_contract::{declared_tool, output_violation, DeclaredTool};
+use crate::connectors::{filter, RemoteTool};
 use crate::protocol::{
     AgentConfig, ClientAppend, ClientContext, ClientMessage, ClientMessages, ClientPayload,
     Content, ContentPart, DraftMessage, EffectStatus, ErrorCode, ImageUrl, InterruptOrigin,
@@ -60,7 +63,6 @@ pub enum CommandPayload {
         tool_call_id: String,
         name: String,
         arguments: String,
-        handler: ToolHandler,
         retry: RetryPolicy,
     },
     CompleteToolCall {
@@ -73,6 +75,19 @@ pub enum CommandPayload {
         attempt: Option<u32>,
         error: String,
         retryable: bool,
+    },
+    CompleteConnectorSync {
+        connection_id: String,
+        attempt: Option<u32>,
+        prefix: Option<String>,
+        tools: Vec<RemoteTool>,
+    },
+    FailConnectorSync {
+        connection_id: String,
+        attempt: Option<u32>,
+        error: String,
+        retryable: bool,
+        needs_reauth: bool,
     },
     RequestSubAgent {
         session_id: String,
@@ -623,6 +638,7 @@ impl SessionState {
     ) -> Vec<EventPayload> {
         let parked = self.has_pending_worker_decision()
             || self.has_unsettled_session_start()
+            || self.connectors_unready(batch, gate_leaf)
             || self.active_interrupt_for(gate_leaf).is_some()
             || batch
                 .iter()
@@ -638,6 +654,176 @@ impl SessionState {
             ));
         }
         events
+    }
+
+    /// Whether a connection the config in force names has not settled. A
+    /// decision that would prompt the model parks behind this: the config names
+    /// tools the engine has not fetched, so the turn cannot be authored against
+    /// it yet. The same sentence as `has_unsettled_session_start`, one level down.
+    ///
+    /// Also checks the batch, because the config write that introduces a
+    /// connector emits its fetch in the same batch — invisible to `self`, which
+    /// is the pre-batch state.
+    ///
+    /// **Every site that emits `WorkerDecisionRequested` must consult this.**
+    /// There are five, and they do not share a guard: `emit_decision_request_at`,
+    /// the promotion pass in `SubmitWorkerDecision`, `release_decisions`, the
+    /// resume in `ResumeInterrupt`, and both loops in `handle_wake`. Waiting is
+    /// always bounded — a fetch carries a deadline and always settles, failed if
+    /// nothing else — so blocking on this can delay a decision but never strand
+    /// one.
+    fn connectors_unready(&self, batch: &[EventPayload], leaf: Option<&str>) -> bool {
+        self.has_pending_connector_sync(leaf)
+            || batch
+                .iter()
+                .any(|e| matches!(e, EventPayload::ConnectorSyncRequested(_)))
+    }
+
+    /// Append the connector tools in force to a request's tool list.
+    ///
+    /// Done here rather than where the request is authored, because both authors
+    /// need it and neither can do it: the engine's proposal builds tools from
+    /// `tools_as_llm`, and a worker hand-authoring a call cannot name a connector
+    /// tool it has never seen. The agent declared the connector, so its tools are
+    /// part of every call that config authorizes.
+    ///
+    /// Resolved against the pre-batch state, so a connector takes effect from the
+    /// decision after the one declaring it — by then its fetch has settled, which
+    /// is what the decision gate is for.
+    fn with_connector_tools(&self, request: LlmRequest) -> LlmRequest {
+        let connector_tools = self.connector_tools(self.head_id.as_deref()).tools;
+        if connector_tools.is_empty() {
+            return request;
+        }
+        let mut tools = request.tools.unwrap_or_default();
+        // Skip what the request already offers. A re-prompt is built from the
+        // previous call's stored spec, which already carries these, and every
+        // provider rejects a duplicate tool name.
+        for tool in &connector_tools {
+            if !tools.iter().any(|t| t.name == tool.name) {
+                tools.push(tool.to_llm_tool());
+            }
+        }
+        LlmRequest {
+            tools: Some(tools),
+            ..request
+        }
+    }
+
+    /// The in-flight fetch `connection_id` names, fenced against a stale
+    /// executor the same way a tool or LLM settle is.
+    fn check_connector_sync(
+        &self,
+        connection_id: &str,
+        attempt: Option<u32>,
+    ) -> Result<&ConnectorSyncState, SessionError> {
+        let sync = self
+            .connector_syncs
+            .get(connection_id)
+            .ok_or(SessionError::EffectNotFound)?;
+        if sync.tracking.status != EffectStatus::Pending {
+            return Err(SessionError::EffectNotPending);
+        }
+        if attempt.is_some_and(|a| a != sync.tracking.retry.attempts) {
+            return Err(SessionError::EffectAttemptMismatch);
+        }
+        Ok(sync)
+    }
+
+    /// Report what the filter did to a fresh offer.
+    ///
+    /// Logged once per fetch rather than carried on every decision: these are
+    /// facts about the config, identical on every turn, and a worker cannot act
+    /// on them anyway — an `include` that matches nothing is a typo for whoever
+    /// wrote the config, not a runtime condition for the agent to handle.
+    fn report_filter(&self, connection_id: &str, offered: &[RemoteTool], prefix: Option<&str>) {
+        let Some(connector) = self
+            .resolve_agent_for(self.head_id.as_deref())
+            .and_then(|c| c.mcp.into_iter().find(|c| c.id == connection_id))
+        else {
+            return;
+        };
+        let r = filter::resolve(&connector, offered, prefix);
+        tracing::info!(
+            connection = %connection_id,
+            offered = r.offered,
+            resolved = r.tools.len(),
+            "fetched connector tools"
+        );
+        if !r.unmatched_include.is_empty() {
+            tracing::warn!(
+                connection = %connection_id,
+                patterns = ?r.unmatched_include,
+                "connector include patterns matched no tool"
+            );
+        }
+        if !r.oversized.is_empty() {
+            tracing::warn!(
+                connection = %connection_id,
+                tools = ?r.oversized,
+                "connector tool names too long to offer; shorten the connection id or turn off prefixing"
+            );
+        }
+        if r.unannotated > 0 {
+            tracing::warn!(
+                connection = %connection_id,
+                count = r.unannotated,
+                "connector tools dropped for carrying no annotation to test"
+            );
+        }
+    }
+
+    /// Promote the next queued decision now that a fetch settled, if nothing
+    /// else parks it. `batch` carries the settling events, which `self` — the
+    /// pre-batch state — cannot see.
+    fn release_decisions(&self, batch: &[EventPayload]) -> Vec<EventPayload> {
+        let settled: std::collections::HashSet<&str> = batch
+            .iter()
+            .filter_map(|e| match e {
+                EventPayload::ConnectorSyncCompleted(p) => Some(p.connection_id.as_str()),
+                EventPayload::ConnectorSyncErrored(p) => Some(p.connection_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        if self.has_pending_worker_decision() || self.has_unsettled_session_start() {
+            return Vec::new();
+        }
+        // Still waiting on a sibling connection: the config needs all of them.
+        let waiting = self
+            .connector_syncs
+            .values()
+            .any(|s| s.is_in_flight() && !settled.contains(s.connection_id.as_str()));
+        if waiting {
+            return Vec::new();
+        }
+        self.queued_decisions()
+            .into_iter()
+            .find(|d| !self.decision_parked(&d.trigger))
+            .map(|d| {
+                EventPayload::WorkerDecisionRequested(WorkerDecisionRequested {
+                    decision_id: d.decision_id.clone(),
+                })
+            })
+            .into_iter()
+            .collect()
+    }
+
+    /// Fetch every connection `config` names that this session has never fetched.
+    /// Keyed on the connection, so a config rewritten for unrelated reasons —
+    /// client tools appearing, a branch switch — costs nothing.
+    fn sync_connectors(&self, config: &AgentConfig) -> Vec<EventPayload> {
+        config
+            .mcp
+            .iter()
+            .filter(|c| !self.connector_syncs.contains_key(&c.id))
+            .map(|c| {
+                EventPayload::ConnectorSyncRequested(ConnectorSyncRequested {
+                    connection_id: c.id.clone(),
+                    attempt: 0,
+                    retry: RetryPolicy::connector_default(),
+                })
+            })
+            .collect()
     }
 
     /// A failed `session.start` left the session with no config, so the client's
@@ -981,6 +1167,7 @@ impl SessionState {
                             .collect(),
                         ..request
                     };
+                    let request = self.with_connector_tools(request);
                     let mut events = vec![EventPayload::LlmCallRequested(LlmCallRequested {
                         call_id: call_id.clone(),
                         attempt: 0,
@@ -1136,14 +1323,24 @@ impl SessionState {
                 Ok(events)
             }
 
+            // Where a tool call runs follows from its name against the config in
+            // force, resolved once here and frozen onto the call — a later config
+            // change must not reroute a call already in flight.
             CommandPayload::RequestToolCall {
                 tool_call_id,
                 name,
                 arguments,
-                handler,
                 retry,
             } => {
                 Self::ensure_internal(caller)?;
+                let handler = self.tool_handler_for(&name);
+                // Resolved once, here, and frozen onto the call with its
+                // handler: a later config or fetch must not reroute a call
+                // already in flight.
+                let target = self.connector_tool_for(&name).map(|t| ConnectorTarget {
+                    connector: t.connector,
+                    remote_name: t.remote_name,
+                });
                 match self.tool_calls.get(&tool_call_id) {
                     Some(_) => Ok(vec![]),
                     None => {
@@ -1153,6 +1350,7 @@ impl SessionState {
                             name: name.clone(),
                             arguments: arguments.clone(),
                             handler,
+                            target,
                             retry: retry.clone(),
                         })];
                         if handler == ToolHandler::Worker {
@@ -1254,6 +1452,71 @@ impl SessionState {
                 if exhausted {
                     let settle = self.emit_tool_result(&events, tool_call_id, name, error, true);
                     events.extend(settle);
+                }
+                Ok(events)
+            }
+
+            CommandPayload::CompleteConnectorSync {
+                connection_id,
+                attempt,
+                prefix,
+                tools,
+            } => {
+                Self::ensure_internal(caller)?;
+                self.check_connector_sync(&connection_id, attempt)?;
+                self.report_filter(&connection_id, &tools, prefix.as_deref());
+                let mut events = vec![EventPayload::ConnectorSyncCompleted(Box::new(
+                    ConnectorSyncCompleted {
+                        connection_id,
+                        prefix,
+                        tools,
+                    },
+                ))];
+                events.extend(self.release_decisions(&events));
+                Ok(events)
+            }
+
+            CommandPayload::FailConnectorSync {
+                connection_id,
+                attempt,
+                error,
+                retryable,
+                needs_reauth,
+            } => {
+                Self::ensure_internal(caller)?;
+                let sync = self.check_connector_sync(&connection_id, attempt)?;
+                let terminal = sync.tracking.is_terminal_failure(retryable);
+                // At ERROR because the turn goes ahead without these tools, and
+                // a model answering confidently with a connector missing looks
+                // exactly like one answering with it. `subs run` shows ERROR by
+                // default, so this is the only notice a human gets.
+                if terminal {
+                    tracing::error!(
+                        connection = %connection_id,
+                        error = %error,
+                        needs_reauth,
+                        "connector unreachable; its tools are not offered to the model"
+                    );
+                } else {
+                    tracing::warn!(
+                        connection = %connection_id,
+                        error = %error,
+                        attempt = sync.tracking.retry.attempts,
+                        "connector fetch failed; retrying"
+                    );
+                }
+                let mut events = vec![EventPayload::ConnectorSyncErrored(ConnectorSyncErrored {
+                    connection_id,
+                    error,
+                    retryable,
+                    needs_reauth,
+                })];
+                // A terminal failure is settled, so it stops parking anything.
+                // The engine unblocks and the worker decides whether a connector
+                // it cannot reach is fatal; parking forever is the one outcome
+                // that leaves nobody able to act.
+                if terminal {
+                    events.extend(self.release_decisions(&events));
                 }
                 Ok(events)
             }
@@ -1411,7 +1674,10 @@ impl SessionState {
                         decision_id: decision_id.clone(),
                         trigger,
                     }));
-                    if !self.has_pending_worker_decision() && !self.has_unsettled_session_start() {
+                    if !self.has_pending_worker_decision()
+                        && !self.has_unsettled_session_start()
+                        && !self.connectors_unready(&events, self.head_id.as_deref())
+                    {
                         events.push(EventPayload::WorkerDecisionRequested(
                             WorkerDecisionRequested { decision_id },
                         ));
@@ -1482,6 +1748,9 @@ impl SessionState {
 
                 if let Some(config) = agent {
                     if Some(&config) != self.resolve_agent_for(prefix_leaf.as_deref()).as_ref() {
+                        // A config write is what triggers a fetch; the promotion
+                        // pass below waits on it.
+                        events.extend(self.sync_connectors(&config));
                         events.push(EventPayload::AgentConfigUpdated(AgentConfigUpdated {
                             config,
                             anchor: head_after.clone(),
@@ -1531,14 +1800,12 @@ impl SessionState {
                             id,
                             name,
                             arguments,
-                            handler,
                             retry,
                         } => self.handle(
                             CommandPayload::RequestToolCall {
                                 tool_call_id: id,
                                 name,
                                 arguments,
-                                handler,
                                 retry,
                             },
                             &system,
@@ -1667,11 +1934,14 @@ impl SessionState {
                 }
 
                 // Promote the next unparked queued decision, unless this batch
-                // interrupted (its anchor is in-batch, invisible here).
+                // interrupted (its anchor is in-batch, invisible here) or a
+                // connector this batch declared is still being fetched.
                 let interrupted_in_batch = events
                     .iter()
                     .any(|e| matches!(e, EventPayload::SessionInterrupted(_)));
-                if !interrupted_in_batch {
+                if !interrupted_in_batch
+                    && !self.connectors_unready(&events, prefix_leaf.as_deref())
+                {
                     let promoted = {
                         let dropped: std::collections::HashSet<&str> = events
                             .iter()
@@ -1925,6 +2195,8 @@ impl SessionState {
                             name: tc.name.clone(),
                             arguments: tc.arguments.clone(),
                             handler: tc.handler,
+                            // A retry keeps the target it was routed to.
+                            target: tc.target.clone(),
                             retry: tc.tracking.retry_policy.clone(),
                         })];
                         if tc.handler == ToolHandler::Worker {
@@ -1943,6 +2215,44 @@ impl SessionState {
                         return Ok(events);
                     }
                 }
+            }
+        }
+
+        // Timed-out pending connector syncs → fail. Decisions park behind these,
+        // so a hung connection that never times out parks the session forever.
+        for sync in self.connector_syncs.values() {
+            if sync.tracking.status == EffectStatus::Pending
+                && sync.tracking.deadline.is_some_and(|d| d <= now)
+            {
+                let mut events = vec![EventPayload::ConnectorSyncErrored(ConnectorSyncErrored {
+                    connection_id: sync.connection_id.clone(),
+                    error: "deadline exceeded".to_string(),
+                    retryable: true,
+                    needs_reauth: false,
+                })];
+                if sync.tracking.is_terminal_failure(true) {
+                    tracing::error!(
+                        connection = %sync.connection_id,
+                        "connector did not answer in time; its tools are not offered to the model"
+                    );
+                    events.extend(self.release_decisions(&events));
+                }
+                return Ok(events);
+            }
+        }
+
+        // RetryScheduled connector syncs ready to re-fetch
+        for sync in self.connector_syncs.values() {
+            if sync.tracking.status == EffectStatus::RetryScheduled
+                && sync.tracking.retry.next_at.is_some_and(|at| at <= now)
+            {
+                return Ok(vec![EventPayload::ConnectorSyncRequested(
+                    ConnectorSyncRequested {
+                        connection_id: sync.connection_id.clone(),
+                        attempt: sync.tracking.retry.attempts,
+                        retry: sync.tracking.retry_policy.clone(),
+                    },
+                )]);
             }
         }
 
@@ -2015,6 +2325,7 @@ impl SessionState {
             for wd in self.worker_decisions.values() {
                 if wd.tracking.status == EffectStatus::RetryScheduled
                     && !self.decision_parked(&wd.trigger)
+                    && !self.connectors_unready(&[], self.head_id.as_deref())
                 {
                     if let Some(next_at) = wd.tracking.retry.next_at {
                         if next_at <= now {
@@ -2029,8 +2340,11 @@ impl SessionState {
             }
 
             // An unsettled session.start owns the slot until it settles:
-            // queued decisions wait for its retry even before it is due.
-            if !self.has_unsettled_session_start() {
+            // queued decisions wait for its retry even before it is due. An
+            // unsettled connector fetch holds it the same way.
+            if !self.has_unsettled_session_start()
+                && !self.connectors_unready(&[], self.head_id.as_deref())
+            {
                 if let Some(wd) = self
                     .queued_decisions()
                     .into_iter()
@@ -2056,8 +2370,9 @@ mod tests {
     use chrono::Utc;
 
     use super::super::aggregate::{CommitContext, SessionAggregate};
+    use super::super::state::{AgentVersion, Logged};
     use super::*;
-    use crate::protocol::Message;
+    use crate::protocol::{AgentTool, Handler, LlmTool, McpServer, McpTools, Message};
     use crate::runtime::session::events::EventPayload;
     use crate::runtime::span::SpanContext;
     use crate::runtime::Caller;
@@ -2162,13 +2477,13 @@ mod tests {
     #[test]
     fn frontend_can_complete_own_client_handled_tool_call() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        declare_client_tool(&mut agg, "my_tool");
         dispatch(
             &mut agg,
             CommandPayload::RequestToolCall {
                 tool_call_id: "tc-1".to_string(),
                 name: "my_tool".to_string(),
                 arguments: "{}".to_string(),
-                handler: ToolHandler::Client,
                 retry: RetryPolicy::no_retry(),
             },
             &Caller::System {
@@ -2218,7 +2533,6 @@ mod tests {
                 tool_call_id: "tc-1".to_string(),
                 name: "my_tool".to_string(),
                 arguments: "{}".to_string(),
-                handler: ToolHandler::Client,
                 retry: RetryPolicy::no_retry(),
             },
             &Caller::System {
@@ -2259,7 +2573,6 @@ mod tests {
                 tool_call_id: "tc-1".to_string(),
                 name: "my_tool".to_string(),
                 arguments: "{}".to_string(),
-                handler: ToolHandler::Worker,
                 retry: RetryPolicy::no_retry(),
             },
             &Caller::System {
@@ -2375,7 +2688,6 @@ mod tests {
                     id: "tc-1".to_string(),
                     name: "get_weather".to_string(),
                     arguments: "{}".to_string(),
-                    handler: ToolHandler::Worker,
                     retry: RetryPolicy::no_retry(),
                 }],
                 state: None,
@@ -2432,6 +2744,7 @@ mod tests {
     #[test]
     fn request_tool_call_with_client_handler_does_not_queue_worker_decision() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        declare_client_tool(&mut agg, "my_tool");
 
         let events = dispatch(
             &mut agg,
@@ -2439,7 +2752,6 @@ mod tests {
                 tool_call_id: "tc-1".to_string(),
                 name: "my_tool".to_string(),
                 arguments: "{}".to_string(),
-                handler: ToolHandler::Client,
                 retry: RetryPolicy::no_retry(),
             },
             &Caller::System {
@@ -2468,7 +2780,6 @@ mod tests {
                 tool_call_id: "tc-1".to_string(),
                 name: "my_tool".to_string(),
                 arguments: "{}".to_string(),
-                handler: ToolHandler::Worker,
                 retry: RetryPolicy::no_retry(),
             },
             &Caller::System {
@@ -2502,7 +2813,6 @@ mod tests {
                 tool_call_id: "tc-1".to_string(),
                 name: "my_tool".to_string(),
                 arguments: "{}".to_string(),
-                handler: ToolHandler::Worker,
                 retry: RetryPolicy::no_retry(),
             },
             &Caller::System {
@@ -2571,7 +2881,6 @@ mod tests {
                 tool_call_id: "tc-1".to_string(),
                 name: "my_tool".to_string(),
                 arguments: "{}".to_string(),
-                handler: ToolHandler::Worker,
                 retry: RetryPolicy::no_retry(),
             },
             &Caller::System {
@@ -2617,7 +2926,6 @@ mod tests {
                 tool_call_id: "tc-1".to_string(),
                 name: "my_tool".to_string(),
                 arguments: "{}".to_string(),
-                handler: ToolHandler::Worker,
                 retry: RetryPolicy::no_retry(),
             },
             &Caller::System {
@@ -2739,7 +3047,6 @@ mod tests {
                         id: "tc-1".to_string(),
                         name: "my_tool".to_string(),
                         arguments: "{}".to_string(),
-                        handler: ToolHandler::Worker,
                         retry: RetryPolicy::no_retry(),
                     }],
                     state: None,
@@ -2822,7 +3129,6 @@ mod tests {
                         id: "tc-1".to_string(),
                         name: "my_tool".to_string(),
                         arguments: "{}".to_string(),
-                        handler: ToolHandler::Worker,
                         retry: RetryPolicy::no_retry(),
                     }],
                     state: None,
@@ -4482,7 +4788,6 @@ mod tests {
                 tool_call_id: "tc-1".to_string(),
                 name: "my_tool".to_string(),
                 arguments: "{}".to_string(),
-                handler: ToolHandler::Worker,
                 retry: RetryPolicy::no_retry(),
             },
             &Caller::System {
@@ -4735,14 +5040,38 @@ mod tests {
         }
     }
 
+    /// Declare `name` as client-handled, unanchored so it covers every path.
+    ///
+    /// Where a call runs is derived from the config rather than passed in, so a
+    /// test that exercises the client path has to say so. Pushed straight onto
+    /// the log rather than through a decision, to leave event assertions alone.
+    fn declare_client_tool(agg: &mut SessionAggregate, name: &str) {
+        let mut agent = agent_config("m1");
+        agent.tools.push(AgentTool {
+            name: name.to_string(),
+            description: String::new(),
+            input: None,
+            output: None,
+            handler: Some(Handler::Client),
+        });
+        agg.state.agent_versions.push(Logged {
+            seq: agg.state.agent_versions.last().map_or(0, |v| v.seq),
+            entry: AgentVersion {
+                agent,
+                anchor: None,
+            },
+        });
+    }
+
     fn request_client_tool(agg: &mut SessionAggregate, id: &str) {
+        let name = format!("tool_{id}");
+        declare_client_tool(agg, &name);
         dispatch(
             agg,
             CommandPayload::RequestToolCall {
                 tool_call_id: id.to_string(),
-                name: format!("tool_{id}"),
+                name,
                 arguments: "{}".to_string(),
-                handler: ToolHandler::Client,
                 retry: RetryPolicy::no_retry(),
             },
             &system(),
@@ -4849,7 +5178,6 @@ mod tests {
                     id: "t1".to_string(),
                     name: "getWeather".to_string(),
                     arguments: "{}".to_string(),
-                    handler: ToolHandler::Worker,
                     retry: RetryPolicy::no_retry(),
                 }],
                 state: None,
@@ -4982,7 +5310,6 @@ mod tests {
                         id: "t1".to_string(),
                         name: "getWeather".to_string(),
                         arguments: "{}".to_string(),
-                        handler: ToolHandler::Worker,
                         retry: RetryPolicy::no_retry(),
                     },
                     Action::SpawnSubAgent {
@@ -5045,7 +5372,6 @@ mod tests {
                 tool_call_id: "t1".to_string(),
                 name: "tool_t1".to_string(),
                 arguments: "{}".to_string(),
-                handler: ToolHandler::Client,
                 retry: RetryPolicy {
                     timeout_secs: Some(60),
                     max_retries: 0,
@@ -5737,7 +6063,6 @@ mod tests {
                     id: "tc-1".to_string(),
                     name: "crawl".to_string(),
                     arguments: "{}".to_string(),
-                    handler: ToolHandler::Worker,
                     retry: RetryPolicy::no_retry(),
                 }],
                 state: None,
@@ -6076,7 +6401,6 @@ mod tests {
                     tool_call_id: id.to_string(),
                     name: "t".to_string(),
                     arguments: "{}".to_string(),
-                    handler: ToolHandler::Client,
                     retry: RetryPolicy::no_retry(),
                 },
                 &sys,
@@ -6203,7 +6527,6 @@ mod tests {
             id: id.to_string(),
             name: "find".to_string(),
             arguments: "{}".to_string(),
-            handler: ToolHandler::Worker,
             retry: RetryPolicy::no_retry(),
         }
     }
@@ -7421,6 +7744,7 @@ mod tests {
             retry: None,
             tools: Vec::new(),
             sub_agents: Vec::new(),
+            mcp: Vec::new(),
         }
     }
 
@@ -7441,6 +7765,559 @@ mod tests {
             },
             &machine(),
         )
+    }
+
+    // ── Connectors ───────────────────────────────────────────────────────
+
+    fn connector_config(ids: &[&str]) -> AgentConfig {
+        AgentConfig {
+            mcp: ids
+                .iter()
+                .map(|id| McpServer {
+                    id: id.to_string(),
+                    tools: None,
+                })
+                .collect(),
+            ..agent_config("m1")
+        }
+    }
+
+    fn remote_tool(name: &str) -> RemoteTool {
+        RemoteTool {
+            name: name.to_string(),
+            description: "a remote tool".to_string(),
+            input: None,
+            output: None,
+            annotations: Default::default(),
+        }
+    }
+
+    fn sync_requests(events: &[EventPayload]) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                EventPayload::ConnectorSyncRequested(p) => Some(p.connection_id.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn promotions(events: &[EventPayload]) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                EventPayload::WorkerDecisionRequested(p) => Some(p.decision_id.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn settle_sync(agg: &mut SessionAggregate, id: &str, tools: &[&str]) -> Vec<EventPayload> {
+        dispatch(
+            agg,
+            CommandPayload::CompleteConnectorSync {
+                connection_id: id.to_string(),
+                attempt: None,
+                prefix: Some(id.to_string()),
+                tools: tools.iter().map(|t| remote_tool(t)).collect(),
+            },
+            &system(),
+        )
+    }
+
+    /// A session whose config names `ids`, with every fetch settled and each
+    /// connection offering `tools`.
+    fn session_with_connectors(ids: &[&str], tools: &[&str]) -> SessionAggregate {
+        let mut agg =
+            create_session_with_config("sess-1", "tenant-a", "user-1", Some(connector_config(ids)));
+        for id in ids {
+            settle_sync(&mut agg, id, tools);
+        }
+        agg
+    }
+
+    #[test]
+    fn declaring_a_connector_fetches_it_and_parks_the_turn() {
+        let mut agg = create_session_with_config(
+            "sess-1",
+            "tenant-a",
+            "user-1",
+            Some(connector_config(&["sentry"])),
+        );
+        assert!(
+            agg.state.connector_syncs.contains_key("sentry"),
+            "the config write fetches the connection it names"
+        );
+
+        // A message now cannot be decided: the config names tools the engine
+        // has not fetched, so the turn cannot be authored against it.
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Message(ClientMessage {
+                    message: node_msg("", Role::User, "hi"),
+                    stream: false,
+                }),
+                turn_id: None,
+            },
+            &system(),
+        );
+        assert!(
+            promotions(&events).is_empty(),
+            "a decision parks behind an unsettled fetch; got {events:?}"
+        );
+        assert_eq!(
+            agg.state.queued_decisions().len(),
+            1,
+            "the decision is queued, not lost"
+        );
+
+        let events = settle_sync(&mut agg, "sentry", &["search_issues"]);
+        assert_eq!(
+            promotions(&events).len(),
+            1,
+            "settling the fetch releases the parked decision; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn work_started_beside_a_new_connector_queues_its_decision_rather_than_running_it() {
+        let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        let d = open_decision(&mut agg, "hi");
+
+        // One decision that both declares a connector and starts a worker tool
+        // call. The tool call's `tool.execute` must not go out: the fetch this
+        // batch just requested has not settled.
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: d,
+                transcript: vec![node_msg("u1", Role::User, "hi")],
+                actions: vec![Action::CallTool {
+                    id: "tc-1".to_string(),
+                    name: "get_time".to_string(),
+                    arguments: "{}".to_string(),
+                    retry: RetryPolicy::no_retry(),
+                }],
+                state: None,
+                agent: Some(connector_config(&["sentry"])),
+            },
+            &machine(),
+        );
+
+        assert_eq!(sync_requests(&events), ["sentry"]);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::DecisionRequestQueued(_))),
+            "the tool.execute decision is created; got {events:?}"
+        );
+        assert!(
+            promotions(&events).is_empty(),
+            "but not promoted while the fetch is in flight; got {events:?}"
+        );
+        assert_eq!(
+            agg.state.queued_decisions().len(),
+            1,
+            "it waits in the queue"
+        );
+
+        let events = settle_sync(&mut agg, "sentry", &["search_issues"]);
+        assert_eq!(
+            promotions(&events).len(),
+            1,
+            "and runs once the offer lands; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn resuming_an_interrupt_still_waits_on_an_unsettled_fetch() {
+        let mut agg = create_session_with_config(
+            "sess-1",
+            "tenant-a",
+            "user-1",
+            Some(connector_config(&["sentry"])),
+        );
+        dispatch(
+            &mut agg,
+            CommandPayload::Interrupt {
+                interrupt_id: "int-1".to_string(),
+                reason: "hold".to_string(),
+                payload: serde_json::json!({}),
+            },
+            &machine(),
+        );
+
+        // Resume promotes directly rather than through the usual gate, because
+        // that gate would park on the interrupt this batch just cleared. The
+        // fetch still has to hold it.
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::ResumeInterrupt {
+                interrupt_id: "int-1".to_string(),
+                payload: serde_json::json!({}),
+            },
+            &machine(),
+        );
+        assert!(
+            promotions(&events).is_empty(),
+            "an interrupt clearing does not release a turn the fetch still holds; got {events:?}"
+        );
+
+        let events = settle_sync(&mut agg, "sentry", &["search_issues"]);
+        assert_eq!(
+            promotions(&events).len(),
+            1,
+            "the fetch releases it; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_fetch_is_keyed_on_the_connection_not_the_agent_version() {
+        let mut agg = session_with_connectors(&["sentry"], &["search_issues"]);
+
+        // A config rewritten for an unrelated reason — a new declared tool —
+        // must not cost another round trip.
+        let mut rewritten = connector_config(&["sentry"]);
+        rewritten.tools.push(AgentTool {
+            name: "get_time".to_string(),
+            description: String::new(),
+            input: None,
+            output: None,
+            handler: None,
+        });
+        let d = open_decision(&mut agg, "hi");
+        let events = submit_agent(
+            &mut agg,
+            d,
+            vec![node_msg("u1", Role::User, "hi")],
+            Some(rewritten),
+        );
+        assert!(
+            sync_requests(&events).is_empty(),
+            "an unrelated config rewrite refetches nothing; got {events:?}"
+        );
+
+        // Adding a connection fetches only the new one.
+        let d = open_decision(&mut agg, "again");
+        let events = submit_agent(
+            &mut agg,
+            d,
+            vec![node_msg("u2", Role::User, "again")],
+            Some(connector_config(&["sentry", "github"])),
+        );
+        assert_eq!(
+            sync_requests(&events),
+            ["github"],
+            "only the connection that was never fetched; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_terminally_failed_fetch_releases_the_turn_rather_than_parking_it() {
+        let mut agg = create_session_with_config(
+            "sess-1",
+            "tenant-a",
+            "user-1",
+            Some(connector_config(&["sentry"])),
+        );
+        dispatch(
+            &mut agg,
+            CommandPayload::SubmitClientPayload {
+                payload: ClientPayload::Message(ClientMessage {
+                    message: node_msg("", Role::User, "hi"),
+                    stream: false,
+                }),
+                turn_id: None,
+            },
+            &system(),
+        );
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::FailConnectorSync {
+                connection_id: "sentry".to_string(),
+                attempt: None,
+                error: "connection refused".to_string(),
+                retryable: false,
+                needs_reauth: false,
+            },
+            &system(),
+        );
+        assert_eq!(
+            promotions(&events).len(),
+            1,
+            "an unreachable connector unblocks the worker to decide; got {events:?}"
+        );
+        assert!(
+            !agg.state
+                .has_pending_connector_sync(agg.state.head_id.as_deref()),
+            "a terminal failure is settled, so it parks nothing further"
+        );
+        assert!(
+            agg.state
+                .connector_tools(agg.state.head_id.as_deref())
+                .tools
+                .is_empty(),
+            "a failed fetch contributes no tools"
+        );
+    }
+
+    #[test]
+    fn a_retryable_failure_keeps_parking_until_it_is_exhausted() {
+        let mut agg = create_session_with_config(
+            "sess-1",
+            "tenant-a",
+            "user-1",
+            Some(connector_config(&["sentry"])),
+        );
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::FailConnectorSync {
+                connection_id: "sentry".to_string(),
+                attempt: None,
+                error: "503".to_string(),
+                retryable: true,
+                needs_reauth: false,
+            },
+            &system(),
+        );
+        assert!(
+            promotions(&events).is_empty(),
+            "a retry is still unsettled, so it still parks; got {events:?}"
+        );
+        assert!(agg
+            .state
+            .has_pending_connector_sync(agg.state.head_id.as_deref()));
+        assert!(
+            agg.state.wake_at().is_some(),
+            "the retry is scheduled, so the session wakes for it"
+        );
+    }
+
+    #[test]
+    fn a_hung_fetch_times_out_rather_than_parking_the_session_forever() {
+        let agg = create_session_with_config(
+            "sess-1",
+            "tenant-a",
+            "user-1",
+            Some(connector_config(&["sentry"])),
+        );
+        let deadline = agg.state.connector_syncs["sentry"]
+            .tracking
+            .deadline
+            .expect("a fetch is bounded");
+        let events = agg
+            .state
+            .handle_wake(deadline + chrono::Duration::seconds(1))
+            .expect("wake");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::ConnectorSyncErrored(_))),
+            "a fetch past its deadline fails; got {events:?}"
+        );
+    }
+
+    #[test]
+    fn connector_tools_reach_the_model_and_route_to_the_engine() {
+        let mut agg = session_with_connectors(&["sentry"], &["search_issues"]);
+
+        assert_eq!(
+            agg.state.tool_handler_for("sentry__search_issues"),
+            ToolHandler::Server,
+            "a connector-resolved name runs on the engine"
+        );
+        assert_eq!(
+            agg.state.tool_handler_for("something_else"),
+            ToolHandler::Worker,
+            "an undeclared name still gets its contract error on the worker"
+        );
+
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::RequestLlmCall {
+                call_id: "call-1".to_string(),
+                request: LlmRequest {
+                    model: "m1".to_string(),
+                    messages: vec![],
+                    tools: Some(vec![]),
+                    temperature: None,
+                    max_completion_tokens: None,
+                    reasoning: None,
+                },
+                stream: false,
+                retry: RetryPolicy::no_retry(),
+                handler: LlmHandler::Server,
+                format: None,
+            },
+            &system(),
+        );
+        let offered: Vec<String> = events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::LlmCallRequested(p) => p.request.tools.clone(),
+                _ => None,
+            })
+            .expect("an llm call")
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(
+            offered,
+            ["sentry__search_issues"],
+            "the engine adds the connector's tools, which no worker could name"
+        );
+
+        // A connector call is the engine's to run: no worker execute trigger.
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::RequestToolCall {
+                tool_call_id: "tc-1".to_string(),
+                name: "sentry__search_issues".to_string(),
+                arguments: "{}".to_string(),
+                retry: RetryPolicy::no_retry(),
+            },
+            &system(),
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, EventPayload::DecisionRequestQueued(_))),
+            "the engine executes it; the worker is not asked to; got {events:?}"
+        );
+        assert_eq!(
+            agg.state.tool_calls["tc-1"].handler,
+            ToolHandler::Server,
+            "the handler is frozen onto the call"
+        );
+    }
+
+    #[test]
+    fn a_re_prompt_does_not_offer_a_connector_tool_twice() {
+        let mut agg = session_with_connectors(&["sentry"], &["search_issues"]);
+
+        // A re-prompt is authored from the previous call's stored spec, which
+        // already carries the connector's tools. Adding them again is a 400
+        // from every provider: tool names must be unique.
+        let already = LlmRequest {
+            model: "m1".to_string(),
+            messages: vec![],
+            tools: Some(vec![LlmTool {
+                name: "sentry__search_issues".to_string(),
+                description: "a remote tool".to_string(),
+                input: None,
+                output: None,
+            }]),
+            temperature: None,
+            max_completion_tokens: None,
+            reasoning: None,
+        };
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::RequestLlmCall {
+                call_id: "call-1".to_string(),
+                request: already,
+                stream: false,
+                retry: RetryPolicy::no_retry(),
+                handler: LlmHandler::Server,
+                format: None,
+            },
+            &system(),
+        );
+        let names: Vec<String> = events
+            .iter()
+            .find_map(|e| match e {
+                EventPayload::LlmCallRequested(p) => p.request.tools.clone(),
+                _ => None,
+            })
+            .expect("an llm call")
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(names, ["sentry__search_issues"], "offered once, not twice");
+    }
+
+    #[test]
+    fn a_declared_tool_keeps_its_name_and_its_handler_against_a_connector() {
+        let mut config = connector_config(&["sentry"]);
+        config.tools.push(AgentTool {
+            name: "sentry__search_issues".to_string(),
+            description: String::new(),
+            input: None,
+            output: None,
+            handler: None,
+        });
+        let mut agg = create_session_with_config("sess-1", "tenant-a", "user-1", Some(config));
+        settle_sync(&mut agg, "sentry", &["search_issues"]);
+
+        assert_eq!(
+            agg.state.tool_handler_for("sentry__search_issues"),
+            ToolHandler::Worker,
+            "the config claims the name, so the connector never takes it"
+        );
+        let merged = agg.state.connector_tools(agg.state.head_id.as_deref());
+        assert!(merged.tools.is_empty());
+        assert_eq!(
+            merged.collisions,
+            ["sentry__search_issues"],
+            "and the drop is reported rather than silent"
+        );
+    }
+
+    #[test]
+    fn a_filter_change_re_derives_without_another_fetch() {
+        let mut agg = session_with_connectors(&["sentry"], &["search_issues", "create_issue"]);
+        assert_eq!(
+            agg.state
+                .connector_tools(agg.state.head_id.as_deref())
+                .tools
+                .len(),
+            2
+        );
+
+        let narrowed = AgentConfig {
+            mcp: vec![McpServer {
+                id: "sentry".to_string(),
+                tools: Some(McpTools {
+                    include: vec!["search_*".to_string()],
+                    ..Default::default()
+                }),
+            }],
+            ..agent_config("m1")
+        };
+        let d = open_decision(&mut agg, "hi");
+        let events = submit_agent(
+            &mut agg,
+            d,
+            vec![node_msg("u1", Role::User, "hi")],
+            Some(narrowed),
+        );
+        assert!(
+            sync_requests(&events).is_empty(),
+            "filtering is pure, so narrowing costs no round trip; got {events:?}"
+        );
+        let names: Vec<String> = agg
+            .state
+            .connector_tools(agg.state.head_id.as_deref())
+            .tools
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(names, ["sentry__search_issues"], "the offer re-filters");
+    }
+
+    #[test]
+    fn a_fork_keeps_the_offer_it_already_fetched() {
+        let agg = session_with_connectors(&["sentry"], &["search_issues"]);
+
+        // Rewind past the fetch: an offer is a fact about the remote, not about
+        // a branch, so it survives the way the call maps do.
+        let rewound = agg.state.clone().rewind(0, None);
+        assert!(
+            rewound.connector_syncs["sentry"].is_ready(),
+            "a fork refetches nothing"
+        );
     }
 
     #[test]
@@ -7970,7 +8847,6 @@ mod tests {
                     id: "t1".to_string(),
                     name: "slow".to_string(),
                     arguments: "{}".to_string(),
-                    handler: ToolHandler::Worker,
                     retry: RetryPolicy::no_retry(),
                 }],
                 state: None,
@@ -8275,6 +9151,7 @@ mod tests {
     #[test]
     fn fork_voids_a_retrying_effect() {
         let mut agg = create_session("sess-1", "tenant-a", "user-1");
+        declare_client_tool(&mut agg, "flaky");
         let d1 = open_decision(&mut agg, "hi");
         submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
         dispatch(
@@ -8283,7 +9160,6 @@ mod tests {
                 tool_call_id: "tc-1".to_string(),
                 name: "flaky".to_string(),
                 arguments: "{}".to_string(),
-                handler: ToolHandler::Client,
                 retry: RetryPolicy {
                     timeout_secs: None,
                     max_retries: 2,
@@ -8402,7 +9278,6 @@ mod tests {
             id: id.to_string(),
             name: "slow".to_string(),
             arguments: "{}".to_string(),
-            handler: ToolHandler::Worker,
             retry: RetryPolicy::no_retry(),
         };
         let events = dispatch(
@@ -9205,7 +10080,6 @@ mod tests {
                 tool_call_id: "tc-parked".to_string(),
                 name: "slow".to_string(),
                 arguments: "{}".to_string(),
-                handler: ToolHandler::Client,
                 retry: deadline_policy.clone(),
             },
             &system(),
@@ -9224,7 +10098,6 @@ mod tests {
                 tool_call_id: "tc-live".to_string(),
                 name: "slow".to_string(),
                 arguments: "{}".to_string(),
-                handler: ToolHandler::Client,
                 retry: deadline_policy,
             },
             &system(),

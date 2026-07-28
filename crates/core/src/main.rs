@@ -13,14 +13,21 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    let default_level = match &cli.command {
-        Command::Run(_) => "error",
-        _ => "info",
-    };
+    // Precedence: $RUST_LOG > `log` in substructure.toml > the command's
+    // default. Read here rather than inside the command, because a setting that
+    // only took effect after startup would miss what startup has to say.
+    //
+    // A file that will not parse is ignored at this point: the command reads it
+    // again and reports that properly, and failing here would mean failing
+    // before there is anywhere to print to.
+    let configured = cli::project_log_filter(cli.command.config_path());
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| default_level.into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                configured
+                    .unwrap_or_else(|| cli.command.default_log().to_string())
+                    .into()
+            }),
         )
         .init();
 

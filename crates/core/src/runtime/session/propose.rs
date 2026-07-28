@@ -185,18 +185,10 @@ fn route_tool_call(
             },
         ];
     }
-    let handler = match config
-        .and_then(|c| c.tool(&call.function.name))
-        .and_then(|t| t.handler)
-    {
-        Some(Handler::Client) => Handler::Client,
-        _ => Handler::Worker,
-    };
     vec![DecisionAction::CallTool {
         id: Some(call.id.clone()),
         name: call.function.name.clone(),
         arguments: serde_json::Value::String(call.function.arguments.clone()),
-        handler,
         retry: RetryPolicy::no_retry(),
     }]
 }
@@ -589,10 +581,7 @@ mod tests {
             .iter()
             .map(|a| match a {
                 DecisionAction::CallTool {
-                    id: Some(id),
-                    name,
-                    handler: Handler::Worker,
-                    ..
+                    id: Some(id), name, ..
                 } => (id.as_str(), name.as_str()),
                 other => panic!("expected tool.call with the model's id; got {other:?}"),
             })
@@ -973,6 +962,7 @@ mod tests {
                 id: "researcher".to_string(),
                 description: String::new(),
             }],
+            mcp: Vec::new(),
         }
     }
 
@@ -1200,7 +1190,7 @@ mod tests {
             }, DecisionAction::SendMessage {
                 session_id: msg_session,
                 ..
-            }, DecisionAction::CallTool { handler: hb, .. }, DecisionAction::CallTool { handler: hc, .. }] =>
+            }, DecisionAction::CallTool { name: nb, .. }, DecisionAction::CallTool { name: nc, .. }] =>
             {
                 assert_eq!(agent_id.as_str(), "researcher");
                 assert_eq!(tool_call_id.as_str(), "tc-a");
@@ -1209,10 +1199,12 @@ mod tests {
                     msg_session, session_id,
                     "the delegating message targets the spawned child"
                 );
-                assert_eq!(*hb, Handler::Client);
-                assert_eq!(*hc, Handler::Worker);
+                // A sub-agent becomes a spawn here; every other name becomes a
+                // plain call, and where it runs is settled at dispatch.
+                assert_eq!(nb.as_str(), "confirm");
+                assert_eq!(nc.as_str(), "get_time");
             }
-            other => panic!("expected agent/client/worker routing; got {other:?}"),
+            other => panic!("expected a spawn then two tool calls; got {other:?}"),
         }
     }
 

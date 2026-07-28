@@ -30,7 +30,7 @@ npm install
 node server.ts
 ```
 
-**2. Send a message with the CLI** (no `--provider`, the worker owns the LLM):
+**2. Send a message with the CLI** (no `--llm-provider`, the worker owns the LLM):
 
 ```sh
 subs run \

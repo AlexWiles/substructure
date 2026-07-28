@@ -19,10 +19,14 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 ### Added
 
 - Add a Slack adapter and a channel abstraction.
+- Add MCP support.
+- substructure.toml as a config file.
 
 ### Changed
 
 - Rename the default database file to `substructure.db`.
+- Rename the `--provider` option to `--llm-provider`.
+- The `tool.call` action has no `handler` field; the engine finds where a call runs from its name.
 
 ## [0.2.3] - 2026-07-22
 

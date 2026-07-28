@@ -417,6 +417,7 @@ mod tests {
                 name: name.into(),
                 arguments: "{}".into(),
                 handler: Default::default(),
+                target: None,
                 retry: retry(),
             }),
         )

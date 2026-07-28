@@ -128,6 +128,13 @@ impl EmbeddedRuntime {
             } else {
                 None
             };
+        // The in-process runtime has no connection registry yet, so connector
+        // work is inert; the queue is still passed so the shape stays uniform.
+        let connector_task_queue: Arc<
+            dyn TaskQueue<substructure_core::runtime::connector::ConnectorTask>,
+        > = Arc::new(ShardedInMemoryQueue::new(
+            config.connector_executor_workers as u32,
+        ));
         let token_delta_transport =
             Arc::new(substructure_core::llm::InMemoryTokenDeltaTransport::new());
 
@@ -139,6 +146,8 @@ impl EmbeddedRuntime {
                 llm_provider,
                 llm_task_queue,
                 sub_agent_task_queue,
+                None,
+                connector_task_queue,
                 queue,
                 session_index_store,
                 checkpoint_store,

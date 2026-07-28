@@ -29,7 +29,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 subs run \
     --worker-url http://localhost:4444 \
     --agent planner \
-    --provider anthropic \
+    --llm-provider anthropic \
     --output pretty \
     --session plan-demo \
     --input '{"type":"client.message","message":{"role":"user","content": "plan a weekend trip to Lisbon"}}'
@@ -42,7 +42,7 @@ the transcript:
 subs run \
     --worker-url http://localhost:4444 \
     --agent planner \
-    --provider anthropic \
+    --llm-provider anthropic \
     --output pretty \
     --session plan-demo \
     --input '{"type":"client.action","name":"set_mode","args":{"mode":"executing"}}'

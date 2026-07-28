@@ -37,6 +37,9 @@ pub enum ToolHandler {
     Worker,
     /// Executed by the client. Session goes Idle while waiting.
     Client,
+    /// Executed by the engine against a connection. Only ever set by the engine
+    /// when it expands a connector; a worker declaring it is rejected.
+    Server,
 }
 
 /// Where an LLM call runs — the engine's strict form of the wire [`Handler`].
@@ -55,6 +58,7 @@ impl From<ToolHandler> for Handler {
         match h {
             ToolHandler::Worker => Handler::Worker,
             ToolHandler::Client => Handler::Client,
+            ToolHandler::Server => Handler::Server,
         }
     }
 }
@@ -75,7 +79,7 @@ impl TryFrom<Handler> for ToolHandler {
         match h {
             Handler::Worker => Ok(ToolHandler::Worker),
             Handler::Client => Ok(ToolHandler::Client),
-            Handler::Server => Err(h),
+            Handler::Server => Ok(ToolHandler::Server),
         }
     }
 }
@@ -309,7 +313,6 @@ pub enum Action {
         id: String,
         name: String,
         arguments: String,
-        handler: ToolHandler,
         #[serde(default = "RetryPolicy::no_retry")]
         retry: RetryPolicy,
     },

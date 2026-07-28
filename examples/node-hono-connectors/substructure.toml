@@ -1,0 +1,7 @@
+worker_url = "http://localhost:4444"
+output = "pretty"
+log = "error"
+llm_provider = "anthropic"
+
+[mcp.issues]
+url = "http://localhost:4445/mcp"

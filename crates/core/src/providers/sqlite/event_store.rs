@@ -707,6 +707,7 @@ mod tests {
             retry: None,
             tools: Vec::new(),
             sub_agents: Vec::new(),
+            mcp: Vec::new(),
         }
     }
 

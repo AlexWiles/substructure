@@ -178,14 +178,15 @@ pub struct MessageTree {
 // ── Handlers ─────────────────────────────────────────────────────────────
 
 /// Where a call runs — one wire enum so `handler` has a single type on every
-/// surface. Tool calls accept `worker` (default) or `client`; LLM calls accept
-/// `server` (default) or `worker`. The invalid pairing (a `server` tool, a
-/// `client` LLM call) is rejected at the decision seam.
+/// surface. Tool calls accept `worker` (default), `client`, or `server` (set by
+/// the engine for connector tools, never declared by a worker); LLM calls accept
+/// `server` (default) or `worker`. The invalid pairing (a `client` LLM call) is
+/// rejected at the decision seam.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[schemars(title = "Handler")]
 pub enum Handler {
-    /// Server-side executor resolves the provider and makes the call (LLM only).
+    /// Server-side executor resolves the provider or connection and makes the call.
     Server,
     /// Dispatched to the work queue for the worker to execute.
     Worker,
@@ -281,12 +282,24 @@ pub struct AgentConfig {
     /// executing a function.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sub_agents: Vec<SubAgent>,
+    /// MCP servers the agent draws tools from. The engine resolves each against
+    /// its connection registry into [`ConnectorTool`]s the model sees alongside
+    /// `tools`. Like `sub_agents`, these are never merged into `tools` — the
+    /// worker declares the server, not its tools.
+    ///
+    /// A second protocol gets its own field rather than a `type` tag here: its
+    /// filter would not be this one (MCP annotations mean nothing to an A2A
+    /// agent), and a union of conditionally-valid fields generates badly in the
+    /// Go and Python bindings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp: Vec<McpServer>,
 }
 
 /// A function tool the agent offers. The model-facing contract is
 /// `name`/`description`/`input`/`output`; `handler` selects where a call runs —
 /// `Some(Client)` ⇒ client-executed, absent ⇒ worker-executed (the default).
-/// `server` is invalid for tools.
+/// `server` is invalid for tools: engine-executed tools come from a connector,
+/// which a worker declares by id rather than by tool.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "AgentTool")]
 pub struct AgentTool {
@@ -299,6 +312,78 @@ pub struct AgentTool {
     pub output: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handler: Option<Handler>,
+}
+
+/// One tool the engine resolved from a connector and will execute itself.
+///
+/// Derived, not stored: the session records what a connection *offered*
+/// (`connector.sync.completed`) and re-derives this by filtering that offer
+/// through the config in force. So replay is deterministic — a connection that
+/// changes its tools underneath a live session cannot rewrite what already
+/// happened — while a filter change costs no round trip.
+/// `name` is what the model sees; `remote_name` is what the executor calls.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "ConnectorTool")]
+pub struct ConnectorTool {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<Value>,
+    pub connector: String,
+    pub via: ConnectorProtocol,
+    pub remote_name: String,
+}
+
+/// How the engine reaches a connection. Internal: the config says which
+/// protocol by which section a connection is declared under, and an agent names
+/// a connection by id without knowing. Adding A2A is a variant here plus a
+/// section, not a change to either surface.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(title = "ConnectorProtocol")]
+pub enum ConnectorProtocol {
+    #[default]
+    Mcp,
+}
+
+/// An MCP server the agent draws tools from. `id` resolves against the engine's
+/// connection registry — locally from `[mcp]` in `substructure.toml`, in the
+/// cloud from the connections an admin granted this app. The worker never names
+/// a URL or a credential.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "McpServer")]
+pub struct McpServer {
+    pub id: String,
+    /// Narrows what the model sees. Absent ⇒ every tool the connection grants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<McpTools>,
+}
+
+/// An MCP server's tool filter. Applied in order — capability predicates, then
+/// `include`, then `exclude` — and only ever narrowing, so a filter can never
+/// widen what the connection grants.
+///
+/// `include`/`exclude` are globs matched against the tool's name on the
+/// connection, the name its own documentation uses, not the prefixed name the
+/// model sees. Capability predicates read the MCP annotations; a tool that
+/// carries none fails the predicate, so an unannotated server yields nothing
+/// under `read_only` rather than silently passing everything through.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "McpTools")]
+pub struct McpTools {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub non_destructive: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotent: Option<bool>,
 }
 
 /// A sub-agent the model can delegate to. Named by `id` (the child agent to spawn,
@@ -503,12 +588,15 @@ pub enum EffectKind {
     ToolCall,
     SubAgent,
     LlmCall,
+    /// Fetching one connection's tool list. Its `id` is the connection id.
+    ConnectorSync,
 }
 
 /// An in-flight effect (Pending or RetryScheduled) surfaced on each worker decision.
 /// A flat envelope plus kind-specific fields: a tool call's
 /// `name`/`arguments`/`handler`, an LLM call's `handler`/`stream`, a
-/// sub-agent's `agent_id`/`session_id`.
+/// sub-agent's `agent_id`/`session_id`. A connector sync carries none — its
+/// `id` is the connection being fetched.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "Effect")]
 pub struct Effect {
@@ -966,6 +1054,12 @@ pub enum DecisionAction {
         handler: Handler,
     },
     /// `id` omitted ⇒ the engine mints one (LLM-driven tools carry the model's id).
+    ///
+    /// There is no `handler`: where a call runs follows from its name. A tool
+    /// resolved from a connector runs on the engine, a tool declared
+    /// `handler: client` runs on the client, and anything else runs on the
+    /// worker. The engine already knows all three, so asking the worker to
+    /// restate it only creates a way for the two to disagree.
     #[serde(rename = "tool.call")]
     CallTool {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -973,9 +1067,6 @@ pub enum DecisionAction {
         name: String,
         // Any JSON value; non-strings are canonicalized to JSON text.
         arguments: Value,
-        /// `worker` or `client`; omitted ⇒ `worker`.
-        #[serde(default = "Handler::worker")]
-        handler: Handler,
         #[serde(default = "RetryPolicy::no_retry")]
         retry: RetryPolicy,
     },

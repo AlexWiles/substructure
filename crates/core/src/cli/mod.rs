@@ -12,7 +12,45 @@ use crate::worker::push::PushRegistrationRecord;
 
 use cloud::{AppScope, CloudGlobals, GLOBAL_FLAGS_HELP};
 
+/// Read a secret the project file names rather than holds. An unset or blank
+/// variable reads as absent, so a stale name never becomes an empty secret.
+pub(crate) fn env_value(var: &str) -> Option<String> {
+    std::env::var(var)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// The `log` setting from the project file, for setting up tracing before the
+/// command runs. Silent on any failure — the command reads the same file and
+/// reports a real problem with it, and there is no logger yet to report to.
+pub fn project_log_filter(config: Option<&std::path::Path>) -> Option<String> {
+    cloud::project_config::resolve(config).ok().flatten()?.log
+}
+
 pub(crate) const DEFAULT_TENANT: &str = "default";
+
+impl Command {
+    /// The project file this invocation will read, for callers that need it
+    /// before the command runs. Only the engine commands: a cloud command
+    /// neither runs an engine nor logs at a level worth pinning.
+    pub fn config_path(&self) -> Option<&std::path::Path> {
+        match self {
+            Command::Run(a) => a.config_path(),
+            Command::Serve(a) => a.config_path(),
+            _ => None,
+        }
+    }
+
+    /// The log filter to use when `$RUST_LOG` is unset: `run` streams a turn to
+    /// stdout, so only errors belong on stderr beside it.
+    pub fn default_log(&self) -> &'static str {
+        match self {
+            Command::Run(_) => "error",
+            _ => "info",
+        }
+    }
+}
 
 #[derive(Subcommand)]
 pub enum Command {

@@ -6,10 +6,25 @@
 //! system) that the worker would otherwise have to hand-author. It is versioned
 //! and anchored exactly like worker state (see [`AgentVersion`](super::state::AgentVersion)).
 
-use crate::protocol::{AgentConfig, AgentTool, Content, DraftMessage, LlmTool, Role, SubAgent};
+use crate::protocol::{
+    AgentConfig, AgentTool, ConnectorTool, Content, DraftMessage, LlmTool, Role, SubAgent,
+};
 
 impl AgentTool {
     /// The model-facing contract, with routing stripped.
+    pub fn to_llm_tool(&self) -> LlmTool {
+        LlmTool {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            input: self.input.clone(),
+            output: self.output.clone(),
+        }
+    }
+}
+
+impl ConnectorTool {
+    /// The model-facing contract, with routing stripped. `name` is the prefixed
+    /// name the model calls; `connector`/`remote_name` are the engine's business.
     pub fn to_llm_tool(&self) -> LlmTool {
         LlmTool {
             name: self.name.clone(),
@@ -144,6 +159,7 @@ mod tests {
             retry: None,
             tools,
             sub_agents,
+            mcp: Vec::new(),
         }
     }
 

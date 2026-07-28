@@ -1,11 +1,14 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use clap::Args;
 use tokio::net::TcpListener;
 
 use crate::cli::auth::AuthWiring;
+use crate::cli::cloud::project_config;
 use crate::cli::env::{EnvVars, LlmProviderArg, ProviderEnv};
 use crate::cli::{register_startup_worker, DEFAULT_TENANT};
+use crate::connectors::registry::{ConnectionSpec, Connections, EnvCredentials, LocalRegistry};
 use crate::llm::{LlmProviderTrait, LlmTask};
 use crate::providers::anthropic::{AnthropicConfig, AnthropicProvider};
 use crate::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
@@ -15,6 +18,7 @@ use crate::providers::sqlite::{
     SqliteCheckpointStore, SqliteDb, SqliteEventStore, SqlitePushStore, SqliteSessionIndexStore,
     SqliteWakeStore, SqliteWorkerQueue,
 };
+use crate::runtime::connector::ConnectorTask;
 use crate::sub_agent::SubAgentTask;
 use crate::transport::admin_http::{self, AdminHttpState};
 use crate::transport::ag_ui::channel::AgUiChannel;
@@ -30,12 +34,19 @@ use crate::{start, Runtime, RuntimeConfig};
 
 #[derive(Args)]
 pub struct ServeArgs {
-    #[arg(long, default_value = "127.0.0.1")]
-    host: String,
-    #[arg(long, default_value_t = 8080)]
-    port: u16,
-    #[arg(long, default_value = "substructure.db")]
-    db: String,
+    /// [default: 127.0.0.1]
+    #[arg(long)]
+    host: Option<String>,
+    /// [default: 8080]
+    #[arg(long)]
+    port: Option<u16>,
+    /// [default: substructure.db]
+    #[arg(long)]
+    db: Option<String>,
+    /// Project config file (default: walks up from cwd looking for
+    /// `substructure.toml`). Supplies the engine's connections.
+    #[arg(short = 'c', long)]
+    config: Option<std::path::PathBuf>,
     /// Pre-register an HTTP worker at startup.
     #[arg(long)]
     worker_url: Option<String>,
@@ -46,7 +57,7 @@ pub struct ServeArgs {
     /// (e.g. `openrouter` needs OPENROUTER_API_KEY). Optional: omit it to
     /// run a server that only handles worker-side LLM calls.
     #[arg(long, value_enum)]
-    provider: Option<LlmProviderArg>,
+    llm_provider: Option<LlmProviderArg>,
     /// Disable client and worker authentication. For local development only.
     #[arg(long)]
     dev: bool,
@@ -56,22 +67,36 @@ pub struct ServeArgs {
     slack_agent: Option<String>,
 }
 
+impl ServeArgs {
+    pub fn config_path(&self) -> Option<&std::path::Path> {
+        self.config.as_deref()
+    }
+}
+
 pub async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     start_server(args).await
 }
 
 async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
-    let ServeArgs {
-        host,
-        port,
-        db: db_path,
-        worker_url,
-        signing_secret,
-        provider,
-        dev,
-        slack_agent,
-    } = args;
-    let env = match EnvVars::load(provider, dev) {
+    // Anything argv omits can be pinned in the project file. Precedence is
+    // flag > environment > file > default, applied one field at a time.
+    let cfg = project_config::resolve(args.config.as_deref())?.unwrap_or_default();
+
+    let connections = cfg.connections();
+    let host = args.host.or(cfg.host).unwrap_or_else(|| "127.0.0.1".into());
+    let port = args.port.or(cfg.port).unwrap_or(8080);
+    let db_path = args
+        .db
+        .or(cfg.db)
+        .unwrap_or_else(|| "substructure.db".into());
+    let worker_url = args.worker_url.or(cfg.worker_url);
+    let signing_secret = args
+        .signing_secret
+        .or_else(|| cfg.signing_secret_env.as_deref().and_then(super::env_value));
+    let dev = args.dev || cfg.dev.unwrap_or(false);
+    let slack_agent = args.slack_agent.or(cfg.slack_agent);
+
+    let env = match EnvVars::load(args.llm_provider.or(cfg.llm_provider), dev) {
         Ok(e) => e,
         Err(_) => std::process::exit(2),
     };
@@ -90,7 +115,7 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
         None => None,
     };
 
-    let (rt, adapter) = start_engine(db, env.provider).await?;
+    let (rt, adapter) = start_engine(db, env.provider, connections).await?;
 
     let auth = match env.auth {
         Some(a) => AuthWiring::from_env(a)?,
@@ -166,6 +191,7 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
 pub(crate) async fn start_engine(
     db: SqliteDb,
     provider_env: Option<ProviderEnv>,
+    connectors: BTreeMap<String, ConnectionSpec>,
 ) -> anyhow::Result<(Arc<Runtime>, Arc<PushAdapter>)> {
     let event_store = Arc::new(SqliteEventStore::new(db.clone())?);
     let worker_queue = Arc::new(SqliteWorkerQueue::new(db.clone())?);
@@ -181,6 +207,24 @@ pub(crate) async fn start_engine(
     let sub_agent_task_queue: Arc<dyn TaskQueue<SubAgentTask>> = Arc::new(
         ShardedInMemoryQueue::new(config.sub_agent_executor_workers as u32),
     );
+    let connector_task_queue: Arc<dyn TaskQueue<ConnectorTask>> = Arc::new(
+        ShardedInMemoryQueue::new(config.connector_executor_workers as u32),
+    );
+    // Connections come from `substructure.toml`; the file holds only names and
+    // env-var references, never a token.
+    let connections = Some(connectors)
+        .filter(|c| !c.is_empty())
+        .map(|connectors| {
+            tracing::info!(
+                connections = connectors.len(),
+                "loaded connections from substructure.toml"
+            );
+            Arc::new(Connections::new(
+                Arc::new(LocalRegistry::new(connectors)),
+                Arc::new(EnvCredentials),
+            ))
+        });
+
     let llm_provider: Option<Arc<dyn LlmProviderTrait>> = match provider_env {
         Some(ProviderEnv::Openrouter { api_key }) => {
             Some(Arc::new(OpenRouterProvider::new(OpenRouterConfig {
@@ -217,6 +261,8 @@ pub(crate) async fn start_engine(
         llm_provider,
         llm_task_queue,
         sub_agent_task_queue,
+        connections,
+        connector_task_queue,
         worker_queue,
         session_index_store,
         checkpoint_store,

@@ -4,6 +4,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use super::decision::{LlmHandler, ToolHandler, Trigger};
+use crate::connectors::RemoteTool;
 pub use crate::protocol::EffectKind;
 use crate::protocol::{
     AgentConfig, DraftMessage, ErrorCode, InterruptOrigin, LlmFormat, LlmRequest, LlmResponse,
@@ -31,6 +32,12 @@ pub enum EventPayload {
     ToolCallCompleted(ToolCallCompleted),
     #[serde(rename = "tool.call.errored")]
     ToolCallErrored(ToolCallErrored),
+    #[serde(rename = "connector.sync.requested")]
+    ConnectorSyncRequested(ConnectorSyncRequested),
+    #[serde(rename = "connector.sync.completed")]
+    ConnectorSyncCompleted(Box<ConnectorSyncCompleted>),
+    #[serde(rename = "connector.sync.errored")]
+    ConnectorSyncErrored(ConnectorSyncErrored),
     #[serde(rename = "sub_agent.requested")]
     SubAgentRequested(SubAgentRequested),
     #[serde(rename = "sub_agent.started")]
@@ -151,6 +158,40 @@ pub struct LlmCallErrored {
     pub detail: Option<serde_json::Value>,
 }
 
+/// Fetch one connection's tool list. Keyed on the connection id, not on the
+/// agent version that asked for it: the offer is a fact about the remote, and
+/// a config rewritten for unrelated reasons must not cost another round trip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorSyncRequested {
+    pub connection_id: String,
+    pub attempt: u32,
+    pub retry: RetryPolicy,
+}
+
+/// What a connection offered, verbatim and unfiltered, plus the prefix its
+/// tools are expanded under. The prefix is recorded rather than read back from
+/// config so that editing `substructure.toml` cannot rename tools underneath a
+/// live session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorSyncCompleted {
+    pub connection_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    pub tools: Vec<RemoteTool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorSyncErrored {
+    pub connection_id: String,
+    pub error: String,
+    #[serde(default)]
+    pub retryable: bool,
+    /// The connection rejected the credential; a retry cannot help until it is
+    /// replaced.
+    #[serde(default)]
+    pub needs_reauth: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentRequested {
     pub session_id: String,
@@ -173,6 +214,16 @@ pub struct SubAgentErrored {
     pub retryable: bool,
 }
 
+/// Where an engine-executed call lands: the connection, and the name that
+/// connection knows the tool by. Frozen onto the call beside its handler, so a
+/// config change cannot reroute a call already in flight — and so the audit
+/// record names the connection rather than only the model's prefixed alias.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConnectorTarget {
+    pub connector: String,
+    pub remote_name: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallRequested {
     pub tool_call_id: String,
@@ -181,6 +232,9 @@ pub struct ToolCallRequested {
     pub arguments: String,
     #[serde(default)]
     pub handler: ToolHandler,
+    /// Set exactly when `handler` is `Server`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<ConnectorTarget>,
     pub retry: RetryPolicy,
 }
 

@@ -27,6 +27,13 @@
             ],
             "description": "Where the proposed LLM call runs: `Some(Worker)` ⇒ the worker executes it\n(answering `llm.execute`); absent or `Some(Server)` ⇒ the engine's\nserver-side provider. `client` is invalid and rejected at the decision seam."
           },
+          "mcp": {
+            "description": "MCP servers the agent draws tools from. The engine resolves each against\nits connection registry into [`ConnectorTool`]s the model sees alongside\n`tools`. Like `sub_agents`, these are never merged into `tools` — the\nworker declares the server, not its tools.\n\nA second protocol gets its own field rather than a `type` tag here: its\nfilter would not be this one (MCP annotations mean nothing to an A2A\nagent), and a union of conditionally-valid fields generates badly in the\nGo and Python bindings.",
+            "items": {
+              "$ref": "#/components/schemas/McpServer"
+            },
+            "type": "array"
+          },
           "model": {
             "type": "string"
           },
@@ -72,7 +79,7 @@
       },
       "AgentTool": {
         "additionalProperties": false,
-        "description": "A function tool the agent offers. The model-facing contract is\n`name`/`description`/`input`/`output`; `handler` selects where a call runs —\n`Some(Client)` ⇒ client-executed, absent ⇒ worker-executed (the default).\n`server` is invalid for tools.",
+        "description": "A function tool the agent offers. The model-facing contract is\n`name`/`description`/`input`/`output`; `handler` selects where a call runs —\n`Some(Client)` ⇒ client-executed, absent ⇒ worker-executed (the default).\n`server` is invalid for tools: engine-executed tools come from a connector,\nwhich a worker declares by id rather than by tool.",
         "properties": {
           "description": {
             "type": "string"
@@ -335,13 +342,9 @@
           },
           {
             "additionalProperties": false,
-            "description": "`id` omitted ⇒ the engine mints one (LLM-driven tools carry the model's id).",
+            "description": "`id` omitted ⇒ the engine mints one (LLM-driven tools carry the model's id).\n\nThere is no `handler`: where a call runs follows from its name. A tool\nresolved from a connector runs on the engine, a tool declared\n`handler: client` runs on the client, and anything else runs on the\nworker. The engine already knows all three, so asking the worker to\nrestate it only creates a way for the two to disagree.",
             "properties": {
               "arguments": {},
-              "handler": {
-                "$ref": "#/components/schemas/Handler",
-                "description": "`worker` or `client`; omitted ⇒ `worker`."
-              },
               "id": {
                 "type": [
                   "string",
@@ -1160,7 +1163,7 @@
       },
       "Effect": {
         "additionalProperties": false,
-        "description": "An in-flight effect (Pending or RetryScheduled) surfaced on each worker decision.\nA flat envelope plus kind-specific fields: a tool call's\n`name`/`arguments`/`handler`, an LLM call's `handler`/`stream`, a\nsub-agent's `agent_id`/`session_id`.",
+        "description": "An in-flight effect (Pending or RetryScheduled) surfaced on each worker decision.\nA flat envelope plus kind-specific fields: a tool call's\n`name`/`arguments`/`handler`, an LLM call's `handler`/`stream`, a\nsub-agent's `agent_id`/`session_id`. A connector sync carries none — its\n`id` is the connection being fetched.",
         "properties": {
           "agent_id": {
             "type": [
@@ -1241,13 +1244,22 @@
         "type": "object"
       },
       "EffectKind": {
-        "enum": [
-          "tool_call",
-          "sub_agent",
-          "llm_call"
+        "oneOf": [
+          {
+            "enum": [
+              "tool_call",
+              "sub_agent",
+              "llm_call"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "connector_sync",
+            "description": "Fetching one connection's tool list. Its `id` is the connection id.",
+            "type": "string"
+          }
         ],
-        "title": "EffectKind",
-        "type": "string"
+        "title": "EffectKind"
       },
       "EffectStatus": {
         "enum": [
@@ -1289,11 +1301,11 @@
         "type": "object"
       },
       "Handler": {
-        "description": "Where a call runs — one wire enum so `handler` has a single type on every\nsurface. Tool calls accept `worker` (default) or `client`; LLM calls accept\n`server` (default) or `worker`. The invalid pairing (a `server` tool, a\n`client` LLM call) is rejected at the decision seam.",
+        "description": "Where a call runs — one wire enum so `handler` has a single type on every\nsurface. Tool calls accept `worker` (default), `client`, or `server` (set by\nthe engine for connector tools, never declared by a worker); LLM calls accept\n`server` (default) or `worker`. The invalid pairing (a `client` LLM call) is\nrejected at the decision seam.",
         "oneOf": [
           {
             "const": "server",
-            "description": "Server-side executor resolves the provider and makes the call (LLM only).",
+            "description": "Server-side executor resolves the provider or connection and makes the call.",
             "type": "string"
           },
           {
@@ -1360,6 +1372,69 @@
           "description"
         ],
         "title": "LlmTool",
+        "type": "object"
+      },
+      "McpServer": {
+        "additionalProperties": false,
+        "description": "An MCP server the agent draws tools from. `id` resolves against the engine's\nconnection registry — locally from `[mcp]` in `substructure.toml`, in the\ncloud from the connections an admin granted this app. The worker never names\na URL or a credential.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "tools": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/McpTools"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Narrows what the model sees. Absent ⇒ every tool the connection grants."
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "McpServer",
+        "type": "object"
+      },
+      "McpTools": {
+        "additionalProperties": false,
+        "description": "An MCP server's tool filter. Applied in order — capability predicates, then\n`include`, then `exclude` — and only ever narrowing, so a filter can never\nwiden what the connection grants.\n\n`include`/`exclude` are globs matched against the tool's name on the\nconnection, the name its own documentation uses, not the prefixed name the\nmodel sees. Capability predicates read the MCP annotations; a tool that\ncarries none fails the predicate, so an unannotated server yields nothing\nunder `read_only` rather than silently passing everything through.",
+        "properties": {
+          "exclude": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "idempotent": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "include": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "non_destructive": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "read_only": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "title": "McpTools",
         "type": "object"
       },
       "Message": {

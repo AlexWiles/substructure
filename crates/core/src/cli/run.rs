@@ -3,6 +3,7 @@ use std::io::{IsTerminal, Write};
 use clap::{Args, ValueEnum};
 use uuid::Uuid;
 
+use super::cloud::project_config;
 use super::env::{EnvVars, LlmProviderArg};
 use super::pretty::PrettyPrinter;
 use super::{local, register_startup_worker, DEFAULT_TENANT};
@@ -42,16 +43,20 @@ pub struct RunArgs {
     /// LLM provider for engine-executed `llm.call` actions. Omit when the worker
     /// makes its own LLM calls.
     #[arg(long, value_enum)]
-    provider: Option<LlmProviderArg>,
-    /// SQLite dev database path.
-    #[arg(long, default_value = "substructure.db")]
-    db: String,
+    llm_provider: Option<LlmProviderArg>,
+    /// Project config file (default: walks up from cwd looking for
+    /// `substructure.toml`). Supplies the engine's connections.
+    #[arg(short = 'c', long)]
+    config: Option<std::path::PathBuf>,
+    /// SQLite dev database path. [default: substructure.db]
+    #[arg(long)]
+    db: Option<String>,
     /// Signing secret if the worker verifies webhook signatures.
     #[arg(long)]
     signing_secret: Option<String>,
     /// Output mode. (Engine logs go to stderr at error level; set RUST_LOG=info for more.)
-    #[arg(long, short = 'o', value_enum, default_value_t = OutputMode::AgUi)]
-    output: OutputMode,
+    #[arg(long, short = 'o', value_enum)]
+    output: Option<OutputMode>,
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -62,6 +67,17 @@ enum OutputMode {
     Jsonl,
     /// Human-readable text: streamed replies, tool calls, and results.
     Pretty,
+}
+
+impl OutputMode {
+    /// The project file spells these the way `--output` does, so the value
+    /// names clap already knows are the parser.
+    fn parse(s: &str) -> Option<Self> {
+        Self::value_variants()
+            .iter()
+            .copied()
+            .find(|v| v.to_possible_value().is_some_and(|p| p.get_name() == s))
+    }
 }
 
 /// Where translated AG-UI events go. `Jsonl` renders nothing here — its raw
@@ -111,40 +127,64 @@ fn write_json<T: serde::Serialize>(stdout: &mut std::io::Stdout, value: &T) -> a
     Ok(())
 }
 
+impl RunArgs {
+    pub fn config_path(&self) -> Option<&std::path::Path> {
+        self.config.as_deref()
+    }
+}
+
 pub async fn run(args: RunArgs) -> anyhow::Result<()> {
+    // Anything argv omits can be pinned in the project file. Precedence is
+    // flag > environment > file > default, applied one field at a time.
+    let cfg = project_config::resolve(args.config.as_deref())?.unwrap_or_default();
+
+    let connections = cfg.connections();
+    let agent_id = args.agent.or(cfg.agent);
+    let provider_arg = args.llm_provider.or(cfg.llm_provider);
+    let output_mode = args
+        .output
+        .or_else(|| cfg.output.as_deref().and_then(OutputMode::parse))
+        .unwrap_or(OutputMode::AgUi);
+    let db_path = args
+        .db
+        .or(cfg.db)
+        .unwrap_or_else(|| "substructure.db".to_string());
+
     // Captured for the resume hint printed at the end, before the args are consumed.
-    let agent = args.agent.clone();
-    let provider = args
-        .provider
+    let agent = agent_id.clone();
+    let provider = provider_arg
         .and_then(|p| p.to_possible_value())
         .map(|v| v.get_name().to_string());
-    let output = args
-        .output
+    let output = output_mode
         .to_possible_value()
         .map(|v| v.get_name().to_string());
 
-    let input = parse_input(&args.input, args.agent)?;
+    let input = parse_input(&args.input, agent_id)?;
 
     // dev=true: `run` exposes no server, so no client/worker auth env is required.
-    let env = match EnvVars::load(args.provider, true) {
+    let env = match EnvVars::load(provider_arg, true) {
         Ok(e) => e,
         Err(_) => std::process::exit(2),
     };
 
-    if let Some(parent) = std::path::Path::new(&args.db).parent() {
+    if let Some(parent) = std::path::Path::new(&db_path).parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
         }
     }
 
-    let db = SqliteDb::open(&args.db, std::time::Duration::from_secs(5))?;
-    let (rt, adapter) = local::start_engine(db, env.provider).await?;
+    let db = SqliteDb::open(&db_path, std::time::Duration::from_secs(5))?;
+    let (rt, adapter) = local::start_engine(db, env.provider, connections).await?;
 
     let worker_url = args
         .worker_url
         .or_else(|| std::env::var("SUBSTRUCTURE_WORKER_URL").ok())
+        .or(cfg.worker_url)
         .unwrap_or_else(|| "http://localhost:3000/agent".to_string());
-    register_startup_worker(&adapter, &worker_url, args.signing_secret).await?;
+    let signing_secret = args
+        .signing_secret
+        .or_else(|| cfg.signing_secret_env.as_deref().and_then(super::env_value));
+    register_startup_worker(&adapter, &worker_url, signing_secret).await?;
 
     let session_id = args.session.unwrap_or_else(|| Uuid::now_v7().to_string());
 
@@ -197,8 +237,8 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
     // yield, or an interrupt — which is exactly when this invocation should stop.
     let mut translator = AgUiTranslator::new(session_id.clone(), turn_id);
     let mut stdout = std::io::stdout();
-    let raw = matches!(args.output, OutputMode::Jsonl);
-    let mut renderer = match args.output {
+    let raw = matches!(output_mode, OutputMode::Jsonl);
+    let mut renderer = match output_mode {
         OutputMode::AgUi => Renderer::AgUi,
         OutputMode::Jsonl => Renderer::Jsonl,
         OutputMode::Pretty => Renderer::Pretty(PrettyPrinter::new(stdout.is_terminal())),
@@ -252,7 +292,7 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
                 agent.as_deref(),
                 provider.as_deref(),
                 output.as_deref(),
-                &args.db,
+                &db_path,
             )
         );
         // Faint so the hint reads as secondary; plain when piped.
@@ -292,7 +332,7 @@ fn resume_command(
         cmd.push_str(&format!(" --agent {agent}"));
     }
     if let Some(provider) = provider {
-        cmd.push_str(&format!(" --provider {provider}"));
+        cmd.push_str(&format!(" --llm-provider {provider}"));
     }
     if let Some(output) = output.filter(|o| *o != "ag-ui") {
         cmd.push_str(&format!(" --output {output}"));
@@ -323,7 +363,7 @@ mod tests {
         );
         assert_eq!(
             cmd,
-            r#"subs run --session sess-1 --worker-url http://localhost:4444 --agent my-agent --provider anthropic --input '{"type":"client.message","message":{"role":"user","content":"..."}}'"#
+            r#"subs run --session sess-1 --worker-url http://localhost:4444 --agent my-agent --llm-provider anthropic --input '{"type":"client.message","message":{"role":"user","content":"..."}}'"#
         );
     }
 
@@ -346,7 +386,7 @@ mod tests {
         );
         assert!(cmd.contains(" --db other.db"), "{cmd}");
         assert!(!cmd.contains("--agent"), "{cmd}");
-        assert!(!cmd.contains("--provider"), "{cmd}");
+        assert!(!cmd.contains("--llm-provider"), "{cmd}");
         assert!(!cmd.contains("--output"), "{cmd}");
     }
 

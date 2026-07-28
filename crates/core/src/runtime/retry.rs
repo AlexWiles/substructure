@@ -48,6 +48,19 @@ impl RetryPolicy {
         }
     }
 
+    /// The default for fetching a connection's tool list. Every decision that
+    /// would prompt the model waits behind this, so it is deliberately shorter
+    /// and shallower than an LLM call: a connection that cannot answer promptly
+    /// should settle as failed and let the worker decide, not hold the turn.
+    pub fn connector_default() -> Self {
+        RetryPolicy {
+            timeout_secs: Some(30),
+            max_retries: 3,
+            backoff_base_secs: 1,
+            backoff_max_secs: 10,
+        }
+    }
+
     /// Compute the deadline from a start time. Returns None if no timeout is set.
     pub fn deadline(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
         self.timeout_secs
