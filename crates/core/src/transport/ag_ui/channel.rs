@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use axum::extract::{Extension, Path, State};
-use axum::http::StatusCode;
 use axum::middleware;
 use axum::response::sse::{KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -11,15 +10,18 @@ use futures_util::stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-use crate::protocol::{ClientInput, InterruptResumption, SessionOwner};
+use crate::protocol::{
+    ClientInput, ClientMessages, ClientPayload, InterruptResumption, SessionOwner,
+};
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
+use crate::transport::ag_ui::events::AgUiEvent;
 use crate::transport::ag_ui::snapshot::snapshot_events;
-use crate::transport::ag_ui::translator::run_ag_ui_translation;
+use crate::transport::ag_ui::translator::{run_ag_ui_translation, AgUiTranslator};
 use crate::transport::ag_ui::types::{ConnectInput, RunAgentInput};
 use crate::transport::auth::AuthResolver;
 use crate::transport::channel::{Channel, ChannelContext};
 use crate::transport::http::{client_auth_middleware, client_cors, runtime_error_response};
-use crate::{Caller, HandleClientInput};
+use crate::{Caller, HandleClientInput, SubmitClientPayload};
 
 pub struct AgUiChannel {
     auth: Arc<dyn AuthResolver>,
@@ -52,6 +54,24 @@ impl Channel for AgUiChannel {
     }
 }
 
+/// AG-UI reports a rejected run on the stream, not as an HTTP status: "agents
+/// receiving a non-conforming input must emit `RunError`". Only input the
+/// protocol defines as non-conforming comes here — auth and stream-setup
+/// failures stay HTTP errors, since no run ever began for them.
+fn run_error(thread_id: String, run_id: String, message: String) -> Response {
+    let mut t = AgUiTranslator::new(thread_id, run_id);
+    let mut events: Vec<AgUiEvent> = t.start();
+    events.extend(t.finalize_error(message));
+    let stream = futures_util::stream::iter(
+        events
+            .into_iter()
+            .map(|e| Ok::<_, std::convert::Infallible>(e.to_sse())),
+    );
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
 async fn run(
     State(ctx): State<ChannelContext>,
     Extension(caller): Extension<Caller>,
@@ -60,11 +80,50 @@ async fn run(
     Json(input): Json<RunAgentInput>,
 ) -> Response {
     let session_id = input.thread_id.clone();
+    let (thread_id, run_id) = (input.thread_id.clone(), input.run_id.clone());
 
     // Passthrough; the core classifies new turn vs. client tool results.
     if input.resume.is_empty() && input.to_messages().is_empty() {
-        let body = serde_json::json!({"error": "no messages or resume in RunAgentInput"});
-        return (StatusCode::BAD_REQUEST, Json(body)).into_response();
+        return run_error(
+            thread_id,
+            run_id,
+            "no messages or resume in RunAgentInput".to_string(),
+        );
+    }
+
+    // "If a thread has unresolved interrupts, any RunAgentInput on that thread
+    // must include a resume addressing them", and "a single resume array must
+    // address every open interrupt from the interrupted run. Partial resumes
+    // are not supported."
+    let open: Vec<String> = match ctx.get_session(caller.tenant_id(), &session_id).await {
+        Ok(session) => session
+            .state
+            .interrupts_for(session.state.head_id.as_deref())
+            .into_iter()
+            .map(|i| i.interrupt_id.clone())
+            .collect(),
+        // No session yet: nothing can be open on it.
+        Err(_) => Vec::new(),
+    };
+    let addressed: std::collections::HashSet<&str> = input
+        .resume
+        .iter()
+        .map(|r| r.interrupt_id.as_str())
+        .collect();
+    let unaddressed: Vec<&str> = open
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !addressed.contains(id))
+        .collect();
+    if !unaddressed.is_empty() {
+        return run_error(
+            thread_id,
+            run_id,
+            format!(
+                "resume must address every open interrupt; unaddressed: {}",
+                unaddressed.join(", ")
+            ),
+        );
     }
 
     let spec = SessionSubscriptionSpec {
@@ -80,7 +139,10 @@ async fn run(
 
     // AG-UI's input is already classified (a `resume` list vs. messages), so the inputs are
     // built directly with their addressing rather than parsed from untrusted tagged JSON.
-    // Resumes apply first, then the messages view — steerAway sends both.
+    // Resumes apply first, then the messages view — while an interrupt is open the protocol
+    // requires both to arrive as one input, so a user who types instead of answering the
+    // prompt lands here.
+    let resuming = !input.resume.is_empty();
     for entry in input.resume.clone() {
         let payload = serde_json::to_value(crate::protocol::InterruptResolution {
             status: entry.status,
@@ -112,20 +174,25 @@ async fn run(
     }
     if !input.to_messages().is_empty() {
         let submit = ctx
-            .handle_client_input(HandleClientInput {
+            .submit_client_payload(SubmitClientPayload {
                 session_id: session_id.clone(),
                 caller,
                 owner,
-                input: ClientInput::Messages {
-                    agent_id,
-                    turn_id: Some(input.run_id.clone()),
+                agent_id,
+                payload: ClientPayload::Messages(ClientMessages {
                     // Full client view so edits/branches reconcile into the tree.
                     messages: input.to_messages(),
                     stream: true,
                     // Client-declared tools/context/state, forwarded to the worker.
                     client: input.client_context(),
-                },
-                span: crate::span::SpanContext::root().child("ag_ui_run"),
+                }),
+                turn_id: Some(input.run_id.clone()),
+                // A resume did not end the turn it unpaused, so a view arriving
+                // with one continues that turn rather than opening a second.
+                continue_turn: resuming,
+                // A full view cannot be frozen behind a turn: it settles
+                // pending client calls at submit time.
+                queue: false,
             })
             .await;
         if let Err(e) = submit {

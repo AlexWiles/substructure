@@ -14,12 +14,13 @@ use crate::runtime::session::SessionEvent;
 use super::SubAgentTask;
 
 struct SubAgentDispatchProjection {
+    store: Arc<dyn EventStore>,
     queue: Arc<dyn TaskQueue<SubAgentTask>>,
 }
 
 impl SubAgentDispatchProjection {
-    fn new(queue: Arc<dyn TaskQueue<SubAgentTask>>) -> Self {
-        Self { queue }
+    fn new(store: Arc<dyn EventStore>, queue: Arc<dyn TaskQueue<SubAgentTask>>) -> Self {
+        Self { store, queue }
     }
 }
 
@@ -33,10 +34,26 @@ impl EventProcessor for SubAgentDispatchProjection {
         let shard_key = event.session_id.clone();
 
         let task = match &event.payload {
-            EventPayload::SubAgentRequested(req) => {
+            // Executors key off the dispatch marker; the delegation is read
+            // from state. A requested spawn is queued, not running.
+            EventPayload::SubAgentDispatched(d) => {
                 let owner = event.meta.owner.clone().ok_or_else(|| {
                     ProcessorError::Apply("missing owner in event meta".to_string())
                 })?;
+
+                let session = self
+                    .store
+                    .load(&event.tenant_id, &event.session_id)
+                    .await
+                    .map_err(|e| {
+                        ProcessorError::Apply(format!("load session for sub-agent dispatch: {e}"))
+                    })?;
+                let Some(effect) = session.state.effect(EffectKind::SubAgent, &d.id) else {
+                    return Ok(());
+                };
+                let Some(sa) = effect.sub_agent() else {
+                    return Ok(());
+                };
 
                 let mut ancestry = event.meta.ancestry.clone();
                 ancestry.push(event.session_id.clone());
@@ -45,11 +62,11 @@ impl EventProcessor for SubAgentDispatchProjection {
                     source_event_id: event.id,
                     parent_session_id: event.session_id,
                     tenant_id: event.tenant_id,
-                    child_session_id: req.session_id.clone(),
-                    agent_id: req.agent_id.clone(),
+                    child_session_id: d.id.clone(),
+                    agent_id: sa.agent_id.clone(),
                     owner,
                     ancestry,
-                    retry: req.retry.clone(),
+                    retry: effect.tracking.retry_policy.clone(),
                     span: event.span,
                 })
             }
@@ -61,15 +78,14 @@ impl EventProcessor for SubAgentDispatchProjection {
                 span: event.span,
             }),
             // A voided sub-agent delegation cancels its child session.
-            EventPayload::CallVoided(v) if v.kind == EffectKind::SubAgent => v
-                .session_id
-                .as_ref()
-                .map(|child_session_id| SubAgentTask::CancelSubAgent {
+            EventPayload::CallVoided(v) if v.kind == EffectKind::SubAgent => {
+                Some(SubAgentTask::CancelSubAgent {
                     source_event_id: event.id,
                     tenant_id: event.tenant_id.clone(),
-                    child_session_id: child_session_id.clone(),
+                    child_session_id: v.id.clone(),
                     span: event.span,
-                }),
+                })
+            }
             EventPayload::TurnCompleted(tc) => {
                 let parent_session_id = match event.meta.ancestry.last() {
                     Some(id) => id.clone(),
@@ -116,8 +132,10 @@ pub fn spawn_sub_agent_dispatch_processor(
     queue: Arc<dyn TaskQueue<SubAgentTask>>,
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
-    let projection = Arc::new(SubAgentDispatchProjection::new(queue));
-    let mut config = EventProcessorRunnerConfig::default();
-    config.owner_id = Some("sub_agent_dispatch".to_string());
+    let projection = Arc::new(SubAgentDispatchProjection::new(store.clone(), queue));
+    let config = EventProcessorRunnerConfig {
+        owner_id: Some("sub_agent_dispatch".to_string()),
+        ..Default::default()
+    };
     EventProcessorRunner::new(store, checkpoint_store, projection, config, cancel).spawn()
 }

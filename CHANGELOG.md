@@ -13,11 +13,15 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 
 - Failed decisions now retry or end the run with the error.
 - Decisions and LLM calls have default timeouts and retries.
+- An LLM call that times out on its last attempt now settles the turn instead of stalling it.
+- A turn now completes when its finalizer decision settles without a `done` action.
 - The push transport no longer cuts long streams.
 - A failed sub-agent and an unconfigured session now report errors.
+- A tool result that arrives after its deadline no longer reports an error.
 
 ### Added
 
+- A client submit can queue a message while a turn is active.
 - Add a Slack adapter and a channel abstraction.
 - Add MCP support.
 - substructure.toml as a config file.
@@ -27,6 +31,19 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 - Rename the default database file to `substructure.db`.
 - Rename the `--provider` option to `--llm-provider`.
 - The `tool.call` action has no `handler` field; the engine finds where a call runs from its name.
+- LLM calls and tool routing now use the agent config from the same decision.
+- Effects and decisions queue in arrival order and dispatch when their prerequisites settle.
+- Rename the decision events to the effect lifecycle names: `decision.queued`, `decision.dispatched`, `decision.completed`, `decision.errored`, `decision.dropped`.
+- An LLM call waits for the connector fetches of its own decision and offers the fetched tools.
+- One scheduler now decides all work: an effect past its deadline and a due retry settle at the next command, not only at a wake.
+- A sub-agent effect is named by its child session. In `calls[]`, `id` is the child session and the new `tool_call_id` field gives the call the delegation answers.
+- `calls[]` reports a connector fetch with the `connector_sync` kind.
+- Each event of an effect names that effect with `id`, in place of `call_id`, `tool_call_id`, `session_id`, `connection_id` and `decision_id`.
+- A client submit during an active turn now gives a conflict error and does not start a second turn.
+- An AG-UI run that resumes an interrupt and sends messages now continues the resumed turn.
+- An AG-UI run with a missing or partial `resume` for its open interrupts now ends with `RUN_ERROR`.
+- A turn that starts while the previous turn finishes now completes the previous turn first.
+- The session state has a new incompatible shape; delete existing database files.
 
 ## [0.2.3] - 2026-07-22
 

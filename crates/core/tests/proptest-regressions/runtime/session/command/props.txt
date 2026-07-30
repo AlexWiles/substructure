@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 90ae47479a58bc72e1ddf8fc57e083db35c318c799b45a157870cde3349f2521 # shrinks to ops = [Decide { acts: [CallLlm { worker: false }], append: false, set_config: false }, ClientMessage, Wake { advance_secs: 5 }]
+cc c0ead878548431afca14c5fccfd0351b6fbf8762e26577f672f2a5da1987e4b0 # shrinks to ops = [Wake { advance_secs: 5 }, Wake { advance_secs: 1 }, ClientMessage, Decide { acts: [Done], append: false, set_config: false }, ClientMessage]

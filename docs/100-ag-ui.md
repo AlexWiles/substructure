@@ -44,6 +44,12 @@ The stream is AG-UI events: `RUN_STARTED` and `RUN_FINISHED` around the turn,
 for tool calls and results, and `MESSAGES_SNAPSHOT` for the active branch.
 `RUN_FINISHED` carries an interrupt outcome when the agent paused.
 
+While a thread has open interrupts, every run input must carry a `resume`
+addressing all of them; a partial or missing one ends the run with `RUN_ERROR`
+rather than an HTTP error. A run may resume and send messages at once — the
+messages then continue the turn the resume unpaused, so they do not open a
+second one.
+
 ## Frontend tools and context
 
 `tools`, `context`, and `state` from `RunAgentInput` become the decision's

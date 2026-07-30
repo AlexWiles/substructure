@@ -166,25 +166,23 @@ impl TurnActivity {
     fn apply(&mut self, event: &SessionEvent) {
         match &event.payload {
             EventPayload::ToolCallRequested(t) => {
-                self.start(&t.tool_call_id, t.name.clone(), Some(&t.arguments), event)
+                self.start(&t.id, t.name.clone(), Some(&t.arguments), event)
             }
-            EventPayload::ToolCallCompleted(t) => {
-                self.end(&t.tool_call_id, event, Ok(Some(&t.result)))
-            }
-            EventPayload::ToolCallErrored(t) => self.end(&t.tool_call_id, event, Err(&t.error)),
+            EventPayload::ToolCallCompleted(t) => self.end(&t.id, event, Ok(Some(&t.result))),
+            EventPayload::ToolCallErrored(t) => self.end(&t.id, event, Err(&t.error)),
             EventPayload::SubAgentRequested(s) => {
-                self.start(&s.session_id, format!("agent {}", s.agent_id), None, event)
+                self.start(&s.id, format!("agent {}", s.agent_id), None, event)
             }
             EventPayload::SubAgentTurnCompleted(s) => {
                 let data = (!s.data.is_null()).then(|| s.data.to_string());
-                self.end(&s.session_id, event, Ok(data.as_deref()))
+                self.end(&s.id, event, Ok(data.as_deref()))
             }
-            EventPayload::SubAgentErrored(s) => self.end(&s.session_id, event, Err(&s.error)),
+            EventPayload::SubAgentErrored(s) => self.end(&s.id, event, Err(&s.error)),
             // A response with no calls is the answer, not a preamble.
             EventPayload::LlmCallCompleted(c) if !c.response.tool_calls.is_empty() => {
                 if let Some(text) = c.response.content.as_deref().map(str::trim) {
                     if !text.is_empty() {
-                        self.say(&c.call_id, clip(text, MAX_TEXT));
+                        self.say(&c.id, clip(text, MAX_TEXT));
                     }
                 }
             }
@@ -334,7 +332,7 @@ mod tests {
             seq,
             0,
             EventPayload::LlmCallCompleted(crate::session::events::LlmCallCompleted {
-                call_id: id.into(),
+                id: id.into(),
                 attempt: 0,
                 response: LlmResponse {
                     model: "m".into(),
@@ -412,7 +410,7 @@ mod tests {
             seq,
             secs,
             EventPayload::ToolCallRequested(ToolCallRequested {
-                tool_call_id: id.into(),
+                id: id.into(),
                 attempt: 0,
                 name: name.into(),
                 arguments: "{}".into(),
@@ -428,7 +426,7 @@ mod tests {
             seq,
             secs,
             EventPayload::ToolCallCompleted(ToolCallCompleted {
-                tool_call_id: id.into(),
+                id: id.into(),
                 name: "tool".into(),
                 result: "ok".into(),
             }),
@@ -556,7 +554,7 @@ mod tests {
                 3,
                 1,
                 EventPayload::ToolCallErrored(ToolCallErrored {
-                    tool_call_id: "tc1".into(),
+                    id: "tc1".into(),
                     name: "send_email".into(),
                     error: "permission\n  denied".into(),
                     retryable: false,
@@ -587,7 +585,7 @@ mod tests {
                 3,
                 1,
                 EventPayload::ToolCallCompleted(ToolCallCompleted {
-                    tool_call_id: "tc1".into(),
+                    id: "tc1".into(),
                     name: "send_email".into(),
                     result: "   ".into(),
                 }),
@@ -609,7 +607,7 @@ mod tests {
                 3,
                 1,
                 EventPayload::ToolCallErrored(ToolCallErrored {
-                    tool_call_id: "tc1".into(),
+                    id: "tc1".into(),
                     name: "search_web".into(),
                     error: "rate limited".into(),
                     retryable: true,
@@ -633,7 +631,7 @@ mod tests {
                 2,
                 0,
                 EventPayload::SubAgentRequested(SubAgentRequested {
-                    session_id: "sub-1".into(),
+                    id: "sub-1".into(),
                     agent_id: "researcher".into(),
                     tool_call_id: "tc1".into(),
                     retry: retry(),
@@ -643,7 +641,7 @@ mod tests {
                 3,
                 90,
                 EventPayload::SubAgentTurnCompleted(SubAgentTurnCompleted {
-                    session_id: "sub-1".into(),
+                    id: "sub-1".into(),
                     cost: Default::default(),
                     token_usage: Default::default(),
                     data: Value::Null,
@@ -688,7 +686,7 @@ mod tests {
                 3 + i * 2,
                 1,
                 EventPayload::ToolCallCompleted(ToolCallCompleted {
-                    tool_call_id: id,
+                    id,
                     name: "tool".into(),
                     result: big.clone(),
                 }),

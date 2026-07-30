@@ -443,6 +443,9 @@ impl SlackBot {
                 messages: build_batch(&path, &replies, &inbound),
                 stream: false,
                 client: Default::default(),
+                // A mention that lands mid-turn is a question, not a mistake:
+                // hold it and answer it in the next turn.
+                queue: true,
             },
             Err(e) => {
                 let hint = if e.code() != "missing_scope" {
@@ -466,6 +469,7 @@ impl SlackBot {
                         ),
                     ),
                     stream: false,
+                    queue: true,
                 }
             }
         };
@@ -504,8 +508,9 @@ impl SlackBot {
         }
         match submitted {
             Ok(_) => {}
-            // A redelivery, or a message while a prompt is open. The next
-            // turn gets it from the thread delta.
+            // A true redelivery of a message already taken, or a message while
+            // a prompt is open. Nothing to say: the first copy is queued or
+            // running, and an interrupt owes the user an answer first.
             Err(RuntimeError::Session(
                 SessionError::TurnAlreadyActive { .. }
                 | SessionError::TurnAlreadyCompleted { .. }
@@ -797,12 +802,15 @@ impl EventProcessor for SlackBot {
         if let Err(e) = self.track(&ws, &event).await {
             return Err(ProcessorError::Apply(e.to_string()));
         }
-        // Clear the indicator before the final message.
-        if matches!(
-            &event.payload,
-            EventPayload::TurnCompleted(_) | EventPayload::SessionInterrupted(_)
-        ) {
-            self.set_status(&ws, &thread, "").await;
+        // Clear the indicator before the final message, and light it for a turn
+        // that starts on its own — a queued turn takes the phase in the batch
+        // that ends the one before it, so its start follows that clear.
+        match &event.payload {
+            EventPayload::TurnCompleted(_) | EventPayload::SessionInterrupted(_) => {
+                self.set_status(&ws, &thread, "").await;
+            }
+            EventPayload::TurnStarted(_) => self.set_status(&ws, &thread, STATUS).await,
+            _ => {}
         }
         let result = match &event.payload {
             EventPayload::TurnCompleted(t) => {

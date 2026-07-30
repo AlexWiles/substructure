@@ -112,6 +112,11 @@ pub enum Trigger {
         messages: Vec<DraftMessage>,
         #[serde(default)]
         client: ClientContext,
+        /// The turn this message opens when it dispatches. `Some` = deferred:
+        /// the decision parks until the phase is free, then its dispatch starts
+        /// the turn. `None` = an ordinary message on the turn already running.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
     },
     /// `messages` is the full proposed conversation; `messages[new_from..]` is
     /// unrecorded (recomputed at delivery against the tree). Wire tag: `client.messages`.
@@ -201,7 +206,8 @@ pub enum Trigger {
         payload: serde_json::Value,
     },
     /// Fired after a turn completes, carrying its final output. Blocks `SessionDone`
-    /// until answered; echo the proposed `done` to finalize.
+    /// until answered; the turn completes when this decision settles, with or
+    /// without the proposed `done` echoed.
     #[serde(rename = "turn.finished")]
     TurnFinished {
         turn_id: String,
@@ -215,6 +221,14 @@ pub enum Trigger {
 }
 
 impl Trigger {
+    /// The turn this trigger opens at dispatch, for the triggers that defer one.
+    pub fn deferred_turn_id(&self) -> Option<&str> {
+        match self {
+            Trigger::ClientMessage { turn_id, .. } => turn_id.as_deref(),
+            _ => None,
+        }
+    }
+
     pub fn llm_ok(
         id: String,
         message: DraftMessage,

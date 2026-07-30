@@ -13,6 +13,6 @@ pub use runtime::Caller;
 pub use runtime::{
     event_store, llm, processor, retry, session, span, start, sub_agent, wake, worker,
     ClientInputOutput, EffectSettlement, HandleClientInput, InterruptSessionInput,
-    ResumeInterruptInput, Runtime, RuntimeConfig, RuntimeError, SettleEffectInput,
+    ResumeInterruptInput, Runtime, RuntimeConfig, RuntimeDeps, RuntimeError, SettleEffectInput,
     SubmitClientPayload, SubmitClientPayloadOutput,
 };

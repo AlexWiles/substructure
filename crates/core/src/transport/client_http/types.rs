@@ -17,6 +17,8 @@ pub struct ClientInputRequest {
 pub struct ClientInputResponse {
     pub session_id: String,
     pub turn_id: String,
+    /// The turn was taken but has not started: another turn holds the session.
+    pub queued: bool,
 }
 
 #[derive(Debug, Deserialize)]

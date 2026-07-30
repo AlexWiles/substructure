@@ -30,7 +30,7 @@ use crate::transport::server::SubstructureServer;
 use crate::transport::slack::{SlackChannel, StreamStore};
 use crate::transport::worker_http::{self, WorkerHttpState};
 use crate::worker::push::{PushRegistry, TransportRegistry};
-use crate::{start, Runtime, RuntimeConfig};
+use crate::{start, Runtime, RuntimeConfig, RuntimeDeps};
 
 #[derive(Args)]
 pub struct ServeArgs {
@@ -97,8 +97,8 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
     let slack_agent = args.slack_agent.or(cfg.slack_agent);
 
     let env = match EnvVars::load(args.llm_provider.or(cfg.llm_provider), dev) {
-        Ok(e) => e,
-        Err(_) => std::process::exit(2),
+        Some(e) => e,
+        None => std::process::exit(2),
     };
     let db = SqliteDb::open(&db_path, std::time::Duration::from_secs(5))?;
     let slack = match slack_agent {
@@ -257,17 +257,19 @@ pub(crate) async fn start_engine(
 
     let token_delta_transport = Arc::new(crate::llm::InMemoryTokenDeltaTransport::new());
     let rt = start(
-        event_store,
-        llm_provider,
-        llm_task_queue,
-        sub_agent_task_queue,
-        connections,
-        connector_task_queue,
-        worker_queue,
-        session_index_store,
-        checkpoint_store,
-        wake_store,
-        token_delta_transport,
+        RuntimeDeps {
+            store: event_store,
+            llm_provider,
+            llm_task_queue,
+            sub_agent_task_queue,
+            connections,
+            connector_task_queue,
+            worker_queue,
+            session_index_store,
+            checkpoint_store,
+            wake_store,
+            token_delta_transport,
+        },
         config,
     );
 

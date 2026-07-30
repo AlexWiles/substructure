@@ -114,7 +114,7 @@ mod tests {
         let nodes: Vec<NewMessage> = messages
             .into_iter()
             .enumerate()
-            .map(|(i, m)| node((i + 1) as u128, (i > 0).then(|| i as u128), m))
+            .map(|(i, m)| node((i + 1) as u128, (i > 0).then_some(i as u128), m))
             .collect();
         let head = nodes.len() as u128;
         tree(nodes, head)

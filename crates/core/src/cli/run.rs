@@ -163,8 +163,8 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
 
     // dev=true: `run` exposes no server, so no client/worker auth env is required.
     let env = match EnvVars::load(provider_arg, true) {
-        Ok(e) => e,
-        Err(_) => std::process::exit(2),
+        Some(e) => e,
+        None => std::process::exit(2),
     };
 
     if let Some(parent) = std::path::Path::new(&db_path).parent() {

@@ -10,7 +10,9 @@ use uuid::Uuid;
 use crate::event_store::{AppendInput, EventFilter, EventStore, GlobalPosition, Seq, StoreError};
 use crate::protocol::{Message, NewMessage};
 use crate::runtime::session::events::EventPayload;
-use crate::runtime::session::state::{AgentVersion, Logged, SessionState, StateVersion};
+use crate::runtime::session::state::{
+    AgentVersion, EffectKind, Logged, SessionState, StateVersion,
+};
 use crate::runtime::session::{NewSessionEvent, SessionAggregate, SessionEvent};
 
 use super::{parse_dt, sea_params, spawn_err, SqliteDb};
@@ -315,7 +317,7 @@ fn insert_event(
         // it, mirroring apply(). Stored from post-apply state so load
         // rejoins byte-identical bytes.
         EventPayload::LlmCallRequested(req) => {
-            if let Some(call) = snap.state.llm_calls.get(&req.call_id) {
+            if let Some(call) = snap.state.llm_call(&req.id) {
                 let data = serde_json::to_string(&call.prompt).map_err(internal)?;
                 tx.execute(
                     "INSERT INTO llm_prompts (tenant_id, session_id, call_id, seq, data)
@@ -323,7 +325,7 @@ fn insert_event(
                      ON CONFLICT(tenant_id, session_id, call_id) DO UPDATE SET
                          seq = excluded.seq,
                          data = excluded.data",
-                    rusqlite::params![snap.tenant_id, sid, req.call_id, event.seq, data],
+                    rusqlite::params![snap.tenant_id, sid, req.id, event.seq, data],
                 )
                 .map_err(internal)?;
             }
@@ -427,8 +429,10 @@ fn strip(state: &SessionState) -> SessionState {
     state.nodes = Vec::new();
     state.state_versions = Vec::new();
     state.agent_versions = Vec::new();
-    for call in state.llm_calls.values_mut() {
-        call.prompt = Vec::new();
+    for effect in state.effects.values_mut() {
+        if let Some(call) = effect.llm_mut() {
+            call.prompt = Vec::new();
+        }
     }
     state
 }
@@ -445,7 +449,10 @@ fn hydrate(
     state.state_versions = state_versions;
     state.agent_versions = agent_versions;
     for (call_id, prompt) in prompts {
-        if let Some(call) = state.llm_calls.get_mut(&call_id) {
+        if let Some(call) = state
+            .effect_mut(EffectKind::LlmCall, &call_id)
+            .and_then(|e| e.llm_mut())
+        {
             call.prompt = prompt;
         }
     }
@@ -516,14 +523,14 @@ fn load_versions(
             "state" => states.push(Logged {
                 seq,
                 entry: StateVersion {
-                    state: serde_json::from_str(&data).map_err(internal)?,
+                    value: serde_json::from_str(&data).map_err(internal)?,
                     anchor,
                 },
             }),
             "agent" => agents.push(Logged {
                 seq,
                 entry: AgentVersion {
-                    agent: serde_json::from_str(&data).map_err(internal)?,
+                    value: serde_json::from_str(&data).map_err(internal)?,
                     anchor,
                 },
             }),
@@ -784,7 +791,7 @@ mod tests {
                     anchor: Some("m1".to_string()),
                 }),
                 EventPayload::LlmCallRequested(LlmCallRequested {
-                    call_id: "call-1".to_string(),
+                    id: "call-1".to_string(),
                     attempt: 0,
                     request: LlmRequest {
                         model: "m".to_string(),
@@ -824,9 +831,9 @@ mod tests {
         assert_eq!(loaded.state.nodes.len(), 2);
         assert_eq!(loaded.state.nodes[1].message.id, "m2");
         assert_eq!(loaded.state.state_versions.len(), 2);
-        assert_eq!(loaded.state.state_versions[1].state.0, json!({"v": 2}));
+        assert_eq!(loaded.state.state_versions[1].value.0, json!({"v": 2}));
         assert_eq!(
-            loaded.state.llm_calls["call-1"].prompt.len(),
+            loaded.state.llm_call("call-1").unwrap().prompt.len(),
             2,
             "the verbatim prompt rejoins from its table"
         );

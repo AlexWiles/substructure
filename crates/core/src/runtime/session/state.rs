@@ -1,3 +1,26 @@
+//! The session's canonical state, and the reducer that builds it.
+//!
+//! # Laws
+//!
+//! **A transition writes state; it never stores a task.** `apply` records what
+//! happened and nothing else. What runs next is derived from the result by
+//! [`schedule::plan`](super::schedule::plan), every time. There is no queue of
+//! pending work here beyond `schedule_queue`, which is position — an arrival
+//! order — not a work list. The reflex to "enqueue the follow-up while we know
+//! about it" is the thing this design exists to prevent: it puts the same
+//! decision in two places, and they drift.
+//!
+//! **One table, one lifecycle.** Every tracked effect lives in `effects`, keyed
+//! by `(kind, id)`, and carries an [`EffectTracking`] whose status only its own
+//! transitions may write. Deadlines, retries, voiding, the wire projection and
+//! the queue invariant are each one pass over that table, so adding a kind adds
+//! no sweep.
+//!
+//! **Orthogonal regions.** The turn's phase, each effect's lifecycle, and the
+//! interrupt overlay are independent. An interrupt is projected from
+//! `open_interrupts` at read time and never stored as a status; `Interrupted`
+//! is a [`SessionStatus`], never an [`EffectStatus`].
+
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
@@ -10,10 +33,11 @@ use crate::connectors::{filter, RemoteTool};
 use crate::protocol::{ConnectorTool, Handler};
 use rust_decimal::Decimal;
 
+pub use crate::protocol::EffectKind;
 use crate::protocol::{
-    AgentConfig, DraftMessage, Effect, EffectKind, EffectStatus, InterruptOrigin, LlmFormat,
-    LlmRequest, LlmTool, Message, MessageTree, NewMessage, ReasoningConfig, RetryPolicy, Role,
-    SessionOwner, WorkerState,
+    AgentConfig, DraftMessage, Effect, EffectStatus, InterruptOrigin, LlmFormat, LlmRequest,
+    LlmTool, Message, MessageTree, NewMessage, ReasoningConfig, RetryPolicy, Role, SessionOwner,
+    WorkerState,
 };
 use crate::runtime::retry::RetryState;
 
@@ -37,15 +61,27 @@ pub enum SessionStatus {
     Done,
 }
 
+/// One effect's lifecycle, the same for every kind.
+///
+/// ```text
+/// Queued ─dispatch→ Pending ─complete──────────────→ Completed
+///                      │ ─error[retries left]──────→ RetryScheduled ─requeue→ Queued
+///                      │ ─error[exhausted]─────────→ Failed
+///                      └ ─void────────────────────→ Failed
+/// ```
+///
+/// `status` is only ever written by the transitions below, each of which asserts
+/// the move is legal. Nothing else assigns it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EffectTracking {
-    pub status: EffectStatus,
+    status: EffectStatus,
     pub retry: RetryState,
     pub retry_policy: RetryPolicy,
     pub deadline: Option<DateTime<Utc>>,
 }
 
 impl EffectTracking {
+    /// A fetch: requested and in flight at once, never queued.
     pub fn new(retry_policy: RetryPolicy, now: DateTime<Utc>) -> Self {
         let deadline = retry_policy.deadline(now);
         Self {
@@ -65,14 +101,61 @@ impl EffectTracking {
         }
     }
 
-    pub fn reset_pending(&mut self, now: DateTime<Utc>) {
-        self.status = EffectStatus::Pending;
+    pub fn status(&self) -> EffectStatus {
+        self.status
+    }
+
+    fn move_to(&mut self, next: EffectStatus, from: &[EffectStatus]) {
+        debug_assert!(
+            from.contains(&self.status),
+            "illegal effect transition {:?} → {next:?}",
+            self.status
+        );
+        self.status = next;
+    }
+
+    /// Re-armed for another attempt: a retry, or a re-request of work still queued.
+    pub fn requeue(&mut self) {
+        self.move_to(
+            EffectStatus::Queued,
+            &[
+                EffectStatus::Queued,
+                EffectStatus::Pending,
+                EffectStatus::RetryScheduled,
+                EffectStatus::Failed,
+            ],
+        );
+    }
+
+    /// Started: the deadline clock runs from here.
+    pub fn dispatch(&mut self, now: DateTime<Utc>) {
+        self.move_to(
+            EffectStatus::Pending,
+            &[
+                EffectStatus::Queued,
+                EffectStatus::Pending,
+                EffectStatus::RetryScheduled,
+            ],
+        );
         self.deadline = self.retry_policy.deadline(now);
         self.retry.next_at = None;
     }
 
     pub fn complete(&mut self) {
-        self.status = EffectStatus::Completed;
+        self.move_to(EffectStatus::Completed, &[EffectStatus::Pending]);
+    }
+
+    /// Abandoned mid-flight — its branch was forked away, or the session ended.
+    pub fn void(&mut self) {
+        self.move_to(
+            EffectStatus::Failed,
+            &[
+                EffectStatus::Queued,
+                EffectStatus::Pending,
+                EffectStatus::RetryScheduled,
+                EffectStatus::Failed,
+            ],
+        );
     }
 
     /// Whether recording a failure now would be terminal (no further attempt):
@@ -85,12 +168,43 @@ impl EffectTracking {
     pub fn record_error(&mut self, retryable: bool, now: DateTime<Utc>) {
         let terminal = self.is_terminal_failure(retryable);
         self.retry = self.retry_policy.record_failure(&self.retry, now);
-        if terminal {
-            self.status = EffectStatus::Failed;
+        let next = if terminal {
             self.retry.next_at = None;
+            EffectStatus::Failed
         } else {
-            self.status = EffectStatus::RetryScheduled;
-        }
+            EffectStatus::RetryScheduled
+        };
+        self.move_to(
+            next,
+            &[
+                EffectStatus::Queued,
+                EffectStatus::Pending,
+                EffectStatus::RetryScheduled,
+            ],
+        );
+    }
+
+    /// Whether a connector offer is usable — settled, and settled successfully.
+    pub fn is_ready(&self) -> bool {
+        self.status == EffectStatus::Completed
+    }
+
+    /// Whether the effect is still going to produce something.
+    pub fn is_in_flight(&self) -> bool {
+        matches!(
+            self.status,
+            EffectStatus::Pending | EffectStatus::RetryScheduled
+        )
+    }
+
+    /// Recorded but not started.
+    pub fn is_queued(&self) -> bool {
+        self.status == EffectStatus::Queued
+    }
+
+    /// Not settled: recorded, running, or waiting to run again.
+    pub fn is_open(&self) -> bool {
+        self.is_queued() || self.is_in_flight()
     }
 
     pub fn earliest_wake(&self) -> Option<DateTime<Utc>> {
@@ -102,10 +216,98 @@ impl EffectTracking {
     }
 }
 
+/// One tracked effect: the envelope every kind shares, plus its own data.
+///
+/// `id` is the id that kind's own events name it by — a tool call, an LLM call,
+/// a child session, a connection, a decision — so `(kind, id)` keys the table
+/// and nothing needs a second identifier.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EffectState {
+    pub id: String,
+    pub tracking: EffectTracking,
+    /// The active head when the effect was first requested; retries keep it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
+    pub payload: EffectPayload,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EffectPayload {
+    LlmCall(LlmCallState),
+    ToolCall(ToolCallState),
+    SubAgent(SubAgentCallState),
+    ConnectorSync(ConnectorSyncState),
+    Decision(WorkerDecisionState),
+}
+
+impl EffectPayload {
+    pub fn kind(&self) -> EffectKind {
+        match self {
+            EffectPayload::LlmCall(_) => EffectKind::LlmCall,
+            EffectPayload::ToolCall(_) => EffectKind::ToolCall,
+            EffectPayload::SubAgent(_) => EffectKind::SubAgent,
+            EffectPayload::ConnectorSync(_) => EffectKind::ConnectorSync,
+            EffectPayload::Decision(_) => EffectKind::Decision,
+        }
+    }
+}
+
+/// `payload()` reads a kind's data off an effect of that kind; `None` means the
+/// caller asked the wrong kind, which the table's key makes impossible in
+/// practice. One pair per kind, written out rather than generated so the
+/// matches stay greppable.
+macro_rules! payload_views {
+    ($($get:ident, $get_mut:ident => $variant:ident($ty:ty)),* $(,)?) => {
+        impl EffectState {
+            pub fn kind(&self) -> EffectKind {
+                self.payload.kind()
+            }
+
+            $(
+                pub fn $get(&self) -> Option<&$ty> {
+                    match &self.payload {
+                        EffectPayload::$variant(v) => Some(v),
+                        _ => None,
+                    }
+                }
+                pub fn $get_mut(&mut self) -> Option<&mut $ty> {
+                    match &mut self.payload {
+                        EffectPayload::$variant(v) => Some(v),
+                        _ => None,
+                    }
+                }
+            )*
+        }
+    };
+}
+
+impl EffectState {
+    pub fn new(id: impl Into<String>, tracking: EffectTracking, payload: EffectPayload) -> Self {
+        Self {
+            id: id.into(),
+            tracking,
+            anchor: None,
+            payload,
+        }
+    }
+
+    pub fn at(mut self, anchor: Option<&str>) -> Self {
+        self.anchor = anchor.map(str::to_string);
+        self
+    }
+}
+
+payload_views! {
+    llm, llm_mut => LlmCall(LlmCallState),
+    tool, tool_mut => ToolCall(ToolCallState),
+    sub_agent, sub_agent_mut => SubAgent(SubAgentCallState),
+    connector, connector_mut => ConnectorSync(ConnectorSyncState),
+    decision, decision_mut => Decision(WorkerDecisionState),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmCallState {
-    pub call_id: String,
-    pub tracking: EffectTracking,
     /// The verbatim prompt the worker sent, stored for retries.
     #[serde(default)]
     pub prompt: Vec<Message>,
@@ -115,9 +317,6 @@ pub struct LlmCallState {
     pub handler: LlmHandler,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<LlmFormat>,
-    /// The active head when the effect was first requested; retries keep it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub anchor: Option<String>,
 }
 
 /// An `LlmRequest` without its message list; the prompt is stored alongside.
@@ -165,9 +364,7 @@ impl From<&LlmRequest> for LlmCallSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallState {
-    pub tool_call_id: String,
     pub name: String,
-    pub tracking: EffectTracking,
     #[serde(default)]
     pub handler: ToolHandler,
     /// The connection and remote name for a `Server` call; `None` otherwise.
@@ -180,16 +377,13 @@ pub struct ToolCallState {
     pub result: Option<String>,
     #[serde(default)]
     pub is_error: bool,
-    /// The active head when the effect was first requested; retries keep it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub anchor: Option<String>,
 }
 
+/// A delegation, keyed by the child session it runs — the id every sub-agent
+/// event names it by.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentCallState {
-    pub session_id: String,
     pub agent_id: String,
-    pub tracking: EffectTracking,
     /// The model tool-call id this delegation answers.
     #[serde(default)]
     pub tool_call_id: String,
@@ -198,9 +392,6 @@ pub struct SubAgentCallState {
     pub result: Option<String>,
     #[serde(default)]
     pub is_error: bool,
-    /// The active head when the effect was first requested; retries keep it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub anchor: Option<String>,
 }
 
 /// One connection's fetched tool list.
@@ -211,8 +402,6 @@ pub struct SubAgentCallState {
 /// way the call maps stay current across a rewind.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectorSyncState {
-    pub connection_id: String,
-    pub tracking: EffectTracking,
     /// Every tool the connection offered, unfiltered. Empty until it settles.
     #[serde(default)]
     pub tools: Vec<RemoteTool>,
@@ -227,36 +416,20 @@ pub struct ConnectorSyncState {
     pub needs_reauth: bool,
 }
 
-impl ConnectorSyncState {
-    /// Whether the offer is usable — settled, and settled successfully.
-    pub fn is_ready(&self) -> bool {
-        self.tracking.status == EffectStatus::Completed
-    }
-
-    /// Whether the fetch is still going to produce something.
-    pub fn is_in_flight(&self) -> bool {
-        matches!(
-            self.tracking.status,
-            EffectStatus::Pending | EffectStatus::RetryScheduled
-        )
-    }
+/// One anchored document write. Both typed channels — worker state and agent
+/// config — are versioned and resolved newest-on-path identically, so they are
+/// one type over what they carry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Versioned<T> {
+    pub value: T,
+    pub anchor: Option<String>,
 }
 
 /// Anchored worker-state write; current state is resolved, not stored.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StateVersion {
-    pub state: WorkerState,
-    pub anchor: Option<String>,
-}
+pub type StateVersion = Versioned<WorkerState>;
 
-/// Anchored agent-config write; the sibling of [`StateVersion`] for the typed
-/// agent-identity channel. Kept as its own struct (not a generic over
-/// `StateVersion`) so the persisted `state` field name never changes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentVersion {
-    pub agent: AgentConfig,
-    pub anchor: Option<String>,
-}
+/// Anchored agent-config write, the sibling channel for agent identity.
+pub type AgentVersion = Versioned<AgentConfig>;
 
 /// An unresumed interrupt: parks paths through its anchor (`None` = every path).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,6 +439,17 @@ pub struct OpenInterrupt {
     pub reason: String,
     pub payload: serde_json::Value,
     pub anchor: Option<String>,
+}
+
+/// What holds a parked decision. A park is region-shaped: the entry is skipped
+/// while a region elsewhere holds it, and the queue flows past. Each variant
+/// names the region — a branch under an interrupt, or the phase under a turn.
+#[derive(Debug, Clone, Copy)]
+pub enum DecisionPark<'a> {
+    /// An open interrupt parks the branch the decision lands on.
+    Interrupt(&'a OpenInterrupt),
+    /// The named turn holds the phase; this decision opens a different one.
+    Turn(&'a str),
 }
 
 /// A history-log entry tagged with the seq of the event that appended it —
@@ -303,13 +487,7 @@ impl<T: Anchored> Anchored for Logged<T> {
     }
 }
 
-impl Anchored for StateVersion {
-    fn anchor(&self) -> Option<&str> {
-        self.anchor.as_deref()
-    }
-}
-
-impl Anchored for AgentVersion {
+impl<T> Anchored for Versioned<T> {
     fn anchor(&self) -> Option<&str> {
         self.anchor.as_deref()
     }
@@ -334,17 +512,25 @@ pub fn resolve_on_path<'a, V: Anchored>(
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerDecisionState {
-    pub decision_id: String,
-    pub tracking: EffectTracking,
     pub trigger: Trigger,
     #[serde(default)]
     pub source_event_sequence: u64,
 }
 
+/// One entry of the schedule queue: work recorded but not yet dispatched.
+/// `seq` is the queued event's own sequence — arrival order is log order.
+/// The payload stays in its kind's map; the entry is position, not data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueEntry {
+    pub seq: u64,
+    pub kind: EffectKind,
+    pub id: String,
+}
+
 /// The frozen turn output held while its `turn.finished` finalizer runs, emitted as
 /// `TurnCompleted` once the finalizer settles (pass 2).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Finalizing {
+pub struct TurnEnd {
     pub turn_id: String,
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub data: serde_json::Value,
@@ -352,6 +538,53 @@ pub struct Finalizing {
     pub cost: Decimal,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub usage: BTreeMap<String, u64>,
+}
+
+/// Where the session is in a turn.
+///
+/// ```text
+/// Idle ─turn.started→ Active{turn_id} ─turn.finished queued→ Finalizing(TurnEnd)
+///  ↑                                                              │
+///  └────────────────────── turn.completed ────────────────────────┘
+/// ```
+///
+/// One of three orthogonal regions a session lives in — turn phase ∥ effect
+/// lifecycles ∥ the interrupt overlay — so it says nothing about what work is in
+/// flight or whether a branch is parked. There is deliberately no `Interrupted`
+/// variant: an interrupt parks a branch of the tree, and a turn can be
+/// interrupted in any phase. `SessionStatus` is the same story from the other
+/// side — stored `Idle`/`Done`, with `Interrupted` projected from the overlay.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum TurnPhase {
+    /// No turn is running. The session may still hold settled work and a tree.
+    #[default]
+    Idle,
+    /// The agent is working.
+    Active { turn_id: String },
+    /// The agent's turn is over and its output is frozen; the worker's
+    /// `turn.finished` finalizer is in flight. Holds what `TurnCompleted` will
+    /// carry, and is the pass-1/pass-2 discriminator.
+    Finalizing(TurnEnd),
+}
+
+impl TurnPhase {
+    /// The turn in progress, in either working phase.
+    pub fn turn_id(&self) -> Option<&str> {
+        match self {
+            TurnPhase::Idle => None,
+            TurnPhase::Active { turn_id } => Some(turn_id),
+            TurnPhase::Finalizing(end) => Some(&end.turn_id),
+        }
+    }
+
+    /// The frozen output, once the turn has one.
+    pub fn finalizing(&self) -> Option<&TurnEnd> {
+        match self {
+            TurnPhase::Finalizing(end) => Some(end),
+            _ => None,
+        }
+    }
 }
 
 /// Per-event stamp: scalars plus bounded in-flight status. History-sized
@@ -412,7 +645,7 @@ impl EventMeta {
                 matches!(e.kind, EffectKind::ToolCall | EffectKind::SubAgent)
                     && matches!(
                         e.status,
-                        EffectStatus::Pending | EffectStatus::RetryScheduled
+                        EffectStatus::Queued | EffectStatus::Pending | EffectStatus::RetryScheduled
                     )
             })
             .count();
@@ -425,6 +658,30 @@ impl EventMeta {
             })
             .count();
         in_flight_calls + unrecorded_results
+    }
+}
+
+/// The effect table serializes as a flat list: its key is `(payload.kind(), id)`,
+/// both of which every entry already carries, and JSON has no tuple keys.
+mod effect_table {
+    use super::{EffectKind, EffectState};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeMap;
+
+    pub fn serialize<S: Serializer>(
+        table: &BTreeMap<(EffectKind, String), EffectState>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        table.values().collect::<Vec<_>>().serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<BTreeMap<(EffectKind, String), EffectState>, D::Error> {
+        Ok(Vec::<EffectState>::deserialize(d)?
+            .into_iter()
+            .map(|e| ((e.kind(), e.id.clone()), e))
+            .collect())
     }
 }
 
@@ -487,30 +744,30 @@ pub struct SessionState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_retry: Option<RetryPolicy>,
 
-    pub llm_calls: HashMap<String, LlmCallState>,
-    pub tool_calls: HashMap<String, ToolCallState>,
-    pub sub_agent_calls: HashMap<String, SubAgentCallState>,
-    pub worker_decisions: HashMap<String, WorkerDecisionState>,
+    /// Every tracked effect, keyed by `(kind, id)`. One table so that every
+    /// generic sweep — deadlines, retries, voiding, the wire projection, the
+    /// queue invariant — is one iteration rather than one per kind.
+    ///
+    /// Connector syncs live here too, keyed by connection id. They are keyed on
+    /// the connection rather than on the agent version that asked for one, so a
+    /// config rewritten for unrelated reasons — a client tool appearing, a
+    /// branch switch — costs no round trip.
+    #[serde(with = "effect_table", default = "BTreeMap::new")]
+    pub effects: BTreeMap<(EffectKind, String), EffectState>,
 
-    /// Fetched tool lists, keyed by connection id. Keyed on the connection
-    /// rather than on the agent version that asked for it, so a config rewritten
-    /// for unrelated reasons — a client tool appearing, a branch switch — costs
-    /// no round trip.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub connector_syncs: HashMap<String, ConnectorSyncState>,
+    /// Queued work in arrival order — every effect and decision waits here
+    /// between its queued event and its dispatch event. Maintained solely by
+    /// `apply`: queued events push, dispatch/settle/void/drop events remove.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schedule_queue: Vec<QueueEntry>,
 
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn_id: Option<String>,
+    /// Where the session is in a turn — the whole turn region, in one field.
+    #[serde(default)]
+    pub phase: TurnPhase,
 
     /// Turn IDs that have completed, used for idempotency checks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub completed_turn_ids: Vec<String>,
-
-    /// Set while a turn's `turn.finished` finalizer is in flight; holds the frozen
-    /// output to emit as `TurnCompleted` at pass 2. Set when `turn.finished` is
-    /// queued, cleared by `TurnCompleted`. Also the pass-1/pass-2 discriminator.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub finalizing: Option<Finalizing>,
 
     /// The active branch's leaf; advances to each appended message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -523,7 +780,13 @@ pub struct SessionState {
     pub open_interrupts: Vec<OpenInterrupt>,
 
     /// `session.start` failed terminally: no config can ever be resolved, so
-    /// user payloads are refused and queued decisions are dropped.
+    /// user payloads are refused and queued decisions are dropped. Cleared by a
+    /// re-queued `session.start`.
+    ///
+    /// Its own region, not a [`TurnPhase`] variant: a start failure outlives the
+    /// turn it happened in — the re-queued start rides the *next* user message,
+    /// which opens a new turn — so a phase that held it would be cleared by the
+    /// very turn meant to recover from it.
     #[serde(default)]
     pub session_start_failed: bool,
 }
@@ -546,19 +809,312 @@ impl SessionState {
             ancestry: Vec::new(),
             data: serde_json::Value::Null,
             worker_retry: None,
-            llm_calls: HashMap::new(),
-            tool_calls: HashMap::new(),
-            sub_agent_calls: HashMap::new(),
-            worker_decisions: HashMap::new(),
-            connector_syncs: HashMap::new(),
-            turn_id: None,
+            effects: BTreeMap::new(),
+            schedule_queue: Vec::new(),
+            phase: TurnPhase::default(),
             completed_turn_ids: Vec::new(),
-            finalizing: None,
             head_id: None,
             nodes: Vec::new(),
             open_interrupts: Vec::new(),
             session_start_failed: false,
         }
+    }
+
+    /// The turn events belong to: the live one, or — once it has completed —
+    /// the one that just finished. The tail matters: `TurnCompleted` is stamped
+    /// after it applies, so a turn-scoped stream would otherwise miss its own
+    /// terminal event.
+    pub fn turn_id(&self) -> Option<&str> {
+        self.phase
+            .turn_id()
+            .or_else(|| self.completed_turn_ids.last().map(String::as_str))
+    }
+
+    pub fn effect(&self, kind: EffectKind, id: &str) -> Option<&EffectState> {
+        self.effects.get(&(kind, id.to_string()))
+    }
+
+    pub fn effect_mut(&mut self, kind: EffectKind, id: &str) -> Option<&mut EffectState> {
+        self.effects.get_mut(&(kind, id.to_string()))
+    }
+
+    /// Record an effect verbatim. For fixtures and store hydration; `apply` uses
+    /// [`SessionState::insert_effect`], which anchors at the head.
+    pub fn put_effect(&mut self, effect: EffectState) {
+        self.effects
+            .insert((effect.kind(), effect.id.clone()), effect);
+    }
+
+    pub fn has_effect(&self, kind: EffectKind, id: &str) -> bool {
+        self.effects.contains_key(&(kind, id.to_string()))
+    }
+
+    pub fn tracking(&self, kind: EffectKind, id: &str) -> Option<&EffectTracking> {
+        self.effect(kind, id).map(|e| &e.tracking)
+    }
+
+    /// Every effect of one kind, in id order.
+    pub fn effects_of(&self, kind: EffectKind) -> impl Iterator<Item = &EffectState> {
+        self.effects.values().filter(move |e| e.kind() == kind)
+    }
+
+    pub fn llm_call(&self, id: &str) -> Option<&LlmCallState> {
+        self.effect(EffectKind::LlmCall, id).and_then(|e| e.llm())
+    }
+
+    pub fn tool_call(&self, id: &str) -> Option<&ToolCallState> {
+        self.effect(EffectKind::ToolCall, id).and_then(|e| e.tool())
+    }
+
+    pub fn sub_agent(&self, id: &str) -> Option<&SubAgentCallState> {
+        self.effect(EffectKind::SubAgent, id)
+            .and_then(|e| e.sub_agent())
+    }
+
+    pub fn connector_sync(&self, id: &str) -> Option<&ConnectorSyncState> {
+        self.effect(EffectKind::ConnectorSync, id)
+            .and_then(|e| e.connector())
+    }
+
+    /// Record an effect anchored at the current head — where it was requested.
+    /// A fetch anchors nowhere: it belongs to the connection, not to a branch.
+    fn insert_effect(&mut self, id: &str, tracking: EffectTracking, payload: EffectPayload) {
+        let anchor = match payload {
+            EffectPayload::ConnectorSync(_) => None,
+            _ => self.head_id.clone(),
+        };
+        self.effects.insert(
+            (payload.kind(), id.to_string()),
+            EffectState {
+                id: id.to_string(),
+                tracking,
+                anchor,
+                payload,
+            },
+        );
+    }
+
+    fn remove_effect(&mut self, kind: EffectKind, id: &str) -> Option<EffectState> {
+        self.effects.remove(&(kind, id.to_string()))
+    }
+
+    /// Push a queue entry; idempotent per (kind, id) so a retry re-request of
+    /// an entry still queued re-arms in place instead of duplicating it.
+    fn enqueue(&mut self, seq: u64, kind: EffectKind, id: &str) {
+        if !self
+            .schedule_queue
+            .iter()
+            .any(|e| e.kind == kind && e.id == id)
+        {
+            self.schedule_queue.push(QueueEntry {
+                seq,
+                kind,
+                id: id.to_string(),
+            });
+        }
+    }
+
+    fn dequeue(&mut self, kind: EffectKind, id: &str) {
+        self.schedule_queue
+            .retain(|e| !(e.kind == kind && e.id == id));
+    }
+
+    /// A (re-)issued call: re-arm an existing one, else record it. Applies after
+    /// the same batch's `NewMessage` events, so `head_id` is post-reconcile.
+    fn apply_llm_requested(&mut self, payload: &LlmCallRequested, ctx: &ApplyContext) {
+        let prompt: Vec<Message> = payload
+            .request
+            .messages
+            .iter()
+            .cloned()
+            .map(DraftMessage::record)
+            .collect();
+        let spec = LlmCallSpec::from(&payload.request);
+        if let Some(existing) = self.effect_mut(EffectKind::LlmCall, &payload.id) {
+            existing.tracking.requeue();
+            if let Some(call) = existing.llm_mut() {
+                call.prompt = prompt;
+                call.spec = spec;
+                call.stream = payload.stream;
+                call.handler = payload.handler;
+                call.format = payload.format;
+            }
+        } else {
+            self.insert_effect(
+                &payload.id,
+                EffectTracking::new_queued(payload.retry.clone()),
+                EffectPayload::LlmCall(LlmCallState {
+                    prompt,
+                    spec,
+                    stream: payload.stream,
+                    handler: payload.handler,
+                    format: payload.format,
+                }),
+            );
+        }
+        self.enqueue(ctx.sequence, EffectKind::LlmCall, &payload.id);
+    }
+
+    /// The queued call clears its gates: merge the connector tools in force
+    /// (dispatch is when derived context is current), start the deadline clock,
+    /// leave the queue.
+    fn apply_llm_dispatched(&mut self, payload: &LlmCallDispatched, now: DateTime<Utc>) {
+        let leaf = self
+            .effect(EffectKind::LlmCall, &payload.id)
+            .and_then(|e| e.anchor.clone())
+            .or_else(|| self.head_id.clone());
+        let connector_tools = self.connector_tools(leaf.as_deref()).tools;
+        if let Some(effect) = self.effect_mut(EffectKind::LlmCall, &payload.id) {
+            effect.tracking.dispatch(now);
+            if let Some(call) = effect.llm_mut() {
+                if !connector_tools.is_empty() {
+                    let tools = call.spec.tools.get_or_insert_with(Vec::new);
+                    for tool in connector_tools {
+                        if !tools.iter().any(|t| t.name == tool.name) {
+                            tools.push(tool.to_llm_tool());
+                        }
+                    }
+                }
+            }
+        }
+        self.dequeue(EffectKind::LlmCall, &payload.id);
+    }
+
+    /// A (re-)issued tool call: re-arm an existing one, else record it.
+    fn apply_tool_requested(&mut self, payload: &ToolCallRequested, ctx: &ApplyContext) {
+        if let Some(existing) = self.effect_mut(EffectKind::ToolCall, &payload.id) {
+            existing.tracking.requeue();
+            if let Some(tc) = existing.tool_mut() {
+                tc.arguments = payload.arguments.clone();
+            }
+        } else {
+            self.insert_effect(
+                &payload.id,
+                EffectTracking::new_queued(payload.retry.clone()),
+                EffectPayload::ToolCall(ToolCallState {
+                    name: payload.name.clone(),
+                    handler: payload.handler,
+                    target: payload.target.clone(),
+                    arguments: payload.arguments.clone(),
+                    result: None,
+                    is_error: false,
+                }),
+            );
+        }
+        self.enqueue(ctx.sequence, EffectKind::ToolCall, &payload.id);
+    }
+
+    /// A (re-)issued delegation: re-arm an existing one, else record it.
+    fn apply_sub_agent_requested(&mut self, payload: &SubAgentRequested, ctx: &ApplyContext) {
+        if let Some(existing) = self.effect_mut(EffectKind::SubAgent, &payload.id) {
+            existing.tracking.requeue();
+        } else {
+            self.insert_effect(
+                &payload.id,
+                EffectTracking::new_queued(payload.retry.clone()),
+                EffectPayload::SubAgent(SubAgentCallState {
+                    agent_id: payload.agent_id.clone(),
+                    tool_call_id: payload.tool_call_id.clone(),
+                    result: None,
+                    is_error: false,
+                }),
+            );
+        }
+        self.enqueue(ctx.sequence, EffectKind::SubAgent, &payload.id);
+    }
+
+    /// One open interrupt per id. Pending decisions void so late submissions
+    /// no-op; calls void via their own `CallVoided` events.
+    fn apply_interrupted(&mut self, payload: &SessionInterrupted) {
+        if !self
+            .open_interrupts
+            .iter()
+            .any(|i| i.interrupt_id == payload.interrupt_id)
+        {
+            self.open_interrupts.push(OpenInterrupt {
+                interrupt_id: payload.interrupt_id.clone(),
+                origin: payload.origin,
+                reason: payload.reason.clone(),
+                payload: payload.payload.clone(),
+                anchor: payload.anchor.clone(),
+            });
+        }
+        self.effects.retain(|(kind, _), e| {
+            *kind != EffectKind::Decision || e.tracking.status() != EffectStatus::Pending
+        });
+    }
+
+    /// A terminally-failed decision leaves the map, and a failed `session.start`
+    /// poisons the session until another start is queued.
+    fn apply_decision_errored(&mut self, p: &DecisionErrored, now: DateTime<Utc>) {
+        let failed = self
+            .effect_mut(EffectKind::Decision, &p.id)
+            .map(|e| {
+                e.tracking.record_error(p.retryable, now);
+                e.tracking.status == EffectStatus::Failed
+            })
+            .unwrap_or(false);
+        if failed {
+            let started = self
+                .remove_effect(EffectKind::Decision, &p.id)
+                .and_then(|e| e.decision().map(|d| d.trigger.clone()))
+                .is_some_and(|t| matches!(t, Trigger::SessionStart));
+            self.session_start_failed |= started;
+            self.dequeue(EffectKind::Decision, &p.id);
+        }
+    }
+
+    /// Queuing `turn.finished` (pass 1) captures the frozen output; the turn is
+    /// finalizing until `TurnCompleted` (pass 2). The turn's completion queues as
+    /// a dependent of the finalizer decision, so a finalizer that settles without
+    /// a `done` echo still completes the turn at the next walk.
+    fn apply_decision_queued(&mut self, p: &DecisionQueued, ctx: &ApplyContext) {
+        // A re-queued start clears the poison: the session gets another chance
+        // at a config, so client input is accepted again.
+        if matches!(p.trigger, Trigger::SessionStart) {
+            self.session_start_failed = false;
+        }
+        let retry_policy = self.worker_retry.clone().unwrap_or(RetryPolicy::no_retry());
+        self.insert_effect(
+            &p.id,
+            EffectTracking::new_queued(retry_policy),
+            EffectPayload::Decision(WorkerDecisionState {
+                trigger: p.trigger.clone(),
+                source_event_sequence: ctx.sequence,
+            }),
+        );
+        self.enqueue(ctx.sequence, EffectKind::Decision, &p.id);
+        if let Trigger::TurnFinished {
+            turn_id,
+            data,
+            cost,
+            usage,
+        } = &p.trigger
+        {
+            self.phase = TurnPhase::Finalizing(TurnEnd {
+                turn_id: turn_id.clone(),
+                data: data.clone(),
+                cost: *cost,
+                usage: usage.clone(),
+            });
+            let turn_id = turn_id.clone();
+            self.enqueue(ctx.sequence, EffectKind::TurnEnd, &turn_id);
+        }
+    }
+
+    /// A voided effect fails in place and leaves the queue.
+    ///
+    /// A fetch is the exception: it belongs to the connection, not to the branch
+    /// that asked for it, so a fork never abandons one. The queue removal is a
+    /// guard — fetches never queue in practice.
+    fn apply_call_voided(&mut self, p: &CallVoided) {
+        let kind = p.kind;
+        if kind != EffectKind::ConnectorSync {
+            if let Some(effect) = self.effect_mut(kind, &p.id) {
+                effect.tracking.void();
+            }
+        }
+        self.dequeue(kind, &p.id);
     }
 
     pub fn apply(&mut self, event: &EventPayload, ctx: &ApplyContext) {
@@ -584,40 +1140,8 @@ impl SessionState {
             EventPayload::HeadMoved(payload) => {
                 self.head_id = Some(payload.head_id.clone());
             }
-            EventPayload::LlmCallRequested(payload) => {
-                self.status = SessionStatus::Idle;
-                let prompt: Vec<Message> = payload
-                    .request
-                    .messages
-                    .iter()
-                    .cloned()
-                    .map(DraftMessage::record)
-                    .collect();
-                let spec = LlmCallSpec::from(&payload.request);
-                if let Some(existing) = self.llm_calls.get_mut(&payload.call_id) {
-                    existing.tracking.reset_pending(now);
-                    existing.prompt = prompt;
-                    existing.spec = spec;
-                    existing.stream = payload.stream;
-                    existing.handler = payload.handler;
-                    existing.format = payload.format;
-                } else {
-                    // Applies after the same batch's NewMessage events: head_id is post-reconcile.
-                    self.llm_calls.insert(
-                        payload.call_id.clone(),
-                        LlmCallState {
-                            call_id: payload.call_id.clone(),
-                            tracking: EffectTracking::new(payload.retry.clone(), now),
-                            prompt,
-                            spec,
-                            stream: payload.stream,
-                            handler: payload.handler,
-                            format: payload.format,
-                            anchor: self.head_id.clone(),
-                        },
-                    );
-                }
-            }
+            EventPayload::LlmCallRequested(payload) => self.apply_llm_requested(payload, ctx),
+            EventPayload::LlmCallDispatched(payload) => self.apply_llm_dispatched(payload, now),
             EventPayload::LlmCallCompleted(payload) => {
                 self.track_usage(&payload.response.usage);
                 self.track_turn_usage(&payload.response.usage);
@@ -625,226 +1149,131 @@ impl SessionState {
                     self.cost += c;
                     self.turn_cost += c;
                 }
-                if let Some(call) = self.llm_calls.get_mut(&payload.call_id) {
-                    call.tracking.complete();
+                if let Some(e) = self.effect_mut(EffectKind::LlmCall, &payload.id) {
+                    e.tracking.complete();
                 }
-                self.status = SessionStatus::Idle;
             }
             EventPayload::LlmCallErrored(payload) => {
-                if let Some(call) = self.llm_calls.get_mut(&payload.call_id) {
-                    call.tracking.record_error(payload.retryable, now);
+                if let Some(e) = self.effect_mut(EffectKind::LlmCall, &payload.id) {
+                    e.tracking.record_error(payload.retryable, now);
                 }
-                self.status = SessionStatus::Idle;
             }
-            EventPayload::ToolCallRequested(payload) => {
-                if let Some(existing) = self.tool_calls.get_mut(&payload.tool_call_id) {
-                    existing.tracking.reset_pending(now);
-                    existing.arguments = payload.arguments.clone();
-                } else {
-                    self.tool_calls.insert(
-                        payload.tool_call_id.clone(),
-                        ToolCallState {
-                            tool_call_id: payload.tool_call_id.clone(),
-                            name: payload.name.clone(),
-                            tracking: EffectTracking::new(payload.retry.clone(), now),
-                            handler: payload.handler,
-                            target: payload.target.clone(),
-                            arguments: payload.arguments.clone(),
-                            result: None,
-                            is_error: false,
-                            anchor: self.head_id.clone(),
-                        },
-                    );
+            EventPayload::ToolCallRequested(payload) => self.apply_tool_requested(payload, ctx),
+            EventPayload::ToolCallDispatched(payload) => {
+                if let Some(e) = self.effect_mut(EffectKind::ToolCall, &payload.id) {
+                    e.tracking.dispatch(now);
                 }
-                self.status = SessionStatus::Idle;
+                self.dequeue(EffectKind::ToolCall, &payload.id);
             }
             EventPayload::ToolCallCompleted(payload) => {
-                if let Some(tc) = self.tool_calls.get_mut(&payload.tool_call_id) {
-                    tc.tracking.complete();
-                    tc.result = Some(payload.result.clone());
-                    tc.is_error = false;
+                if let Some(e) = self.effect_mut(EffectKind::ToolCall, &payload.id) {
+                    e.tracking.complete();
+                    if let Some(tc) = e.tool_mut() {
+                        tc.result = Some(payload.result.clone());
+                        tc.is_error = false;
+                    }
                 }
             }
             EventPayload::ToolCallErrored(payload) => {
-                if let Some(tc) = self.tool_calls.get_mut(&payload.tool_call_id) {
-                    tc.tracking.record_error(payload.retryable, now);
-                    if tc.tracking.status == EffectStatus::Failed {
+                if let Some(e) = self.effect_mut(EffectKind::ToolCall, &payload.id) {
+                    e.tracking.record_error(payload.retryable, now);
+                    let failed = e.tracking.status == EffectStatus::Failed;
+                    if let Some(tc) = e.tool_mut().filter(|_| failed) {
                         tc.result = Some(payload.error.clone());
                         tc.is_error = true;
                     }
                 }
             }
             EventPayload::SubAgentRequested(payload) => {
-                let sid = payload.session_id.clone();
-                if let Some(existing) = self.sub_agent_calls.get_mut(&sid) {
-                    existing.tracking.reset_pending(now);
-                } else {
-                    self.sub_agent_calls.insert(
-                        sid.clone(),
-                        SubAgentCallState {
-                            session_id: sid,
-                            agent_id: payload.agent_id.clone(),
-                            tracking: EffectTracking::new(payload.retry.clone(), now),
-                            tool_call_id: payload.tool_call_id.clone(),
-                            result: None,
-                            is_error: false,
-                            anchor: self.head_id.clone(),
-                        },
-                    );
+                self.apply_sub_agent_requested(payload, ctx)
+            }
+            EventPayload::SubAgentDispatched(payload) => {
+                if let Some(e) = self.effect_mut(EffectKind::SubAgent, &payload.id) {
+                    e.tracking.dispatch(now);
                 }
-                self.status = SessionStatus::Idle;
+                self.dequeue(EffectKind::SubAgent, &payload.id);
             }
             EventPayload::SubAgentStarted(payload) => {
-                if let Some(sa) = self.sub_agent_calls.get_mut(&payload.session_id) {
-                    sa.tracking.complete();
+                if let Some(e) = self.effect_mut(EffectKind::SubAgent, &payload.id) {
+                    e.tracking.complete();
                 }
             }
             EventPayload::SubAgentErrored(payload) => {
-                if let Some(sa) = self.sub_agent_calls.get_mut(&payload.session_id) {
-                    sa.tracking.record_error(payload.retryable, now);
-                    if sa.tracking.status == EffectStatus::Failed {
+                if let Some(e) = self.effect_mut(EffectKind::SubAgent, &payload.id) {
+                    e.tracking.record_error(payload.retryable, now);
+                    let failed = e.tracking.status == EffectStatus::Failed;
+                    if let Some(sa) = e.sub_agent_mut().filter(|_| failed) {
                         sa.result = Some(payload.error.clone());
                         sa.is_error = true;
                     }
                 }
             }
-            EventPayload::SessionInterrupted(payload) => {
-                if !self
-                    .open_interrupts
-                    .iter()
-                    .any(|i| i.interrupt_id == payload.interrupt_id)
-                {
-                    self.open_interrupts.push(OpenInterrupt {
-                        interrupt_id: payload.interrupt_id.clone(),
-                        origin: payload.origin,
-                        reason: payload.reason.clone(),
-                        payload: payload.payload.clone(),
-                        anchor: payload.anchor.clone(),
-                    });
-                }
-                // Void pending decisions so late submissions no-op; calls void via CallVoided events.
-                self.worker_decisions
-                    .retain(|_, wd| wd.tracking.status != EffectStatus::Pending);
-            }
+            EventPayload::SessionInterrupted(payload) => self.apply_interrupted(payload),
             EventPayload::InterruptResumed(p) => {
                 self.open_interrupts
                     .retain(|i| i.interrupt_id != p.interrupt_id);
             }
-            // Marker: the decision (seeded by DecisionRequestQueued) goes live.
-            EventPayload::WorkerDecisionRequested(p) => {
-                if let Some(existing) = self.worker_decisions.get_mut(&p.decision_id) {
-                    existing.tracking.reset_pending(now);
+            // Dispatch marker: the decision (seeded by DecisionQueued)
+            // goes live and leaves the queue.
+            EventPayload::DecisionDispatched(p) => {
+                if let Some(e) = self.effect_mut(EffectKind::Decision, &p.id) {
+                    e.tracking.dispatch(now);
                 }
+                self.dequeue(EffectKind::Decision, &p.id);
                 self.status = SessionStatus::Idle;
             }
-            // Settled decisions leave the map: absent reads as not-Pending, so
+            // Settled decisions leave the table: absent reads as not-Pending, so
             // late submissions still no-op and stored triggers don't accumulate.
-            EventPayload::WorkerDecisionCompleted(p) => {
-                self.worker_decisions.remove(&p.decision_id);
+            EventPayload::DecisionCompleted(p) => {
+                self.remove_effect(EffectKind::Decision, &p.id);
+                self.dequeue(EffectKind::Decision, &p.id);
             }
-            EventPayload::WorkerDecisionErrored(p) => {
-                let failed = self
-                    .worker_decisions
-                    .get_mut(&p.decision_id)
-                    .map(|wd| {
-                        wd.tracking.record_error(p.retryable, now);
-                        wd.tracking.status == EffectStatus::Failed
-                    })
-                    .unwrap_or(false);
-                if failed {
-                    if let Some(wd) = self.worker_decisions.remove(&p.decision_id) {
-                        if matches!(wd.trigger, Trigger::SessionStart) {
-                            self.session_start_failed = true;
-                        }
+            EventPayload::DecisionErrored(p) => self.apply_decision_errored(p, now),
+            EventPayload::SessionMessageRequested(_) => {}
+            EventPayload::DecisionQueued(p) => self.apply_decision_queued(p, ctx),
+            EventPayload::DecisionDropped(p) => {
+                // Voided like an interrupted decision: out of the queue, never delivered.
+                self.remove_effect(EffectKind::Decision, &p.id);
+                self.dequeue(EffectKind::Decision, &p.id);
+            }
+            EventPayload::CallVoided(p) => self.apply_call_voided(p),
+            EventPayload::ConnectorSyncRequested(p) => {
+                if !self.has_effect(EffectKind::ConnectorSync, &p.id) {
+                    self.insert_effect(
+                        &p.id,
+                        EffectTracking::new(p.retry.clone(), now),
+                        EffectPayload::ConnectorSync(ConnectorSyncState {
+                            tools: Vec::new(),
+                            prefix: None,
+                            error: None,
+                            needs_reauth: false,
+                        }),
+                    );
+                }
+                // A retry re-arms the same entry rather than starting a new one:
+                // one connection, one fetch, however many attempts.
+                if let Some(e) = self.effect_mut(EffectKind::ConnectorSync, &p.id) {
+                    e.tracking.dispatch(now);
+                }
+            }
+            EventPayload::ConnectorSyncCompleted(p) => {
+                if let Some(e) = self.effect_mut(EffectKind::ConnectorSync, &p.id) {
+                    e.tracking.complete();
+                    if let Some(sync) = e.connector_mut() {
+                        sync.tools = p.tools.clone();
+                        sync.prefix = p.prefix.clone();
+                        sync.error = None;
+                        sync.needs_reauth = false;
                     }
                 }
             }
-            EventPayload::SessionMessageRequested(_) => {}
-            EventPayload::DecisionRequestQueued(p) => {
-                // A re-queued start clears the poison: the session gets another
-                // chance at a config, so client input is accepted again.
-                if matches!(p.trigger, Trigger::SessionStart) {
-                    self.session_start_failed = false;
-                }
-                let retry_policy = self.worker_retry.clone().unwrap_or(RetryPolicy::no_retry());
-                self.worker_decisions.insert(
-                    p.decision_id.clone(),
-                    WorkerDecisionState {
-                        decision_id: p.decision_id.clone(),
-                        tracking: EffectTracking::new_queued(retry_policy),
-                        trigger: p.trigger.clone(),
-                        source_event_sequence: ctx.sequence,
-                    },
-                );
-                // Queuing turn.finished (pass 1) captures the frozen output; the turn
-                // is now finalizing until TurnCompleted (pass 2).
-                if let Trigger::TurnFinished {
-                    turn_id,
-                    data,
-                    cost,
-                    usage,
-                } = &p.trigger
-                {
-                    self.finalizing = Some(Finalizing {
-                        turn_id: turn_id.clone(),
-                        data: data.clone(),
-                        cost: *cost,
-                        usage: usage.clone(),
-                    });
-                }
-            }
-            EventPayload::DecisionRequestDropped(p) => {
-                // Voided like an interrupted decision: out of the queue, never delivered.
-                self.worker_decisions.remove(&p.decision_id);
-            }
-            EventPayload::CallVoided(p) => {
-                let tracking = match p.kind {
-                    EffectKind::ToolCall => self.tool_calls.get_mut(&p.id).map(|c| &mut c.tracking),
-                    EffectKind::LlmCall => self.llm_calls.get_mut(&p.id).map(|c| &mut c.tracking),
-                    // Sub-agent calls are keyed by child session, not call id.
-                    EffectKind::SubAgent => p
-                        .session_id
-                        .as_ref()
-                        .and_then(|sid| self.sub_agent_calls.get_mut(sid))
-                        .map(|c| &mut c.tracking),
-                    // A fetch belongs to the connection, not to the branch that
-                    // asked for it, so a fork never abandons one.
-                    EffectKind::ConnectorSync => None,
-                };
-                if let Some(tracking) = tracking {
-                    tracking.status = EffectStatus::Failed;
-                }
-            }
-            EventPayload::ConnectorSyncRequested(p) => {
-                let entry = self
-                    .connector_syncs
-                    .entry(p.connection_id.clone())
-                    .or_insert_with(|| ConnectorSyncState {
-                        connection_id: p.connection_id.clone(),
-                        tracking: EffectTracking::new(p.retry.clone(), now),
-                        tools: Vec::new(),
-                        prefix: None,
-                        error: None,
-                        needs_reauth: false,
-                    });
-                // A retry re-arms the same entry rather than starting a new one:
-                // one connection, one fetch, however many attempts.
-                entry.tracking.reset_pending(now);
-            }
-            EventPayload::ConnectorSyncCompleted(p) => {
-                if let Some(sync) = self.connector_syncs.get_mut(&p.connection_id) {
-                    sync.tracking.complete();
-                    sync.tools = p.tools.clone();
-                    sync.prefix = p.prefix.clone();
-                    sync.error = None;
-                    sync.needs_reauth = false;
-                }
-            }
             EventPayload::ConnectorSyncErrored(p) => {
-                if let Some(sync) = self.connector_syncs.get_mut(&p.connection_id) {
-                    sync.tracking.record_error(p.retryable, now);
-                    sync.error = Some(p.error.clone());
-                    sync.needs_reauth = p.needs_reauth;
+                if let Some(e) = self.effect_mut(EffectKind::ConnectorSync, &p.id) {
+                    e.tracking.record_error(p.retryable, now);
+                    if let Some(sync) = e.connector_mut() {
+                        sync.error = Some(p.error.clone());
+                        sync.needs_reauth = p.needs_reauth;
+                    }
                 }
             }
             // Append-only, like the tree: `resolve_on_path` scans newest-first,
@@ -853,7 +1282,7 @@ impl SessionState {
                 self.state_versions.push(Logged {
                     seq: ctx.sequence,
                     entry: StateVersion {
-                        state: p.state.clone(),
+                        value: p.state.clone(),
                         anchor: p.anchor.clone(),
                     },
                 });
@@ -862,7 +1291,7 @@ impl SessionState {
                 self.agent_versions.push(Logged {
                     seq: ctx.sequence,
                     entry: AgentVersion {
-                        agent: p.config.clone(),
+                        value: p.config.clone(),
                         anchor: p.anchor.clone(),
                     },
                 });
@@ -870,8 +1299,9 @@ impl SessionState {
             EventPayload::SessionCancelled => {
                 self.status = SessionStatus::Done;
                 // Terminal: void pending decisions so late submissions no-op; calls void via CallVoided events.
-                self.worker_decisions
-                    .retain(|_, wd| wd.tracking.status != EffectStatus::Pending);
+                self.effects.retain(|(kind, _), e| {
+                    *kind != EffectKind::Decision || e.tracking.status() != EffectStatus::Pending
+                });
             }
             EventPayload::SessionDone(_) => {
                 if !self.ancestry.is_empty() {
@@ -879,6 +1309,9 @@ impl SessionState {
                 } else {
                     self.status = SessionStatus::Idle;
                 }
+                // A run terminal leaves nothing to finalize.
+                self.schedule_queue
+                    .retain(|e| e.kind != EffectKind::TurnEnd);
             }
             EventPayload::SubAgentTurnCompleted(payload) => {
                 self.sub_agent_cost += payload.cost;
@@ -887,26 +1320,80 @@ impl SessionState {
                     *self.sub_agent_token_usage.entry(k.clone()).or_insert(0) += v;
                     *self.turn_token_usage.entry(k.clone()).or_insert(0) += v;
                 }
-                if let Some(sa) = self.sub_agent_calls.get_mut(&payload.session_id) {
+                if let Some(sa) = self
+                    .effect_mut(EffectKind::SubAgent, &payload.id)
+                    .and_then(|e| e.sub_agent_mut())
+                {
                     sa.result = Some(json_to_string(&payload.data));
                     sa.is_error = false;
                 }
             }
             EventPayload::TurnStarted(p) => {
-                self.turn_id = Some(p.turn_id.clone());
+                self.phase = TurnPhase::Active {
+                    turn_id: p.turn_id.clone(),
+                };
                 self.turn_cost = Decimal::ZERO;
                 self.turn_token_usage.clear();
             }
             EventPayload::TurnCompleted(payload) => {
-                if let Some(tid) = self.turn_id.clone() {
-                    self.completed_turn_ids.push(tid);
-                }
+                // The event names the turn it ends, and every emitter builds it
+                // from the live phase, so the log needs no second source.
+                self.completed_turn_ids.push(payload.turn_id.clone());
                 self.data = payload.data.clone();
                 self.turn_cost = Decimal::ZERO;
                 self.turn_token_usage.clear();
-                self.finalizing = None;
+                self.phase = TurnPhase::Idle;
+                self.dequeue(EffectKind::TurnEnd, &payload.turn_id);
             }
         }
+    }
+
+    /// The scheduling invariants, as one enumeration. `Working` asserts these
+    /// after every emit (so a violation names the event that caused it) and the
+    /// property tests assert them on committed state; both read this, so the
+    /// two can't drift.
+    pub(crate) fn check_invariants(&self) -> Result<(), String> {
+        let live = self
+            .effects_of(EffectKind::Decision)
+            .filter(|e| e.tracking.status == EffectStatus::Pending)
+            .count();
+        if live > 1 {
+            return Err(format!("decision slot violated: {live} live decisions"));
+        }
+        if live > 0 && self.has_pending_connector_sync(self.head_id.as_deref()) {
+            return Err(
+                "a decision is live while a fetch its config owes is in flight".to_string(),
+            );
+        }
+        // Queue and statuses agree: Queued status ⟺ a queue entry. Fetches are
+        // excluded on both sides — they never queue.
+        let queued_statuses = self
+            .effects
+            .values()
+            .filter(|e| e.kind() != EffectKind::ConnectorSync)
+            .filter(|e| e.tracking.status == EffectStatus::Queued)
+            .count();
+        // TurnEnd entries carry no status of their own: their payload is the
+        // finalizing phase, so they are counted against it instead.
+        let effect_entries = self
+            .schedule_queue
+            .iter()
+            .filter(|e| e.kind != EffectKind::TurnEnd)
+            .count();
+        if queued_statuses != effect_entries {
+            return Err(format!(
+                "queue ({effect_entries}) and Queued statuses ({queued_statuses}) disagree"
+            ));
+        }
+        let turn_ends = self
+            .schedule_queue
+            .iter()
+            .filter(|e| e.kind == EffectKind::TurnEnd)
+            .count();
+        if turn_ends > usize::from(self.phase.finalizing().is_some()) {
+            return Err("a TurnEnd entry exists without a finalizing turn".to_string());
+        }
+        Ok(())
     }
 
     /// Newest open interrupt on the path to `leaf`; unanchored matches any path.
@@ -953,17 +1440,23 @@ impl SessionState {
     pub fn trigger_anchor(&self, trigger: &Trigger) -> Option<&str> {
         match trigger {
             Trigger::ToolFinished { id, .. } | Trigger::ToolExecute { id, .. } => {
-                self.tool_calls.get(id).and_then(|c| c.anchor.as_deref())
+                self.effect(EffectKind::ToolCall, id)
             }
-            Trigger::SubAgentFinished { session_id, .. } => self
-                .sub_agent_calls
-                .get(session_id)
-                .and_then(|c| c.anchor.as_deref()),
+            Trigger::SubAgentFinished { session_id, .. } => {
+                self.effect(EffectKind::SubAgent, session_id)
+            }
             Trigger::LlmFinished { id, .. } | Trigger::LlmExecute { id, .. } => {
-                self.llm_calls.get(id).and_then(|c| c.anchor.as_deref())
+                self.effect(EffectKind::LlmCall, id)
             }
             _ => None,
         }
+        .and_then(|e| e.anchor.as_deref())
+    }
+
+    /// A decision's stored data, by id.
+    pub fn worker_decision(&self, id: &str) -> Option<&WorkerDecisionState> {
+        self.effect(EffectKind::Decision, id)
+            .and_then(|e| e.decision())
     }
 
     /// Whether work at `anchor` lands on a parked branch: on-head anchors gate
@@ -977,106 +1470,65 @@ impl SessionState {
         }
     }
 
-    /// Whether a decision's landing branch is parked: transcripts gate at
-    /// their landing leaf, effect settles at their anchor.
+    /// Whether a decision waits on a region elsewhere.
     pub fn decision_parked(&self, trigger: &Trigger) -> bool {
+        self.decision_park(trigger).is_some()
+    }
+
+    /// The region holding a decision, if one does. Two members: an interrupt
+    /// parks the branch the decision lands on, and a running turn parks a
+    /// decision that opens a different one.
+    pub fn decision_park(&self, trigger: &Trigger) -> Option<DecisionPark<'_>> {
+        if let Some(interrupt) = self.decision_park_interrupt(trigger) {
+            return Some(DecisionPark::Interrupt(interrupt));
+        }
+        // A different turn holds the phase — never "any turn is running": once
+        // this decision dispatches, its own `TurnStarted` makes the phase Active
+        // with its id, and a redelivery must not park against itself.
+        match (trigger.deferred_turn_id(), self.phase.turn_id()) {
+            (Some(turn_id), Some(active)) if active != turn_id => Some(DecisionPark::Turn(active)),
+            _ => None,
+        }
+    }
+
+    /// The open interrupt parking a decision's landing branch, if any:
+    /// transcripts gate at their landing leaf, effect settles at their anchor.
+    fn decision_park_interrupt(&self, trigger: &Trigger) -> Option<&OpenInterrupt> {
         if let Trigger::ClientTranscript { messages, .. } = trigger {
             let messages = self.normalize_client_view(messages.clone());
             let known: std::collections::HashSet<&str> =
                 self.nodes.iter().map(|n| n.message.id.as_str()).collect();
             let plan = super::reconcile::plan_reconcile(&known, &messages);
             let landing = super::reconcile::landing_leaf(&messages, &plan);
-            return self.active_interrupt_for(landing.as_deref()).is_some();
+            return self.active_interrupt_for(landing.as_deref());
         }
-        self.anchor_parked(self.trigger_anchor(trigger))
-    }
-
-    pub fn has_pending_llm(&self) -> bool {
-        self.llm_calls
-            .values()
-            .any(|c| c.tracking.status == EffectStatus::Pending)
+        let anchor = self.trigger_anchor(trigger);
+        match anchor {
+            Some(a) if !self.anchor_on_path(self.head_id.as_deref(), Some(a)) => {
+                self.active_interrupt_for(Some(a))
+            }
+            _ => self.active_interrupt_for(self.head_id.as_deref()),
+        }
     }
 
     pub fn has_pending_worker_decision(&self) -> bool {
-        self.worker_decisions
-            .values()
-            .any(|wd| wd.tracking.status == EffectStatus::Pending)
-    }
-
-    /// `session.start` is every turn's prerequisite: its decision writes the
-    /// config that parameterizes them. Unsettled — live or awaiting a retry —
-    /// it parks all other decisions; unlike a sibling settle, a prerequisite
-    /// cannot be superseded by a fork.
-    pub fn has_unsettled_session_start(&self) -> bool {
-        self.worker_decisions.values().any(|wd| {
-            matches!(wd.trigger, Trigger::SessionStart)
-                && matches!(
-                    wd.tracking.status,
-                    EffectStatus::Pending | EffectStatus::RetryScheduled
-                )
-        })
+        self.decisions_with(EffectStatus::Pending).next().is_some()
     }
 
     /// All queued decisions in arrival order.
-    pub fn queued_decisions(&self) -> Vec<&WorkerDecisionState> {
-        let mut queued: Vec<&WorkerDecisionState> = self
-            .worker_decisions
-            .values()
-            .filter(|wd| wd.tracking.status == EffectStatus::Queued)
-            .collect();
-        queued.sort_by_key(|wd| wd.source_event_sequence);
+    pub fn queued_decisions(&self) -> Vec<&EffectState> {
+        let mut queued: Vec<&EffectState> = self.decisions_with(EffectStatus::Queued).collect();
+        queued.sort_by_key(|e| e.decision().map(|d| d.source_event_sequence));
         queued
     }
 
     pub fn has_queued_worker_decision(&self) -> bool {
-        self.worker_decisions
-            .values()
-            .any(|wd| wd.tracking.status == EffectStatus::Queued)
+        self.decisions_with(EffectStatus::Queued).next().is_some()
     }
 
-    /// Next timer, counting only work on unparked branches.
-    pub fn wake_at(&self) -> Option<DateTime<Utc>> {
-        if matches!(self.status, SessionStatus::Done) {
-            return None;
-        }
-        if !self.has_pending_worker_decision()
-            && self
-                .queued_decisions()
-                .iter()
-                .any(|d| !self.decision_parked(&d.trigger))
-        {
-            return Some(Utc::now());
-        }
-        self.llm_calls
-            .values()
-            .filter(|c| !self.anchor_parked(c.anchor.as_deref()))
-            .filter_map(|c| c.tracking.earliest_wake())
-            .chain(
-                self.tool_calls
-                    .values()
-                    .filter(|c| !self.anchor_parked(c.anchor.as_deref()))
-                    .filter_map(|c| c.tracking.earliest_wake()),
-            )
-            .chain(
-                self.sub_agent_calls
-                    .values()
-                    .filter(|c| !self.anchor_parked(c.anchor.as_deref()))
-                    .filter_map(|c| c.tracking.earliest_wake()),
-            )
-            // Unanchored, so never parked: a hung fetch must still time out, or
-            // the decisions waiting on it park forever.
-            .chain(
-                self.connector_syncs
-                    .values()
-                    .filter_map(|c| c.tracking.earliest_wake()),
-            )
-            .chain(
-                self.worker_decisions
-                    .values()
-                    .filter(|d| !self.decision_parked(&d.trigger))
-                    .filter_map(|d| d.tracking.earliest_wake()),
-            )
-            .min()
+    fn decisions_with(&self, status: EffectStatus) -> impl Iterator<Item = &EffectState> {
+        self.effects_of(EffectKind::Decision)
+            .filter(move |e| e.tracking.status == status)
     }
 
     /// All message ids on the root→`leaf` chain.
@@ -1110,7 +1562,7 @@ impl SessionState {
     pub fn resolve_state_for(&self, leaf: Option<&str>) -> WorkerState {
         let on_path = leaf.map(|l| self.path_ids(l)).unwrap_or_default();
         resolve_on_path(&self.state_versions, &on_path)
-            .map(|v| v.state.clone())
+            .map(|v| v.value.clone())
             .unwrap_or_default()
     }
 
@@ -1163,8 +1615,11 @@ impl SessionState {
 
     pub fn connector_tools_for_config(&self, config: &AgentConfig) -> filter::Merged {
         let resolutions = config.mcp.iter().filter_map(|connector| {
-            let sync = self.connector_syncs.get(&connector.id)?;
-            sync.is_ready()
+            let effect = self.effect(EffectKind::ConnectorSync, &connector.id)?;
+            let sync = effect.connector()?;
+            effect
+                .tracking
+                .is_ready()
                 .then(|| filter::resolve(connector, &sync.tools, sync.prefix.as_deref()))
         });
         let taken: Vec<&str> = config
@@ -1185,7 +1640,7 @@ impl SessionState {
         config
             .mcp
             .iter()
-            .filter(|c| !self.connector_syncs.contains_key(&c.id))
+            .filter(|c| !self.has_effect(EffectKind::ConnectorSync, &c.id))
             .map(|c| c.id.clone())
             .collect()
     }
@@ -1203,9 +1658,8 @@ impl SessionState {
             return false;
         };
         config.mcp.iter().any(|c| {
-            self.connector_syncs
-                .get(&c.id)
-                .is_some_and(ConnectorSyncState::is_in_flight)
+            self.tracking(EffectKind::ConnectorSync, &c.id)
+                .is_some_and(EffectTracking::is_in_flight)
         })
     }
 
@@ -1213,7 +1667,7 @@ impl SessionState {
     /// any path. `None` when no config was ever written on the path.
     pub fn resolve_agent_for(&self, leaf: Option<&str>) -> Option<AgentConfig> {
         let on_path = leaf.map(|l| self.path_ids(l)).unwrap_or_default();
-        resolve_on_path(&self.agent_versions, &on_path).map(|v| v.agent.clone())
+        resolve_on_path(&self.agent_versions, &on_path).map(|v| v.value.clone())
     }
 
     pub fn message_tree(&self) -> MessageTree {
@@ -1223,86 +1677,58 @@ impl SessionState {
         }
     }
 
-    /// The effects still in flight (Pending or RetryScheduled).
+    /// The effects still open: queued, in flight, or awaiting a retry.
+    ///
+    /// A fetch is surfaced too, so a worker sees one in flight rather than
+    /// inferring it from a decision that has not arrived.
     pub fn effects(&self) -> Vec<Effect> {
-        let in_flight =
-            |s: &EffectStatus| matches!(s, EffectStatus::Pending | EffectStatus::RetryScheduled);
-        let envelope =
-            |id: &str, kind: EffectKind, t: &EffectTracking, anchor: &Option<String>| Effect {
-                id: id.to_string(),
-                kind,
-                status: t.status.clone(),
-                attempt: t.retry.attempts,
-                deadline: t.deadline,
-                anchor: anchor.clone(),
-                name: None,
-                arguments: None,
-                handler: None,
-                stream: None,
-                agent_id: None,
-                session_id: None,
-            };
-
-        let mut effects: Vec<Effect> = Vec::new();
-
-        for c in self
-            .tool_calls
+        let mut effects: Vec<Effect> = self
+            .effects
             .values()
-            .filter(|c| in_flight(&c.tracking.status))
-        {
-            let mut e = envelope(
-                &c.tool_call_id,
-                EffectKind::ToolCall,
-                &c.tracking,
-                &c.anchor,
-            );
-            e.name = Some(c.name.clone());
-            e.arguments = Some(c.arguments.clone());
-            e.handler = Some(c.handler.into());
-            effects.push(e);
-        }
-
-        for c in self
-            .sub_agent_calls
-            .values()
-            .filter(|c| in_flight(&c.tracking.status))
-        {
-            let mut e = envelope(
-                &c.tool_call_id,
-                EffectKind::SubAgent,
-                &c.tracking,
-                &c.anchor,
-            );
-            e.agent_id = Some(c.agent_id.clone());
-            e.session_id = Some(c.session_id.clone());
-            effects.push(e);
-        }
-
-        for c in self
-            .llm_calls
-            .values()
-            .filter(|c| in_flight(&c.tracking.status))
-        {
-            let mut e = envelope(&c.call_id, EffectKind::LlmCall, &c.tracking, &c.anchor);
-            e.handler = Some(c.handler.into());
-            e.stream = Some(c.stream);
-            effects.push(e);
-        }
-
-        // Surfaced so a worker sees a fetch in flight rather than inferring it
-        // from a decision that has not arrived. Unanchored: a fetch belongs to
-        // the connection, not to a branch.
-        for c in self.connector_syncs.values().filter(|c| c.is_in_flight()) {
-            let mut e = envelope(
-                &c.connection_id,
-                EffectKind::ConnectorSync,
-                &c.tracking,
-                &None,
-            );
-            e.name = Some(c.connection_id.clone());
-            effects.push(e);
-        }
-
+            .filter(|e| e.kind() != EffectKind::Decision)
+            .filter(|e| {
+                matches!(
+                    e.tracking.status(),
+                    EffectStatus::Queued | EffectStatus::Pending | EffectStatus::RetryScheduled
+                )
+            })
+            .map(|e| {
+                let mut wire = Effect {
+                    id: e.id.clone(),
+                    kind: e.kind(),
+                    status: e.tracking.status(),
+                    attempt: e.tracking.retry.attempts,
+                    deadline: e.tracking.deadline,
+                    anchor: e.anchor.clone(),
+                    name: None,
+                    arguments: None,
+                    handler: None,
+                    stream: None,
+                    agent_id: None,
+                    tool_call_id: None,
+                };
+                match &e.payload {
+                    EffectPayload::ToolCall(c) => {
+                        wire.name = Some(c.name.clone());
+                        wire.arguments = Some(c.arguments.clone());
+                        wire.handler = Some(c.handler.into());
+                    }
+                    EffectPayload::SubAgent(c) => {
+                        wire.agent_id = Some(c.agent_id.clone());
+                        wire.tool_call_id = Some(c.tool_call_id.clone());
+                    }
+                    EffectPayload::LlmCall(c) => {
+                        wire.handler = Some(c.handler.into());
+                        wire.stream = Some(c.stream);
+                    }
+                    // The connection being fetched; unanchored, since a fetch
+                    // belongs to the connection, not to a branch.
+                    EffectPayload::ConnectorSync(_) => wire.name = Some(e.id.clone()),
+                    EffectPayload::Decision(_) => unreachable!(),
+                }
+                wire
+            })
+            .collect();
         effects.sort_by(|a, b| a.id.cmp(&b.id));
         effects
     }
@@ -1311,7 +1737,7 @@ impl SessionState {
     /// active path. The tree is frozen during a pending decision, so the call
     /// answering the last `tool.finished` is still open when that decision is
     /// projected — exactly when its re-issue proposal is derived.
-    pub(crate) fn open_llm_calls(&self, tree: &MessageTree) -> HashMap<String, LlmCallState> {
+    pub(crate) fn open_llm_calls(&self, tree: &MessageTree) -> HashMap<String, EffectState> {
         let Some(head) = tree.head_id.as_deref() else {
             return HashMap::new();
         };
@@ -1326,30 +1752,35 @@ impl SessionState {
                     .iter()
                     .any(|c| !answered.contains(c.id.as_str()))
             })
-            .filter_map(|m| self.llm_calls.get(&m.id).map(|c| (m.id.clone(), c.clone())))
+            .filter_map(|m| {
+                self.effect(EffectKind::LlmCall, &m.id)
+                    .map(|e| (m.id.clone(), e.clone()))
+            })
             .collect()
     }
 
-    pub fn event_meta(&self) -> EventMeta {
+    pub fn event_meta(&self, now: DateTime<Utc>) -> EventMeta {
         let mut decisions: Vec<MetaDecision> = self
-            .worker_decisions
-            .values()
-            .filter(|d| {
+            .effects_of(EffectKind::Decision)
+            .filter(|e| {
                 matches!(
-                    d.tracking.status,
+                    e.tracking.status(),
                     EffectStatus::Pending | EffectStatus::Queued
                 )
             })
-            .map(|d| MetaDecision {
-                decision_id: d.decision_id.clone(),
-                status: d.tracking.status.clone(),
-                finished: matches!(
-                    d.trigger,
-                    Trigger::ToolFinished { .. } | Trigger::SubAgentFinished { .. }
-                ),
-                attempts: d.tracking.retry.attempts,
-                deadline: d.tracking.deadline,
-                source_event_sequence: d.source_event_sequence,
+            .filter_map(|e| {
+                let d = e.decision()?;
+                Some(MetaDecision {
+                    decision_id: e.id.clone(),
+                    status: e.tracking.status(),
+                    finished: matches!(
+                        d.trigger,
+                        Trigger::ToolFinished { .. } | Trigger::SubAgentFinished { .. }
+                    ),
+                    attempts: e.tracking.retry.attempts,
+                    deadline: e.tracking.deadline,
+                    source_event_sequence: d.source_event_sequence,
+                })
             })
             .collect();
 
@@ -1357,11 +1788,11 @@ impl SessionState {
 
         EventMeta {
             status: self.projected_status(),
-            wake_at: self.wake_at(),
+            wake_at: super::schedule::wake_at(self, now),
             owner: self.owner.clone(),
             agent_id: self.agent_id.clone(),
             ancestry: self.ancestry.clone(),
-            turn_id: self.turn_id.clone(),
+            turn_id: self.turn_id().map(str::to_string),
             cost: self.cost,
             sub_agent_cost: self.sub_agent_cost,
             head_id: self.head_id.clone(),
@@ -1464,23 +1895,24 @@ mod open_llm_calls_tests {
         }
     }
 
-    fn call_state(call_id: &str) -> LlmCallState {
-        LlmCallState {
-            format: None,
-            call_id: call_id.to_string(),
-            tracking: EffectTracking::new(RetryPolicy::no_retry(), Utc::now()),
-            prompt: vec![],
-            spec: LlmCallSpec {
-                model: "m".to_string(),
-                tools: None,
-                temperature: None,
-                max_completion_tokens: None,
-                reasoning: None,
-            },
-            stream: false,
-            handler: LlmHandler::Server,
-            anchor: None,
-        }
+    fn call_state(call_id: &str) -> EffectState {
+        EffectState::new(
+            call_id,
+            EffectTracking::new(RetryPolicy::no_retry(), Utc::now()),
+            EffectPayload::LlmCall(LlmCallState {
+                format: None,
+                prompt: vec![],
+                spec: LlmCallSpec {
+                    model: "m".to_string(),
+                    tools: None,
+                    temperature: None,
+                    max_completion_tokens: None,
+                    reasoning: None,
+                },
+                stream: false,
+                handler: LlmHandler::Server,
+            }),
+        )
     }
 
     #[test]
@@ -1490,8 +1922,7 @@ mod open_llm_calls_tests {
         s.nodes
             .push(node(assistant_calling("call-1", "tc-1"), Some("u1")));
         s.head_id = Some("call-1".to_string());
-        s.llm_calls
-            .insert("call-1".to_string(), call_state("call-1"));
+        s.put_effect(call_state("call-1"));
 
         assert!(
             s.open_llm_calls(&s.message_tree()).contains_key("call-1"),
@@ -1546,7 +1977,7 @@ mod state_version_tests {
         Logged {
             seq: 0,
             entry: StateVersion {
-                state: WorkerState(state),
+                value: WorkerState(state),
                 anchor: anchor.map(str::to_string),
             },
         }
@@ -1610,12 +2041,11 @@ mod state_version_tests {
     }
 
     #[test]
-    fn state_version_serializes_with_the_state_field() {
-        // Guard: the persisted field name must not change, and the log tag
-        // flattens alongside rather than nesting.
+    fn a_version_serializes_flat_under_its_log_tag() {
+        // Guard: the log tag flattens alongside the version rather than nesting.
         let v = version(json!({"v": 1}), Some("u1"));
         let value = serde_json::to_value(&v).expect("serializes");
-        assert_eq!(value, json!({"seq": 0, "state": {"v": 1}, "anchor": "u1"}));
+        assert_eq!(value, json!({"seq": 0, "value": {"v": 1}, "anchor": "u1"}));
     }
 
     /// Rewinding by an event's seq restores every history log to its prefix.
@@ -1714,7 +2144,7 @@ mod agent_version_tests {
         Logged {
             seq: 0,
             entry: AgentVersion {
-                agent: config(model),
+                value: config(model),
                 anchor: anchor.map(str::to_string),
             },
         }
@@ -1799,7 +2229,7 @@ mod effect_tests {
             handler: Some(crate::protocol::Handler::Worker),
             stream: None,
             agent_id: None,
-            session_id: None,
+            tool_call_id: None,
         };
         let json = serde_json::to_value(&e).unwrap();
         // Envelope, tag, and kind-specific fields all on one flat object.

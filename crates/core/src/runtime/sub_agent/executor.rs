@@ -6,7 +6,8 @@ use uuid::Uuid;
 
 use crate::providers::memory_queue::TaskQueue;
 use crate::runtime::event_store::EventStore;
-use crate::runtime::session::command::{CommandPayload, SessionError};
+use crate::runtime::session::command::{CommandPayload, Outcome, SessionError, SettleError};
+use crate::runtime::session::state::EffectKind;
 use crate::runtime::session::{execute, ConflictRetry, ExecuteError, ExecuteInput};
 use crate::runtime::Caller;
 
@@ -72,21 +73,20 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
             )
             .await;
 
-            let parent_command = match create_result {
-                Ok(_) => CommandPayload::StartSubAgent {
-                    session_id: child_session_id.clone(),
-                },
-                Err(ExecuteError::Command(SessionError::SessionAlreadyCreated)) => {
-                    CommandPayload::StartSubAgent {
-                        session_id: child_session_id.clone(),
-                    }
+            let outcome = match create_result {
+                Ok(_) | Err(ExecuteError::Command(SessionError::SessionAlreadyCreated)) => {
+                    Outcome::SubAgentStarted
                 }
-                Err(err) => CommandPayload::FailSubAgent {
-                    session_id: child_session_id.clone(),
-                    error: format!("failed to create child session: {err}"),
-                    retryable: false,
-                },
+                Err(err) => {
+                    SettleError::new(format!("failed to create child session: {err}"), false).into()
+                }
             };
+            let parent_command = CommandPayload::settle(
+                EffectKind::SubAgent,
+                child_session_id.clone(),
+                None,
+                outcome,
+            );
 
             let result = execute(
                 store,
@@ -159,11 +159,12 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
             // A child whose run failed settles the delegation as an error; its
             // empty output is not an answer.
             let command = match error {
-                Some(error) => CommandPayload::FailSubAgent {
-                    session_id: child_session_id,
-                    error,
-                    retryable: false,
-                },
+                Some(error) => CommandPayload::settle(
+                    EffectKind::SubAgent,
+                    child_session_id,
+                    None,
+                    SettleError::new(error, false),
+                ),
                 None => CommandPayload::CompleteSubAgentTurn {
                     session_id: child_session_id,
                     agent_id,

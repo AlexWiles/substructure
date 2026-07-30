@@ -28,7 +28,8 @@ pub struct EnvVars {
 }
 
 impl EnvVars {
-    pub fn load(provider: Option<LlmProviderArg>, dev: bool) -> Result<Self, ()> {
+    /// Returns `None` after printing the missing variables to stderr.
+    pub fn load(provider: Option<LlmProviderArg>, dev: bool) -> Option<Self> {
         let provider_specs: &[(&str, &str)] = match provider {
             Some(LlmProviderArg::Openrouter) => &[(
                 "OPENROUTER_API_KEY",
@@ -86,7 +87,7 @@ impl EnvVars {
             for (name, _) in &missing {
                 eprintln!("  export {name}=...");
             }
-            return Err(());
+            return None;
         }
 
         let provider = match provider {
@@ -114,6 +115,6 @@ impl EnvVars {
             })
         };
 
-        Ok(Self { provider, auth })
+        Some(Self { provider, auth })
     }
 }

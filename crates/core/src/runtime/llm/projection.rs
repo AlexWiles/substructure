@@ -15,12 +15,13 @@ use crate::runtime::session::SessionEvent;
 use super::LlmTask;
 
 struct LlmDispatchProjection {
+    store: Arc<dyn EventStore>,
     queue: Arc<dyn TaskQueue<LlmTask>>,
 }
 
 impl LlmDispatchProjection {
-    fn new(queue: Arc<dyn TaskQueue<LlmTask>>) -> Self {
-        Self { queue }
+    fn new(store: Arc<dyn EventStore>, queue: Arc<dyn TaskQueue<LlmTask>>) -> Self {
+        Self { store, queue }
     }
 }
 
@@ -31,13 +32,26 @@ impl EventProcessor for LlmDispatchProjection {
     }
 
     async fn apply(&self, event: SessionEvent) -> Result<(), ProcessorError> {
-        let req = match &event.payload {
-            EventPayload::LlmCallRequested(req) => req,
+        // Executors key off the dispatch marker: a requested call is queued,
+        // not running. The payload is read from state — post-dispatch, the
+        // stored spec carries the connector tools in force.
+        let dispatched = match &event.payload {
+            EventPayload::LlmCallDispatched(d) => d,
             _ => return Ok(()),
         };
 
+        let session = self
+            .store
+            .load(&event.tenant_id, &event.session_id)
+            .await
+            .map_err(|e| ProcessorError::Apply(format!("load session for llm dispatch: {e}")))?;
+        let Some(call) = session.state.llm_call(&dispatched.id) else {
+            // Settled and gone — nothing left to execute.
+            return Ok(());
+        };
+
         // Worker-handled calls run on the worker, not the server-side executor.
-        if req.handler == LlmHandler::Worker {
+        if call.handler == LlmHandler::Worker {
             return Ok(());
         }
 
@@ -59,10 +73,10 @@ impl EventProcessor for LlmDispatchProjection {
             session_id: event.session_id,
             tenant_id: event.tenant_id,
             agent_id,
-            call_id: req.call_id.clone(),
-            attempt: req.attempt,
-            request: req.request.clone(),
-            stream: req.stream,
+            call_id: dispatched.id.clone(),
+            attempt: dispatched.attempt,
+            request: call.spec.to_request(call.prompt.clone()),
+            stream: call.stream,
             owner,
             ancestry,
             turn_id,
@@ -89,8 +103,10 @@ pub fn spawn_llm_dispatch_processor(
     queue: Arc<dyn TaskQueue<LlmTask>>,
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
-    let projection = Arc::new(LlmDispatchProjection::new(queue));
-    let mut config = EventProcessorRunnerConfig::default();
-    config.owner_id = Some("llm_dispatch".to_string());
+    let projection = Arc::new(LlmDispatchProjection::new(store.clone(), queue));
+    let config = EventProcessorRunnerConfig {
+        owner_id: Some("llm_dispatch".to_string()),
+        ..Default::default()
+    };
     EventProcessorRunner::new(store, checkpoint_store, projection, config, cancel).spawn()
 }

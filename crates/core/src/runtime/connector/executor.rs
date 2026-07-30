@@ -7,7 +7,8 @@ use crate::connectors::registry::Connections;
 use crate::connectors::{ConnectorError, ToolOutcome};
 use crate::providers::memory_queue::TaskQueue;
 use crate::runtime::event_store::EventStore;
-use crate::runtime::session::command::CommandPayload;
+use crate::runtime::session::command::{CommandPayload, Outcome, SettleError};
+use crate::runtime::session::state::EffectKind;
 use crate::runtime::session::{execute, ConflictRetry, ExecuteInput};
 use crate::runtime::span::SpanContext;
 use crate::runtime::Caller;
@@ -55,19 +56,21 @@ async fn handle_task(store: &dyn EventStore, connections: &Connections, task: Co
             ..
         } => {
             let command = match connections.list_tools(&tenant_id, &connection_id).await {
-                Ok(offer) => CommandPayload::CompleteConnectorSync {
-                    connection_id: connection_id.clone(),
-                    attempt: Some(attempt),
-                    prefix: offer.prefix,
-                    tools: offer.tools,
-                },
-                Err(err) => CommandPayload::FailConnectorSync {
-                    connection_id: connection_id.clone(),
-                    attempt: Some(attempt),
-                    error: err.message.clone(),
-                    retryable: err.retryable,
-                    needs_reauth: err.needs_reauth,
-                },
+                Ok(offer) => CommandPayload::settle(
+                    EffectKind::ConnectorSync,
+                    connection_id.clone(),
+                    Some(attempt),
+                    Outcome::Connector {
+                        prefix: offer.prefix,
+                        tools: offer.tools,
+                    },
+                ),
+                Err(err) => CommandPayload::settle(
+                    EffectKind::ConnectorSync,
+                    connection_id.clone(),
+                    Some(attempt),
+                    SettleError::new(err.message.clone(), err.retryable).reauth(err.needs_reauth),
+                ),
             };
             submit(
                 store,
@@ -117,31 +120,19 @@ fn settle_call(
     attempt: u32,
     result: Result<ToolOutcome, ConnectorError>,
 ) -> CommandPayload {
-    match result {
-        Ok(outcome) if outcome.is_error => CommandPayload::FailToolCall {
-            tool_call_id,
-            attempt: Some(attempt),
-            error: outcome.content,
-            retryable: false,
-        },
-        Ok(outcome) => CommandPayload::CompleteToolCall {
-            tool_call_id,
-            attempt: Some(attempt),
-            // Prefer the structured form when the connection sent one: it round
-            // trips through a declared `output` schema, where rendered text
-            // would not.
+    let outcome = match result {
+        Ok(outcome) if outcome.is_error => SettleError::new(outcome.content, false).into(),
+        // Prefer the structured form when the connection sent one: it round
+        // trips through a declared `output` schema, where rendered text would not.
+        Ok(outcome) => Outcome::Tool {
             result: match outcome.structured {
                 Some(value) => value.to_string(),
                 None => outcome.content,
             },
         },
-        Err(err) => CommandPayload::FailToolCall {
-            tool_call_id,
-            attempt: Some(attempt),
-            error: err.message,
-            retryable: err.retryable,
-        },
-    }
+        Err(err) => SettleError::new(err.message, err.retryable).into(),
+    };
+    CommandPayload::settle(EffectKind::ToolCall, tool_call_id, Some(attempt), outcome)
 }
 
 async fn submit(
@@ -197,11 +188,13 @@ mod tests {
     fn a_tool_that_ran_and_failed_is_terminal_not_a_retry() {
         let cmd = settle_call("tc-1".into(), 0, Ok(outcome("no such issue", None, true)));
         match cmd {
-            CommandPayload::FailToolCall {
-                error, retryable, ..
+            CommandPayload::SettleEffect {
+                kind: EffectKind::ToolCall,
+                outcome: Outcome::Error(e),
+                ..
             } => {
-                assert_eq!(error, "no such issue");
-                assert!(!retryable, "the tool ran; running it again says the same");
+                assert_eq!(e.error, "no such issue");
+                assert!(!e.retryable, "the tool ran; running it again says the same");
             }
             other => panic!("expected a terminal failure; got {other:?}"),
         }
@@ -215,10 +208,13 @@ mod tests {
             Err(ConnectorError::retryable("connection reset")),
         );
         match cmd {
-            CommandPayload::FailToolCall {
-                attempt, retryable, ..
+            CommandPayload::SettleEffect {
+                kind: EffectKind::ToolCall,
+                outcome: Outcome::Error(e),
+                attempt,
+                ..
             } => {
-                assert!(retryable, "the engine's problem, not the model's");
+                assert!(e.retryable, "the engine's problem, not the model's");
                 assert_eq!(attempt, Some(2), "fenced against a stale executor");
             }
             other => panic!("expected a retryable failure; got {other:?}"),
@@ -234,7 +230,11 @@ mod tests {
             Ok(outcome("Issue 7", Some(structured.clone()), false)),
         );
         match cmd {
-            CommandPayload::CompleteToolCall { result, .. } => {
+            CommandPayload::SettleEffect {
+                kind: EffectKind::ToolCall,
+                outcome: Outcome::Tool { result },
+                ..
+            } => {
                 assert_eq!(
                     result,
                     structured.to_string(),
@@ -249,7 +249,11 @@ mod tests {
     fn rendered_content_settles_a_connection_that_sent_no_structure() {
         let cmd = settle_call("tc-1".into(), 0, Ok(outcome("Issue 7", None, false)));
         match cmd {
-            CommandPayload::CompleteToolCall { result, .. } => assert_eq!(result, "Issue 7"),
+            CommandPayload::SettleEffect {
+                kind: EffectKind::ToolCall,
+                outcome: Outcome::Tool { result },
+                ..
+            } => assert_eq!(result, "Issue 7"),
             other => panic!("expected a result; got {other:?}"),
         }
     }

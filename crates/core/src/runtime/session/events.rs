@@ -22,12 +22,16 @@ pub enum EventPayload {
     HeadMoved(HeadMoved),
     #[serde(rename = "llm.call.requested")]
     LlmCallRequested(LlmCallRequested),
+    #[serde(rename = "llm.call.dispatched")]
+    LlmCallDispatched(LlmCallDispatched),
     #[serde(rename = "llm.call.completed")]
     LlmCallCompleted(LlmCallCompleted),
     #[serde(rename = "llm.call.errored")]
     LlmCallErrored(LlmCallErrored),
     #[serde(rename = "tool.call.requested")]
     ToolCallRequested(ToolCallRequested),
+    #[serde(rename = "tool.call.dispatched")]
+    ToolCallDispatched(ToolCallDispatched),
     #[serde(rename = "tool.call.completed")]
     ToolCallCompleted(ToolCallCompleted),
     #[serde(rename = "tool.call.errored")]
@@ -40,6 +44,8 @@ pub enum EventPayload {
     ConnectorSyncErrored(ConnectorSyncErrored),
     #[serde(rename = "sub_agent.requested")]
     SubAgentRequested(SubAgentRequested),
+    #[serde(rename = "sub_agent.dispatched")]
+    SubAgentDispatched(SubAgentDispatched),
     #[serde(rename = "sub_agent.started")]
     SubAgentStarted(SubAgentStarted),
     #[serde(rename = "sub_agent.errored")]
@@ -48,12 +54,12 @@ pub enum EventPayload {
     SessionInterrupted(SessionInterrupted),
     #[serde(rename = "session.interrupt_resumed")]
     InterruptResumed(InterruptResumed),
-    #[serde(rename = "worker.decision.requested")]
-    WorkerDecisionRequested(WorkerDecisionRequested),
-    #[serde(rename = "worker.decision.completed")]
-    WorkerDecisionCompleted(WorkerDecisionCompleted),
-    #[serde(rename = "worker.decision.errored")]
-    WorkerDecisionErrored(WorkerDecisionErrored),
+    #[serde(rename = "decision.dispatched")]
+    DecisionDispatched(DecisionDispatched),
+    #[serde(rename = "decision.completed")]
+    DecisionCompleted(DecisionCompleted),
+    #[serde(rename = "decision.errored")]
+    DecisionErrored(DecisionErrored),
     #[serde(rename = "session.message_requested")]
     SessionMessageRequested(SessionMessageRequested),
     #[serde(rename = "worker.state.updated")]
@@ -62,10 +68,10 @@ pub enum EventPayload {
     AgentConfigUpdated(AgentConfigUpdated),
     #[serde(rename = "sub_agent.turn_completed")]
     SubAgentTurnCompleted(SubAgentTurnCompleted),
-    #[serde(rename = "decision_request.queued")]
-    DecisionRequestQueued(DecisionRequestQueued),
-    #[serde(rename = "decision_request.dropped")]
-    DecisionRequestDropped(DecisionRequestDropped),
+    #[serde(rename = "decision.queued")]
+    DecisionQueued(DecisionQueued),
+    #[serde(rename = "decision.dropped")]
+    DecisionDropped(DecisionDropped),
     #[serde(rename = "call.voided")]
     CallVoided(CallVoided),
     #[serde(rename = "session.cancelled")]
@@ -123,7 +129,7 @@ impl MessageTree {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmCallRequested {
-    pub call_id: String,
+    pub id: String,
     pub attempt: u32,
     pub request: LlmRequest,
     pub stream: bool,
@@ -134,9 +140,34 @@ pub struct LlmCallRequested {
     pub format: Option<LlmFormat>,
 }
 
+/// Dispatch marker: the queued call cleared its gates and starts executing.
+/// The payload lives on the call's `*Requested` event and in state; executors
+/// key off this marker and read the call from state, mirroring how worker
+/// delivery reads a promoted decision. For an LLM call, applying this merges
+/// the connector tools in force into the stored spec — dispatch time is when
+/// derived context is current.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmCallDispatched {
+    pub id: String,
+    pub attempt: u32,
+}
+
+/// Dispatch marker; see [`LlmCallDispatched`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallDispatched {
+    pub id: String,
+    pub attempt: u32,
+}
+
+/// Dispatch marker; see [`LlmCallDispatched`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubAgentDispatched {
+    pub id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmCallCompleted {
-    pub call_id: String,
+    pub id: String,
     pub attempt: u32,
     pub response: LlmResponse,
 }
@@ -147,7 +178,7 @@ fn default_true() -> bool {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmCallErrored {
-    pub call_id: String,
+    pub id: String,
     pub attempt: u32,
     pub error: String,
     #[serde(default = "default_true")]
@@ -163,7 +194,7 @@ pub struct LlmCallErrored {
 /// a config rewritten for unrelated reasons must not cost another round trip.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectorSyncRequested {
-    pub connection_id: String,
+    pub id: String,
     pub attempt: u32,
     pub retry: RetryPolicy,
 }
@@ -174,7 +205,7 @@ pub struct ConnectorSyncRequested {
 /// live session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectorSyncCompleted {
-    pub connection_id: String,
+    pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix: Option<String>,
     pub tools: Vec<RemoteTool>,
@@ -182,7 +213,7 @@ pub struct ConnectorSyncCompleted {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectorSyncErrored {
-    pub connection_id: String,
+    pub id: String,
     pub error: String,
     #[serde(default)]
     pub retryable: bool,
@@ -194,7 +225,7 @@ pub struct ConnectorSyncErrored {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentRequested {
-    pub session_id: String,
+    pub id: String,
     pub agent_id: String,
     #[serde(default)]
     pub tool_call_id: String,
@@ -203,12 +234,12 @@ pub struct SubAgentRequested {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentStarted {
-    pub session_id: String,
+    pub id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentErrored {
-    pub session_id: String,
+    pub id: String,
     pub error: String,
     #[serde(default)]
     pub retryable: bool,
@@ -226,7 +257,7 @@ pub struct ConnectorTarget {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallRequested {
-    pub tool_call_id: String,
+    pub id: String,
     pub attempt: u32,
     pub name: String,
     pub arguments: String,
@@ -240,14 +271,14 @@ pub struct ToolCallRequested {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallCompleted {
-    pub tool_call_id: String,
+    pub id: String,
     pub name: String,
     pub result: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallErrored {
-    pub tool_call_id: String,
+    pub id: String,
     pub name: String,
     pub error: String,
     #[serde(default)]
@@ -282,20 +313,20 @@ pub struct InterruptResumed {
 }
 
 /// Promotion marker: the queued decision is now live. The trigger lives on
-/// the decision's `DecisionRequestQueued` event, which always precedes this.
+/// the decision's `DecisionQueued` event, which always precedes this.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkerDecisionRequested {
-    pub decision_id: String,
+pub struct DecisionDispatched {
+    pub id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkerDecisionCompleted {
-    pub decision_id: String,
+pub struct DecisionCompleted {
+    pub id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkerDecisionErrored {
-    pub decision_id: String,
+pub struct DecisionErrored {
+    pub id: String,
     pub error: String,
     #[serde(default = "default_true")]
     pub retryable: bool,
@@ -345,30 +376,28 @@ pub struct TurnCompleted {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DecisionRequestQueued {
-    pub decision_id: String,
+pub struct DecisionQueued {
+    pub id: String,
     pub trigger: Trigger,
 }
 
 /// A settle decision dropped when its branch was forked away.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DecisionRequestDropped {
-    pub decision_id: String,
+pub struct DecisionDropped {
+    pub id: String,
 }
 
-/// An abandoned in-flight call. For a sub-agent, `id` is the tool call and
-/// `session_id` the child session to cancel.
+/// An abandoned in-flight call, named the way its kind names itself: a
+/// sub-agent's `id` is the child session, a connector sync's the connection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallVoided {
     pub kind: EffectKind,
     pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentTurnCompleted {
-    pub session_id: String,
+    pub id: String,
     #[serde(default)]
     pub cost: Decimal,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

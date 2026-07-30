@@ -31,7 +31,7 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
-use super::state::LlmCallState;
+use super::state::EffectState;
 use super::tool_contract::{declared_tool, DeclaredTool};
 use crate::protocol::{
     AgentConfig, ClientContext, Content, DecisionAction, DecisionResponse, DecisionTrigger,
@@ -41,7 +41,7 @@ use crate::protocol::{
 pub fn propose(
     trigger: &DecisionTrigger,
     transcript: &[Message],
-    llm_calls: &HashMap<String, LlmCallState>,
+    llm_calls: &HashMap<String, EffectState>,
     pending_calls: usize,
     config: Option<&AgentConfig>,
     decision_id: &str,
@@ -110,7 +110,9 @@ pub fn propose(
         ),
         DecisionTrigger::ToolExecute {
             id, name, input, ..
-        } => match declared_tool(id, name, transcript, llm_calls) {
+        } => match declared_tool(id, name, transcript, |id| {
+            llm_calls.get(id).and_then(|e| e.llm())
+        }) {
             DeclaredTool::Undeclared => {
                 Some(tool_error(id, format!("unknown tool: {name}"), transcript))
             }
@@ -350,7 +352,7 @@ fn tool_finished(
     name: &str,
     content: &str,
     transcript: &[Message],
-    llm_calls: &HashMap<String, LlmCallState>,
+    llm_calls: &HashMap<String, EffectState>,
     pending_calls: usize,
 ) -> Option<DecisionResponse> {
     let tool_message = DraftMessage {
@@ -382,12 +384,13 @@ fn reissue(
     tool_call_id: &str,
     tool_message: &DraftMessage,
     transcript: &[Message],
-    llm_calls: &HashMap<String, LlmCallState>,
+    llm_calls: &HashMap<String, EffectState>,
 ) -> Option<DecisionAction> {
     let assistant_at = transcript
         .iter()
         .rposition(|m| m.tool_calls.iter().any(|c| c.id == tool_call_id))?;
-    let call = llm_calls.get(&transcript[assistant_at].id)?;
+    let effect = llm_calls.get(&transcript[assistant_at].id)?;
+    let call = effect.llm()?;
 
     let mut messages: Vec<DraftMessage> = call
         .prompt
@@ -414,7 +417,7 @@ fn reissue(
         max_completion_tokens: call.spec.max_completion_tokens,
         reasoning: call.spec.reasoning.clone(),
         stream: Some(call.stream),
-        retry: Some(call.tracking.retry_policy.clone()),
+        retry: Some(effect.tracking.retry_policy.clone()),
         handler: call.handler.into(),
     })
 }
@@ -470,23 +473,25 @@ mod tests {
         }
     }
 
-    fn call_state(call_id: &str, prompt: Vec<Message>) -> LlmCallState {
-        LlmCallState {
-            format: None,
-            call_id: call_id.to_string(),
-            tracking: EffectTracking::new(RetryPolicy::no_retry(), Utc::now()),
-            prompt,
-            spec: LlmCallSpec {
-                model: "test-model".to_string(),
-                tools: None,
-                temperature: Some(0.5),
-                max_completion_tokens: None,
-                reasoning: None,
-            },
-            stream: true,
-            handler: LlmHandler::Server,
-            anchor: None,
-        }
+    fn call_state(call_id: &str, prompt: Vec<Message>) -> EffectState {
+        use crate::runtime::session::state::{EffectPayload, LlmCallState};
+        EffectState::new(
+            call_id,
+            EffectTracking::new(RetryPolicy::no_retry(), Utc::now()),
+            EffectPayload::LlmCall(LlmCallState {
+                format: None,
+                prompt,
+                spec: LlmCallSpec {
+                    model: "test-model".to_string(),
+                    tools: None,
+                    temperature: Some(0.5),
+                    max_completion_tokens: None,
+                    reasoning: None,
+                },
+                stream: true,
+                handler: LlmHandler::Server,
+            }),
+        )
     }
 
     fn llm_finished_trigger(message: DraftMessage, ok: bool, truncated: bool) -> DecisionTrigger {
@@ -778,7 +783,7 @@ mod tests {
             assistant_with_calls("call-1", &[("tc-1", "hallucinated")]),
         ];
         let mut call = call_state("call-1", vec![]);
-        call.spec.tools = Some(vec![crate::protocol::LlmTool {
+        call.llm_mut().unwrap().spec.tools = Some(vec![crate::protocol::LlmTool {
             name: "get_time".to_string(),
             description: "d".to_string(),
             input: None,

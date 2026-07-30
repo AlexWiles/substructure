@@ -24,7 +24,7 @@ use serde_json::Value;
 
 use super::decision::{Action, LlmHandler, ToolHandler, Trigger};
 use super::reconcile::news_start;
-use super::state::{new_call_id, new_message_id, LlmCallState};
+use super::state::{new_call_id, new_message_id, EffectState};
 use super::tool_contract::{classify_arguments, declared_tool, DeclaredTool};
 use crate::protocol::{
     AgentConfig, DecisionAction, DecisionRequest, DecisionResponse, DecisionTrigger, DraftMessage,
@@ -483,11 +483,15 @@ pub fn to_wire_trigger(
     trigger: Trigger,
     active_path: &[Message],
     tree: &MessageTree,
-    open_llm_calls: &HashMap<String, LlmCallState>,
+    open_llm_calls: &HashMap<String, EffectState>,
 ) -> DecisionTrigger {
     match trigger {
         Trigger::SessionStart => DecisionTrigger::SessionStart,
-        Trigger::ClientMessage { messages, client } => {
+        // The worker wire has no notion of a deferred turn: by delivery the turn
+        // is running, so `turn_id` is dropped here.
+        Trigger::ClientMessage {
+            messages, client, ..
+        } => {
             let known: std::collections::HashSet<&str> =
                 tree.nodes.iter().map(|n| n.message.id.as_str()).collect();
             let mut view: Vec<DraftMessage> = active_path
@@ -530,7 +534,9 @@ pub fn to_wire_trigger(
             attempt,
             deadline,
         } => {
-            let schema = match declared_tool(&id, &name, active_path, open_llm_calls) {
+            let schema = match declared_tool(&id, &name, active_path, |id| {
+                open_llm_calls.get(id).and_then(|e| e.llm())
+            }) {
                 DeclaredTool::Declared(t) => t.input.as_ref(),
                 _ => None,
             };
@@ -1233,6 +1239,7 @@ mod tests {
             Trigger::ClientMessage {
                 messages: vec![msg("u2", Role::User, "more").into()],
                 client: ClientContext::default(),
+                turn_id: None,
             },
             &path,
             &tree,
@@ -1264,6 +1271,7 @@ mod tests {
                     msg("u3", Role::User, "and more").into(),
                 ],
                 client: ClientContext::default(),
+                turn_id: None,
             },
             &path,
             &tree,
@@ -1397,7 +1405,7 @@ mod tests {
         name: &str,
         arguments: &str,
         active_path: &[Message],
-        open_llm_calls: &HashMap<String, LlmCallState>,
+        open_llm_calls: &HashMap<String, EffectState>,
     ) -> ToolInput {
         let trigger = to_wire_trigger(
             Trigger::ToolExecute {
@@ -1417,9 +1425,9 @@ mod tests {
         }
     }
 
-    fn weather_call(schema: serde_json::Value) -> (Vec<Message>, HashMap<String, LlmCallState>) {
+    fn weather_call(schema: serde_json::Value) -> (Vec<Message>, HashMap<String, EffectState>) {
         use crate::protocol::LlmTool;
-        use crate::runtime::session::state::EffectTracking;
+        use crate::runtime::session::state::{EffectPayload, EffectTracking, LlmCallState};
 
         let assistant = Message {
             id: "call-1".to_string(),
@@ -1436,27 +1444,28 @@ mod tests {
             tool_call_id: None,
             name: None,
         };
-        let call = LlmCallState {
-            format: None,
-            call_id: "call-1".to_string(),
-            tracking: EffectTracking::new(RetryPolicy::no_retry(), chrono::Utc::now()),
-            prompt: vec![],
-            spec: LlmCallSpec {
-                model: "m".to_string(),
-                tools: Some(vec![LlmTool {
-                    name: "get_weather".to_string(),
-                    description: "d".to_string(),
-                    input: Some(schema),
-                    output: None,
-                }]),
-                temperature: None,
-                max_completion_tokens: None,
-                reasoning: None,
-            },
-            stream: false,
-            handler: crate::runtime::session::decision::LlmHandler::Server,
-            anchor: None,
-        };
+        let call = EffectState::new(
+            "call-1",
+            EffectTracking::new(RetryPolicy::no_retry(), chrono::Utc::now()),
+            EffectPayload::LlmCall(LlmCallState {
+                format: None,
+                prompt: vec![],
+                spec: LlmCallSpec {
+                    model: "m".to_string(),
+                    tools: Some(vec![LlmTool {
+                        name: "get_weather".to_string(),
+                        description: "d".to_string(),
+                        input: Some(schema),
+                        output: None,
+                    }]),
+                    temperature: None,
+                    max_completion_tokens: None,
+                    reasoning: None,
+                },
+                stream: false,
+                handler: crate::runtime::session::decision::LlmHandler::Server,
+            }),
+        );
         (
             vec![msg("u1", Role::User, "hi"), assistant],
             HashMap::from([("call-1".to_string(), call)]),
@@ -1589,9 +1598,11 @@ mod tests {
         assert!(r.actions.is_empty());
     }
 
+    type VariantCheck = fn(&ClientInput) -> bool;
+
     #[test]
     fn client_input_parses_every_tag_to_its_variant() {
-        let cases: [(&str, fn(&ClientInput) -> bool); 7] = [
+        let cases: [(&str, VariantCheck); 7] = [
             (
                 r#"{"type":"client.message","agent_id":"bot","message":{"role":"user","content":"hi"}}"#,
                 |i| matches!(i, ClientInput::Message { .. }),

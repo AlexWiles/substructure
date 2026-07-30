@@ -135,8 +135,10 @@ pub fn spawn_session_index_processor(
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     let projection = Arc::new(SessionIndexProjection::new(session_index_store));
-    let mut config = EventProcessorRunnerConfig::default();
-    config.batch_size = 512;
-    config.owner_id = Some("session_index".to_string());
+    let config = EventProcessorRunnerConfig {
+        batch_size: 512,
+        owner_id: Some("session_index".to_string()),
+        ..Default::default()
+    };
     EventProcessorRunner::new(event_store, checkpoint_store, projection, config, cancel).spawn()
 }

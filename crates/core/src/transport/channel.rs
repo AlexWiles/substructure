@@ -33,6 +33,13 @@ impl ChannelContext {
         self.runtime.handle_client_input(input).await
     }
 
+    pub async fn submit_client_payload(
+        &self,
+        input: crate::SubmitClientPayload,
+    ) -> Result<crate::SubmitClientPayloadOutput, RuntimeError> {
+        self.runtime.submit_client_payload(input).await
+    }
+
     pub async fn stream(
         &self,
         spec: SessionSubscriptionSpec,

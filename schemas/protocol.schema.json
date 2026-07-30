@@ -154,6 +154,10 @@
             "message": {
               "$ref": "#/$defs/DraftMessage"
             },
+            "queue": {
+              "description": "Hold this message for the next turn instead of refusing it when one\nis already running. Off by default: rejection stays the contract for\na plain submitter, and queuing is declared intent.",
+              "type": "boolean"
+            },
             "stream": {
               "type": "boolean"
             },
@@ -225,6 +229,10 @@
                 "$ref": "#/$defs/DraftMessage"
               },
               "type": "array"
+            },
+            "queue": {
+              "description": "Hold this batch for the next turn instead of refusing it when one is\nalready running. Off by default: rejection stays the contract for a\nplain submitter, and queuing is declared intent.",
+              "type": "boolean"
             },
             "stream": {
               "type": "boolean"
@@ -1531,18 +1539,19 @@
             "null"
           ]
         },
-        "session_id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "status": {
           "$ref": "#/$defs/EffectStatus"
         },
         "stream": {
           "type": [
             "boolean",
+            "null"
+          ]
+        },
+        "tool_call_id": {
+          "description": "The model tool call a delegation answers; its own `id` is the child session.",
+          "type": [
+            "string",
             "null"
           ]
         }
@@ -1557,6 +1566,7 @@
       "type": "object"
     },
     "EffectKind": {
+      "description": "What kind of work an effect is. One enum for the wire and for the engine's\nown scheduling: a decision and a turn's end queue beside the calls and are\nswept the same way, so they are kinds too. Neither ever appears on an\n[`Effect`] — a decision rides the decision list, a turn end has no record.",
       "oneOf": [
         {
           "enum": [
@@ -1569,6 +1579,16 @@
         {
           "const": "connector_sync",
           "description": "Fetching one connection's tool list. Its `id` is the connection id.",
+          "type": "string"
+        },
+        {
+          "const": "decision",
+          "description": "A worker decision.",
+          "type": "string"
+        },
+        {
+          "const": "turn_end",
+          "description": "The turn's completion, dependent on its `turn.finished` finalizer\ndecision settling. Carries the turn id; the frozen output lives in the\nsession's `finalizing`. Never swept: it has no deadline of its own.",
           "type": "string"
         }
       ],

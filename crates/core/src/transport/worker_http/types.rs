@@ -100,6 +100,10 @@ pub struct SubmitClientPayloadRequest {
     pub session_id: Option<String>,
     #[serde(default)]
     pub turn_id: Option<String>,
+    /// Hold a message-shaped payload for the next turn instead of refusing it
+    /// when one is already running.
+    #[serde(default)]
+    pub queue: bool,
     pub identity: SubmitClientPayloadIdentity,
 }
 
@@ -114,6 +118,8 @@ pub struct SubmitClientPayloadIdentity {
 pub struct SubmitClientPayloadResponse {
     pub session_id: String,
     pub turn_id: String,
+    /// The turn was taken but has not started: another turn holds the session.
+    pub queued: bool,
 }
 
 #[derive(Debug, Deserialize)]

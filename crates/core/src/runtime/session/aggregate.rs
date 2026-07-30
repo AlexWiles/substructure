@@ -9,7 +9,7 @@ use crate::runtime::caller::Caller;
 use crate::runtime::event_store::{AppendInput, EventStore, GlobalPosition, Seq, StoreError};
 use crate::runtime::span::SpanContext;
 
-use super::command::{CommandPayload, SessionError};
+use super::command::{CommandPayload, SessionError, Working};
 use super::events::EventPayload;
 use super::state::{ApplyContext, EventMeta, SessionState};
 
@@ -124,6 +124,31 @@ impl SessionAggregate {
         }
     }
 
+    /// Handle a command against a working copy of the state: each emitted
+    /// event is applied as it is emitted, so handler reads always see the
+    /// events already produced. The scratch copy is discarded; `commit`
+    /// applies the returned events to the canonical state.
+    pub fn handle(
+        &self,
+        cmd: CommandPayload,
+        caller: &Caller,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<EventPayload>, SessionError> {
+        let mut working = Working::new(self.state.clone(), self.seq, now);
+        working.run(cmd, caller)?;
+        Ok(working.into_events())
+    }
+
+    /// [`handle`](Self::handle) with the current clock; test convenience.
+    #[cfg(test)]
+    pub fn try_handle(
+        &self,
+        cmd: CommandPayload,
+        caller: &Caller,
+    ) -> Result<Vec<EventPayload>, SessionError> {
+        self.handle(cmd, caller, Utc::now())
+    }
+
     pub fn commit(
         &mut self,
         events: Vec<EventPayload>,
@@ -147,8 +172,8 @@ impl SessionAggregate {
                 self.first_event_at = Some(context.occurred_at);
             }
             self.last_event_at = Some(context.occurred_at);
-            self.wake_at = self.state.wake_at();
-            let meta = self.state.event_meta();
+            let meta = self.state.event_meta(context.occurred_at);
+            self.wake_at = meta.wake_at;
             session_events.push(NewSessionEvent {
                 id: Uuid::now_v7(),
                 tenant_id: self.tenant_id.clone(),
@@ -215,11 +240,21 @@ impl ConflictRetry {
     }
 }
 
+/// What a committed command left behind. Facts the caller would otherwise have
+/// to re-read the session to learn — so the answer comes from the state the
+/// command itself committed, not from a second look at the store.
+#[derive(Debug, Clone, Default)]
+pub struct ExecuteOutput {
+    /// The turn the session is on, as of this command. `None` before the first
+    /// one. Matches what a `turn_id` stamp on these events would say.
+    pub turn_id: Option<String>,
+}
+
 pub async fn execute(
     store: &dyn EventStore,
     input: ExecuteInput,
     retry: &ConflictRetry,
-) -> Result<(), ExecuteError> {
+) -> Result<ExecuteOutput, ExecuteError> {
     let mut attempt = 0;
     loop {
         let start_time = Utc::now();
@@ -231,20 +266,23 @@ pub async fn execute(
         )
         .await?;
 
+        // One clock per attempt: handling and commit see the same instant.
+        let now = Utc::now();
         let events = session
-            .state
-            .handle(command, &input.caller)
+            .handle(command, &input.caller, now)
             .map_err(ExecuteError::Command)?;
 
         if events.is_empty() {
-            return Ok(());
+            return Ok(ExecuteOutput {
+                turn_id: session.state.turn_id().map(str::to_string),
+            });
         }
 
         let mut events = session.commit(
             events,
             &CommitContext {
                 span: input.span.clone(),
-                occurred_at: Utc::now(),
+                occurred_at: now,
             },
         );
         let end_time = Utc::now();
@@ -253,6 +291,11 @@ pub async fn execute(
             event.end_time = end_time;
         }
 
+        // Read before the snapshot moves into the append: this is the state the
+        // events being written leave the session in.
+        let output = ExecuteOutput {
+            turn_id: session.state.turn_id().map(str::to_string),
+        };
         match store
             .append(AppendInput {
                 events,
@@ -261,7 +304,7 @@ pub async fn execute(
             })
             .await
         {
-            Ok(()) => return Ok(()),
+            Ok(()) => return Ok(output),
             Err(StoreError::VersionConflict { .. }) if attempt < retry.max_retries => {
                 let delay = retry.delay_for(attempt);
                 if !delay.is_zero() {

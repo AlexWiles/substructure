@@ -72,7 +72,7 @@ async fn extract(
     event: SessionEvent,
 ) -> Result<Option<WorkerDecisionRequest>, ProcessorError> {
     let req = match &event.payload {
-        EventPayload::WorkerDecisionRequested(req) => req,
+        EventPayload::DecisionDispatched(req) => req,
         _ => return Ok(None),
     };
     let meta = &event.meta;
@@ -81,11 +81,7 @@ async fn extract(
         return Ok(None);
     };
 
-    let Some(wd) = meta
-        .decisions
-        .iter()
-        .find(|d| d.decision_id == req.decision_id)
-    else {
+    let Some(wd) = meta.decisions.iter().find(|d| d.decision_id == req.id) else {
         return Ok(None);
     };
 
@@ -99,8 +95,7 @@ async fn extract(
     // after this event — nothing left to deliver.
     let Some(trigger) = session
         .state
-        .worker_decisions
-        .get(&req.decision_id)
+        .worker_decision(&req.id)
         .map(|d| d.trigger.clone())
     else {
         return Ok(None);
@@ -119,7 +114,7 @@ async fn extract(
     // the as-of subset even from the current map.
     let open_llm_calls = state.open_llm_calls(&message_tree);
 
-    let pending_calls = meta.pending_work(&req.decision_id);
+    let pending_calls = meta.pending_work(&req.id);
     let worker_state = state.resolve_state_for(message_tree.head_id.as_deref());
     let agent_config = state.resolve_agent_for(message_tree.head_id.as_deref());
 
@@ -130,13 +125,13 @@ async fn extract(
         &open_llm_calls,
         pending_calls,
         agent_config.as_ref(),
-        &req.decision_id,
+        &req.id,
     )
     .unwrap_or_default();
 
     Ok(Some(WorkerDecisionRequest {
         session_id: event.session_id.clone(),
-        decision_id: req.decision_id.clone(),
+        decision_id: req.id.clone(),
         agent_id: agent_id.clone(),
         identity: owner.clone(),
         trigger,
@@ -171,7 +166,7 @@ mod tests {
     use crate::runtime::event_store::{
         AppendInput, EventFilter, EventStore, GlobalPosition, StoreError,
     };
-    use crate::runtime::session::command::CommandPayload;
+    use crate::runtime::session::command::{CommandPayload, TurnTarget};
     use crate::runtime::session::events::EventPayload;
     use crate::runtime::session::state::SessionState;
     use crate::runtime::session::{CommitContext, NewSessionEvent, SessionAggregate, SessionEvent};
@@ -219,12 +214,13 @@ mod tests {
         cmd: CommandPayload,
         caller: &Caller,
     ) -> Vec<NewSessionEvent> {
-        let events = agg.state.handle(cmd, caller).expect("setup command failed");
+        let now = Utc::now();
+        let events = agg.handle(cmd, caller, now).expect("setup command failed");
         agg.commit(
             events,
             &CommitContext {
                 span: SpanContext::root(),
-                occurred_at: Utc::now(),
+                occurred_at: now,
             },
         )
     }
@@ -272,7 +268,7 @@ mod tests {
         let start = created
             .iter()
             .find_map(|e| match &e.payload {
-                EventPayload::WorkerDecisionRequested(w) => Some(w.decision_id.clone()),
+                EventPayload::DecisionDispatched(w) => Some(w.id.clone()),
                 _ => None,
             })
             .expect("CreateSession opens a session.start decision");
@@ -294,12 +290,13 @@ mod tests {
                     message: user_msg("hi"),
                     stream: false,
                 }),
-                turn_id: None,
+                turn: TurnTarget::Detached,
+                queue: false,
             },
             &system(),
         )
         .into_iter()
-        .find(|e| matches!(e.payload, EventPayload::WorkerDecisionRequested(_)))
+        .find(|e| matches!(e.payload, EventPayload::DecisionDispatched(_)))
         .expect("the client decision goes live")
         .into_event(GlobalPosition(1));
 

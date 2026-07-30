@@ -49,3 +49,6 @@ webbrowser = "1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 jsonschema = { version = "0.47.0", default-features = false }
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"] }
+
+[dev-dependencies]
+proptest = "1.11.0"

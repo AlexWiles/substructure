@@ -60,6 +60,15 @@ New messages extending the parked branch are refused until it resumes. Work
 that settles an in-flight call is still recorded, but its follow-on decision
 is held and delivered only after the resume.
 
+A parked turn is still the same turn. Pausing emits no `turn.completed`, and
+resuming starts no new turn: the `interrupt.resumed` trigger arrives inside the
+turn that raised the interrupt, and events on both sides of the pause carry the
+same `turn_id`.
+
+A transport may still draw its own boundary. [AG-UI](./100-ag-ui.md) ends the
+run at an interrupt — `RUN_FINISHED` with an interrupt outcome — because a run
+is one HTTP request; the resume opens a new run over the same engine turn.
+
 The rest of the tree stays live. A client view that edits an earlier message
 — branching off below the interrupt's anchor — dispatches normally: the user
 walks away from the parked question and the interrupt stays open on the

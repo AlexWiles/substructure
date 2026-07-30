@@ -49,6 +49,7 @@ pub async fn client_input(
             Json(ClientInputResponse {
                 session_id: output.session_id,
                 turn_id: output.turn_id,
+                queued: output.queued,
             }),
         )
             .into_response(),

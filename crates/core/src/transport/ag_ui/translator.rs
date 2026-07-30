@@ -168,7 +168,7 @@ impl AgUiTranslator {
                 vec![]
             }
             EventPayload::LlmCallRequested(r) => {
-                self.current_call_id = Some(r.call_id);
+                self.current_call_id = Some(r.id);
                 vec![]
             }
             EventPayload::LlmCallCompleted(c) => {
@@ -183,51 +183,49 @@ impl AgUiTranslator {
                     pending_worker_tool_calls: HashSet::new(),
                     has_client: false,
                 });
-                self.on_llm_completed(c.call_id, c.response.content)
+                self.on_llm_completed(c.id, c.response.content)
             }
             EventPayload::ToolCallRequested(t) => {
-                let mut out = if self.streamed_tool_calls.remove(&t.tool_call_id) {
-                    self.open_tools.remove(&t.tool_call_id);
+                let mut out = if self.streamed_tool_calls.remove(&t.id) {
+                    self.open_tools.remove(&t.id);
                     let mut closed = Vec::new();
                     // Emit args even when empty ("{}"): AG-UI clients close the
                     // args stream — and fire a client tool's execute — only on a
                     // non-empty delta.
-                    if !self.streamed_tool_call_args.remove(&t.tool_call_id) {
+                    if !self.streamed_tool_call_args.remove(&t.id) {
                         closed.push(AgUiEvent::ToolCallArgs {
-                            tool_call_id: t.tool_call_id.clone(),
+                            tool_call_id: t.id.clone(),
                             delta: non_empty_args(&t.arguments),
                         });
                     }
                     closed.push(AgUiEvent::ToolCallEnd {
-                        tool_call_id: t.tool_call_id.clone(),
+                        tool_call_id: t.id.clone(),
                     });
                     closed
                 } else {
                     vec![
                         AgUiEvent::ToolCallStart {
-                            tool_call_id: t.tool_call_id.clone(),
+                            tool_call_id: t.id.clone(),
                             tool_call_name: t.name.clone(),
                             parent_message_id: self.current_call_id.clone(),
                         },
                         AgUiEvent::ToolCallArgs {
-                            tool_call_id: t.tool_call_id.clone(),
+                            tool_call_id: t.id.clone(),
                             delta: non_empty_args(&t.arguments),
                         },
                         AgUiEvent::ToolCallEnd {
-                            tool_call_id: t.tool_call_id.clone(),
+                            tool_call_id: t.id.clone(),
                         },
                     ]
                 };
-                self.closed_tool_calls.insert(t.tool_call_id.clone());
+                self.closed_tool_calls.insert(t.id.clone());
                 let is_client = t.handler == ToolHandler::Client;
                 let yield_now = if let Some(batch) = self.batch.as_mut() {
-                    if batch.pending_client_tool_calls.remove(&t.tool_call_id) {
+                    if batch.pending_client_tool_calls.remove(&t.id) {
                         if is_client {
                             batch.has_client = true;
                         } else {
-                            batch
-                                .pending_worker_tool_calls
-                                .insert(t.tool_call_id.clone());
+                            batch.pending_worker_tool_calls.insert(t.id.clone());
                         }
                         batch.is_yield_point()
                     } else {
@@ -242,9 +240,9 @@ impl AgUiTranslator {
                 out
             }
             EventPayload::ToolCallCompleted(t) => {
-                let mut out = vec![tool_result(t.tool_call_id.clone(), t.result)];
+                let mut out = vec![tool_result(t.id.clone(), t.result)];
                 let yield_now = if let Some(batch) = self.batch.as_mut() {
-                    batch.pending_worker_tool_calls.remove(&t.tool_call_id);
+                    batch.pending_worker_tool_calls.remove(&t.id);
                     batch.is_yield_point()
                 } else {
                     false
@@ -255,9 +253,9 @@ impl AgUiTranslator {
                 out
             }
             EventPayload::ToolCallErrored(t) => {
-                let mut out = vec![tool_result(t.tool_call_id.clone(), t.error)];
+                let mut out = vec![tool_result(t.id.clone(), t.error)];
                 let yield_now = if let Some(batch) = self.batch.as_mut() {
-                    batch.pending_worker_tool_calls.remove(&t.tool_call_id);
+                    batch.pending_worker_tool_calls.remove(&t.id);
                     batch.is_yield_point()
                 } else {
                     false
@@ -271,8 +269,7 @@ impl AgUiTranslator {
                 // A delegation surfaces to the client as a tool call named for the
                 // sub-agent; its answer arrives later on `sub_agent.turn_completed`,
                 // keyed by child session id, so remember the mapping.
-                self.sub_agent_calls
-                    .insert(s.session_id, s.tool_call_id.clone());
+                self.sub_agent_calls.insert(s.id, s.tool_call_id.clone());
                 let out = if self.streamed_tool_calls.remove(&s.tool_call_id) {
                     self.open_tools.remove(&s.tool_call_id);
                     self.streamed_tool_call_args.remove(&s.tool_call_id);
@@ -303,9 +300,9 @@ impl AgUiTranslator {
                 out
             }
             EventPayload::SubAgentTurnCompleted(s) => {
-                self.settle_sub_agent(&s.session_id, sub_agent_result(&s.data))
+                self.settle_sub_agent(&s.id, sub_agent_result(&s.data))
             }
-            EventPayload::SubAgentErrored(s) => self.settle_sub_agent(&s.session_id, s.error),
+            EventPayload::SubAgentErrored(s) => self.settle_sub_agent(&s.id, s.error),
             EventPayload::LlmCallErrored(e) if !e.retryable => self.finalize_error(e.error),
             EventPayload::SessionCancelled => self.finalize_error("session cancelled".to_string()),
             EventPayload::SessionInterrupted(p) => {
@@ -623,7 +620,7 @@ mod tests {
     fn tool_requested(id: &str, name: &str, args: &str, handler: &str) -> EventPayload {
         ev(json!({
             "type": "tool.call.requested",
-            "tool_call_id": id,
+            "id": id,
             "attempt": 0,
             "name": name,
             "arguments": args,
@@ -647,7 +644,7 @@ mod tests {
         assert_eq!(kinds(&b), ["TEXT_MESSAGE_CONTENT"]);
 
         let c = vals(t.on_event(ev(json!({
-            "type": "llm.call.completed", "call_id": "c1", "attempt": 0,
+            "type": "llm.call.completed", "id": "c1", "attempt": 0,
             "response": {"model": "m"},
         }))));
         assert_eq!(kinds(&c), ["TEXT_MESSAGE_END"]);
@@ -692,7 +689,7 @@ mod tests {
         );
 
         let d = vals(t.on_event(ev(json!({
-            "type": "llm.call.completed", "call_id": "c1", "attempt": 0,
+            "type": "llm.call.completed", "id": "c1", "attempt": 0,
             "response": {"model": "m"},
         }))));
         assert_eq!(kinds(&d), ["TEXT_MESSAGE_END"]);
@@ -748,7 +745,7 @@ mod tests {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
         let _ = t.on_delta(reasoning_delta("c1", "r1", "hmm"));
         let done = vals(t.on_event(ev(json!({
-            "type": "llm.call.completed", "call_id": "c1", "attempt": 0,
+            "type": "llm.call.completed", "id": "c1", "attempt": 0,
             "response": {"model": "m"},
         }))));
         assert_eq!(kinds(&done), ["REASONING_MESSAGE_END", "REASONING_END"]);
@@ -759,7 +756,7 @@ mod tests {
     fn streamed_tool_args_then_requested_only_closes() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
         t.on_event(ev(json!({
-            "type": "llm.call.requested", "call_id": "c1", "attempt": 0,
+            "type": "llm.call.requested", "id": "c1", "attempt": 0,
             "request": {"model": "m", "messages": []}, "stream": true,
             "retry": serde_json::from_str::<Value>(RETRY).unwrap(),
         })));
@@ -885,7 +882,7 @@ mod tests {
     fn non_streaming_synthesizes_text() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
         let c = vals(t.on_event(ev(json!({
-            "type": "llm.call.completed", "call_id": "c2", "attempt": 0,
+            "type": "llm.call.completed", "id": "c2", "attempt": 0,
             "response": {"model": "m", "content": "hi there"},
         }))));
         assert_eq!(
@@ -914,7 +911,7 @@ mod tests {
         assert_eq!(s[1]["delta"], r#"{"city":"SF"}"#);
 
         let r = vals(t.on_event(ev(json!({
-            "type": "tool.call.completed", "tool_call_id": "x",
+            "type": "tool.call.completed", "id": "x",
             "name": "get_weather", "result": r#"{"temp":62}"#,
         }))));
         assert_eq!(kinds(&r), ["TOOL_CALL_RESULT"]);
@@ -927,7 +924,7 @@ mod tests {
     fn tool_call_carries_parent_message_id_from_llm_call() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
         t.on_event(ev(json!({
-            "type": "llm.call.requested", "call_id": "c9", "attempt": 0,
+            "type": "llm.call.requested", "id": "c9", "attempt": 0,
             "request": {"model": "m", "messages": []}, "stream": true,
             "retry": serde_json::from_str::<Value>(RETRY).unwrap(),
         })));
@@ -985,13 +982,13 @@ mod tests {
         // and the run does not prematurely finish.
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
         let a = t.on_event(ev(json!({
-            "type": "tool.call.completed", "tool_call_id": "tc-1", "name": "f", "result": "RA",
+            "type": "tool.call.completed", "id": "tc-1", "name": "f", "result": "RA",
         })));
         assert_eq!(kinds(&vals(a.clone())), ["TOOL_CALL_RESULT"]);
         assert_eq!(vals(a)[0]["messageId"], "tc-1");
 
         let b = vals(t.on_event(ev(json!({
-            "type": "tool.call.completed", "tool_call_id": "tc-2", "name": "g", "result": "RB",
+            "type": "tool.call.completed", "id": "tc-2", "name": "g", "result": "RB",
         }))));
         assert_eq!(kinds(&b), ["TOOL_CALL_RESULT"]);
         assert!(!t.terminated, "settles in a fresh run must not finish it");
@@ -1008,7 +1005,7 @@ mod tests {
             })
             .collect();
         ev(json!({
-            "type": "llm.call.completed", "call_id": call_id, "attempt": 0,
+            "type": "llm.call.completed", "id": call_id, "attempt": 0,
             "response": {"model": "m", "tool_calls": tool_calls},
         }))
     }
@@ -1058,7 +1055,7 @@ mod tests {
         assert!(!t.terminated);
 
         let done = vals(t.on_event(ev(json!({
-            "type": "tool.call.completed", "tool_call_id": "w",
+            "type": "tool.call.completed", "id": "w",
             "name": "get_weather", "result": r#"{"temp":62}"#,
         }))));
         assert_eq!(kinds(&done), ["TOOL_CALL_RESULT", "RUN_FINISHED"]);
@@ -1072,10 +1069,10 @@ mod tests {
         let _ = t.on_event(tool_requested("w1", "f", "{}", "worker"));
         let _ = t.on_event(tool_requested("w2", "g", "{}", "worker"));
         let r1 = vals(t.on_event(ev(json!({
-            "type": "tool.call.completed", "tool_call_id": "w1", "name": "f", "result": "1",
+            "type": "tool.call.completed", "id": "w1", "name": "f", "result": "1",
         }))));
         let r2 = vals(t.on_event(ev(json!({
-            "type": "tool.call.completed", "tool_call_id": "w2", "name": "g", "result": "2",
+            "type": "tool.call.completed", "id": "w2", "name": "g", "result": "2",
         }))));
         assert_eq!(kinds(&r1), ["TOOL_CALL_RESULT"]);
         assert_eq!(kinds(&r2), ["TOOL_CALL_RESULT"]);
@@ -1088,7 +1085,7 @@ mod tests {
     fn client_tool_result_emitted_on_resume() {
         let mut t = AgUiTranslator::new("t1".into(), "r2".into());
         let r = vals(t.on_event(ev(json!({
-            "type": "tool.call.completed", "tool_call_id": "x",
+            "type": "tool.call.completed", "id": "x",
             "name": "get_user_timezone", "result": "America/Los_Angeles",
         }))));
         assert_eq!(kinds(&r), ["TOOL_CALL_RESULT"]);
@@ -1101,7 +1098,7 @@ mod tests {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
         let _ = t.on_delta(delta("c1", "r1", "partial"));
         let e = vals(t.on_event(ev(json!({
-            "type": "llm.call.errored", "call_id": "c1", "attempt": 0,
+            "type": "llm.call.errored", "id": "c1", "attempt": 0,
             "error": "boom", "retryable": false,
         }))));
         assert_eq!(kinds(&e), ["TEXT_MESSAGE_END", "RUN_ERROR"]);
@@ -1114,7 +1111,7 @@ mod tests {
     fn retryable_error_is_silent() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
         let e = t.on_event(ev(json!({
-            "type": "llm.call.errored", "call_id": "c1", "attempt": 0,
+            "type": "llm.call.errored", "id": "c1", "attempt": 0,
             "error": "temporary", "retryable": true,
         })));
         assert!(e.is_empty());
@@ -1162,7 +1159,7 @@ mod tests {
     fn sub_agent_requested(session: &str, agent: &str, tool_id: &str) -> EventPayload {
         ev(json!({
             "type": "sub_agent.requested",
-            "session_id": session,
+            "id": session,
             "agent_id": agent,
             "tool_call_id": tool_id,
             "retry": serde_json::from_str::<Value>(RETRY).unwrap(),
@@ -1172,7 +1169,7 @@ mod tests {
     fn sub_agent_turn_completed(session: &str, data: Value) -> EventPayload {
         ev(json!({
             "type": "sub_agent.turn_completed",
-            "session_id": session,
+            "id": session,
             "data": data,
         }))
     }
@@ -1232,7 +1229,7 @@ mod tests {
         let _ = t.on_event(sub_agent_requested("child-1", "weather", "call-1"));
         let err = vals(t.on_event(ev(json!({
             "type": "sub_agent.errored",
-            "session_id": "child-1",
+            "id": "child-1",
             "error": "child boom",
         }))));
         assert_eq!(kinds(&err), ["TOOL_CALL_RESULT"]);

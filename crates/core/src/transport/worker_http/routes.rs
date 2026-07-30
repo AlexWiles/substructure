@@ -274,6 +274,8 @@ pub async fn submit_client_payload(
             agent_id: req.agent_id,
             payload: req.payload,
             turn_id: req.turn_id,
+            continue_turn: false,
+            queue: req.queue,
         })
         .await;
 
@@ -283,6 +285,7 @@ pub async fn submit_client_payload(
             Json(SubmitClientPayloadResponse {
                 session_id: output.session_id,
                 turn_id: output.turn_id,
+                queued: output.queued,
             }),
         )
             .into_response(),

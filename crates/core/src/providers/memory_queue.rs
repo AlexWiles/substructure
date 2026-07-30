@@ -12,6 +12,12 @@ pub struct InMemoryQueue<T> {
     rx: Mutex<mpsc::UnboundedReceiver<T>>,
 }
 
+impl<T: Send + 'static> Default for InMemoryQueue<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T: Send + 'static> InMemoryQueue<T> {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();

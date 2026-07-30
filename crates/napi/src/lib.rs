@@ -33,6 +33,8 @@ use substructure_core::{
 pub struct SubmitPayloadResult {
     pub session_id: String,
     pub turn_id: String,
+    /// The turn was taken but has not started: another turn holds the session.
+    pub queued: bool,
 }
 
 /// Configuration for creating a new Runtime.
@@ -142,17 +144,19 @@ impl EmbeddedRuntime {
         let rt = tokio::runtime::Handle::current();
         let inner = rt.block_on(async {
             substructure_core::start(
-                event_store,
-                llm_provider,
-                llm_task_queue,
-                sub_agent_task_queue,
-                None,
-                connector_task_queue,
-                queue,
-                session_index_store,
-                checkpoint_store,
-                wake_store,
-                token_delta_transport,
+                substructure_core::RuntimeDeps {
+                    store: event_store,
+                    llm_provider,
+                    llm_task_queue,
+                    sub_agent_task_queue,
+                    connections: None,
+                    connector_task_queue,
+                    worker_queue: queue,
+                    session_index_store,
+                    checkpoint_store,
+                    wake_store,
+                    token_delta_transport,
+                },
                 config,
             )
         });
@@ -316,7 +320,7 @@ impl EmbeddedRuntime {
     /// use `streamSession` to observe events.
     #[napi(
         js_name = "submitPayload",
-        ts_args_type = "sessionId: string, agentId: string, payloadJson: string, identityJson: string, turnId: string | undefined"
+        ts_args_type = "sessionId: string, agentId: string, payloadJson: string, identityJson: string, turnId: string | undefined, queue?: boolean | undefined"
     )]
     pub async fn submit_client_payload(
         &self,
@@ -325,6 +329,7 @@ impl EmbeddedRuntime {
         payload_json: String,
         identity_json: String,
         turn_id: Option<String>,
+        queue: Option<bool>,
     ) -> Result<SubmitPayloadResult> {
         let payload: ClientPayload = serde_json::from_str(&payload_json)
             .map_err(|e| Error::from_reason(format!("invalid payloadJson: {e}")))?;
@@ -345,6 +350,8 @@ impl EmbeddedRuntime {
                 agent_id,
                 payload,
                 turn_id,
+                continue_turn: false,
+                queue: queue.unwrap_or(false),
             })
             .await
             .map_err(|e| Error::from_reason(e.to_string()))?;
@@ -352,6 +359,7 @@ impl EmbeddedRuntime {
         Ok(SubmitPayloadResult {
             session_id: output.session_id,
             turn_id: output.turn_id,
+            queued: output.queued,
         })
     }
 
@@ -362,6 +370,8 @@ impl EmbeddedRuntime {
         js_name = "settleEffect",
         ts_args_type = "sessionId: string, tenantId: string, kind: string, id: string, attempt: number | undefined, resultJson: string | undefined, responseJson: string | undefined, errorMessage: string | undefined, retryable: boolean | undefined"
     )]
+    // Arity is fixed by the JS signature.
+    #[allow(clippy::too_many_arguments)]
     pub async fn settle_effect(
         &self,
         session_id: String,

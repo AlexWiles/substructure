@@ -12,6 +12,8 @@ export interface RuntimeOptions {
 export interface SubmitPayloadResult {
     sessionId: string;
     turnId: string;
+    /** The turn was taken but has not started: another turn holds the session. */
+    queued: boolean;
 }
 
 export class EmbeddedRuntime {
@@ -29,6 +31,7 @@ export class EmbeddedRuntime {
         payloadJson: string,
         identityJson: string,
         turnId?: string,
+        queue?: boolean,
     ): Promise<SubmitPayloadResult>;
 
     settleEffect(

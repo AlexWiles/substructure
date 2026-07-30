@@ -20,6 +20,30 @@ A **session** is one conversation: its messages, tool calls, state, and
 config, persisted by the engine. A **turn** starts when a client submits
 input and ends when the agent is done responding.
 
+A session runs one turn at a time. A submit that arrives while a turn is
+running is refused with `409`, naming the turn that holds the session — to
+redirect a working agent, [interrupt](./140-interrupts.md) it first, then
+submit.
+
+A submitter that would rather wait than be refused sends `queue: true`. The
+message is taken and held, and becomes the next turn the moment the running
+one completes — one turn at a time, in arrival order. Its content is composed
+against the conversation as it stands when its turn starts, so a queued
+message sees the reply it waited for. This is what a chat transport wants: a
+mention that lands mid-turn is a follow-up question, not an error.
+
+Events carry the turn that was running when they happened. A queued turn's
+`decision.queued` is therefore stamped with the *previous* turn — it was
+recorded while that one held the session — and everything belonging to the
+queued turn itself falls between its `turn.started` and `turn.completed`.
+
+Three things move independently, and reading them as one will mislead you:
+the turn (running, or not), each call in flight (its own lifecycle and
+retries), and any open [interrupt](./140-interrupts.md) (which parks a branch
+of the conversation). An interrupted session still has its turn, and its tools
+keep running; a turn does not end because a call failed, or because someone
+paused a branch.
+
 ## The decision loop
 
 Whenever the engine needs to know what happens next, it POSTs a decision

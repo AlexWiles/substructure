@@ -15,6 +15,7 @@ use crate::runtime::session::SessionEvent;
 use super::ConnectorTask;
 
 struct ConnectorDispatchProjection {
+    store: Arc<dyn EventStore>,
     queue: Arc<dyn TaskQueue<ConnectorTask>>,
 }
 
@@ -26,36 +27,51 @@ impl EventProcessor for ConnectorDispatchProjection {
 
     async fn apply(&self, event: SessionEvent) -> Result<(), ProcessorError> {
         let task = match &event.payload {
+            // Fetches are prerequisites, never queued: requested is dispatched.
             EventPayload::ConnectorSyncRequested(req) => ConnectorTask::Sync {
                 source_event_id: event.id,
                 session_id: event.session_id.clone(),
                 tenant_id: event.tenant_id.clone(),
-                connection_id: req.connection_id.clone(),
+                connection_id: req.id.clone(),
                 attempt: req.attempt,
                 span: event.span,
             },
-            // Only calls the engine owns. A worker- or client-handled call is
-            // dispatched by its `tool.execute` decision, not from here.
-            EventPayload::ToolCallRequested(req) if req.handler == ToolHandler::Server => {
-                let Some(target) = &req.target else {
+            // Executors key off the dispatch marker; the call is read from
+            // state. Only calls the engine owns run here — a worker- or
+            // client-handled call is answered by its owner instead.
+            EventPayload::ToolCallDispatched(d) => {
+                let session = self
+                    .store
+                    .load(&event.tenant_id, &event.session_id)
+                    .await
+                    .map_err(|e| {
+                        ProcessorError::Apply(format!("load session for tool dispatch: {e}"))
+                    })?;
+                let Some(tc) = session.state.tool_call(&d.id) else {
+                    return Ok(());
+                };
+                if tc.handler != ToolHandler::Server {
+                    return Ok(());
+                }
+                let Some(target) = &tc.target else {
                     // `handler: server` is only ever set alongside a target;
                     // one without the other is a bug, not a runtime condition.
                     return Err(ProcessorError::Apply(format!(
                         "server-handled tool call `{}` has no connector target",
-                        req.name
+                        tc.name
                     )));
                 };
                 ConnectorTask::CallTool {
                     source_event_id: event.id,
                     session_id: event.session_id.clone(),
                     tenant_id: event.tenant_id.clone(),
-                    tool_call_id: req.tool_call_id.clone(),
-                    attempt: req.attempt,
+                    tool_call_id: d.id.clone(),
+                    attempt: d.attempt,
                     connection_id: target.connector.clone(),
                     remote_name: target.remote_name.clone(),
                     // Arguments are stored as the raw model string; a tool that
                     // takes none sends an empty object rather than a null.
-                    arguments: serde_json::from_str(&req.arguments)
+                    arguments: serde_json::from_str(&tc.arguments)
                         .unwrap_or_else(|_| serde_json::json!({})),
                     span: event.span,
                 }
@@ -83,8 +99,13 @@ pub fn spawn_connector_dispatch_processor(
     queue: Arc<dyn TaskQueue<ConnectorTask>>,
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
-    let projection = Arc::new(ConnectorDispatchProjection { queue });
-    let mut config = EventProcessorRunnerConfig::default();
-    config.owner_id = Some("connector_dispatch".to_string());
+    let projection = Arc::new(ConnectorDispatchProjection {
+        store: store.clone(),
+        queue,
+    });
+    let config = EventProcessorRunnerConfig {
+        owner_id: Some("connector_dispatch".to_string()),
+        ..Default::default()
+    };
     EventProcessorRunner::new(store, checkpoint_store, projection, config, cancel).spawn()
 }

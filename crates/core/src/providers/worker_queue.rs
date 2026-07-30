@@ -24,6 +24,12 @@ pub struct InMemoryWorkerQueue {
     inner: Mutex<Inner>,
 }
 
+impl Default for InMemoryWorkerQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InMemoryWorkerQueue {
     pub fn new() -> Self {
         Self {

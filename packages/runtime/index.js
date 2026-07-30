@@ -50,8 +50,8 @@ export class EmbeddedRuntime {
     return this._native.registerWorker(tenantId, agentIds, callback);
   }
 
-  submitPayload(sessionId, agentId, payloadJson, identityJson, turnId) {
-    return this._native.submitPayload(sessionId, agentId, payloadJson, identityJson, turnId);
+  submitPayload(sessionId, agentId, payloadJson, identityJson, turnId, queue) {
+    return this._native.submitPayload(sessionId, agentId, payloadJson, identityJson, turnId, queue);
   }
 
   settleEffect(sessionId, tenantId, kind, id, attempt, resultJson, responseJson, errorMessage, retryable) {

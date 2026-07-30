@@ -570,7 +570,7 @@ pub struct TokenDelta {
 
 // ── Effects ──────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[schemars(title = "EffectStatus")]
 pub enum EffectStatus {
@@ -581,7 +581,13 @@ pub enum EffectStatus {
     Queued,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// What kind of work an effect is. One enum for the wire and for the engine's
+/// own scheduling: a decision and a turn's end queue beside the calls and are
+/// swept the same way, so they are kinds too. Neither ever appears on an
+/// [`Effect`] — a decision rides the decision list, a turn end has no record.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 #[schemars(title = "EffectKind")]
 pub enum EffectKind {
@@ -590,6 +596,25 @@ pub enum EffectKind {
     LlmCall,
     /// Fetching one connection's tool list. Its `id` is the connection id.
     ConnectorSync,
+    /// A worker decision.
+    Decision,
+    /// The turn's completion, dependent on its `turn.finished` finalizer
+    /// decision settling. Carries the turn id; the frozen output lives in the
+    /// session's `finalizing`. Never swept: it has no deadline of its own.
+    TurnEnd,
+}
+
+impl EffectKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            EffectKind::ToolCall => "tool_call",
+            EffectKind::SubAgent => "sub_agent",
+            EffectKind::LlmCall => "llm_call",
+            EffectKind::ConnectorSync => "connector_sync",
+            EffectKind::Decision => "decision",
+            EffectKind::TurnEnd => "turn_end",
+        }
+    }
 }
 
 /// An in-flight effect (Pending or RetryScheduled) surfaced on each worker decision.
@@ -619,8 +644,9 @@ pub struct Effect {
     pub stream: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
+    /// The model tool call a delegation answers; its own `id` is the child session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
+    pub tool_call_id: Option<String>,
 }
 
 // ── Tool contract ────────────────────────────────────────────────────────
@@ -729,6 +755,11 @@ pub enum ClientInput {
         message: DraftMessage,
         #[serde(default)]
         stream: bool,
+        /// Hold this message for the next turn instead of refusing it when one
+        /// is already running. Off by default: rejection stays the contract for
+        /// a plain submitter, and queuing is declared intent.
+        #[serde(default)]
+        queue: bool,
     },
     #[serde(rename = "client.messages")]
     Messages {
@@ -751,6 +782,11 @@ pub enum ClientInput {
         stream: bool,
         #[serde(default)]
         client: ClientContext,
+        /// Hold this batch for the next turn instead of refusing it when one is
+        /// already running. Off by default: rejection stays the contract for a
+        /// plain submitter, and queuing is declared intent.
+        #[serde(default)]
+        queue: bool,
     },
     #[serde(rename = "client.action")]
     Action {

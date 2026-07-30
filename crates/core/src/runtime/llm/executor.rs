@@ -7,7 +7,8 @@ use tokio_util::sync::CancellationToken;
 use crate::protocol::{ErrorCode, StreamDelta, TokenDelta};
 use crate::providers::memory_queue::TaskQueue;
 use crate::runtime::event_store::EventStore;
-use crate::runtime::session::command::CommandPayload;
+use crate::runtime::session::command::{CommandPayload, Outcome, SettleError};
+use crate::runtime::session::state::EffectKind;
 use crate::runtime::session::{execute, ConflictRetry, ExecuteInput};
 use crate::runtime::Caller;
 
@@ -61,30 +62,26 @@ pub fn spawn_llm_task_executor(
                         } else {
                             client.call(&task.request, &ctx).await
                         };
-                        match result {
-                            Ok(response) => CommandPayload::CompleteLlmCall {
-                                call_id: task.call_id.clone(),
-                                attempt: Some(task.attempt),
-                                response,
-                            },
-                            Err(err) => CommandPayload::FailLlmCall {
-                                call_id: task.call_id.clone(),
-                                attempt: Some(task.attempt),
-                                error: err.message,
-                                retryable: err.retryable,
-                                code: err.code,
-                                detail: err.detail,
-                            },
-                        }
+                        let outcome = match result {
+                            Ok(response) => Outcome::Llm(Box::new(response)),
+                            Err(err) => SettleError::new(err.message, err.retryable)
+                                .with_detail(err.code, err.detail)
+                                .into(),
+                        };
+                        CommandPayload::settle(
+                            EffectKind::LlmCall,
+                            task.call_id.clone(),
+                            Some(task.attempt),
+                            outcome,
+                        )
                     }
-                    Err(err) => CommandPayload::FailLlmCall {
-                        call_id: task.call_id.clone(),
-                        attempt: Some(task.attempt),
-                        error: err,
-                        retryable: false,
-                        code: Some(ErrorCode::ProviderError),
-                        detail: None,
-                    },
+                    Err(err) => CommandPayload::settle(
+                        EffectKind::LlmCall,
+                        task.call_id.clone(),
+                        Some(task.attempt),
+                        SettleError::new(err, false)
+                            .with_detail(Some(ErrorCode::ProviderError), None),
+                    ),
                 };
 
                 let result = execute(

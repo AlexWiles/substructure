@@ -57,18 +57,18 @@ type WorkerIdentity = {   // the session owner, without the tenant
 }
 
 type Call = {
-    id: string
-    kind: "tool_call" | "llm_call" | "sub_agent"
+    id: string                  // sub-agents: the child session; fetches: the connection
+    kind: "tool_call" | "llm_call" | "sub_agent" | "connector_sync"
     status: "pending" | "completed" | "failed" | "retry_scheduled" | "queued"
     attempt: number
     deadline?: string
     anchor?: string             // the tree node the call was requested at
-    name?: string               // tool calls
+    name?: string               // tool calls; fetches: the connection
     arguments?: string          // tool calls
     handler?: Handler
     stream?: boolean            // llm calls
     agent_id?: string           // sub-agents
-    session_id?: string         // sub-agents
+    tool_call_id?: string       // sub-agents: the call the delegation answers
 }
 
 type Handler = "server" | "worker" | "client"
@@ -77,6 +77,13 @@ type Handler = "server" | "worker" | "client"
 `proposed` is the engine's default continuation. Accept it by echoing it as
 the decision. It is `null` when only the worker knows what to do, such as
 running one of its own tools.
+
+Every call and decision is queued first and dispatched when its
+prerequisites settle, in arrival order. A `queued` call has not started: it
+is still waiting on a fetch the agent's config owes, the live decision slot,
+a parked branch, a running turn, or a blocked entry ahead of it in the
+queue. Waits are bounded: every prerequisite carries a deadline and always
+settles.
 
 ## Decision response
 
@@ -389,6 +396,7 @@ type ClientInput =
           turn_id?: string        // idempotency key
           message: DraftMessage
           stream?: boolean
+          queue?: boolean         // hold for the next turn instead of refusing
       }
     | {
           type: "client.messages"
@@ -418,6 +426,22 @@ type ClientInput =
 
 `agent_id` routes the turn and creates the session if new. Resubmitting a
 completed `turn_id` returns the existing turn instead of running it again.
+
+### Queuing a message
+
+A session runs one turn at a time, so a submit that arrives while a turn is
+running is refused with `turn_already_active`. `queue: true` asks for the other
+behaviour: the engine takes the message, holds it, and starts it as the next
+turn the moment the running one completes. The reply carries `queued: true`
+when the turn has been taken but has not started.
+
+Only `client.message` and `client.append` accept the flag. A full
+`client.messages` view and a `client.action` are refused as before: a view
+settles pending client tool calls as it arrives, so it cannot be held.
+
+Queued turns run one at a time, in arrival order. A `turn_id` that is running,
+queued, or completed is refused, so a retrying transport cannot ask the same
+question twice.
 
 ## Streaming
 
