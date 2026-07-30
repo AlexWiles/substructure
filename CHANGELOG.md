@@ -25,6 +25,7 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 - Add a Slack adapter and a channel abstraction.
 - Add MCP support.
 - substructure.toml as a config file.
+- `subs init <local|remote> [path]` writes a starter environment file.
 
 ### Changed
 

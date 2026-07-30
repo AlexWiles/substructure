@@ -81,14 +81,27 @@ mod tests {
     use super::*;
     use crate::cli::cloud::project_config::{self, EnvConfig};
 
+    fn tmpdir() -> PathBuf {
+        // Timestamp alone collides across parallel tests; the counter disambiguates.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("subs-init-test-{nanos}-{seq}"));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     /// The starters have to survive the same parse a hand-written file does —
     /// `deny_unknown_fields` makes a key on the wrong side of the split an
     /// error, so a template can rot.
     #[test]
     fn each_starter_parses_as_the_target_it_declares() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tmpdir();
         for (target, body) in [(Target::Local, LOCAL), (Target::Remote, REMOTE)] {
-            let path = dir.path().join(format!("{target:?}.toml"));
+            let path = dir.join(format!("{target:?}.toml"));
             run(InitCommand {
                 target,
                 path: Some(path.clone()),
@@ -107,8 +120,7 @@ mod tests {
 
     #[test]
     fn an_existing_file_is_not_overwritten_without_force() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("substructure.toml");
+        let path = tmpdir().join("substructure.toml");
         fs::write(&path, "target = \"local\"\ndb = \"mine.db\"\n").unwrap();
 
         let init = |force| InitCommand {
@@ -128,8 +140,7 @@ mod tests {
     /// does not fail on a directory that does not exist yet.
     #[test]
     fn a_missing_parent_directory_is_created() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nested/deeper/substructure.toml");
+        let path = tmpdir().join("nested/deeper/substructure.toml");
         run(InitCommand {
             target: Target::Local,
             path: Some(path.clone()),
