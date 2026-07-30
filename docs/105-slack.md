@@ -74,18 +74,21 @@ in as more cards while it runs, and the result finalizes it. Until there is a
 card to show, the thread carries Slack's own status indicator instead
 ([`assistant.threads.setStatus`](https://docs.slack.dev/reference/methods/assistant.threads.setStatus/)) —
 `substructure.ai is thinking…`, chrome rather than a message, and the same
-call in a DM as in a channel. It goes up the moment the mention lands,
-alongside the history fetch, and comes back down when the turn ends. Slack
-drops a status after two minutes, so a turn still thinking has it re-set.
-The message that asked carries the same state as a 👀 reaction, added the
-moment the bot takes it — so a mention queued behind a running turn is
-acknowledged before it is answered — and removed when its turn completes.
+call in a DM as in a channel. It belongs to the turn, start to end: it goes
+up when the turn starts and comes back down when the turn ends, so a message
+still waiting its turn never claims the thread is working. Slack drops a
+status after two minutes, so a turn still thinking has it re-set.
+Arrival is the reaction's job instead: the message that asked carries a 👀
+from the moment the bot takes it — so a mention queued behind a running turn
+is acknowledged before it is answered — removed when its turn completes.
 An interrupt closes the message early —
 `Paused: {reason}`, or a button prompt (below), lands in the message with
-the cards it interrupted, and work after the resume opens a fresh one. Every
-conversation is a thread: a top-level DM message (or unthreaded mention)
-starts one at its own ts, and follow-ups inside the thread continue that
-session.
+the cards it interrupted, and work after the resume opens a fresh one. A
+thread shows one open message at a time: a queued turn waits for the turn
+before it to settle before it opens its own, rather than streaming beside
+it. Every conversation is a thread: a top-level DM message (or unthreaded
+mention) starts one at its own ts, and follow-ups inside the thread continue
+that session.
 
 ## Activity
 

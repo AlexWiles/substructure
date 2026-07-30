@@ -442,10 +442,10 @@ impl SlackBot {
             .filter_map(|m| m.id.strip_prefix("slack:"))
             .max();
 
-        // Set the status and acknowledge the message while the fetch runs.
-        let (fetched, _, _) = tokio::join!(
+        // Acknowledge the message while the fetch runs. The status belongs to
+        // the turn, not to the message: a queued one has no turn to report.
+        let (fetched, _) = tokio::join!(
             self.fetch_thread(ws, &thread, cursor),
-            self.set_status(ws, &thread, STATUS),
             self.react(
                 ws,
                 "reactions.add",
@@ -516,7 +516,7 @@ impl SlackBot {
                 span: crate::span::SpanContext::root().child("slack_inbound"),
             })
             .await;
-        // Clear the indicator and the ack unless a turn owes an answer.
+        // Take the ack back unless a turn owes an answer.
         if !matches!(
             submitted,
             Ok(_)
@@ -524,7 +524,6 @@ impl SlackBot {
                     SessionError::TurnAlreadyActive { .. }
                 ))
         ) {
-            self.set_status(ws, &thread, "").await;
             self.react(
                 ws,
                 "reactions.remove",
@@ -839,9 +838,8 @@ impl EventProcessor for SlackBot {
         if let Err(e) = self.track(&ws, &event).await {
             return Err(ProcessorError::Apply(e.to_string()));
         }
-        // Clear the indicator before the final message, and light it for a turn
-        // that starts on its own — a queued turn takes the phase in the batch
-        // that ends the one before it, so its start follows that clear.
+        // The indicator is the turn's, start to end: nothing else lights it, so
+        // a message waiting its turn does not claim the thread is working.
         match &event.payload {
             EventPayload::TurnCompleted(_) | EventPayload::SessionInterrupted(_) => {
                 self.set_status(&ws, &thread, "").await;
