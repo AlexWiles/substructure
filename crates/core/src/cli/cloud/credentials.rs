@@ -11,6 +11,9 @@ pub const DEFAULT_API_URL: &str = "https://api.substructure.ai";
 pub const API_URL_ENV: &str = "SUBS_API_URL";
 pub const TOKEN_ENV: &str = "SUBS_API_TOKEN";
 
+/// Who this machine is logged in as, per server. User-level identity and
+/// nothing else: what a connection authorized belongs to the environment that
+/// uses it, so it lives in that environment's database.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Credentials {
@@ -126,11 +129,15 @@ mod tests {
     use std::os::unix::fs::MetadataExt;
 
     fn tmpdir() -> PathBuf {
+        // Tests run in parallel and share this binary, so the clock alone is
+        // not a unique name: two callers can read the same instant.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("subs-credentials-test-{nanos}"));
+        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("subs-credentials-test-{nanos}-{seq}"));
         fs::create_dir_all(&dir).unwrap();
         dir
     }

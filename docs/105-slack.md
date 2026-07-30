@@ -59,6 +59,16 @@ subs serve --dev --worker-url http://localhost:4444 --slack-agent my-agent
 ```
 
 `--slack-agent` names the agent that handles mentions and enables the channel.
+Pin it in [`substructure.toml`](./160-cli.md#environments) to leave it off the
+command line:
+
+```toml
+[slack]
+agent = "my-agent"
+```
+
+The tokens stay in the environment either way: the file names secrets, it never
+holds them.
 
 ## Mapping
 

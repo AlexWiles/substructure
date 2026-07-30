@@ -30,11 +30,7 @@ node server.mjs
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
-subs run \
-    --worker-url http://localhost:4444 \
-    --agent my-agent \
-    --llm-provider anthropic \
-    --output pretty \
+subs run -c substructure.toml \
     --session approval-demo \
     --input '{"type":"client.message","message":{"role":"user","content": "email bob@example.com a hello"}}'
 ```
@@ -49,10 +45,7 @@ Resolve it — the AG-UI resume shape, with the inner `payload` a chosen
 option's value, verbatim:
 
 ```sh
-subs run \
-    --worker-url http://localhost:4444 \
-    --llm-provider anthropic \
-    --output pretty \
+subs run -c substructure.toml \
     --session approval-demo \
     --input '{"type":"interrupt.resume","interrupt_id":"approve:tc_...","payload":{"status":"resolved","payload":{"decision":"approve"}}}'
 ```
@@ -68,7 +61,7 @@ enabled for buttons):
 
 ```sh
 export SLACK_APP_TOKEN=xapp-... SLACK_BOT_TOKEN=xoxb-... ANTHROPIC_API_KEY=sk-ant-...
-subs serve --dev --worker-url http://localhost:4444 --slack-agent my-agent --llm-provider anthropic
+subs serve -c substructure.toml
 ```
 
 Ask the bot to send an email: the thread gets the prompt with

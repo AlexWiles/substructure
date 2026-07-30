@@ -1,0 +1,11 @@
+target = "local"
+
+[worker]
+url = "http://localhost:4444"
+
+[llm]
+provider = "anthropic"
+
+[run]
+agent = "my-agent"
+output = "pretty"

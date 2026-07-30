@@ -1,0 +1,8 @@
+target = "local"
+
+[worker]
+url = "http://localhost:4444"
+
+[run]
+agent = "my-agent"
+output = "pretty"

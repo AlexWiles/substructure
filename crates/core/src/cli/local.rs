@@ -8,7 +8,8 @@ use crate::cli::auth::AuthWiring;
 use crate::cli::cloud::project_config;
 use crate::cli::env::{EnvVars, LlmProviderArg, ProviderEnv};
 use crate::cli::{register_startup_worker, DEFAULT_TENANT};
-use crate::connectors::registry::{ConnectionSpec, Connections, EnvCredentials, LocalRegistry};
+use crate::connectors::oauth::StoredCredentials;
+use crate::connectors::registry::{ConnectionSpec, Connections, LocalRegistry};
 use crate::llm::{LlmProviderTrait, LlmTask};
 use crate::providers::anthropic::{AnthropicConfig, AnthropicProvider};
 use crate::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
@@ -16,7 +17,7 @@ use crate::providers::openai::{OpenAiConfig, OpenAiProvider};
 use crate::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
 use crate::providers::sqlite::{
     SqliteCheckpointStore, SqliteDb, SqliteEventStore, SqlitePushStore, SqliteSessionIndexStore,
-    SqliteWakeStore, SqliteWorkerQueue,
+    SqliteTokenStore, SqliteWakeStore, SqliteWorkerQueue,
 };
 use crate::runtime::connector::ConnectorTask;
 use crate::sub_agent::SubAgentTask;
@@ -43,8 +44,8 @@ pub struct ServeArgs {
     /// [default: substructure.db]
     #[arg(long)]
     db: Option<String>,
-    /// Project config file (default: walks up from cwd looking for
-    /// `substructure.toml`). Supplies the engine's connections.
+    /// Environment file (default: walks up from cwd looking for
+    /// `substructure.toml`). Must declare `target = "local"`.
     #[arg(short = 'c', long)]
     config: Option<std::path::PathBuf>,
     /// Pre-register an HTTP worker at startup.
@@ -80,23 +81,23 @@ pub async fn serve(args: ServeArgs) -> anyhow::Result<()> {
 async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
     // Anything argv omits can be pinned in the project file. Precedence is
     // flag > environment > file > default, applied one field at a time.
-    let cfg = project_config::resolve(args.config.as_deref())?.unwrap_or_default();
+    let cfg = project_config::local(args.config.as_deref(), "`subs serve`")?;
 
     let connections = cfg.connections();
-    let host = args.host.or(cfg.host).unwrap_or_else(|| "127.0.0.1".into());
-    let port = args.port.or(cfg.port).unwrap_or(8080);
-    let db_path = args
-        .db
-        .or(cfg.db)
-        .unwrap_or_else(|| "substructure.db".into());
-    let worker_url = args.worker_url.or(cfg.worker_url);
-    let signing_secret = args
-        .signing_secret
-        .or_else(|| cfg.signing_secret_env.as_deref().and_then(super::env_value));
-    let dev = args.dev || cfg.dev.unwrap_or(false);
-    let slack_agent = args.slack_agent.or(cfg.slack_agent);
+    let slack_agent = args.slack_agent.or_else(|| cfg.slack_agent());
+    let server = cfg.server.clone().unwrap_or_default();
 
-    let env = match EnvVars::load(args.llm_provider.or(cfg.llm_provider), dev) {
+    let host = args
+        .host
+        .or(server.host)
+        .unwrap_or_else(|| "127.0.0.1".into());
+    let port = args.port.or(server.port).unwrap_or(8080);
+    let db_path = args.db.unwrap_or_else(|| cfg.db_path());
+    let worker_url = args.worker_url.or_else(|| cfg.worker_url());
+    let signing_secret = args.signing_secret.or_else(|| cfg.signing_secret());
+    let dev = args.dev || server.dev.unwrap_or(false);
+
+    let env = match EnvVars::load(args.llm_provider.or_else(|| cfg.llm_provider()), dev) {
         Some(e) => e,
         None => std::process::exit(2),
     };
@@ -198,6 +199,7 @@ pub(crate) async fn start_engine(
     let checkpoint_store = Arc::new(SqliteCheckpointStore::new(db.clone())?);
     let wake_store = Arc::new(SqliteWakeStore::new(db.clone())?);
     let session_index_store = Arc::new(SqliteSessionIndexStore::new(db.clone())?);
+    let token_store = Arc::new(SqliteTokenStore::new(db.clone())?);
     let push_store = Arc::new(SqlitePushStore::new(db)?);
 
     let config = RuntimeConfig::default();
@@ -211,7 +213,9 @@ pub(crate) async fn start_engine(
         ShardedInMemoryQueue::new(config.connector_executor_workers as u32),
     );
     // Connections come from `substructure.toml`; the file holds only names and
-    // env-var references, never a token.
+    // env-var references, never a token. What `subs mcp login` authorized is in
+    // this same database, so a login and the engine that uses it cannot drift
+    // apart.
     let connections = Some(connectors)
         .filter(|c| !c.is_empty())
         .map(|connectors| {
@@ -221,7 +225,7 @@ pub(crate) async fn start_engine(
             );
             Arc::new(Connections::new(
                 Arc::new(LocalRegistry::new(connectors)),
-                Arc::new(EnvCredentials),
+                Arc::new(StoredCredentials::new(token_store)),
             ))
         });
 

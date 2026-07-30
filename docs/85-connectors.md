@@ -11,13 +11,13 @@ the tool.
 
 ## Configure a connection
 
-MCP servers live under `[mcp]` in `substructure.toml`, next to the rest of your
-project config. The file holds names and references only — never a token.
+MCP servers live under `[mcp.<id>]` in
+[`substructure.toml`](./160-cli.md#environments), next to the rest of the
+environment. The file holds names and references only — never a token.
 
 ```toml
 [mcp.sentry]
-url = "https://mcp.sentry.dev/mcp"
-auth = { header = "Sentry-Bearer", token_env = "SENTRY_TOKEN" }
+url = "https://mcp.sentry.dev/mcp"      # authorize with `subs mcp login sentry`
 
 [mcp.github]
 url = "https://api.githubcopilot.com/mcp/"
@@ -26,6 +26,34 @@ prefix_tools = false                    # default true
 ```
 
 An inline `token` is a parse error, not a secret you can commit by accident.
+
+## Authorize it
+
+A server taking a static credential needs nothing more: the engine reads
+`$token_env` at call time.
+
+Everything else is OAuth, and consent is a human in a browser:
+
+```sh
+subs mcp login sentry     # opens a browser; `list` shows what is authorized
+subs mcp logout sentry    # forgets the credential
+```
+
+Where the credential lands follows the environment. A `target = "local"` file
+stores it in that environment's `db`, beside the sessions that use it — so a
+login and the engine that uses it cannot drift apart, and two environments
+authorize independently. **That database now holds credentials: gitignore
+`*.db*`.**
+
+A `target = "remote"` file has the server run the flow instead, and the
+credential never touches your machine. `subs mcp login` opens the deployment's
+consent URL, waits for it to land, and grants the connection to the app the file
+pins (`--no-grant` to skip). The dashboard's connectors page starts the same
+flow; either surface finishes the other's.
+
+`auth` and `prefix_tools` are local-only. A remote connection declares a URL and
+nothing else: the deployment holds the credential, and where it enforces a
+catalog, that URL has to be one it offers — the error lists the ones it does.
 
 ## Declare it on the agent
 

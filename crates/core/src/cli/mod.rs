@@ -1,7 +1,9 @@
 pub mod auth;
 pub mod cloud;
 pub mod env;
+pub mod init;
 pub mod local;
+pub mod mcp;
 mod pretty;
 pub mod run;
 
@@ -25,7 +27,8 @@ pub(crate) fn env_value(var: &str) -> Option<String> {
 /// command runs. Silent on any failure — the command reads the same file and
 /// reports a real problem with it, and there is no logger yet to report to.
 pub fn project_log_filter(config: Option<&std::path::Path>) -> Option<String> {
-    cloud::project_config::resolve(config).ok().flatten()?.log
+    let found = cloud::project_config::resolve(config).ok().flatten()?;
+    found.config.log().map(str::to_string)
 }
 
 pub(crate) const DEFAULT_TENANT: &str = "default";
@@ -54,6 +57,8 @@ impl Command {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Write a starter `substructure.toml` describing one environment.
+    Init(init::InitCommand),
     /// Run a local Substructure server.
     Serve(local::ServeArgs),
     /// Run a single turn against a worker in-process and stream events, then exit.
@@ -119,11 +124,17 @@ pub enum Command {
     /// Link the current directory to an org (and app) by writing a
     /// `substructure.toml`, so commands run from this tree pick them up automatically.
     Link(cloud::link::LinkCommand),
+    /// Authorize the MCP connections this project declares.
+    Mcp {
+        #[command(subcommand)]
+        command: mcp::McpCommand,
+    },
 }
 
 pub async fn run(command: Command) -> anyhow::Result<()> {
     cloud::telemetry::init(command_path(&command));
     match command {
+        Command::Init(cmd) => init::run(cmd),
         Command::Serve(args) => local::serve(args).await,
         Command::Run(args) => run::run(args).await,
         Command::Login {
@@ -148,6 +159,7 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
             scope,
         } => cloud::open::run(app_id, no_browser, scope).await,
         Command::Link(cmd) => cloud::link::run(cmd).await,
+        Command::Mcp { command } => mcp::run(command).await,
     }
 }
 
@@ -158,6 +170,7 @@ fn command_path(cmd: &Command) -> &'static str {
     use cloud::{apps::AppsCommand, keys::KeysCommand, orgs::OrgsCommand};
     use cloud::{sessions::SessionsCommand, webhook::WebhookCommand};
     match cmd {
+        Command::Init(_) => "init",
         Command::Serve(_) => "serve",
         Command::Run(_) => "run",
         Command::Login { .. } => "login",
@@ -165,6 +178,11 @@ fn command_path(cmd: &Command) -> &'static str {
         Command::Whoami { .. } => "whoami",
         Command::Open { .. } => "open",
         Command::Link(_) => "link",
+        Command::Mcp { command } => match command {
+            mcp::McpCommand::Login { .. } => "mcp login",
+            mcp::McpCommand::Logout { .. } => "mcp logout",
+            mcp::McpCommand::List { .. } => "mcp list",
+        },
         Command::Orgs { command } => match command {
             OrgsCommand::List { .. } => "orgs list",
         },

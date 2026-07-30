@@ -28,10 +28,24 @@ commands need no `--app`:
 subs link
 ```
 
+That writes a `target = "remote"` [environment
+file](./160-cli.md#environments) pinning the org and app.
+
 ## Point it at your worker
 
 ```sh
 subs webhook set https://my-worker.example.com/agent
+```
+
+Or state the endpoint in the environment file and apply it with no argument:
+
+```toml title="substructure.toml"
+[worker]
+url = "https://my-worker.example.com/agent"
+```
+
+```sh
+subs webhook set
 ```
 
 The engine now POSTs decisions to that URL and signs each with the app's secret,

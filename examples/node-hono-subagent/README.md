@@ -24,10 +24,6 @@ node server.mjs
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
-subs run \
-    --worker-url http://localhost:4444 \
-    --agent assistant \
-    --llm-provider anthropic \
-    --output pretty \
+subs run -c substructure.toml \
     --input '{"type":"client.message","message":{"role":"user","content": "what is the weather in Paris?"}}'
 ```

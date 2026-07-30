@@ -1,0 +1,12 @@
+target = "local"
+
+[worker]
+url = "http://localhost:4444"
+signing_secret_env = "SUBS_SIGNING_SECRET"
+
+[llm]
+provider = "anthropic"
+
+[run]
+agent = "my-agent"
+output = "pretty"

@@ -1,7 +1,19 @@
-worker_url = "http://localhost:4444"
-output = "pretty"
+target = "local"
+db = "dev.substructure.db"
 log = "error"
-llm_provider = "anthropic"
+
+[worker]
+url = "http://localhost:4444"
+
+[llm]
+provider = "anthropic"
+
+[run]
+agent = "my-agent"
+output = "pretty"
+
+[mcp.sentry]
+url = "https://mcp.sentry.dev/mcp"
 
 [mcp.issues]
 url = "http://localhost:4445/mcp"

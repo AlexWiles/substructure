@@ -57,17 +57,31 @@ In another terminal, install the CLI:
 npm install -g @substructure.ai/cli
 ```
 
+Describe the environment once, in `substructure.toml` beside `server.mjs`:
+
+```toml title="substructure.toml"
+target = "local"
+
+[worker]
+url = "http://localhost:4444"
+
+[llm]
+provider = "anthropic"
+
+[run]
+agent = "my-agent"
+output = "pretty"
+```
+
 Send a message:
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
-subs run \
-    --worker-url http://localhost:4444 \
-    --agent my-agent \
-    --llm-provider anthropic \
-    --output pretty \
-    --input '{"type":"client.message","message":{"role":"user","content": "hi"}}'
+subs run --input '{"type":"client.message","message":{"role":"user","content": "hi"}}'
 ```
+
+Everything else the run needs is in the file. A flag still wins where you pass
+one.
 
 The reply streams to your terminal. The engine ran the loop; your worker made every decision.
 
@@ -109,12 +123,7 @@ function decide({ trigger, proposed }) {
 Restart the worker and ask a question that needs the tool:
 
 ```sh
-subs run \
-    --worker-url http://localhost:4444 \
-    --agent my-agent \
-    --llm-provider anthropic \
-    --output pretty \
-    --input '{"type":"client.message","message":{"role":"user","content": "what time is it?"}}'
+subs run --input '{"type":"client.message","message":{"role":"user","content": "what time is it?"}}'
 ```
 
 The model calls the tool, your worker runs it, and the engine folds the result
@@ -135,10 +144,6 @@ Run it with a follow-up question:
 ```sh
 subs run \
     --session <session-id> \
-    --worker-url http://localhost:4444 \
-    --agent my-agent \
-    --llm-provider anthropic \
-    --output pretty \
     --input '{"type":"client.message","message":{"role":"user","content": "what was my first question?"}}'
 ```
 
@@ -204,12 +209,7 @@ The sub-agent appears to the model as a tool. Restart the worker and start a
 conversation that uses both:
 
 ```sh
-subs run \
-    --worker-url http://localhost:4444 \
-    --agent my-agent \
-    --llm-provider anthropic \
-    --output pretty \
-    --input '{"type":"client.message","message":{"role":"user","content": "what time is it? have the poet write a haiku about it"}}'
+subs run --input '{"type":"client.message","message":{"role":"user","content": "what time is it? have the poet write a haiku about it"}}'
 ```
 
 The assistant calls your tool, delegates to the poet, and folds the haiku into

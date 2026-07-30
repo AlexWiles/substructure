@@ -1,5 +1,5 @@
 pub mod apps;
-mod context;
+pub mod context;
 pub mod credentials;
 mod http;
 pub mod keys;
@@ -24,7 +24,7 @@ use std::path::PathBuf;
 pub const GLOBAL_FLAGS_HELP: &str = "\
 Global Options:
       --url <URL>          Override the cloud API URL.
-  -c, --config <PATH>      Project-local substructure.toml override.
+  -c, --config <PATH>      Environment file override (substructure.toml).
       --credentials <PATH> User-level credentials file override.
       --json               Emit machine-readable JSON.
   -n, --no-interaction     Never prompt; fail if input is required.";
@@ -34,8 +34,9 @@ pub struct CloudGlobals {
     /// Override the cloud API URL (precedence: flag > $SUBS_API_URL > prod).
     #[arg(long, global = true)]
     pub url: Option<String>,
-    /// Project-local config file (default: walks up from cwd looking for
-    /// `substructure.toml`). Pins which org/app commands target without flags.
+    /// Environment file (default: walks up from cwd looking for
+    /// `substructure.toml`). Must declare `target = "remote"`; pins which
+    /// org/app commands target without flags.
     #[arg(short = 'c', long, global = true)]
     pub config: Option<PathBuf>,
     /// User-level credentials file holding the bearer token

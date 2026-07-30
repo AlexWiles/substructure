@@ -28,6 +28,43 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 
 ### Changed
 
+- `substructure.toml` now declares `target = "local"` or `target = "remote"`, and
+  describes one environment: one file, one engine. Engine settings moved into
+  `[worker]`, `[llm]`, `[run]`, and `[server]`; `org`/`app`/`url` are the remote
+  half. There is no migration — a file without `target` is a parse error.
+
+  ```toml
+  # before
+  worker_url = "http://localhost:4444"
+  llm_provider = "anthropic"
+  output = "pretty"
+  port = 8080
+
+  # after
+  target = "local"
+  [worker]
+  url = "http://localhost:4444"
+  [llm]
+  provider = "anthropic"
+  [run]
+  output = "pretty"
+  [server]
+  port = 8080
+  ```
+
+- `subs mcp login` stores credentials in the environment's `db` instead of
+  `credentials.toml`, so a login belongs to the environment that uses it. Run
+  `subs mcp login <id>` once per environment; **gitignore `*.db*`**, which now
+  holds credentials. `credentials.toml` keeps only `subs login` tokens, and the
+  `credentials` config key and `--credentials` flag on `serve` are gone.
+- `subs mcp add` is gone: declare `[mcp.<id>]` in the file. Ids and URLs are
+  checked when the file is read.
+- `subs webhook set` with no URL pushes the `[worker].url` the file declares.
+- An `output` the file does not recognize is a parse error rather than a silent
+  fall back to `ag-ui`.
+- `subs link` writes to the file commands actually read (the discovered one, or
+  `-c`) instead of always the working directory, and keeps a `url` it did not
+  set.
 - Rename the default database file to `substructure.db`.
 - Rename the `--provider` option to `--llm-provider`.
 - The `tool.call` action has no `handler` field; the engine finds where a call runs from its name.

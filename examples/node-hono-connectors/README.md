@@ -37,18 +37,17 @@ node mcp-server.mjs
 node server.mjs
 ```
 
-**3. Send a message with the CLI.** Run it from this directory, because the CLI
-reads `substructure.toml` from here.
+**3. Send a message with the CLI.** Run it from this directory.
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
-subs run \
-    --agent my-agent \
+subs run -c substructure.toml \
     --input '{"type":"client.message","message":{"role":"user","content": "which issues are open?"}}'
 ```
 
-`substructure.toml` supplies the worker URL, the provider, and the output mode,
-so they are not on the command line. A flag still wins over the file.
+`substructure.toml` describes the environment — `target = "local"` and the
+worker URL, the agent, the provider, and the output mode — so none of it is on
+the command line. A flag still wins over the file.
 
 The model calls `issues__search_issues`. The tool name has the connection id in
 front of it, because `prefix_tools` is on by default.
@@ -63,14 +62,18 @@ credential, so this connection has no `auth`:
 url = "http://localhost:4445/mcp"
 ```
 
-A real service needs one. The file holds the name of the variable with the
-token, never the token:
+A real service needs one. Where it takes a static token the file names the
+variable holding it, never the token:
 
 ```toml
 [mcp.sentry]
 url = "https://mcp.sentry.dev/mcp"
 auth = { header = "Sentry-Bearer", token_env = "SENTRY_TOKEN" }
 ```
+
+Where it takes OAuth, `subs mcp login sentry` opens a browser and stores the
+credential in the `db` this file names — which is why `.gitignore` covers
+`*.db*`.
 
 ## The filter
 
@@ -88,5 +91,6 @@ gives you no tools under `read_only`, instead of every tool.
 
 ## Use a real service
 
-Uncomment a connection in `substructure.toml`, set the variable it names, and
-add the id to `mcp` in `server.mjs`. Nothing else changes.
+Declare a connection in `substructure.toml`, authorize it (set the variable it
+names, or `subs mcp login <id>`), and add the id to `mcp` in `server.mjs`.
+Nothing else changes.

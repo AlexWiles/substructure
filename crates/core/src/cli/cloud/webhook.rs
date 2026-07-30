@@ -14,10 +14,11 @@ pub enum WebhookCommand {
         #[command(flatten)]
         scope: AppScope,
     },
-    /// Set the webhook URL (implies state=enabled).
+    /// Set the webhook URL (implies state=enabled). Omit it to push the
+    /// `[worker].url` the environment file declares.
     Set {
         #[arg(value_name = "URL")]
-        endpoint: String,
+        endpoint: Option<String>,
         #[command(flatten)]
         scope: AppScope,
     },
@@ -76,8 +77,15 @@ async fn show(scope: AppScope) -> Result<()> {
     Ok(())
 }
 
-async fn set(endpoint: String, scope: AppScope) -> Result<()> {
+/// The endpoint an argument names, or the one the file declares. An explicit
+/// argument is not written back: it says what to do now, not what this
+/// environment is.
+async fn set(endpoint: Option<String>, scope: AppScope) -> Result<()> {
     let (ctx, app) = Context::from_app(&scope).await?;
+    let endpoint = match endpoint.or_else(|| ctx.project.as_ref().and_then(|p| p.worker_url())) {
+        Some(url) => url,
+        None => bail!("no URL given, and no `[worker].url` in substructure.toml"),
+    };
     let w: WorkerConfig = ctx
         .client
         .put_json(

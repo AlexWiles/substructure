@@ -1,0 +1,11 @@
+target = "local"
+
+[worker]
+url = "http://localhost:4444/agent"
+
+[llm]
+provider = "anthropic"
+
+[server]
+port = 9000
+dev = true

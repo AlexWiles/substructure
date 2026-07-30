@@ -4,7 +4,7 @@ use clap::{Args, ValueEnum};
 use uuid::Uuid;
 
 use super::cloud::project_config;
-use super::env::{EnvVars, LlmProviderArg};
+use super::env::{EnvVars, LlmProviderArg, OutputFormat};
 use super::pretty::PrettyPrinter;
 use super::{local, register_startup_worker, DEFAULT_TENANT};
 use crate::event_store::Seq;
@@ -44,8 +44,8 @@ pub struct RunArgs {
     /// makes its own LLM calls.
     #[arg(long, value_enum)]
     llm_provider: Option<LlmProviderArg>,
-    /// Project config file (default: walks up from cwd looking for
-    /// `substructure.toml`). Supplies the engine's connections.
+    /// Environment file (default: walks up from cwd looking for
+    /// `substructure.toml`). Must declare `target = "local"`.
     #[arg(short = 'c', long)]
     config: Option<std::path::PathBuf>,
     /// SQLite dev database path. [default: substructure.db]
@@ -56,28 +56,7 @@ pub struct RunArgs {
     signing_secret: Option<String>,
     /// Output mode. (Engine logs go to stderr at error level; set RUST_LOG=info for more.)
     #[arg(long, short = 'o', value_enum)]
-    output: Option<OutputMode>,
-}
-
-#[derive(Copy, Clone, ValueEnum)]
-enum OutputMode {
-    /// Stream AG-UI protocol events, one JSON object per line.
-    AgUi,
-    /// Stream raw persisted engine events, one JSON object per line.
-    Jsonl,
-    /// Human-readable text: streamed replies, tool calls, and results.
-    Pretty,
-}
-
-impl OutputMode {
-    /// The project file spells these the way `--output` does, so the value
-    /// names clap already knows are the parser.
-    fn parse(s: &str) -> Option<Self> {
-        Self::value_variants()
-            .iter()
-            .copied()
-            .find(|v| v.to_possible_value().is_some_and(|p| p.get_name() == s))
-    }
+    output: Option<OutputFormat>,
 }
 
 /// Where translated AG-UI events go. `Jsonl` renders nothing here — its raw
@@ -136,19 +115,14 @@ impl RunArgs {
 pub async fn run(args: RunArgs) -> anyhow::Result<()> {
     // Anything argv omits can be pinned in the project file. Precedence is
     // flag > environment > file > default, applied one field at a time.
-    let cfg = project_config::resolve(args.config.as_deref())?.unwrap_or_default();
+    let cfg = project_config::local(args.config.as_deref(), "`subs run`")?;
 
     let connections = cfg.connections();
-    let agent_id = args.agent.or(cfg.agent);
-    let provider_arg = args.llm_provider.or(cfg.llm_provider);
-    let output_mode = args
-        .output
-        .or_else(|| cfg.output.as_deref().and_then(OutputMode::parse))
-        .unwrap_or(OutputMode::AgUi);
-    let db_path = args
-        .db
-        .or(cfg.db)
-        .unwrap_or_else(|| "substructure.db".to_string());
+    let run = cfg.run.clone().unwrap_or_default();
+    let agent_id = args.agent.or(run.agent);
+    let provider_arg = args.llm_provider.or_else(|| cfg.llm_provider());
+    let output_mode = args.output.or(run.output).unwrap_or(OutputFormat::AgUi);
+    let db_path = args.db.unwrap_or_else(|| cfg.db_path());
 
     // Captured for the resume hint printed at the end, before the args are consumed.
     let agent = agent_id.clone();
@@ -179,11 +153,9 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
     let worker_url = args
         .worker_url
         .or_else(|| std::env::var("SUBSTRUCTURE_WORKER_URL").ok())
-        .or(cfg.worker_url)
+        .or_else(|| cfg.worker_url())
         .unwrap_or_else(|| "http://localhost:3000/agent".to_string());
-    let signing_secret = args
-        .signing_secret
-        .or_else(|| cfg.signing_secret_env.as_deref().and_then(super::env_value));
+    let signing_secret = args.signing_secret.or_else(|| cfg.signing_secret());
     register_startup_worker(&adapter, &worker_url, signing_secret).await?;
 
     let session_id = args.session.unwrap_or_else(|| Uuid::now_v7().to_string());
@@ -237,11 +209,11 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
     // yield, or an interrupt — which is exactly when this invocation should stop.
     let mut translator = AgUiTranslator::new(session_id.clone(), turn_id);
     let mut stdout = std::io::stdout();
-    let raw = matches!(output_mode, OutputMode::Jsonl);
+    let raw = matches!(output_mode, OutputFormat::Jsonl);
     let mut renderer = match output_mode {
-        OutputMode::AgUi => Renderer::AgUi,
-        OutputMode::Jsonl => Renderer::Jsonl,
-        OutputMode::Pretty => Renderer::Pretty(PrettyPrinter::new(stdout.is_terminal())),
+        OutputFormat::AgUi => Renderer::AgUi,
+        OutputFormat::Jsonl => Renderer::Jsonl,
+        OutputFormat::Pretty => Renderer::Pretty(PrettyPrinter::new(stdout.is_terminal())),
     };
 
     let evs = translator.start();
@@ -337,7 +309,7 @@ fn resume_command(
     if let Some(output) = output.filter(|o| *o != "ag-ui") {
         cmd.push_str(&format!(" --output {output}"));
     }
-    if db != "substructure.db" {
+    if db != project_config::DEFAULT_DB {
         cmd.push_str(&format!(" --db {db}"));
     }
     cmd.push_str(

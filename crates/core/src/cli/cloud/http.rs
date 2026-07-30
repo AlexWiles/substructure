@@ -173,6 +173,16 @@ impl CloudClient {
         decode(res).await
     }
 
+    /// A POST whose success is a 204: nothing to decode, and decoding an empty
+    /// body as JSON would fail.
+    pub async fn post_json_discard<B: Serialize>(&self, path: &str, body: &B) -> Result<()> {
+        let res = self
+            .send(self.request(Method::POST, path).json(body))
+            .await?;
+        check_status(res).await?;
+        Ok(())
+    }
+
     pub async fn delete_discard(&self, path: &str) -> Result<()> {
         let res = self.send(self.request(Method::DELETE, path)).await?;
         check_status(res).await?;

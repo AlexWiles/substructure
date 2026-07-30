@@ -26,11 +26,7 @@ Plan:
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
-subs run \
-    --worker-url http://localhost:4444 \
-    --agent planner \
-    --llm-provider anthropic \
-    --output pretty \
+subs run -c substructure.toml \
     --session plan-demo \
     --input '{"type":"client.message","message":{"role":"user","content": "plan a weekend trip to Lisbon"}}'
 ```
@@ -39,11 +35,7 @@ Flip to execution — a `client.action`, not a chat message, so it never lands i
 the transcript:
 
 ```sh
-subs run \
-    --worker-url http://localhost:4444 \
-    --agent planner \
-    --llm-provider anthropic \
-    --output pretty \
+subs run -c substructure.toml \
     --session plan-demo \
     --input '{"type":"client.action","name":"set_mode","args":{"mode":"executing"}}'
 ```

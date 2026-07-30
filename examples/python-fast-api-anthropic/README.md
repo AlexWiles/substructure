@@ -29,12 +29,9 @@ pip install -r requirements.txt
 python3 main.py
 ```
 
-**2. Send a message with the CLI** (no `--llm-provider`, the worker owns the LLM):
+**2. Send a message with the CLI** (no `[llm]` section, the worker owns the LLM):
 
 ```sh
-subs run \
-    --worker-url http://localhost:4444 \
-    --agent my-agent \
-    --output pretty \
+subs run -c substructure.toml \
     --input '{"type":"client.message","message":{"role":"user","content": "hi"}}'
 ```

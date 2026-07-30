@@ -8,6 +8,7 @@ use serde_json::Value;
 
 pub mod filter;
 pub mod mcp;
+pub mod oauth;
 pub mod registry;
 
 /// A tool as a connection offers it, before filtering or prefixing. The neutral

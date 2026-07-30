@@ -26,6 +26,10 @@ Pin the app so later commands need no `--app`:
 subs link
 ```
 
+That writes a `target = "remote"` `substructure.toml` in this directory —
+the environment your project deploys to. See
+[Environments](./160-cli.md#environments).
+
 ## 2. Make sure to verify the signature in your worker
 
 The hosted engine signs every decision it POSTs with the app's signing secret. Your

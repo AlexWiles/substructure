@@ -39,12 +39,18 @@ pub struct ConnectionSpec {
     /// Turning it off is safe — a name that collides with another connection, a
     /// declared tool, or a sub-agent is dropped and reported rather than
     /// silently shadowing anything.
-    #[serde(default = "yes")]
+    /// Written only when turned off, so a config `subs mcp add` rewrites does
+    /// not gain a line per connection saying what the default already says.
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
     pub prefix_tools: bool,
 }
 
 fn yes() -> bool {
     true
+}
+
+fn is_yes(v: &bool) -> bool {
+    *v
 }
 
 impl ConnectionSpec {

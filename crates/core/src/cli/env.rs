@@ -9,6 +9,19 @@ pub enum LlmProviderArg {
     Openai,
 }
 
+/// How `subs run` renders a turn. The file spells these the way `--output`
+/// does, so one type is both the flag's values and the manifest's.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OutputFormat {
+    /// Stream AG-UI protocol events, one JSON object per line.
+    AgUi,
+    /// Stream raw persisted engine events, one JSON object per line.
+    Jsonl,
+    /// Human-readable text: streamed replies, tool calls, and results.
+    Pretty,
+}
+
 pub enum ProviderEnv {
     Openrouter { api_key: String },
     Anthropic { api_key: String },

@@ -23,7 +23,7 @@ Three things: the engine, the app, the browser.
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
-subs serve --dev --port 9000 --llm-provider anthropic --worker-url http://localhost:4444/agent
+subs serve -c substructure.toml
 ```
 
 **2. Build and start the app**:

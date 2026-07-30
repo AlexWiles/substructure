@@ -3,23 +3,28 @@ use anyhow::{bail, Result};
 use super::credentials;
 use super::http::CloudClient;
 use super::pickers;
-use super::project_config::{self, ProjectConfig};
+use super::project_config::{self, RemoteEnv};
 use super::{AppScope, CloudGlobals, OrgScope};
 
 pub struct Context {
-    pub project: Option<ProjectConfig>,
+    pub project: Option<RemoteEnv>,
     pub client: CloudClient,
     pub globals: CloudGlobals,
 }
 
 impl Context {
     pub fn load(globals: &CloudGlobals) -> Result<Self> {
+        let project = project_config::resolve(globals.config.as_deref())?
+            .map(|found| found.into_remote("this command"))
+            .transpose()?;
+        Self::with_project(globals, project)
+    }
+
+    /// A context over an environment the caller resolved itself, for `subs
+    /// link` — which may be creating the file every other command reads.
+    pub fn with_project(globals: &CloudGlobals, project: Option<RemoteEnv>) -> Result<Self> {
         let credentials_path = credentials::resolve_path(globals.credentials.clone())?;
         let creds = credentials::load(&credentials_path)?;
-        let project = match globals.config.as_deref() {
-            Some(p) => Some(project_config::load_explicit(p)?.config),
-            None => project_config::find()?.map(|f| f.config),
-        };
         // Precedence: --url flag > project substructure.toml url > $SUBS_API_URL > default.
         let url_override = globals
             .url
@@ -72,6 +77,19 @@ impl Context {
             None => bail!("no app selected"),
         };
         Ok((ctx, app))
+    }
+
+    /// The app to act on without a picker: flag, then the file's pin, then
+    /// what a single-tenant server advertises. For callers that can carry on
+    /// without one.
+    pub async fn pinned_app(&self, flag: Option<&str>) -> Option<String> {
+        if let Some(app) = flag {
+            return Some(app.to_string());
+        }
+        if let Some(app) = self.project.as_ref().and_then(|p| p.app.clone()) {
+            return Some(app);
+        }
+        self.server_default_app().await
     }
 
     pub async fn require_org(&self, flag: Option<&str>) -> Result<String> {

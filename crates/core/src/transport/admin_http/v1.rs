@@ -13,7 +13,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Extension, Json, Router};
 
-use crate::api::v1::{ApiError, App, Org, WorkerConfig, WorkerUpsert};
+use crate::api::v1::{ApiError, App, Meta, Org, WorkerConfig, WorkerUpsert};
 use crate::cli::DEFAULT_TENANT;
 use crate::transport::push::PushAdapter;
 use crate::worker::push::PushRegistrationRecord;
@@ -43,6 +43,7 @@ pub fn router(admin: AdminHttpState, push: Arc<PushAdapter>) -> Router {
         push,
     };
     Router::new()
+        .route("/api/v1/meta", get(meta))
         .route("/api/v1/apps/{app}/sessions", get(routes::list_sessions))
         .route("/api/v1/apps/{app}/sessions/{session_id}", get(get_session))
         .route(
@@ -229,6 +230,15 @@ fn registry_error(message: String) -> Response {
         Json(ApiError::message(message)),
     )
         .into_response()
+}
+
+/// What this server offers. `single_tenant` is what lets the CLI adopt the
+/// advertised org/app instead of asking which one.
+async fn meta() -> impl IntoResponse {
+    Json(Meta {
+        single_tenant: true,
+        features: vec!["sessions".into(), "worker".into()],
+    })
 }
 
 async fn list_orgs() -> impl IntoResponse {

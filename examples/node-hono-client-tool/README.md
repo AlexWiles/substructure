@@ -29,11 +29,7 @@ call with its id and a ready-to-edit settle input:
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
-subs run \
-    --worker-url http://localhost:4444 \
-    --agent my-agent \
-    --llm-provider anthropic \
-    --output pretty \
+subs run -c substructure.toml \
     --session $(uuidgen) \
     --input '{"type":"client.message","message":{"role":"user","content": "recommend a coffee shop near me"}}'
 ```
