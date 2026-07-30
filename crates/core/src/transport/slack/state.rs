@@ -6,9 +6,7 @@ use crate::providers::sqlite::{parse_dt, spawn_err, SqliteDb};
 
 /// One row per turn, not per session: a queued turn takes its slot while the
 /// turn before it is still settling, and each must keep its own message.
-/// The rows are live bookkeeping, so the old shape is dropped, not migrated.
 const SCHEMA: &str = "
-DROP TABLE IF EXISTS slack_streams;
 CREATE TABLE IF NOT EXISTS slack_turn_streams (
     tenant_id  TEXT NOT NULL,
     session_id TEXT NOT NULL,
