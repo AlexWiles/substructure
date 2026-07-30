@@ -4,8 +4,12 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::event_store::StoreError;
 use crate::providers::sqlite::{parse_dt, spawn_err, SqliteDb};
 
+/// One row per turn, not per session: a queued turn takes its slot while the
+/// turn before it is still settling, and each must keep its own message.
+/// The rows are live bookkeeping, so the old shape is dropped, not migrated.
 const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS slack_streams (
+DROP TABLE IF EXISTS slack_streams;
+CREATE TABLE IF NOT EXISTS slack_turn_streams (
     tenant_id  TEXT NOT NULL,
     session_id TEXT NOT NULL,
     turn_id    TEXT NOT NULL,
@@ -14,7 +18,7 @@ CREATE TABLE IF NOT EXISTS slack_streams (
     ts         TEXT,
     version    INTEGER NOT NULL,
     updated_at TEXT NOT NULL,
-    PRIMARY KEY (tenant_id, session_id)
+    PRIMARY KEY (tenant_id, session_id, turn_id)
 );
 ";
 
@@ -53,19 +57,56 @@ impl StreamStore {
         &self,
         tenant_id: &str,
         session_id: &str,
+        turn_id: &str,
     ) -> Result<Option<StreamRow>, StoreError> {
-        let (tenant_id, session_id) = (tenant_id.to_string(), session_id.to_string());
+        let (tenant_id, session_id, turn_id) = (
+            tenant_id.to_string(),
+            session_id.to_string(),
+            turn_id.to_string(),
+        );
         let reader = self.db.reader.clone();
         tokio::task::spawn_blocking(move || {
             let conn = reader.open()?;
-            do_load(&conn, &tenant_id, &session_id)
+            do_load(&conn, &tenant_id, &session_id, &turn_id)
         })
         .await
         .map_err(spawn_err)?
     }
 
-    /// Record the turn. The same turn keeps its ts (a redelivery must not
-    /// forget the open stream); a new turn resets it.
+    /// Another turn of this session that still holds a message. One thread
+    /// shows one open stream, so a turn seeing this one waits its turn.
+    pub(super) async fn open_other(
+        &self,
+        tenant_id: &str,
+        session_id: &str,
+        turn_id: &str,
+    ) -> Result<Option<StreamRow>, StoreError> {
+        let (tenant_id, session_id, turn_id) = (
+            tenant_id.to_string(),
+            session_id.to_string(),
+            turn_id.to_string(),
+        );
+        let reader = self.db.reader.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = reader.open()?;
+            conn.query_row(
+                "SELECT turn_id, start_seq, started_at, ts, version
+                 FROM slack_turn_streams
+                 WHERE tenant_id = ?1 AND session_id = ?2 AND turn_id <> ?3
+                   AND ts IS NOT NULL
+                 ORDER BY start_seq DESC LIMIT 1",
+                rusqlite::params![tenant_id, session_id, turn_id],
+                read_row,
+            )
+            .optional()
+            .map_err(|e| StoreError::Internal(e.to_string()))
+        })
+        .await
+        .map_err(spawn_err)?
+    }
+
+    /// Record the turn. A redelivery keeps everything the turn already had —
+    /// it must not forget its open stream — and only bumps the fence.
     pub(super) async fn upsert_turn(
         &self,
         tenant_id: &str,
@@ -87,19 +128,13 @@ impl StreamStore {
             let tx = conn
                 .transaction()
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
-            let prior = do_load(&tx, &tenant_id, &session_id)?;
-            let resumed = prior.as_ref().is_some_and(|r| r.turn_id == turn_id);
-            let resumed_ts = prior.filter(|_| resumed).and_then(|r| r.ts);
+            let resumed = do_load(&tx, &tenant_id, &session_id, &turn_id)?.is_some();
             tx.execute(
-                "INSERT INTO slack_streams
+                "INSERT INTO slack_turn_streams
                    (tenant_id, session_id, turn_id, start_seq, started_at, ts, version, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)
-                 ON CONFLICT (tenant_id, session_id) DO UPDATE SET
-                   turn_id = excluded.turn_id,
-                   start_seq = excluded.start_seq,
-                   started_at = excluded.started_at,
-                   ts = excluded.ts,
-                   version = slack_streams.version + 1,
+                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, 1, ?6)
+                 ON CONFLICT (tenant_id, session_id, turn_id) DO UPDATE SET
+                   version = slack_turn_streams.version + 1,
                    updated_at = excluded.updated_at",
                 rusqlite::params![
                     tenant_id,
@@ -107,15 +142,15 @@ impl StreamStore {
                     turn_id,
                     start_seq,
                     started_at.to_rfc3339(),
-                    resumed_ts,
                     Utc::now().to_rfc3339(),
                 ],
             )
             .map_err(|e| StoreError::Internal(e.to_string()))?;
             let version = tx
                 .query_row(
-                    "SELECT version FROM slack_streams WHERE tenant_id = ?1 AND session_id = ?2",
-                    rusqlite::params![tenant_id, session_id],
+                    "SELECT version FROM slack_turn_streams
+                     WHERE tenant_id = ?1 AND session_id = ?2 AND turn_id = ?3",
+                    rusqlite::params![tenant_id, session_id, turn_id],
                     |row| row.get::<_, u64>(0),
                 )
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -150,7 +185,7 @@ impl StreamStore {
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
             let updated = conn
                 .execute(
-                    "UPDATE slack_streams
+                    "UPDATE slack_turn_streams
                      SET ts = ?1, version = version + 1, updated_at = ?2
                      WHERE tenant_id = ?3 AND session_id = ?4
                        AND turn_id = ?5 AND version = ?6",
@@ -189,7 +224,7 @@ impl StreamStore {
                 .lock()
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
             conn.execute(
-                "DELETE FROM slack_streams
+                "DELETE FROM slack_turn_streams
                  WHERE tenant_id = ?1 AND session_id = ?2 AND turn_id = ?3",
                 rusqlite::params![tenant_id, session_id, turn_id],
             )
@@ -200,7 +235,7 @@ impl StreamStore {
         .map_err(spawn_err)?
     }
 
-    /// Remove the session's row whatever turn holds it: a cancel ends them all.
+    /// Remove every turn's row: a cancel ends them all.
     pub(super) async fn clear(&self, tenant_id: &str, session_id: &str) -> Result<(), StoreError> {
         let (tenant_id, session_id) = (tenant_id.to_string(), session_id.to_string());
         let writer = self.db.writer.clone();
@@ -209,7 +244,7 @@ impl StreamStore {
                 .lock()
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
             conn.execute(
-                "DELETE FROM slack_streams WHERE tenant_id = ?1 AND session_id = ?2",
+                "DELETE FROM slack_turn_streams WHERE tenant_id = ?1 AND session_id = ?2",
                 rusqlite::params![tenant_id, session_id],
             )
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -224,25 +259,29 @@ fn do_load(
     conn: &Connection,
     tenant_id: &str,
     session_id: &str,
+    turn_id: &str,
 ) -> Result<Option<StreamRow>, StoreError> {
     conn.query_row(
         "SELECT turn_id, start_seq, started_at, ts, version
-         FROM slack_streams WHERE tenant_id = ?1 AND session_id = ?2",
-        rusqlite::params![tenant_id, session_id],
-        |row| {
-            Ok(StreamRow {
-                turn_id: row.get(0)?,
-                start_seq: row.get(1)?,
-                started_at: row
-                    .get::<_, String>(2)
-                    .map(|s| parse_dt(&s).unwrap_or_else(Utc::now))?,
-                ts: row.get(3)?,
-                version: row.get(4)?,
-            })
-        },
+         FROM slack_turn_streams
+         WHERE tenant_id = ?1 AND session_id = ?2 AND turn_id = ?3",
+        rusqlite::params![tenant_id, session_id, turn_id],
+        read_row,
     )
     .optional()
     .map_err(|e| StoreError::Internal(e.to_string()))
+}
+
+fn read_row(row: &rusqlite::Row) -> rusqlite::Result<StreamRow> {
+    Ok(StreamRow {
+        turn_id: row.get(0)?,
+        start_seq: row.get(1)?,
+        started_at: row
+            .get::<_, String>(2)
+            .map(|s| parse_dt(&s).unwrap_or_else(Utc::now))?,
+        ts: row.get(3)?,
+        version: row.get(4)?,
+    })
 }
 
 #[cfg(test)]
@@ -267,20 +306,20 @@ mod tests {
     #[tokio::test]
     async fn a_turn_records_and_clears_its_row() {
         let (s, t) = store("t-record");
-        assert_eq!(s.load(&t, "s").await.unwrap(), None);
+        assert_eq!(s.load(&t, "s", "turn-1").await.unwrap(), None);
         let slot = s.upsert_turn(&t, "s", "turn-1", 5, at(0)).await.unwrap();
         assert!(!slot.resumed);
         assert!(s
             .set_ts(&t, "s", "turn-1", "111.222", slot.version)
             .await
             .unwrap());
-        let row = s.load(&t, "s").await.unwrap().unwrap();
+        let row = s.load(&t, "s", "turn-1").await.unwrap().unwrap();
         assert_eq!(row.turn_id, "turn-1");
         assert_eq!(row.start_seq, 5);
         assert_eq!(row.started_at, at(0));
         assert_eq!(row.ts.as_deref(), Some("111.222"));
         s.clear_turn(&t, "s", "turn-1").await.unwrap();
-        assert_eq!(s.load(&t, "s").await.unwrap(), None);
+        assert_eq!(s.load(&t, "s", "turn-1").await.unwrap(), None);
     }
 
     #[tokio::test]
@@ -295,13 +334,49 @@ mod tests {
         let again = s.upsert_turn(&t, "s", "turn-1", 5, at(0)).await.unwrap();
         assert!(again.resumed);
         assert_eq!(
-            s.load(&t, "s").await.unwrap().unwrap().ts.as_deref(),
+            s.load(&t, "s", "turn-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .ts
+                .as_deref(),
             Some("111.222")
         );
-        // A new turn starts clean.
+        // A new turn starts clean, and leaves the turn before it alone.
         let next = s.upsert_turn(&t, "s", "turn-2", 9, at(60)).await.unwrap();
         assert!(!next.resumed);
-        assert_eq!(s.load(&t, "s").await.unwrap().unwrap().ts, None);
+        assert_eq!(s.load(&t, "s", "turn-2").await.unwrap().unwrap().ts, None);
+        assert_eq!(
+            s.load(&t, "s", "turn-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .ts
+                .as_deref(),
+            Some("111.222")
+        );
+    }
+
+    /// The queued-turn guard: turn-2 must see that turn-1 still holds a
+    /// message, and stop seeing it the moment turn-1 settles.
+    #[tokio::test]
+    async fn a_turn_sees_another_turns_open_message() {
+        let (s, t) = store("t-open-other");
+        let one = s.upsert_turn(&t, "s", "turn-1", 5, at(0)).await.unwrap();
+        s.upsert_turn(&t, "s", "turn-2", 9, at(60)).await.unwrap();
+        // A turn with no message yet blocks nobody.
+        assert_eq!(s.open_other(&t, "s", "turn-2").await.unwrap(), None);
+
+        s.set_ts(&t, "s", "turn-1", "111.222", one.version)
+            .await
+            .unwrap();
+        let blocking = s.open_other(&t, "s", "turn-2").await.unwrap().unwrap();
+        assert_eq!(blocking.turn_id, "turn-1");
+        // Its own message is not another's.
+        assert_eq!(s.open_other(&t, "s", "turn-1").await.unwrap(), None);
+
+        s.clear_turn(&t, "s", "turn-1").await.unwrap();
+        assert_eq!(s.open_other(&t, "s", "turn-2").await.unwrap(), None);
     }
 
     #[tokio::test]
@@ -318,11 +393,16 @@ mod tests {
             .await
             .unwrap());
         assert_eq!(
-            s.load(&t, "s").await.unwrap().unwrap().ts.as_deref(),
+            s.load(&t, "s", "turn-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .ts
+                .as_deref(),
             Some("111.222")
         );
         // The wrong turn cannot write at all.
-        let row = s.load(&t, "s").await.unwrap().unwrap();
+        let row = s.load(&t, "s", "turn-1").await.unwrap().unwrap();
         assert!(!s
             .set_ts(&t, "s", "turn-9", "555.666", row.version)
             .await
@@ -332,11 +412,14 @@ mod tests {
     #[tokio::test]
     async fn clears_are_scoped_to_their_turn_except_cancel() {
         let (s, t) = store("t-clear");
+        s.upsert_turn(&t, "s", "turn-1", 5, at(0)).await.unwrap();
         s.upsert_turn(&t, "s", "turn-2", 9, at(0)).await.unwrap();
-        // A stale settle for an older turn must not drop the newer row.
+        // A settle takes its own turn's row and no other.
         s.clear_turn(&t, "s", "turn-1").await.unwrap();
-        assert!(s.load(&t, "s").await.unwrap().is_some());
+        assert_eq!(s.load(&t, "s", "turn-1").await.unwrap(), None);
+        assert!(s.load(&t, "s", "turn-2").await.unwrap().is_some());
+        // A cancel ends them all.
         s.clear(&t, "s").await.unwrap();
-        assert_eq!(s.load(&t, "s").await.unwrap(), None);
+        assert_eq!(s.load(&t, "s", "turn-2").await.unwrap(), None);
     }
 }

@@ -81,18 +81,22 @@ pub trait WorkspaceResolver: Send + Sync {
     async fn by_tenant(&self, tenant_id: &str) -> Option<Arc<Workspace>>;
 }
 
-/// Session ids are unique only in one workspace.
+/// One turn's stream. A queued turn takes its slot while the turn before it
+/// is still settling, so the turn is part of the key; session ids are unique
+/// only in one workspace.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct StreamKey {
     tenant_id: String,
     session_id: String,
+    turn_id: String,
 }
 
 impl StreamKey {
-    fn new(tenant_id: &str, session_id: &str) -> Self {
+    fn new(tenant_id: &str, session_id: &str, turn_id: &str) -> Self {
         Self {
             tenant_id: tenant_id.to_string(),
             session_id: session_id.to_string(),
+            turn_id: turn_id.to_string(),
         }
     }
 }
@@ -137,7 +141,7 @@ struct Stream {
 
 impl Stream {
     fn key(&self) -> StreamKey {
-        StreamKey::new(&self.tenant_id, &self.session_id)
+        StreamKey::new(&self.tenant_id, &self.session_id, &self.turn_id)
     }
 }
 
@@ -163,6 +167,11 @@ impl Streams {
         lock(&self.open).remove(key);
     }
 
+    /// Every turn of the session: a cancel ends them all.
+    fn remove_session(&self, tenant_id: &str, session_id: &str) {
+        lock(&self.open).retain(|k, _| k.tenant_id != tenant_id || k.session_id != session_id);
+    }
+
     /// Remove the slot; the worker cannot append after this.
     fn take(&self, key: &StreamKey) -> Option<Stream> {
         lock(&self.open).remove(key).filter(|s| !s.dead)
@@ -178,22 +187,23 @@ impl Streams {
         }
     }
 
+    /// Another turn of this session still holding a message.
+    fn open_elsewhere(&self, key: &StreamKey) -> bool {
+        lock(&self.open).iter().any(|(k, s)| {
+            k.tenant_id == key.tenant_id
+                && k.session_id == key.session_id
+                && k.turn_id != key.turn_id
+                && !s.dead
+                && s.ts.is_some()
+        })
+    }
+
     /// Record what was sent, unless the turn ended during the append.
-    fn commit(
-        &self,
-        key: &StreamKey,
-        turn_id: &str,
-        ts: String,
-        version: u64,
-        sent: Vec<(String, Value)>,
-    ) {
+    fn commit(&self, key: &StreamKey, ts: String, version: u64, sent: Vec<(String, Value)>) {
         let mut open = lock(&self.open);
         let Some(stream) = open.get_mut(key) else {
             return;
         };
-        if stream.turn_id != turn_id {
-            return;
-        }
         stream.ts = Some(ts);
         stream.version = version;
         stream.sent.extend(sent);
@@ -852,8 +862,15 @@ impl EventProcessor for SlackBot {
                 .await
             }
             EventPayload::SessionInterrupted(p) => {
-                self.post_interrupt(&ws, &thread, &event.session_id, p, event.seq)
-                    .await
+                self.post_interrupt(
+                    &ws,
+                    &thread,
+                    &event.session_id,
+                    event.meta.turn_id.as_deref(),
+                    p,
+                    event.seq,
+                )
+                .await
             }
             EventPayload::InterruptResumed(p) => self.settle_prompt(&ws, &thread, p).await,
             _ => return Ok(()),
@@ -897,13 +914,10 @@ impl SlackBot {
         at: chrono::DateTime<chrono::Utc>,
         seq: u64,
     ) -> Result<(), Error> {
-        let key = StreamKey::new(&ws.tenant_id, session_id);
-        let live = match self.streams.take(&key).filter(|s| s.turn_id == t.turn_id) {
+        let key = StreamKey::new(&ws.tenant_id, session_id, &t.turn_id);
+        let live = match self.streams.take(&key) {
             Some(live) => Some(live),
-            None => self
-                .recover(ws, &key, seq)
-                .await
-                .filter(|s| s.turn_id == t.turn_id),
+            None => self.recover(ws, &key, seq).await,
         };
         let footer = live.as_ref().map(|s| activity::elapsed(s.started_at, at));
         let Some(ts) = live.as_ref().and_then(|s| s.ts.clone()) else {
@@ -1039,6 +1053,7 @@ impl SlackBot {
         ws: &Workspace,
         thread: &Thread,
         session_id: &str,
+        turn_id: Option<&str>,
         p: &crate::session::events::SessionInterrupted,
         seq: u64,
     ) -> Result<(), Error> {
@@ -1067,10 +1082,13 @@ impl SlackBot {
             }
         };
         // A prompt can wait for a long time; do not hold the stream open.
-        let key = StreamKey::new(&ws.tenant_id, session_id);
-        let open = match self.streams.take(&key) {
-            Some(open) => Some(open),
-            None => self.recover(ws, &key, seq).await,
+        let key = turn_id.map(|t| StreamKey::new(&ws.tenant_id, session_id, t));
+        let open = match &key {
+            Some(key) => match self.streams.take(key) {
+                Some(open) => Some(open),
+                None => self.recover(ws, key, seq).await,
+            },
+            None => None,
         };
         let posted = 'post: {
             if let Some(ts) = open.as_ref().and_then(|s| s.ts.as_deref()) {
@@ -1136,7 +1154,11 @@ impl SlackBot {
     /// Track the turn's slot; durable when a store is attached. A store
     /// failure is retryable so the row always lands before the checkpoint.
     async fn track(&self, ws: &Workspace, event: &SessionEvent) -> Result<(), Error> {
-        let key = StreamKey::new(&event.tenant_id, &event.session_id);
+        // Every event names the turn it belongs to; a start names its own.
+        let turn_id = match &event.payload {
+            EventPayload::TurnStarted(t) => Some(t.turn_id.clone()),
+            _ => event.meta.turn_id.clone(),
+        };
         match &event.payload {
             EventPayload::TurnStarted(t) => {
                 let owner = event.meta.owner.as_ref();
@@ -1173,7 +1195,7 @@ impl SlackBot {
                     // A replayed start after a restart: pick the open
                     // stream back up instead of opening a second one.
                     if slot.resumed {
-                        if let Some(recovered) = self.recover(ws, &key, event.seq).await {
+                        if let Some(recovered) = self.recover(ws, &stream.key(), event.seq).await {
                             stream = recovered;
                         }
                     }
@@ -1186,9 +1208,10 @@ impl SlackBot {
             | EventPayload::SubAgentRequested(_)
             | EventPayload::SubAgentTurnCompleted(_)
             | EventPayload::SubAgentErrored(_) => {}
-            // A cancelled turn frees its slot.
+            // A cancel ends every turn of the session.
             EventPayload::SessionCancelled => {
-                self.streams.remove(&key);
+                self.streams
+                    .remove_session(&event.tenant_id, &event.session_id);
                 if let Some(store) = self.store.as_deref() {
                     if let Err(e) = store.clear(&event.tenant_id, &event.session_id).await {
                         tracing::warn!(session_id = %event.session_id, error = %e, "slack: stream state not cleared");
@@ -1198,7 +1221,14 @@ impl SlackBot {
             }
             _ => return Ok(()),
         }
-        self.streams.mark_dirty(key);
+        // An event outside any turn renders nothing.
+        if let Some(turn_id) = turn_id {
+            self.streams.mark_dirty(StreamKey::new(
+                &event.tenant_id,
+                &event.session_id,
+                &turn_id,
+            ));
+        }
         Ok(())
     }
 
@@ -1268,11 +1298,11 @@ impl SlackBot {
         let Ok(events) = events else {
             return;
         };
-        let Some(turn) = TurnActivity::fold(&events, Some(open.turn_id.clone())) else {
+        let Some(turn) = TurnActivity::fold(&events, Some(key.turn_id.clone())) else {
             return;
         };
         // A newer turn owns its own message.
-        if turn.turn_id != open.turn_id {
+        if turn.turn_id != key.turn_id {
             return;
         }
         let changed: Vec<(String, Value)> = turn
@@ -1291,6 +1321,13 @@ impl SlackBot {
         let (ts, version) = match open.ts.clone() {
             Some(ts) => (ts, open.version),
             None => {
+                // A thread shows one open stream. A queued turn waits for the
+                // turn before it to settle rather than opening a second one
+                // beside it; the tick that follows tries again.
+                if self.stream_open_elsewhere(key).await {
+                    self.streams.mark_dirty(key.clone());
+                    return;
+                }
                 let ts = match self
                     .start_stream(
                         ws,
@@ -1322,8 +1359,47 @@ impl SlackBot {
         if let Err(e) = self.append_stream(ws, channel, &ts, chunks).await {
             return self.kill_stream(key, e);
         }
-        self.streams
-            .commit(key, &open.turn_id, ts, version, changed);
+        self.streams.commit(key, ts, version, changed);
+    }
+
+    /// True while another turn of this session still holds an open message.
+    /// A row whose turn the log has already completed is leftover, not open:
+    /// its owner clears it, so it must not hold this turn back.
+    async fn stream_open_elsewhere(&self, key: &StreamKey) -> bool {
+        if self.streams.open_elsewhere(key) {
+            return true;
+        }
+        let Some(store) = self.store.as_deref() else {
+            return false;
+        };
+        let other = store
+            .open_other(&key.tenant_id, &key.session_id, &key.turn_id)
+            .await;
+        let Ok(Some(row)) = other else {
+            return false;
+        };
+        !self.turn_is_over(key, &row).await
+    }
+
+    /// Whether the log has settled the row's turn.
+    async fn turn_is_over(&self, key: &StreamKey, row: &super::state::StreamRow) -> bool {
+        let Some(ctx) = self.ctx.get() else {
+            return false;
+        };
+        let caller = Caller::System {
+            tenant_id: key.tenant_id.clone(),
+        };
+        let events = ctx
+            .read_session_events(&caller, &key.session_id, Some(Seq(row.start_seq)), None)
+            .await;
+        let Ok(events) = events else {
+            return false;
+        };
+        events.iter().any(|e| match &e.payload {
+            EventPayload::TurnCompleted(t) => t.turn_id == row.turn_id,
+            EventPayload::SessionCancelled => true,
+            _ => false,
+        })
     }
 
     /// The finished turn rendered as blocks, ready to replace the stream.
@@ -1353,7 +1429,12 @@ impl SlackBot {
 
     /// Abandon a rejected stream. The answer posts as a message.
     fn kill_stream(&self, key: &StreamKey, error: Error) {
-        tracing::warn!(error = %error, session_id = %key.session_id, "slack: activity stream failed");
+        tracing::warn!(
+            error = %error,
+            session_id = %key.session_id,
+            turn_id = %key.turn_id,
+            "slack: activity stream failed"
+        );
         self.streams.kill(key);
     }
 
@@ -1363,7 +1444,7 @@ impl SlackBot {
     async fn recover(&self, ws: &Workspace, key: &StreamKey, before: u64) -> Option<Stream> {
         let (store, ctx) = (self.store.as_deref()?, self.ctx.get()?);
         let row = store
-            .load(&key.tenant_id, &key.session_id)
+            .load(&key.tenant_id, &key.session_id, &key.turn_id)
             .await
             .ok()
             .flatten()?;
@@ -1376,8 +1457,9 @@ impl SlackBot {
             .ok()?;
         for event in events.iter().filter(|e| e.seq < before) {
             match &event.payload {
-                // The turn is over; the row is leftover.
-                EventPayload::TurnStarted(_) | EventPayload::SessionCancelled => {
+                // The turn is over; the row is leftover. A later turn starting
+                // says nothing: it holds a row of its own.
+                EventPayload::SessionCancelled => {
                     let _ = store
                         .clear_turn(&key.tenant_id, &key.session_id, &row.turn_id)
                         .await;
@@ -1431,7 +1513,7 @@ impl SlackBot {
 
     /// A crash can beat the record after `chat.startStream`. The thread
     /// knows: stamps land only when a message settles, so the orphan is our
-    /// last unstamped message after the turn's trigger.
+    /// last unstamped message after the turn opened.
     async fn heal_ts(&self, ws: &Workspace, key: &StreamKey, stream: &mut Stream) {
         let Some((_, trigger)) = slack_session(&stream.turn_id) else {
             return;
@@ -1440,7 +1522,13 @@ impl SlackBot {
             return;
         };
         let thread = Thread::new(channel, thread_ts);
-        let Ok(resp) = self.fetch_replies_raw(ws, &thread, Some(trigger)).await else {
+        // A queued turn's trigger predates the whole turn before it, whose own
+        // orphan would then look like ours. Never look back past our start.
+        let oldest = std::cmp::max(
+            trigger.to_string(),
+            format!("{}.000000", stream.started_at.timestamp()),
+        );
+        let Ok(resp) = self.fetch_replies_raw(ws, &thread, Some(&oldest)).await else {
             return;
         };
         let ours = self
@@ -1487,15 +1575,19 @@ impl SlackBot {
                 .await
             {
                 Ok(true) => return TsPersist::Kept(expected + 1),
-                Ok(false) => match store.load(&open.tenant_id, &open.session_id).await {
-                    Ok(Some(row)) if row.turn_id == open.turn_id => match row.ts {
+                Ok(false) => match store
+                    .load(&open.tenant_id, &open.session_id, &open.turn_id)
+                    .await
+                {
+                    Ok(Some(row)) => match row.ts {
                         Some(theirs) if theirs != ts => {
                             return TsPersist::Adopted(theirs, row.version)
                         }
                         Some(_) => return TsPersist::Kept(row.version),
                         None => expected = row.version,
                     },
-                    Ok(_) => return TsPersist::TurnOver,
+                    // The row is gone: the turn settled under us.
+                    Ok(None) => return TsPersist::TurnOver,
                     Err(e) => {
                         tracing::warn!(session_id = %open.session_id, error = %e, "slack: stream ts unrecorded");
                         return TsPersist::Kept(open.version);
@@ -1525,7 +1617,7 @@ enum TsPersist {
     Kept(u64),
     /// A concurrent writer won; use their message.
     Adopted(String, u64),
-    /// The row is gone or re-owned: the turn ended under us.
+    /// The row is gone: the turn ended under us.
     TurnOver,
 }
 
@@ -1556,5 +1648,77 @@ impl Error {
         match self {
             Error::Retryable(e) | Error::Terminal(e) => e,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SESSION: &str = "slack:C1:1.0";
+
+    fn stream(turn_id: &str, ts: Option<&str>) -> Stream {
+        Stream {
+            tenant_id: "t".into(),
+            session_id: SESSION.into(),
+            turn_id: turn_id.into(),
+            start_seq: 1,
+            started_at: chrono::Utc::now(),
+            recipient: None,
+            recipient_team: None,
+            ts: ts.map(str::to_string),
+            sent: HashMap::new(),
+            dead: false,
+            version: 0,
+        }
+    }
+
+    fn key(turn_id: &str) -> StreamKey {
+        StreamKey::new("t", SESSION, turn_id)
+    }
+
+    /// A queued turn takes its slot while the turn before it is still
+    /// settling, so one turn's writer must never reach the other's slot.
+    #[test]
+    fn two_turns_of_one_session_hold_their_own_slots() {
+        let streams = Streams::default();
+        streams.insert(stream("turn-1", Some("100.1")));
+        streams.insert(stream("turn-2", None));
+
+        streams.kill(&key("turn-1"));
+        assert!(streams.get(&key("turn-1")).unwrap().dead);
+        assert!(!streams.get(&key("turn-2")).unwrap().dead);
+
+        streams.commit(&key("turn-1"), "9.9".into(), 7, vec![]);
+        assert_eq!(streams.get(&key("turn-2")).unwrap().ts, None);
+
+        streams.remove(&key("turn-1"));
+        assert!(streams.get(&key("turn-2")).is_some());
+    }
+
+    /// The guard: a turn with no message yet must see the open one beside it.
+    #[test]
+    fn an_open_message_is_visible_to_the_turn_behind_it() {
+        let streams = Streams::default();
+        streams.insert(stream("turn-2", None));
+        // Nothing else open yet.
+        assert!(!streams.open_elsewhere(&key("turn-2")));
+
+        streams.insert(stream("turn-1", Some("100.1")));
+        assert!(streams.open_elsewhere(&key("turn-2")));
+        // Its own message is not another's.
+        assert!(!streams.open_elsewhere(&key("turn-1")));
+        // A turn holding no message blocks nobody.
+        streams.insert(stream("turn-1", None));
+        assert!(!streams.open_elsewhere(&key("turn-2")));
+        // Nor does an abandoned one.
+        streams.insert(stream("turn-1", Some("100.1")));
+        streams.kill(&key("turn-1"));
+        assert!(!streams.open_elsewhere(&key("turn-2")));
+
+        // A cancel takes the whole session.
+        streams.remove_session("t", SESSION);
+        assert!(streams.get(&key("turn-1")).is_none());
+        assert!(streams.get(&key("turn-2")).is_none());
     }
 }
