@@ -31,6 +31,7 @@ oauth_config:
       - channels:history
       - chat:write
       - assistant:write
+      - reactions:write
   pkce_enabled: false
 settings:
   event_subscriptions:
@@ -76,6 +77,9 @@ card to show, the thread carries Slack's own status indicator instead
 call in a DM as in a channel. It goes up the moment the mention lands,
 alongside the history fetch, and comes back down when the turn ends. Slack
 drops a status after two minutes, so a turn still thinking has it re-set.
+The message that asked carries the same state as a 👀 reaction, added the
+moment the bot takes it — so a mention queued behind a running turn is
+acknowledged before it is answered — and removed when its turn completes.
 An interrupt closes the message early —
 `Paused: {reason}`, or a button prompt (below), lands in the message with
 the cards it interrupted, and work after the resume opens a fresh one. Every

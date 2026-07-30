@@ -31,6 +31,9 @@ const ACTIVITY_INTERVAL: Duration = Duration::from_secs(1);
 const STATUS: &str = "is thinking…";
 /// Slack removes a status after two minutes. Set it again on this cadence.
 const STATUS_REFRESH: Duration = Duration::from_secs(90);
+/// Marks a message the bot has taken, including one still waiting its turn.
+/// It comes off when the turn the message opened completes.
+const ACK_REACTION: &str = "eyes";
 
 /// One Slack install.
 pub struct Workspace {
@@ -429,10 +432,17 @@ impl SlackBot {
             .filter_map(|m| m.id.strip_prefix("slack:"))
             .max();
 
-        // Set the status while the fetch runs.
-        let (fetched, _) = tokio::join!(
+        // Set the status and acknowledge the message while the fetch runs.
+        let (fetched, _, _) = tokio::join!(
             self.fetch_thread(ws, &thread, cursor),
             self.set_status(ws, &thread, STATUS),
+            self.react(
+                ws,
+                "reactions.add",
+                &inbound.channel,
+                &inbound.ts,
+                ACK_REACTION
+            ),
         );
 
         // If the fetch fails, append the message alone with a note.
@@ -496,7 +506,7 @@ impl SlackBot {
                 span: crate::span::SpanContext::root().child("slack_inbound"),
             })
             .await;
-        // Clear the indicator unless a turn is active.
+        // Clear the indicator and the ack unless a turn owes an answer.
         if !matches!(
             submitted,
             Ok(_)
@@ -505,6 +515,14 @@ impl SlackBot {
                 ))
         ) {
             self.set_status(ws, &thread, "").await;
+            self.react(
+                ws,
+                "reactions.remove",
+                &inbound.channel,
+                &inbound.ts,
+                ACK_REACTION,
+            )
+            .await;
         }
         match submitted {
             Ok(_) => {}
@@ -604,6 +622,15 @@ impl SlackBot {
         });
         if let Err(e) = self.api_call(ws, "assistant.threads.setStatus", body).await {
             tracing::debug!(error = %e, channel = %thread.channel, "slack: status not set");
+        }
+    }
+
+    /// Best-effort `reactions.add` / `reactions.remove`. A replay re-adds a
+    /// reaction that is already there, or removes one that is already gone.
+    async fn react(&self, ws: &Workspace, method: &str, channel: &str, ts: &str, name: &str) {
+        let body = serde_json::json!({ "channel": channel, "timestamp": ts, "name": name });
+        if let Err(e) = self.api_call(ws, method, body).await {
+            tracing::debug!(error = %e, %channel, %ts, %name, "slack: reaction not set");
         }
     }
 
@@ -831,16 +858,18 @@ impl EventProcessor for SlackBot {
             EventPayload::InterruptResumed(p) => self.settle_prompt(&ws, &thread, p).await,
             _ => return Ok(()),
         };
-        // The turn is settled (or undeliverable) either way: drop its row.
+        // The turn is settled (or undeliverable) either way: release the
+        // message that asked, and drop the turn's row.
         if matches!(result, Ok(()) | Err(Error::Terminal(_))) {
-            if let (EventPayload::TurnCompleted(t), Some(store)) =
-                (&event.payload, self.store.as_deref())
-            {
-                if let Err(e) = store
-                    .clear_turn(&event.tenant_id, &event.session_id, &t.turn_id)
-                    .await
-                {
-                    tracing::warn!(session_id = %event.session_id, error = %e, "slack: stream state not cleared");
+            if let EventPayload::TurnCompleted(t) = &event.payload {
+                self.clear_ack(&ws, &t.turn_id).await;
+                if let Some(store) = self.store.as_deref() {
+                    if let Err(e) = store
+                        .clear_turn(&event.tenant_id, &event.session_id, &t.turn_id)
+                        .await
+                    {
+                        tracing::warn!(session_id = %event.session_id, error = %e, "slack: stream state not cleared");
+                    }
                 }
             }
         }
@@ -938,6 +967,16 @@ impl SlackBot {
                     .await
             }
         }
+    }
+
+    /// Take the ack off the message that opened the turn. A turn nobody asked
+    /// for (no `slack:{channel}:{ts}` id) has no message to clear.
+    async fn clear_ack(&self, ws: &Workspace, turn_id: &str) {
+        let Some((channel, ts)) = slack_session(turn_id) else {
+            return;
+        };
+        self.react(ws, "reactions.remove", channel, ts, ACK_REACTION)
+            .await;
     }
 
     async fn post_turn(

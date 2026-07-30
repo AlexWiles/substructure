@@ -103,7 +103,7 @@ impl SlackChannel {
         );
         let bot_token = var(
             "SLACK_BOT_TOKEN",
-            "Bot token with app_mentions:read, chat:write, channels:history, im:history (xoxb-…)",
+            "Bot token with app_mentions:read, chat:write, channels:history, im:history, reactions:write (xoxb-…)",
         );
         if !missing.is_empty() {
             return Err(MissingEnv(missing));
