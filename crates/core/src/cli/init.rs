@@ -24,8 +24,10 @@ pub enum Target {
     Remote,
 }
 
-/// Starters, not schemas: every key here is one a first run needs, so the file
-/// works before it is edited and `docs/160-cli.md` holds the rest.
+/// Starters, not schemas: what a first run needs, plus the settings most
+/// likely to be changed next, so the file works before it is edited and
+/// `docs/160-cli.md` holds the rest. `dev` ships on so a fresh file serves
+/// without also setting an API key, and says what it costs on the same line.
 const LOCAL: &str = "\
 target = \"local\"
 
@@ -38,6 +40,11 @@ provider = \"anthropic\"
 [run]
 agent = \"my-agent\"
 output = \"pretty\"
+
+[server]
+host = \"127.0.0.1\"
+port = 8080
+dev = true   # no client or worker auth. Local development only
 ";
 
 /// No org or app: `subs link` pins those, and guessing them here would only
