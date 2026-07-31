@@ -174,9 +174,9 @@ fn web_base(api_url: &str) -> String {
     base.trim_end_matches('/').to_string()
 }
 
-/// Admin landing page for an app. Doubles as the top-up entry point.
-pub fn admin_url(api_url: &str, app_id: &str) -> String {
-    format!("{}/apps/{app_id}", web_base(api_url))
+/// Admin landing page for a project. Doubles as the top-up entry point.
+pub fn admin_url(api_url: &str, project_id: &str) -> String {
+    format!("{}/projects/{project_id}", web_base(api_url))
 }
 
 #[cfg(test)]
@@ -198,19 +198,19 @@ mod tests {
     fn admin_url_swaps_api_subdomain() {
         assert_eq!(
             admin_url("https://api.substructure.ai", "abc"),
-            "https://app.substructure.ai/apps/abc"
+            "https://app.substructure.ai/projects/abc"
         );
         assert_eq!(
             admin_url("http://api.local.test", "abc"),
-            "http://app.local.test/apps/abc"
+            "http://app.local.test/projects/abc"
         );
         assert_eq!(
             admin_url("http://localhost:5173", "abc"),
-            "http://localhost:5173/apps/abc"
+            "http://localhost:5173/projects/abc"
         );
         assert_eq!(
             admin_url("https://api.substructure.ai/", "abc"),
-            "https://app.substructure.ai/apps/abc"
+            "https://app.substructure.ai/projects/abc"
         );
     }
 

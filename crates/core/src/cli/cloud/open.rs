@@ -3,22 +3,22 @@ use serde::Serialize;
 
 use super::context::Context;
 use super::print;
-use super::AppScope;
+use super::ProjectScope;
 
 #[derive(Debug, Serialize)]
 struct OpenResult<'a> {
-    app_id: &'a str,
+    project_id: &'a str,
     url: &'a str,
     opened: bool,
 }
 
-pub async fn run(app_id: Option<String>, no_browser: bool, scope: AppScope) -> Result<()> {
-    let scope = AppScope {
-        app: app_id.or(scope.app.clone()),
+pub async fn run(project_id: Option<String>, no_browser: bool, scope: ProjectScope) -> Result<()> {
+    let scope = ProjectScope {
+        project: project_id.or(scope.project.clone()),
         ..scope
     };
-    let (ctx, app_id) = Context::from_app(&scope).await?;
-    let url = print::admin_url(ctx.client.base_url(), &app_id);
+    let (ctx, project_id) = Context::from_project(&scope).await?;
+    let url = print::admin_url(ctx.client.base_url(), &project_id);
 
     // --no-interaction implies --no-browser; opening a browser is never
     // appropriate in non-interactive contexts (CI, scripts).
@@ -27,7 +27,7 @@ pub async fn run(app_id: Option<String>, no_browser: bool, scope: AppScope) -> R
 
     if scope.globals.json {
         return print::json(&OpenResult {
-            app_id: &app_id,
+            project_id: &project_id,
             url: &url,
             opened,
         });

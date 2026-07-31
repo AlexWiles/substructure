@@ -31,9 +31,6 @@ const ACTIVITY_INTERVAL: Duration = Duration::from_secs(1);
 const STATUS: &str = "is thinking…";
 /// Slack removes a status after two minutes. Set it again on this cadence.
 const STATUS_REFRESH: Duration = Duration::from_secs(90);
-/// Marks a message the bot has taken, including one still waiting its turn.
-/// It comes off when the turn the message opened completes.
-const ACK_REACTION: &str = "eyes";
 
 /// Which agent answers where.
 ///
@@ -491,9 +488,8 @@ impl SlackBot {
     }
 
     async fn submit(&self, ctx: &ChannelContext, ws: &Workspace, inbound: Inbound) {
-        // Ahead of the ack: a channel nobody answers in gets no reaction
-        // either, rather than an eyes emoji on a message that never gets a
-        // reply. A click is deliberately not gated the same way — a prompt
+        // Before the thread fetch: a channel nobody answers in costs no API
+        // calls. A click is deliberately not gated the same way — a prompt
         // already posted has to stay answerable after its channel goes off.
         let Some(agent_id) = ws.routing.agent_for(&inbound.channel) else {
             tracing::debug!(channel = %inbound.channel, "slack: no agent for channel; ignored");
@@ -512,18 +508,7 @@ impl SlackBot {
             .filter_map(|m| m.id.strip_prefix("slack:"))
             .max();
 
-        // Acknowledge the message while the fetch runs. The status belongs to
-        // the turn, not to the message: a queued one has no turn to report.
-        let (fetched, _) = tokio::join!(
-            self.fetch_thread(ws, &thread, cursor),
-            self.react(
-                ws,
-                "reactions.add",
-                &inbound.channel,
-                &inbound.ts,
-                ACK_REACTION
-            ),
-        );
+        let fetched = self.fetch_thread(ws, &thread, cursor).await;
 
         // If the fetch fails, append the message alone with a note.
         let input = match fetched {
@@ -586,23 +571,6 @@ impl SlackBot {
                 span: crate::span::SpanContext::root().child("slack_inbound"),
             })
             .await;
-        // Take the ack back unless a turn owes an answer.
-        if !matches!(
-            submitted,
-            Ok(_)
-                | Err(RuntimeError::Session(
-                    SessionError::TurnAlreadyActive { .. }
-                ))
-        ) {
-            self.react(
-                ws,
-                "reactions.remove",
-                &inbound.channel,
-                &inbound.ts,
-                ACK_REACTION,
-            )
-            .await;
-        }
         match submitted {
             Ok(_) => {}
             // A true redelivery of a message already taken, or a message while
@@ -701,15 +669,6 @@ impl SlackBot {
         });
         if let Err(e) = self.api_call(ws, "assistant.threads.setStatus", body).await {
             tracing::debug!(error = %e, channel = %thread.channel, "slack: status not set");
-        }
-    }
-
-    /// Best-effort `reactions.add` / `reactions.remove`. A replay re-adds a
-    /// reaction that is already there, or removes one that is already gone.
-    async fn react(&self, ws: &Workspace, method: &str, channel: &str, ts: &str, name: &str) {
-        let body = serde_json::json!({ "channel": channel, "timestamp": ts, "name": name });
-        if let Err(e) = self.api_call(ws, method, body).await {
-            tracing::debug!(error = %e, %channel, %ts, %name, "slack: reaction not set");
         }
     }
 
@@ -943,11 +902,9 @@ impl EventProcessor for SlackBot {
             EventPayload::InterruptResumed(p) => self.settle_prompt(&ws, &thread, p).await,
             _ => return Ok(()),
         };
-        // The turn is settled (or undeliverable) either way: release the
-        // message that asked, and drop the turn's row.
+        // The turn is settled (or undeliverable) either way: drop its row.
         if matches!(result, Ok(()) | Err(Error::Terminal(_))) {
             if let EventPayload::TurnCompleted(t) = &event.payload {
-                self.clear_ack(&ws, &t.turn_id).await;
                 if let Some(store) = self.store.as_deref() {
                     if let Err(e) = store
                         .clear_turn(&event.tenant_id, &event.session_id, &t.turn_id)
@@ -1049,16 +1006,6 @@ impl SlackBot {
                     .await
             }
         }
-    }
-
-    /// Take the ack off the message that opened the turn. A turn nobody asked
-    /// for (no `slack:{channel}:{ts}` id) has no message to clear.
-    async fn clear_ack(&self, ws: &Workspace, turn_id: &str) {
-        let Some((channel, ts)) = slack_session(turn_id) else {
-            return;
-        };
-        self.react(ws, "reactions.remove", channel, ts, ACK_REACTION)
-            .await;
     }
 
     async fn post_turn(

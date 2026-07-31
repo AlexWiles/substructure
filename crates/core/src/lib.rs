@@ -5,6 +5,7 @@ mod shard;
 pub mod api;
 pub mod cli;
 pub mod connectors;
+pub mod manifest;
 pub mod providers;
 pub mod transport;
 

@@ -4,7 +4,7 @@ use clap::Args;
 use tokio::net::TcpListener;
 
 use crate::cli::auth::AuthWiring;
-use crate::cli::cloud::project_config::{self, EnvConfig};
+use crate::cli::cloud::project_config::{self, ProjectConfig};
 use crate::cli::env::{EnvVars, ProviderEnv, ProviderKind};
 use crate::cli::DEFAULT_TENANT;
 use crate::connectors::oauth::StoredCredentials;
@@ -69,7 +69,7 @@ impl ServeArgs {
 ///
 /// Precedence is one field at a time, so `--slack-agent` replaces the default
 /// the file names and leaves its channel table standing.
-fn slack_routing(cfg: &EnvConfig, flag: Option<String>) -> Option<Routing> {
+fn slack_routing(cfg: &ProjectConfig, flag: Option<String>) -> Option<Routing> {
     let slack = cfg.slack.clone().unwrap_or_default();
     let mut routing = Routing::new(flag.or(slack.agent));
     for (id, channel) in &slack.channel {
@@ -183,7 +183,7 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
 
 /// What this engine serves, once, at startup: an agent's hosting is a property
 /// of the file, so it should be readable without reading the file.
-fn announce_agents(cfg: &EnvConfig) {
+fn announce_agents(cfg: &ProjectConfig) {
     if cfg.agent.is_empty() {
         tracing::warn!(
             "substructure.toml declares no [agent.*]; every decision will fail until one does"
@@ -204,7 +204,7 @@ fn announce_agents(cfg: &EnvConfig) {
 pub(crate) async fn start_engine(
     db: SqliteDb,
     providers: Vec<ProviderEnv>,
-    cfg: &EnvConfig,
+    cfg: &ProjectConfig,
 ) -> anyhow::Result<(Arc<Runtime>, Arc<PushAdapter>)> {
     let connectors = cfg.connections();
     let event_store = Arc::new(SqliteEventStore::new(db.clone())?);
@@ -264,7 +264,7 @@ pub(crate) async fn start_engine(
         RuntimeDeps {
             store: event_store,
             agents: agents.clone(),
-            llm_providers,
+            llm: llm_providers,
             llm_task_queue,
             sub_agent_task_queue,
             connections,

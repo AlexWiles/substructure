@@ -18,7 +18,7 @@ pub struct CloudClient {
     token: Option<String>,
     http: reqwest::Client,
     default_org: Mutex<Option<String>>,
-    default_app: Mutex<Option<String>>,
+    default_project: Mutex<Option<String>>,
     defaults_probed: AtomicBool,
 }
 
@@ -49,7 +49,7 @@ impl CloudClient {
             token,
             http,
             default_org: Mutex::new(None),
-            default_app: Mutex::new(None),
+            default_project: Mutex::new(None),
             defaults_probed: AtomicBool::new(false),
         }
     }
@@ -58,14 +58,14 @@ impl CloudClient {
         &self.base_url
     }
 
-    /// Org/app a single-tenant server advertised via response headers (None
+    /// Org/project a single-tenant server advertised via response headers (None
     /// against the cloud). Populated as a side effect of any request.
     pub fn default_org(&self) -> Option<String> {
         self.default_org.lock().unwrap().clone()
     }
 
-    pub fn default_app(&self) -> Option<String> {
-        self.default_app.lock().unwrap().clone()
+    pub fn default_project(&self) -> Option<String> {
+        self.default_project.lock().unwrap().clone()
     }
 
     /// True the first time only, so callers probe the server for defaults once.
@@ -81,10 +81,10 @@ impl CloudClient {
             *self.default_org.lock().unwrap() = Some(v.to_string());
         }
         if let Some(v) = headers
-            .get("x-substructure-app")
+            .get("x-substructure-project")
             .and_then(|v| v.to_str().ok())
         {
-            *self.default_app.lock().unwrap() = Some(v.to_string());
+            *self.default_project.lock().unwrap() = Some(v.to_string());
         }
     }
 
@@ -171,6 +171,16 @@ impl CloudClient {
             .send(self.request(Method::PUT, path).json(body))
             .await?;
         decode(res).await
+    }
+
+    /// A PUT whose success is a 204 — a write-only surface has nothing to
+    /// return, and decoding an empty body as JSON would fail.
+    pub async fn put_discard<B: Serialize>(&self, path: &str, body: &B) -> Result<()> {
+        let res = self
+            .send(self.request(Method::PUT, path).json(body))
+            .await?;
+        check_status(res).await?;
+        Ok(())
     }
 
     /// A POST whose success is a 204: nothing to decode, and decoding an empty

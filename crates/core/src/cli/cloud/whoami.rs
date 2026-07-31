@@ -32,7 +32,7 @@ struct WhoamiOutput<'a> {
     single_tenant: bool,
     features: &'a [String],
     pinned_org: Option<&'a str>,
-    pinned_app: Option<&'a str>,
+    pinned_project: Option<&'a str>,
 }
 
 pub async fn run(globals: CloudGlobals) -> Result<()> {
@@ -44,8 +44,8 @@ pub async fn run(globals: CloudGlobals) -> Result<()> {
         false => Some(ctx.client.get("/api/v1/me").await?),
     };
 
-    let pinned_org = ctx.project.as_ref().and_then(|p| p.org());
-    let pinned_app = ctx.project.as_ref().and_then(|p| p.app());
+    let pinned_org = ctx.config.as_ref().and_then(|p| p.org());
+    let pinned_project = ctx.config.as_ref().and_then(|p| p.project());
 
     if globals.json {
         return print::json(&WhoamiOutput {
@@ -54,7 +54,7 @@ pub async fn run(globals: CloudGlobals) -> Result<()> {
             single_tenant: meta.single_tenant,
             features: &meta.features,
             pinned_org,
-            pinned_app,
+            pinned_project,
         });
     }
 
@@ -83,8 +83,8 @@ pub async fn run(globals: CloudGlobals) -> Result<()> {
             println!("Run `subs link` in your project to pin one.");
         }
     }
-    if let Some(app_id) = pinned_app {
-        println!("Pinned app: {app_id}");
+    if let Some(project_id) = pinned_project {
+        println!("Pinned project: {project_id}");
     }
 
     if let Some(me) = &me {

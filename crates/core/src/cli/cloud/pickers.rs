@@ -4,7 +4,7 @@ use anyhow::{bail, Context as _, Result};
 use dialoguer::{theme::ColorfulTheme, Input, Select};
 use serde::{Deserialize, Serialize};
 
-use crate::api::v1::{App, Org};
+use crate::api::v1::{Org, Project};
 
 use super::context::Context;
 use super::CloudGlobals;
@@ -22,7 +22,7 @@ pub async fn pick_org(ctx: &Context) -> Result<String> {
     }
 
     let default_idx = ctx
-        .project
+        .config
         .as_ref()
         .and_then(|p| p.org())
         .and_then(|d| orgs.iter().position(|o| o.id == d))
@@ -41,23 +41,23 @@ pub async fn pick_org(ctx: &Context) -> Result<String> {
     Ok(orgs[pick].id.clone())
 }
 
-pub async fn pick_app(ctx: &Context, org_id: &str) -> Result<Option<String>> {
-    let apps: Vec<App> = ctx
+pub async fn pick_project(ctx: &Context, org_id: &str) -> Result<Option<String>> {
+    let projects: Vec<Project> = ctx
         .client
-        .get(&format!("/api/v1/orgs/{org_id}/apps"))
+        .get(&format!("/api/v1/orgs/{org_id}/projects"))
         .await?;
 
-    const CREATE_LABEL: &str = "(create new app)";
+    const CREATE_LABEL: &str = "(create new project)";
     const SKIP_LABEL: &str = "(skip)";
 
-    if apps.is_empty() {
+    if projects.is_empty() {
         let items = vec![CREATE_LABEL, SKIP_LABEL];
         let pick = Select::with_theme(&ColorfulTheme::default())
-            .with_prompt("No apps in this org yet")
+            .with_prompt("No projects in this org yet")
             .items(&items)
             .default(0)
             .interact()
-            .context("app picker")?;
+            .context("project picker")?;
         if pick == 0 {
             return create_app(ctx, org_id).await.map(Some);
         }
@@ -65,13 +65,13 @@ pub async fn pick_app(ctx: &Context, org_id: &str) -> Result<Option<String>> {
     }
 
     let default_idx = ctx
-        .project
+        .config
         .as_ref()
-        .and_then(|p| p.app())
-        .and_then(|d| apps.iter().position(|a| a.id == d))
+        .and_then(|p| p.project())
+        .and_then(|d| projects.iter().position(|a| a.id == d))
         .unwrap_or(0);
 
-    let mut items: Vec<String> = apps
+    let mut items: Vec<String> = projects
         .iter()
         .map(|a| format!("{}  ({})", a.name, a.id))
         .collect();
@@ -81,17 +81,17 @@ pub async fn pick_app(ctx: &Context, org_id: &str) -> Result<Option<String>> {
     items.push(SKIP_LABEL.into());
 
     let pick = Select::with_theme(&ColorfulTheme::default())
-        .with_prompt("Select app")
+        .with_prompt("Select project")
         .items(&items)
         .default(default_idx)
         .interact()
-        .context("app picker")?;
+        .context("project picker")?;
     if pick == create_idx {
         create_app(ctx, org_id).await.map(Some)
     } else if pick == skip_idx {
         Ok(None)
     } else {
-        Ok(Some(apps[pick].id.clone()))
+        Ok(Some(projects[pick].id.clone()))
     }
 }
 
@@ -102,8 +102,8 @@ struct NamePayload<'a> {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CreateAppResponse {
-    app: App,
+struct CreateProjectResponse {
+    project: Project,
     signing_secret: String,
 }
 
@@ -113,10 +113,10 @@ struct ApiKeyRow {
     label: String,
 }
 
-pub async fn pick_api_key(ctx: &Context, app_id: &str) -> Result<String> {
+pub async fn pick_api_key(ctx: &Context, project_id: &str) -> Result<String> {
     let keys: Vec<ApiKeyRow> = ctx
         .client
-        .get(&format!("/api/v1/apps/{app_id}/api-keys"))
+        .get(&format!("/api/v1/projects/{project_id}/api-keys"))
         .await?;
     if keys.is_empty() {
         bail!("no API keys to revoke.");
@@ -144,24 +144,24 @@ pub fn prompt_text(prompt: &str) -> Result<String> {
 
 pub async fn create_app(ctx: &Context, org_id: &str) -> Result<String> {
     let name: String = Input::with_theme(&ColorfulTheme::default())
-        .with_prompt("App name")
+        .with_prompt("Project name")
         .interact_text()
-        .context("app name prompt")?;
+        .context("project name prompt")?;
 
-    let res: CreateAppResponse = ctx
+    let res: CreateProjectResponse = ctx
         .client
         .post_json(
-            &format!("/api/v1/orgs/{org_id}/apps"),
+            &format!("/api/v1/orgs/{org_id}/projects"),
             &NamePayload { name: &name },
         )
         .await?;
 
     println!();
-    println!("App created");
-    println!("  id:              {}", res.app.id);
-    println!("  name:            {}", res.app.name);
+    println!("Project created");
+    println!("  id:              {}", res.project.id);
+    println!("  name:            {}", res.project.name);
     println!("  signing_secret:  {}", res.signing_secret);
     println!();
 
-    Ok(res.app.id)
+    Ok(res.project.id)
 }

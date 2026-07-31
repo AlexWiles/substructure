@@ -5,28 +5,28 @@ use serde::{Deserialize, Serialize};
 use super::context::Context;
 use super::pickers;
 use super::print;
-use super::AppScope;
+use super::ProjectScope;
 
 #[derive(Subcommand)]
 pub enum KeysCommand {
-    /// List API keys for the current app.
+    /// List API keys for the current project.
     #[command(name = "list", visible_alias = "ls")]
     List {
         #[command(flatten)]
-        scope: AppScope,
+        scope: ProjectScope,
     },
     /// Issue a new API key. The plaintext is printed to stdout and shown once.
     /// Pipe-friendly: `subs keys create --label foo | wrangler secret put X`.
     Create {
         label: Option<String>,
         #[command(flatten)]
-        scope: AppScope,
+        scope: ProjectScope,
     },
     /// Revoke an API key (owner only).
     Revoke {
         key_id: Option<String>,
         #[command(flatten)]
-        scope: AppScope,
+        scope: ProjectScope,
     },
 }
 
@@ -70,11 +70,11 @@ pub async fn run(command: KeysCommand) -> Result<()> {
     }
 }
 
-async fn list(scope: AppScope) -> Result<()> {
-    let (ctx, app) = Context::from_app(&scope).await?;
+async fn list(scope: ProjectScope) -> Result<()> {
+    let (ctx, project) = Context::from_project(&scope).await?;
     let keys: Vec<ApiKeyRow> = ctx
         .client
-        .get(&format!("/api/v1/apps/{app}/api-keys"))
+        .get(&format!("/api/v1/projects/{project}/api-keys"))
         .await?;
 
     if scope.globals.json {
@@ -102,8 +102,8 @@ async fn list(scope: AppScope) -> Result<()> {
     Ok(())
 }
 
-async fn create(label: Option<String>, scope: AppScope) -> Result<()> {
-    let (ctx, app) = Context::from_app(&scope).await?;
+async fn create(label: Option<String>, scope: ProjectScope) -> Result<()> {
+    let (ctx, project) = Context::from_project(&scope).await?;
     let label = match label {
         Some(l) => l,
         None => {
@@ -116,7 +116,7 @@ async fn create(label: Option<String>, scope: AppScope) -> Result<()> {
     let res: CreateKeyResponse = ctx
         .client
         .post_json(
-            &format!("/api/v1/apps/{app}/api-keys"),
+            &format!("/api/v1/projects/{project}/api-keys"),
             &LabelPayload { label: &label },
         )
         .await?;
@@ -134,19 +134,19 @@ async fn create(label: Option<String>, scope: AppScope) -> Result<()> {
     Ok(())
 }
 
-async fn revoke(key_id: Option<String>, scope: AppScope) -> Result<()> {
-    let (ctx, app) = Context::from_app(&scope).await?;
+async fn revoke(key_id: Option<String>, scope: ProjectScope) -> Result<()> {
+    let (ctx, project) = Context::from_project(&scope).await?;
     let key_id = match key_id {
         Some(id) => id,
         None => {
             if !pickers::interactive(&scope.globals) {
                 bail!("missing <KEY_ID>");
             }
-            pickers::pick_api_key(&ctx, &app).await?
+            pickers::pick_api_key(&ctx, &project).await?
         }
     };
     ctx.client
-        .delete_discard(&format!("/api/v1/apps/{app}/api-keys/{key_id}"))
+        .delete_discard(&format!("/api/v1/projects/{project}/api-keys/{key_id}"))
         .await?;
 
     if scope.globals.json {

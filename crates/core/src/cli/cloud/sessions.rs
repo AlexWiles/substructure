@@ -5,11 +5,11 @@ use serde_json::value::RawValue;
 
 use super::context::Context;
 use super::print;
-use super::AppScope;
+use super::ProjectScope;
 
 #[derive(Subcommand)]
 pub enum SessionsCommand {
-    /// List debug sessions for an app.
+    /// List debug sessions for a project.
     #[command(name = "list", visible_alias = "ls")]
     List(ListCommand),
     /// Print a session's events. Prints all events and exits; pass --stream to
@@ -28,7 +28,7 @@ pub struct ListCommand {
     #[arg(long)]
     pub agent_id: Option<String>,
     #[command(flatten)]
-    pub scope: AppScope,
+    pub scope: ProjectScope,
 }
 
 #[derive(Args)]
@@ -42,7 +42,7 @@ pub struct EventsCommand {
     #[arg(long, short = 'f')]
     pub stream: bool,
     #[command(flatten)]
-    pub scope: AppScope,
+    pub scope: ProjectScope,
 }
 
 pub async fn run(command: SessionsCommand) -> Result<()> {
@@ -85,7 +85,7 @@ struct Query<'a> {
 }
 
 async fn list(cmd: ListCommand) -> Result<()> {
-    let (ctx, app) = Context::from_app(&cmd.scope).await?;
+    let (ctx, project) = Context::from_project(&cmd.scope).await?;
 
     let query = serde_urlencoded::to_string(&Query {
         limit: cmd.limit,
@@ -97,7 +97,7 @@ async fn list(cmd: ListCommand) -> Result<()> {
 
     let page: Page = ctx
         .client
-        .get(&format!("/api/v1/apps/{app}/sessions?{query}"))
+        .get(&format!("/api/v1/projects/{project}/sessions?{query}"))
         .await?;
 
     if cmd.scope.globals.json {
@@ -132,7 +132,7 @@ async fn list(cmd: ListCommand) -> Result<()> {
 }
 
 async fn events(cmd: EventsCommand) -> Result<()> {
-    let (ctx, app) = Context::from_app(&cmd.scope).await?;
+    let (ctx, project) = Context::from_project(&cmd.scope).await?;
     let session_id = match cmd.session_id {
         Some(id) => id,
         None => bail!("missing <SESSION_ID>. (Session picker not yet implemented.)"),
@@ -140,7 +140,7 @@ async fn events(cmd: EventsCommand) -> Result<()> {
 
     if cmd.stream {
         let path = format!(
-            "/api/v1/apps/{app}/sessions/{session_id}/events/stream?after_seq={}",
+            "/api/v1/projects/{project}/sessions/{session_id}/events/stream?after_seq={}",
             cmd.from
         );
         return ctx
@@ -156,7 +156,7 @@ async fn events(cmd: EventsCommand) -> Result<()> {
     let events: Vec<Box<RawValue>> = ctx
         .client
         .get(&format!(
-            "/api/v1/apps/{app}/sessions/{session_id}/events?after_seq={}",
+            "/api/v1/projects/{project}/sessions/{session_id}/events?after_seq={}",
             cmd.from
         ))
         .await?;

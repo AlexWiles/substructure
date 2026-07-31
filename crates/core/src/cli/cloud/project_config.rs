@@ -9,23 +9,27 @@ use toml_edit::{DocumentMut, Item, Table, Value};
 
 use crate::cli::env::{OutputFormat, ProviderBinding, ProviderKind};
 use crate::connectors::registry::ConnectionSpec;
-use crate::protocol::{
-    AgentConfig, AgentTool, ConnectorProtocol, Handler, LlmFormat, McpServer, RetryPolicy, SubAgent,
-};
-use crate::runtime::llm::{LlmBlock, LlmBlocks};
-use crate::runtime::worker::{AgentEntry, WorkerEndpoint};
+use crate::manifest::{AgentSection, Manifest, ProviderSpec, SlackConfig};
+use crate::runtime::llm::LlmBlocks;
+use crate::runtime::worker::AgentEntry;
 
 pub const FILENAME: &str = "substructure.toml";
 pub const DEFAULT_DB: &str = "substructure.db";
 
-/// One system, described once.
+/// One project, described once. One file is one project: a second environment
+/// is a second file (`subs apply -c substructure.staging.toml`), deployed as a
+/// second project with its own wallet, quota, and keys.
 ///
 /// A file carries two roles, either or both: **an engine you run** (`db`,
 /// `log`, `[run]`, `[server]`) and **a deployment you administer**
-/// (`[deployment]`). What the app *is* — `name`, `[agent.<id>]`, `[llm.<id>]`,
-/// `[slack]`, `[mcp.<id>]` — is one declaration whichever role reads it, so a
-/// self-hosted system is served and administered from the same file rather
-/// than two that have to agree.
+/// (`[deployment]`). What the project *is* — `name`, `[agent.<id>]`,
+/// `[llm.<id>]`, `[slack]`, `[mcp.<id>]` — is one declaration whichever role
+/// reads it, and it is exactly [`Manifest`], so a self-hosted system is served
+/// and administered from the same file rather than two that have to agree.
+///
+/// The manifest's sections are spelled out here rather than nested behind
+/// `#[serde(flatten)]` because flattening would cost `deny_unknown_fields`, and
+/// a typo'd section name being loud matters more than the repetition.
 ///
 /// A role is present when its keys are: `[deployment]` is what `subs apply`
 /// and `subs sessions` act on, and it is also what decides that a connection's
@@ -42,9 +46,10 @@ pub const DEFAULT_DB: &str = "substructure.db";
 /// rather than written.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct EnvConfig {
-    /// The app's name. `subs apply` creates the app from it when nothing is
-    /// pinned, and renames when it changes: the file is the source of truth.
+pub struct ProjectConfig {
+    /// The project's name. `subs apply` creates the project from it when
+    /// nothing is pinned, and renames when it changes: the file is the source
+    /// of truth.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Engine state: events, sessions, and the credentials `subs mcp login`
@@ -55,12 +60,13 @@ pub struct EnvConfig {
     /// directives (`substructure_core=debug,warn`). `$RUST_LOG` still wins.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log: Option<String>,
-    /// The LLM blocks this app declares, keyed by the name an agent names. The
-    /// declaration travels with the app; the credential binds per environment.
+    /// The LLM blocks this project declares, keyed by the name an agent names.
+    /// The declaration travels with the project; the credential binds per
+    /// environment.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub llm: BTreeMap<String, ProviderSpec>,
-    /// The agents this app declares, keyed by the id a client routes on. Each
-    /// section is the wire `AgentConfig` plus where its decisions go.
+    /// The agents this project declares, keyed by the id a client routes on.
+    /// Each section is the wire `AgentConfig` plus where its decisions go.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub agent: BTreeMap<String, AgentSection>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -69,7 +75,7 @@ pub struct EnvConfig {
     pub server: Option<ServerConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slack: Option<SlackConfig>,
-    /// MCP servers this app may reach, keyed by the id an agent names. An
+    /// MCP servers this project may reach, keyed by the id an agent names. An
     /// engine here dials them itself; a deployment is told the id and URL and
     /// holds the credential, so `auth` is the engine's half alone.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -92,132 +98,7 @@ pub struct Deployment {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub org: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub app: Option<String>,
-}
-
-/// One `[llm.<id>]` block: what runs a call on it, and — where the engine runs
-/// it — how a key is bound.
-///
-/// The key is named, never written, for the same reason a connection's is: a
-/// committed file must not be able to hold a secret. A `worker` block names no
-/// variable at all — the call never leaves the worker.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProviderSpec {
-    #[serde(rename = "type")]
-    pub kind: ProviderKind,
-    /// Variable holding the key. Absent ⇒ the type's own default
-    /// (`ANTHROPIC_API_KEY` and so on).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key_env: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_url: Option<String>,
-    /// Wire shape of the `llm.execute` a worker answers. Only ever valid on
-    /// `type = "worker"`; absent ⇒ the engine's neutral format.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub format: Option<LlmFormat>,
-}
-
-impl ProviderSpec {
-    fn block(&self) -> LlmBlock {
-        match self.kind {
-            ProviderKind::Worker => LlmBlock::worker(self.format),
-            _ => LlmBlock::engine(),
-        }
-    }
-
-    /// The variable this block's key is read from, for the types that need one.
-    fn api_key_env(&self) -> Option<String> {
-        self.api_key_env
-            .clone()
-            .or_else(|| self.kind.default_api_key_env().map(str::to_string))
-    }
-}
-
-/// One `[agent.<id>]` section: what the agent is, and who decides for it.
-///
-/// `worker` is the whole routing switch — set, and decisions POST there; unset,
-/// and the engine decides by accepting its own proposals.
-///
-/// The config half mirrors the wire [`AgentConfig`], but every field is
-/// optional here, because a section has two jobs and only the first is
-/// mandatory: it declares that the agent *exists* and where its decisions go,
-/// and it may also *seed* the config. An agent that delegates everything to its
-/// worker needs only the first, so `[agent.<id>]` with nothing but a `worker`
-/// URL is a complete declaration — the worker authors the config on
-/// `session.start`, exactly as it did before the file could.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct AgentSection {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub llm: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stream: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub retry: Option<RetryPolicy>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<AgentTool>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub sub_agents: Vec<SubAgent>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub mcp: Vec<McpServer>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub worker: Option<String>,
-    /// Environment variable holding the secret an engine here signs this
-    /// agent's decision requests with. Named, never written. Unset means the
-    /// requests go unsigned, rather than signed with a secret nobody can check.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub signing_secret_env: Option<String>,
-}
-
-impl AgentSection {
-    /// Whether the section says anything about the agent beyond its hosting.
-    /// A section that does not is a declaration of existence alone.
-    fn declares_config(&self) -> bool {
-        self.llm.is_some()
-            || self.model.is_some()
-            || self.system.is_some()
-            || self.stream.is_some()
-            || self.retry.is_some()
-            || !self.tools.is_empty()
-            || !self.sub_agents.is_empty()
-            || !self.mcp.is_empty()
-    }
-
-    /// The wire config this section seeds, with the hosting stripped. `None`
-    /// when the section seeds nothing — validation has already made sure a
-    /// worker is there to author one.
-    pub fn to_agent_config(&self) -> Option<AgentConfig> {
-        Some(AgentConfig {
-            llm: self.llm.clone(),
-            model: self.model.clone()?,
-            system: self.system.clone(),
-            stream: self.stream.unwrap_or(false),
-            retry: self.retry.clone(),
-            tools: self.tools.clone(),
-            sub_agents: self.sub_agents.clone(),
-            mcp: self.mcp.clone(),
-        })
-    }
-
-    /// This agent as the engine routes it: the config it seeds, and the endpoint
-    /// its decisions go to with whatever secret the named variable held.
-    pub fn to_entry(&self) -> AgentEntry {
-        AgentEntry {
-            config: self.to_agent_config(),
-            worker: self.worker.clone().map(|url| WorkerEndpoint {
-                url,
-                signing_secret: self
-                    .signing_secret_env
-                    .as_deref()
-                    .and_then(crate::cli::env_value),
-            }),
-        }
-    }
+    pub project: Option<String>,
 }
 
 /// Defaults for `subs run`.
@@ -245,82 +126,21 @@ pub struct ServerConfig {
     pub auth: Option<bool>,
 }
 
-/// The `[slack]` section: what the Socket Mode bot needs that is not a secret.
-///
-/// The tokens are absent for the same reason they are absent from `[mcp]` — a
-/// committed file must not be able to hold one — so `SLACK_APP_TOKEN` and
-/// `SLACK_BOT_TOKEN` stay in the environment.
-///
-/// `agent` is the default, and `[slack.channel.<id>]` is where one channel
-/// differs. An allowlist is the absence of a default rather than a second
-/// setting: with no `agent` here, only the declared channels are served.
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct SlackConfig {
-    /// Agent id the bot drives wherever the channel table says nothing.
-    /// Absent, with no channel declared, leaves the bot off.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent: Option<String>,
-    /// Where one channel differs, keyed by Slack channel id. An id is the
-    /// stable identity; a name is remote state that a rename re-points, so
-    /// only an id is accepted.
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub channel: BTreeMap<String, SlackChannelConfig>,
-}
-
-/// One `[slack.channel.<id>]` section: who answers there, or that nobody does.
-///
-/// A channel names an `agent` rather than restating a system prompt or a tool
-/// list, because `[agent.<id>]` already is that bundle: pointing a channel at
-/// a different agent gives it a different prompt, model, and tools at once,
-/// and the tools are the agent's own rather than a request the model may
-/// decline.
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct SlackChannelConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent: Option<String>,
-    /// The bot stays out of this channel.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub off: bool,
-}
-
-impl SlackChannelConfig {
-    /// The agent that answers here, or `None` where the bot stays out.
-    pub fn agent(&self) -> Option<&str> {
-        match self.off {
-            true => None,
-            false => self.agent.as_deref(),
+impl ProjectConfig {
+    /// The half of this file a deployment holds. Cheap enough to build on
+    /// demand: it is read at startup and at `subs apply`, never per decision.
+    pub fn manifest(&self) -> Manifest {
+        Manifest {
+            name: self.name.clone(),
+            llm: self.llm.clone(),
+            agent: self.agent.clone(),
+            mcp: self.mcp.clone(),
+            slack: self.slack.clone(),
         }
     }
-}
 
-impl SlackConfig {
-    /// Whether this section configures a bot at all.
-    pub fn is_configured(&self) -> bool {
-        self.agent.is_some() || !self.channel.is_empty()
-    }
-}
-
-impl EnvConfig {
-    /// Every connection this environment declares, keyed by the id an agent
-    /// names.
-    ///
-    /// The one place the per-protocol sections become one registry, and so the
-    /// one place a second protocol is added: `[a2a]` folds in here with its own
-    /// `ConnectorProtocol`, and ids must stay unique across sections because an
-    /// agent references a bare id and tool names are prefixed from it.
     pub fn connections(&self) -> BTreeMap<String, ConnectionSpec> {
-        self.mcp
-            .iter()
-            .map(|(id, spec)| {
-                let spec = ConnectionSpec {
-                    protocol: ConnectorProtocol::Mcp,
-                    ..spec.clone()
-                };
-                (id.clone(), spec)
-            })
-            .collect()
+        self.manifest().connections()
     }
 
     pub fn db_path(&self) -> String {
@@ -334,10 +154,7 @@ impl EnvConfig {
     /// The declared blocks as the engine reads them: venue and wire shape,
     /// never a credential.
     pub fn llm_blocks(&self) -> LlmBlocks {
-        self.llm
-            .iter()
-            .map(|(name, spec)| (name.clone(), spec.block()))
-            .collect()
+        self.manifest().llm_blocks()
     }
 
     /// The blocks the engine runs itself, each with the variable its key comes
@@ -357,12 +174,9 @@ impl EnvConfig {
             .collect()
     }
 
-    /// Every agent this app declares, keyed by the id a client routes on.
+    /// Every agent this project declares, keyed by the id a client routes on.
     pub fn agents(&self) -> BTreeMap<String, AgentEntry> {
-        self.agent
-            .iter()
-            .map(|(id, section)| (id.clone(), section.to_entry()))
-            .collect()
+        self.manifest().agents()
     }
 
     /// The declared agent ids, for the error that says what could have been named.
@@ -384,8 +198,8 @@ impl EnvConfig {
         self.deployment.as_ref()?.org.as_deref()
     }
 
-    pub fn app(&self) -> Option<&str> {
-        self.deployment.as_ref()?.app.as_deref()
+    pub fn project(&self) -> Option<&str> {
+        self.deployment.as_ref()?.project.as_deref()
     }
 
     /// The deployment section, creating it if the file has none — for the
@@ -398,185 +212,12 @@ impl EnvConfig {
         let at = path.display();
         let value: toml::Value = toml::from_str(s).map_err(|e| anyhow!("parsing {at}: {e}"))?;
         moved_keys(&value, &at)?;
-        let config: EnvConfig = value.try_into().map_err(|e| anyhow!("parsing {at}: {e}"))?;
-        for (id, spec) in &config.mcp {
-            check_id(id).map_err(|e| anyhow!("{at}: [mcp.{id}]: {e}"))?;
-            check_url(&spec.url).map_err(|e| anyhow!("{at}: [mcp.{id}]: {e}"))?;
-        }
-        for (id, spec) in &config.llm {
-            check_llm(id, spec).map_err(|e| anyhow!("{at}: [llm.{id}]: {e}"))?;
-        }
-        for (id, section) in &config.agent {
-            check_agent(id, section, &config).map_err(|e| anyhow!("{at}: [agent.{id}]: {e}"))?;
-        }
-        if let Some(slack) = &config.slack {
-            check_slack(slack, &config).map_err(|e| anyhow!("{at}: {e}"))?;
-        }
+        let config: ProjectConfig = value.try_into().map_err(|e| anyhow!("parsing {at}: {e}"))?;
+        config
+            .manifest()
+            .validate()
+            .map_err(|e| anyhow!("{at}: {e}"))?;
         Ok(config)
-    }
-}
-
-/// A block declares one venue, so the fields of the other are not a detail to
-/// ignore — they are a misunderstanding of what the block is.
-fn check_llm(id: &str, spec: &ProviderSpec) -> Result<()> {
-    check_id(id)?;
-    match spec.kind {
-        ProviderKind::Worker => {
-            if spec.api_key_env.is_some() || spec.base_url.is_some() {
-                bail!(
-                    "a `worker` block needs no `api_key_env` or `base_url`: the call never \
-                     leaves your worker"
-                );
-            }
-        }
-        _ => {
-            if spec.format.is_some() {
-                bail!(
-                    "`format` is the wire shape of an `llm.execute`, so it only applies to \
-                     `type = \"worker\"`"
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Every name an agent uses is declared in this same file, so a typo is caught
-/// here rather than as a failing decision on the first turn.
-fn check_agent(id: &str, section: &AgentSection, config: &EnvConfig) -> Result<()> {
-    check_id(id)?;
-
-    if let Some(url) = &section.worker {
-        check_url(url)?;
-    } else if section.signing_secret_env.is_some() {
-        bail!(
-            "`signing_secret_env` signs decision requests, and there is no `worker` to send any to"
-        );
-    }
-
-    // Nothing but hosting: the worker authors the config. Legitimate, and the
-    // only way to say "this agent is entirely my code" — but only a worker can
-    // author one, so without one the engine would have nothing to propose.
-    if !section.declares_config() {
-        if section.worker.is_none() {
-            bail!(
-                "declares nothing. An agent the engine decides for needs an `llm` and a \
-                 `model` to propose from; an agent whose worker authors its config needs a \
-                 `worker` URL."
-            );
-        }
-        return Ok(());
-    }
-
-    // Anything the file seeds has to be a config the engine can actually
-    // propose from, so a half-declared one is an error rather than a proposal
-    // that fails at the first model call.
-    let Some(llm) = section.llm.as_deref() else {
-        bail!(
-            "no `llm`. Name one of the declared blocks: {}",
-            declared(config.llm.keys())
-        );
-    };
-    let Some(block) = config.llm.get(llm) else {
-        bail!(
-            "`llm = \"{llm}\"` names no block. Declared: {}",
-            declared(config.llm.keys())
-        );
-    };
-    if section.model.is_none() {
-        bail!("no `model`. An agent that declares an `llm` has to say which model on it.");
-    }
-
-    for server in &section.mcp {
-        if !config.mcp.contains_key(&server.id) {
-            bail!(
-                "`mcp` names no connection `{}`. Declared: {}",
-                server.id,
-                declared(config.mcp.keys())
-            );
-        }
-    }
-
-    // A worker-executed tool comes from worker code, so a file that declares
-    // one would be naming a function nothing here can run.
-    for tool in &section.tools {
-        if tool.handler != Some(Handler::Client) {
-            bail!(
-                "tool `{}` needs `handler = \"client\"`: a file can only declare tools the \
-                 browser runs, and worker-run tools come from worker code",
-                tool.name
-            );
-        }
-    }
-
-    if section.worker.is_none() && block.kind == ProviderKind::Worker {
-        bail!("`llm = \"{llm}\"` is a `worker` block, so this agent needs a `worker` to run its calls");
-    }
-    Ok(())
-}
-
-/// Every agent the bot routes to is declared in this same file, so a typo is
-/// caught here rather than as a bot that answers nowhere.
-fn check_slack(slack: &SlackConfig, config: &EnvConfig) -> Result<()> {
-    if let Some(agent) = &slack.agent {
-        check_slack_agent(agent, config).map_err(|e| anyhow!("[slack]: {e}"))?;
-    }
-    for (id, channel) in &slack.channel {
-        check_channel(id, channel, config).map_err(|e| anyhow!("[slack.channel.{id}]: {e}"))?;
-    }
-    // Channels that are all `off` and no default to fall back to: a bot that
-    // connects, listens, and can answer nowhere.
-    if slack.is_configured() && slack.agent.is_none() && !slack.channel.values().any(|c| !c.off) {
-        bail!(
-            "[slack]: nothing to answer with. Name a default `agent`, or name one in a \
-             `[slack.channel.<id>]`."
-        );
-    }
-    Ok(())
-}
-
-fn check_slack_agent(agent: &str, config: &EnvConfig) -> Result<()> {
-    if config.agent.contains_key(agent) {
-        return Ok(());
-    }
-    bail!(
-        "`agent = \"{agent}\"` names no agent. Declared: {}",
-        declared(config.agent.keys())
-    )
-}
-
-/// A channel says one of two things, and a section that says both or neither
-/// is a setting with no meaning rather than one to resolve by precedence.
-fn check_channel(id: &str, channel: &SlackChannelConfig, config: &EnvConfig) -> Result<()> {
-    if id.is_empty() {
-        bail!("the id is empty");
-    }
-    // The likeliest mistake, and one that would otherwise match no event and
-    // report nothing: a rename re-points a name, so only an id can be pinned.
-    if id.starts_with('#') || id.starts_with('@') {
-        bail!(
-            "`{id}` is a name, not a channel id. A rename re-points a name; use the id from the \
-             channel's About tab (`C…`)."
-        );
-    }
-    match (&channel.agent, channel.off) {
-        (Some(_), true) => bail!(
-            "`off` and `agent` contradict: a channel the bot stays out of has nobody to answer in it"
-        ),
-        (None, false) => bail!(
-            "declares nothing. Name the `agent` that answers here, or set `off = true` to keep \
-             the bot out."
-        ),
-        (Some(agent), false) => check_slack_agent(agent, config),
-        (None, true) => Ok(()),
-    }
-}
-
-fn declared<'a>(mut ids: impl Iterator<Item = &'a String>) -> String {
-    let joined = ids.by_ref().cloned().collect::<Vec<_>>().join(", ");
-    match joined.is_empty() {
-        true => "none".to_string(),
-        false => joined,
     }
 }
 
@@ -584,9 +225,21 @@ fn declared<'a>(mut ids: impl Iterator<Item = &'a String>) -> String {
 /// `deny_unknown_fields`' "unknown field", which says nothing about the file
 /// this one is.
 fn moved_keys(value: &toml::Value, at: &impl std::fmt::Display) -> Result<()> {
-    let pins: Vec<&str> = ["url", "org", "app"]
+    // The unit is a project now, so `app` anywhere is named rather than left to
+    // `deny_unknown_fields`, which would only say the field is unknown.
+    if value.get("deployment").and_then(|d| d.get("app")).is_some() {
+        bail!(
+            "{at}: `[deployment].app` is now `[deployment].project`. One file is one project; \
+             a second environment is a second file (`subs apply -c substructure.staging.toml`)."
+        );
+    }
+    let pins: Vec<&str> = ["url", "org", "project", "app"]
         .into_iter()
         .filter(|k| value.get(k).is_some())
+        .map(|k| match k {
+            "app" => "project",
+            k => k,
+        })
         .collect();
     if value.get("target").is_some() {
         let and_pins = match pins.is_empty() {
@@ -608,7 +261,7 @@ fn moved_keys(value: &toml::Value, at: &impl std::fmt::Display) -> Result<()> {
     if value.get("worker").is_some() {
         bail!(
             "{at}: `[worker]` is no longer a setting: a worker belongs to one agent, not to \
-             the app. Write `worker = \"<url>\"` under the `[agent.<id>]` it decides for, and \
+             the project. Write `worker = \"<url>\"` under the `[agent.<id>]` it decides for, and \
              leave it off the agents the engine decides for."
         );
     }
@@ -626,36 +279,9 @@ fn moved_keys(value: &toml::Value, at: &impl std::fmt::Display) -> Result<()> {
     Ok(())
 }
 
-/// An id becomes the prefix on every tool name the model sees, so it is held to
-/// what a tool name may contain rather than to what TOML accepts as a key.
-fn check_id(id: &str) -> Result<()> {
-    if id.is_empty() {
-        bail!("the id is empty");
-    }
-    if let Some(c) = id
-        .chars()
-        .find(|c| !c.is_ascii_alphanumeric() && *c != '_' && *c != '-')
-    {
-        bail!("`{id}` cannot prefix a tool name: `{c}` is not a letter, digit, `_`, or `-`");
-    }
-    Ok(())
-}
-
-/// Rejected while reading the file rather than at the first fetch, where it
-/// would surface as a discovery failure against a URL nobody meant to write.
-/// A token-backed connection never reaches the OAuth resolver's own check:
-/// `EnvCredentials` sends `$token_env` wherever the URL points.
-fn check_url(url: &str) -> Result<()> {
-    let parsed = reqwest::Url::parse(url).with_context(|| format!("`{url}` is not a URL"))?;
-    if parsed.scheme() == "https" || crate::connectors::oauth::is_loopback(url) {
-        return Ok(());
-    }
-    bail!("`{url}` is not https: a credential would cross the network in the clear")
-}
-
 #[derive(Debug, Clone)]
 pub struct Found {
-    pub config: EnvConfig,
+    pub config: ProjectConfig,
     pub path: PathBuf,
 }
 
@@ -672,7 +298,7 @@ pub fn resolve(path: Option<&Path>) -> Result<Option<Found>> {
 /// What the file says, or the defaults when there is none. For the commands
 /// that work without one — an engine runs on defaults, and every setting is
 /// also a flag.
-pub fn load(path: Option<&Path>) -> Result<EnvConfig> {
+pub fn load(path: Option<&Path>) -> Result<ProjectConfig> {
     Ok(resolve(path)?.map(|found| found.config).unwrap_or_default())
 }
 
@@ -698,7 +324,7 @@ pub fn find() -> Result<Option<Found>> {
 pub fn load_explicit(path: &Path) -> Result<Found> {
     let s = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     Ok(Found {
-        config: EnvConfig::parse(&s, path)?,
+        config: ProjectConfig::parse(&s, path)?,
         path: path.to_path_buf(),
     })
 }
@@ -706,7 +332,7 @@ pub fn load_explicit(path: &Path) -> Result<Found> {
 /// Write `config` back, keeping everything about the file that is not a
 /// setting. A machine edit must not cost a reader their comments or their
 /// layout, so the parsed document is edited in place rather than replaced.
-pub fn write(path: &Path, config: &EnvConfig) -> Result<()> {
+pub fn write(path: &Path, config: &ProjectConfig) -> Result<()> {
     let mut rendered: DocumentMut =
         toml_edit::ser::to_document(config).context("serializing substructure.toml")?;
     for (_, item) in rendered.as_table_mut().iter_mut() {
@@ -777,6 +403,8 @@ fn merge(target: &mut Table, source: &Table) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::LlmFormat;
+    use crate::runtime::llm::LlmBlock;
 
     fn tmpdir() -> PathBuf {
         // Timestamp alone collides across parallel tests; the counter disambiguates.
@@ -791,11 +419,11 @@ mod tests {
         dir
     }
 
-    fn parse(s: &str) -> Result<EnvConfig> {
-        EnvConfig::parse(s, Path::new("substructure.toml"))
+    fn parse(s: &str) -> Result<ProjectConfig> {
+        ProjectConfig::parse(s, Path::new("substructure.toml"))
     }
 
-    fn ok(s: &str) -> EnvConfig {
+    fn ok(s: &str) -> ProjectConfig {
         parse(s).unwrap()
     }
 
@@ -824,19 +452,19 @@ mod tests {
 
             [deployment]
             url = "https://subs.internal"
-            app = "app_1"
+            project = "proj_1"
         "#);
         assert_eq!(both.name.as_deref(), Some("support-bot"));
         assert_eq!(both.db_path(), "prod.db");
         assert_eq!(both.deployment_url(), Some("https://subs.internal"));
-        assert_eq!(both.app(), Some("app_1"));
+        assert_eq!(both.project(), Some("proj_1"));
     }
 
     #[test]
     fn an_empty_file_is_valid_and_is_the_defaults() {
-        assert_eq!(ok(""), EnvConfig::default());
-        assert_eq!(EnvConfig::default().db_path(), DEFAULT_DB);
-        assert!(EnvConfig::default().server_auth());
+        assert_eq!(ok(""), ProjectConfig::default());
+        assert_eq!(ProjectConfig::default().db_path(), DEFAULT_DB);
+        assert!(ProjectConfig::default().server_auth());
     }
 
     #[test]
@@ -886,11 +514,12 @@ mod tests {
         assert!(err.contains("`target` is no longer"), "got {err}");
         assert!(err.contains("[deployment]"), "got {err}");
 
-        // The pins moved with it, so one message covers the whole edit.
+        // The pins moved with it, so one message covers the whole edit — and a
+        // top-level `app` is reported under the name it now has.
         let err = parse("target = \"remote\"\nurl = \"https://x\"\norg = \"o\"\napp = \"a\"\n")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("`url`, `org`, `app`"), "got {err}");
+        assert!(err.contains("`url`, `org`, `project`"), "got {err}");
 
         // And on their own, without a target to hang the message on.
         let err = parse("org = \"acme\"\n").unwrap_err().to_string();
@@ -1244,7 +873,7 @@ mod tests {
             [deployment]
             url = "https://subs.internal"
             org = "org_1"
-            app = "app_1"
+            project = "proj_1"
         "#);
         let written = toml::to_string_pretty(&cfg).unwrap();
         assert_eq!(ok(&written), cfg, "written back as {written}");
@@ -1258,7 +887,7 @@ mod tests {
         let mut cfg = ok("db = \"dev.db\"\n[llm.claude]\ntype = \"anthropic\"\n\n\
              [agent.a]\nllm = \"claude\"\nmodel = \"m\"\n");
         cfg.name = Some("support-bot".into());
-        cfg.deployment_mut().app = Some("app_1".into());
+        cfg.deployment_mut().project = Some("proj_1".into());
         write(&path, &cfg).unwrap();
 
         assert_eq!(load_explicit(&path).unwrap().config, cfg);
@@ -1274,7 +903,7 @@ mod tests {
     #[test]
     fn an_empty_slack_section_is_not_a_configured_bot() {
         assert_eq!(ok("[slack]\n").slack_agent(), None);
-        assert_eq!(EnvConfig::default().slack_agent(), None);
+        assert_eq!(ProjectConfig::default().slack_agent(), None);
         assert!(!ok("[slack]\n").slack.unwrap().is_configured());
 
         // The old bare key is gone, and says so rather than doing nothing.
@@ -1289,7 +918,7 @@ mod tests {
             .to_string()
     }
 
-    fn slack(s: &str) -> Result<EnvConfig> {
+    fn slack(s: &str) -> Result<ProjectConfig> {
         parse(&(agents() + s))
     }
 
@@ -1375,7 +1004,7 @@ mod tests {
         let path = tmpdir().join(FILENAME);
         fs::write(
             &path,
-            "# how this app is deployed\n\
+            "# how this project is deployed\n\
              name = \"support-bot\"\n\
              \n\
              [llm.claude]\n\
@@ -1397,31 +1026,35 @@ mod tests {
 
         let mut cfg = load_explicit(&path).unwrap().config;
         cfg.deployment_mut().org = Some("new".into());
-        cfg.deployment_mut().app = Some("app_1".into());
+        cfg.deployment_mut().project = Some("proj_1".into());
         write(&path, &cfg).unwrap();
 
         let after = fs::read_to_string(&path).unwrap();
-        assert!(after.contains("# how this app is deployed"), "{after}");
+        assert!(after.contains("# how this project is deployed"), "{after}");
         assert!(after.contains("# where the agent runs"), "{after}");
         assert!(
             after.contains("org = \"new\"        # pinned by hand"),
             "{after}"
         );
-        assert!(after.contains("app = \"app_1\""), "{after}");
+        assert!(after.contains("project = \"proj_1\""), "{after}");
         assert!(after.contains("[mcp.sentry]"), "{after}");
     }
 
     #[test]
     fn writing_removes_a_setting_that_is_no_longer_set() {
         let path = tmpdir().join(FILENAME);
-        fs::write(&path, "[deployment]\norg = \"acme\"\napp = \"app_1\"\n").unwrap();
+        fs::write(
+            &path,
+            "[deployment]\norg = \"acme\"\nproject = \"proj_1\"\n",
+        )
+        .unwrap();
 
         let mut cfg = load_explicit(&path).unwrap().config;
-        cfg.deployment_mut().app = None;
+        cfg.deployment_mut().project = None;
         write(&path, &cfg).unwrap();
 
         let after = fs::read_to_string(&path).unwrap();
-        assert!(!after.contains("app"), "{after}");
+        assert!(!after.contains("project"), "{after}");
         assert!(after.contains("org = \"acme\""), "{after}");
     }
 
@@ -1446,14 +1079,14 @@ mod tests {
         let cfg_path = root.join(FILENAME);
         fs::write(
             &cfg_path,
-            "[deployment]\norg = \"org-x\"\napp = \"app-y\"\n",
+            "[deployment]\norg = \"org-x\"\nproject = \"project-y\"\n",
         )
         .unwrap();
 
         let found = find_from(&nested).unwrap().expect("should find ancestor");
         assert_eq!(found.path, cfg_path);
         assert_eq!(found.config.org(), Some("org-x"));
-        assert_eq!(found.config.app(), Some("app-y"));
+        assert_eq!(found.config.project(), Some("project-y"));
     }
 
     #[test]

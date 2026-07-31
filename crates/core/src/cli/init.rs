@@ -163,7 +163,7 @@ fn render(p: &Plan) -> String {
             Some(url) => s.push_str(&format!("url = \"{url}\"\n")),
             // The section is what says a deployment is in play; `subs link`
             // fills in the pins.
-            None => s.push_str("# the hosted cloud. `subs link` pins an org and app\n"),
+            None => s.push_str("# the hosted cloud. `subs link` pins an org and project\n"),
         }
     }
     s
@@ -309,8 +309,8 @@ fn ask(role: Role) -> Result<Plan> {
                  changes, so the file stays the source of truth.",
             );
             let entered: String = Input::with_theme(&theme())
-                .with_prompt("App name")
-                .default(default_name().unwrap_or_else(|| "my-app".into()))
+                .with_prompt("Project name")
+                .default(default_name().unwrap_or_else(|| "my-project".into()))
                 .interact_text()?;
             Some(entered)
         }
@@ -438,7 +438,7 @@ fn next_steps(plan: &Plan) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::cloud::project_config::{self, EnvConfig};
+    use crate::cli::cloud::project_config::{self, ProjectConfig};
 
     fn tmpdir() -> PathBuf {
         // Timestamp alone collides across parallel tests; the counter disambiguates.
@@ -466,7 +466,7 @@ mod tests {
 
     /// A rendered file has to survive the same parse a hand-written one does —
     /// `deny_unknown_fields` makes a misspelling an error, so a renderer can rot.
-    fn parse(body: &str) -> EnvConfig {
+    fn parse(body: &str) -> ProjectConfig {
         let path = tmpdir().join("substructure.toml");
         fs::write(&path, body).unwrap();
         project_config::load_explicit(&path).unwrap().config

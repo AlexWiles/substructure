@@ -192,7 +192,7 @@ impl EmbeddedRuntime {
                 substructure_core::RuntimeDeps {
                     store: event_store,
                     agents: Arc::new(EmptyAgentDirectory),
-                    llm_providers: Arc::new(llm_providers),
+                    llm: Arc::new(llm_providers),
                     llm_task_queue,
                     sub_agent_task_queue,
                     connections: None,

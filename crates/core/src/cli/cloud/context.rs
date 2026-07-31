@@ -3,12 +3,12 @@ use anyhow::{bail, Result};
 use super::credentials;
 use super::http::CloudClient;
 use super::pickers;
-use super::project_config::{self, EnvConfig};
-use super::{AppScope, CloudGlobals, OrgScope};
+use super::project_config::{self, ProjectConfig};
+use super::{CloudGlobals, OrgScope, ProjectScope};
 
 /// The server a credential command targets, without building a [`Context`]:
 /// flag > the environment file's `[deployment].url` > `$SUBS_API_URL` >
-/// default. Same order [`Context::with_project`] applies, so `subs login -c
+/// default. Same order [`Context::with_config`] applies, so `subs login -c
 /// f.toml` writes the token under the URL every other command run with `-c
 /// f.toml` reads.
 pub fn api_url(globals: &CloudGlobals) -> Result<String> {
@@ -19,32 +19,34 @@ pub fn api_url(globals: &CloudGlobals) -> Result<String> {
 }
 
 pub struct Context {
-    pub project: Option<EnvConfig>,
+    /// The file this invocation read, if it read one — not to be confused with
+    /// the project it pins.
+    pub config: Option<ProjectConfig>,
     pub client: CloudClient,
     pub globals: CloudGlobals,
 }
 
 impl Context {
     pub fn load(globals: &CloudGlobals) -> Result<Self> {
-        let project = project_config::resolve(globals.config.as_deref())?.map(|found| found.config);
-        Self::with_project(globals, project)
+        let config = project_config::resolve(globals.config.as_deref())?.map(|found| found.config);
+        Self::with_config(globals, config)
     }
 
-    /// A context over an environment the caller resolved itself, for `subs
-    /// link` — which may be creating the file every other command reads.
-    pub fn with_project(globals: &CloudGlobals, project: Option<EnvConfig>) -> Result<Self> {
+    /// A context over a file the caller resolved itself, for `subs link` —
+    /// which may be creating the file every other command reads.
+    pub fn with_config(globals: &CloudGlobals, config: Option<ProjectConfig>) -> Result<Self> {
         let credentials_path = credentials::resolve_path(globals.credentials.clone())?;
         let creds = credentials::load(&credentials_path)?;
-        // Precedence: --url flag > project substructure.toml url > $SUBS_API_URL > default.
+        // Precedence: --url flag > the file's [deployment].url > $SUBS_API_URL > default.
         let url_override = globals
             .url
             .as_deref()
-            .or_else(|| project.as_ref().and_then(|p| p.deployment_url()));
+            .or_else(|| config.as_ref().and_then(|p| p.deployment_url()));
         let api_url = credentials::resolve_api_url(url_override);
         let token = credentials::resolve_token(&creds, &api_url);
         let client = CloudClient::new(api_url, token);
         Ok(Self {
-            project,
+            config,
             client,
             globals: globals.clone(),
         })
@@ -56,58 +58,62 @@ impl Context {
         Ok((ctx, org))
     }
 
-    pub async fn from_app(scope: &AppScope) -> Result<(Self, String)> {
+    pub async fn from_project(scope: &ProjectScope) -> Result<(Self, String)> {
         let ctx = Self::load(&scope.globals)?;
 
-        // If we already have an app id (flag or pinned), skip org resolution
-        // entirely — app-scoped routes don't need it.
-        if let Some(app) = scope.app.clone().or_else(|| ctx.pinned(EnvConfig::app)) {
-            return Ok((ctx, app));
+        // If we already have a project id (flag or pinned), skip org resolution
+        // entirely — project-scoped routes don't need it.
+        if let Some(project) = scope
+            .project
+            .clone()
+            .or_else(|| ctx.pinned(ProjectConfig::project))
+        {
+            return Ok((ctx, project));
         }
 
-        // A single-tenant server (e.g. a local server) advertises its org/app
-        // in response headers; adopt the app and skip the picker entirely.
-        if let Some(app) = ctx.server_default_app().await {
-            return Ok((ctx, app));
+        // A single-tenant server (e.g. a local server) advertises its org/project
+        // in response headers; adopt the project and skip the picker entirely.
+        if let Some(project) = ctx.server_default_project().await {
+            return Ok((ctx, project));
         }
 
-        // Need to pick. Picker enumerates apps via /orgs/:org/apps, so it
+        // Need to pick. Picker enumerates projects via /orgs/:org/projects, so it
         // still needs an org — but only for the picker, not for the URL we
         // act on afterwards.
         if !pickers::interactive(&ctx.globals) {
-            bail!("no app selected. Pass --app <id>.");
+            bail!("no project selected. Pass --project <id>.");
         }
         let org = ctx.require_org(scope.org.as_deref()).await?;
-        let app = match pickers::pick_app(&ctx, &org).await? {
+        let project = match pickers::pick_project(&ctx, &org).await? {
             Some(a) => a,
-            None => bail!("no app selected"),
+            None => bail!("no project selected"),
         };
-        Ok((ctx, app))
+        Ok((ctx, project))
     }
 
-    /// The app to act on without a picker: flag, then the file's pin, then
+    /// The project to act on without a picker: flag, then the file's pin, then
     /// what a single-tenant server advertises. For callers that can carry on
     /// without one.
-    pub async fn pinned_app(&self, flag: Option<&str>) -> Option<String> {
-        if let Some(app) = flag {
-            return Some(app.to_string());
+    pub async fn pinned_project(&self, flag: Option<&str>) -> Option<String> {
+        if let Some(project) = flag {
+            return Some(project.to_string());
         }
-        if let Some(app) = self.pinned(EnvConfig::app) {
-            return Some(app);
+        if let Some(project) = self.pinned(ProjectConfig::project) {
+            return Some(project);
         }
-        self.server_default_app().await
+        self.server_default_project().await
     }
 
     /// What the file pins, if this invocation read one.
-    fn pinned(&self, key: fn(&EnvConfig) -> Option<&str>) -> Option<String> {
-        key(self.project.as_ref()?).map(str::to_string)
+    fn pinned(&self, key: fn(&ProjectConfig) -> Option<&str>) -> Option<String> {
+        key(self.config.as_ref()?).map(str::to_string)
     }
 
     pub async fn require_org(&self, flag: Option<&str>) -> Result<String> {
         if let Some(s) = flag {
             return Ok(s.to_string());
         }
-        if let Some(org) = self.pinned(EnvConfig::org) {
+        if let Some(org) = self.pinned(ProjectConfig::org) {
             return Ok(org);
         }
         if let Some(org) = self.server_default_org().await {
@@ -125,10 +131,10 @@ impl Context {
         self.client.default_org()
     }
 
-    /// The app a single-tenant server advertises, or None against the cloud.
-    pub async fn server_default_app(&self) -> Option<String> {
+    /// The project a single-tenant server advertises, or None against the cloud.
+    pub async fn server_default_project(&self) -> Option<String> {
         self.probe_server_defaults().await;
-        self.client.default_app()
+        self.client.default_project()
     }
 
     // Defaults ride on response headers (captured in CloudClient), so one

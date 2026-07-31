@@ -9,7 +9,7 @@ pub mod run;
 
 use clap::Subcommand;
 
-use cloud::{AppScope, CloudGlobals, GLOBAL_FLAGS_HELP};
+use cloud::{CloudGlobals, ProjectScope, GLOBAL_FLAGS_HELP};
 
 /// Read a secret the project file names rather than holds. An unset or blank
 /// variable reads as absent, so a stale name never becomes an empty secret.
@@ -76,7 +76,7 @@ pub enum Command {
         #[command(flatten)]
         globals: CloudGlobals,
     },
-    /// Show the currently logged-in user and default org/app.
+    /// Show the currently logged-in user and default org/project.
     Whoami {
         #[command(flatten)]
         globals: CloudGlobals,
@@ -87,41 +87,53 @@ pub enum Command {
         #[command(subcommand)]
         command: cloud::orgs::OrgsCommand,
     },
-    /// Manage apps.
+    /// Manage projects.
     #[command(after_help = GLOBAL_FLAGS_HELP)]
-    Apps {
+    Projects {
         #[command(subcommand)]
-        command: cloud::apps::AppsCommand,
+        command: cloud::projects::ProjectsCommand,
     },
-    /// Manage API keys for an app.
+    /// Inspect the agents a project declares, and rotate their signing secrets.
+    #[command(after_help = GLOBAL_FLAGS_HELP)]
+    Agents {
+        #[command(subcommand)]
+        command: cloud::agents::AgentsCommand,
+    },
+    /// Bind the keys behind a project's `[llm.*]` blocks.
+    #[command(after_help = GLOBAL_FLAGS_HELP)]
+    Llm {
+        #[command(subcommand)]
+        command: cloud::llm::LlmCommand,
+    },
+    /// Manage API keys for a project.
     #[command(after_help = GLOBAL_FLAGS_HELP)]
     Keys {
         #[command(subcommand)]
         command: cloud::keys::KeysCommand,
     },
-    /// Inspect sessions for an app (list, stream events).
+    /// Inspect sessions for a project (list, stream events).
     #[command(after_help = GLOBAL_FLAGS_HELP)]
     Sessions {
         #[command(subcommand)]
         command: cloud::sessions::SessionsCommand,
     },
-    /// Open an app's admin page in your browser.
+    /// Open a project's admin page in your browser.
     Open {
-        app_id: Option<String>,
+        project_id: Option<String>,
         /// Print the URL instead of opening a browser.
         #[arg(long)]
         no_browser: bool,
         #[command(flatten)]
-        scope: AppScope,
+        scope: ProjectScope,
     },
-    /// Link the current directory to an org (and app) by writing a
+    /// Link the current directory to an org (and project) by writing a
     /// `substructure.toml`, so commands run from this tree pick them up automatically.
     Link(cloud::link::LinkCommand),
-    /// Push the environment file to the deployment, creating the app it
+    /// Push the environment file to the deployment, creating the project it
     /// describes if nothing is pinned yet.
     #[command(after_help = GLOBAL_FLAGS_HELP)]
     Apply(cloud::apply::ApplyCommand),
-    /// Inspect an app's configuration history.
+    /// Inspect a project's configuration history.
     #[command(after_help = GLOBAL_FLAGS_HELP)]
     Config {
         #[command(subcommand)]
@@ -152,14 +164,16 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
         Command::Logout { globals } => cloud::logout::run(&globals).await,
         Command::Whoami { globals } => cloud::whoami::run(globals).await,
         Command::Orgs { command } => cloud::orgs::run(command).await,
-        Command::Apps { command } => cloud::apps::run(command).await,
+        Command::Projects { command } => cloud::projects::run(command).await,
+        Command::Agents { command } => cloud::agents::run(command).await,
+        Command::Llm { command } => cloud::llm::run(command).await,
         Command::Keys { command } => cloud::keys::run(command).await,
         Command::Sessions { command } => cloud::sessions::run(command).await,
         Command::Open {
-            app_id,
+            project_id,
             no_browser,
             scope,
-        } => cloud::open::run(app_id, no_browser, scope).await,
+        } => cloud::open::run(project_id, no_browser, scope).await,
         Command::Link(cmd) => cloud::link::run(cmd).await,
         Command::Apply(cmd) => cloud::apply::run(cmd).await,
         Command::Config { command } => cloud::apply::config(command).await,
@@ -171,8 +185,10 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
 // in sync with the enum rather than scraping argv so we never leak secrets
 // users pass on the command line.
 fn command_path(cmd: &Command) -> &'static str {
+    use cloud::agents::AgentsCommand;
+    use cloud::llm::LlmCommand;
     use cloud::sessions::SessionsCommand;
-    use cloud::{apps::AppsCommand, keys::KeysCommand, orgs::OrgsCommand};
+    use cloud::{keys::KeysCommand, orgs::OrgsCommand, projects::ProjectsCommand};
     match cmd {
         Command::Init(_) => "init",
         Command::Serve(_) => "serve",
@@ -194,12 +210,20 @@ fn command_path(cmd: &Command) -> &'static str {
         Command::Orgs { command } => match command {
             OrgsCommand::List { .. } => "orgs list",
         },
-        Command::Apps { command } => match command {
-            AppsCommand::List { .. } => "apps list",
-            AppsCommand::Create { .. } => "apps create",
-            AppsCommand::Show { .. } => "apps show",
-            AppsCommand::Rename { .. } => "apps rename",
-            AppsCommand::Delete { .. } => "apps delete",
+        Command::Projects { command } => match command {
+            ProjectsCommand::List { .. } => "projects list",
+            ProjectsCommand::Show { .. } => "projects show",
+            ProjectsCommand::Delete { .. } => "projects delete",
+        },
+        Command::Agents { command } => match command {
+            AgentsCommand::List { .. } => "agents list",
+            AgentsCommand::Show { .. } => "agents show",
+            AgentsCommand::RotateSecret { .. } => "agents rotate-secret",
+        },
+        Command::Llm { command } => match command {
+            LlmCommand::List { .. } => "llm list",
+            LlmCommand::SetKey { .. } => "llm set-key",
+            LlmCommand::DeleteKey { .. } => "llm delete-key",
         },
         Command::Keys { command } => match command {
             KeysCommand::List { .. } => "keys list",

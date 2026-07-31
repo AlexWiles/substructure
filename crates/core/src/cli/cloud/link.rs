@@ -5,7 +5,7 @@ use anyhow::{bail, Context as _, Result};
 
 use super::context::Context;
 use super::pickers;
-use super::project_config::{self, EnvConfig, FILENAME};
+use super::project_config::{self, ProjectConfig, FILENAME};
 use super::{print, CloudGlobals};
 
 #[derive(Debug, clap::Args)]
@@ -13,11 +13,11 @@ pub struct LinkCommand {
     /// Org id to pin. Skips the org picker.
     #[arg(long)]
     pub org: Option<String>,
-    /// App id to pin. Skips the app picker. Pass `--app=` (empty) to omit
-    /// pinning an app while still pinning an org.
+    /// Project id to pin. Skips the project picker. Pass `--project=` (empty)
+    /// to omit pinning a project while still pinning an org.
     #[arg(long)]
-    pub app: Option<String>,
-    /// Repin a file that already names an org or app.
+    pub project: Option<String>,
+    /// Repin a file that already names an org or project.
     #[arg(long)]
     pub force: bool,
     #[command(flatten)]
@@ -27,7 +27,7 @@ pub struct LinkCommand {
 /// The file to link: the one commands run from this tree already read, or a new
 /// one here. Everything link does not own is carried across, so relinking keeps
 /// the engine settings, connections, and worker the file declares.
-fn target(globals: &CloudGlobals) -> Result<(PathBuf, EnvConfig)> {
+fn target(globals: &CloudGlobals) -> Result<(PathBuf, ProjectConfig)> {
     let found = match globals.config.as_deref() {
         Some(path) if !path.exists() => None,
         path => project_config::resolve(path)?,
@@ -41,7 +41,7 @@ fn target(globals: &CloudGlobals) -> Result<(PathBuf, EnvConfig)> {
                     .context("could not determine cwd")?
                     .join(FILENAME),
             };
-            Ok((path, EnvConfig::default()))
+            Ok((path, ProjectConfig::default()))
         }
     }
 }
@@ -49,7 +49,7 @@ fn target(globals: &CloudGlobals) -> Result<(PathBuf, EnvConfig)> {
 pub async fn run(cmd: LinkCommand) -> Result<()> {
     let (path, existing) = target(&cmd.globals)?;
     if !cmd.force {
-        if let Some(pinned) = existing.org().or(existing.app()) {
+        if let Some(pinned) = existing.org().or(existing.project()) {
             bail!(
                 "{} is already linked to {pinned}. Pass --force to relink.",
                 path.display()
@@ -59,7 +59,7 @@ pub async fn run(cmd: LinkCommand) -> Result<()> {
 
     // The environment link resolved, not one discovered a second time: the file
     // may not exist yet, and an unrelated one above it is not this link's.
-    let ctx = Context::with_project(&cmd.globals, Some(existing.clone()))?;
+    let ctx = Context::with_config(&cmd.globals, Some(existing.clone()))?;
     let interactive = pickers::interactive(&cmd.globals);
 
     let org = if let Some(o) = cmd.org.clone() {
@@ -72,15 +72,15 @@ pub async fn run(cmd: LinkCommand) -> Result<()> {
         bail!("no org to pin. Pass --org <id>.")
     };
 
-    // `--app=` (empty string) pins only the org.
-    let app: Option<String> = match cmd.app.clone() {
+    // `--project=` (empty string) pins only the org.
+    let project: Option<String> = match cmd.project.clone() {
         Some(s) if s.is_empty() => None,
         Some(s) => Some(s),
         None => {
-            if let Some(a) = ctx.server_default_app().await {
+            if let Some(a) = ctx.server_default_project().await {
                 Some(a)
             } else if interactive {
-                pickers::pick_app(&ctx, &org).await?
+                pickers::pick_project(&ctx, &org).await?
             } else {
                 None
             }
@@ -88,35 +88,35 @@ pub async fn run(cmd: LinkCommand) -> Result<()> {
     };
 
     // A `--url` this invocation did not pass leaves the file's own alone: the
-    // API a linked tree talks to is the environment's, not this command's.
-    let mut project = existing;
-    let deployment = project.deployment_mut();
+    // API a linked tree talks to is the file's, not this command's.
+    let mut config = existing;
+    let deployment = config.deployment_mut();
     deployment.org = Some(org.clone());
-    deployment.app = app.clone();
+    deployment.project = project.clone();
     deployment.url = cmd.globals.url.clone().or(deployment.url.take());
     let url = deployment.url.clone();
-    project_config::write(&path, &project)?;
+    project_config::write(&path, &config)?;
 
     if cmd.globals.json {
         return print::json(&serde_json::json!({
             "wrote": path,
             "org": org,
-            "app": app,
+            "project": project,
             "url": url,
         }));
     }
 
     println!("Wrote {}", path.display());
     println!("  org = {org}");
-    if let Some(a) = &app {
-        println!("  app = {a}");
+    if let Some(a) = &project {
+        println!("  project = {a}");
     }
     if let Some(u) = &url {
         println!("  url = {u}");
     }
-    if app.is_none() {
+    if project.is_none() {
         println!();
-        println!("No app pinned. Commands that target an app will need --app.");
+        println!("No project pinned. Commands that target a project will need --project.");
     }
     Ok(())
 }

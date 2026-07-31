@@ -23,8 +23,8 @@ use serde::Deserialize;
 use tokio::sync::{mpsc, Mutex, Notify};
 
 use super::cloud::context::Context as CloudContext;
-use super::cloud::project_config::{self, EnvConfig};
-use super::cloud::{AppScope, CloudGlobals};
+use super::cloud::project_config::{self, ProjectConfig};
+use super::cloud::{CloudGlobals, ProjectScope};
 use super::DEFAULT_TENANT;
 use crate::api::v1::{McpAuthorizeResponse, McpConnection, McpDeclareRequest, McpGrantRequest};
 use crate::connectors::oauth;
@@ -49,23 +49,23 @@ pub enum McpCommand {
         /// Print the authorization URL instead of opening a browser.
         #[arg(long)]
         no_browser: bool,
-        /// Don't grant the connection to the pinned app. Remote only.
+        /// Don't grant the connection to the pinned project. Remote only.
         #[arg(long)]
         no_grant: bool,
         #[command(flatten)]
-        scope: AppScope,
+        scope: ProjectScope,
     },
     /// Forget a connection's stored credential.
     Logout {
         id: Option<String>,
         #[command(flatten)]
-        scope: AppScope,
+        scope: ProjectScope,
     },
     /// Show declared connections and whether each one is authorized.
     #[command(name = "list", visible_alias = "ls")]
     List {
         #[command(flatten)]
-        scope: AppScope,
+        scope: ProjectScope,
     },
 }
 
@@ -93,7 +93,7 @@ pub async fn run(command: McpCommand) -> Result<()> {
 
 /// The environment these commands act on. An absent file is a configuration
 /// problem, not an empty list: nothing here can succeed without one.
-fn environment(globals: &CloudGlobals) -> Result<EnvConfig> {
+fn environment(globals: &CloudGlobals) -> Result<ProjectConfig> {
     let found = project_config::resolve(globals.config.as_deref())?
         .context("no substructure.toml found; connections are declared under `[mcp.<id>]`")?;
     Ok(found.config)
@@ -124,7 +124,7 @@ fn pick<T: Clone>(connections: &BTreeMap<String, T>, id: Option<String>) -> Resu
 
 /// The environment's database, which is also its credential store. `subs run`
 /// creates it the same way, so a login before the first run is not special.
-fn open_db(cfg: &EnvConfig) -> Result<SqliteDb> {
+fn open_db(cfg: &ProjectConfig) -> Result<SqliteDb> {
     let path = cfg.db_path();
     if let Some(parent) = Path::new(&path).parent() {
         if !parent.as_os_str().is_empty() {
@@ -136,7 +136,7 @@ fn open_db(cfg: &EnvConfig) -> Result<SqliteDb> {
 
 /// The store, or nothing when no engine has ever run here — a database is not
 /// worth creating just to report that nothing is authorized.
-fn open_existing_db(cfg: &EnvConfig) -> Result<Option<SqliteDb>> {
+fn open_existing_db(cfg: &ProjectConfig) -> Result<Option<SqliteDb>> {
     let path = cfg.db_path();
     if !Path::new(&path).exists() {
         return Ok(None);
@@ -144,7 +144,7 @@ fn open_existing_db(cfg: &EnvConfig) -> Result<Option<SqliteDb>> {
     Ok(Some(SqliteDb::open(&path, Duration::from_secs(5))?))
 }
 
-async fn login_local(id: Option<String>, no_browser: bool, cfg: EnvConfig) -> Result<()> {
+async fn login_local(id: Option<String>, no_browser: bool, cfg: ProjectConfig) -> Result<()> {
     let (id, spec) = pick(&cfg.connections(), id)?;
 
     if let Some(auth) = &spec.auth {
@@ -227,7 +227,7 @@ async fn login_local(id: Option<String>, no_browser: bool, cfg: EnvConfig) -> Re
     Ok(())
 }
 
-async fn logout_local(id: Option<String>, cfg: EnvConfig) -> Result<()> {
+async fn logout_local(id: Option<String>, cfg: ProjectConfig) -> Result<()> {
     let (id, spec) = pick(&cfg.connections(), id)?;
     let Some(db) = open_existing_db(&cfg)? else {
         println!("`{id}` was not authorized.");
@@ -242,7 +242,7 @@ async fn logout_local(id: Option<String>, cfg: EnvConfig) -> Result<()> {
     Ok(())
 }
 
-async fn list_local(cfg: EnvConfig) -> Result<()> {
+async fn list_local(cfg: ProjectConfig) -> Result<()> {
     let connections = cfg.connections();
     if connections.is_empty() {
         bail!("substructure.toml declares no connections under `[mcp.<id>]`");
@@ -291,8 +291,8 @@ async fn login_remote(
     id: Option<String>,
     no_browser: bool,
     no_grant: bool,
-    scope: AppScope,
-    cfg: EnvConfig,
+    scope: ProjectScope,
+    cfg: ProjectConfig,
 ) -> Result<()> {
     let (id, spec) = pick(&cfg.mcp, id)?;
     if spec.auth.is_some() {
@@ -348,10 +348,10 @@ async fn login_remote(
     if no_grant {
         return Ok(());
     }
-    let app = ctx
-        .pinned_app(scope.app.as_deref())
+    let project = ctx
+        .pinned_project(scope.project.as_deref())
         .await
-        .context("no app to grant the connection to. Pass --app <id>, or --no-grant.")?;
+        .context("no project to grant the connection to. Pass --project <id>, or --no-grant.")?;
     ctx.client
         .post_json_discard(
             &format!(
@@ -359,11 +359,11 @@ async fn login_remote(
                 connection.id
             ),
             &McpGrantRequest {
-                app_id: app.clone(),
+                project_id: project.clone(),
             },
         )
         .await?;
-    println!("Granted it to {app}.");
+    println!("Granted it to {project}.");
     Ok(())
 }
 
@@ -394,7 +394,7 @@ async fn wait_for_connection(
     }
 }
 
-async fn logout_remote(id: Option<String>, scope: AppScope, cfg: EnvConfig) -> Result<()> {
+async fn logout_remote(id: Option<String>, scope: ProjectScope, cfg: ProjectConfig) -> Result<()> {
     let (id, _) = pick(&cfg.mcp, id)?;
     let ctx = CloudContext::load(&scope.globals)?;
     let org = ctx.require_org(scope.org.as_deref()).await?;
@@ -414,7 +414,7 @@ async fn logout_remote(id: Option<String>, scope: AppScope, cfg: EnvConfig) -> R
     Ok(())
 }
 
-async fn list_remote(scope: AppScope, cfg: EnvConfig) -> Result<()> {
+async fn list_remote(scope: ProjectScope, cfg: ProjectConfig) -> Result<()> {
     if cfg.mcp.is_empty() {
         bail!("substructure.toml declares no connections under `[mcp.<id>]`");
     }
@@ -427,13 +427,13 @@ async fn list_remote(scope: AppScope, cfg: EnvConfig) -> Result<()> {
 
     for (id, spec) in &cfg.mcp {
         let status = match connections.iter().find(|c| &c.connection_id == id) {
-            Some(found) if found.granted_apps.is_empty() => {
-                format!("{}, granted to no app", found.status)
+            Some(found) if found.granted_projects.is_empty() => {
+                format!("{}, granted to no project", found.status)
             }
             Some(found) => format!(
                 "{}, granted to {}",
                 found.status,
-                found.granted_apps.join(", ")
+                found.granted_projects.join(", ")
             ),
             None => "not authorized".to_string(),
         };
@@ -572,7 +572,7 @@ mod tests {
     async fn a_credential_lands_in_the_environments_database() {
         let dir = tmpdir();
         let db_path = dir.join("engine.db");
-        let cfg: EnvConfig = toml::from_str(&format!(
+        let cfg: ProjectConfig = toml::from_str(&format!(
             "db = {:?}\n[mcp.linear]\nurl = \"https://mcp.linear.app/mcp\"\n",
             db_path.to_str().unwrap()
         ))
@@ -603,7 +603,7 @@ mod tests {
     async fn listing_does_not_create_a_database() {
         let dir = tmpdir();
         let db_path = dir.join("absent.db");
-        let cfg: EnvConfig = toml::from_str(&format!(
+        let cfg: ProjectConfig = toml::from_str(&format!(
             "db = {:?}\n[mcp.linear]\nurl = \"https://mcp.linear.app/mcp\"\n",
             db_path.to_str().unwrap()
         ))

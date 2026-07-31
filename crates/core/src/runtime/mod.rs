@@ -15,7 +15,7 @@ use crate::providers::memory_queue::TaskQueue;
 use connector::{spawn_connector_dispatch_processor, spawn_connector_task_executor, ConnectorTask};
 use event_store::{EventFilter, EventStore, Seq, StoreError};
 use llm::{
-    spawn_llm_dispatch_processor, spawn_llm_task_executor, LlmBlocks, LlmProviderRegistry, LlmTask,
+    spawn_llm_dispatch_processor, spawn_llm_task_executor, LlmBlocks, LlmResolver, LlmTask,
     TokenDeltaTransport,
 };
 use processor::{
@@ -826,8 +826,8 @@ pub struct RuntimeDeps {
     /// What this deployment declares: its agents, their hosting, and the
     /// `[llm.*]` blocks they name.
     pub agents: Arc<dyn AgentDirectory>,
-    /// One client per engine-run llm block.
-    pub llm_providers: Arc<LlmProviderRegistry>,
+    /// The client for an engine-run llm block, resolved per call.
+    pub llm: Arc<dyn LlmResolver>,
     pub llm_task_queue: Arc<dyn TaskQueue<LlmTask>>,
     pub sub_agent_task_queue: Arc<dyn TaskQueue<SubAgentTask>>,
     pub connections: Option<Arc<Connections>>,
@@ -843,7 +843,7 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
     let RuntimeDeps {
         store,
         agents,
-        llm_providers,
+        llm,
         llm_task_queue,
         sub_agent_task_queue,
         connections,
@@ -860,7 +860,7 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
     // engine-run block declared, every model call belongs to a worker, so we
     // skip that subsystem entirely.
     let mut llm_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-    if !llm_providers.is_empty() {
+    if !llm.is_empty() {
         llm_handles.push(spawn_llm_dispatch_processor(
             store.clone(),
             checkpoint_store.clone(),
@@ -869,7 +869,7 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
         ));
         llm_handles.extend(spawn_llm_task_executor(
             store.clone(),
-            llm_providers,
+            llm,
             llm_task_queue,
             token_delta_transport.clone(),
             config.llm_executor_workers,

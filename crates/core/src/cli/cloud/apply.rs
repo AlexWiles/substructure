@@ -1,31 +1,30 @@
 //! `subs apply` and `subs config log`: the manifest as the only way
 //! configuration enters a deployment.
 //!
-//! Apply is additive and idempotent — it creates and updates what the file
-//! names and removes nothing, so running it on every merge is safe. The app
-//! itself is part of that: an unpinned file gets one created and the pin
-//! written back, which is why this is also how an app is born.
+//! Apply replaces rather than merges — the file is the whole declaration, so an
+//! agent, block, or channel absent from it is one that was removed. It is still
+//! idempotent, so running it on every merge is safe. The project itself is part
+//! of that: an unpinned file gets one created and the pin written back, which
+//! is why this is also how a project is born.
 
 use anyhow::{bail, Context as _, Result};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 
-use crate::api::v1::{
-    App, ApplyResponse, ConfigConnectionRef, ConfigEvent, ConfigUpdate, ConfigWorkerUpdate, Page,
-};
+use crate::api::v1::{ApplyResponse, ConfigEvent, Page, Project};
 
 use super::context::Context;
 use super::pickers;
 use super::print;
-use super::project_config::{self, EnvConfig, Found};
+use super::project_config::{self, Found, ProjectConfig};
 use super::CloudGlobals;
 
 #[derive(Debug, clap::Args)]
 pub struct ApplyCommand {
-    /// Name the app, when the file does not. Written back with the pin.
+    /// Name the project, when the file does not. Written back with the pin.
     #[arg(long)]
     pub name: Option<String>,
-    /// Org to create the app in. Only consulted when nothing is pinned.
+    /// Org to create the project in. Only consulted when nothing is pinned.
     #[arg(long)]
     pub org: Option<String>,
     #[command(flatten)]
@@ -34,7 +33,7 @@ pub struct ApplyCommand {
 
 #[derive(Subcommand)]
 pub enum ConfigCommand {
-    /// Show what has changed this app's configuration, newest first.
+    /// Show what has changed this project's configuration, newest first.
     Log {
         /// Resume from a `next_cursor` a previous page reported.
         #[arg(long)]
@@ -54,16 +53,15 @@ struct NamePayload<'a> {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CreateAppResponse {
-    app: App,
-    signing_secret: String,
+struct CreateProjectResponse {
+    project: Project,
 }
 
 /// What apply reports, and what `--json` emits verbatim.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Applied {
-    app_id: String,
+    project_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     created: Option<Created>,
     changes: Vec<ConfigEvent>,
@@ -74,61 +72,45 @@ struct Applied {
 struct Created {
     org_id: String,
     name: String,
-    /// Shown once, here and never again.
-    signing_secret: String,
 }
 
 pub async fn run(cmd: ApplyCommand) -> Result<()> {
     let found = project_config::resolve(cmd.globals.config.as_deref())?
         .context("no substructure.toml found. Write one with `subs init`, or pass -c.")?;
     let path = found.path.clone();
-    let env = found.config;
-    local_credentials(&env)?;
-    let ctx = Context::with_project(&cmd.globals, Some(env.clone()))?;
+    let config = found.config;
+    local_credentials(&config)?;
+    let ctx = Context::with_config(&cmd.globals, Some(config.clone()))?;
+    require_agents(&ctx).await?;
 
-    let (app_id, created) = match env.app().map(str::to_string) {
-        Some(app_id) => (app_id, None),
+    let (project_id, created) = match config.project().map(str::to_string) {
+        Some(project_id) => (project_id, None),
         None => {
-            let (app, secret) = create(&ctx, &cmd, &env).await?;
-            let org_id = app.organization_id.clone();
-            let name = app.name.clone();
+            let project = create(&ctx, &cmd, &config).await?;
+            let org_id = project.organization_id.clone();
+            let name = project.name.clone();
             // Written back before the document is pushed: an apply that fails
-            // halfway must not leave an app nobody can find again.
-            pin(&path, &env, &app)?;
-            (
-                app.id,
-                Some(Created {
-                    org_id,
-                    name,
-                    signing_secret: secret,
-                }),
-            )
+            // halfway must not leave a project nobody can find again.
+            pin(&path, &config, &project)?;
+            (project.id, Some(Created { org_id, name }))
         }
     };
 
-    let update = ConfigUpdate {
-        name: env
-            .name
-            .clone()
-            .or_else(|| created.as_ref().map(|c| c.name.clone())),
-        worker: app_worker(&env)?.map(|url| ConfigWorkerUpdate { url }),
-        mcp: Some(
-            env.mcp
-                .iter()
-                .map(|(id, spec)| ConfigConnectionRef {
-                    id: id.clone(),
-                    url: spec.url.clone(),
-                })
-                .collect(),
-        ),
-    };
+    // The file's own manifest, minus the two fields that name variables on this
+    // machine. A deployment holds its own key and mints its own secret, so
+    // sending either would be sending a name it cannot resolve.
+    let mut manifest = config.manifest().for_wire();
+    manifest.name = manifest
+        .name
+        .or_else(|| created.as_ref().map(|c| c.name.clone()));
+
     let applied: ApplyResponse = ctx
         .client
-        .put_json(&format!("/api/v1/apps/{app_id}/config"), &update)
+        .put_json(&format!("/api/v1/projects/{project_id}/config"), &manifest)
         .await?;
 
     let result = Applied {
-        app_id: applied.app_id,
+        project_id: applied.project_id,
         created,
         changes: applied.changes,
     };
@@ -139,38 +121,27 @@ pub async fn run(cmd: ApplyCommand) -> Result<()> {
     Ok(())
 }
 
-/// The one worker URL a deployment can hold today.
+/// A deployment that does not declare agents cannot hold this document, and
+/// says so before anything is created rather than 400-ing halfway.
 ///
-/// Hosting is per-agent in the file, but a deployment still keeps a single
-/// worker for the whole app, so apply can carry the file's hosting only while
-/// the agents agree on one URL. Two different ones is not something to pick a
-/// winner from — it is a file this deployment cannot serve yet, and it says so.
-fn app_worker(env: &EnvConfig) -> Result<Option<String>> {
-    let mut urls: Vec<&str> = env
-        .agent
-        .values()
-        .filter_map(|a| a.worker.as_deref())
-        .collect();
-    urls.sort_unstable();
-    urls.dedup();
-    match urls.as_slice() {
-        [] => Ok(None),
-        [url] => Ok(Some((*url).to_string())),
-        many => bail!(
-            "this deployment holds one worker for the whole app, and the file gives {} agents \
-             {} different workers ({}). Point them at one URL, or run them on an engine that \
-             hosts per-agent workers.",
-            env.agent.values().filter(|a| a.worker.is_some()).count(),
-            many.len(),
-            many.join(", ")
-        ),
+/// The gate is the feature, not its absence: a deployment that advertises
+/// nothing is one this CLI predates, and there is no older shape to fall back
+/// to.
+async fn require_agents(ctx: &Context) -> Result<()> {
+    let meta: crate::api::v1::Meta = ctx.client.get("/api/v1/meta").await.unwrap_or_default();
+    if meta.has("agents") {
+        return Ok(());
     }
+    bail!(
+        "this deployment does not hold per-agent configuration, so it cannot take this file. \
+         Upgrade it, or use the CLI it shipped with."
+    )
 }
 
 /// A credential the deployment cannot reach. `token_env` names a variable on
 /// this machine, which is the engine's half of a connection; consent for the
 /// deployment's copy is `subs mcp login`.
-fn local_credentials(env: &EnvConfig) -> Result<()> {
+fn local_credentials(env: &ProjectConfig) -> Result<()> {
     let named: Vec<&str> = env
         .mcp
         .iter()
@@ -186,45 +157,45 @@ fn local_credentials(env: &EnvConfig) -> Result<()> {
     Ok(())
 }
 
-/// Create the app this file describes. The org comes from the pin, then the
+/// Create the project this file describes. The org comes from the pin, then the
 /// server's own default, then a picker.
-async fn create(ctx: &Context, cmd: &ApplyCommand, env: &EnvConfig) -> Result<(App, String)> {
+async fn create(ctx: &Context, cmd: &ApplyCommand, config: &ProjectConfig) -> Result<Project> {
     let interactive = pickers::interactive(&cmd.globals);
-    let org = if let Some(org) = cmd.org.clone().or_else(|| env.org().map(str::to_string)) {
+    let org = if let Some(org) = cmd.org.clone().or_else(|| config.org().map(str::to_string)) {
         org
     } else if let Some(org) = ctx.server_default_org().await {
         org
     } else if interactive {
         pickers::pick_org(ctx).await?
     } else {
-        bail!("no org to create the app in. Pass --org <id>, or set `org` in the file.")
+        bail!("no org to create the project in. Pass --org <id>, or set `org` in the file.")
     };
 
-    let name = match cmd.name.clone().or_else(|| env.name.clone()) {
+    let name = match cmd.name.clone().or_else(|| config.name.clone()) {
         Some(name) => name,
         None if interactive => {
             let default = default_name();
             let prompt = match &default {
-                Some(d) => format!("App name [{d}]"),
-                None => "App name".to_string(),
+                Some(d) => format!("Project name [{d}]"),
+                None => "Project name".to_string(),
             };
             let entered = pickers::prompt_text(&prompt)?;
             match entered.trim() {
-                "" => default.context("no app name given")?,
+                "" => default.context("no project name given")?,
                 given => given.to_string(),
             }
         }
-        None => bail!("no app name. Set `name` in the file, or pass --name."),
+        None => bail!("no project name. Set `name` in the file, or pass --name."),
     };
 
-    let res: CreateAppResponse = ctx
+    let res: CreateProjectResponse = ctx
         .client
         .post_json(
-            &format!("/api/v1/orgs/{org}/apps"),
+            &format!("/api/v1/orgs/{org}/projects"),
             &NamePayload { name: &name },
         )
         .await?;
-    Ok((res.app, res.signing_secret))
+    Ok(res.project)
 }
 
 /// The directory's own name, which is what a project is usually called.
@@ -237,13 +208,13 @@ fn default_name() -> Option<String> {
 }
 
 /// Write the pin back, and the org and name with it, so a second apply is a
-/// no-op rather than a second app.
-fn pin(path: &std::path::Path, env: &EnvConfig, app: &App) -> Result<()> {
+/// no-op rather than a second project.
+fn pin(path: &std::path::Path, env: &ProjectConfig, project: &Project) -> Result<()> {
     let mut pinned = env.clone();
-    pinned.name = Some(app.name.clone());
+    pinned.name = Some(project.name.clone());
     let deployment = pinned.deployment_mut();
-    deployment.app = Some(app.id.clone());
-    deployment.org = Some(app.organization_id.clone());
+    deployment.project = Some(project.id.clone());
+    deployment.org = Some(project.organization_id.clone());
     project_config::write(path, &pinned)
 }
 
@@ -251,11 +222,10 @@ fn report(result: &Applied, path: &std::path::Path) {
     let file = path.display();
     if let Some(created) = &result.created {
         println!(
-            "Created app {} ({}) in {}",
-            created.name, result.app_id, created.org_id
+            "Created project {} ({}) in {}",
+            created.name, result.project_id, created.org_id
         );
-        println!("  signing secret (shown once): {}", created.signing_secret);
-        println!("Pinned {} in {file}", result.app_id);
+        println!("Pinned {} in {file}", result.project_id);
     }
 
     if result.changes.is_empty() {
@@ -272,6 +242,22 @@ fn report(result: &Applied, path: &std::path::Path) {
     println!("Applied {} changes:", changes.len());
     for change in &changes {
         println!("  {:<24}{}", change.kind, summarize(change));
+    }
+
+    // A worker-hosted agent gets a secret minted on its first apply. It is
+    // retrievable, so this points at the command rather than printing it.
+    let minted: Vec<&str> = result
+        .changes
+        .iter()
+        .filter(|c| c.kind == "agent.updated")
+        .filter(|c| c.data.get("secretMinted").and_then(|v| v.as_bool()) == Some(true))
+        .filter_map(|c| c.data.get("id").and_then(|v| v.as_str()))
+        .collect();
+    if !minted.is_empty() {
+        println!("Signing secrets minted:");
+        for id in minted {
+            println!("  {id} — `subs agents show {id}`");
+        }
     }
 
     // A declared connection reaches nothing until a human consents, so the
@@ -314,9 +300,16 @@ fn summarize(change: &ConfigEvent) -> String {
             .to_string()
     };
     match change.kind.as_str() {
-        "app.created" => field("name"),
-        "app.renamed" => format!("{} -> {}", field("from"), field("to")),
-        "worker.updated" => format!("url={}", field("url")),
+        "project.created" => field("name"),
+        "project.renamed" => format!("{} -> {}", field("from"), field("to")),
+        "agent.updated" => match field("workerUrl").as_str() {
+            "" => format!("{} (engine)", field("id")),
+            url => format!("{} -> {url}", field("id")),
+        },
+        "agent.removed" | "agent.secret_rotated" => field("id"),
+        "llm.updated" => format!("{} ({})", field("name"), field("type")),
+        "llm.removed" | "llm.key_set" | "llm.key_removed" => field("name"),
+        "slack.routing_updated" => field("summary"),
         "mcp.connection_declared" => format!("{} (pending authorization)", field("id")),
         "mcp.grant_added" | "mcp.grant_removed" => field("id"),
         _ => String::new(),
@@ -335,12 +328,12 @@ pub async fn config(command: ConfigCommand) -> Result<()> {
 
 async fn log(cursor: Option<String>, limit: usize, globals: CloudGlobals) -> Result<()> {
     let ctx = Context::load(&globals)?;
-    let app = ctx
-        .pinned_app(None)
+    let project = ctx
+        .pinned_project(None)
         .await
-        .context("no app. Pin one with `subs apply`, or pass -c <file>.")?;
+        .context("no project. Pin one with `subs apply`, or pass -c <file>.")?;
 
-    let mut path = format!("/api/v1/apps/{app}/config/events?limit={limit}");
+    let mut path = format!("/api/v1/projects/{project}/config/events?limit={limit}");
     if let Some(cursor) = &cursor {
         path.push_str(&format!("&cursor={cursor}"));
     }
@@ -418,15 +411,30 @@ mod tests {
     #[test]
     fn a_change_reads_as_what_it_did() {
         assert_eq!(
-            summarize(&event("worker.updated", json!({"url": "https://w.test"}))),
-            "url=https://w.test"
+            summarize(&event(
+                "agent.updated",
+                json!({"id": "triage", "workerUrl": "https://w.test"})
+            )),
+            "triage -> https://w.test"
+        );
+        // No worker URL is not missing data: the engine decides for it.
+        assert_eq!(
+            summarize(&event("agent.updated", json!({"id": "support"}))),
+            "support (engine)"
+        );
+        assert_eq!(
+            summarize(&event(
+                "llm.updated",
+                json!({"name": "claude", "type": "anthropic"})
+            )),
+            "claude (anthropic)"
         );
         assert_eq!(
             summarize(&event("mcp.connection_declared", json!({"id": "sentry"}))),
             "sentry (pending authorization)"
         );
         assert_eq!(
-            summarize(&event("app.renamed", json!({"from": "a", "to": "b"}))),
+            summarize(&event("project.renamed", json!({"from": "a", "to": "b"}))),
             "a -> b"
         );
         // A kind this build does not know is still a row, just without detail.

@@ -12,11 +12,11 @@ use crate::runtime::session::state::EffectKind;
 use crate::runtime::session::{execute, ConflictRetry, ExecuteInput};
 use crate::runtime::Caller;
 
-use super::{CallContext, LlmProviderRegistry, LlmTask, TokenDeltaTransport};
+use super::{CallContext, LlmResolver, LlmTask, TokenDeltaTransport};
 
 pub fn spawn_llm_task_executor(
     store: Arc<dyn EventStore>,
-    providers: Arc<LlmProviderRegistry>,
+    providers: Arc<dyn LlmResolver>,
     queue: Arc<dyn TaskQueue<LlmTask>>,
     token_delta_transport: Arc<dyn TokenDeltaTransport>,
     worker_count: usize,

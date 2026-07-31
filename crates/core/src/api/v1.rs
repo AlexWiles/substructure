@@ -2,6 +2,8 @@
 //! server serializes these, the CLI deserializes them, and they must match
 //! what the hosted cloud sends.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,7 +16,7 @@ pub struct Org {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct App {
+pub struct Project {
     pub id: String,
     pub organization_id: String,
     pub name: String,
@@ -31,7 +33,7 @@ pub struct App {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Meta {
-    /// One org and one app, advertised on every response. `subs link` adopts
+    /// One org and one project, advertised on every response. `subs link` adopts
     /// them and pickers are skipped.
     #[serde(default)]
     pub single_tenant: bool,
@@ -59,7 +61,7 @@ pub struct McpConnection {
     #[serde(default)]
     pub scopes: String,
     #[serde(default)]
-    pub granted_apps: Vec<String>,
+    pub granted_projects: Vec<String>,
 }
 
 /// Declare a connection: the id an agent config names and the URL it points
@@ -84,30 +86,77 @@ pub struct McpAuthorizeResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpGrantRequest {
-    pub app_id: String,
+    pub project_id: String,
 }
 
-/// An app's configuration as the deployment holds it: what a manifest says,
-/// plus the state only the deployment knows.
+/// A project's configuration as the deployment holds it: the manifest it was
+/// last applied, plus the state only the deployment knows — which agents have a
+/// signing secret, which blocks have a key. Status is not config, so it is a
+/// view rather than something `subs apply` could send back.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AppConfig {
-    pub name: String,
+pub struct ProjectConfigView {
+    pub manifest: crate::manifest::Manifest,
     #[serde(default)]
-    pub worker: ConfigWorker,
+    pub agents: BTreeMap<String, AgentState>,
+    #[serde(default)]
+    pub llm: BTreeMap<String, LlmState>,
     #[serde(default)]
     pub mcp: Vec<ConfigConnection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_applied: Option<ConfigApplied>,
 }
 
+/// What the deployment knows about one declared agent that the manifest cannot
+/// say. The secret itself is never in a list.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ConfigWorker {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
+pub struct AgentState {
     #[serde(default)]
-    pub state: String,
+    pub secret_set: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmState {
+    #[serde(default)]
+    pub key_bound: bool,
+}
+
+/// One declared agent, as `subs agents` reads it. `signing_secret` is present
+/// only on the single-agent GET.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Agent {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<crate::protocol::AgentConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_url: Option<String>,
+    #[serde(default)]
+    pub secret_set: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signing_secret: Option<String>,
+}
+
+/// One declared `[llm.*]` block, as `subs llm list` reads it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmBlockView {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub key_bound: bool,
+}
+
+/// The customer key for one block. Write-only: no read ever returns it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmKeyRequest {
+    pub key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,33 +179,7 @@ pub struct ConfigApplied {
     pub actor_email: Option<String>,
 }
 
-/// The manifest `subs apply` pushes. An absent field says nothing about that
-/// setting rather than unsetting it.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ConfigUpdate {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker: Option<ConfigWorkerUpdate>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp: Option<Vec<ConfigConnectionRef>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ConfigWorkerUpdate {
-    pub url: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ConfigConnectionRef {
-    pub id: String,
-    pub url: String,
-}
-
-/// One entry in an app's configuration history.
+/// One entry in a project's configuration history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigEvent {
@@ -175,7 +198,7 @@ pub struct ConfigEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyResponse {
-    pub app_id: String,
+    pub project_id: String,
     #[serde(default)]
     pub changes: Vec<ConfigEvent>,
 }

@@ -1,7 +1,7 @@
 //! The hosted cloud's `/api/v1` surface, served by a local server so the same
 //! commands work against both. A local server is single-tenant, so `{org}`/
-//! `{app}` segments are accepted and ignored; control-plane mutations
-//! (create/rename/delete app, API keys) are rejected.
+//! `{project}` segments are accepted and ignored; control-plane mutations
+//! (create/rename/delete project, API keys) are rejected.
 
 use axum::extract::{FromRef, Path, Query, State};
 use axum::http::header::{HeaderName, HeaderValue};
@@ -11,14 +11,14 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Extension, Json, Router};
 
-use crate::api::v1::{ApiError, App, Meta, Org};
+use crate::api::v1::{ApiError, Meta, Org, Project};
 use crate::Caller;
 
 use super::routes::{self, SessionEventsParams};
 use super::{machine_auth_middleware, AdminHttpState};
 
 const LOCAL_ORG: &str = "local";
-const LOCAL_APP: &str = "local";
+const LOCAL_PROJECT: &str = "local";
 
 #[derive(Clone)]
 pub struct V1State {
@@ -37,26 +37,38 @@ pub fn router(admin: AdminHttpState) -> Router {
     };
     Router::new()
         .route("/api/v1/meta", get(meta))
-        .route("/api/v1/apps/{app}/sessions", get(routes::list_sessions))
-        .route("/api/v1/apps/{app}/sessions/{session_id}", get(get_session))
         .route(
-            "/api/v1/apps/{app}/sessions/{session_id}/events",
+            "/api/v1/projects/{project}/sessions",
+            get(routes::list_sessions),
+        )
+        .route(
+            "/api/v1/projects/{project}/sessions/{session_id}",
+            get(get_session),
+        )
+        .route(
+            "/api/v1/projects/{project}/sessions/{session_id}/events",
             get(get_session_events),
         )
         .route(
-            "/api/v1/apps/{app}/sessions/{session_id}/events/stream",
+            "/api/v1/projects/{project}/sessions/{session_id}/events/stream",
             get(stream_session_events),
         )
         .route("/api/v1/orgs", get(list_orgs))
-        .route("/api/v1/orgs/{org}/apps", get(list_apps))
-        .route("/api/v1/apps/{app}", get(get_app))
-        .route("/api/v1/orgs/{org}/apps", post(unsupported))
-        .route("/api/v1/apps/{app}", patch(unsupported).delete(unsupported))
+        .route("/api/v1/orgs/{org}/projects", get(list_projects))
+        .route("/api/v1/projects/{project}", get(get_project))
+        .route("/api/v1/orgs/{org}/projects", post(unsupported))
         .route(
-            "/api/v1/apps/{app}/api-keys",
+            "/api/v1/projects/{project}",
+            patch(unsupported).delete(unsupported),
+        )
+        .route(
+            "/api/v1/projects/{project}/api-keys",
             get(unsupported).post(unsupported),
         )
-        .route("/api/v1/apps/{app}/api-keys/{key_id}", delete(unsupported))
+        .route(
+            "/api/v1/projects/{project}/api-keys/{key_id}",
+            delete(unsupported),
+        )
         .route_layer(middleware::from_fn_with_state(
             admin,
             machine_auth_middleware,
@@ -65,7 +77,7 @@ pub fn router(admin: AdminHttpState) -> Router {
         .with_state(state)
 }
 
-// Tells the CLI it's a single-tenant server: it adopts these as the org/app
+// Tells the CLI it's a single-tenant server: it adopts these as the org/project
 // and skips the interactive picker.
 async fn advertise_defaults(
     request: axum::http::Request<axum::body::Body>,
@@ -78,8 +90,8 @@ async fn advertise_defaults(
         HeaderValue::from_static(LOCAL_ORG),
     );
     headers.insert(
-        HeaderName::from_static("x-substructure-app"),
-        HeaderValue::from_static(LOCAL_APP),
+        HeaderName::from_static("x-substructure-project"),
+        HeaderValue::from_static(LOCAL_PROJECT),
     );
     res
 }
@@ -112,11 +124,11 @@ async fn stream_session_events(
 }
 
 /// What this server offers. `single_tenant` is what lets the CLI adopt the
-/// advertised org/app instead of asking which one.
+/// advertised org/project instead of asking which one.
 async fn meta() -> impl IntoResponse {
     Json(Meta {
         single_tenant: true,
-        features: vec!["sessions".into()],
+        features: vec!["sessions".into(), "projects".into()],
     })
 }
 
@@ -124,12 +136,12 @@ async fn list_orgs() -> impl IntoResponse {
     Json(vec![local_org()])
 }
 
-async fn list_apps() -> impl IntoResponse {
-    Json(vec![local_app()])
+async fn list_projects() -> impl IntoResponse {
+    Json(vec![local_project()])
 }
 
-async fn get_app() -> impl IntoResponse {
-    Json(local_app())
+async fn get_project() -> impl IntoResponse {
+    Json(local_project())
 }
 
 fn local_org() -> Org {
@@ -141,11 +153,11 @@ fn local_org() -> Org {
 }
 
 // balance_usd is left None: local servers don't track a balance.
-fn local_app() -> App {
-    App {
-        id: LOCAL_APP.into(),
+fn local_project() -> Project {
+    Project {
+        id: LOCAL_PROJECT.into(),
         organization_id: LOCAL_ORG.into(),
-        name: LOCAL_APP.into(),
+        name: LOCAL_PROJECT.into(),
         created_at: None,
         balance_usd: None,
         session_count: None,

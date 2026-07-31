@@ -1,10 +1,11 @@
+pub mod agents;
 pub mod apply;
-pub mod apps;
 pub mod context;
 pub mod credentials;
 mod http;
 pub mod keys;
 pub mod link;
+pub mod llm;
 pub mod login;
 pub mod logout;
 pub mod open;
@@ -12,6 +13,7 @@ pub mod orgs;
 mod pickers;
 mod print;
 pub(crate) mod project_config;
+pub mod projects;
 pub mod sessions;
 pub mod telemetry;
 pub mod whoami;
@@ -37,7 +39,7 @@ pub struct CloudGlobals {
     pub url: Option<String>,
     /// Environment file (default: walks up from cwd looking for
     /// `substructure.toml`). Its `[deployment]` section names the server and
-    /// pins which org/app commands target without flags.
+    /// pins which org/project commands target without flags.
     #[arg(short = 'c', long, global = true)]
     pub config: Option<PathBuf>,
     /// User-level credentials file holding the bearer token
@@ -61,11 +63,11 @@ pub struct OrgScope {
 }
 
 #[derive(Debug, clap::Args, Clone)]
-pub struct AppScope {
+pub struct ProjectScope {
     #[arg(long)]
     pub org: Option<String>,
     #[arg(long)]
-    pub app: Option<String>,
+    pub project: Option<String>,
     #[command(flatten)]
     pub globals: CloudGlobals,
 }

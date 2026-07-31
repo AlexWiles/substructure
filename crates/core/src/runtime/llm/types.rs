@@ -21,6 +21,28 @@ pub trait LlmProviderTrait: Send + Sync {
     async fn resolve(&self, owner: &SessionOwner) -> Result<Arc<dyn LlmCallable>, String>;
 }
 
+/// What the executor asks for a client: the block a call names, resolved for
+/// the session that made it.
+///
+/// A deployment serving one declaration answers from a static registry; one
+/// serving many resolves per owner, because the same block name means a
+/// different credential for each.
+#[async_trait]
+pub trait LlmResolver: Send + Sync {
+    async fn resolve(
+        &self,
+        llm: &str,
+        owner: &SessionOwner,
+    ) -> Result<Arc<dyn LlmCallable>, String>;
+
+    /// `true` ⇒ nothing can ever resolve, so the engine-side LLM subsystem is
+    /// not started. A resolver that only learns its blocks at call time says
+    /// `false`.
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+
 /// The engine-executed half of the declared `[llm.*]` blocks: one client per
 /// block the engine calls itself, keyed by the name a call references.
 ///
@@ -36,14 +58,17 @@ impl LlmProviderRegistry {
     pub fn new(providers: BTreeMap<String, Arc<dyn LlmProviderTrait>>) -> Self {
         Self { providers }
     }
+}
 
-    pub fn is_empty(&self) -> bool {
+#[async_trait]
+impl LlmResolver for LlmProviderRegistry {
+    fn is_empty(&self) -> bool {
         self.providers.is_empty()
     }
 
     /// The client for one call. There is no default provider and no fallback
     /// chain: an unknown name is an error naming what was declared.
-    pub async fn resolve(
+    async fn resolve(
         &self,
         llm: &str,
         owner: &SessionOwner,

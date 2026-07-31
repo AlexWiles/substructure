@@ -168,7 +168,7 @@ async fn start(agents: BTreeMap<String, AgentEntry>) -> Harness {
         RuntimeDeps {
             store: Arc::new(SqliteEventStore::new(db.clone()).unwrap()),
             agents: directory.clone(),
-            llm_providers: Arc::new(providers),
+            llm: Arc::new(providers),
             llm_task_queue: Arc::new(ShardedInMemoryQueue::new(
                 config.llm_executor_workers as u32,
             )) as Arc<dyn TaskQueue<LlmTask>>,
