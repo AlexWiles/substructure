@@ -4,7 +4,7 @@ mod socket;
 mod state;
 mod webhook;
 
-pub use bot::{SlackBot, Workspace, WorkspaceResolver};
+pub use bot::{Routing, SlackBot, Workspace, WorkspaceResolver};
 pub use socket::{MissingEnv, SlackChannel};
 pub use state::StreamStore;
 pub use webhook::webhook_router;

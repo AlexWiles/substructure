@@ -5,7 +5,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-use super::bot::{SlackBot, Workspace, WorkspaceResolver};
+use super::bot::{Routing, SlackBot, Workspace, WorkspaceResolver};
 use crate::transport::channel::{Channel, ChannelContext};
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
@@ -33,7 +33,7 @@ impl std::error::Error for MissingEnv {}
 /// Socket Mode transport: one workspace from env, behavior in [`SlackBot`].
 #[derive(Clone)]
 pub struct SlackChannel {
-    agent_id: String,
+    routing: Routing,
     app_token: String,
     api_base: String,
     http: reqwest::Client,
@@ -62,16 +62,16 @@ impl SlackChannel {
     /// `store` holds durable stream state so a restart resumes open
     /// streaming messages.
     pub fn new(
-        agent_id: String,
+        routing: Routing,
         app_token: String,
         bot_token: String,
         tenant_id: String,
         api_base: String,
         store: Option<super::StreamStore>,
     ) -> Self {
-        let workspace = Arc::new(Workspace::new(bot_token, tenant_id, agent_id.clone()));
+        let workspace = Arc::new(Workspace::new(bot_token, tenant_id, routing.clone()));
         Self {
-            agent_id,
+            routing,
             app_token,
             api_base: api_base.clone(),
             http: reqwest::Client::new(),
@@ -79,14 +79,14 @@ impl SlackChannel {
         }
     }
 
-    pub fn agent_id(&self) -> &str {
-        &self.agent_id
+    pub fn routing(&self) -> &Routing {
+        &self.routing
     }
 
     /// Reads SLACK_APP_TOKEN and SLACK_BOT_TOKEN. SLACK_API_BASE overrides
     /// the API origin (tests).
     pub fn from_env(
-        agent_id: String,
+        routing: Routing,
         tenant_id: String,
         store: Option<super::StreamStore>,
     ) -> Result<Self, MissingEnv> {
@@ -111,7 +111,7 @@ impl SlackChannel {
         let api_base =
             std::env::var("SLACK_API_BASE").unwrap_or_else(|_| "https://slack.com/api".to_string());
         Ok(Self::new(
-            agent_id, app_token, bot_token, tenant_id, api_base, store,
+            routing, app_token, bot_token, tenant_id, api_base, store,
         ))
     }
 

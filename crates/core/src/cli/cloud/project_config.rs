@@ -250,12 +250,56 @@ pub struct ServerConfig {
 /// The tokens are absent for the same reason they are absent from `[mcp]` — a
 /// committed file must not be able to hold one — so `SLACK_APP_TOKEN` and
 /// `SLACK_BOT_TOKEN` stay in the environment.
+///
+/// `agent` is the default, and `[slack.channel.<id>]` is where one channel
+/// differs. An allowlist is the absence of a default rather than a second
+/// setting: with no `agent` here, only the declared channels are served.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SlackConfig {
-    /// Agent id the bot drives. Absent leaves the channel off.
+    /// Agent id the bot drives wherever the channel table says nothing.
+    /// Absent, with no channel declared, leaves the bot off.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// Where one channel differs, keyed by Slack channel id. An id is the
+    /// stable identity; a name is remote state that a rename re-points, so
+    /// only an id is accepted.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub channel: BTreeMap<String, SlackChannelConfig>,
+}
+
+/// One `[slack.channel.<id>]` section: who answers there, or that nobody does.
+///
+/// A channel names an `agent` rather than restating a system prompt or a tool
+/// list, because `[agent.<id>]` already is that bundle: pointing a channel at
+/// a different agent gives it a different prompt, model, and tools at once,
+/// and the tools are the agent's own rather than a request the model may
+/// decline.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SlackChannelConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// The bot stays out of this channel.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub off: bool,
+}
+
+impl SlackChannelConfig {
+    /// The agent that answers here, or `None` where the bot stays out.
+    pub fn agent(&self) -> Option<&str> {
+        match self.off {
+            true => None,
+            false => self.agent.as_deref(),
+        }
+    }
+}
+
+impl SlackConfig {
+    /// Whether this section configures a bot at all.
+    pub fn is_configured(&self) -> bool {
+        self.agent.is_some() || !self.channel.is_empty()
+    }
 }
 
 impl EnvConfig {
@@ -365,6 +409,9 @@ impl EnvConfig {
         for (id, section) in &config.agent {
             check_agent(id, section, &config).map_err(|e| anyhow!("{at}: [agent.{id}]: {e}"))?;
         }
+        if let Some(slack) = &config.slack {
+            check_slack(slack, &config).map_err(|e| anyhow!("{at}: {e}"))?;
+        }
         Ok(config)
     }
 }
@@ -466,6 +513,63 @@ fn check_agent(id: &str, section: &AgentSection, config: &EnvConfig) -> Result<(
         bail!("`llm = \"{llm}\"` is a `worker` block, so this agent needs a `worker` to run its calls");
     }
     Ok(())
+}
+
+/// Every agent the bot routes to is declared in this same file, so a typo is
+/// caught here rather than as a bot that answers nowhere.
+fn check_slack(slack: &SlackConfig, config: &EnvConfig) -> Result<()> {
+    if let Some(agent) = &slack.agent {
+        check_slack_agent(agent, config).map_err(|e| anyhow!("[slack]: {e}"))?;
+    }
+    for (id, channel) in &slack.channel {
+        check_channel(id, channel, config).map_err(|e| anyhow!("[slack.channel.{id}]: {e}"))?;
+    }
+    // Channels that are all `off` and no default to fall back to: a bot that
+    // connects, listens, and can answer nowhere.
+    if slack.is_configured() && slack.agent.is_none() && !slack.channel.values().any(|c| !c.off) {
+        bail!(
+            "[slack]: nothing to answer with. Name a default `agent`, or name one in a \
+             `[slack.channel.<id>]`."
+        );
+    }
+    Ok(())
+}
+
+fn check_slack_agent(agent: &str, config: &EnvConfig) -> Result<()> {
+    if config.agent.contains_key(agent) {
+        return Ok(());
+    }
+    bail!(
+        "`agent = \"{agent}\"` names no agent. Declared: {}",
+        declared(config.agent.keys())
+    )
+}
+
+/// A channel says one of two things, and a section that says both or neither
+/// is a setting with no meaning rather than one to resolve by precedence.
+fn check_channel(id: &str, channel: &SlackChannelConfig, config: &EnvConfig) -> Result<()> {
+    if id.is_empty() {
+        bail!("the id is empty");
+    }
+    // The likeliest mistake, and one that would otherwise match no event and
+    // report nothing: a rename re-points a name, so only an id can be pinned.
+    if id.starts_with('#') || id.starts_with('@') {
+        bail!(
+            "`{id}` is a name, not a channel id. A rename re-points a name; use the id from the \
+             channel's About tab (`C…`)."
+        );
+    }
+    match (&channel.agent, channel.off) {
+        (Some(_), true) => bail!(
+            "`off` and `agent` contradict: a channel the bot stays out of has nobody to answer in it"
+        ),
+        (None, false) => bail!(
+            "declares nothing. Name the `agent` that answers here, or set `off = true` to keep \
+             the bot out."
+        ),
+        (Some(agent), false) => check_slack_agent(agent, config),
+        (None, true) => Ok(()),
+    }
 }
 
 fn declared<'a>(mut ids: impl Iterator<Item = &'a String>) -> String {
@@ -1127,6 +1231,12 @@ mod tests {
             [slack]
             agent = "support"
 
+            [slack.channel.C0ENGOPS]
+            agent = "researcher"
+
+            [slack.channel.C0RANDOM]
+            off = true
+
             [mcp.sentry]
             url = "https://mcp.sentry.dev/mcp"
             prefix_tools = false
@@ -1165,10 +1275,99 @@ mod tests {
     fn an_empty_slack_section_is_not_a_configured_bot() {
         assert_eq!(ok("[slack]\n").slack_agent(), None);
         assert_eq!(EnvConfig::default().slack_agent(), None);
+        assert!(!ok("[slack]\n").slack.unwrap().is_configured());
 
         // The old bare key is gone, and says so rather than doing nothing.
         let err = parse("slack_agent = \"helper\"\n").unwrap_err().to_string();
         assert!(err.contains("slack_agent"), "got {err}");
+    }
+
+    fn agents() -> String {
+        "[llm.claude]\ntype = \"anthropic\"\n\n\
+         [agent.support]\nllm = \"claude\"\nmodel = \"m\"\n\n\
+         [agent.oncall]\nllm = \"claude\"\nmodel = \"m\"\n\n"
+            .to_string()
+    }
+
+    fn slack(s: &str) -> Result<EnvConfig> {
+        parse(&(agents() + s))
+    }
+
+    /// A channel names an agent rather than restating a prompt or a tool list:
+    /// `[agent.<id>]` already is that bundle.
+    #[test]
+    fn a_channel_names_the_agent_that_answers_there() {
+        let cfg = slack(
+            "[slack]\nagent = \"support\"\n\n\
+             [slack.channel.C0ENGOPS]\nagent = \"oncall\"\n\n\
+             [slack.channel.C0RANDOM]\noff = true\n",
+        )
+        .unwrap();
+        let s = cfg.slack.unwrap();
+        assert_eq!(s.agent.as_deref(), Some("support"));
+        assert_eq!(s.channel["C0ENGOPS"].agent(), Some("oncall"));
+        // `off` is the absence of an agent, however the section spelled it.
+        assert_eq!(s.channel["C0RANDOM"].agent(), None);
+        assert!(s.is_configured());
+    }
+
+    /// A default is not required: naming channels alone is the allowlist.
+    #[test]
+    fn channels_without_a_default_are_a_complete_section() {
+        let cfg = slack("[slack.channel.C0ENGOPS]\nagent = \"oncall\"\n").unwrap();
+        let s = cfg.slack.unwrap();
+        assert_eq!(s.agent, None);
+        assert!(s.is_configured(), "the bot is on, in one channel");
+    }
+
+    /// Every name the bot routes to is declared in this same file, so a typo
+    /// is caught here rather than as a bot that answers nowhere.
+    #[test]
+    fn a_channels_agent_is_checked_against_the_file() {
+        let err = slack("[slack]\nagent = \"suport\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("names no agent"), "got {err}");
+        assert!(err.contains("oncall, support"), "and says which; got {err}");
+
+        let err = slack("[slack.channel.C0ENGOPS]\nagent = \"on-call\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("[slack.channel.C0ENGOPS]"), "got {err}");
+        assert!(err.contains("names no agent"), "got {err}");
+    }
+
+    /// The likeliest mistake, and one that would otherwise match no event and
+    /// report nothing.
+    #[test]
+    fn a_channel_name_is_not_a_channel_id() {
+        let err = slack("[slack.channel.\"#eng-oncall\"]\nagent = \"oncall\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is a name, not a channel id"), "got {err}");
+        assert!(err.contains("About tab"), "and where to get one; got {err}");
+    }
+
+    /// A channel says one of two things. Both, or neither, is a setting with
+    /// no meaning rather than one to resolve by precedence.
+    #[test]
+    fn a_channel_that_says_both_or_neither_is_an_error() {
+        let err = slack("[slack.channel.C0RANDOM]\nagent = \"oncall\"\noff = true\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("contradict"), "got {err}");
+
+        let err = slack("[slack.channel.C0RANDOM]\n").unwrap_err().to_string();
+        assert!(err.contains("declares nothing"), "got {err}");
+    }
+
+    /// A bot that connects, listens, and can answer nowhere.
+    #[test]
+    fn a_section_that_serves_nowhere_is_an_error() {
+        let err = slack("[slack.channel.C0RANDOM]\noff = true\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("nothing to answer with"), "got {err}");
     }
 
     #[test]

@@ -35,6 +35,67 @@ const STATUS_REFRESH: Duration = Duration::from_secs(90);
 /// It comes off when the turn the message opened completes.
 const ACK_REACTION: &str = "eyes";
 
+/// Which agent answers where.
+///
+/// A channel with no entry of its own falls to the default, so an allowlist is
+/// the absence of a default rather than a second setting: without one, the bot
+/// serves only the channels named here. A DM is a channel (`D…`) and resolves
+/// the same way.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Routing {
+    default_agent: Option<String>,
+    /// The agent for each named channel, or `None` where the bot stays out.
+    channels: HashMap<String, Option<String>>,
+}
+
+impl Routing {
+    pub fn new(default_agent: Option<String>) -> Self {
+        Self {
+            default_agent,
+            channels: HashMap::new(),
+        }
+    }
+
+    /// `agent` answers in `id`; `None` keeps the bot out of it.
+    pub fn channel(mut self, id: impl Into<String>, agent: Option<String>) -> Self {
+        self.channels.insert(id.into(), agent);
+        self
+    }
+
+    /// The agent that answers in `channel`, or `None` where the bot is silent.
+    pub fn agent_for(&self, channel: &str) -> Option<&str> {
+        match self.channels.get(channel) {
+            Some(entry) => entry.as_deref(),
+            None => self.default_agent.as_deref(),
+        }
+    }
+
+    /// Whether this routes anything at all.
+    pub fn is_empty(&self) -> bool {
+        self.default_agent.is_none() && self.channels.is_empty()
+    }
+}
+
+/// The line the server logs at startup, so a misrouted channel is visible
+/// without the file.
+impl std::fmt::Display for Routing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut parts: Vec<String> = self.default_agent.iter().cloned().collect();
+        let mut channels: Vec<_> = self.channels.iter().collect();
+        channels.sort_by(|a, b| a.0.cmp(b.0));
+        for (id, agent) in channels {
+            parts.push(match agent {
+                Some(agent) => format!("{id}→{agent}"),
+                None => format!("{id} off"),
+            });
+        }
+        match parts.is_empty() {
+            true => write!(f, "nothing"),
+            false => write!(f, "{}", parts.join(", ")),
+        }
+    }
+}
+
 /// One Slack install.
 pub struct Workspace {
     pub bot_token: String,
@@ -42,16 +103,16 @@ pub struct Workspace {
     /// only the channel and thread, so two of our apps in one workspace share
     /// a tenant's sessions and stream rows.
     pub tenant_id: String,
-    pub agent_id: String,
+    pub routing: Routing,
     identity: tokio::sync::OnceCell<Identity>,
 }
 
 impl Workspace {
-    pub fn new(bot_token: String, tenant_id: String, agent_id: String) -> Self {
+    pub fn new(bot_token: String, tenant_id: String, routing: Routing) -> Self {
         Self {
             bot_token,
             tenant_id,
-            agent_id,
+            routing,
             identity: tokio::sync::OnceCell::new(),
         }
     }
@@ -430,6 +491,15 @@ impl SlackBot {
     }
 
     async fn submit(&self, ctx: &ChannelContext, ws: &Workspace, inbound: Inbound) {
+        // Ahead of the ack: a channel nobody answers in gets no reaction
+        // either, rather than an eyes emoji on a message that never gets a
+        // reply. A click is deliberately not gated the same way — a prompt
+        // already posted has to stay answerable after its channel goes off.
+        let Some(agent_id) = ws.routing.agent_for(&inbound.channel) else {
+            tracing::debug!(channel = %inbound.channel, "slack: no agent for channel; ignored");
+            return;
+        };
+        let agent_id = agent_id.to_string();
         let thread = Thread::new(&inbound.channel, &inbound.thread_ts);
         let session_id = format!("slack:{}:{}", inbound.channel, inbound.thread_ts);
         // Deterministic for each message: a redelivery dedupes.
@@ -458,7 +528,7 @@ impl SlackBot {
         // If the fetch fails, append the message alone with a note.
         let input = match fetched {
             Ok(replies) => ClientInput::Append {
-                agent_id: ws.agent_id.clone(),
+                agent_id: agent_id.clone(),
                 turn_id: turn_id.clone(),
                 messages: build_batch(&path, &replies, &inbound),
                 stream: false,
@@ -477,7 +547,7 @@ impl SlackBot {
                 };
                 tracing::warn!(error = %e, "slack: history fetch failed{hint}; appending message only");
                 ClientInput::Message {
-                    agent_id: ws.agent_id.clone(),
+                    agent_id: agent_id.clone(),
                     turn_id: turn_id.clone(),
                     message: draft(
                         &format!("slack:{}", inbound.ts),
@@ -1654,6 +1724,47 @@ mod tests {
     use super::*;
 
     const SESSION: &str = "slack:C1:1.0";
+
+    /// A channel with nothing of its own is the default's, so declaring one
+    /// channel does not take the bot out of every other.
+    #[test]
+    fn a_channel_falls_to_the_default() {
+        let routing = Routing::new(Some("support".into())).channel("C0ENG", Some("oncall".into()));
+        assert_eq!(routing.agent_for("C0ENG"), Some("oncall"));
+        assert_eq!(routing.agent_for("C0SALES"), Some("support"));
+        // A DM is a channel, and resolves the same way.
+        assert_eq!(routing.agent_for("D0USER"), Some("support"));
+    }
+
+    /// No default is the allowlist: the bot is in the channels the file names
+    /// and nowhere else, without a second setting saying so.
+    #[test]
+    fn without_a_default_only_the_named_channels_are_served() {
+        let routing = Routing::new(None).channel("C0ENG", Some("oncall".into()));
+        assert_eq!(routing.agent_for("C0ENG"), Some("oncall"));
+        assert_eq!(routing.agent_for("C0SALES"), None);
+        assert_eq!(routing.agent_for("D0USER"), None);
+    }
+
+    /// And with a default, `off` is how one channel is carved back out.
+    #[test]
+    fn an_off_channel_is_silent_under_a_default() {
+        let routing = Routing::new(Some("support".into())).channel("C0RANDOM", None);
+        assert_eq!(routing.agent_for("C0RANDOM"), None);
+        assert_eq!(routing.agent_for("C0SALES"), Some("support"));
+    }
+
+    #[test]
+    fn routing_reads_back_for_the_startup_line() {
+        let routing = Routing::new(Some("support".into()))
+            .channel("C0RANDOM", None)
+            .channel("C0ENG", Some("oncall".into()));
+        assert_eq!(routing.to_string(), "support, C0ENG→oncall, C0RANDOM off");
+
+        assert!(Routing::default().is_empty());
+        assert_eq!(Routing::default().to_string(), "nothing");
+        assert!(!Routing::new(None).channel("C0ENG", None).is_empty());
+    }
 
     fn stream(turn_id: &str, ts: Option<&str>) -> Stream {
         Stream {

@@ -70,6 +70,45 @@ agent = "my-agent"
 The tokens stay in the environment either way: the file names secrets, it never
 holds them.
 
+## Channels
+
+`agent` is the default. Where one channel differs, name it:
+
+```toml
+[slack]
+agent = "support"            # answers wherever nothing below applies
+
+[slack.channel.C0ENGOPS]     # eng-oncall
+agent = "oncall"
+
+[slack.channel.C0RANDOM]     # random
+off = true
+```
+
+A channel names an *agent*, not a prompt or a tool list, because
+[`[agent.<id>]`](./160-cli.md#agentid) already is that bundle: pointing a
+channel at another agent gives it another system prompt, model, and tool set
+at once, and the tools are that agent's own rather than a request the model may
+decline.
+
+Leaving the default off makes the table an allowlist — the bot answers in the
+channels named here and nowhere else:
+
+```toml
+[slack.channel.C0ENGOPS]
+agent = "oncall"
+```
+
+A DM is a channel (`D…`) and resolves the same way, so an allowlist with no
+default silences DMs too. Name a default to keep them.
+
+Channels are keyed by **id**, never by name: a rename re-points a name, and the
+id does not move. Get one from the channel's **About** tab, from the channel
+link (`…/C0ENGOPS`), or from `conversations.list`. A `#name` here is a parse
+error rather than a rule that matches nothing. Every `agent` is checked against
+the file's `[agent.<id>]` sections when it is read, so a typo fails at startup
+instead of as a bot that never answers.
+
 ## Mapping
 
 | Slack | Engine |

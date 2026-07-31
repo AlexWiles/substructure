@@ -27,7 +27,7 @@ use crate::transport::client_http::{self, ClientHttpState};
 use crate::transport::http_push::http_transport;
 use crate::transport::push::PushAdapter;
 use crate::transport::server::SubstructureServer;
-use crate::transport::slack::{SlackChannel, StreamStore};
+use crate::transport::slack::{Routing, SlackChannel, StreamStore};
 use crate::transport::worker_http::{self, WorkerHttpState};
 use crate::worker::push::TransportRegistry;
 use crate::worker::StaticAgentDirectory;
@@ -52,8 +52,9 @@ pub struct ServeArgs {
     /// this machine can reach.
     #[arg(long = "no-auth", alias = "dev")]
     no_auth: bool,
-    /// Serve a Slack Socket Mode bot driving this agent. Requires
-    /// SLACK_APP_TOKEN and SLACK_BOT_TOKEN.
+    /// Serve a Slack Socket Mode bot driving this agent wherever
+    /// `[slack.channel.<id>]` says nothing. Requires SLACK_APP_TOKEN and
+    /// SLACK_BOT_TOKEN.
     #[arg(long, value_name = "AGENT_ID")]
     slack_agent: Option<String>,
 }
@@ -62,6 +63,19 @@ impl ServeArgs {
     pub fn config_path(&self) -> Option<&std::path::Path> {
         self.config.as_deref()
     }
+}
+
+/// Who the bot answers as, per channel. `None` leaves it off.
+///
+/// Precedence is one field at a time, so `--slack-agent` replaces the default
+/// the file names and leaves its channel table standing.
+fn slack_routing(cfg: &EnvConfig, flag: Option<String>) -> Option<Routing> {
+    let slack = cfg.slack.clone().unwrap_or_default();
+    let mut routing = Routing::new(flag.or(slack.agent));
+    for (id, channel) in &slack.channel {
+        routing = routing.channel(id, channel.agent().map(str::to_string));
+    }
+    (!routing.is_empty()).then_some(routing)
 }
 
 pub async fn serve(args: ServeArgs) -> anyhow::Result<()> {
@@ -73,7 +87,7 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
     // flag > environment > file > default, applied one field at a time.
     let cfg = project_config::load(args.config.as_deref())?;
 
-    let slack_agent = args.slack_agent.or_else(|| cfg.slack_agent());
+    let slack_routing = slack_routing(&cfg, args.slack_agent);
     let server = cfg.server.clone().unwrap_or_default();
 
     let host = args
@@ -89,10 +103,10 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
         None => std::process::exit(2),
     };
     let db = SqliteDb::open(&db_path, std::time::Duration::from_secs(5))?;
-    let slack = match slack_agent {
-        Some(agent_id) => {
+    let slack = match slack_routing {
+        Some(routing) => {
             let store = StreamStore::new(db.clone())?;
-            match SlackChannel::from_env(agent_id, DEFAULT_TENANT.to_string(), Some(store)) {
+            match SlackChannel::from_env(routing, DEFAULT_TENANT.to_string(), Some(store)) {
                 Ok(s) => Some(s),
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -145,7 +159,7 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
 
     let mut channels: Vec<Arc<dyn Channel>> = vec![Arc::new(AgUiChannel::new(auth.client))];
     if let Some(slack) = slack {
-        tracing::info!(agent_id = %slack.agent_id(), "slack channel enabled");
+        tracing::info!(routing = %slack.routing(), "slack channel enabled");
         channels.push(Arc::new(slack));
     }
     let channel_ctx = ChannelContext::new(rt.clone(), shutdown.clone());
