@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 
 use crate::protocol::DecisionResponse;
 use crate::runtime::llm::TokenDeltaTransport;
@@ -27,21 +26,6 @@ impl std::fmt::Display for PushError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.message)
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PushRegistrationRecord {
-    pub tenant_id: String,
-    pub transport_type: String,
-    pub config: serde_json::Value,
-}
-
-#[async_trait]
-pub trait PushRegistrationStore: Send + Sync {
-    async fn save(&self, record: &PushRegistrationRecord) -> Result<(), String>;
-    async fn remove(&self, tenant_id: &str) -> Result<(), String>;
-    async fn get(&self, tenant_id: &str) -> Result<Option<PushRegistrationRecord>, String>;
-    async fn list_tenants(&self) -> Result<Vec<String>, String>;
 }
 
 pub type TransportConstructor =
@@ -71,41 +55,5 @@ impl TransportRegistry {
             .get(transport_type)
             .ok_or_else(|| format!("unknown transport type: {transport_type}"))?;
         constructor(config)
-    }
-}
-
-pub struct PushRegistry {
-    store: Arc<dyn PushRegistrationStore>,
-    transports: TransportRegistry,
-}
-
-impl PushRegistry {
-    pub fn new(store: Arc<dyn PushRegistrationStore>, transports: TransportRegistry) -> Self {
-        Self { store, transports }
-    }
-
-    pub async fn register(&self, record: PushRegistrationRecord) -> Result<(), String> {
-        self.transports
-            .create(&record.transport_type, record.config.clone())?;
-        self.store.save(&record).await
-    }
-
-    pub async fn unregister(&self, tenant_id: &str) -> Result<(), String> {
-        self.store.remove(tenant_id).await
-    }
-
-    pub async fn registration(&self, tenant_id: &str) -> Option<PushRegistrationRecord> {
-        self.store.get(tenant_id).await.ok().flatten()
-    }
-
-    pub async fn lookup(&self, tenant_id: &str) -> Option<Arc<dyn PushTransport>> {
-        let record = self.store.get(tenant_id).await.ok()??;
-        self.transports
-            .create(&record.transport_type, record.config)
-            .ok()
-    }
-
-    pub async fn tenants(&self) -> Vec<String> {
-        self.store.list_tenants().await.unwrap_or_default()
     }
 }

@@ -55,7 +55,7 @@ function decide({ trigger, proposed, state }) {
     if (trigger.type === "session.start") {
         return {
             agent: {
-                model: "claude-haiku-4-5-20251001",
+                ...proposed.agent,
                 stream: true,
                 tools: tools.map(({ name, description, input }) => ({ name, description, input }))
             },

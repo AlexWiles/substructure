@@ -9,10 +9,15 @@ The vocabulary the rest of the docs assume.
 
 - **Engine**: runs the agent loop. Calls LLMs, dispatches tools, persists
   every step, streams events. The `subs` binary, or the cloud.
-- **Worker**: your code. An HTTP endpoint that receives a decision request
-  and returns a decision. Hosts one or more agents, told apart by `agent_id`.
+- **Worker**: your code, and optional. An HTTP endpoint that receives a
+  decision request and returns a decision. Hosts one or more agents, told
+  apart by `agent_id`.
 - **Client**: anything that sends messages and streams events back. A
   browser, a backend, the CLI.
+
+An agent is declared in `substructure.toml`, and `worker` on its section is the
+whole switch: set it and decisions POST there; leave it off and the engine
+decides by accepting its own proposal. Both kinds live in one app.
 
 ## Sessions and turns
 
@@ -46,8 +51,8 @@ paused a branch.
 
 ## The decision loop
 
-Whenever the engine needs to know what happens next, it POSTs a decision
-request to your worker:
+Whenever the engine needs to know what happens next, it derives a decision
+request. For an agent with a `worker`, it POSTs it there:
 
 ```jsonc
 {
@@ -80,7 +85,7 @@ The `trigger` says why the engine is asking.
 
 | Trigger | Meaning |
 | --- | --- |
-| `session.start` | A new session. Usually answered with the agent config. |
+| `session.start` | A new session. Its `proposed` is the config the file declares. |
 | `client.messages` | The client sent or edited messages. |
 | `client.action` | The client invoked a named action you define. |
 | `tool.execute` | The model called one of your tools. Run it. |
@@ -97,7 +102,10 @@ would make next: record the reply, dispatch the tool calls, finish the
 turn. Return it as-is to accept. `proposed` is empty when only your worker
 knows what to do, like running one of your own tools.
 
-A worker that returns `proposed` unchanged is a complete agent.
+A worker that returns `proposed` unchanged is a complete agent — and an agent
+with no worker at all is that same loop, with the engine accepting its own
+proposals. An empty proposal on an engine-hosted agent fails the decision
+loudly rather than settling it as a silent no-op.
 
 ## Actions
 
@@ -116,17 +124,19 @@ A decision's `actions` say what the engine should do.
 
 ## Agent config
 
-The config declares what the agent is: `model`, `system`, `tools`,
-`sub_agents`, and where LLM calls run. It's usually written once at
-`session.start`, but a decision can rewrite it mid-conversation: swap the
-model, add a tool, change the system prompt.
+The config declares what the agent is: `llm`, `model`, `system`, `tools`,
+`sub_agents`. An `[agent.<id>]` section *is* this config — same field names —
+so what the file declares arrives as the `session.start` proposal. A worker
+takes it from there: echo it, amend it, or replace it, and rewrite it again
+mid-conversation to swap the model, add a tool, change the system prompt.
 
 ## Where things run
 
 | Call | Default | Alternative |
 | --- | --- | --- |
+| Decisions | The engine | Your worker (`worker` on `[agent.<id>]`) |
 | Tools | Your worker | The browser ([client-side tools](./90-client-tools.md)) |
-| LLM calls | The engine | Your worker ([LLMs](./50-llms.md)) |
+| LLM calls | The engine | Your worker (`type = "worker"` on `[llm.<id>]`, [LLMs](./50-llms.md)) |
 
 ## Durability
 

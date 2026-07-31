@@ -119,6 +119,7 @@ impl KindSpec for LlmSpec {
         vec![EventPayload::LlmCallRequested(LlmCallRequested {
             id: id.to_string(),
             attempt: t.retry.attempts,
+            llm: call.llm.clone(),
             request: call.spec.to_request(call.prompt.clone()),
             stream: call.stream,
             retry: t.retry_policy.clone(),
@@ -163,6 +164,7 @@ fn complete(state: &SessionState, id: &str, response: LlmResponse) -> Vec<EventP
 pub(in crate::runtime::session) fn request(
     state: &SessionState,
     call_id: String,
+    llm: String,
     request: LlmRequest,
     stream: bool,
     retry: RetryPolicy,
@@ -199,6 +201,7 @@ pub(in crate::runtime::session) fn request(
     Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {
         id: call_id,
         attempt: 0,
+        llm,
         request,
         stream,
         retry,

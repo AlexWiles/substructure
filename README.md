@@ -22,28 +22,54 @@ Substructure is an open-source engine that drives the agent loop over HTTP. It k
   client reconnect doesn't lose anything.
 
 ## See it in action
-Two terminals.
 
-**1. Create and start the agent worker**:
+Install the CLI and declare an agent.
 
-Create a file called `server.mjs` with this content:
+```sh
+npm install -g @substructure.ai/cli
+subs init engine
+```
+
+That writes a `substructure.toml`. The part that matters is four lines:
+
+```toml
+[llm.claude]
+type = "anthropic"
+
+[agent.assistant]
+llm = "claude"
+model = "claude-sonnet-4-5"
+```
+
+Send it a message:
+
+```sh
+export ANTHROPIC_API_KEY=sk-ant-...
+subs run --agent assistant -o pretty "hi"
+```
+
+There is no worker yet — the engine derives every step of the turn and, because
+this agent has no `worker` URL, takes its own proposal.
+
+**Add a worker when you outgrow the file.** A worker is an HTTP endpoint the
+engine asks before each step, so you can override any decision it would have
+made. Point one agent at it:
+
+```toml
+[agent.assistant]
+llm = "claude"
+model = "claude-sonnet-4-5"
+worker = "http://localhost:4444"
+```
 
 ```javascript
-// A complete chat agent served with Node's built-in http server. No dependencies.
+// A complete worker, served with Node's built-in http server. No dependencies.
 import { createServer } from "node:http";
 
-function decide({ trigger, proposed }) {
-    if (trigger.type === "session.start") {
-        // The engine will use this agent config to generate proposed actions.
-        return {
-            agent: {
-                model: "claude-haiku-4-5-20251001",
-                stream: true
-            }
-        };
-    }
-
-    // Accept the engine's proposal for every other decision.
+function decide({ proposed }) {
+    // The declared agent arrives as the `session.start` proposal, and every
+    // other proposal is the step the engine would have taken. Echo them all,
+    // then start overriding the ones you care about.
     return proposed;
 }
 
@@ -61,40 +87,17 @@ server.listen(4444, () =>
     console.log("worker listening on http://localhost:4444"));
 ```
 
-Start the worker
-
 ```sh
-node server.mjs
+node server.mjs                    # one terminal
+subs run --agent assistant "hi"    # another
 ```
 
-**2. Send a message with the CLI**
-
-In another terminal.
-
-Install the CLI.
-
-```sh
-npm install -g @substructure.ai/cli
-```
-
-Then send a message to the worker.
-
-```sh
-export ANTHROPIC_API_KEY=sk-ant-...
-subs run \
-    --worker-url http://localhost:4444 \
-    --agent my-agent \
-    --llm-provider anthropic \
-    --output pretty \
-    --input '{"type":"client.message","message":{"role":"user","content": "hi"}}'
-```
-
-The run command spins up an engine, which communicates with your worker and streams the response back to the terminal.
+The run command spins up an engine, which drives the turn and streams the response back to the terminal.
 
 Next:
 
 - The [quick start](./docs/10-quick-start.md) continues from here: add a tool,
-  continue the conversation, then add a sub-agent.
+  continue the conversation, add a teammate, then attach a worker.
 - The same agent in [Python](./examples/python-fast-api-basic), or in
   [Go with tools and generated types](./examples/go-chat-with-tools).
 - A [full chat UI](./examples/node-hono-assistant-ui) talking to the engine

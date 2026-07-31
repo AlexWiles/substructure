@@ -3,14 +3,29 @@ title: LLMs
 group: Building agents
 ---
 
-The engine runs the agent's LLM calls for you, against the provider you
-configure. A worker can run them itself instead: declare `handler: "worker"`
-and answer the `llm.execute` trigger with the provider's response.
+An agent's model calls run on the `[llm.<id>]` block it names, and the block's
+`type` is the venue: `anthropic`, `openai`, and `openrouter` mean the engine
+calls the vendor itself; `worker` means your worker does, answering the
+`llm.execute` trigger with the provider's response.
+
+Declaring it in one place is the point — the file says where a call runs, and
+nothing on the wire can disagree.
 
 ## Example
 
 An agent whose calls run on the worker, in Anthropic's wire format, served
 with Hono.
+
+```toml title="substructure.toml"
+[llm.byo]
+type = "worker"        # this agent's worker makes the call
+format = "anthropic"   # trigger.request is a Messages API body
+
+[agent.my-agent]
+llm = "byo"
+model = "claude-haiku-4-5-20251001"
+worker = "http://localhost:4444"
+```
 
 ```javascript title="server.mjs"
 import Anthropic from "@anthropic-ai/sdk";
@@ -24,15 +39,9 @@ const app = new Hono();
 app.post("/", async (c) => {
     const { trigger, proposed } = await c.req.json();
 
+    // The declared config arrives as the proposal; add streaming to it.
     if (trigger.type === "session.start") {
-        return c.json({
-            agent: {
-                model: "claude-haiku-4-5-20251001",
-                stream: true,
-                handler: "worker",   // run LLM calls here, not on the engine
-                format: "anthropic"  // trigger.request is a Messages API body
-            }
-        });
+        return c.json({ agent: { ...proposed.agent, stream: true } });
     }
 
     if (trigger.type === "llm.execute") {
@@ -58,19 +67,30 @@ serve({ fetch: app.fetch, port: 4444 });
 
 ## Where calls run
 
-`handler` on the agent config decides where an LLM call runs.
+The block's `type` decides.
 
-| `handler` | Runs |
-| --- | --- |
-| `server` (default) | On the engine, against its provider. |
-| `worker` | On your worker, which answers `llm.execute` with `llm.result` or `llm.error`. |
+| `type` | Runs | Needs a key where the engine runs |
+| --- | --- | --- |
+| `anthropic` / `openai` / `openrouter` | On the engine, against that vendor. | yes |
+| `worker` | On your worker, which answers `llm.execute` with `llm.result` or `llm.error`. | no |
+
+An agent on a `worker` block must have a `worker` URL — otherwise nothing would
+be there to make the call — and the file says so rather than failing at the
+first turn.
+
+A worker can move one call to another block by naming it on the `llm.call`
+itself, so mixing venues per call needs no config rewrite:
+
+```javascript
+{ type: "llm.call", llm: "cheap" }   // this call only
+```
 
 ## Wire format
 
-Without `format`, `llm.execute.request` is the engine's neutral `LlmRequest`,
-and you answer with a neutral `LlmResponse`. Set `format` and the request is
-the provider's own body, ready to send, and you return the provider's own
-response.
+On a `worker` block without `format`, `llm.execute.request` is the engine's
+neutral `LlmRequest`, and you answer with a neutral `LlmResponse`. Set `format`
+and the request is the provider's own body, ready to send, and you return the
+provider's own response.
 
 | `format` | `request` and `response` |
 | --- | --- |
@@ -78,7 +98,8 @@ response.
 | `"anthropic"` | Anthropic Messages API. |
 | `"openai"` | OpenAI Chat Completions. |
 
-`format` requires `handler: "worker"`.
+`format` only applies to `type = "worker"`: an engine-run call is always
+neutral.
 
 ## Streaming
 
@@ -96,10 +117,18 @@ message and dispatches the tool calls or ends the turn. Return `proposed`.
 
 ## Spec
 
+```toml
+# substructure.toml
+[llm.<id>]
+type = "anthropic" | "openai" | "openrouter" | "worker"
+api_key_env = "…"                  # engine-run types; defaults from `type`
+base_url = "…"                     # engine-run types
+format = "openai" | "anthropic"    # `worker` only
+```
+
 ```typescript
 // agent config
-handler?: "server" | "worker"      // default server
-format?: "openai" | "anthropic"    // requires handler worker
+llm?: string                       // the [llm.<id>] to run on
 stream?: boolean                   // default false
 
 type LlmExecute = {
@@ -112,6 +141,7 @@ type LlmExecute = {
     deadline?: string
 }
 
+type CallLlm = { type: "llm.call"; llm?: string; model?: string; /* … */ }
 type LlmResult = { type: "llm.result"; id?: string; attempt?: number; response: unknown }
 type LlmError = { type: "llm.error"; id?: string; attempt?: number; error: string; retryable?: boolean; code?: ErrorCode; detail?: unknown }
 ```

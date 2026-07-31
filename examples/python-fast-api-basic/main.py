@@ -2,19 +2,10 @@
 from fastapi import FastAPI, Request
 
 
+# The whole worker: accept the engine's proposal for every decision. The agent
+# is declared in substructure.toml, and arrives as the `session.start`
+# proposal, so there is nothing to author until you want to override something.
 def decide(req):
-    trigger = req["trigger"]
-
-    if trigger["type"] == "session.start":
-        # The engine will use this agent config to generate proposed actions.
-        return {
-            "agent": {
-                "model": "claude-haiku-4-5-20251001",
-                "stream": True,
-            }
-        }
-
-    # Accept the engine's proposal for every other decision.
     return req["proposed"]
 
 

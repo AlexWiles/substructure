@@ -40,13 +40,12 @@ func decide(req DecisionRequest) DecisionResponse {
 			description := t.description
 			agentTools[i] = AgentTool{Name: t.name, Description: &description}
 		}
-		return DecisionResponse{
-			Agent: &AgentConfig{
-				Model:  "claude-haiku-4-5-20251001",
-				Stream: &stream,
-				Tools:  agentTools,
-			},
-		}
+		// The declared config arrives as the proposal; keep its `Llm` and
+		// `Model` and add only what this worker knows.
+		agent := *req.Proposed.Agent
+		agent.Stream = &stream
+		agent.Tools = agentTools
+		return DecisionResponse{Agent: &agent}
 	}
 
 	// Run our tool when the model calls it.

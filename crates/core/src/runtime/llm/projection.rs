@@ -75,6 +75,7 @@ impl EventProcessor for LlmDispatchProjection {
             agent_id,
             call_id: dispatched.id.clone(),
             attempt: dispatched.attempt,
+            llm: call.llm.clone(),
             request: call.spec.to_request(call.prompt.clone()),
             stream: call.stream,
             owner,

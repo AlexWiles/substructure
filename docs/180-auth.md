@@ -91,8 +91,11 @@ X-Substructure-Signature: sha256=<hex HMAC-SHA256 of the body>
 ```
 
 Your worker recomputes the HMAC with the same secret and rejects a mismatch.
-Set the secret with `--signing-secret` locally, or `subs webhook` in the cloud.
-Worker responses are not signed; the engine trusts the connection it opened.
+Locally, name the variable holding it with `signing_secret_env` on the agent's
+`[agent.<id>]` section; a worker that names none is called unsigned, because
+signing with a secret only the engine knows proves nothing to anybody. In the
+cloud the deployment mints it. Worker responses are not signed; the engine
+trusts the connection it opened.
 
 ## Rules
 

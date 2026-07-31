@@ -15,7 +15,7 @@ Supported platforms: macOS (arm64, x64), Linux (arm64, x64).
 ## Usage
 
 ```sh
-subs serve --dev --provider openrouter --worker-url http://localhost:4444
+subs serve --no-auth --provider openrouter --worker-url http://localhost:4444
 ```
 
 Run `subs --help` for the full command list. Cloud management commands (`apps`, `keys`, `webhook`, `sessions`, …) are top-level subcommands.

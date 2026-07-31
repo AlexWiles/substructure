@@ -19,7 +19,7 @@ async function decide({ trigger, proposed }) {
         // Offer every MCP tool to the model as-is.
         return {
             agent: {
-                model: "claude-haiku-4-5-20251001",
+                ...proposed.agent,
                 stream: true,
                 tools: tools.map((t) => ({
                     name: t.name,

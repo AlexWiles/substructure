@@ -5,7 +5,7 @@ use anyhow::{bail, Context as _, Result};
 
 use super::context::Context;
 use super::pickers;
-use super::project_config::{self, EnvConfig, RemoteEnv, FILENAME};
+use super::project_config::{self, EnvConfig, FILENAME};
 use super::{print, CloudGlobals};
 
 #[derive(Debug, clap::Args)]
@@ -26,17 +26,14 @@ pub struct LinkCommand {
 
 /// The file to link: the one commands run from this tree already read, or a new
 /// one here. Everything link does not own is carried across, so relinking keeps
-/// the connections and worker settings the environment declares.
-fn target(globals: &CloudGlobals) -> Result<(PathBuf, RemoteEnv)> {
+/// the engine settings, connections, and worker the file declares.
+fn target(globals: &CloudGlobals) -> Result<(PathBuf, EnvConfig)> {
     let found = match globals.config.as_deref() {
         Some(path) if !path.exists() => None,
         path => project_config::resolve(path)?,
     };
     match found {
-        Some(found) => {
-            let path = found.path.clone();
-            Ok((path, found.into_remote("`subs link`")?))
-        }
+        Some(found) => Ok((found.path, found.config)),
         None => {
             let path = match globals.config.clone() {
                 Some(path) => path,
@@ -44,7 +41,7 @@ fn target(globals: &CloudGlobals) -> Result<(PathBuf, RemoteEnv)> {
                     .context("could not determine cwd")?
                     .join(FILENAME),
             };
-            Ok((path, RemoteEnv::default()))
+            Ok((path, EnvConfig::default()))
         }
     }
 }
@@ -52,7 +49,7 @@ fn target(globals: &CloudGlobals) -> Result<(PathBuf, RemoteEnv)> {
 pub async fn run(cmd: LinkCommand) -> Result<()> {
     let (path, existing) = target(&cmd.globals)?;
     if !cmd.force {
-        if let Some(pinned) = existing.org.as_deref().or(existing.app.as_deref()) {
+        if let Some(pinned) = existing.org().or(existing.app()) {
             bail!(
                 "{} is already linked to {pinned}. Pass --force to relink.",
                 path.display()
@@ -92,20 +89,20 @@ pub async fn run(cmd: LinkCommand) -> Result<()> {
 
     // A `--url` this invocation did not pass leaves the file's own alone: the
     // API a linked tree talks to is the environment's, not this command's.
-    let project = RemoteEnv {
-        org: Some(org.clone()),
-        app: app.clone(),
-        url: cmd.globals.url.clone().or(existing.url),
-        ..existing
-    };
-    project_config::write(&path, &EnvConfig::Remote(project.clone()))?;
+    let mut project = existing;
+    let deployment = project.deployment_mut();
+    deployment.org = Some(org.clone());
+    deployment.app = app.clone();
+    deployment.url = cmd.globals.url.clone().or(deployment.url.take());
+    let url = deployment.url.clone();
+    project_config::write(&path, &project)?;
 
     if cmd.globals.json {
         return print::json(&serde_json::json!({
             "wrote": path,
             "org": org,
             "app": app,
-            "url": project.url,
+            "url": url,
         }));
     }
 
@@ -114,7 +111,7 @@ pub async fn run(cmd: LinkCommand) -> Result<()> {
     if let Some(a) = &app {
         println!("  app = {a}");
     }
-    if let Some(u) = &project.url {
+    if let Some(u) = &url {
         println!("  url = {u}");
     }
     if app.is_none() {

@@ -2,29 +2,14 @@
   "$defs": {
     "AgentConfig": {
       "additionalProperties": false,
-      "description": "A declared agent identity. `model` is the only required field; everything else\nrefines the proposed LLM request the engine derives for `client.messages`.",
+      "description": "A declared agent identity — the same shape whether it is written in an\n`[agent.<id>]` section or returned by a worker.\n\n`llm` names the `[llm.*]` block every proposed call runs on, and so decides\nboth the venue (the engine with a vendor key, or the agent's own worker) and\nthe wire shape of a worker-run call. It is effectively required: a config\nthat names none fails when the engine resolves a call against it.",
       "properties": {
-        "format": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/LlmFormat"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Provider wire format for worker-handled calls; requires `handler:\nworker`. Absent ⇒ the neutral format."
-        },
-        "handler": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Handler"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Where the proposed LLM call runs: `Some(Worker)` ⇒ the worker executes it\n(answering `llm.execute`); absent or `Some(Server)` ⇒ the engine's\nserver-side provider. `client` is invalid and rejected at the decision seam."
+        "llm": {
+          "description": "The `[llm.*]` block this agent's calls run on.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "mcp": {
           "description": "MCP servers the agent draws tools from. The engine resolves each against\nits connection registry into [`ConnectorTool`]s the model sees alongside\n`tools`. Like `sub_agents`, these are never merged into `tools` — the\nworker declares the server, not its tools.\n\nA second protocol gets its own field rather than a `type` tag here: its\nfilter would not be this one (MCP annotations mean nothing to an A2A\nagent), and a union of conditionally-valid fields generates badly in the\nGo and Python bindings.",
@@ -576,11 +561,14 @@
           "additionalProperties": false,
           "description": "A flat, all-optional LLM request. `id` omitted ⇒ the engine mints one; it\nbecomes the assistant node's id. Omitted fields are filled from the agent\nconfig (merge source), then engine defaults; `messages` omitted ⇒\n`[config.system?] + the decision's declared view`. Explicit `messages`\nsuppress system injection. A bare `{\"type\":\"llm.call\"}` prompts per the\nagent's identity over the current view.",
           "properties": {
-            "handler": {
-              "$ref": "#/$defs/Handler",
-              "description": "`server` or `worker`; omitted ⇒ `server`."
-            },
             "id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "llm": {
+              "description": "The `[llm.*]` block this call runs on; omitted ⇒ the merge source\nconfig's `llm`. Naming a different block moves one call to another\nvenue or vendor.",
               "type": [
                 "string",
                 "null"
@@ -1634,7 +1622,7 @@
       "type": "object"
     },
     "Handler": {
-      "description": "Where a call runs — one wire enum so `handler` has a single type on every\nsurface. Tool calls accept `worker` (default), `client`, or `server` (set by\nthe engine for connector tools, never declared by a worker); LLM calls accept\n`server` (default) or `worker`. The invalid pairing (a `client` LLM call) is\nrejected at the decision seam.",
+      "description": "Where a call runs — one wire enum so `handler` has a single type on every\nsurface. Tool calls accept `worker` (default), `client`, or `server` (set by\nthe engine for connector tools, never declared by a worker). An LLM call has\nno `handler`: where it runs follows from the `[llm.*]` block it names.",
       "oneOf": [
         {
           "const": "server",
@@ -1792,7 +1780,7 @@
       "type": "object"
     },
     "LlmFormat": {
-      "description": "The wire shape of a worker-handled LLM call. Absent ⇒ the engine's neutral\nformat. Set ⇒ `llm.execute` carries the provider's native request body, and\n`llm.result`/`llm.token.delta` accept the provider's native response and\nstream events. Requires `handler: worker`.",
+      "description": "The wire shape of a worker-run LLM call, declared on a `type = \"worker\"`\n`[llm.*]` block. Absent ⇒ the engine's neutral format. Set ⇒ `llm.execute`\ncarries the provider's native request body, and `llm.result`/\n`llm.token.delta` accept the provider's native response and stream events.",
       "oneOf": [
         {
           "const": "openai",

@@ -1,12 +1,75 @@
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+/// What an `[llm.<id>]` block's `type` says: which vendor the engine calls with
+/// a key of its own, or that the agent's own worker makes the call.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum LlmProviderArg {
+pub enum ProviderKind {
     Openrouter,
     Anthropic,
     Openai,
+    /// The agent's worker executes calls on this block itself, answering
+    /// `llm.execute`. Never needs a credential where the engine runs.
+    Worker,
+}
+
+impl ProviderKind {
+    /// The vendors the engine can call itself, in the order `subs init` offers
+    /// them.
+    pub const VENDORS: [ProviderKind; 3] = [Self::Anthropic, Self::Openai, Self::Openrouter];
+
+    /// The variable a key is read from when the file names none. Named here
+    /// rather than at each use so `subs init` tells you the same name the
+    /// engine will look for.
+    pub fn default_api_key_env(self) -> Option<&'static str> {
+        match self {
+            Self::Openrouter => Some("OPENROUTER_API_KEY"),
+            Self::Anthropic => Some("ANTHROPIC_API_KEY"),
+            Self::Openai => Some("OPENAI_API_KEY"),
+            Self::Worker => None,
+        }
+    }
+
+    /// The variable holding the base URL override, for a vendor that has one.
+    pub fn base_url_env(self) -> Option<&'static str> {
+        match self {
+            Self::Openrouter => Some("OPENROUTER_BASE_URL"),
+            Self::Anthropic => Some("ANTHROPIC_BASE_URL"),
+            Self::Openai => Some("OPENAI_BASE_URL"),
+            Self::Worker => None,
+        }
+    }
+
+    /// Where the key is issued.
+    pub fn console_url(self) -> Option<&'static str> {
+        match self {
+            Self::Openrouter => Some("https://openrouter.ai/keys"),
+            Self::Anthropic => Some("https://console.anthropic.com/settings/keys"),
+            Self::Openai => Some("https://platform.openai.com/api-keys"),
+            Self::Worker => None,
+        }
+    }
+
+    /// A model that exists, so a file `subs init` writes runs before it is edited.
+    pub fn default_model(self) -> &'static str {
+        match self {
+            Self::Openrouter => "anthropic/claude-sonnet-4.5",
+            Self::Anthropic => "claude-sonnet-4-5",
+            Self::Openai => "gpt-5",
+            Self::Worker => "claude-sonnet-4-5",
+        }
+    }
+
+    /// The spelling the file uses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Openrouter => "openrouter",
+            Self::Anthropic => "anthropic",
+            Self::Openai => "openai",
+            Self::Worker => "worker",
+        }
+    }
 }
 
 /// How `subs run` renders a turn. The file spells these the way `--output`
@@ -22,10 +85,21 @@ pub enum OutputFormat {
     Pretty,
 }
 
-pub enum ProviderEnv {
-    Openrouter { api_key: String },
-    Anthropic { api_key: String },
-    Openai { api_key: String },
+/// One engine-run llm block, bound: the block's name, what it calls, and the
+/// key the environment held for it.
+pub struct ProviderEnv {
+    pub name: String,
+    pub kind: ProviderKind,
+    pub api_key: String,
+    pub base_url: Option<String>,
+}
+
+/// One engine-run llm block as the file declares it, before binding.
+pub struct ProviderBinding {
+    pub name: String,
+    pub kind: ProviderKind,
+    pub api_key_env: String,
+    pub base_url: Option<String>,
 }
 
 pub struct AuthEnvVars {
@@ -36,28 +110,34 @@ pub struct AuthEnvVars {
 }
 
 pub struct EnvVars {
-    pub provider: Option<ProviderEnv>,
+    pub providers: Vec<ProviderEnv>,
     pub auth: Option<AuthEnvVars>,
 }
 
 impl EnvVars {
-    /// Returns `None` after printing the missing variables to stderr.
-    pub fn load(provider: Option<LlmProviderArg>, dev: bool) -> Option<Self> {
-        let provider_specs: &[(&str, &str)] = match provider {
-            Some(LlmProviderArg::Openrouter) => &[(
-                "OPENROUTER_API_KEY",
-                "API key for OpenRouter (https://openrouter.ai/keys)",
-            )],
-            Some(LlmProviderArg::Anthropic) => &[(
-                "ANTHROPIC_API_KEY",
-                "API key for Anthropic (https://console.anthropic.com/settings/keys)",
-            )],
-            Some(LlmProviderArg::Openai) => &[(
-                "OPENAI_API_KEY",
-                "API key for OpenAI (https://platform.openai.com/api-keys)",
-            )],
-            None => &[],
-        };
+    /// Returns `None` after printing the missing variables to stderr — every
+    /// one of them, so a file declaring three blocks reports three names
+    /// rather than one per run. `authenticate` false skips the token variables
+    /// an unauthenticated server has no use for.
+    pub fn load(bindings: Vec<ProviderBinding>, authenticate: bool) -> Option<Self> {
+        let provider_specs: Vec<(String, String)> = bindings
+            .iter()
+            .map(|b| {
+                let console = b
+                    .kind
+                    .console_url()
+                    .map(|u| format!(" ({u})"))
+                    .unwrap_or_default();
+                (
+                    b.api_key_env.clone(),
+                    format!(
+                        "API key for [llm.{}], a {} block{console}",
+                        b.name,
+                        b.kind.as_str()
+                    ),
+                )
+            })
+            .collect();
 
         let auth_specs: &[(&str, &str)] = &[
             ("CLIENT_TOKEN_ISSUER", "JWT 'iss' claim for client tokens"),
@@ -72,21 +152,21 @@ impl EnvVars {
             ),
         ];
 
-        let mut missing: Vec<(&'static str, &'static str)> = Vec::new();
+        let mut missing: Vec<(String, String)> = Vec::new();
         let mut provider_values: Vec<String> = Vec::with_capacity(provider_specs.len());
         let mut auth_values: Vec<String> = Vec::with_capacity(auth_specs.len());
 
-        for (name, desc) in provider_specs {
+        for (name, desc) in &provider_specs {
             match std::env::var(name) {
                 Ok(v) => provider_values.push(v),
-                Err(_) => missing.push((name, desc)),
+                Err(_) => missing.push((name.clone(), desc.clone())),
             }
         }
-        if !dev {
+        if authenticate {
             for (name, desc) in auth_specs {
                 match std::env::var(name) {
                     Ok(v) => auth_values.push(v),
-                    Err(_) => missing.push((name, desc)),
+                    Err(_) => missing.push((name.to_string(), desc.to_string())),
                 }
             }
         }
@@ -103,20 +183,18 @@ impl EnvVars {
             return None;
         }
 
-        let provider = match provider {
-            Some(LlmProviderArg::Openrouter) => Some(ProviderEnv::Openrouter {
-                api_key: provider_values.into_iter().next().unwrap(),
-            }),
-            Some(LlmProviderArg::Anthropic) => Some(ProviderEnv::Anthropic {
-                api_key: provider_values.into_iter().next().unwrap(),
-            }),
-            Some(LlmProviderArg::Openai) => Some(ProviderEnv::Openai {
-                api_key: provider_values.into_iter().next().unwrap(),
-            }),
-            None => None,
-        };
+        let providers = bindings
+            .into_iter()
+            .zip(provider_values)
+            .map(|(b, api_key)| ProviderEnv {
+                name: b.name,
+                kind: b.kind,
+                api_key,
+                base_url: b.base_url,
+            })
+            .collect();
 
-        let auth = if dev {
+        let auth = if !authenticate {
             None
         } else {
             let mut it = auth_values.into_iter();
@@ -128,6 +206,6 @@ impl EnvVars {
             })
         };
 
-        Some(Self { provider, auth })
+        Some(Self { providers, auth })
     }
 }

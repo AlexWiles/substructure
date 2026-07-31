@@ -35,7 +35,7 @@ use super::state::EffectState;
 use super::tool_contract::{declared_tool, DeclaredTool};
 use crate::protocol::{
     AgentConfig, ClientContext, Content, DecisionAction, DecisionResponse, DecisionTrigger,
-    DraftMessage, ErrorCode, Handler, Message, RetryPolicy, Role, ToolCall,
+    DraftMessage, ErrorCode, Message, RetryPolicy, Role, ToolCall,
 };
 
 pub fn propose(
@@ -129,10 +129,42 @@ pub fn propose(
             }],
             ..Default::default()
         }),
-        // The worker declares its `agent` config here; a truthy empty proposal
-        // would short-circuit proposed-first workers before their config branch runs.
+        // Pick the turn back up where it stopped: re-issue the model call over
+        // the current transcript. Without this an engine-hosted session that
+        // ever interrupts — after `llm.failed`, say — could never be resumed,
+        // because nothing else would author the next call.
+        DecisionTrigger::InterruptResumed { .. } => config.map(|c| resumed(transcript, c)),
+        // The config a worker declares here is the app's, not the session's, so
+        // the engine cannot derive it from state: the directory seeds it at
+        // delivery (`runtime::worker::handler`) instead.
         DecisionTrigger::SessionStart => None,
         _ => None,
+    }
+}
+
+/// Prompt the model again over everything recorded so far, per the config.
+fn resumed(transcript: &[Message], config: &AgentConfig) -> DecisionResponse {
+    let view = recorded(transcript);
+    DecisionResponse {
+        messages: view.clone(),
+        actions: vec![DecisionAction::CallLlm {
+            id: None,
+            llm: config.llm.clone(),
+            model: Some(config.model.clone()),
+            messages: Some(config.prompt_for(&view)),
+            tools: config.tools_as_llm(),
+            temperature: None,
+            max_completion_tokens: None,
+            reasoning: None,
+            stream: Some(config.stream),
+            retry: Some(
+                config
+                    .retry
+                    .clone()
+                    .unwrap_or_else(RetryPolicy::llm_default),
+            ),
+        }],
+        ..Default::default()
     }
 }
 
@@ -252,6 +284,7 @@ fn client_turn(
         messages: view.clone(),
         actions: vec![DecisionAction::CallLlm {
             id: None,
+            llm: effective.llm.clone(),
             model: Some(effective.model.clone()),
             messages: Some(effective.prompt_for(&view)),
             tools: effective.tools_as_llm(),
@@ -265,7 +298,6 @@ fn client_turn(
                     .clone()
                     .unwrap_or_else(RetryPolicy::llm_default),
             ),
-            handler: effective.handler.unwrap_or(Handler::Server),
         }],
         agent: merged,
         ..Default::default()
@@ -407,9 +439,10 @@ fn reissue(
     messages.push(tool_message.clone());
 
     // Every field is explicit from the stored spec, so the seam merges nothing:
-    // this preserves any per-turn override (model, prompt shaping) for the loop.
+    // this preserves any per-turn override (model, venue, prompt shaping) for the loop.
     Some(DecisionAction::CallLlm {
         id: None,
+        llm: Some(call.llm.clone()),
         model: Some(call.spec.model.clone()),
         messages: Some(messages),
         tools: call.spec.tools.clone(),
@@ -418,7 +451,6 @@ fn reissue(
         reasoning: call.spec.reasoning.clone(),
         stream: Some(call.stream),
         retry: Some(effect.tracking.retry_policy.clone()),
-        handler: call.handler.into(),
     })
 }
 
@@ -437,7 +469,7 @@ mod tests {
     use chrono::Utc;
 
     use super::*;
-    use crate::protocol::{AgentTool, LlmRequest, SubAgent, ToolCallFunction, ToolInput};
+    use crate::protocol::{AgentTool, Handler, LlmRequest, SubAgent, ToolCallFunction, ToolInput};
     use crate::runtime::session::decision::LlmHandler;
     use crate::runtime::session::state::{EffectTracking, LlmCallSpec};
 
@@ -480,6 +512,7 @@ mod tests {
             EffectTracking::new(RetryPolicy::no_retry(), Utc::now()),
             EffectPayload::LlmCall(LlmCallState {
                 format: None,
+                llm: "claude".to_string(),
                 prompt,
                 spec: LlmCallSpec {
                     model: "test-model".to_string(),
@@ -527,10 +560,11 @@ mod tests {
         }
     }
 
-    fn reissued_request(proposal: &DecisionResponse) -> (LlmRequest, bool, Handler) {
+    fn reissued_request(proposal: &DecisionResponse) -> (LlmRequest, bool, Option<String>) {
         match &proposal.actions[..] {
             [DecisionAction::CallLlm {
                 id: None,
+                llm,
                 model,
                 messages,
                 tools,
@@ -538,7 +572,6 @@ mod tests {
                 max_completion_tokens,
                 reasoning,
                 stream,
-                handler,
                 ..
             }] => {
                 let request = LlmRequest {
@@ -549,7 +582,7 @@ mod tests {
                     max_completion_tokens: *max_completion_tokens,
                     reasoning: reasoning.clone(),
                 };
-                (request, stream.unwrap_or(false), *handler)
+                (request, stream.unwrap_or(false), llm.clone())
             }
             other => panic!("expected a single llm.call with no id; got {other:?}"),
         }
@@ -861,11 +894,15 @@ mod tests {
         )
         .expect("proposes");
 
-        let (request, stream, handler) = reissued_request(&p);
+        let (request, stream, llm) = reissued_request(&p);
         assert_eq!(request.model, "test-model");
         assert_eq!(request.temperature, Some(0.5));
         assert!(stream);
-        assert!(matches!(handler, Handler::Server));
+        assert_eq!(
+            llm.as_deref(),
+            Some("claude"),
+            "the re-issue stays on the block the first call ran on"
+        );
         let roles: Vec<_> = request.messages.iter().map(|m| &m.role).collect();
         assert!(
             matches!(
@@ -953,11 +990,10 @@ mod tests {
             handler,
         };
         AgentConfig {
-            format: None,
+            llm: Some("claude".to_string()),
             model: "cfg-model".to_string(),
             system: Some("be terse".to_string()),
             stream: true,
-            handler: None,
             retry: None,
             tools: vec![
                 tool("confirm", Some(Handler::Client)),
@@ -1049,35 +1085,14 @@ mod tests {
     }
 
     #[test]
-    fn config_handler_worker_proposes_a_worker_run_call() {
+    fn the_configs_llm_block_flows_to_the_proposed_call() {
+        // Where the call runs is the block's business, resolved at the wire
+        // seam; the proposal's job is only to name the block the config names.
         let view = vec![DraftMessage::from(msg("u1", Role::User, "hi"))];
         let cfg = AgentConfig {
-            handler: Some(Handler::Worker),
+            llm: Some("byo".to_string()),
             ..agent_cfg()
         };
-        let trigger = DecisionTrigger::ClientTranscript {
-            messages: view.clone(),
-            new_from: 0,
-            client: ClientContext::default(),
-        };
-        let p = propose(&trigger, &[], &HashMap::new(), 0, Some(&cfg), "d0")
-            .expect("config ⇒ a proposal");
-        match &p.actions[..] {
-            [DecisionAction::CallLlm { handler, .. }] => {
-                assert_eq!(
-                    *handler,
-                    Handler::Worker,
-                    "config handler flows to the call"
-                )
-            }
-            other => panic!("expected one llm.call; got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn config_without_an_handler_proposes_a_server_call() {
-        let view = vec![DraftMessage::from(msg("u1", Role::User, "hi"))];
-        let cfg = agent_cfg();
         let trigger = DecisionTrigger::ClientTranscript {
             messages: view,
             new_from: 0,
@@ -1086,7 +1101,7 @@ mod tests {
         let p = propose(&trigger, &[], &HashMap::new(), 0, Some(&cfg), "d0")
             .expect("config ⇒ a proposal");
         match &p.actions[..] {
-            [DecisionAction::CallLlm { handler, .. }] => assert_eq!(*handler, Handler::Server),
+            [DecisionAction::CallLlm { llm, .. }] => assert_eq!(llm.as_deref(), Some("byo")),
             other => panic!("expected one llm.call; got {other:?}"),
         }
     }

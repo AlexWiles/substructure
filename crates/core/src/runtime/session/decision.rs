@@ -9,16 +9,6 @@ use crate::protocol::{
 };
 
 impl Handler {
-    /// Serde default for `llm.call`.
-    pub fn server() -> Self {
-        Handler::Server
-    }
-
-    /// Serde default for `tool.call`.
-    pub fn worker() -> Self {
-        Handler::Worker
-    }
-
     pub fn as_str(self) -> &'static str {
         match self {
             Handler::Server => "server",
@@ -311,13 +301,16 @@ pub enum Action {
     CallLlm {
         // Omit to have the engine mint one; it becomes the assistant node's id.
         id: String,
+        /// The `[llm.*]` block the call runs on, resolved at the seam.
+        llm: String,
         request: LlmRequest,
         #[serde(default)]
         stream: bool,
         #[serde(default = "RetryPolicy::no_retry")]
         retry: RetryPolicy,
+        /// The block's venue, resolved at the seam.
         handler: LlmHandler,
-        /// The config's `format`, resolved at the seam (worker calls only).
+        /// The block's `format`, resolved at the seam (worker calls only).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         format: Option<LlmFormat>,
     },

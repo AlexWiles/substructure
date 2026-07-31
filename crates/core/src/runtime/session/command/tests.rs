@@ -261,7 +261,7 @@ fn settle_with_output_contract(result: &str) -> (SessionAggregate, Vec<EventPayl
     dispatch(
         &mut agg,
         CommandPayload::RequestLlmCall {
-            format: None,
+            llm: "claude".to_string(),
             call_id: "call-1".to_string(),
             request: LlmRequest {
                 model: "test-model".to_string(),
@@ -283,6 +283,7 @@ fn settle_with_output_contract(result: &str) -> (SessionAggregate, Vec<EventPayl
             stream: false,
             retry: RetryPolicy::no_retry(),
             handler: LlmHandler::Server,
+            format: None,
         },
         &system(),
     );
@@ -1095,12 +1096,13 @@ fn reconcile_dispatch_retries_a_pending_server_llm_call() {
     dispatch(
         &mut agg,
         CommandPayload::RequestLlmCall {
-            format: None,
+            llm: "claude".to_string(),
             call_id: "llm-1".to_string(),
             request: request_with(vec![]),
             stream: false,
             retry: RetryPolicy::llm_default(),
             handler: LlmHandler::Server,
+            format: None,
         },
         &system(),
     );
@@ -1129,7 +1131,7 @@ fn request_llm_call_emits_requested() {
     let events = dispatch(
         &mut agg,
         CommandPayload::RequestLlmCall {
-            format: None,
+            llm: "claude".to_string(),
             call_id: "llm-1".to_string(),
             request: LlmRequest {
                 model: "test-model".to_string(),
@@ -1142,6 +1144,7 @@ fn request_llm_call_emits_requested() {
             stream: false,
             retry: RetryPolicy::no_retry(),
             handler: LlmHandler::Server,
+            format: None,
         },
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -1227,7 +1230,7 @@ fn request_llm_call_stores_prompt_without_minting_nodes() {
     let events = dispatch(
         &mut agg,
         CommandPayload::RequestLlmCall {
-            format: None,
+            llm: "claude".to_string(),
             call_id: "llm-1".to_string(),
             request: request_with(vec![
                 node_msg("sys", Role::System, "be helpful"),
@@ -1236,6 +1239,7 @@ fn request_llm_call_stores_prompt_without_minting_nodes() {
             stream: false,
             retry: RetryPolicy::no_retry(),
             handler: LlmHandler::Server,
+            format: None,
         },
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -2055,7 +2059,7 @@ fn complete_llm_call_emits_completed() {
     dispatch(
         &mut agg,
         CommandPayload::RequestLlmCall {
-            format: None,
+            llm: "claude".to_string(),
             call_id: "llm-1".to_string(),
             request: LlmRequest {
                 model: "test-model".to_string(),
@@ -2068,6 +2072,7 @@ fn complete_llm_call_emits_completed() {
             stream: false,
             retry: RetryPolicy::no_retry(),
             handler: LlmHandler::Server,
+            format: None,
         },
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -2226,7 +2231,7 @@ fn fail_llm_call_emits_errored() {
     dispatch(
         &mut agg,
         CommandPayload::RequestLlmCall {
-            format: None,
+            llm: "claude".to_string(),
             call_id: "llm-1".to_string(),
             request: LlmRequest {
                 model: "test-model".to_string(),
@@ -2239,6 +2244,7 @@ fn fail_llm_call_emits_errored() {
             stream: false,
             retry: RetryPolicy::no_retry(),
             handler: LlmHandler::Server,
+            format: None,
         },
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -2297,7 +2303,7 @@ fn llm_retry_reuses_the_stored_prompt() {
     dispatch(
         &mut agg,
         CommandPayload::RequestLlmCall {
-            format: None,
+            llm: "claude".to_string(),
             call_id: "llm-1".to_string(),
             request: request_with(vec![
                 node_msg("sys", Role::System, "sys prompt"),
@@ -2306,6 +2312,7 @@ fn llm_retry_reuses_the_stored_prompt() {
             stream: false,
             retry,
             handler: LlmHandler::Server,
+            format: None,
         },
         &system(),
     );
@@ -2378,12 +2385,13 @@ fn worker_handled_llm_call_emits_request_trigger() {
     let events = dispatch(
         &mut agg,
         CommandPayload::RequestLlmCall {
-            format: None,
+            llm: "claude".to_string(),
             call_id: "llm-1".to_string(),
             request: test_llm_request(),
             stream: false,
             retry: RetryPolicy::no_retry(),
             handler: LlmHandler::Worker,
+            format: None,
         },
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -2430,12 +2438,13 @@ fn server_handled_llm_call_does_not_emit_request_trigger() {
     let events = dispatch(
         &mut agg,
         CommandPayload::RequestLlmCall {
-            format: None,
+            llm: "claude".to_string(),
             call_id: "llm-1".to_string(),
             request: test_llm_request(),
             stream: false,
             retry: RetryPolicy::no_retry(),
             handler: LlmHandler::Server,
+            format: None,
         },
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -2465,12 +2474,13 @@ fn return_llm_result_completes_worker_handled_call() {
     let request_events = dispatch(
         &mut agg,
         CommandPayload::RequestLlmCall {
-            format: None,
+            llm: "claude".to_string(),
             call_id: "llm-1".to_string(),
             request: test_llm_request(),
             stream: false,
             retry: RetryPolicy::no_retry(),
             handler: LlmHandler::Worker,
+            format: None,
         },
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -3691,12 +3701,13 @@ fn interrupt_action_voids_llm_calls_requested_in_the_same_submit() {
             transcript: vec![node_msg("u1", Role::User, "hi")],
             actions: vec![
                 Action::CallLlm {
-                    format: None,
+                    llm: "claude".to_string(),
                     id: "llm-1".to_string(),
                     request: request_with(vec![]),
                     stream: false,
                     retry: RetryPolicy::no_retry(),
                     handler: LlmHandler::Server,
+                    format: None,
                 },
                 Action::Interrupt {
                     interrupt_id: "int-1".to_string(),
@@ -4631,6 +4642,7 @@ fn an_in_flight_deferred_sibling_keeps_a_fast_tool_from_prompting() {
 
 fn call_llm_action(id: &str, handler: LlmHandler) -> Action {
     Action::CallLlm {
+        llm: "claude".to_string(),
         format: None,
         id: id.to_string(),
         request: request_with(vec![]),
@@ -4656,12 +4668,13 @@ fn request_llm(agg: &mut SessionAggregate, id: &str, handler: LlmHandler) -> Vec
     dispatch(
         agg,
         CommandPayload::RequestLlmCall {
-            format: None,
+            llm: "claude".to_string(),
             call_id: id.to_string(),
             request: request_with(vec![]),
             stream: false,
             retry: RetryPolicy::no_retry(),
             handler,
+            format: None,
         },
         &system(),
     )
@@ -5778,11 +5791,10 @@ fn agent_updates(events: &[EventPayload]) -> Vec<&AgentConfigUpdated> {
 
 fn agent_config(model: &str) -> AgentConfig {
     AgentConfig {
-        format: None,
+        llm: Some("claude".to_string()),
         model: model.to_string(),
         system: None,
         stream: true,
-        handler: None,
         retry: None,
         tools: Vec::new(),
         sub_agents: Vec::new(),
@@ -6187,6 +6199,7 @@ fn connector_tools_reach_the_model_and_route_to_the_engine() {
     let events = dispatch(
         &mut agg,
         CommandPayload::RequestLlmCall {
+            llm: "claude".to_string(),
             call_id: "call-1".to_string(),
             request: LlmRequest {
                 model: "m1".to_string(),
@@ -6473,6 +6486,7 @@ fn a_re_prompt_does_not_offer_a_connector_tool_twice() {
     let events = dispatch(
         &mut agg,
         CommandPayload::RequestLlmCall {
+            llm: "claude".to_string(),
             call_id: "call-1".to_string(),
             request: already,
             stream: false,
@@ -8081,13 +8095,14 @@ fn interrupt_voiding_is_scoped_to_the_parked_path() {
     };
     let llm = |id: &str| {
         EventPayload::LlmCallRequested(LlmCallRequested {
+            llm: "claude".to_string(),
+            format: None,
             id: id.to_string(),
             attempt: 0,
             request: request_with(vec![]),
             stream: false,
             retry: RetryPolicy::no_retry(),
             handler: LlmHandler::Server,
-            format: None,
         })
     };
     agg.commit(vec![msg("u1", None), msg("a1", Some("u1"))], &ctx);

@@ -22,7 +22,7 @@ function decide({ trigger, proposed }: DecisionRequest): DecisionResponse {
         // The engine will use this agent config to generate proposed actions.
         return {
             agent: {
-                model: "claude-haiku-4-5-20251001",
+                ...proposed.agent!,
                 stream: true,
                 tools: tools.map(({ name, description }) => ({ name, description })),
             },

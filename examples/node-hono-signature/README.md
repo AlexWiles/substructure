@@ -26,8 +26,7 @@ node server.mjs
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
 export SUBS_SIGNING_SECRET=dev-secret-not-for-production
-subs run -c substructure.toml \
-    --input '{"type":"client.message","message":{"role":"user","content": "hi"}}'
+subs run -c substructure.toml --agent my-agent "hi"
 ```
 
 Unset `SUBS_SIGNING_SECRET` and the worker answers `401 invalid signature`.

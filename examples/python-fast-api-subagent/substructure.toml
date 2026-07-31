@@ -1,10 +1,15 @@
-target = "local"
+[llm.claude]
+type = "anthropic"
 
-[worker]
-url = "http://localhost:4444"
+[agent.assistant]
+llm = "claude"
+model = "claude-haiku-4-5-20251001"
+worker = "http://localhost:4444"
 
-[llm]
-provider = "anthropic"
+[agent.weather]
+llm = "claude"
+model = "claude-haiku-4-5-20251001"
+worker = "http://localhost:4444"
 
 [run]
 agent = "assistant"

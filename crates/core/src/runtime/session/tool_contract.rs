@@ -264,6 +264,7 @@ mod tests {
             EffectTracking::new(RetryPolicy::no_retry(), chrono::Utc::now()),
             EffectPayload::LlmCall(LlmCallState {
                 format: None,
+                llm: "claude".to_string(),
                 prompt: vec![],
                 spec: LlmCallSpec {
                     model: "m".to_string(),

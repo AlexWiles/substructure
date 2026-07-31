@@ -39,21 +39,29 @@ subs mcp login sentry     # opens a browser; `list` shows what is authorized
 subs mcp logout sentry    # forgets the credential
 ```
 
-Where the credential lands follows the environment. A `target = "local"` file
-stores it in that environment's `db`, beside the sessions that use it — so a
-login and the engine that uses it cannot drift apart, and two environments
-authorize independently. **That database now holds credentials: gitignore
-`*.db*`.**
+Where the credential lands follows the file. Without a `[deployment]` section
+the engine here is the one that will dial the connection, so the credential goes
+in that environment's `db`, beside the sessions that use it — a login and the
+engine that uses it cannot drift apart, and two environments authorize
+independently. **That database now holds credentials: gitignore `*.db*`.**
 
-A `target = "remote"` file has the server run the flow instead, and the
-credential never touches your machine. `subs mcp login` opens the deployment's
-consent URL, waits for it to land, and grants the connection to the app the file
-pins (`--no-grant` to skip). The dashboard's connectors page starts the same
-flow; either surface finishes the other's.
+A file naming a `[deployment]` has that server run the flow instead, and the
+credential never touches your machine. In two steps: **declaring** a connection
+records the id and the URL and nothing else — `subs apply` does that for every
+`[mcp.<id>]` the file names, and grants it to the pinned app — and
+**authorizing** it is consent. `subs mcp login` does both: it declares (a no-op
+if apply already did), opens the deployment's consent URL, waits for it to land,
+and grants the connection to the app the file pins (`--no-grant` to skip). A
+declared connection reaches nothing until that consent, which is why declaring
+is safe to do from a manifest and consenting is not. The dashboard's connectors
+page starts the same flow; either surface finishes the other's.
 
-`auth` and `prefix_tools` are local-only. A remote connection declares a URL and
-nothing else: the deployment holds the credential, and where it enforces a
-catalog, that URL has to be one it offers — the error lists the ones it does.
+`auth` is the engine's half alone: it names a variable on this machine, which a
+deployment cannot read. `subs apply` and `subs mcp login` refuse a connection
+carrying one rather than push a URL the deployment could not authenticate — drop
+it and authorize there. What a deployment is told is the id and the URL, and
+where it enforces a catalog, that URL has to be one it offers — the error lists
+the ones it does.
 
 ## Declare it on the agent
 

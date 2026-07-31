@@ -1,10 +1,11 @@
 //! Authorizing the connections `substructure.toml` declares.
 //!
 //! Consent is always a human in a browser; what differs is where the credential
-//! lands. A local environment authorizes over a loopback redirect and stores the
-//! credential in its own database, beside the sessions that use it. A remote one
-//! asks the server to start the flow, and the credential never touches this
-//! machine.
+//! lands, and the file says which. A file naming a `[deployment]` asks that
+//! server to run the flow, and the credential never touches this machine.
+//! Otherwise the engine here is the one that will dial the connection, so
+//! consent comes back over a loopback redirect into that engine's database,
+//! beside the sessions that use it.
 
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -22,10 +23,10 @@ use serde::Deserialize;
 use tokio::sync::{mpsc, Mutex, Notify};
 
 use super::cloud::context::Context as CloudContext;
-use super::cloud::project_config::{self, EnvConfig, LocalEnv, RemoteEnv};
+use super::cloud::project_config::{self, EnvConfig};
 use super::cloud::{AppScope, CloudGlobals};
 use super::DEFAULT_TENANT;
-use crate::api::v1::{McpAuthorizeRequest, McpAuthorizeResponse, McpConnection, McpGrantRequest};
+use crate::api::v1::{McpAuthorizeResponse, McpConnection, McpDeclareRequest, McpGrantRequest};
 use crate::connectors::oauth;
 use crate::providers::sqlite::{SqliteDb, SqliteTokenStore};
 
@@ -76,16 +77,16 @@ pub async fn run(command: McpCommand) -> Result<()> {
             no_grant,
             scope,
         } => match environment(&scope.globals)? {
-            EnvConfig::Local(cfg) => login_local(id, no_browser, cfg).await,
-            EnvConfig::Remote(cfg) => login_remote(id, no_browser, no_grant, scope, cfg).await,
+            cfg if cfg.deployment.is_none() => login_local(id, no_browser, cfg).await,
+            cfg => login_remote(id, no_browser, no_grant, scope, cfg).await,
         },
         McpCommand::Logout { id, scope } => match environment(&scope.globals)? {
-            EnvConfig::Local(cfg) => logout_local(id, cfg).await,
-            EnvConfig::Remote(cfg) => logout_remote(id, scope, cfg).await,
+            cfg if cfg.deployment.is_none() => logout_local(id, cfg).await,
+            cfg => logout_remote(id, scope, cfg).await,
         },
         McpCommand::List { scope } => match environment(&scope.globals)? {
-            EnvConfig::Local(cfg) => list_local(cfg).await,
-            EnvConfig::Remote(cfg) => list_remote(scope, cfg).await,
+            cfg if cfg.deployment.is_none() => list_local(cfg).await,
+            cfg => list_remote(scope, cfg).await,
         },
     }
 }
@@ -123,7 +124,7 @@ fn pick<T: Clone>(connections: &BTreeMap<String, T>, id: Option<String>) -> Resu
 
 /// The environment's database, which is also its credential store. `subs run`
 /// creates it the same way, so a login before the first run is not special.
-fn open_db(cfg: &LocalEnv) -> Result<SqliteDb> {
+fn open_db(cfg: &EnvConfig) -> Result<SqliteDb> {
     let path = cfg.db_path();
     if let Some(parent) = Path::new(&path).parent() {
         if !parent.as_os_str().is_empty() {
@@ -135,7 +136,7 @@ fn open_db(cfg: &LocalEnv) -> Result<SqliteDb> {
 
 /// The store, or nothing when no engine has ever run here — a database is not
 /// worth creating just to report that nothing is authorized.
-fn open_existing_db(cfg: &LocalEnv) -> Result<Option<SqliteDb>> {
+fn open_existing_db(cfg: &EnvConfig) -> Result<Option<SqliteDb>> {
     let path = cfg.db_path();
     if !Path::new(&path).exists() {
         return Ok(None);
@@ -143,7 +144,7 @@ fn open_existing_db(cfg: &LocalEnv) -> Result<Option<SqliteDb>> {
     Ok(Some(SqliteDb::open(&path, Duration::from_secs(5))?))
 }
 
-async fn login_local(id: Option<String>, no_browser: bool, cfg: LocalEnv) -> Result<()> {
+async fn login_local(id: Option<String>, no_browser: bool, cfg: EnvConfig) -> Result<()> {
     let (id, spec) = pick(&cfg.connections(), id)?;
 
     if let Some(auth) = &spec.auth {
@@ -226,7 +227,7 @@ async fn login_local(id: Option<String>, no_browser: bool, cfg: LocalEnv) -> Res
     Ok(())
 }
 
-async fn logout_local(id: Option<String>, cfg: LocalEnv) -> Result<()> {
+async fn logout_local(id: Option<String>, cfg: EnvConfig) -> Result<()> {
     let (id, spec) = pick(&cfg.connections(), id)?;
     let Some(db) = open_existing_db(&cfg)? else {
         println!("`{id}` was not authorized.");
@@ -241,7 +242,7 @@ async fn logout_local(id: Option<String>, cfg: LocalEnv) -> Result<()> {
     Ok(())
 }
 
-async fn list_local(cfg: LocalEnv) -> Result<()> {
+async fn list_local(cfg: EnvConfig) -> Result<()> {
     let connections = cfg.connections();
     if connections.is_empty() {
         bail!("substructure.toml declares no connections under `[mcp.<id>]`");
@@ -291,21 +292,36 @@ async fn login_remote(
     no_browser: bool,
     no_grant: bool,
     scope: AppScope,
-    cfg: RemoteEnv,
+    cfg: EnvConfig,
 ) -> Result<()> {
     let (id, spec) = pick(&cfg.mcp, id)?;
+    if spec.auth.is_some() {
+        bail!(
+            "`{id}` names `token_env`, which the deployment cannot read: it holds its own \
+             credential. Drop `auth` to authorize it there."
+        );
+    }
     let ctx = CloudContext::load(&scope.globals)?;
     let org = ctx.require_org(scope.org.as_deref()).await?;
 
-    let started: McpAuthorizeResponse = ctx
+    // Declaring first is idempotent and inert: `subs apply` may already have
+    // done it, and either way consent is the step that matters.
+    let declared: McpConnection = ctx
         .client
         .post_json(
-            &format!("/api/v1/orgs/{org}/mcp/authorize"),
-            &McpAuthorizeRequest {
+            &format!("/api/v1/orgs/{org}/mcp/connections"),
+            &McpDeclareRequest {
                 url: spec.url.clone(),
                 connection_id: Some(id.clone()),
             },
         )
+        .await?;
+    let started: McpAuthorizeResponse = ctx
+        .client
+        .post_empty(&format!(
+            "/api/v1/orgs/{org}/mcp/connections/{}/authorize",
+            declared.id
+        ))
         .await?;
 
     if let Some(requested) = &started.scope {
@@ -378,7 +394,7 @@ async fn wait_for_connection(
     }
 }
 
-async fn logout_remote(id: Option<String>, scope: AppScope, cfg: RemoteEnv) -> Result<()> {
+async fn logout_remote(id: Option<String>, scope: AppScope, cfg: EnvConfig) -> Result<()> {
     let (id, _) = pick(&cfg.mcp, id)?;
     let ctx = CloudContext::load(&scope.globals)?;
     let org = ctx.require_org(scope.org.as_deref()).await?;
@@ -398,7 +414,7 @@ async fn logout_remote(id: Option<String>, scope: AppScope, cfg: RemoteEnv) -> R
     Ok(())
 }
 
-async fn list_remote(scope: AppScope, cfg: RemoteEnv) -> Result<()> {
+async fn list_remote(scope: AppScope, cfg: EnvConfig) -> Result<()> {
     if cfg.mcp.is_empty() {
         bail!("substructure.toml declares no connections under `[mcp.<id>]`");
     }
@@ -536,15 +552,14 @@ mod tests {
             let path = tmpdir().join(project_config::FILENAME);
             std::fs::write(
                 &path,
-                "target = \"local\"\n[mcp.sentry]\nurl = \"https://mcp.sentry.dev/mcp\"\n\
+                "[mcp.sentry]\nurl = \"https://mcp.sentry.dev/mcp\"\n\
                  auth = { token_env = \"SENTRY_TOKEN\" }\n",
             )
             .unwrap();
             path
         })
         .unwrap()
-        .into_local("x")
-        .unwrap();
+        .config;
 
         let err = login_local(Some("sentry".into()), true, cfg)
             .await
@@ -557,8 +572,8 @@ mod tests {
     async fn a_credential_lands_in_the_environments_database() {
         let dir = tmpdir();
         let db_path = dir.join("engine.db");
-        let cfg: LocalEnv = toml::from_str(&format!(
-            "target = \"local\"\ndb = {:?}\n[mcp.linear]\nurl = \"https://mcp.linear.app/mcp\"\n",
+        let cfg: EnvConfig = toml::from_str(&format!(
+            "db = {:?}\n[mcp.linear]\nurl = \"https://mcp.linear.app/mcp\"\n",
             db_path.to_str().unwrap()
         ))
         .unwrap();
@@ -588,8 +603,8 @@ mod tests {
     async fn listing_does_not_create_a_database() {
         let dir = tmpdir();
         let db_path = dir.join("absent.db");
-        let cfg: LocalEnv = toml::from_str(&format!(
-            "target = \"local\"\ndb = {:?}\n[mcp.linear]\nurl = \"https://mcp.linear.app/mcp\"\n",
+        let cfg: EnvConfig = toml::from_str(&format!(
+            "db = {:?}\n[mcp.linear]\nurl = \"https://mcp.linear.app/mcp\"\n",
             db_path.to_str().unwrap()
         ))
         .unwrap();

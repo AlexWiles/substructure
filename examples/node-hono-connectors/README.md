@@ -41,13 +41,11 @@ node server.mjs
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
-subs run -c substructure.toml \
-    --input '{"type":"client.message","message":{"role":"user","content": "which issues are open?"}}'
+subs run -c substructure.toml --agent my-agent "which issues are open?"
 ```
 
-`substructure.toml` describes the environment — `target = "local"` and the
-worker URL, the agent, the provider, and the output mode — so none of it is on
-the command line. A flag still wins over the file.
+`substructure.toml` describes the environment — the worker URL, the agent, the
+provider, and the output mode — so none of it is on the command line. A flag still wins over the file.
 
 The model calls `issues__search_issues`. The tool name has the connection id in
 front of it, because `prefix_tools` is on by default.

@@ -1,7 +1,11 @@
-target = "local"
+[llm.byo]
+type = "worker"
+format = "anthropic"
 
-[worker]
-url = "http://localhost:4444"
+[agent.my-agent]
+llm = "byo"
+model = "claude-haiku-4-5-20251001"
+worker = "http://localhost:4444"
 
 [run]
 agent = "my-agent"

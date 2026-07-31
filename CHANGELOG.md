@@ -18,21 +18,44 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 - The push transport no longer cuts long streams.
 - A failed sub-agent and an unconfigured session now report errors.
 - A tool result that arrives after its deadline no longer reports an error.
+- `subs login` and `subs logout` now read the environment file's
+  `[deployment].url` like every other cloud command, so `subs login -c
+  subs.prod.toml` authenticates against the deployment that file names instead
+  of the hosted cloud.
 
 ### Added
 
+- A worker is now optional. Declare an agent in `substructure.toml`, and the engine decides its turns.
+- `[agent.<id>]` sections declare each agent. The section mirrors the wire agent config, plus a `worker` URL and a `signing_secret_env`.
+- An agent can give its whole config to its worker. Declare only a `worker` URL, and the worker declares the agent at `session.start`.
+- `[llm.<id>]` sections declare each LLM. An agent names one, and the block's `type` sets where its calls run.
+- The `session.start` decision proposes the agent config that the file declares.
+- An `interrupt.resumed` decision proposes the next model call.
+- `subs run` accepts the message as an argument.
 - A client submit can queue a message while a turn is active.
 - Add a Slack adapter and a channel abstraction.
 - Add MCP support.
 - substructure.toml as a config file.
-- `subs init <local|remote> [path]` writes a starter environment file.
+- `subs init` asks questions and writes an environment file, or writes a starter file if there is no terminal.
+- `subs apply` pushes a file's `[deployment]` to that server: it creates
+  the app when nothing is pinned (printing the signing secret once and writing
+  the pin back), then applies `name`, the agents' `worker` URL, and the `[mcp.<id>]`
+  declarations and grants. Additive and idempotent — re-applying an unchanged
+  file prints `No changes.` and exits 0 — so it is safe to run on every merge.
+  The new `name` key is what an app is created from and renamed to.
+- `subs config log` shows what has changed an app's configuration, who changed
+  it, and through which surface. The imperative commands append the same
+  events, so the log is complete whichever one wrote.
 
 ### Changed
 
-- `substructure.toml` now declares `target = "local"` or `target = "remote"`, and
-  describes one environment: one file, one engine. Engine settings moved into
-  `[worker]`, `[llm]`, `[run]`, and `[server]`; `org`/`app`/`url` are the remote
-  half. There is no migration — a file without `target` is a parse error.
+- `substructure.toml` describes one system, in groups: settings moved into
+  `[llm.<id>]`, `[agent.<id>]`, `[run]`, `[server]`, and `[deployment]`. A file
+  carries two roles, either or both — **an engine you run** (`db`, `log`,
+  `[run]`, `[server]`) and **a deployment you administer** (`[deployment]`) —
+  while `name`, `[agent.<id>]`, `[llm.<id>]`, `[slack]`, and `[mcp.<id>]` are
+  one declaration whichever role reads them. A self-hosted system is therefore
+  one file rather than two that have to agree. There is no migration.
 
   ```toml
   # before
@@ -42,17 +65,27 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
   port = 8080
 
   # after
-  target = "local"
-  [worker]
-  url = "http://localhost:4444"
-  [llm]
-  provider = "anthropic"
+  [llm.claude]
+  type = "anthropic"
+  [agent.assistant]
+  llm = "claude"
+  model = "claude-sonnet-4-5"
+  worker = "http://localhost:4444"   # only if a worker decides for it
   [run]
   output = "pretty"
   [server]
   port = 8080
+  [deployment]        # only if this file administers one
+  org = "org_01hx…"
   ```
 
+- `[server].dev` is `[server].auth`, and `subs serve --dev` is `--no-auth`
+  (`--dev` still works as an alias): the file said "dev" for what is really
+  "authenticate clients and workers", which is a decision about reachability,
+  not about a stage. `auth` defaults to true.
+- `subs init` takes `engine`, `deployment`, or `both` (`local` and `remote` are
+  aliases) — what the file is *for*, rather than which engine is at the other
+  end of it.
 - `subs mcp login` stores credentials in the environment's `db` instead of
   `credentials.toml`, so a login belongs to the environment that uses it. Run
   `subs mcp login <id>` once per environment; **gitignore `*.db*`**, which now
@@ -60,15 +93,22 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
   `credentials` config key and `--credentials` flag on `serve` are gone.
 - `subs mcp add` is gone: declare `[mcp.<id>]` in the file. Ids and URLs are
   checked when the file is read.
-- `subs webhook set` with no URL pushes the `[worker].url` the file declares.
 - An `output` the file does not recognize is a parse error rather than a silent
   fall back to `ag-ui`.
 - `subs link` writes to the file commands actually read (the discovered one, or
   `-c`) instead of always the working directory, and keeps a `url` it did not
   set.
 - Rename the default database file to `substructure.db`.
-- Rename the `--provider` option to `--llm-provider`.
 - The `tool.call` action has no `handler` field; the engine finds where a call runs from its name.
+- The agent config has an `llm` field, and no `handler` or `format` fields. The named `[llm.<id>]` block sets where a call runs and its wire shape.
+- The `llm.call` action has an `llm` field and no `handler` field. Name a different block to move one call to a different LLM.
+- Decisions route per agent. An agent with a `worker` URL gets a push; an agent without one runs on the engine; an agent that the file does not declare fails immediately.
+- Remove the `[worker]` section. Set `worker` on each `[agent.<id>]` that a worker decides for.
+- Remove the `subs webhook` commands and the local `PUT /apps/{app}/worker` route. `subs apply` pushes the worker URL that the file declares.
+- Remove the `--worker-url`, `--signing-secret`, and `--llm-provider` options from `subs run` and `subs serve`. The file declares all three.
+- `subs run` needs `--agent` or `[run].agent`, and checks the id before it makes a session.
+- `subs init` asks for an agent id and a model, and writes a file with no worker.
+- The engine signs a decision request only if the agent names a `signing_secret_env`.
 - LLM calls and tool routing now use the agent config from the same decision.
 - Effects and decisions queue in arrival order and dispatch when their prerequisites settle.
 - Rename the decision events to the effect lifecycle names: `decision.queued`, `decision.dispatched`, `decision.completed`, `decision.errored`, `decision.dropped`.

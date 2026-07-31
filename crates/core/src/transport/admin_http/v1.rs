@@ -3,8 +3,6 @@
 //! `{app}` segments are accepted and ignored; control-plane mutations
 //! (create/rename/delete app, API keys) are rejected.
 
-use std::sync::Arc;
-
 use axum::extract::{FromRef, Path, Query, State};
 use axum::http::header::{HeaderName, HeaderValue};
 use axum::http::StatusCode;
@@ -13,10 +11,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Extension, Json, Router};
 
-use crate::api::v1::{ApiError, App, Meta, Org, WorkerConfig, WorkerUpsert};
-use crate::cli::DEFAULT_TENANT;
-use crate::transport::push::PushAdapter;
-use crate::worker::push::PushRegistrationRecord;
+use crate::api::v1::{ApiError, App, Meta, Org};
 use crate::Caller;
 
 use super::routes::{self, SessionEventsParams};
@@ -28,7 +23,6 @@ const LOCAL_APP: &str = "local";
 #[derive(Clone)]
 pub struct V1State {
     admin: AdminHttpState,
-    push: Arc<PushAdapter>,
 }
 
 impl FromRef<V1State> for AdminHttpState {
@@ -37,10 +31,9 @@ impl FromRef<V1State> for AdminHttpState {
     }
 }
 
-pub fn router(admin: AdminHttpState, push: Arc<PushAdapter>) -> Router {
+pub fn router(admin: AdminHttpState) -> Router {
     let state = V1State {
         admin: admin.clone(),
-        push,
     };
     Router::new()
         .route("/api/v1/meta", get(meta))
@@ -53,11 +46,6 @@ pub fn router(admin: AdminHttpState, push: Arc<PushAdapter>) -> Router {
         .route(
             "/api/v1/apps/{app}/sessions/{session_id}/events/stream",
             get(stream_session_events),
-        )
-        .route("/api/v1/apps/{app}/worker", get(get_worker).put(put_worker))
-        .route(
-            "/api/v1/apps/{app}/worker/rotate-secret",
-            post(rotate_secret),
         )
         .route("/api/v1/orgs", get(list_orgs))
         .route("/api/v1/orgs/{org}/apps", get(list_apps))
@@ -123,121 +111,12 @@ async fn stream_session_events(
     routes::stream_session_events(state, caller, Path(session_id), params, headers).await
 }
 
-async fn get_worker(State(state): State<V1State>) -> impl IntoResponse {
-    Json(worker_config(state.push.registration(DEFAULT_TENANT).await))
-}
-
-async fn put_worker(
-    State(state): State<V1State>,
-    Json(body): Json<WorkerUpsert>,
-) -> impl IntoResponse {
-    let existing = state.push.registration(DEFAULT_TENANT).await;
-
-    if body.state.as_deref() == Some("disabled") {
-        if let Err(e) = state.push.unregister(DEFAULT_TENANT).await {
-            return registry_error(e);
-        }
-        return Json(worker_config(None)).into_response();
-    }
-
-    let endpoint_url = body
-        .endpoint_url
-        .or_else(|| existing.as_ref().and_then(config_endpoint));
-    let Some(endpoint_url) = endpoint_url else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiError::message(
-                "endpointUrl is required to enable the worker",
-            )),
-        )
-            .into_response();
-    };
-    let signing_secret = existing
-        .as_ref()
-        .and_then(config_secret)
-        .unwrap_or_else(new_secret);
-
-    match register(&state, endpoint_url, signing_secret).await {
-        Ok(record) => Json(worker_config(Some(record))).into_response(),
-        Err(e) => registry_error(e),
-    }
-}
-
-async fn rotate_secret(State(state): State<V1State>) -> impl IntoResponse {
-    let Some(existing) = state.push.registration(DEFAULT_TENANT).await else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiError::message("no worker configured")),
-        )
-            .into_response();
-    };
-    let Some(endpoint_url) = config_endpoint(&existing) else {
-        return registry_error("stored worker has no endpoint_url".into());
-    };
-    match register(&state, endpoint_url, new_secret()).await {
-        Ok(record) => Json(worker_config(Some(record))).into_response(),
-        Err(e) => registry_error(e),
-    }
-}
-
-async fn register(
-    state: &V1State,
-    endpoint_url: String,
-    signing_secret: String,
-) -> Result<PushRegistrationRecord, String> {
-    let record = PushRegistrationRecord {
-        tenant_id: DEFAULT_TENANT.into(),
-        transport_type: "http".into(),
-        config: serde_json::json!({
-            "endpoint_url": endpoint_url,
-            "signing_secret": signing_secret,
-        }),
-    };
-    state.push.register(record.clone()).await?;
-    Ok(record)
-}
-
-fn worker_config(record: Option<PushRegistrationRecord>) -> WorkerConfig {
-    match record {
-        Some(r) => WorkerConfig {
-            endpoint_url: config_endpoint(&r),
-            state: Some("enabled".into()),
-            signing_secret: config_secret(&r),
-        },
-        None => WorkerConfig {
-            endpoint_url: None,
-            state: Some("disabled".into()),
-            signing_secret: None,
-        },
-    }
-}
-
-fn config_endpoint(r: &PushRegistrationRecord) -> Option<String> {
-    r.config.get("endpoint_url")?.as_str().map(String::from)
-}
-
-fn config_secret(r: &PushRegistrationRecord) -> Option<String> {
-    r.config.get("signing_secret")?.as_str().map(String::from)
-}
-
-fn new_secret() -> String {
-    hex::encode(rand::random::<[u8; 32]>())
-}
-
-fn registry_error(message: String) -> Response {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ApiError::message(message)),
-    )
-        .into_response()
-}
-
 /// What this server offers. `single_tenant` is what lets the CLI adopt the
 /// advertised org/app instead of asking which one.
 async fn meta() -> impl IntoResponse {
     Json(Meta {
         single_tenant: true,
-        features: vec!["sessions".into(), "worker".into()],
+        features: vec!["sessions".into()],
     })
 }
 

@@ -24,7 +24,7 @@ def decide(req):
         # The engine will use this agent config to generate proposed actions.
         return {
             "agent": {
-                "model": "claude-haiku-4-5-20251001",
+                **req["proposed"]["agent"],
                 "stream": True,
                 "tools": [
                     {"name": t["name"], "description": t["description"]} for t in TOOLS

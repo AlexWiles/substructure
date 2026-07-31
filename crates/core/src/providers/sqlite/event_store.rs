@@ -706,11 +706,10 @@ mod tests {
 
     fn agent_config(model: &str) -> crate::protocol::AgentConfig {
         crate::protocol::AgentConfig {
-            format: None,
+            llm: Some("claude".to_string()),
             model: model.to_string(),
             system: None,
             stream: false,
-            handler: None,
             retry: None,
             tools: Vec::new(),
             sub_agents: Vec::new(),
@@ -791,6 +790,8 @@ mod tests {
                     anchor: Some("m1".to_string()),
                 }),
                 EventPayload::LlmCallRequested(LlmCallRequested {
+                    llm: "claude".to_string(),
+                    format: None,
                     id: "call-1".to_string(),
                     attempt: 0,
                     request: LlmRequest {
@@ -821,7 +822,6 @@ mod tests {
                     stream: false,
                     retry: RetryPolicy::no_retry(),
                     handler: LlmHandler::Worker,
-                    format: None,
                 }),
             ],
         );

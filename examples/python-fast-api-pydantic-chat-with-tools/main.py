@@ -28,6 +28,8 @@ def decide(req: DecisionRequest) -> DecisionResponse:
         # The engine will use this agent config to generate proposed actions.
         return DecisionResponse(
             agent=AgentConfig(
+                # `llm` and `model` name what substructure.toml declares.
+                llm="claude",
                 model="claude-haiku-4-5-20251001",
                 stream=True,
                 tools=[

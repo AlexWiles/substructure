@@ -18,7 +18,9 @@ pub struct AuthWiring {
 }
 
 impl AuthWiring {
-    pub fn dev() -> Self {
+    /// No client or worker authentication, for a server nothing off this
+    /// machine can reach.
+    pub fn unauthenticated() -> Self {
         let secret = hex::encode(rand::random::<[u8; 32]>());
         let issuer = Arc::new(JwtHs256ClientTokenAuthResolver::new(
             "substructure-dev",

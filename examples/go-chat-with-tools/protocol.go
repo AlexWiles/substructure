@@ -24,23 +24,25 @@ func (r *Protocol) Marshal() ([]byte, error) {
 
 // One entry point per wire surface; every protocol type is named under $defs.
 type Protocol struct {
-	ClientInput      *ClientInput      `json:"client_input,omitempty"`
-	ClientPayload    *ClientPayload    `json:"client_payload,omitempty"`
-	DecisionRequest  *DecisionRequest  `json:"decision_request,omitempty"`
-	DecisionResponse *DecisionResponse `json:"decision_response,omitempty"`
-	StreamDelta      *StreamDelta      `json:"stream_delta,omitempty"`
-	TokenDelta       *TokenDelta       `json:"token_delta,omitempty"`
+	ClientInput         *ClientInput         `json:"client_input,omitempty"`
+	ClientPayload       *ClientPayload       `json:"client_payload,omitempty"`
+	DecisionRequest     *DecisionRequest     `json:"decision_request,omitempty"`
+	DecisionResponse    *DecisionResponse    `json:"decision_response,omitempty"`
+	InterruptPayload    *InterruptPayload    `json:"interrupt_payload,omitempty"`
+	InterruptResolution *InterruptResolution `json:"interrupt_resolution,omitempty"`
+	StreamDelta         *StreamDelta         `json:"stream_delta,omitempty"`
+	TokenDelta          *TokenDelta          `json:"token_delta,omitempty"`
 }
 
-// Everything a client can send on the input surface: submit a message / a full view / a
-// named action, resume an interrupt, or settle a client tool. A flat, internally-tagged
-// union — its six tags produce serde's "unknown variant, expected one of …" error for
-// free. `Runtime::handle_client_input` is the single seam that dispatches it (mirroring
-// `resolve_response` on the worker side).
+// Everything a client can send on the input surface: submit a message / a full view / an
+// append batch / a named action, resume an interrupt, or settle a client tool. A flat,
+// internally-tagged union — its seven tags produce serde's "unknown variant, expected one
+// of …" error for free. `Runtime::handle_client_input` is the single seam that dispatches
+// it (mirroring `resolve_response` on the worker side).
 //
 // Addressing lives where it is meaningful, not in a shared envelope: `agent_id` (routes
 // the turn, creating the session if new) and the optional idempotency `turn_id` are
-// fields of the three submit variants only. A resume/settle addresses an interrupt/effect
+// fields of the four submit variants only. A resume/settle addresses an interrupt/effect
 // id and continues whatever turn is active, so it carries neither — misplacing them is
 // unrepresentable rather than rejected. `session_id` is the one universal address and
 // rides the envelope. A submit's body rebuilds a [`ClientPayload`] at the seam.
@@ -49,8 +51,16 @@ type Protocol struct {
 // to the worker. Shared by the [`ClientInput::InterruptResume`] input and the
 // [`DecisionTrigger::InterruptResumed`] trigger.
 type ClientInput struct {
-	AgentID     *string         `json:"agent_id,omitempty"`
-	Message     *DraftMessage   `json:"message,omitempty"`
+	AgentID *string       `json:"agent_id,omitempty"`
+	Message *DraftMessage `json:"message,omitempty"`
+	// Hold this message for the next turn instead of refusing it when one
+	// is already running. Off by default: rejection stays the contract for
+	// a plain submitter, and queuing is declared intent.
+	//
+	// Hold this batch for the next turn instead of refusing it when one is
+	// already running. Off by default: rejection stays the contract for a
+	// plain submitter, and queuing is declared intent.
+	Queue       *bool           `json:"queue,omitempty"`
 	Stream      *bool           `json:"stream,omitempty"`
 	TurnID      *string         `json:"turn_id"`
 	Type        ClientInputType `json:"type"`
@@ -85,7 +95,8 @@ type ClientContext struct {
 // A function tool the agent offers. The model-facing contract is
 // `name`/`description`/`input`/`output`; `handler` selects where a call runs —
 // `Some(Client)` ⇒ client-executed, absent ⇒ worker-executed (the default).
-// `server` is invalid for tools.
+// `server` is invalid for tools: engine-executed tools come from a connector,
+// which a worker declares by id rather than by tool.
 type AgentTool struct {
 	Description *string     `json:"description,omitempty"`
 	Handler     *Handler    `json:"handler"`
@@ -146,7 +157,8 @@ type ToolCallFunction struct {
 }
 
 // The client→engine inbound *submit* wire form: an untrusted client submits a message,
-// its full conversation view, or a named action. Lowered to domain events at the
+// its full conversation view, an append batch, or a named action. Lowered to domain events
+// at the
 // `SubmitClientPayload` command seam (`runtime::session::command`); never persisted
 // as-is. Carried verbatim inside [`ClientInput`], which is the full client input
 // surface.
@@ -155,6 +167,11 @@ type ToolCallFunction struct {
 //
 // The body of a `client.messages`: the client's full conversation view, optionally
 // streamed.
+//
+// The body of a `client.append`: messages appended at the session head. The
+// view is composed against the active path at delivery, so a queued append
+// lands after whatever turn beat it — it can never fork the tree. Messages
+// whose ids are already recorded are dropped.
 //
 // The payload of a `client.action`: a named action with optional JSON args.
 type ClientPayload struct {
@@ -190,19 +207,29 @@ type DecisionRequest struct {
 	TurnID    *string          `json:"turn_id"`
 }
 
-// A declared agent identity. `model` is the only required field; everything else
-// refines the proposed LLM request the engine derives for `client.messages`.
+// A declared agent identity — the same shape whether it is written in an
+// `[agent.<id>]` section or returned by a worker.
+//
+// `llm` names the `[llm.*]` block every proposed call runs on, and so decides
+// both the venue (the engine with a vendor key, or the agent's own worker) and
+// the wire shape of a worker-run call. It is effectively required: a config
+// that names none fails when the engine resolves a call against it.
 type AgentConfig struct {
-	// Provider wire format for worker-handled calls; requires `handler:
-	// worker`. Absent ⇒ the neutral format.
-	Format *LlmFormat `json:"format"`
-	// Where the proposed LLM call runs: `Some(Worker)` ⇒ the worker executes it
-	// (answering `llm.execute`); absent or `Some(Server)` ⇒ the engine's
-	// server-side provider. `client` is invalid and rejected at the decision seam.
-	Handler *Handler     `json:"handler"`
-	Model   string       `json:"model"`
-	Retry   *RetryPolicy `json:"retry"`
-	Stream  *bool        `json:"stream,omitempty"`
+	// The `[llm.*]` block this agent's calls run on.
+	Llm *string `json:"llm"`
+	// MCP servers the agent draws tools from. The engine resolves each against
+	// its connection registry into [`ConnectorTool`]s the model sees alongside
+	// `tools`. Like `sub_agents`, these are never merged into `tools` — the
+	// worker declares the server, not its tools.
+	//
+	// A second protocol gets its own field rather than a `type` tag here: its
+	// filter would not be this one (MCP annotations mean nothing to an A2A
+	// agent), and a union of conditionally-valid fields generates badly in the
+	// Go and Python bindings.
+	MCP    []MCPServer  `json:"mcp,omitempty"`
+	Model  string       `json:"model"`
+	Retry  *RetryPolicy `json:"retry"`
+	Stream *bool        `json:"stream,omitempty"`
 	// Sub-agents the model can delegate to. Presented to the model as tools (by
 	// id) alongside `tools`, but each call spawns a child session rather than
 	// executing a function.
@@ -210,6 +237,33 @@ type AgentConfig struct {
 	System    *string           `json:"system"`
 	// Worker- or client-executed tools the model can call.
 	Tools []AgentTool `json:"tools,omitempty"`
+}
+
+// An MCP server the agent draws tools from. `id` resolves against the engine's
+// connection registry — locally from `[mcp]` in `substructure.toml`, in the
+// cloud from the connections an admin granted this app. The worker never names
+// a URL or a credential.
+type MCPServer struct {
+	ID string `json:"id"`
+	// Narrows what the model sees. Absent ⇒ every tool the connection grants.
+	Tools *MCPTools `json:"tools"`
+}
+
+// An MCP server's tool filter. Applied in order — capability predicates, then
+// `include`, then `exclude` — and only ever narrowing, so a filter can never
+// widen what the connection grants.
+//
+// `include`/`exclude` are globs matched against the tool's name on the
+// connection, the name its own documentation uses, not the prefixed name the
+// model sees. Capability predicates read the MCP annotations; a tool that
+// carries none fails the predicate, so an unannotated server yields nothing
+// under `read_only` rather than silently passing everything through.
+type MCPTools struct {
+	Exclude        []string `json:"exclude,omitempty"`
+	Idempotent     *bool    `json:"idempotent"`
+	Include        []string `json:"include,omitempty"`
+	NonDestructive *bool    `json:"non_destructive"`
+	ReadOnly       *bool    `json:"read_only"`
 }
 
 // Fully-resolved retry policy — no optional fields. Stored on call state and
@@ -232,7 +286,8 @@ type SubAgentElement struct {
 // An in-flight effect (Pending or RetryScheduled) surfaced on each worker decision.
 // A flat envelope plus kind-specific fields: a tool call's
 // `name`/`arguments`/`handler`, an LLM call's `handler`/`stream`, a
-// sub-agent's `agent_id`/`session_id`.
+// sub-agent's `agent_id`/`session_id`. A connector sync carries none — its
+// `id` is the connection being fetched.
 type Effect struct {
 	AgentID *string `json:"agent_id"`
 	// The tree node the effect was requested at.
@@ -244,9 +299,10 @@ type Effect struct {
 	ID        string       `json:"id"`
 	Kind      EffectKind   `json:"kind"`
 	Name      *string      `json:"name"`
-	SessionID *string      `json:"session_id"`
 	Status    EffectStatus `json:"status"`
 	Stream    *bool        `json:"stream"`
+	// The model tool call a delegation answers; its own `id` is the child session.
+	ToolCallID *string `json:"tool_call_id"`
 }
 
 // The owner as delivered to the worker on `DecisionRequest.identity`: the
@@ -273,7 +329,7 @@ type Message struct {
 	Name       *string           `json:"name"`
 	Role       Role              `json:"role"`
 	ToolCallID *string           `json:"tool_call_id"`
-	ToolCalls  []ToolCallElement `json:"tool_calls"`
+	ToolCalls  []ToolCallElement `json:"tool_calls,omitempty"`
 }
 
 // The engine's default continuation for `trigger` (empty when it needs
@@ -306,6 +362,12 @@ type DecisionResponse struct {
 //
 // `id` omitted ⇒ the engine mints one (LLM-driven tools carry the model's id).
 //
+// There is no `handler`: where a call runs follows from its name. A tool
+// resolved from a connector runs on the engine, a tool declared
+// `handler: client` runs on the client, and anything else runs on the
+// worker. The engine already knows all three, so asking the worker to
+// restate it only creates a way for the two to disagree.
+//
 // `id`/`attempt` omitted ⇒ taken from the answering `tool.execute` trigger,
 // fencing the result to the attempt that ran.
 //
@@ -314,11 +376,11 @@ type DecisionResponse struct {
 //
 // `interrupt_id` omitted ⇒ the engine mints one to correlate the later resume.
 type DecisionAction struct {
-	// `server` or `worker`; omitted ⇒ `server`.
-	//
-	// `worker` or `client`; omitted ⇒ `worker`.
-	Handler             *Handler           `json:"handler,omitempty"`
-	ID                  *string            `json:"id"`
+	ID *string `json:"id"`
+	// The `[llm.*]` block this call runs on; omitted ⇒ the merge source
+	// config's `llm`. Naming a different block moves one call to another
+	// venue or vendor.
+	Llm                 *string            `json:"llm"`
 	MaxCompletionTokens *int64             `json:"max_completion_tokens"`
 	Messages            []DraftMessage     `json:"messages"`
 	Model               *string            `json:"model"`
@@ -388,6 +450,9 @@ type LlmTool struct {
 // The body of an interrupt resume: which interrupt, and the payload delivered
 // to the worker. Shared by the [`ClientInput::InterruptResume`] input and the
 // [`DecisionTrigger::InterruptResumed`] trigger.
+//
+// Fired after a turn completes, carrying its final output; blocks the session
+// going idle until answered. Echo the proposed `done` to finalize.
 type DecisionTrigger struct {
 	Type DecisionTriggerType `json:"type"`
 	// Inputs the client declared on its run; the engine layers `client.tools`
@@ -424,6 +489,8 @@ type DecisionTrigger struct {
 	SessionID   *string       `json:"session_id,omitempty"`
 	InterruptID *string       `json:"interrupt_id,omitempty"`
 	Payload     interface{}   `json:"payload"`
+	Data        interface{}   `json:"data"`
+	TurnID      *string       `json:"turn_id,omitempty"`
 }
 
 // The engine's classification of `arguments` against the tool's
@@ -445,6 +512,41 @@ type ToolInput struct {
 	Status Status      `json:"status"`
 	Value  interface{} `json:"value"`
 	Error  *string     `json:"error,omitempty"`
+}
+
+// An interrupt payload following the AG-UI Interrupt shape (spec spelling;
+// `id` and `reason` live on the interrupt itself).
+type InterruptPayload struct {
+	// RFC 3339; display only until engine TTLs land.
+	ExpiresAt *string `json:"expiresAt"`
+	// Markdown; channels down-convert. Without it, channels fall back to
+	// the interrupt's `reason`.
+	Message *string `json:"message"`
+	// Free-form, delivered to clients verbatim. `metadata.options`
+	// ([`InterruptOption`] list) renders as Slack buttons.
+	Metadata interface{} `json:"metadata"`
+	// JSON Schema for the expected resolution payload.
+	ResponseSchema interface{} `json:"responseSchema"`
+	// Binds the interrupt to a prior tool call.
+	ToolCallID *string `json:"toolCallId"`
+}
+
+// A channel-authored resume payload: the AG-UI resume shape
+// (`{status, payload}`) plus a provenance stamp.
+type InterruptResolution struct {
+	Payload   interface{}         `json:"payload"`
+	Responder *InterruptResponder `json:"responder"`
+	Status    ResumeStatus        `json:"status"`
+}
+
+// Who resolved it, stamped by the channel — never by the requester.
+type InterruptResponder struct {
+	// The channel kind, e.g. `slack`, `ag-ui`.
+	Channel string `json:"channel"`
+	// The chosen option's label, when the resolution was a pick.
+	Label *string `json:"label"`
+	// Channel-native user id.
+	User *string `json:"user"`
 }
 
 type StreamDelta struct {
@@ -479,20 +581,11 @@ type TokenDelta struct {
 	TurnID    *string         `json:"turn_id"`
 }
 
-// Server-side executor resolves the provider and makes the call (LLM only).
+// Server-side executor resolves the provider or connection and makes the call.
 //
 // Dispatched to the work queue for the worker to execute.
 //
 // Executed by the client. Session goes Idle while waiting (tools only).
-//
-// Where a call runs — one wire enum so `handler` has a single type on every
-// surface. Tool calls accept `worker` (default) or `client`; LLM calls accept
-// `server` (default) or `worker`. The invalid pairing (a `server` tool, a
-// `client` LLM call) is rejected at the decision seam.
-//
-// `server` or `worker`; omitted ⇒ `server`.
-//
-// `worker` or `client`; omitted ⇒ `worker`.
 type Handler string
 
 const (
@@ -525,6 +618,7 @@ type ClientInputType string
 const (
 	InterruptResume      ClientInputType = "interrupt.resume"
 	PurpleClientAction   ClientInputType = "client.action"
+	PurpleClientAppend   ClientInputType = "client.append"
 	PurpleClientMessage  ClientInputType = "client.message"
 	PurpleClientMessages ClientInputType = "client.messages"
 	PurpleToolError      ClientInputType = "tool.error"
@@ -535,26 +629,32 @@ type ClientPayloadType string
 
 const (
 	FluffyClientAction   ClientPayloadType = "client.action"
+	FluffyClientAppend   ClientPayloadType = "client.append"
 	FluffyClientMessage  ClientPayloadType = "client.message"
 	FluffyClientMessages ClientPayloadType = "client.messages"
 )
 
-// OpenAI Chat Completions.
+// What kind of work an effect is. One enum for the wire and for the engine's
+// own scheduling: a decision and a turn's end queue beside the calls and are
+// swept the same way, so they are kinds too. Neither ever appears on an
+// [`Effect`] — a decision rides the decision list, a turn end has no record.
 //
-// Anthropic Messages API.
-type LlmFormat string
-
-const (
-	Anthropic LlmFormat = "anthropic"
-	Openai    LlmFormat = "openai"
-)
-
+// Fetching one connection's tool list. Its `id` is the connection id.
+//
+// A worker decision.
+//
+// The turn's completion, dependent on its `turn.finished` finalizer
+// decision settling. Carries the turn id; the frozen output lives in the
+// session's `finalizing`. Never swept: it has no deadline of its own.
 type EffectKind string
 
 const (
-	LlmCall  EffectKind = "llm_call"
-	SubAgent EffectKind = "sub_agent"
-	ToolCall EffectKind = "tool_call"
+	ConnectorSync EffectKind = "connector_sync"
+	Decision      EffectKind = "decision"
+	LlmCall       EffectKind = "llm_call"
+	SubAgent      EffectKind = "sub_agent"
+	ToolCall      EffectKind = "tool_call"
+	TurnEnd       EffectKind = "turn_end"
 )
 
 type EffectStatus string
@@ -603,6 +703,16 @@ const (
 	TypeToolCall     DecisionActionType = "tool.call"
 )
 
+// OpenAI Chat Completions.
+//
+// Anthropic Messages API.
+type LlmFormat string
+
+const (
+	Anthropic LlmFormat = "anthropic"
+	Openai    LlmFormat = "openai"
+)
+
 type Status string
 
 const (
@@ -623,6 +733,14 @@ const (
 	TentacledClientMessages DecisionTriggerType = "client.messages"
 	ToolExecute             DecisionTriggerType = "tool.execute"
 	ToolFinished            DecisionTriggerType = "tool.finished"
+	TurnFinished            DecisionTriggerType = "turn.finished"
+)
+
+type ResumeStatus string
+
+const (
+	Cancelled ResumeStatus = "cancelled"
+	Resolved  ResumeStatus = "resolved"
 )
 
 type Content struct {

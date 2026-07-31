@@ -131,6 +131,8 @@ impl MessageTree {
 pub struct LlmCallRequested {
     pub id: String,
     pub attempt: u32,
+    /// The `[llm.*]` block the call runs on.
+    pub llm: String,
     pub request: LlmRequest,
     pub stream: bool,
     pub retry: RetryPolicy,

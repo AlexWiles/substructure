@@ -4,11 +4,11 @@ use clap::{Args, ValueEnum};
 use uuid::Uuid;
 
 use super::cloud::project_config;
-use super::env::{EnvVars, LlmProviderArg, OutputFormat};
+use super::env::{EnvVars, OutputFormat};
 use super::pretty::PrettyPrinter;
-use super::{local, register_startup_worker, DEFAULT_TENANT};
+use super::{local, DEFAULT_TENANT};
 use crate::event_store::Seq;
-use crate::protocol::{ClientInput, SessionOwner};
+use crate::protocol::{ClientInput, Content, DraftMessage, Role, SessionOwner};
 use crate::providers::sqlite::SqliteDb;
 use crate::session::events::EventPayload;
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
@@ -19,41 +19,35 @@ use crate::{Caller, HandleClientInput};
 
 #[derive(Args)]
 pub struct RunArgs {
-    /// Agent id the worker routes on. Required for submit inputs
-    /// (`client.message`/`client.messages`/`client.action`); ignored otherwise.
+    /// The message to send. Shorthand for
+    /// `--input '{"type":"client.message","message":{"role":"user","content":"..."}}'`.
+    #[arg(value_name = "MESSAGE")]
+    message: Option<String>,
+    /// Agent id to run, naming an `[agent.<id>]` section. Falls back to
+    /// `[run].agent`.
     #[arg(long)]
     agent: Option<String>,
-    /// JSON input. Its `type` selects the path:
+    /// JSON input, for anything a plain message cannot say. Its `type` selects
+    /// the path:
     ///   `client.message` / `client.messages` / `client.action`  submit a client payload;
     ///   `interrupt.resume`                                       resume a parked interrupt;
     ///   `tool.result` / `tool.error`                             settle a client-side tool call.
     ///
     /// A plain user turn:
     /// `{"type":"client.message","message":{"role":"user","content":"hi"}}`
-    #[arg(long)]
-    input: String,
-    /// Worker endpoint the engine POSTs decisions to.
-    /// Falls back to $SUBSTRUCTURE_WORKER_URL, then http://localhost:3000/agent.
-    #[arg(long)]
-    worker_url: Option<String>,
+    #[arg(long, conflicts_with = "message")]
+    input: Option<String>,
     /// Resume/continue an existing session. Omit to start a new one (its id is
     /// printed). Required for `interrupt.resume` and `tool.result`/`tool.error`.
     #[arg(long)]
     session: Option<String>,
-    /// LLM provider for engine-executed `llm.call` actions. Omit when the worker
-    /// makes its own LLM calls.
-    #[arg(long, value_enum)]
-    llm_provider: Option<LlmProviderArg>,
     /// Environment file (default: walks up from cwd looking for
-    /// `substructure.toml`). Must declare `target = "local"`.
+    /// `substructure.toml`).
     #[arg(short = 'c', long)]
     config: Option<std::path::PathBuf>,
     /// SQLite dev database path. [default: substructure.db]
     #[arg(long)]
     db: Option<String>,
-    /// Signing secret if the worker verifies webhook signatures.
-    #[arg(long)]
-    signing_secret: Option<String>,
     /// Output mode. (Engine logs go to stderr at error level; set RUST_LOG=info for more.)
     #[arg(long, short = 'o', value_enum)]
     output: Option<OutputFormat>,
@@ -99,6 +93,48 @@ fn parse_input(input: &str, agent: Option<String>) -> anyhow::Result<ClientInput
     serde_json::from_value(value).map_err(|e| anyhow::anyhow!("invalid --input: {e}"))
 }
 
+/// One user message, the shape a positional argument means.
+fn message_input(message: String, agent_id: String) -> ClientInput {
+    ClientInput::Message {
+        agent_id,
+        turn_id: None,
+        message: DraftMessage {
+            id: None,
+            role: Role::User,
+            content: Some(Content::Text(message)),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        },
+        stream: true,
+        queue: false,
+    }
+}
+
+/// Which agent this run drives. `--agent`, else `[run].agent` when the file
+/// pins one; nothing is inferred from what happens to be declared, because an
+/// engine that picks for you picks differently the day a second agent is added.
+fn select_agent(
+    flag: Option<String>,
+    pinned: Option<String>,
+    declared: &[String],
+) -> anyhow::Result<String> {
+    let Some(agent_id) = flag.or(pinned) else {
+        anyhow::bail!(
+            "no agent given. Pass `--agent <id>` or set `[run].agent`. Declared: {}",
+            crate::worker::directory::declared(declared)
+        );
+    };
+    // A typo here would otherwise surface as a failed decision one turn later.
+    if !declared.contains(&agent_id) {
+        anyhow::bail!(
+            "no [agent.{agent_id}] in substructure.toml. Declared: {}",
+            crate::worker::directory::declared(declared)
+        );
+    }
+    Ok(agent_id)
+}
+
 fn write_json<T: serde::Serialize>(stdout: &mut std::io::Stdout, value: &T) -> anyhow::Result<()> {
     serde_json::to_writer(&mut *stdout, value)?;
     stdout.write_all(b"\n")?;
@@ -115,28 +151,32 @@ impl RunArgs {
 pub async fn run(args: RunArgs) -> anyhow::Result<()> {
     // Anything argv omits can be pinned in the project file. Precedence is
     // flag > environment > file > default, applied one field at a time.
-    let cfg = project_config::local(args.config.as_deref(), "`subs run`")?;
+    let cfg = project_config::load(args.config.as_deref())?;
 
-    let connections = cfg.connections();
     let run = cfg.run.clone().unwrap_or_default();
-    let agent_id = args.agent.or(run.agent);
-    let provider_arg = args.llm_provider.or_else(|| cfg.llm_provider());
     let output_mode = args.output.or(run.output).unwrap_or(OutputFormat::AgUi);
     let db_path = args.db.unwrap_or_else(|| cfg.db_path());
 
+    // Preflight: the agent is checked against the file before a session exists,
+    // so a typo costs nothing and leaves nothing behind.
+    let agent_id = select_agent(args.agent, run.agent, &cfg.agent_ids())?;
+
     // Captured for the resume hint printed at the end, before the args are consumed.
     let agent = agent_id.clone();
-    let provider = provider_arg
-        .and_then(|p| p.to_possible_value())
-        .map(|v| v.get_name().to_string());
     let output = output_mode
         .to_possible_value()
         .map(|v| v.get_name().to_string());
 
-    let input = parse_input(&args.input, agent_id)?;
+    let input = match (args.message, args.input) {
+        (Some(message), _) => message_input(message, agent_id),
+        (None, Some(input)) => parse_input(&input, Some(agent_id))?,
+        (None, None) => {
+            anyhow::bail!("nothing to send. Pass a message, or `--input` for a non-message input.")
+        }
+    };
 
-    // dev=true: `run` exposes no server, so no client/worker auth env is required.
-    let env = match EnvVars::load(provider_arg, true) {
+    // `run` exposes no server, so no client/worker auth env is required.
+    let env = match EnvVars::load(cfg.provider_bindings(), false) {
         Some(e) => e,
         None => std::process::exit(2),
     };
@@ -148,15 +188,7 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
     }
 
     let db = SqliteDb::open(&db_path, std::time::Duration::from_secs(5))?;
-    let (rt, adapter) = local::start_engine(db, env.provider, connections).await?;
-
-    let worker_url = args
-        .worker_url
-        .or_else(|| std::env::var("SUBSTRUCTURE_WORKER_URL").ok())
-        .or_else(|| cfg.worker_url())
-        .unwrap_or_else(|| "http://localhost:3000/agent".to_string());
-    let signing_secret = args.signing_secret.or_else(|| cfg.signing_secret());
-    register_startup_worker(&adapter, &worker_url, signing_secret).await?;
+    let (rt, _adapter) = local::start_engine(db, env.providers, &cfg).await?;
 
     let session_id = args.session.unwrap_or_else(|| Uuid::now_v7().to_string());
 
@@ -260,9 +292,7 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
             resume_command(
                 &program_name(),
                 &session_id,
-                &worker_url,
-                agent.as_deref(),
-                provider.as_deref(),
+                &agent,
                 output.as_deref(),
                 &db_path,
             )
@@ -293,28 +323,18 @@ fn program_name() -> String {
 fn resume_command(
     program: &str,
     session: &str,
-    worker_url: &str,
-    agent: Option<&str>,
-    provider: Option<&str>,
+    agent: &str,
     output: Option<&str>,
     db: &str,
 ) -> String {
-    let mut cmd = format!("{program} run --session {session} --worker-url {worker_url}");
-    if let Some(agent) = agent {
-        cmd.push_str(&format!(" --agent {agent}"));
-    }
-    if let Some(provider) = provider {
-        cmd.push_str(&format!(" --llm-provider {provider}"));
-    }
+    let mut cmd = format!("{program} run --agent {agent} --session {session}");
     if let Some(output) = output.filter(|o| *o != "ag-ui") {
         cmd.push_str(&format!(" --output {output}"));
     }
     if db != project_config::DEFAULT_DB {
         cmd.push_str(&format!(" --db {db}"));
     }
-    cmd.push_str(
-        r#" --input '{"type":"client.message","message":{"role":"user","content":"..."}}'"#,
-    );
+    cmd.push_str(" '...'");
     cmd
 }
 
@@ -322,69 +342,92 @@ fn resume_command(
 mod tests {
     use super::*;
 
+    fn declared() -> Vec<String> {
+        vec!["assistant".to_string(), "researcher".to_string()]
+    }
+
     #[test]
     fn resume_command_leads_with_program_and_omits_default_db() {
         let cmd = resume_command(
             "subs",
             "sess-1",
-            "http://localhost:4444",
-            Some("my-agent"),
-            Some("anthropic"),
+            "my-agent",
             Some("ag-ui"),
             "substructure.db",
         );
-        assert_eq!(
-            cmd,
-            r#"subs run --session sess-1 --worker-url http://localhost:4444 --agent my-agent --llm-provider anthropic --input '{"type":"client.message","message":{"role":"user","content":"..."}}'"#
-        );
+        assert_eq!(cmd, "subs run --agent my-agent --session sess-1 '...'");
     }
 
     #[test]
     fn resume_command_uses_the_given_program_name() {
-        let cmd = resume_command("renamed-cli", "s", "w", None, None, None, "substructure.db");
+        let cmd = resume_command("renamed-cli", "s", "a", None, "substructure.db");
         assert!(cmd.starts_with("renamed-cli run "), "{cmd}");
     }
 
     #[test]
-    fn resume_command_echoes_non_default_db_and_skips_absent_flags() {
-        let cmd = resume_command(
-            "subs",
-            "sess-2",
-            "http://localhost:4444",
-            None,
-            None,
-            Some("ag-ui"),
-            "other.db",
-        );
+    fn resume_command_echoes_a_non_default_db() {
+        let cmd = resume_command("subs", "sess-2", "a", Some("ag-ui"), "other.db");
         assert!(cmd.contains(" --db other.db"), "{cmd}");
-        assert!(!cmd.contains("--agent"), "{cmd}");
-        assert!(!cmd.contains("--llm-provider"), "{cmd}");
-        assert!(!cmd.contains("--output"), "{cmd}");
     }
 
     #[test]
     fn resume_command_echoes_non_default_output_and_omits_the_default() {
-        let pretty = resume_command(
-            "subs",
-            "s",
-            "w",
-            None,
-            None,
-            Some("pretty"),
-            "substructure.db",
-        );
+        let pretty = resume_command("subs", "s", "a", Some("pretty"), "substructure.db");
         assert!(pretty.contains(" --output pretty"), "{pretty}");
 
-        let default = resume_command(
-            "subs",
-            "s",
-            "w",
-            None,
-            None,
-            Some("ag-ui"),
-            "substructure.db",
-        );
+        let default = resume_command("subs", "s", "a", Some("ag-ui"), "substructure.db");
         assert!(!default.contains("--output"), "{default}");
+    }
+
+    #[test]
+    fn the_flag_wins_over_the_pinned_agent() {
+        let agent = select_agent(
+            Some("researcher".to_string()),
+            Some("assistant".to_string()),
+            &declared(),
+        )
+        .unwrap();
+        assert_eq!(agent, "researcher");
+        assert_eq!(
+            select_agent(None, Some("assistant".to_string()), &declared()).unwrap(),
+            "assistant"
+        );
+    }
+
+    /// Nothing is inferred from what happens to be declared: an engine that
+    /// picks for you picks differently the day a second agent is added.
+    #[test]
+    fn no_agent_anywhere_is_an_error_listing_the_declared_ones() {
+        let err = select_agent(None, None, &declared())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no agent given"), "got {err}");
+        assert!(err.contains("assistant, researcher"), "got {err}");
+    }
+
+    /// The preflight is what makes a typo cost nothing: without it the run
+    /// creates a session and fails one decision later.
+    #[test]
+    fn an_undeclared_agent_fails_before_the_session_exists() {
+        let err = select_agent(Some("assistnat".to_string()), None, &declared())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no [agent.assistnat]"), "got {err}");
+        assert!(err.contains("assistant, researcher"), "got {err}");
+    }
+
+    #[test]
+    fn a_positional_message_is_a_user_turn_for_the_selected_agent() {
+        match message_input("hi".to_string(), "assistant".to_string()) {
+            ClientInput::Message {
+                agent_id, message, ..
+            } => {
+                assert_eq!(agent_id, "assistant");
+                assert_eq!(message.role, Role::User);
+                assert_eq!(message.content.as_ref().and_then(Content::text), Some("hi"));
+            }
+            other => panic!("expected client.message, got {other:?}"),
+        }
     }
 
     #[test]

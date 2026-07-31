@@ -311,6 +311,9 @@ pub struct LlmCallState {
     /// The verbatim prompt the worker sent, stored for retries.
     #[serde(default)]
     pub prompt: Vec<Message>,
+    /// The `[llm.*]` block the call names, kept for retries and for the
+    /// executor to pick its client by.
+    pub llm: String,
     pub spec: LlmCallSpec,
     pub stream: bool,
     #[serde(default)]
@@ -934,6 +937,7 @@ impl SessionState {
             existing.tracking.requeue();
             if let Some(call) = existing.llm_mut() {
                 call.prompt = prompt;
+                call.llm = payload.llm.clone();
                 call.spec = spec;
                 call.stream = payload.stream;
                 call.handler = payload.handler;
@@ -945,6 +949,7 @@ impl SessionState {
                 EffectTracking::new_queued(payload.retry.clone()),
                 EffectPayload::LlmCall(LlmCallState {
                     prompt,
+                    llm: payload.llm.clone(),
                     spec,
                     stream: payload.stream,
                     handler: payload.handler,
@@ -1901,6 +1906,7 @@ mod open_llm_calls_tests {
             EffectTracking::new(RetryPolicy::no_retry(), Utc::now()),
             EffectPayload::LlmCall(LlmCallState {
                 format: None,
+                llm: "claude".to_string(),
                 prompt: vec![],
                 spec: LlmCallSpec {
                     model: "m".to_string(),
@@ -2128,11 +2134,10 @@ mod agent_version_tests {
 
     fn config(model: &str) -> AgentConfig {
         AgentConfig {
-            format: None,
+            llm: Some("claude".to_string()),
             model: model.to_string(),
             system: None,
             stream: false,
-            handler: None,
             retry: None,
             tools: Vec::new(),
             sub_agents: Vec::new(),

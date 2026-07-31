@@ -55,7 +55,7 @@ what the bot needs to stream a turn's progress.
 ```sh
 export SLACK_APP_TOKEN=xapp-...
 export SLACK_BOT_TOKEN=xoxb-...
-subs serve --dev --worker-url http://localhost:4444 --slack-agent my-agent
+subs serve --no-auth --slack-agent my-agent
 ```
 
 `--slack-agent` names the agent that handles mentions and enables the channel.

@@ -34,6 +34,16 @@ export interface Protocol {
 export interface ClientInput {
     agent_id?: string;
     message?: DraftMessage;
+    /**
+     * Hold this message for the next turn instead of refusing it when one
+     * is already running. Off by default: rejection stays the contract for
+     * a plain submitter, and queuing is declared intent.
+     *
+     * Hold this batch for the next turn instead of refusing it when one is
+     * already running. Off by default: rejection stays the contract for a
+     * plain submitter, and queuing is declared intent.
+     */
+    queue?: boolean;
     stream?: boolean;
     turn_id?: null | string;
     type: ClientInputType;
@@ -71,7 +81,8 @@ export interface ClientContext {
  * A function tool the agent offers. The model-facing contract is
  * `name`/`description`/`input`/`output`; `handler` selects where a call runs —
  * `Some(Client)` ⇒ client-executed, absent ⇒ worker-executed (the default).
- * `server` is invalid for tools.
+ * `server` is invalid for tools: engine-executed tools come from a connector,
+ * which a worker declares by id rather than by tool.
  */
 export interface AgentTool {
     description?: string;
@@ -82,20 +93,11 @@ export interface AgentTool {
 }
 
 /**
- * Server-side executor resolves the provider and makes the call (LLM only).
+ * Server-side executor resolves the provider or connection and makes the call.
  *
  * Dispatched to the work queue for the worker to execute.
  *
  * Executed by the client. Session goes Idle while waiting (tools only).
- *
- * Where a call runs — one wire enum so `handler` has a single type on every
- * surface. Tool calls accept `worker` (default) or `client`; LLM calls accept
- * `server` (default) or `worker`. The invalid pairing (a `server` tool, a
- * `client` LLM call) is rejected at the decision seam.
- *
- * `server` or `worker`; omitted ⇒ `server`.
- *
- * `worker` or `client`; omitted ⇒ `worker`.
  */
 export type Handler = "server" | "worker" | "client";
 
@@ -227,21 +229,31 @@ export interface DecisionRequest {
 }
 
 /**
- * A declared agent identity. `model` is the only required field; everything else
- * refines the proposed LLM request the engine derives for `client.messages`.
+ * A declared agent identity — the same shape whether it is written in an
+ * `[agent.<id>]` section or returned by a worker.
+ *
+ * `llm` names the `[llm.*]` block every proposed call runs on, and so decides
+ * both the venue (the engine with a vendor key, or the agent's own worker) and
+ * the wire shape of a worker-run call. It is effectively required: a config
+ * that names none fails when the engine resolves a call against it.
  */
 export interface AgentConfig {
     /**
-     * Provider wire format for worker-handled calls; requires `handler:
-     * worker`. Absent ⇒ the neutral format.
+     * The `[llm.*]` block this agent's calls run on.
      */
-    format?: LlmFormat | null;
+    llm?: null | string;
     /**
-     * Where the proposed LLM call runs: `Some(Worker)` ⇒ the worker executes it
-     * (answering `llm.execute`); absent or `Some(Server)` ⇒ the engine's
-     * server-side provider. `client` is invalid and rejected at the decision seam.
+     * MCP servers the agent draws tools from. The engine resolves each against
+     * its connection registry into [`ConnectorTool`]s the model sees alongside
+     * `tools`. Like `sub_agents`, these are never merged into `tools` — the
+     * worker declares the server, not its tools.
+     *
+     * A second protocol gets its own field rather than a `type` tag here: its
+     * filter would not be this one (MCP annotations mean nothing to an A2A
+     * agent), and a union of conditionally-valid fields generates badly in the
+     * Go and Python bindings.
      */
-    handler?: Handler | null;
+    mcp?: MCPServer[];
     model: string;
     retry?: RetryPolicy | null;
     stream?: boolean;
@@ -259,11 +271,37 @@ export interface AgentConfig {
 }
 
 /**
- * OpenAI Chat Completions.
- *
- * Anthropic Messages API.
+ * An MCP server the agent draws tools from. `id` resolves against the engine's
+ * connection registry — locally from `[mcp]` in `substructure.toml`, in the
+ * cloud from the connections an admin granted this app. The worker never names
+ * a URL or a credential.
  */
-export type LlmFormat = "openai" | "anthropic";
+export interface MCPServer {
+    id: string;
+    /**
+     * Narrows what the model sees. Absent ⇒ every tool the connection grants.
+     */
+    tools?: MCPTools | null;
+}
+
+/**
+ * An MCP server's tool filter. Applied in order — capability predicates, then
+ * `include`, then `exclude` — and only ever narrowing, so a filter can never
+ * widen what the connection grants.
+ *
+ * `include`/`exclude` are globs matched against the tool's name on the
+ * connection, the name its own documentation uses, not the prefixed name the
+ * model sees. Capability predicates read the MCP annotations; a tool that
+ * carries none fails the predicate, so an unannotated server yields nothing
+ * under `read_only` rather than silently passing everything through.
+ */
+export interface MCPTools {
+    exclude?: string[];
+    idempotent?: boolean | null;
+    include?: string[];
+    non_destructive?: boolean | null;
+    read_only?: boolean | null;
+}
 
 /**
  * Fully-resolved retry policy — no optional fields. Stored on call state and
@@ -290,7 +328,8 @@ export interface SubAgent {
  * An in-flight effect (Pending or RetryScheduled) surfaced on each worker decision.
  * A flat envelope plus kind-specific fields: a tool call's
  * `name`/`arguments`/`handler`, an LLM call's `handler`/`stream`, a
- * sub-agent's `agent_id`/`session_id`.
+ * sub-agent's `agent_id`/`session_id`. A connector sync carries none — its
+ * `id` is the connection being fetched.
  */
 export interface Effect {
     agent_id?: null | string;
@@ -305,12 +344,29 @@ export interface Effect {
     id: string;
     kind: EffectKind;
     name?: null | string;
-    session_id?: null | string;
     status: EffectStatus;
     stream?: boolean | null;
+    /**
+     * The model tool call a delegation answers; its own `id` is the child session.
+     */
+    tool_call_id?: null | string;
 }
 
-export type EffectKind = "tool_call" | "sub_agent" | "llm_call";
+/**
+ * What kind of work an effect is. One enum for the wire and for the engine's
+ * own scheduling: a decision and a turn's end queue beside the calls and are
+ * swept the same way, so they are kinds too. Neither ever appears on an
+ * [`Effect`] — a decision rides the decision list, a turn end has no record.
+ *
+ * Fetching one connection's tool list. Its `id` is the connection id.
+ *
+ * A worker decision.
+ *
+ * The turn's completion, dependent on its `turn.finished` finalizer
+ * decision settling. Carries the turn id; the frozen output lives in the
+ * session's `finalizing`. Never swept: it has no deadline of its own.
+ */
+export type EffectKind = "tool_call" | "sub_agent" | "llm_call" | "connector_sync" | "decision" | "turn_end";
 
 export type EffectStatus = "pending" | "completed" | "failed" | "retry_scheduled" | "queued";
 
@@ -380,6 +436,12 @@ export interface DecisionResponse {
  *
  * `id` omitted ⇒ the engine mints one (LLM-driven tools carry the model's id).
  *
+ * There is no `handler`: where a call runs follows from its name. A tool
+ * resolved from a connector runs on the engine, a tool declared
+ * `handler: client` runs on the client, and anything else runs on the
+ * worker. The engine already knows all three, so asking the worker to
+ * restate it only creates a way for the two to disagree.
+ *
  * `id`/`attempt` omitted ⇒ taken from the answering `tool.execute` trigger,
  * fencing the result to the attempt that ran.
  *
@@ -389,13 +451,13 @@ export interface DecisionResponse {
  * `interrupt_id` omitted ⇒ the engine mints one to correlate the later resume.
  */
 export interface DecisionAction {
-    /**
-     * `server` or `worker`; omitted ⇒ `server`.
-     *
-     * `worker` or `client`; omitted ⇒ `worker`.
-     */
-    handler?: Handler;
     id?: null | string;
+    /**
+     * The `[llm.*]` block this call runs on; omitted ⇒ the merge source
+     * config's `llm`. Naming a different block moves one call to another
+     * venue or vendor.
+     */
+    llm?: null | string;
     max_completion_tokens?: number | null;
     messages?: DraftMessage[] | null;
     model?: null | string;
@@ -543,6 +605,13 @@ export interface DecisionTrigger {
     data?: unknown;
     turn_id?: string;
 }
+
+/**
+ * OpenAI Chat Completions.
+ *
+ * Anthropic Messages API.
+ */
+export type LlmFormat = "openai" | "anthropic";
 
 /**
  * The engine's classification of `arguments` against the tool's

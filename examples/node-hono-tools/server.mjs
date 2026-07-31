@@ -20,7 +20,7 @@ function decide({ trigger, proposed }) {
         // The engine will use this agent config to generate proposed actions.
         return {
             agent: {
-                model: "claude-sonnet-5",
+                ...proposed.agent,
                 stream: true,
                 tools: tools.map(({ name, description }) => ({ name, description })),
                 system: "Please answer is slack compatible mrkdwn"

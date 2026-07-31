@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -18,6 +19,51 @@ impl LlmTool {
 #[async_trait]
 pub trait LlmProviderTrait: Send + Sync {
     async fn resolve(&self, owner: &SessionOwner) -> Result<Arc<dyn LlmCallable>, String>;
+}
+
+/// The engine-executed half of the declared `[llm.*]` blocks: one client per
+/// block the engine calls itself, keyed by the name a call references.
+///
+/// Blocks the agent's worker runs are absent by construction — they never need
+/// a credential where the engine runs — so a name missing here is either
+/// undeclared or worker-run, and either way not the engine's call to make.
+#[derive(Default)]
+pub struct LlmProviderRegistry {
+    providers: BTreeMap<String, Arc<dyn LlmProviderTrait>>,
+}
+
+impl LlmProviderRegistry {
+    pub fn new(providers: BTreeMap<String, Arc<dyn LlmProviderTrait>>) -> Self {
+        Self { providers }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.providers.is_empty()
+    }
+
+    /// The client for one call. There is no default provider and no fallback
+    /// chain: an unknown name is an error naming what was declared.
+    pub async fn resolve(
+        &self,
+        llm: &str,
+        owner: &SessionOwner,
+    ) -> Result<Arc<dyn LlmCallable>, String> {
+        match self.providers.get(llm) {
+            Some(p) => p.resolve(owner).await,
+            None => Err(format!(
+                "no engine-run llm block `{llm}` — declared: {}",
+                match self.providers.is_empty() {
+                    true => "none".to_string(),
+                    false => self
+                        .providers
+                        .keys()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                }
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

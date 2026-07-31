@@ -1,14 +1,15 @@
 // OAuth 2.0 Device Authorization Grant (RFC 8628).
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use tokio::time::sleep;
 
+use super::context;
 use super::credentials;
 use super::http::CloudClient;
+use super::CloudGlobals;
 
 const CLIENT_ID: &str = "subs-cli";
 const MAX_POLL_WINDOW: Duration = Duration::from_secs(15 * 60); // matches deviceAuthorization expiresIn
@@ -36,14 +37,10 @@ struct OauthError {
     error_description: Option<String>,
 }
 
-pub async fn run(
-    url_flag: Option<String>,
-    credentials_path: Option<PathBuf>,
-    no_browser: bool,
-) -> Result<()> {
-    let path = credentials::resolve_path(credentials_path)?;
+pub async fn run(globals: &CloudGlobals, no_browser: bool) -> Result<()> {
+    let path = credentials::resolve_path(globals.credentials.clone())?;
     let mut creds = credentials::load(&path)?;
-    let api_url = credentials::resolve_api_url(url_flag.as_deref());
+    let api_url = context::api_url(globals)?;
 
     let client = CloudClient::new(&api_url, None);
 

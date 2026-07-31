@@ -15,7 +15,7 @@ use crate::providers::memory_queue::TaskQueue;
 use connector::{spawn_connector_dispatch_processor, spawn_connector_task_executor, ConnectorTask};
 use event_store::{EventFilter, EventStore, Seq, StoreError};
 use llm::{
-    spawn_llm_dispatch_processor, spawn_llm_task_executor, LlmProviderTrait, LlmTask,
+    spawn_llm_dispatch_processor, spawn_llm_task_executor, LlmBlocks, LlmProviderRegistry, LlmTask,
     TokenDeltaTransport,
 };
 use processor::{
@@ -35,7 +35,9 @@ use span::SpanContext;
 use sub_agent::{spawn_sub_agent_dispatch_processor, spawn_sub_agent_task_executor, SubAgentTask};
 use wake::{spawn_boot_reconciler, spawn_wake_dispatcher, spawn_wake_processor, WakeScheduleStore};
 use worker::spawn_worker_processor;
-use worker::{DequeueFilter, FailDecision, SubmitDecision, WorkerDecisionRequest, WorkerQueue};
+use worker::{
+    AgentDirectory, DequeueFilter, FailDecision, SubmitDecision, WorkerDecisionRequest, WorkerQueue,
+};
 
 mod caller;
 pub mod connector;
@@ -76,6 +78,7 @@ impl Default for RuntimeConfig {
 pub struct Runtime {
     store: Arc<dyn EventStore>,
     queue: Arc<dyn WorkerQueue>,
+    agents: Arc<dyn AgentDirectory>,
     session_index: Arc<dyn SessionIndexStore>,
     session_subscriptions: session::subscriptions::SessionSubscriptions,
     token_delta_transport: Arc<dyn TokenDeltaTransport>,
@@ -635,6 +638,16 @@ impl Runtime {
         self.token_delta_transport.clone()
     }
 
+    /// What this deployment declares — the routing truth, and the blocks a
+    /// decision seam resolves an `llm.call` against.
+    pub fn agents(&self) -> Arc<dyn AgentDirectory> {
+        self.agents.clone()
+    }
+
+    pub fn llm_blocks(&self, tenant_id: &str) -> LlmBlocks {
+        self.agents.llm(tenant_id)
+    }
+
     // ---- Admin / inspection methods ----
 
     pub async fn list_sessions(&self, filter: &SessionFilter) -> Result<SessionPage, RuntimeError> {
@@ -810,7 +823,11 @@ impl Runtime {
 /// The stores, queues and providers a runtime drives.
 pub struct RuntimeDeps {
     pub store: Arc<dyn EventStore>,
-    pub llm_provider: Option<Arc<dyn LlmProviderTrait>>,
+    /// What this deployment declares: its agents, their hosting, and the
+    /// `[llm.*]` blocks they name.
+    pub agents: Arc<dyn AgentDirectory>,
+    /// One client per engine-run llm block.
+    pub llm_providers: Arc<LlmProviderRegistry>,
     pub llm_task_queue: Arc<dyn TaskQueue<LlmTask>>,
     pub sub_agent_task_queue: Arc<dyn TaskQueue<SubAgentTask>>,
     pub connections: Option<Arc<Connections>>,
@@ -825,7 +842,8 @@ pub struct RuntimeDeps {
 pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
     let RuntimeDeps {
         store,
-        llm_provider,
+        agents,
+        llm_providers,
         llm_task_queue,
         sub_agent_task_queue,
         connections,
@@ -838,11 +856,11 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
     } = deps;
     let cancel = CancellationToken::new();
 
-    // The LLM dispatch processor + executor only run server-side calls. With no
-    // provider configured the server handles LLM calls worker-side only, so we
+    // The LLM dispatch processor + executor only run engine-side calls. With no
+    // engine-run block declared, every model call belongs to a worker, so we
     // skip that subsystem entirely.
     let mut llm_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-    if let Some(llm_provider) = llm_provider {
+    if !llm_providers.is_empty() {
         llm_handles.push(spawn_llm_dispatch_processor(
             store.clone(),
             checkpoint_store.clone(),
@@ -851,7 +869,7 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
         ));
         llm_handles.extend(spawn_llm_task_executor(
             store.clone(),
-            llm_provider,
+            llm_providers,
             llm_task_queue,
             token_delta_transport.clone(),
             config.llm_executor_workers,
@@ -895,6 +913,7 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
         store.clone(),
         checkpoint_store.clone(),
         worker_queue.clone(),
+        agents.clone(),
         cancel.clone(),
     );
     let session_index_processor_handle = spawn_session_index_processor(
@@ -939,6 +958,7 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
     Arc::new(Runtime {
         store,
         queue: worker_queue,
+        agents,
         session_index: session_index_store,
         session_subscriptions,
         token_delta_transport,

@@ -22,7 +22,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use super::decision::{Action, LlmHandler, ToolHandler, Trigger};
+use super::decision::{Action, ToolHandler, Trigger};
 use super::reconcile::news_start;
 use super::state::{new_call_id, new_message_id, EffectState};
 use super::tool_contract::{classify_arguments, declared_tool, DeclaredTool};
@@ -31,6 +31,7 @@ use crate::protocol::{
     Handler, InterruptResumption, LlmFormat, LlmRequest, LlmResponse, Message, MessageTree,
     RetryPolicy, WorkerIdentity, WorkerState,
 };
+use crate::runtime::llm::LlmBlocks;
 use crate::runtime::worker::WorkerDecisionRequest;
 
 impl From<Message> for DraftMessage {
@@ -134,14 +135,16 @@ pub enum ResolveError {
     UnresolvableSettleId { kind: &'static str },
     /// An `llm.call` omitted `model` and no agent config supplied one.
     MissingModel,
+    /// An `llm.call` named no `[llm.*]` block and no agent config supplied one.
+    MissingLlm { declared: String },
+    /// An `llm.call` named a block this app does not declare.
+    UnknownLlm { name: String, declared: String },
     /// A handler value the addressed surface does not support: `server` on a
-    /// tool, `client` on an LLM call.
+    /// declared tool.
     InvalidHandler {
         surface: &'static str,
         handler: &'static str,
     },
-    /// A config declared `format` without `handler: worker`.
-    FormatRequiresWorkerHandler,
     /// An `llm.result` response that doesn't parse in the call's format.
     InvalidLlmResponse { message: String },
 }
@@ -157,11 +160,16 @@ impl std::fmt::Display for ResolveError {
                 f,
                 "llm.call omitted `model` and no agent config supplies one"
             ),
+            ResolveError::MissingLlm { declared } => write!(
+                f,
+                "agent config names no llm — declared: {declared}"
+            ),
+            ResolveError::UnknownLlm { name, declared } => write!(
+                f,
+                "no llm block `{name}` is declared — declared: {declared}"
+            ),
             ResolveError::InvalidHandler { surface, handler } => {
                 write!(f, "`{handler}` is not a valid handler for {surface}")
-            }
-            ResolveError::FormatRequiresWorkerHandler => {
-                write!(f, "`format` requires `handler: worker`")
             }
             ResolveError::InvalidLlmResponse { message } => {
                 write!(f, "llm.result response does not parse: {message}")
@@ -172,33 +180,22 @@ impl std::fmt::Display for ResolveError {
 
 impl std::error::Error for ResolveError {}
 
-fn tool_handler(h: Handler, surface: &'static str) -> Result<ToolHandler, ResolveError> {
-    h.try_into()
-        .map_err(|h: Handler| ResolveError::InvalidHandler {
-            surface,
-            handler: h.as_str(),
-        })
-}
-
 /// A tool a worker declares runs on the worker or the client, never on the
 /// engine. Engine-executed tools come from a connector, which the worker names
-/// by id in `connectors`, so `server` here is always a mistake.
+/// by id in `mcp`, so `server` here is always a mistake.
 fn declared_tool_handler(h: Handler) -> Result<ToolHandler, ResolveError> {
     match h {
         Handler::Server => Err(ResolveError::InvalidHandler {
             surface: "a declared tool",
             handler: h.as_str(),
         }),
-        _ => tool_handler(h, "a declared tool"),
+        _ => h
+            .try_into()
+            .map_err(|h: Handler| ResolveError::InvalidHandler {
+                surface: "a declared tool",
+                handler: h.as_str(),
+            }),
     }
-}
-
-fn llm_handler(h: Handler) -> Result<LlmHandler, ResolveError> {
-    h.try_into()
-        .map_err(|h: Handler| ResolveError::InvalidHandler {
-            surface: "llm.call",
-            handler: h.as_str(),
-        })
 }
 
 /// Resolve a settle's `id` and `attempt` against the `*.execute` trigger it
@@ -266,10 +263,15 @@ pub struct ResolvedResponse {
 /// is the config the response itself sets, else `echoed_config` (the config
 /// resolved for this decision). The declared view for an omitted-`messages`
 /// `llm.call` is the response's `messages`.
+///
+/// `blocks` is where a call's `llm` name becomes a venue and a wire shape: this
+/// is the one seam that reads the declared `[llm.*]`, so nothing downstream has
+/// to re-derive where a call runs.
 pub fn resolve_response(
     response: DecisionResponse,
     echoed_config: Option<&AgentConfig>,
     trigger: Option<&DecisionTrigger>,
+    blocks: &LlmBlocks,
 ) -> Result<ResolvedResponse, ResolveError> {
     let DecisionResponse {
         messages,
@@ -278,12 +280,6 @@ pub fn resolve_response(
         agent,
     } = response;
     if let Some(cfg) = &agent {
-        if let Some(h) = cfg.handler {
-            llm_handler(h)?;
-        }
-        if cfg.format.is_some() && cfg.handler != Some(Handler::Worker) {
-            return Err(ResolveError::FormatRequiresWorkerHandler);
-        }
         for t in &cfg.tools {
             if let Some(h) = t.handler {
                 declared_tool_handler(h)?;
@@ -291,7 +287,7 @@ pub fn resolve_response(
         }
     }
     let merge_cfg = agent.as_ref().or(echoed_config);
-    let resolved = lower_actions(actions, &messages, merge_cfg, trigger)?;
+    let resolved = lower_actions(actions, &messages, merge_cfg, trigger, blocks)?;
     Ok(ResolvedResponse {
         messages,
         actions: resolved,
@@ -307,6 +303,7 @@ fn lower_actions(
     view: &[DraftMessage],
     config: Option<&AgentConfig>,
     trigger: Option<&DecisionTrigger>,
+    blocks: &LlmBlocks,
 ) -> Result<Vec<Action>, ResolveError> {
     actions
         .into_iter()
@@ -314,6 +311,7 @@ fn lower_actions(
             Ok(match action {
                 DecisionAction::CallLlm {
                     id,
+                    llm,
                     model,
                     messages,
                     tools,
@@ -322,7 +320,6 @@ fn lower_actions(
                     reasoning,
                     stream,
                     retry,
-                    handler,
                 } => {
                     let model = model
                         .or_else(|| config.map(|c| c.model.clone()))
@@ -338,14 +335,20 @@ fn lower_actions(
                     let retry = retry
                         .or_else(|| config.and_then(|c| c.retry.clone()))
                         .unwrap_or_else(RetryPolicy::llm_default);
-                    let handler = llm_handler(handler)?;
-                    // The format shapes the worker wire only; a server call is neutral.
-                    let format = match handler {
-                        LlmHandler::Worker => config.and_then(|c| c.format),
-                        LlmHandler::Server => None,
-                    };
+                    // The block settles the venue and, for a worker-run call,
+                    // the wire shape; a server call is always neutral.
+                    let llm = llm
+                        .or_else(|| config.and_then(|c| c.llm.clone()))
+                        .ok_or_else(|| ResolveError::MissingLlm {
+                            declared: blocks.declared(),
+                        })?;
+                    let block = blocks.get(&llm).ok_or_else(|| ResolveError::UnknownLlm {
+                        name: llm.clone(),
+                        declared: blocks.declared(),
+                    })?;
                     Action::CallLlm {
                         id: id.unwrap_or_else(new_call_id),
+                        llm,
                         request: LlmRequest {
                             model,
                             messages,
@@ -356,8 +359,8 @@ fn lower_actions(
                         },
                         stream,
                         retry,
-                        handler,
-                        format,
+                        handler: block.handler,
+                        format: block.format,
                     }
                 }
                 DecisionAction::CallTool {
@@ -647,7 +650,21 @@ mod tests {
         AgentTool, ClientContext, ClientInput, ClientPayload, Content, NewMessage, Role, ToolCall,
         ToolCallFunction, ToolInput,
     };
+    use crate::runtime::llm::LlmBlock;
+    use crate::runtime::session::decision::LlmHandler;
     use crate::runtime::session::state::LlmCallSpec;
+
+    /// The two blocks these tests resolve against: one the engine runs, one the
+    /// worker runs in Anthropic's own wire shape.
+    fn blocks() -> LlmBlocks {
+        LlmBlocks::from_iter([
+            ("claude".to_string(), LlmBlock::engine()),
+            (
+                "byo".to_string(),
+                LlmBlock::worker(Some(LlmFormat::Anthropic)),
+            ),
+        ])
+    }
 
     /// Lower just `actions` (no messages/config) through the response seam.
     fn resolve_test_actions(
@@ -663,6 +680,7 @@ mod tests {
             },
             None,
             trigger,
+            &blocks(),
         )
         .map(|r| r.actions)
     }
@@ -686,18 +704,34 @@ mod tests {
     }
 
     #[test]
-    fn the_invalid_handler_pairing_is_rejected_at_the_seam() {
+    fn a_call_naming_no_block_is_rejected_at_the_seam() {
         let mut call = bare_llm_call();
-        if let DecisionAction::CallLlm { handler, model, .. } = &mut call {
-            *handler = Handler::Client;
+        if let DecisionAction::CallLlm { model, .. } = &mut call {
             *model = Some("m".to_string());
         }
         let err = resolve_test_actions(vec![call], None).unwrap_err();
         assert_eq!(
             err,
-            ResolveError::InvalidHandler {
-                surface: "llm.call",
-                handler: "client"
+            ResolveError::MissingLlm {
+                declared: "byo, claude".to_string()
+            },
+            "the error says what could have been named"
+        );
+    }
+
+    #[test]
+    fn a_call_naming_an_undeclared_block_is_rejected_at_the_seam() {
+        let mut call = bare_llm_call();
+        if let DecisionAction::CallLlm { llm, model, .. } = &mut call {
+            *llm = Some("clade".to_string());
+            *model = Some("m".to_string());
+        }
+        let err = resolve_test_actions(vec![call], None).unwrap_err();
+        assert_eq!(
+            err,
+            ResolveError::UnknownLlm {
+                name: "clade".to_string(),
+                declared: "byo, claude".to_string()
             }
         );
     }
@@ -721,6 +755,7 @@ mod tests {
             },
             None,
             None,
+            &blocks(),
         )
         .unwrap_err();
         assert_eq!(
@@ -814,30 +849,6 @@ mod tests {
     }
 
     #[test]
-    fn a_config_client_handler_is_rejected_at_the_seam() {
-        let mut config = cfg("m1", None);
-        config.handler = Some(Handler::Client);
-        let err = resolve_response(
-            DecisionResponse {
-                messages: vec![],
-                actions: vec![],
-                state: None,
-                agent: Some(config),
-            },
-            None,
-            None,
-        )
-        .unwrap_err();
-        assert_eq!(
-            err,
-            ResolveError::InvalidHandler {
-                surface: "llm.call",
-                handler: "client"
-            }
-        );
-    }
-
-    #[test]
     fn omitted_settle_id_without_a_matching_execute_is_an_error() {
         let err = resolve_test_actions(
             vec![DecisionAction::ToolResult {
@@ -852,45 +863,46 @@ mod tests {
     }
 
     #[test]
-    fn a_format_without_a_worker_handler_is_rejected_at_the_seam() {
-        // Absent handler (⇒ server) and explicit server both reject.
-        for handler in [None, Some(Handler::Server)] {
-            let mut config = cfg("m1", None);
-            config.handler = handler;
-            config.format = Some(LlmFormat::Anthropic);
-            let err = resolve_response(
-                DecisionResponse {
-                    messages: vec![],
-                    actions: vec![],
-                    state: None,
-                    agent: Some(config),
-                },
-                None,
-                None,
-            )
-            .unwrap_err();
-            assert_eq!(err, ResolveError::FormatRequiresWorkerHandler);
+    fn the_block_settles_the_venue_and_the_wire_shape() {
+        // A worker-run block carries its format onto the call; an engine-run
+        // one is always neutral. Neither is stated on the call itself.
+        let byo = cfg_on("byo", "m1", None);
+        match resolve_one_call(bare_llm_call(), vec![user_wire("hi")], Some(&byo), None).unwrap() {
+            Action::CallLlm {
+                handler, format, ..
+            } => {
+                assert_eq!(handler, LlmHandler::Worker);
+                assert_eq!(format, Some(LlmFormat::Anthropic));
+            }
+            other => panic!("expected llm.call; got {other:?}"),
+        }
+
+        let claude = cfg("m1", None);
+        match resolve_one_call(bare_llm_call(), vec![user_wire("hi")], Some(&claude), None).unwrap()
+        {
+            Action::CallLlm {
+                handler, format, ..
+            } => {
+                assert_eq!(handler, LlmHandler::Server);
+                assert_eq!(format, None);
+            }
+            other => panic!("expected llm.call; got {other:?}"),
         }
     }
 
     #[test]
-    fn a_worker_call_inherits_the_config_format_and_a_server_call_does_not() {
-        let mut config = cfg("m1", None);
-        config.handler = Some(Handler::Worker);
-        config.format = Some(LlmFormat::Anthropic);
-
-        let mut worker_call = bare_llm_call();
-        if let DecisionAction::CallLlm { handler, .. } = &mut worker_call {
-            *handler = Handler::Worker;
+    fn a_call_may_name_a_different_block_than_the_config() {
+        // Mixing venues per call: the call's own `llm` wins over the config's.
+        let claude = cfg("m1", None);
+        let mut call = bare_llm_call();
+        if let DecisionAction::CallLlm { llm, .. } = &mut call {
+            *llm = Some("byo".to_string());
         }
-        match resolve_one_call(worker_call, vec![user_wire("hi")], Some(&config), None).unwrap() {
-            Action::CallLlm { format, .. } => assert_eq!(format, Some(LlmFormat::Anthropic)),
-            other => panic!("expected llm.call; got {other:?}"),
-        }
-        // An explicit server call under the same config stays neutral.
-        match resolve_one_call(bare_llm_call(), vec![user_wire("hi")], Some(&config), None).unwrap()
-        {
-            Action::CallLlm { format, .. } => assert_eq!(format, None),
+        match resolve_one_call(call, vec![user_wire("hi")], Some(&claude), None).unwrap() {
+            Action::CallLlm { llm, handler, .. } => {
+                assert_eq!(llm, "byo");
+                assert_eq!(handler, LlmHandler::Worker);
+            }
             other => panic!("expected llm.call; got {other:?}"),
         }
     }
@@ -946,9 +958,9 @@ mod tests {
         // No format ⇒ the neutral LlmRequest JSON, verbatim.
         let wire = to_wire_trigger(
             Trigger::LlmExecute {
+                format: None,
                 id: "llm-1".to_string(),
                 request: request.clone(),
-                format: None,
                 stream: true,
                 attempt: 0,
                 deadline: None,
@@ -1033,12 +1045,15 @@ mod tests {
     }
 
     fn cfg(model: &str, system: Option<&str>) -> AgentConfig {
+        cfg_on("claude", model, system)
+    }
+
+    fn cfg_on(llm: &str, model: &str, system: Option<&str>) -> AgentConfig {
         AgentConfig {
-            format: None,
+            llm: Some(llm.to_string()),
             model: model.to_string(),
             system: system.map(str::to_string),
             stream: true,
-            handler: None,
             retry: None,
             tools: Vec::new(),
             sub_agents: Vec::new(),
@@ -1060,6 +1075,7 @@ mod tests {
     fn bare_llm_call() -> DecisionAction {
         DecisionAction::CallLlm {
             id: None,
+            llm: None,
             model: None,
             messages: None,
             tools: None,
@@ -1068,7 +1084,6 @@ mod tests {
             reasoning: None,
             stream: None,
             retry: None,
-            handler: Handler::Server,
         }
     }
 
@@ -1087,6 +1102,7 @@ mod tests {
             },
             echoed,
             None,
+            &blocks(),
         )?;
         Ok(r.actions.into_iter().next().expect("one action"))
     }
@@ -1117,6 +1133,7 @@ mod tests {
         let config = cfg("m1", Some("be nice"));
         let call = DecisionAction::CallLlm {
             id: None,
+            llm: None,
             model: None,
             messages: Some(vec![user_wire("only me")]),
             tools: None,
@@ -1125,7 +1142,6 @@ mod tests {
             reasoning: None,
             stream: None,
             retry: None,
-            handler: Handler::Server,
         };
         let action =
             resolve_one_call(call, vec![user_wire("the view")], Some(&config), None).unwrap();
@@ -1146,6 +1162,7 @@ mod tests {
         let config = cfg("base", None);
         let call = DecisionAction::CallLlm {
             id: None,
+            llm: None,
             model: Some("override".to_string()),
             messages: None,
             tools: None,
@@ -1154,7 +1171,6 @@ mod tests {
             reasoning: None,
             stream: None,
             retry: None,
-            handler: Handler::Server,
         };
         let action = resolve_one_call(call, vec![], Some(&config), None).unwrap();
         match action {
@@ -1449,6 +1465,7 @@ mod tests {
             EffectTracking::new(RetryPolicy::no_retry(), chrono::Utc::now()),
             EffectPayload::LlmCall(LlmCallState {
                 format: None,
+                llm: "claude".to_string(),
                 prompt: vec![],
                 spec: LlmCallSpec {
                     model: "m".to_string(),
@@ -1548,10 +1565,7 @@ mod tests {
         .expect("defaults fill");
         assert!(matches!(
             &actions[0],
-            DecisionAction::CallLlm {
-                handler: Handler::Server,
-                ..
-            }
+            DecisionAction::CallLlm { llm: None, .. }
         ));
         match &actions[1] {
             DecisionAction::CallTool { arguments, .. } => {

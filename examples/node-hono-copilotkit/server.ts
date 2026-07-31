@@ -29,7 +29,7 @@ function decide({ trigger, proposed }: DecisionRequest): DecisionResponse {
     if (trigger.type === "session.start") {
         return {
             agent: {
-                model: "claude-haiku-4-5-20251001",
+                ...proposed.agent!,
                 stream: true,
                 system:
                     "You are a concise, friendly assistant. Use get_current_time for the current " +

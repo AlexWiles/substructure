@@ -9,9 +9,6 @@ pub mod run;
 
 use clap::Subcommand;
 
-use crate::transport::push::PushAdapter;
-use crate::worker::push::PushRegistrationRecord;
-
 use cloud::{AppScope, CloudGlobals, GLOBAL_FLAGS_HELP};
 
 /// Read a secret the project file names rather than holds. An unset or blank
@@ -28,7 +25,7 @@ pub(crate) fn env_value(var: &str) -> Option<String> {
 /// reports a real problem with it, and there is no logger yet to report to.
 pub fn project_log_filter(config: Option<&std::path::Path>) -> Option<String> {
     let found = cloud::project_config::resolve(config).ok().flatten()?;
-    found.config.log().map(str::to_string)
+    found.config.log
 }
 
 pub(crate) const DEFAULT_TENANT: &str = "default";
@@ -57,7 +54,7 @@ impl Command {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Write a starter `substructure.toml` describing one environment.
+    /// Write a starter `substructure.toml` describing one system.
     Init(init::InitCommand),
     /// Run a local Substructure server.
     Serve(local::ServeArgs),
@@ -65,6 +62,8 @@ pub enum Command {
     /// For local development and testing example agents.
     Run(run::RunArgs),
     /// Authenticate via the OAuth device flow and persist the token locally.
+    /// Targets the server the environment file names, so `subs login -c
+    /// subs.prod.toml` logs in to a self-hosted deployment.
     Login {
         /// Don't try to open the verification URL in a browser.
         #[arg(long)]
@@ -106,12 +105,6 @@ pub enum Command {
         #[command(subcommand)]
         command: cloud::sessions::SessionsCommand,
     },
-    /// Manage the webhook (worker) config for an app.
-    #[command(after_help = GLOBAL_FLAGS_HELP)]
-    Webhook {
-        #[command(subcommand)]
-        command: cloud::webhook::WebhookCommand,
-    },
     /// Open an app's admin page in your browser.
     Open {
         app_id: Option<String>,
@@ -124,6 +117,16 @@ pub enum Command {
     /// Link the current directory to an org (and app) by writing a
     /// `substructure.toml`, so commands run from this tree pick them up automatically.
     Link(cloud::link::LinkCommand),
+    /// Push the environment file to the deployment, creating the app it
+    /// describes if nothing is pinned yet.
+    #[command(after_help = GLOBAL_FLAGS_HELP)]
+    Apply(cloud::apply::ApplyCommand),
+    /// Inspect an app's configuration history.
+    #[command(after_help = GLOBAL_FLAGS_HELP)]
+    Config {
+        #[command(subcommand)]
+        command: cloud::apply::ConfigCommand,
+    },
     /// Authorize the MCP connections this project declares.
     Mcp {
         #[command(subcommand)]
@@ -144,21 +147,22 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
             // --no-interaction implies --no-browser; opening a browser is
             // never appropriate in non-interactive contexts (CI, scripts).
             let no_browser = no_browser || globals.no_interaction;
-            cloud::login::run(globals.url, globals.credentials, no_browser).await
+            cloud::login::run(&globals, no_browser).await
         }
-        Command::Logout { globals } => cloud::logout::run(globals.url, globals.credentials).await,
+        Command::Logout { globals } => cloud::logout::run(&globals).await,
         Command::Whoami { globals } => cloud::whoami::run(globals).await,
         Command::Orgs { command } => cloud::orgs::run(command).await,
         Command::Apps { command } => cloud::apps::run(command).await,
         Command::Keys { command } => cloud::keys::run(command).await,
         Command::Sessions { command } => cloud::sessions::run(command).await,
-        Command::Webhook { command } => cloud::webhook::run(command).await,
         Command::Open {
             app_id,
             no_browser,
             scope,
         } => cloud::open::run(app_id, no_browser, scope).await,
         Command::Link(cmd) => cloud::link::run(cmd).await,
+        Command::Apply(cmd) => cloud::apply::run(cmd).await,
+        Command::Config { command } => cloud::apply::config(command).await,
         Command::Mcp { command } => mcp::run(command).await,
     }
 }
@@ -167,8 +171,8 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
 // in sync with the enum rather than scraping argv so we never leak secrets
 // users pass on the command line.
 fn command_path(cmd: &Command) -> &'static str {
+    use cloud::sessions::SessionsCommand;
     use cloud::{apps::AppsCommand, keys::KeysCommand, orgs::OrgsCommand};
-    use cloud::{sessions::SessionsCommand, webhook::WebhookCommand};
     match cmd {
         Command::Init(_) => "init",
         Command::Serve(_) => "serve",
@@ -178,6 +182,10 @@ fn command_path(cmd: &Command) -> &'static str {
         Command::Whoami { .. } => "whoami",
         Command::Open { .. } => "open",
         Command::Link(_) => "link",
+        Command::Apply(_) => "apply",
+        Command::Config { command } => match command {
+            cloud::apply::ConfigCommand::Log { .. } => "config log",
+        },
         Command::Mcp { command } => match command {
             mcp::McpCommand::Login { .. } => "mcp login",
             mcp::McpCommand::Logout { .. } => "mcp logout",
@@ -202,32 +210,5 @@ fn command_path(cmd: &Command) -> &'static str {
             SessionsCommand::List(_) => "sessions list",
             SessionsCommand::Events(_) => "sessions events",
         },
-        Command::Webhook { command } => match command {
-            WebhookCommand::Show { .. } => "webhook show",
-            WebhookCommand::Set { .. } => "webhook set",
-            WebhookCommand::Disable { .. } => "webhook disable",
-            WebhookCommand::Secret { .. } => "webhook secret",
-            WebhookCommand::RotateSecret { .. } => "webhook rotate-secret",
-        },
     }
-}
-
-pub async fn register_startup_worker(
-    adapter: &PushAdapter,
-    url: &str,
-    signing_secret: Option<String>,
-) -> anyhow::Result<()> {
-    let secret = signing_secret.unwrap_or_else(|| hex::encode(rand::random::<[u8; 32]>()));
-    adapter
-        .register(PushRegistrationRecord {
-            tenant_id: DEFAULT_TENANT.into(),
-            transport_type: "http".into(),
-            config: serde_json::json!({
-                "endpoint_url": url,
-                "signing_secret": secret,
-            }),
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to register startup worker: {e}"))?;
-    Ok(())
 }

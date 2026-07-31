@@ -29,9 +29,7 @@ call with its id and a ready-to-edit settle input:
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
-subs run -c substructure.toml \
-    --session $(uuidgen) \
-    --input '{"type":"client.message","message":{"role":"user","content": "recommend a coffee shop near me"}}'
+subs run -c substructure.toml --agent my-agent "recommend a coffee shop near me"
 ```
 
 Take the printed `continue this session with` command and swap its input for the

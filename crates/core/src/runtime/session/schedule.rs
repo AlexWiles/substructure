@@ -446,6 +446,8 @@ mod tests {
             id,
             tracking(status),
             EffectPayload::LlmCall(LlmCallState {
+                format: None,
+                llm: "claude".to_string(),
                 prompt: vec![],
                 spec: LlmCallSpec {
                     model: "m".to_string(),
@@ -456,7 +458,6 @@ mod tests {
                 },
                 stream: false,
                 handler: crate::runtime::session::decision::LlmHandler::Server,
-                format: None,
             }),
         ));
     }
@@ -496,11 +497,10 @@ mod tests {
 
     fn config_with_mcp(connection: &str) -> AgentConfig {
         AgentConfig {
+            llm: Some("claude".to_string()),
             model: "m".to_string(),
             system: None,
             stream: false,
-            handler: None,
-            format: None,
             retry: None,
             tools: Vec::new(),
             sub_agents: Vec::new(),

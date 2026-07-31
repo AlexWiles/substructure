@@ -756,7 +756,7 @@ mod tests {
     fn streamed_tool_args_then_requested_only_closes() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
         t.on_event(ev(json!({
-            "type": "llm.call.requested", "id": "c1", "attempt": 0,
+            "type": "llm.call.requested", "id": "c1", "attempt": 0, "llm": "claude",
             "request": {"model": "m", "messages": []}, "stream": true,
             "retry": serde_json::from_str::<Value>(RETRY).unwrap(),
         })));
@@ -924,7 +924,7 @@ mod tests {
     fn tool_call_carries_parent_message_id_from_llm_call() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
         t.on_event(ev(json!({
-            "type": "llm.call.requested", "id": "c9", "attempt": 0,
+            "type": "llm.call.requested", "id": "c9", "attempt": 0, "llm": "claude",
             "request": {"model": "m", "messages": []}, "stream": true,
             "retry": serde_json::from_str::<Value>(RETRY).unwrap(),
         })));

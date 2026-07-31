@@ -1,23 +1,22 @@
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use clap::Args;
 use tokio::net::TcpListener;
 
 use crate::cli::auth::AuthWiring;
-use crate::cli::cloud::project_config;
-use crate::cli::env::{EnvVars, LlmProviderArg, ProviderEnv};
-use crate::cli::{register_startup_worker, DEFAULT_TENANT};
+use crate::cli::cloud::project_config::{self, EnvConfig};
+use crate::cli::env::{EnvVars, ProviderEnv, ProviderKind};
+use crate::cli::DEFAULT_TENANT;
 use crate::connectors::oauth::StoredCredentials;
-use crate::connectors::registry::{ConnectionSpec, Connections, LocalRegistry};
-use crate::llm::{LlmProviderTrait, LlmTask};
+use crate::connectors::registry::{Connections, LocalRegistry};
+use crate::llm::{LlmProviderRegistry, LlmProviderTrait, LlmTask};
 use crate::providers::anthropic::{AnthropicConfig, AnthropicProvider};
 use crate::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use crate::providers::openai::{OpenAiConfig, OpenAiProvider};
 use crate::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
 use crate::providers::sqlite::{
-    SqliteCheckpointStore, SqliteDb, SqliteEventStore, SqlitePushStore, SqliteSessionIndexStore,
-    SqliteTokenStore, SqliteWakeStore, SqliteWorkerQueue,
+    SqliteCheckpointStore, SqliteDb, SqliteEventStore, SqliteSessionIndexStore, SqliteTokenStore,
+    SqliteWakeStore, SqliteWorkerQueue,
 };
 use crate::runtime::connector::ConnectorTask;
 use crate::sub_agent::SubAgentTask;
@@ -30,7 +29,8 @@ use crate::transport::push::PushAdapter;
 use crate::transport::server::SubstructureServer;
 use crate::transport::slack::{SlackChannel, StreamStore};
 use crate::transport::worker_http::{self, WorkerHttpState};
-use crate::worker::push::{PushRegistry, TransportRegistry};
+use crate::worker::push::TransportRegistry;
+use crate::worker::StaticAgentDirectory;
 use crate::{start, Runtime, RuntimeConfig, RuntimeDeps};
 
 #[derive(Args)]
@@ -45,23 +45,13 @@ pub struct ServeArgs {
     #[arg(long)]
     db: Option<String>,
     /// Environment file (default: walks up from cwd looking for
-    /// `substructure.toml`). Must declare `target = "local"`.
+    /// `substructure.toml`).
     #[arg(short = 'c', long)]
     config: Option<std::path::PathBuf>,
-    /// Pre-register an HTTP worker at startup.
-    #[arg(long)]
-    worker_url: Option<String>,
-    /// Signing secret for the pre-registered HTTP worker (auto-generated if omitted).
-    #[arg(long, requires = "worker_url")]
-    signing_secret: Option<String>,
-    /// LLM provider. Determines which API key env var is required
-    /// (e.g. `openrouter` needs OPENROUTER_API_KEY). Optional: omit it to
-    /// run a server that only handles worker-side LLM calls.
-    #[arg(long, value_enum)]
-    llm_provider: Option<LlmProviderArg>,
-    /// Disable client and worker authentication. For local development only.
-    #[arg(long)]
-    dev: bool,
+    /// Serve without client or worker authentication. For a server nothing off
+    /// this machine can reach.
+    #[arg(long = "no-auth", alias = "dev")]
+    no_auth: bool,
     /// Serve a Slack Socket Mode bot driving this agent. Requires
     /// SLACK_APP_TOKEN and SLACK_BOT_TOKEN.
     #[arg(long, value_name = "AGENT_ID")]
@@ -81,9 +71,8 @@ pub async fn serve(args: ServeArgs) -> anyhow::Result<()> {
 async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
     // Anything argv omits can be pinned in the project file. Precedence is
     // flag > environment > file > default, applied one field at a time.
-    let cfg = project_config::local(args.config.as_deref(), "`subs serve`")?;
+    let cfg = project_config::load(args.config.as_deref())?;
 
-    let connections = cfg.connections();
     let slack_agent = args.slack_agent.or_else(|| cfg.slack_agent());
     let server = cfg.server.clone().unwrap_or_default();
 
@@ -93,11 +82,9 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
         .unwrap_or_else(|| "127.0.0.1".into());
     let port = args.port.or(server.port).unwrap_or(8080);
     let db_path = args.db.unwrap_or_else(|| cfg.db_path());
-    let worker_url = args.worker_url.or_else(|| cfg.worker_url());
-    let signing_secret = args.signing_secret.or_else(|| cfg.signing_secret());
-    let dev = args.dev || server.dev.unwrap_or(false);
+    let authenticate = !args.no_auth && cfg.server_auth();
 
-    let env = match EnvVars::load(args.llm_provider.or_else(|| cfg.llm_provider()), dev) {
+    let env = match EnvVars::load(cfg.provider_bindings(), authenticate) {
         Some(e) => e,
         None => std::process::exit(2),
     };
@@ -116,17 +103,14 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
         None => None,
     };
 
-    let (rt, adapter) = start_engine(db, env.provider, connections).await?;
+    // Held for the process's life: dropping it aborts the decision loops.
+    let (rt, _adapter) = start_engine(db, env.providers, &cfg).await?;
+    announce_agents(&cfg);
 
     let auth = match env.auth {
         Some(a) => AuthWiring::from_env(a)?,
-        None => AuthWiring::dev(),
+        None => AuthWiring::unauthenticated(),
     };
-
-    if let Some(ref url) = worker_url {
-        register_startup_worker(&adapter, url, signing_secret).await?;
-        tracing::info!(url, "startup worker registered (signing enabled)");
-    }
 
     let shutdown = tokio_util::sync::CancellationToken::new();
     let signal_token = shutdown.clone();
@@ -142,14 +126,11 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
         auth: auth.admin.clone(),
         shutdown: shutdown.clone(),
     });
-    let v1_routes = admin_http::v1_router(
-        AdminHttpState {
-            runtime: rt.clone(),
-            auth: auth.admin,
-            shutdown: shutdown.clone(),
-        },
-        adapter.clone(),
-    );
+    let v1_routes = admin_http::v1_router(AdminHttpState {
+        runtime: rt.clone(),
+        auth: auth.admin,
+        shutdown: shutdown.clone(),
+    });
     let client_routes = client_http::router(ClientHttpState {
         runtime: rt.clone(),
         auth: auth.client.clone(),
@@ -174,9 +155,9 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
     let server = SubstructureServer::new(routers);
 
     let addr = format!("{host}:{port}");
-    if dev {
+    if !authenticate {
         eprintln!();
-        eprintln!("  DEV MODE - authentication is disabled.");
+        eprintln!("  AUTHENTICATION IS DISABLED.");
         eprintln!("  Do not use in production or expose to untrusted networks.");
         eprintln!();
     }
@@ -186,21 +167,38 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
     server.serve(listener, shutdown).await
 }
 
+/// What this engine serves, once, at startup: an agent's hosting is a property
+/// of the file, so it should be readable without reading the file.
+fn announce_agents(cfg: &EnvConfig) {
+    if cfg.agent.is_empty() {
+        tracing::warn!(
+            "substructure.toml declares no [agent.*]; every decision will fail until one does"
+        );
+        return;
+    }
+    for (id, section) in &cfg.agent {
+        match &section.worker {
+            Some(url) => tracing::info!(agent = %id, worker = %url, "agent hosted by a worker"),
+            None => tracing::info!(agent = %id, "agent hosted by the engine"),
+        }
+    }
+}
+
 /// Open the SQLite-backed stores, start the in-process engine, and build a
 /// started push adapter. Shared by `serve` (which then mounts HTTP routers) and
 /// `run` (which drives a single turn without any HTTP server).
 pub(crate) async fn start_engine(
     db: SqliteDb,
-    provider_env: Option<ProviderEnv>,
-    connectors: BTreeMap<String, ConnectionSpec>,
+    providers: Vec<ProviderEnv>,
+    cfg: &EnvConfig,
 ) -> anyhow::Result<(Arc<Runtime>, Arc<PushAdapter>)> {
+    let connectors = cfg.connections();
     let event_store = Arc::new(SqliteEventStore::new(db.clone())?);
     let worker_queue = Arc::new(SqliteWorkerQueue::new(db.clone())?);
     let checkpoint_store = Arc::new(SqliteCheckpointStore::new(db.clone())?);
     let wake_store = Arc::new(SqliteWakeStore::new(db.clone())?);
     let session_index_store = Arc::new(SqliteSessionIndexStore::new(db.clone())?);
-    let token_store = Arc::new(SqliteTokenStore::new(db.clone())?);
-    let push_store = Arc::new(SqlitePushStore::new(db)?);
+    let token_store = Arc::new(SqliteTokenStore::new(db)?);
 
     let config = RuntimeConfig::default();
     let llm_task_queue: Arc<dyn TaskQueue<LlmTask>> = Arc::new(ShardedInMemoryQueue::new(
@@ -229,41 +227,30 @@ pub(crate) async fn start_engine(
             ))
         });
 
-    let llm_provider: Option<Arc<dyn LlmProviderTrait>> = match provider_env {
-        Some(ProviderEnv::Openrouter { api_key }) => {
-            Some(Arc::new(OpenRouterProvider::new(OpenRouterConfig {
-                base_url: std::env::var("OPENROUTER_BASE_URL")
-                    .unwrap_or_else(|_| "https://openrouter.ai/api".to_string()),
-                api_key,
-            })))
-        }
-        Some(ProviderEnv::Anthropic { api_key }) => {
-            let mut config = AnthropicConfig::new(api_key);
-            if let Ok(base_url) = std::env::var("ANTHROPIC_BASE_URL") {
-                config.base_url = base_url;
-            }
-            Some(Arc::new(AnthropicProvider::new(config)))
-        }
-        Some(ProviderEnv::Openai { api_key }) => {
-            let mut config = OpenAiConfig::new(api_key);
-            if let Ok(base_url) = std::env::var("OPENAI_BASE_URL") {
-                config.base_url = base_url;
-            }
-            config.organization = std::env::var("OPENAI_ORG_ID").ok();
-            config.project = std::env::var("OPENAI_PROJECT_ID").ok();
-            Some(Arc::new(OpenAiProvider::new(config)))
-        }
-        None => {
-            tracing::info!("no LLM provider configured; server-side LLM execution is disabled (worker-handled calls only)");
-            None
-        }
-    };
+    if providers.is_empty() {
+        tracing::info!(
+            "no engine-run [llm.*] block declared; every model call belongs to a worker"
+        );
+    }
+    let llm_providers = Arc::new(LlmProviderRegistry::new(
+        providers
+            .into_iter()
+            .map(|p| (p.name.clone(), client(p)))
+            .collect(),
+    ));
+
+    let agents = Arc::new(StaticAgentDirectory::new(
+        DEFAULT_TENANT.to_string(),
+        cfg.agents(),
+        cfg.llm_blocks(),
+    ));
 
     let token_delta_transport = Arc::new(crate::llm::InMemoryTokenDeltaTransport::new());
     let rt = start(
         RuntimeDeps {
             store: event_store,
-            llm_provider,
+            agents: agents.clone(),
+            llm_providers,
             llm_task_queue,
             sub_agent_task_queue,
             connections,
@@ -277,10 +264,47 @@ pub(crate) async fn start_engine(
         config,
     );
 
-    let transports = TransportRegistry::new(vec![http_transport()]);
-    let registry = PushRegistry::new(push_store, transports);
-    let adapter = Arc::new(PushAdapter::new(rt.clone(), registry, 16));
-    adapter.start().await;
+    let adapter = Arc::new(PushAdapter::new(
+        rt.clone(),
+        agents,
+        TransportRegistry::new(vec![http_transport()]),
+        16,
+    ));
+    adapter.start();
 
     Ok((rt, adapter))
+}
+
+/// The client one engine-run block calls with. `base_url` is the file's when it
+/// sets one, then the vendor's own variable, then the vendor default.
+fn client(p: ProviderEnv) -> Arc<dyn LlmProviderTrait> {
+    let base_url = p
+        .base_url
+        .clone()
+        .or_else(|| p.kind.base_url_env().and_then(|v| std::env::var(v).ok()));
+    match p.kind {
+        ProviderKind::Openrouter => Arc::new(OpenRouterProvider::new(OpenRouterConfig {
+            base_url: base_url.unwrap_or_else(|| "https://openrouter.ai/api".to_string()),
+            api_key: p.api_key,
+        })),
+        ProviderKind::Anthropic => {
+            let mut config = AnthropicConfig::new(p.api_key);
+            if let Some(base_url) = base_url {
+                config.base_url = base_url;
+            }
+            Arc::new(AnthropicProvider::new(config))
+        }
+        ProviderKind::Openai => {
+            let mut config = OpenAiConfig::new(p.api_key);
+            if let Some(base_url) = base_url {
+                config.base_url = base_url;
+            }
+            config.organization = std::env::var("OPENAI_ORG_ID").ok();
+            config.project = std::env::var("OPENAI_PROJECT_ID").ok();
+            Arc::new(OpenAiProvider::new(config))
+        }
+        // Never reached: `provider_bindings` keeps worker blocks out of the
+        // registry, since the engine never calls one.
+        ProviderKind::Worker => unreachable!("a worker block has no engine-side client"),
+    }
 }

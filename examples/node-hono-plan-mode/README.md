@@ -26,9 +26,7 @@ Plan:
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
-subs run -c substructure.toml \
-    --session plan-demo \
-    --input '{"type":"client.message","message":{"role":"user","content": "plan a weekend trip to Lisbon"}}'
+subs run -c substructure.toml --agent planner "plan a weekend trip to Lisbon"
 ```
 
 Flip to execution — a `client.action`, not a chat message, so it never lands in

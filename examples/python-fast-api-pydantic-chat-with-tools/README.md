@@ -25,8 +25,7 @@ python3 main.py
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
-subs run -c substructure.toml \
-    --input '{"type":"client.message","message":{"role":"user","content": "what time is it in my timezone?"}}'
+subs run -c substructure.toml --agent my-agent "what time is it in my timezone?"
 ```
 
 ## Regenerate types

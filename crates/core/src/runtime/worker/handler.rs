@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::protocol::{DecisionResponse, DecisionTrigger};
 use crate::runtime::event_store::EventStore;
 use crate::runtime::processor::{
     EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCheckpointStore,
@@ -12,16 +13,25 @@ use crate::runtime::session::propose::propose;
 use crate::runtime::session::wire::to_wire_trigger;
 use crate::runtime::session::SessionEvent;
 
-use super::{WorkerDecisionRequest, WorkerQueue};
+use super::{AgentDirectory, WorkerDecisionRequest, WorkerQueue};
 
 struct WorkerDecisionProjection {
     store: Arc<dyn EventStore>,
     queue: Arc<dyn WorkerQueue>,
+    agents: Arc<dyn AgentDirectory>,
 }
 
 impl WorkerDecisionProjection {
-    fn new(store: Arc<dyn EventStore>, queue: Arc<dyn WorkerQueue>) -> Self {
-        Self { store, queue }
+    fn new(
+        store: Arc<dyn EventStore>,
+        queue: Arc<dyn WorkerQueue>,
+        agents: Arc<dyn AgentDirectory>,
+    ) -> Self {
+        Self {
+            store,
+            queue,
+            agents,
+        }
     }
 }
 
@@ -32,7 +42,7 @@ impl EventProcessor for WorkerDecisionProjection {
     }
 
     async fn apply(&self, event: SessionEvent) -> Result<(), ProcessorError> {
-        if let Some(decision) = extract(self.store.as_ref(), event).await? {
+        if let Some(decision) = extract(self.store.as_ref(), self.agents.as_ref(), event).await? {
             tracing::debug!(
                 session_id = %decision.session_id,
                 decision_id = %decision.decision_id,
@@ -50,9 +60,10 @@ pub fn spawn_worker_processor(
     store: Arc<dyn EventStore>,
     checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
     queue: Arc<dyn WorkerQueue>,
+    agents: Arc<dyn AgentDirectory>,
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
-    let projection = Arc::new(WorkerDecisionProjection::new(store.clone(), queue));
+    let projection = Arc::new(WorkerDecisionProjection::new(store.clone(), queue, agents));
     EventProcessorRunner::new(
         store,
         checkpoint_store,
@@ -69,6 +80,7 @@ pub fn spawn_worker_processor(
 /// dropped decision.
 async fn extract(
     store: &dyn EventStore,
+    agents: &dyn AgentDirectory,
     event: SessionEvent,
 ) -> Result<Option<WorkerDecisionRequest>, ProcessorError> {
     let req = match &event.payload {
@@ -127,6 +139,21 @@ async fn extract(
         agent_config.as_ref(),
         &req.id,
     )
+    // `session.start` is the one trigger the engine cannot derive from the
+    // session: the config is the app's declaration, not the session's history.
+    // Seeding it here makes the declared identity the proposal, so an
+    // echo-worker inherits it and an engine-hosted agent starts configured.
+    // An agent that seeds nothing gets no proposal, and its worker authors the
+    // config exactly as it would have before the file could declare one.
+    .or_else(|| {
+        matches!(trigger, DecisionTrigger::SessionStart)
+            .then(|| agents.agent(&event.tenant_id, agent_id)?.config)
+            .flatten()
+            .map(|config| DecisionResponse {
+                agent: Some(config),
+                ..Default::default()
+            })
+    })
     .unwrap_or_default();
 
     Ok(Some(WorkerDecisionRequest {
@@ -158,7 +185,7 @@ mod tests {
     use chrono::Utc;
     use tokio::sync::broadcast;
 
-    use super::extract;
+    use super::{extract, AgentDirectory};
     use crate::protocol::{
         AgentConfig, ClientMessage, ClientPayload, Content, DraftMessage, RetryPolicy, Role,
         SessionOwner,
@@ -171,6 +198,8 @@ mod tests {
     use crate::runtime::session::state::SessionState;
     use crate::runtime::session::{CommitContext, NewSessionEvent, SessionAggregate, SessionEvent};
     use crate::runtime::span::SpanContext;
+    use crate::runtime::worker::directory::{AgentEntry, StaticAgentDirectory};
+    use crate::runtime::worker::EmptyAgentDirectory;
     use crate::runtime::Caller;
 
     /// Read-only store serving one hydrated session, as `extract` loads it.
@@ -245,6 +274,34 @@ mod tests {
     /// Drive a real session to a live client.message decision (session.start
     /// settled with `agent`), run `extract` on its promotion event, and return
     /// the serialized wire request.
+    fn config(model: &str) -> AgentConfig {
+        AgentConfig {
+            llm: Some("claude".to_string()),
+            model: model.to_string(),
+            system: None,
+            stream: true,
+            retry: None,
+            tools: Vec::new(),
+            sub_agents: Vec::new(),
+            mcp: Vec::new(),
+        }
+    }
+
+    /// A directory declaring `agent-1` with `config`, engine-hosted.
+    fn directory(config: AgentConfig) -> StaticAgentDirectory {
+        StaticAgentDirectory::new(
+            "tenant-a".to_string(),
+            std::collections::BTreeMap::from([(
+                "agent-1".to_string(),
+                AgentEntry {
+                    config: Some(config),
+                    worker: None,
+                },
+            )]),
+            Default::default(),
+        )
+    }
+
     async fn wire_request_for_client_message(agent: Option<AgentConfig>) -> serde_json::Value {
         let mut agg = SessionAggregate::new(
             "sess-1".to_string(),
@@ -304,11 +361,84 @@ mod tests {
             session: agg,
             events: broadcast::channel(1).0,
         };
-        let req = extract(&store, event)
+        let req = extract(&store, &EmptyAgentDirectory, event)
             .await
             .expect("extract succeeds")
             .expect("a deliverable request");
         serde_json::to_value(&req).expect("wire request serializes")
+    }
+
+    /// The `session.start` request for a fresh session, as `agents` declares it.
+    async fn wire_request_for_session_start(agents: &dyn AgentDirectory) -> serde_json::Value {
+        let mut agg = SessionAggregate::new(
+            "sess-1".to_string(),
+            "tenant-a".to_string(),
+            SessionState::new("sess-1".to_string()),
+        );
+        let event = dispatch(
+            &mut agg,
+            CommandPayload::CreateSession {
+                agent_id: "agent-1".to_string(),
+                owner: SessionOwner {
+                    tenant_id: "tenant-a".to_string(),
+                    id: Some("user-1".to_string()),
+                    metadata: HashMap::new(),
+                },
+                ancestry: vec![],
+                worker_retry: RetryPolicy::no_retry(),
+            },
+            &system(),
+        )
+        .into_iter()
+        .find(|e| matches!(e.payload, EventPayload::DecisionDispatched(_)))
+        .expect("CreateSession opens a session.start decision")
+        .into_event(GlobalPosition(1));
+
+        let store = FrozenStore {
+            session: agg,
+            events: broadcast::channel(1).0,
+        };
+        let req = extract(&store, agents, event)
+            .await
+            .expect("extract succeeds")
+            .expect("a deliverable request");
+        serde_json::to_value(&req).expect("wire request serializes")
+    }
+
+    /// The declared config *is* the `session.start` proposal, so an echo-worker
+    /// inherits it and an engine-hosted agent starts configured.
+    #[tokio::test]
+    async fn session_start_is_seeded_with_the_declared_config() {
+        let wire = wire_request_for_session_start(&directory(config("m1"))).await;
+        assert_eq!(wire["proposed"]["agent"]["model"], "m1");
+        assert_eq!(wire["proposed"]["agent"]["llm"], "claude");
+    }
+
+    /// Nothing declared, nothing seeded: the proposal stays empty, so a
+    /// proposed-first worker still reaches its own config branch.
+    #[tokio::test]
+    async fn session_start_without_a_declaration_carries_no_proposal() {
+        let wire = wire_request_for_session_start(&EmptyAgentDirectory).await;
+        assert!(
+            wire["proposed"]["agent"].is_null(),
+            "got {}",
+            wire["proposed"]
+        );
+        assert!(wire["proposed"]["actions"]
+            .as_array()
+            .is_none_or(|a| a.is_empty()));
+    }
+
+    /// Only `session.start` is seeded: every other trigger's proposal is
+    /// derived from the session, and a declaration must not overwrite it.
+    #[tokio::test]
+    async fn a_non_start_trigger_is_not_seeded() {
+        let wire = wire_request_for_client_message(None).await;
+        assert!(
+            wire["proposed"]["agent"].is_null(),
+            "the directory does not reach a client.messages proposal; got {}",
+            wire["proposed"]
+        );
     }
 
     /// `proposed` is always present — but never a silent no-op. With no config
@@ -334,18 +464,7 @@ mod tests {
 
     #[tokio::test]
     async fn configured_client_message_still_carries_a_proposal() {
-        let wire = wire_request_for_client_message(Some(AgentConfig {
-            format: None,
-            model: "m1".to_string(),
-            system: None,
-            stream: true,
-            handler: None,
-            retry: None,
-            tools: Vec::new(),
-            sub_agents: Vec::new(),
-            mcp: Vec::new(),
-        }))
-        .await;
+        let wire = wire_request_for_client_message(Some(config("m1"))).await;
         assert!(
             wire["proposed"]["actions"]
                 .as_array()

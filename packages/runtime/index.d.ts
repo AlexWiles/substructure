@@ -1,10 +1,24 @@
+/** One declared LLM block, named the way an agent config names it. */
+export interface LlmBlockOptions {
+    /** The name an agent config's `llm` references. */
+    name: string;
+    /** "anthropic" | "openai" | "openrouter" | "worker" */
+    type: string;
+    /** Required for every type but "worker", which the worker runs itself. */
+    apiKey?: string;
+    baseUrl?: string;
+    /** Wire shape of `llm.execute`; "worker" blocks only. */
+    format?: "anthropic" | "openai";
+}
+
 export interface RuntimeOptions {
     /** SQLite database path */
     db: string;
-    /** OpenRouter API base URL (default: "https://openrouter.ai/api") */
-    openrouterBaseUrl?: string;
-    /** OpenRouter API key */
-    openrouterApiKey?: string;
+    /**
+     * The LLM blocks agents may name. There is no default block: a config names
+     * one, or its calls fail saying what was declared.
+     */
+    llm?: LlmBlockOptions[];
     /** Number of concurrent LLM handler tasks (default: 4) */
     llmPoolSize?: number;
 }

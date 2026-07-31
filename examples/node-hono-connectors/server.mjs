@@ -10,7 +10,7 @@ function decide({ trigger, proposed }) {
     if (trigger.type === "session.start") {
         return {
             agent: {
-                model: "claude-haiku-4-5-20251001",
+                ...proposed.agent,
                 stream: true,
                 // "issues" is the server in substructure.toml. read_only keeps
                 // close_issue away from the model.

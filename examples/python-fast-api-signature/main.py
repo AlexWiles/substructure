@@ -5,13 +5,9 @@ import hmac
 from fastapi import Depends, FastAPI, HTTPException, Request
 
 
+# The agent is declared in substructure.toml; this worker exists to show the
+# signature check below.
 def decide(req):
-    trigger = req["trigger"]
-
-    if trigger["type"] == "session.start":
-        return {"agent": {"model": "claude-haiku-4-5-20251001", "stream": True}}
-
-    # Accept the engine's proposal for every other decision.
     return req["proposed"]
 
 

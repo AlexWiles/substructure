@@ -4,12 +4,9 @@ import { Hono } from "hono";
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 
-function decide({ trigger, proposed }) {
-    if (trigger.type === "session.start") {
-        return { agent: { model: "claude-haiku-4-5-20251001", stream: true } };
-    }
-
-    // Accept the engine's proposal for every other decision.
+// The agent is declared in substructure.toml; this worker exists to show the
+// signature check below.
+function decide({ proposed }) {
     return proposed;
 }
 

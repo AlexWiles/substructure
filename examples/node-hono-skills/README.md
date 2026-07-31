@@ -37,9 +37,7 @@ loads it, then acts:
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
-subs run -c substructure.toml \
-    --session skills-demo \
-    --input '{"type":"client.message","message":{"role":"user","content":"how far is 42 km in miles?"}}'
+subs run -c substructure.toml --agent skills "how far is 42 km in miles?"
 ```
 
 Ask for a commit message instead to load a skill that ships no tools:

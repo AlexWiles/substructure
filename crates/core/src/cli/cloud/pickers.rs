@@ -24,7 +24,7 @@ pub async fn pick_org(ctx: &Context) -> Result<String> {
     let default_idx = ctx
         .project
         .as_ref()
-        .and_then(|p| p.org.as_deref())
+        .and_then(|p| p.org())
         .and_then(|d| orgs.iter().position(|o| o.id == d))
         .unwrap_or(0);
 
@@ -67,7 +67,7 @@ pub async fn pick_app(ctx: &Context, org_id: &str) -> Result<Option<String>> {
     let default_idx = ctx
         .project
         .as_ref()
-        .and_then(|p| p.app.as_deref())
+        .and_then(|p| p.app())
         .and_then(|d| apps.iter().position(|a| a.id == d))
         .unwrap_or(0);
 

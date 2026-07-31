@@ -31,7 +31,7 @@ async fn list(globals: CloudGlobals) -> Result<()> {
         return print::json(&orgs);
     }
 
-    let pinned = ctx.project.as_ref().and_then(|p| p.org.as_deref());
+    let pinned = ctx.project.as_ref().and_then(|p| p.org());
     let columns = [
         print::Column::left(""),
         print::Column::left("ID"),

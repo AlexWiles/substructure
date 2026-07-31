@@ -24,6 +24,5 @@ python3 main.py
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
-subs run -c substructure.toml \
-    --input '{"type":"client.message","message":{"role":"user","content": "what is the weather in Paris?"}}'
+subs run -c substructure.toml --agent assistant "what is the weather in Paris?"
 ```

@@ -1,7 +1,6 @@
 pub mod checkpoint;
 pub mod connector_tokens;
 pub mod event_store;
-pub mod push;
 pub mod session_index;
 pub mod wake;
 pub mod worker_queue;
@@ -17,7 +16,6 @@ use crate::event_store::StoreError;
 pub use checkpoint::SqliteCheckpointStore;
 pub use connector_tokens::SqliteTokenStore;
 pub use event_store::SqliteEventStore;
-pub use push::SqlitePushStore;
 pub use session_index::SqliteSessionIndexStore;
 pub use wake::SqliteWakeStore;
 pub use worker_queue::SqliteWorkerQueue;

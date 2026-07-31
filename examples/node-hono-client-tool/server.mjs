@@ -5,8 +5,10 @@ import { Hono } from "hono";
 function decide({ trigger, proposed }) {
     if (trigger.type === "session.start") {
         return {
+            // The declared config arrives as the proposal; spread it to keep
+            // the `llm` and `model` substructure.toml names.
             agent: {
-                model: "claude-haiku-4-5-20251001",
+                ...proposed.agent,
                 stream: true,
                 system: "For location-based questions, call get_location instead of guessing.",
                 tools: [

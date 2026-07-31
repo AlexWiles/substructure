@@ -8,6 +8,8 @@ pub struct LlmTask {
     pub agent_id: String,
     pub call_id: String,
     pub attempt: u32,
+    /// The `[llm.*]` block the call names; the registry key for its client.
+    pub llm: String,
     pub request: LlmRequest,
     pub stream: bool,
     pub owner: SessionOwner,

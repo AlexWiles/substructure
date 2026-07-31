@@ -44,6 +44,7 @@ pub enum CommandPayload {
     },
     RequestLlmCall {
         call_id: String,
+        llm: String,
         request: LlmRequest,
         stream: bool,
         retry: RetryPolicy,
@@ -191,6 +192,7 @@ impl Action {
         match self {
             Action::CallLlm {
                 id,
+                llm,
                 request,
                 stream,
                 retry,
@@ -198,6 +200,7 @@ impl Action {
                 format,
             } => Some(CommandPayload::RequestLlmCall {
                 call_id: id,
+                llm,
                 request,
                 stream,
                 retry,
@@ -901,6 +904,7 @@ impl Working {
 
             CommandPayload::RequestLlmCall {
                 call_id,
+                llm,
                 request,
                 stream,
                 retry,
@@ -909,7 +913,7 @@ impl Working {
             } => self
                 .try_then(|s| {
                     effects::llm::request(
-                        s, call_id, request, stream, retry, handler, format, caller,
+                        s, call_id, llm, request, stream, retry, handler, format, caller,
                     )
                 })
                 .map(|_| ()),

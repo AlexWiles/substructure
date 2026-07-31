@@ -9,6 +9,8 @@ use tokio::task::JoinHandle;
 use tracing_subscriber::EnvFilter;
 
 use substructure_core::event_store::Seq;
+use substructure_core::llm::{LlmBlock, LlmBlocks, LlmProviderRegistry, LlmProviderTrait};
+use substructure_core::protocol::LlmFormat;
 use substructure_core::protocol::{
     ClientPayload, DecisionRequest, DecisionResponse, LlmResponse, SessionOwner,
 };
@@ -23,7 +25,7 @@ use substructure_core::providers::worker_queue::InMemoryWorkerQueue;
 use substructure_core::session::decision::{EffectResultPayload, WorkKind};
 use substructure_core::session::wire::resolve_response;
 use substructure_core::span::SpanContext as CoreSpanContext;
-use substructure_core::worker::{DequeueFilter, FailDecision, SubmitDecision};
+use substructure_core::worker::{DequeueFilter, EmptyAgentDirectory, FailDecision, SubmitDecision};
 use substructure_core::{
     Caller, EffectSettlement, Runtime, RuntimeConfig, SettleEffectInput, SubmitClientPayload,
 };
@@ -37,31 +39,95 @@ pub struct SubmitPayloadResult {
     pub queued: bool,
 }
 
+/// One declared LLM block, named the way an agent config names it.
+#[napi(object)]
+pub struct LlmBlockOptions {
+    /// The name an agent config's `llm` references.
+    pub name: String,
+    /// "anthropic" | "openai" | "openrouter" | "worker".
+    #[napi(js_name = "type")]
+    pub kind: String,
+    /// Required for every type but "worker", which the worker runs itself.
+    pub api_key: Option<String>,
+    pub base_url: Option<String>,
+    /// Wire shape of `llm.execute`; "worker" blocks only.
+    pub format: Option<String>,
+}
+
 /// Configuration for creating a new Runtime.
 #[napi(object)]
 pub struct RuntimeOptions {
     /// SQLite database path
     pub db: String,
-    /// OpenRouter API base URL (default: "https://openrouter.ai/api")
-    pub openrouter_base_url: Option<String>,
-    /// OpenRouter API key
-    pub openrouter_api_key: Option<String>,
-    /// Anthropic API base URL (default: "https://api.anthropic.com")
-    pub anthropic_base_url: Option<String>,
-    /// Anthropic API key
-    pub anthropic_api_key: Option<String>,
-    /// OpenAI API base URL (default: "https://api.openai.com/v1")
-    pub openai_base_url: Option<String>,
-    /// OpenAI API key
-    pub openai_api_key: Option<String>,
+    /// The LLM blocks agents may name. There is no default block: a config
+    /// names one, or its calls fail saying what was declared.
+    pub llm: Option<Vec<LlmBlockOptions>>,
     /// Number of concurrent LLM handler tasks (default: 4)
     pub llm_pool_size: Option<u32>,
+}
+
+/// The blocks as the engine reads them, and one client per block it runs
+/// itself. A "worker" block gets no client: the registered JS worker makes
+/// those calls.
+fn llm_blocks(options: Option<Vec<LlmBlockOptions>>) -> Result<(LlmBlocks, LlmProviderRegistry)> {
+    let mut blocks = std::collections::BTreeMap::new();
+    let mut providers: std::collections::BTreeMap<String, Arc<dyn LlmProviderTrait>> =
+        std::collections::BTreeMap::new();
+
+    for o in options.unwrap_or_default() {
+        let format = match o.format.as_deref() {
+            None => None,
+            Some("anthropic") => Some(LlmFormat::Anthropic),
+            Some("openai") => Some(LlmFormat::Openai),
+            Some(other) => return Err(Error::from_reason(format!("unknown llm format: {other}"))),
+        };
+        let key = |o: &LlmBlockOptions| {
+            o.api_key.clone().ok_or_else(|| {
+                Error::from_reason(format!("llm block `{}` needs an apiKey", o.name))
+            })
+        };
+        let provider: Arc<dyn LlmProviderTrait> = match o.kind.as_str() {
+            "worker" => {
+                blocks.insert(o.name, LlmBlock::worker(format));
+                continue;
+            }
+            "openrouter" => Arc::new(OpenRouterProvider::new(OpenRouterConfig {
+                base_url: o
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| "https://openrouter.ai/api".to_string()),
+                api_key: key(&o)?,
+            })),
+            "anthropic" => {
+                let mut config = AnthropicConfig::new(key(&o)?);
+                if let Some(base_url) = o.base_url.clone() {
+                    config.base_url = base_url;
+                }
+                Arc::new(AnthropicProvider::new(config))
+            }
+            "openai" => {
+                let mut config = OpenAiConfig::new(key(&o)?);
+                if let Some(base_url) = o.base_url.clone() {
+                    config.base_url = base_url;
+                }
+                Arc::new(OpenAiProvider::new(config))
+            }
+            other => return Err(Error::from_reason(format!("unknown llm type: {other}"))),
+        };
+        blocks.insert(o.name.clone(), LlmBlock::engine());
+        providers.insert(o.name, provider);
+    }
+    Ok((LlmBlocks::new(blocks), LlmProviderRegistry::new(providers)))
 }
 
 /// The Substructure runtime, running in-process.
 #[napi]
 pub struct EmbeddedRuntime {
     inner: Arc<Runtime>,
+    /// The declared blocks a decision's `llm.call` resolves against. Held here
+    /// rather than in a directory: an embedded runtime registers its workers in
+    /// process, so it declares blocks without declaring agents.
+    llm_blocks: LlmBlocks,
     worker_handles: Mutex<HashMap<String, JoinHandle<()>>>,
 }
 
@@ -107,29 +173,8 @@ impl EmbeddedRuntime {
             Arc::new(ShardedInMemoryQueue::new(
                 config.sub_agent_executor_workers as u32,
             ));
-        let llm_provider: Option<Arc<dyn substructure_core::llm::LlmProviderTrait>> =
-            if let Some(api_key) = options.openrouter_api_key {
-                Some(Arc::new(OpenRouterProvider::new(OpenRouterConfig {
-                    base_url: options
-                        .openrouter_base_url
-                        .unwrap_or_else(|| "https://openrouter.ai/api".to_string()),
-                    api_key,
-                })))
-            } else if let Some(api_key) = options.anthropic_api_key {
-                let mut config = AnthropicConfig::new(api_key);
-                if let Some(base_url) = options.anthropic_base_url {
-                    config.base_url = base_url;
-                }
-                Some(Arc::new(AnthropicProvider::new(config)))
-            } else if let Some(api_key) = options.openai_api_key {
-                let mut config = OpenAiConfig::new(api_key);
-                if let Some(base_url) = options.openai_base_url {
-                    config.base_url = base_url;
-                }
-                Some(Arc::new(OpenAiProvider::new(config)))
-            } else {
-                None
-            };
+        let (llm_blocks, llm_providers) = llm_blocks(options.llm)?;
+
         // The in-process runtime has no connection registry yet, so connector
         // work is inert; the queue is still passed so the shape stays uniform.
         let connector_task_queue: Arc<
@@ -146,7 +191,8 @@ impl EmbeddedRuntime {
             substructure_core::start(
                 substructure_core::RuntimeDeps {
                     store: event_store,
-                    llm_provider,
+                    agents: Arc::new(EmptyAgentDirectory),
+                    llm_providers: Arc::new(llm_providers),
                     llm_task_queue,
                     sub_agent_task_queue,
                     connections: None,
@@ -163,6 +209,7 @@ impl EmbeddedRuntime {
 
         Ok(Self {
             inner,
+            llm_blocks,
             worker_handles: Mutex::new(HashMap::new()),
         })
     }
@@ -178,6 +225,7 @@ impl EmbeddedRuntime {
         callback: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
     ) -> Result<()> {
         let runtime = self.inner.clone();
+        let blocks = self.llm_blocks.clone();
         let filter_tenant = tenant_id.clone();
 
         let handle = tokio::spawn(async move {
@@ -219,6 +267,7 @@ impl EmbeddedRuntime {
                                     submit,
                                     decision.agent.as_ref(),
                                     Some(&decision.trigger),
+                                    &blocks,
                                 ) {
                                     Ok(resolved) => {
                                         let submit_decision = SubmitDecision {

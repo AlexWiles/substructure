@@ -28,8 +28,7 @@ go run .
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
-subs run -c substructure.toml \
-    --input '{"type":"client.message","message":{"role":"user","content": "what files are in this directory?"}}'
+subs run -c substructure.toml --agent my-agent "what files are in this directory?"
 ```
 
 ## Regenerate types

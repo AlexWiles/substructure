@@ -3,33 +3,43 @@ use anyhow::{bail, Result};
 use super::credentials;
 use super::http::CloudClient;
 use super::pickers;
-use super::project_config::{self, RemoteEnv};
+use super::project_config::{self, EnvConfig};
 use super::{AppScope, CloudGlobals, OrgScope};
 
+/// The server a credential command targets, without building a [`Context`]:
+/// flag > the environment file's `[deployment].url` > `$SUBS_API_URL` >
+/// default. Same order [`Context::with_project`] applies, so `subs login -c
+/// f.toml` writes the token under the URL every other command run with `-c
+/// f.toml` reads.
+pub fn api_url(globals: &CloudGlobals) -> Result<String> {
+    let project = project_config::load(globals.config.as_deref())?;
+    Ok(credentials::resolve_api_url(
+        globals.url.as_deref().or(project.deployment_url()),
+    ))
+}
+
 pub struct Context {
-    pub project: Option<RemoteEnv>,
+    pub project: Option<EnvConfig>,
     pub client: CloudClient,
     pub globals: CloudGlobals,
 }
 
 impl Context {
     pub fn load(globals: &CloudGlobals) -> Result<Self> {
-        let project = project_config::resolve(globals.config.as_deref())?
-            .map(|found| found.into_remote("this command"))
-            .transpose()?;
+        let project = project_config::resolve(globals.config.as_deref())?.map(|found| found.config);
         Self::with_project(globals, project)
     }
 
     /// A context over an environment the caller resolved itself, for `subs
     /// link` — which may be creating the file every other command reads.
-    pub fn with_project(globals: &CloudGlobals, project: Option<RemoteEnv>) -> Result<Self> {
+    pub fn with_project(globals: &CloudGlobals, project: Option<EnvConfig>) -> Result<Self> {
         let credentials_path = credentials::resolve_path(globals.credentials.clone())?;
         let creds = credentials::load(&credentials_path)?;
         // Precedence: --url flag > project substructure.toml url > $SUBS_API_URL > default.
         let url_override = globals
             .url
             .as_deref()
-            .or_else(|| project.as_ref().and_then(|p| p.url.as_deref()));
+            .or_else(|| project.as_ref().and_then(|p| p.deployment_url()));
         let api_url = credentials::resolve_api_url(url_override);
         let token = credentials::resolve_token(&creds, &api_url);
         let client = CloudClient::new(api_url, token);
@@ -51,11 +61,7 @@ impl Context {
 
         // If we already have an app id (flag or pinned), skip org resolution
         // entirely — app-scoped routes don't need it.
-        if let Some(app) = scope
-            .app
-            .clone()
-            .or_else(|| ctx.project.as_ref().and_then(|p| p.app.clone()))
-        {
+        if let Some(app) = scope.app.clone().or_else(|| ctx.pinned(EnvConfig::app)) {
             return Ok((ctx, app));
         }
 
@@ -86,17 +92,22 @@ impl Context {
         if let Some(app) = flag {
             return Some(app.to_string());
         }
-        if let Some(app) = self.project.as_ref().and_then(|p| p.app.clone()) {
+        if let Some(app) = self.pinned(EnvConfig::app) {
             return Some(app);
         }
         self.server_default_app().await
+    }
+
+    /// What the file pins, if this invocation read one.
+    fn pinned(&self, key: fn(&EnvConfig) -> Option<&str>) -> Option<String> {
+        key(self.project.as_ref()?).map(str::to_string)
     }
 
     pub async fn require_org(&self, flag: Option<&str>) -> Result<String> {
         if let Some(s) = flag {
             return Ok(s.to_string());
         }
-        if let Some(org) = self.project.as_ref().and_then(|p| p.org.clone()) {
+        if let Some(org) = self.pinned(EnvConfig::org) {
             return Ok(org);
         }
         if let Some(org) = self.server_default_org().await {
@@ -126,5 +137,57 @@ impl Context {
         if self.client.needs_default_probe() {
             let _ = self.client.get::<serde_json::Value>("/api/v1/orgs").await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn write_config(body: &str) -> PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("subs-context-test-{nanos}-{seq}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(project_config::FILENAME);
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    fn globals(url: Option<&str>, config: Option<PathBuf>) -> CloudGlobals {
+        CloudGlobals {
+            url: url.map(str::to_string),
+            config,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_deployment_names_the_server_and_the_flag_still_wins() {
+        let path = write_config("[deployment]\nurl = \"https://self.example\"\n");
+
+        assert_eq!(
+            api_url(&globals(None, Some(path.clone()))).unwrap(),
+            "https://self.example"
+        );
+        assert_eq!(
+            api_url(&globals(Some("https://flag.example"), Some(path))).unwrap(),
+            "https://flag.example"
+        );
+    }
+
+    #[test]
+    fn a_file_that_names_no_deployment_leaves_the_server_alone() {
+        let path = write_config("db = \"dev.db\"\n");
+        // Whatever the env/default resolves to — the file must not change it.
+        assert_eq!(
+            api_url(&globals(None, Some(path))).unwrap(),
+            credentials::resolve_api_url(None)
+        );
     }
 }

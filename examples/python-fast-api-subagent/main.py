@@ -6,7 +6,7 @@ def assistant(req):
     if req["trigger"]["type"] == "session.start":
         return {
             "agent": {
-                "model": "claude-haiku-4-5-20251001",
+                **req["proposed"]["agent"],
                 "stream": True,
                 "system": "Delegate weather questions to the weather agent.",
                 "sub_agents": [
@@ -27,7 +27,7 @@ def weather(req):
     if trigger["type"] == "session.start":
         return {
             "agent": {
-                "model": "claude-haiku-4-5-20251001",
+                **req["proposed"]["agent"],
                 "stream": True,
                 "system": "You report the weather. Look it up, then answer in one line.",
                 "tools": [

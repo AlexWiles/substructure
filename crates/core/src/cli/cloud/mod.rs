@@ -1,3 +1,4 @@
+pub mod apply;
 pub mod apps;
 pub mod context;
 pub mod credentials;
@@ -13,7 +14,6 @@ mod print;
 pub(crate) mod project_config;
 pub mod sessions;
 pub mod telemetry;
-pub mod webhook;
 pub mod whoami;
 
 use std::path::PathBuf;
@@ -31,12 +31,13 @@ Global Options:
 
 #[derive(Debug, clap::Args, Clone, Default)]
 pub struct CloudGlobals {
-    /// Override the cloud API URL (precedence: flag > $SUBS_API_URL > prod).
+    /// Override the cloud API URL (precedence: flag > the environment file's
+    /// `[deployment].url` > $SUBS_API_URL > prod).
     #[arg(long, global = true)]
     pub url: Option<String>,
     /// Environment file (default: walks up from cwd looking for
-    /// `substructure.toml`). Must declare `target = "remote"`; pins which
-    /// org/app commands target without flags.
+    /// `substructure.toml`). Its `[deployment]` section names the server and
+    /// pins which org/app commands target without flags.
     #[arg(short = 'c', long, global = true)]
     pub config: Option<PathBuf>,
     /// User-level credentials file holding the bearer token

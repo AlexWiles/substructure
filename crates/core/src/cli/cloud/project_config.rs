@@ -7,19 +7,29 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use toml_edit::{DocumentMut, Item, Table, Value};
 
-use crate::cli::env::{LlmProviderArg, OutputFormat};
+use crate::cli::env::{OutputFormat, ProviderBinding, ProviderKind};
 use crate::connectors::registry::ConnectionSpec;
-use crate::protocol::ConnectorProtocol;
+use crate::protocol::{
+    AgentConfig, AgentTool, ConnectorProtocol, Handler, LlmFormat, McpServer, RetryPolicy, SubAgent,
+};
+use crate::runtime::llm::{LlmBlock, LlmBlocks};
+use crate::runtime::worker::{AgentEntry, WorkerEndpoint};
 
 pub const FILENAME: &str = "substructure.toml";
 pub const DEFAULT_DB: &str = "substructure.db";
 
-/// One environment: one file, one engine.
+/// One system, described once.
 ///
-/// `target` says which engine the rest of the file describes — an embedded one
-/// over a SQLite file, or a server reached over HTTP — and the two halves share
-/// no keys, so a setting that means nothing here is a parse error rather than
-/// something that silently does nothing.
+/// A file carries two roles, either or both: **an engine you run** (`db`,
+/// `log`, `[run]`, `[server]`) and **a deployment you administer**
+/// (`[deployment]`). What the app *is* — `name`, `[agent.<id>]`, `[llm.<id>]`,
+/// `[slack]`, `[mcp.<id>]` — is one declaration whichever role reads it, so a
+/// self-hosted system is served and administered from the same file rather
+/// than two that have to agree.
+///
+/// A role is present when its keys are: `[deployment]` is what `subs apply`
+/// and `subs sessions` act on, and it is also what decides that a connection's
+/// credential belongs to the deployment rather than to the engine here.
 ///
 /// Precedence for anything the CLI also accepts as a flag is
 /// **flag > environment > this > default**, so pinning something here never
@@ -30,18 +40,13 @@ pub const DEFAULT_DB: &str = "substructure.db";
 /// Secrets are absent for the same reason they are absent from `[mcp]` — a
 /// committed file must not be able to hold one, so the signing secret is named
 /// rather than written.
-#[derive(Debug, Clone, PartialEq)]
-pub enum EnvConfig {
-    Local(LocalEnv),
-    Remote(RemoteEnv),
-}
-
-/// An engine running in this process against a SQLite file: `subs run`,
-/// `subs serve`.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct LocalEnv {
-    pub target: LocalTag,
+pub struct EnvConfig {
+    /// The app's name. `subs apply` creates the app from it when nothing is
+    /// pinned, and renames when it changes: the file is the source of truth.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Engine state: events, sessions, and the credentials `subs mcp login`
     /// authorized [default: `substructure.db`].
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -50,91 +55,169 @@ pub struct LocalEnv {
     /// directives (`substructure_core=debug,warn`). `$RUST_LOG` still wins.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub worker: Option<WorkerConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub llm: Option<LlmConfig>,
+    /// The LLM blocks this app declares, keyed by the name an agent names. The
+    /// declaration travels with the app; the credential binds per environment.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub llm: BTreeMap<String, ProviderSpec>,
+    /// The agents this app declares, keyed by the id a client routes on. Each
+    /// section is the wire `AgentConfig` plus where its decisions go.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent: BTreeMap<String, AgentSection>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<RunConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server: Option<ServerConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slack: Option<SlackConfig>,
-    /// MCP servers this engine can reach, keyed by the id an agent config
-    /// names.
+    /// MCP servers this app may reach, keyed by the id an agent names. An
+    /// engine here dials them itself; a deployment is told the id and URL and
+    /// holds the credential, so `auth` is the engine's half alone.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub mcp: BTreeMap<String, ConnectionSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment: Option<Deployment>,
 }
 
-/// A server speaking `/api/v1`: the hosted cloud, a self-hosted deployment, or
-/// someone else's `subs serve`.
+/// The server this file administers — the hosted cloud, a self-hosted
+/// deployment, or someone else's `subs serve` — and what it is pinned to there.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct RemoteEnv {
-    pub target: RemoteTag,
+pub struct Deployment {
     /// The API to talk to [default: `https://api.substructure.ai`]. A `--url`
-    /// flag or `$SUBS_API_URL` still overrides it.
+    /// flag still overrides it; `$SUBS_API_URL` only fills in when neither is
+    /// set. `subs login` reads it too, so the token is stored under the same
+    /// server the rest of the file's commands reach.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub org: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub worker: Option<RemoteWorkerConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub slack: Option<SlackConfig>,
-    /// MCP servers this app may reach. Only a URL: the credential is held by
-    /// the deployment, so there is no `token_env` to name here.
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub mcp: BTreeMap<String, RemoteConnectionSpec>,
 }
 
-/// The tag that selects [`LocalEnv`]. A field rather than serde's internal
-/// tagging, which cannot be combined with `deny_unknown_fields`.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LocalTag {
-    #[default]
-    #[serde(rename = "local")]
-    Local,
+/// One `[llm.<id>]` block: what runs a call on it, and — where the engine runs
+/// it — how a key is bound.
+///
+/// The key is named, never written, for the same reason a connection's is: a
+/// committed file must not be able to hold a secret. A `worker` block names no
+/// variable at all — the call never leaves the worker.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderSpec {
+    #[serde(rename = "type")]
+    pub kind: ProviderKind,
+    /// Variable holding the key. Absent ⇒ the type's own default
+    /// (`ANTHROPIC_API_KEY` and so on).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Wire shape of the `llm.execute` a worker answers. Only ever valid on
+    /// `type = "worker"`; absent ⇒ the engine's neutral format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<LlmFormat>,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RemoteTag {
-    #[default]
-    #[serde(rename = "remote")]
-    Remote,
+impl ProviderSpec {
+    fn block(&self) -> LlmBlock {
+        match self.kind {
+            ProviderKind::Worker => LlmBlock::worker(self.format),
+            _ => LlmBlock::engine(),
+        }
+    }
+
+    /// The variable this block's key is read from, for the types that need one.
+    fn api_key_env(&self) -> Option<String> {
+        self.api_key_env
+            .clone()
+            .or_else(|| self.kind.default_api_key_env().map(str::to_string))
+    }
 }
 
-/// Where the engine POSTs decisions.
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+/// One `[agent.<id>]` section: what the agent is, and who decides for it.
+///
+/// `worker` is the whole routing switch — set, and decisions POST there; unset,
+/// and the engine decides by accepting its own proposals.
+///
+/// The config half mirrors the wire [`AgentConfig`], but every field is
+/// optional here, because a section has two jobs and only the first is
+/// mandatory: it declares that the agent *exists* and where its decisions go,
+/// and it may also *seed* the config. An agent that delegates everything to its
+/// worker needs only the first, so `[agent.<id>]` with nothing but a `worker`
+/// URL is a complete declaration — the worker authors the config on
+/// `session.start`, exactly as it did before the file could.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct WorkerConfig {
+pub struct AgentSection {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    /// Environment variable holding the signing secret. Named, never written —
-    /// same rule as a connection's `token_env`. Unset means a random secret
-    /// per start.
+    pub llm: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetryPolicy>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<AgentTool>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sub_agents: Vec<SubAgent>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mcp: Vec<McpServer>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker: Option<String>,
+    /// Environment variable holding the secret an engine here signs this
+    /// agent's decision requests with. Named, never written. Unset means the
+    /// requests go unsigned, rather than signed with a secret nobody can check.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signing_secret_env: Option<String>,
 }
 
-/// The remote half: the deployment mints the signing secret, so only the
-/// endpoint is the manifest's to state.
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct RemoteWorkerConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-}
+impl AgentSection {
+    /// Whether the section says anything about the agent beyond its hosting.
+    /// A section that does not is a declaration of existence alone.
+    fn declares_config(&self) -> bool {
+        self.llm.is_some()
+            || self.model.is_some()
+            || self.system.is_some()
+            || self.stream.is_some()
+            || self.retry.is_some()
+            || !self.tools.is_empty()
+            || !self.sub_agents.is_empty()
+            || !self.mcp.is_empty()
+    }
 
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct LlmConfig {
-    /// Provider for engine-executed calls. The key comes from the matching
-    /// `*_API_KEY` variable.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider: Option<LlmProviderArg>,
+    /// The wire config this section seeds, with the hosting stripped. `None`
+    /// when the section seeds nothing — validation has already made sure a
+    /// worker is there to author one.
+    pub fn to_agent_config(&self) -> Option<AgentConfig> {
+        Some(AgentConfig {
+            llm: self.llm.clone(),
+            model: self.model.clone()?,
+            system: self.system.clone(),
+            stream: self.stream.unwrap_or(false),
+            retry: self.retry.clone(),
+            tools: self.tools.clone(),
+            sub_agents: self.sub_agents.clone(),
+            mcp: self.mcp.clone(),
+        })
+    }
+
+    /// This agent as the engine routes it: the config it seeds, and the endpoint
+    /// its decisions go to with whatever secret the named variable held.
+    pub fn to_entry(&self) -> AgentEntry {
+        AgentEntry {
+            config: self.to_agent_config(),
+            worker: self.worker.clone().map(|url| WorkerEndpoint {
+                url,
+                signing_secret: self
+                    .signing_secret_env
+                    .as_deref()
+                    .and_then(crate::cli::env_value),
+            }),
+        }
+    }
 }
 
 /// Defaults for `subs run`.
@@ -155,9 +238,11 @@ pub struct ServerConfig {
     pub host: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
-    /// Disable client and worker authentication. Local development only.
+    /// Client and worker authentication [default: true]. `false` serves
+    /// without issuing tokens, which is for a server nothing outside this
+    /// machine can reach.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub dev: Option<bool>,
+    pub auth: Option<bool>,
 }
 
 /// The `[slack]` section: what the Socket Mode bot needs that is not a secret.
@@ -173,15 +258,7 @@ pub struct SlackConfig {
     pub agent: Option<String>,
 }
 
-/// A connection in a remote environment. The deployment holds the credential
-/// and decides whether the URL is one it will send it to.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RemoteConnectionSpec {
-    pub url: String,
-}
-
-impl LocalEnv {
+impl EnvConfig {
     /// Every connection this environment declares, keyed by the id an agent
     /// names.
     ///
@@ -210,86 +287,239 @@ impl LocalEnv {
         self.slack.as_ref()?.agent.clone()
     }
 
-    pub fn worker_url(&self) -> Option<String> {
-        self.worker.as_ref()?.url.clone()
+    /// The declared blocks as the engine reads them: venue and wire shape,
+    /// never a credential.
+    pub fn llm_blocks(&self) -> LlmBlocks {
+        self.llm
+            .iter()
+            .map(|(name, spec)| (name.clone(), spec.block()))
+            .collect()
     }
 
-    /// The signing secret the named variable holds, if the file names one and
-    /// it is set.
-    pub fn signing_secret(&self) -> Option<String> {
-        crate::cli::env_value(self.worker.as_ref()?.signing_secret_env.as_deref()?)
+    /// The blocks the engine runs itself, each with the variable its key comes
+    /// from. `worker` blocks are absent: they never need a credential here.
+    pub fn provider_bindings(&self) -> Vec<ProviderBinding> {
+        self.llm
+            .iter()
+            .filter(|(_, spec)| spec.kind != ProviderKind::Worker)
+            .filter_map(|(name, spec)| {
+                Some(ProviderBinding {
+                    name: name.clone(),
+                    kind: spec.kind,
+                    api_key_env: spec.api_key_env()?,
+                    base_url: spec.base_url.clone(),
+                })
+            })
+            .collect()
     }
 
-    pub fn llm_provider(&self) -> Option<LlmProviderArg> {
-        self.llm.as_ref()?.provider
-    }
-}
-
-impl RemoteEnv {
-    pub fn worker_url(&self) -> Option<String> {
-        self.worker.as_ref()?.url.clone()
-    }
-}
-
-impl EnvConfig {
-    pub fn log(&self) -> Option<&str> {
-        match self {
-            EnvConfig::Local(local) => local.log.as_deref(),
-            EnvConfig::Remote(_) => None,
-        }
+    /// Every agent this app declares, keyed by the id a client routes on.
+    pub fn agents(&self) -> BTreeMap<String, AgentEntry> {
+        self.agent
+            .iter()
+            .map(|(id, section)| (id.clone(), section.to_entry()))
+            .collect()
     }
 
-    fn target(&self) -> &'static str {
-        match self {
-            EnvConfig::Local(_) => "local",
-            EnvConfig::Remote(_) => "remote",
-        }
+    /// The declared agent ids, for the error that says what could have been named.
+    pub fn agent_ids(&self) -> Vec<String> {
+        self.agent.keys().cloned().collect()
     }
 
-    /// Every connection declared here, as the id an agent names and the URL it
-    /// reaches.
-    fn declared(&self) -> Box<dyn Iterator<Item = (&str, &str)> + '_> {
-        match self {
-            EnvConfig::Local(local) => Box::new(
-                local
-                    .mcp
-                    .iter()
-                    .map(|(id, spec)| (id.as_str(), spec.url.as_str())),
-            ),
-            EnvConfig::Remote(remote) => Box::new(
-                remote
-                    .mcp
-                    .iter()
-                    .map(|(id, spec)| (id.as_str(), spec.url.as_str())),
-            ),
-        }
+    /// Whether an engine here authenticates its clients and workers
+    /// [default: yes].
+    pub fn server_auth(&self) -> bool {
+        self.server.as_ref().and_then(|s| s.auth).unwrap_or(true)
+    }
+
+    pub fn deployment_url(&self) -> Option<&str> {
+        self.deployment.as_ref()?.url.as_deref()
+    }
+
+    pub fn org(&self) -> Option<&str> {
+        self.deployment.as_ref()?.org.as_deref()
+    }
+
+    pub fn app(&self) -> Option<&str> {
+        self.deployment.as_ref()?.app.as_deref()
+    }
+
+    /// The deployment section, creating it if the file has none — for the
+    /// commands that pin (`subs link`, `subs apply`).
+    pub fn deployment_mut(&mut self) -> &mut Deployment {
+        self.deployment.get_or_insert_with(Deployment::default)
     }
 
     fn parse(s: &str, path: &Path) -> Result<Self> {
         let at = path.display();
-        // Two steps because serde's internal tagging cannot be combined with
-        // `deny_unknown_fields`: read the tag, then deserialize the whole
-        // document into the struct it selects, which carries the tag itself so
-        // the unknown-key check accounts for it.
         let value: toml::Value = toml::from_str(s).map_err(|e| anyhow!("parsing {at}: {e}"))?;
-        let config = match value.get("target").and_then(|t| t.as_str()) {
-            Some("local") => {
-                EnvConfig::Local(value.try_into().map_err(|e| anyhow!("parsing {at}: {e}"))?)
-            }
-            Some("remote") => {
-                EnvConfig::Remote(value.try_into().map_err(|e| anyhow!("parsing {at}: {e}"))?)
-            }
-            Some(other) => bail!(
-                "{at}: `{other}` is not a target; use target = \"local\" or target = \"remote\""
-            ),
-            None => bail!("{at} must declare target = \"local\" or target = \"remote\""),
-        };
-        for (id, url) in config.declared() {
+        moved_keys(&value, &at)?;
+        let config: EnvConfig = value.try_into().map_err(|e| anyhow!("parsing {at}: {e}"))?;
+        for (id, spec) in &config.mcp {
             check_id(id).map_err(|e| anyhow!("{at}: [mcp.{id}]: {e}"))?;
-            check_url(url).map_err(|e| anyhow!("{at}: [mcp.{id}]: {e}"))?;
+            check_url(&spec.url).map_err(|e| anyhow!("{at}: [mcp.{id}]: {e}"))?;
+        }
+        for (id, spec) in &config.llm {
+            check_llm(id, spec).map_err(|e| anyhow!("{at}: [llm.{id}]: {e}"))?;
+        }
+        for (id, section) in &config.agent {
+            check_agent(id, section, &config).map_err(|e| anyhow!("{at}: [agent.{id}]: {e}"))?;
         }
         Ok(config)
     }
+}
+
+/// A block declares one venue, so the fields of the other are not a detail to
+/// ignore — they are a misunderstanding of what the block is.
+fn check_llm(id: &str, spec: &ProviderSpec) -> Result<()> {
+    check_id(id)?;
+    match spec.kind {
+        ProviderKind::Worker => {
+            if spec.api_key_env.is_some() || spec.base_url.is_some() {
+                bail!(
+                    "a `worker` block needs no `api_key_env` or `base_url`: the call never \
+                     leaves your worker"
+                );
+            }
+        }
+        _ => {
+            if spec.format.is_some() {
+                bail!(
+                    "`format` is the wire shape of an `llm.execute`, so it only applies to \
+                     `type = \"worker\"`"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every name an agent uses is declared in this same file, so a typo is caught
+/// here rather than as a failing decision on the first turn.
+fn check_agent(id: &str, section: &AgentSection, config: &EnvConfig) -> Result<()> {
+    check_id(id)?;
+
+    if let Some(url) = &section.worker {
+        check_url(url)?;
+    } else if section.signing_secret_env.is_some() {
+        bail!(
+            "`signing_secret_env` signs decision requests, and there is no `worker` to send any to"
+        );
+    }
+
+    // Nothing but hosting: the worker authors the config. Legitimate, and the
+    // only way to say "this agent is entirely my code" — but only a worker can
+    // author one, so without one the engine would have nothing to propose.
+    if !section.declares_config() {
+        if section.worker.is_none() {
+            bail!(
+                "declares nothing. An agent the engine decides for needs an `llm` and a \
+                 `model` to propose from; an agent whose worker authors its config needs a \
+                 `worker` URL."
+            );
+        }
+        return Ok(());
+    }
+
+    // Anything the file seeds has to be a config the engine can actually
+    // propose from, so a half-declared one is an error rather than a proposal
+    // that fails at the first model call.
+    let Some(llm) = section.llm.as_deref() else {
+        bail!(
+            "no `llm`. Name one of the declared blocks: {}",
+            declared(config.llm.keys())
+        );
+    };
+    let Some(block) = config.llm.get(llm) else {
+        bail!(
+            "`llm = \"{llm}\"` names no block. Declared: {}",
+            declared(config.llm.keys())
+        );
+    };
+    if section.model.is_none() {
+        bail!("no `model`. An agent that declares an `llm` has to say which model on it.");
+    }
+
+    for server in &section.mcp {
+        if !config.mcp.contains_key(&server.id) {
+            bail!(
+                "`mcp` names no connection `{}`. Declared: {}",
+                server.id,
+                declared(config.mcp.keys())
+            );
+        }
+    }
+
+    // A worker-executed tool comes from worker code, so a file that declares
+    // one would be naming a function nothing here can run.
+    for tool in &section.tools {
+        if tool.handler != Some(Handler::Client) {
+            bail!(
+                "tool `{}` needs `handler = \"client\"`: a file can only declare tools the \
+                 browser runs, and worker-run tools come from worker code",
+                tool.name
+            );
+        }
+    }
+
+    if section.worker.is_none() && block.kind == ProviderKind::Worker {
+        bail!("`llm = \"{llm}\"` is a `worker` block, so this agent needs a `worker` to run its calls");
+    }
+    Ok(())
+}
+
+fn declared<'a>(mut ids: impl Iterator<Item = &'a String>) -> String {
+    let joined = ids.by_ref().cloned().collect::<Vec<_>>().join(", ");
+    match joined.is_empty() {
+        true => "none".to_string(),
+        false => joined,
+    }
+}
+
+/// The keys and sections that moved, reported where they went rather than as
+/// `deny_unknown_fields`' "unknown field", which says nothing about the file
+/// this one is.
+fn moved_keys(value: &toml::Value, at: &impl std::fmt::Display) -> Result<()> {
+    let pins: Vec<&str> = ["url", "org", "app"]
+        .into_iter()
+        .filter(|k| value.get(k).is_some())
+        .collect();
+    if value.get("target").is_some() {
+        let and_pins = match pins.is_empty() {
+            true => String::new(),
+            false => format!(", and move `{}` under `[deployment]`", pins.join("`, `")),
+        };
+        bail!(
+            "{at}: `target` is no longer a setting. Delete it{and_pins} — a file describes an \
+             engine you run (`db`, `[run]`, `[server]`), a deployment you administer \
+             (`[deployment]`), or both."
+        );
+    }
+    if !pins.is_empty() {
+        bail!(
+            "{at}: `{}` belongs under `[deployment]`, with the server's `url`.",
+            pins.join("`, `")
+        );
+    }
+    if value.get("worker").is_some() {
+        bail!(
+            "{at}: `[worker]` is no longer a setting: a worker belongs to one agent, not to \
+             the app. Write `worker = \"<url>\"` under the `[agent.<id>]` it decides for, and \
+             leave it off the agents the engine decides for."
+        );
+    }
+    // `[llm] provider = "anthropic"` versus `[llm.claude] type = "anthropic"`:
+    // the old form's values are scalars where the new form's are tables.
+    if let Some(llm) = value.get("llm").and_then(toml::Value::as_table) {
+        if llm.values().any(|v| !v.is_table()) {
+            bail!(
+                "{at}: `[llm]` now declares named blocks, so that a second one can be added \
+                 and an agent can say which it uses. Write `[llm.<name>]` with a `type`, e.g. \
+                 `[llm.claude]` / `type = \"anthropic\"`, and name it from `[agent.<id>]`."
+            );
+        }
+    }
+    Ok(())
 }
 
 /// An id becomes the prefix on every tool name the model sees, so it is held to
@@ -325,30 +555,6 @@ pub struct Found {
     pub path: PathBuf,
 }
 
-impl Found {
-    pub fn into_local(self, command: &str) -> Result<LocalEnv> {
-        match self.config {
-            EnvConfig::Local(local) => Ok(local),
-            other => bail!(
-                "{} declares target = \"{}\"; {command} requires target = \"local\"",
-                self.path.display(),
-                other.target()
-            ),
-        }
-    }
-
-    pub fn into_remote(self, command: &str) -> Result<RemoteEnv> {
-        match self.config {
-            EnvConfig::Remote(remote) => Ok(remote),
-            other => bail!(
-                "{} declares target = \"{}\"; {command} requires target = \"remote\"",
-                self.path.display(),
-                other.target()
-            ),
-        }
-    }
-}
-
 /// The environment file at `path`, or the nearest one above the working
 /// directory. An explicit path that does not resolve is an error; discovery
 /// finding nothing is not.
@@ -359,13 +565,11 @@ pub fn resolve(path: Option<&Path>) -> Result<Option<Found>> {
     }
 }
 
-/// The local environment for a command that runs an engine, or the defaults
-/// when no file is in play.
-pub fn local(path: Option<&Path>, command: &str) -> Result<LocalEnv> {
-    Ok(resolve(path)?
-        .map(|found| found.into_local(command))
-        .transpose()?
-        .unwrap_or_default())
+/// What the file says, or the defaults when there is none. For the commands
+/// that work without one — an engine runs on defaults, and every setting is
+/// also a flag.
+pub fn load(path: Option<&Path>) -> Result<EnvConfig> {
+    Ok(resolve(path)?.map(|found| found.config).unwrap_or_default())
 }
 
 pub fn find_from(start: &Path) -> Result<Option<Found>> {
@@ -399,11 +603,8 @@ pub fn load_explicit(path: &Path) -> Result<Found> {
 /// setting. A machine edit must not cost a reader their comments or their
 /// layout, so the parsed document is edited in place rather than replaced.
 pub fn write(path: &Path, config: &EnvConfig) -> Result<()> {
-    let mut rendered: DocumentMut = match config {
-        EnvConfig::Local(local) => toml_edit::ser::to_document(local),
-        EnvConfig::Remote(remote) => toml_edit::ser::to_document(remote),
-    }
-    .context("serializing substructure.toml")?;
+    let mut rendered: DocumentMut =
+        toml_edit::ser::to_document(config).context("serializing substructure.toml")?;
     for (_, item) in rendered.as_table_mut().iter_mut() {
         expand(item, 2);
     }
@@ -490,43 +691,64 @@ mod tests {
         EnvConfig::parse(s, Path::new("substructure.toml"))
     }
 
-    fn local_of(s: &str) -> LocalEnv {
-        match parse(s).unwrap() {
-            EnvConfig::Local(local) => local,
-            other => panic!("expected a local environment, got {other:?}"),
-        }
-    }
-
-    fn remote_of(s: &str) -> RemoteEnv {
-        match parse(s).unwrap() {
-            EnvConfig::Remote(remote) => remote,
-            other => panic!("expected a remote environment, got {other:?}"),
-        }
+    fn ok(s: &str) -> EnvConfig {
+        parse(s).unwrap()
     }
 
     #[test]
-    fn a_file_without_a_target_says_so() {
-        let err = parse("db = \"dev.db\"\n").unwrap_err().to_string();
-        assert!(err.contains("must declare target"), "got {err}");
+    fn a_file_carries_either_role_or_both() {
+        let engine = ok("db = \"dev.db\"\n[server]\nport = 9000\n");
+        assert_eq!(engine.db_path(), "dev.db");
+        assert!(engine.deployment.is_none());
 
-        let err = parse("target = \"cloud\"\n").unwrap_err().to_string();
-        assert!(err.contains("local") && err.contains("remote"), "got {err}");
+        let deployment = ok("[deployment]\norg = \"org_1\"\n");
+        assert_eq!(deployment.org(), Some("org_1"));
+        assert_eq!(deployment.db_path(), DEFAULT_DB);
+
+        // One system: served here, administered there, declared once.
+        let both = ok(r#"
+            name = "support-bot"
+            db = "prod.db"
+
+            [llm.claude]
+            type = "anthropic"
+
+            [agent.support]
+            llm = "claude"
+            model = "claude-sonnet-4-5"
+            worker = "https://bot.example.com/agent"
+
+            [deployment]
+            url = "https://subs.internal"
+            app = "app_1"
+        "#);
+        assert_eq!(both.name.as_deref(), Some("support-bot"));
+        assert_eq!(both.db_path(), "prod.db");
+        assert_eq!(both.deployment_url(), Some("https://subs.internal"));
+        assert_eq!(both.app(), Some("app_1"));
     }
 
     #[test]
-    fn a_local_environment_reads_its_groups() {
-        let cfg = local_of(
-            r#"
-            target = "local"
+    fn an_empty_file_is_valid_and_is_the_defaults() {
+        assert_eq!(ok(""), EnvConfig::default());
+        assert_eq!(EnvConfig::default().db_path(), DEFAULT_DB);
+        assert!(EnvConfig::default().server_auth());
+    }
+
+    #[test]
+    fn the_engine_groups_read_back() {
+        let cfg = ok(r#"
             db = "dev.substructure.db"
             log = "substructure_core=debug,warn"
 
-            [worker]
-            url = "http://localhost:4444"
-            signing_secret_env = "SUBS_SIGNING_SECRET"
+            [llm.claude]
+            type = "anthropic"
 
-            [llm]
-            provider = "anthropic"
+            [agent.support]
+            llm = "claude"
+            model = "claude-sonnet-4-5"
+            worker = "http://localhost:4444"
+            signing_secret_env = "SUBS_SIGNING_SECRET"
 
             [run]
             agent = "support"
@@ -534,85 +756,65 @@ mod tests {
 
             [server]
             port = 9000
-            dev = true
-        "#,
-        );
+            auth = false
+        "#);
         assert_eq!(cfg.db_path(), "dev.substructure.db");
         assert_eq!(cfg.log.as_deref(), Some("substructure_core=debug,warn"));
-        assert_eq!(cfg.worker_url().as_deref(), Some("http://localhost:4444"));
-        assert_eq!(cfg.llm_provider(), Some(LlmProviderArg::Anthropic));
+        assert_eq!(
+            cfg.agent["support"].worker.as_deref(),
+            Some("http://localhost:4444")
+        );
+        assert_eq!(cfg.llm["claude"].kind, ProviderKind::Anthropic);
         assert_eq!(cfg.run.as_ref().unwrap().agent.as_deref(), Some("support"));
-        assert_eq!(cfg.run.unwrap().output, Some(OutputFormat::Pretty));
+        assert_eq!(cfg.run.clone().unwrap().output, Some(OutputFormat::Pretty));
+        assert!(!cfg.server_auth());
         let server = cfg.server.unwrap();
         assert_eq!(server.port, Some(9000));
-        assert_eq!(server.dev, Some(true));
         // Absent is absent, not a default the flag would then have to beat.
         assert_eq!(server.host, None);
     }
 
     #[test]
-    fn a_remote_environment_reads_its_identity_and_worker() {
-        let cfg = remote_of(
-            r#"
-            target = "remote"
-            url = "https://api.substructure.ai"
-            org = "org_1"
-            app = "app_1"
+    fn target_says_where_it_went() {
+        let err = parse("target = \"local\"\ndb = \"dev.db\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`target` is no longer"), "got {err}");
+        assert!(err.contains("[deployment]"), "got {err}");
 
-            [worker]
-            url = "https://bot.example.com/agent"
+        // The pins moved with it, so one message covers the whole edit.
+        let err = parse("target = \"remote\"\nurl = \"https://x\"\norg = \"o\"\napp = \"a\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`url`, `org`, `app`"), "got {err}");
 
-            [mcp.sentry]
-            url = "https://mcp.sentry.dev/mcp"
-        "#,
+        // And on their own, without a target to hang the message on.
+        let err = parse("org = \"acme\"\n").unwrap_err().to_string();
+        assert!(
+            err.contains("`org`") && err.contains("[deployment]"),
+            "got {err}"
         );
-        assert_eq!(cfg.org.as_deref(), Some("org_1"));
-        assert_eq!(cfg.app.as_deref(), Some("app_1"));
-        assert_eq!(
-            cfg.worker_url().as_deref(),
-            Some("https://bot.example.com/agent")
-        );
-        assert_eq!(cfg.mcp["sentry"].url, "https://mcp.sentry.dev/mcp");
-    }
-
-    #[test]
-    fn a_target_only_file_is_valid_and_empty() {
-        assert_eq!(local_of("target = \"local\"\n"), LocalEnv::default());
-        assert_eq!(remote_of("target = \"remote\"\n"), RemoteEnv::default());
     }
 
     #[test]
     fn a_misspelled_key_is_a_parse_error_not_a_silent_no_op() {
-        let err = parse("target = \"local\"\n[worker]\nuri = \"http://x\"\n")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("uri"), "got {err}");
-    }
-
-    #[test]
-    fn a_key_belonging_to_the_other_target_is_rejected() {
-        // `db` is an engine setting: a remote has none.
-        let err = parse("target = \"remote\"\ndb = \"dev.db\"\n")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("db"), "got {err}");
-
-        // `org` names a cloud app, which a local engine knows nothing about.
-        let err = parse("target = \"local\"\norg = \"acme\"\n")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("org"), "got {err}");
-
-        // Credentials are the deployment's, so a remote connection names none.
+        // An agent section is the wire config plus two hosting keys, and
+        // `flatten` blinds serde's own check, so the key set is checked by hand.
         let err = parse(
-            "target = \"remote\"\n[mcp.sentry]\nurl = \"https://x/mcp\"\nauth = { token_env = \"T\" }\n",
+            "[llm.claude]\ntype = \"anthropic\"\n\n\
+             [agent.a]\nllm = \"claude\"\nmodel = \"m\"\nsytem = \"be brief\"\n",
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("auth"), "got {err}");
+        assert!(err.contains("sytem"), "got {err}");
+
+        let err = parse("[deployment]\nnmae = \"x\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("nmae"), "got {err}");
 
         // There is no catalog key: a connection always declares a URL.
-        let err = parse("target = \"remote\"\n[mcp.sentry]\ncatalog = \"sentry\"\n")
+        let err = parse("[mcp.sentry]\ncatalog = \"sentry\"\n")
             .unwrap_err()
             .to_string();
         assert!(err.contains("catalog"), "got {err}");
@@ -621,36 +823,262 @@ mod tests {
     #[test]
     fn a_connection_is_checked_where_it_was_typed() {
         // An id prefixes every tool name the model sees.
-        let err = parse("target = \"local\"\n[mcp.\"my server\"]\nurl = \"https://x/mcp\"\n")
+        let err = parse("[mcp.\"my server\"]\nurl = \"https://x/mcp\"\n")
             .unwrap_err()
             .to_string();
         assert!(err.contains("cannot prefix a tool name"), "got {err}");
 
         // A credential would cross the network in the clear.
-        let err = parse("target = \"remote\"\n[mcp.sentry]\nurl = \"http://mcp.sentry.dev/mcp\"\n")
+        let err = parse("[mcp.sentry]\nurl = \"http://mcp.sentry.dev/mcp\"\n")
             .unwrap_err()
             .to_string();
         assert!(err.contains("not https"), "got {err}");
 
         // Loopback is exempt: nothing off-host sees it.
-        parse("target = \"local\"\n[mcp.issues]\nurl = \"http://localhost:4445/mcp\"\n").unwrap();
+        ok("[mcp.issues]\nurl = \"http://localhost:4445/mcp\"\n");
     }
 
     #[test]
     fn an_inline_secret_is_a_parse_error() {
-        let err = parse("target = \"local\"\n[worker]\nsigning_secret = \"s3cret\"\n")
-            .unwrap_err()
-            .to_string();
+        let err = parse(
+            "[llm.claude]\ntype = \"anthropic\"\n\n\
+             [agent.a]\nllm = \"claude\"\nmodel = \"m\"\nsigning_secret = \"s3cret\"\n",
+        )
+        .unwrap_err()
+        .to_string();
         assert!(
             err.contains("signing_secret"),
             "a committed file must not be able to hold a secret; got {err}"
         );
+
+        let err = parse("[llm.claude]\ntype = \"anthropic\"\napi_key = \"sk-1\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("api_key"), "got {err}");
+
+        let err = parse("[mcp.sentry]\nurl = \"https://x/mcp\"\nauth = { token = \"t\" }\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("token"), "got {err}");
+    }
+
+    /// An agent whose worker authors its whole config declares nothing but the
+    /// URL — the file has no business naming an `llm` or a `model` it will
+    /// never use.
+    #[test]
+    fn an_agent_may_delegate_everything_to_its_worker() {
+        let cfg = ok(r#"
+            [agent.reggu]
+            worker = "http://localhost:4000/substructure/agent"
+        "#);
+        let entry = &cfg.agents()["reggu"];
+        assert!(entry.config.is_none(), "nothing to seed");
+        assert!(entry.worker.is_some(), "the worker authors it");
+    }
+
+    /// …but only a worker can author one, so an agent that declares neither a
+    /// config nor a worker is a declaration nothing can act on.
+    #[test]
+    fn an_agent_that_declares_nothing_at_all_is_an_error() {
+        let err = parse("[agent.a]\n").unwrap_err().to_string();
+        assert!(err.contains("declares nothing"), "got {err}");
+    }
+
+    /// A half-declared config would seed a proposal the engine cannot call
+    /// with, so it fails here instead of at the first model call.
+    #[test]
+    fn a_partly_declared_config_is_an_error() {
+        let err = parse(
+            "[llm.claude]\ntype = \"anthropic\"\n\n\
+             [agent.a]\nllm = \"claude\"\nworker = \"https://a/agent\"\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("no `model`"), "got {err}");
+
+        let err = parse("[agent.a]\nsystem = \"be brief\"\nworker = \"https://a/agent\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no `llm`"), "got {err}");
+    }
+
+    /// Every name an agent uses is declared in this same file, so a typo is a
+    /// parse error rather than a decision that fails on the first turn.
+    #[test]
+    fn an_agents_references_are_checked_against_the_file() {
+        let err = parse("[agent.a]\nmodel = \"m\"\n").unwrap_err().to_string();
+        assert!(err.contains("no `llm`"), "got {err}");
+
+        let err = parse(
+            "[llm.claude]\ntype = \"anthropic\"\n\n[agent.a]\nllm = \"clade\"\nmodel = \"m\"\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("names no block"), "got {err}");
+        assert!(
+            err.contains("claude"),
+            "and says what is declared; got {err}"
+        );
+
+        let err = parse(
+            "[llm.claude]\ntype = \"anthropic\"\n\n\
+             [agent.a]\nllm = \"claude\"\nmodel = \"m\"\nmcp = [{ id = \"sentry\" }]\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("no connection `sentry`"), "got {err}");
+    }
+
+    /// A `worker` block's calls are made by a worker, so an agent on one that
+    /// has no worker could never make a call at all.
+    #[test]
+    fn an_agent_on_a_worker_block_needs_a_worker() {
+        let err = parse(
+            "[llm.byo]\ntype = \"worker\"\nformat = \"anthropic\"\n\n\
+             [agent.a]\nllm = \"byo\"\nmodel = \"m\"\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("needs a `worker`"), "got {err}");
+
+        // With one attached it parses.
+        ok("[llm.byo]\ntype = \"worker\"\n\n\
+            [agent.a]\nllm = \"byo\"\nmodel = \"m\"\nworker = \"https://a/agent\"\n");
+    }
+
+    /// A field belonging to the other venue is a misunderstanding of the block,
+    /// not a detail to ignore.
+    #[test]
+    fn a_block_is_checked_against_its_own_type() {
+        let err = parse("[llm.claude]\ntype = \"anthropic\"\nformat = \"anthropic\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("only applies to"), "got {err}");
+
+        let err = parse("[llm.byo]\ntype = \"worker\"\napi_key_env = \"K\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("never leaves your worker"), "got {err}");
+    }
+
+    /// A file can only declare tools the browser runs: a worker-run tool is
+    /// worker code, and nothing here could execute one.
+    #[test]
+    fn a_file_declared_tool_must_be_client_handled() {
+        let err = parse(
+            "[llm.claude]\ntype = \"anthropic\"\n\n\
+             [agent.a]\nllm = \"claude\"\nmodel = \"m\"\n\
+             tools = [{ name = \"get_time\" }]\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("handler = \"client\""), "got {err}");
+    }
+
+    /// Signing a request nobody receives is a setting with no effect, which is
+    /// worse than an error.
+    #[test]
+    fn a_signing_secret_without_a_worker_is_an_error() {
+        let err = parse(
+            "[llm.claude]\ntype = \"anthropic\"\n\n\
+             [agent.a]\nllm = \"claude\"\nmodel = \"m\"\nsigning_secret_env = \"S\"\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("no `worker`"), "got {err}");
+    }
+
+    /// The two sections that moved say where they went, rather than reading as
+    /// "unknown field".
+    #[test]
+    fn the_old_worker_and_llm_forms_say_what_replaced_them() {
+        let err = parse("[worker]\nurl = \"http://localhost:4444\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("belongs to one agent"), "got {err}");
+        assert!(err.contains("[agent.<id>]"), "got {err}");
+
+        let err = parse("[llm]\nprovider = \"anthropic\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("named blocks"), "got {err}");
+        assert!(err.contains("[llm.<name>]"), "got {err}");
+    }
+
+    /// What the engine reads off the file: the venue per block, and one binding
+    /// per block it runs itself.
+    #[test]
+    fn the_engine_reads_venues_and_bindings_off_the_blocks() {
+        let cfg = ok(r#"
+            [llm.claude]
+            type = "anthropic"
+
+            [llm.cheap]
+            type = "openai"
+            api_key_env = "MY_OPENAI_KEY"
+
+            [llm.byo]
+            type = "worker"
+            format = "anthropic"
+        "#);
+
+        let blocks = cfg.llm_blocks();
+        assert_eq!(blocks.get("claude"), Some(LlmBlock::engine()));
+        assert_eq!(
+            blocks.get("byo"),
+            Some(LlmBlock::worker(Some(LlmFormat::Anthropic)))
+        );
+        assert_eq!(blocks.declared(), "byo, cheap, claude");
+
+        // A worker block needs no credential where the engine runs.
+        let bindings: Vec<(String, String)> = cfg
+            .provider_bindings()
+            .into_iter()
+            .map(|b| (b.name, b.api_key_env))
+            .collect();
+        assert_eq!(
+            bindings,
+            [
+                ("cheap".to_string(), "MY_OPENAI_KEY".to_string()),
+                ("claude".to_string(), "ANTHROPIC_API_KEY".to_string()),
+            ]
+        );
+    }
+
+    /// The directory the engine routes on: config without hosting, hosting
+    /// without config.
+    #[test]
+    fn agents_become_directory_entries() {
+        let cfg = ok(r#"
+            [llm.claude]
+            type = "anthropic"
+
+            [agent.assistant]
+            llm = "claude"
+            model = "claude-sonnet-4-5"
+
+            [agent.triage]
+            llm = "claude"
+            model = "claude-haiku-4-5"
+            worker = "https://triage.internal/agent"
+        "#);
+        let agents = cfg.agents();
+        assert!(agents["assistant"].worker.is_none(), "the engine decides");
+        assert!(agents["assistant"].config.is_some(), "and needs a config");
+        assert_eq!(
+            agents["triage"].worker.as_ref().map(|w| w.url.as_str()),
+            Some("https://triage.internal/agent")
+        );
+        // The hosting never crosses the wire.
+        let wire = serde_json::to_value(agents["triage"].config.as_ref().unwrap()).unwrap();
+        assert!(wire.get("worker").is_none(), "got {wire}");
+        assert_eq!(wire["llm"], "claude");
     }
 
     #[test]
     fn an_output_mode_that_does_not_exist_is_a_parse_error() {
         // It used to fall back to `ag-ui`, so a typo silently changed the mode.
-        let err = parse("target = \"local\"\n[run]\noutput = \"pretyy\"\n")
+        let err = parse("[run]\noutput = \"pretyy\"\n")
             .unwrap_err()
             .to_string();
         assert!(err.contains("pretyy"), "got {err}");
@@ -658,18 +1086,34 @@ mod tests {
 
     #[test]
     fn everything_set_survives_a_round_trip() {
-        let cfg = local_of(
-            r#"
-            target = "local"
+        let cfg = ok(r#"
+            name = "support-bot"
             db = "dev.db"
             log = "info"
 
-            [worker]
-            url = "http://localhost:4444"
-            signing_secret_env = "S"
+            [llm.cheap]
+            type = "openai"
+            api_key_env = "MY_OPENAI_KEY"
+            base_url = "https://openai.internal"
 
-            [llm]
-            provider = "openai"
+            [llm.byo]
+            type = "worker"
+            format = "anthropic"
+
+            [agent.support]
+            llm = "cheap"
+            model = "gpt-5-mini"
+            system = "Be brief."
+            stream = true
+            worker = "http://localhost:4444"
+            signing_secret_env = "S"
+            mcp = [{ id = "sentry" }]
+            sub_agents = [{ id = "researcher", description = "Finds sources" }]
+            tools = [{ name = "confirm", description = "Ask", handler = "client" }]
+
+            [agent.researcher]
+            llm = "cheap"
+            model = "gpt-5-mini"
 
             [run]
             agent = "support"
@@ -678,7 +1122,7 @@ mod tests {
             [server]
             host = "0.0.0.0"
             port = 9000
-            dev = true
+            auth = false
 
             [slack]
             agent = "support"
@@ -686,64 +1130,45 @@ mod tests {
             [mcp.sentry]
             url = "https://mcp.sentry.dev/mcp"
             prefix_tools = false
-        "#,
-        );
-        let written = toml::to_string_pretty(&cfg).unwrap();
-        assert_eq!(local_of(&written), cfg, "written back as {written}");
 
-        let remote = remote_of(
-            "target = \"remote\"\nurl = \"https://api.test\"\norg = \"o\"\napp = \"a\"\n\
-             \n[worker]\nurl = \"https://w.test\"\n\n[slack]\nagent = \"s\"\n\
-             \n[mcp.sentry]\nurl = \"https://mcp.sentry.dev/mcp\"\n",
-        );
-        let written = toml::to_string_pretty(&remote).unwrap();
-        assert_eq!(remote_of(&written), remote, "written back as {written}");
+            [deployment]
+            url = "https://subs.internal"
+            org = "org_1"
+            app = "app_1"
+        "#);
+        let written = toml::to_string_pretty(&cfg).unwrap();
+        assert_eq!(ok(&written), cfg, "written back as {written}");
+    }
+
+    /// Serde renders in declaration order, and a top-level scalar written after
+    /// a section would parse back as that section's key.
+    #[test]
+    fn a_written_file_keeps_its_scalars_above_its_sections() {
+        let path = tmpdir().join(FILENAME);
+        let mut cfg = ok("db = \"dev.db\"\n[llm.claude]\ntype = \"anthropic\"\n\n\
+             [agent.a]\nllm = \"claude\"\nmodel = \"m\"\n");
+        cfg.name = Some("support-bot".into());
+        cfg.deployment_mut().app = Some("app_1".into());
+        write(&path, &cfg).unwrap();
+
+        assert_eq!(load_explicit(&path).unwrap().config, cfg);
     }
 
     #[test]
     fn unset_settings_are_not_written_back() {
-        let cfg = remote_of("target = \"remote\"\norg = \"acme\"\n");
+        let cfg = ok("[deployment]\norg = \"acme\"\n");
         let out = toml::to_string_pretty(&cfg).unwrap();
-        assert_eq!(
-            out.trim(),
-            "target = \"remote\"\norg = \"acme\"",
-            "got {out}"
-        );
+        assert_eq!(out.trim(), "[deployment]\norg = \"acme\"", "got {out}");
     }
 
     #[test]
     fn an_empty_slack_section_is_not_a_configured_bot() {
-        assert_eq!(
-            local_of("target = \"local\"\n[slack]\n").slack_agent(),
-            None
-        );
-        assert_eq!(LocalEnv::default().slack_agent(), None);
+        assert_eq!(ok("[slack]\n").slack_agent(), None);
+        assert_eq!(EnvConfig::default().slack_agent(), None);
 
         // The old bare key is gone, and says so rather than doing nothing.
-        let err = parse("target = \"local\"\nslack_agent = \"helper\"\n")
-            .unwrap_err()
-            .to_string();
+        let err = parse("slack_agent = \"helper\"\n").unwrap_err().to_string();
         assert!(err.contains("slack_agent"), "got {err}");
-    }
-
-    #[test]
-    fn the_wrong_target_names_the_file_and_the_command() {
-        let dir = tmpdir();
-        let path = dir.join(FILENAME);
-        fs::write(&path, "target = \"remote\"\norg = \"acme\"\n").unwrap();
-
-        let err = load_explicit(&path)
-            .unwrap()
-            .into_local("`subs run`")
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("subs run") && err.contains("\"local\""),
-            "got {err}"
-        );
-        assert!(err.contains(&path.display().to_string()), "got {err}");
-
-        assert!(load_explicit(&path).unwrap().into_remote("x").is_ok());
     }
 
     #[test]
@@ -752,22 +1177,29 @@ mod tests {
         fs::write(
             &path,
             "# how this app is deployed\n\
-             target = \"remote\"\n\
-             org = \"old\"        # pinned by hand\n\
+             name = \"support-bot\"\n\
              \n\
-             [worker]\n\
+             [llm.claude]\n\
+             type = \"anthropic\"\n\
+             \n\
+             [agent.support]\n\
+             llm = \"claude\"\n\
+             model = \"claude-sonnet-4-5\"\n\
              # where the agent runs\n\
-             url = \"https://bot.example.com/agent\"\n\
+             worker = \"https://bot.example.com/agent\"\n\
              \n\
              [mcp.sentry]\n\
-             url = \"https://mcp.sentry.dev/mcp\"\n",
+             url = \"https://mcp.sentry.dev/mcp\"\n\
+             \n\
+             [deployment]\n\
+             org = \"old\"        # pinned by hand\n",
         )
         .unwrap();
 
-        let mut cfg = load_explicit(&path).unwrap().into_remote("x").unwrap();
-        cfg.org = Some("new".into());
-        cfg.app = Some("app_1".into());
-        write(&path, &EnvConfig::Remote(cfg)).unwrap();
+        let mut cfg = load_explicit(&path).unwrap().config;
+        cfg.deployment_mut().org = Some("new".into());
+        cfg.deployment_mut().app = Some("app_1".into());
+        write(&path, &cfg).unwrap();
 
         let after = fs::read_to_string(&path).unwrap();
         assert!(after.contains("# how this app is deployed"), "{after}");
@@ -783,15 +1215,11 @@ mod tests {
     #[test]
     fn writing_removes_a_setting_that_is_no_longer_set() {
         let path = tmpdir().join(FILENAME);
-        fs::write(
-            &path,
-            "target = \"remote\"\norg = \"acme\"\napp = \"app_1\"\n",
-        )
-        .unwrap();
+        fs::write(&path, "[deployment]\norg = \"acme\"\napp = \"app_1\"\n").unwrap();
 
-        let mut cfg = load_explicit(&path).unwrap().into_remote("x").unwrap();
-        cfg.app = None;
-        write(&path, &EnvConfig::Remote(cfg)).unwrap();
+        let mut cfg = load_explicit(&path).unwrap().config;
+        cfg.deployment_mut().app = None;
+        write(&path, &cfg).unwrap();
 
         let after = fs::read_to_string(&path).unwrap();
         assert!(!after.contains("app"), "{after}");
@@ -805,6 +1233,13 @@ mod tests {
     }
 
     #[test]
+    fn load_without_a_file_is_the_defaults() {
+        let root = tmpdir().join("isolated");
+        fs::create_dir_all(&root).unwrap();
+        assert!(find_from(&root).unwrap().is_none());
+    }
+
+    #[test]
     fn find_walks_up_from_cwd_to_first_match() {
         let root = tmpdir();
         let nested = root.join("a/b/c");
@@ -812,22 +1247,14 @@ mod tests {
         let cfg_path = root.join(FILENAME);
         fs::write(
             &cfg_path,
-            "target = \"remote\"\norg = \"org-x\"\napp = \"app-y\"\n",
+            "[deployment]\norg = \"org-x\"\napp = \"app-y\"\n",
         )
         .unwrap();
 
         let found = find_from(&nested).unwrap().expect("should find ancestor");
         assert_eq!(found.path, cfg_path);
-        let remote = found.into_remote("x").unwrap();
-        assert_eq!(remote.org.as_deref(), Some("org-x"));
-        assert_eq!(remote.app.as_deref(), Some("app-y"));
-    }
-
-    #[test]
-    fn find_returns_none_when_no_subs_toml_anywhere() {
-        let root = tmpdir().join("isolated");
-        fs::create_dir_all(&root).unwrap();
-        assert!(find_from(&root).unwrap().is_none());
+        assert_eq!(found.config.org(), Some("org-x"));
+        assert_eq!(found.config.app(), Some("app-y"));
     }
 
     #[test]
@@ -835,21 +1262,10 @@ mod tests {
         let root = tmpdir();
         let nested = root.join("inner");
         fs::create_dir_all(&nested).unwrap();
-        fs::write(
-            root.join(FILENAME),
-            "target = \"remote\"\norg = \"outer\"\n",
-        )
-        .unwrap();
-        fs::write(
-            nested.join(FILENAME),
-            "target = \"remote\"\norg = \"inner\"\n",
-        )
-        .unwrap();
+        fs::write(root.join(FILENAME), "[deployment]\norg = \"outer\"\n").unwrap();
+        fs::write(nested.join(FILENAME), "[deployment]\norg = \"inner\"\n").unwrap();
 
         let found = find_from(&nested).unwrap().unwrap();
-        assert_eq!(
-            found.into_remote("x").unwrap().org.as_deref(),
-            Some("inner")
-        );
+        assert_eq!(found.config.org(), Some("inner"));
     }
 }

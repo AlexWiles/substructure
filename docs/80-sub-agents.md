@@ -9,37 +9,46 @@ tool result.
 
 ## Example
 
-The parent declares a sub-agent. Both agents live on one worker, told apart by
-`agent_id`.
+A team is two sections. The parent declares the sub-agent; the child can run on
+a different — often cheaper — model:
+
+```toml title="substructure.toml"
+[llm.claude]
+type = "anthropic"
+
+[llm.cheap]
+type = "anthropic"
+
+[agent.assistant]
+llm = "claude"
+model = "claude-sonnet-4-5"
+sub_agents = [{ id = "poet", description = "Writes a haiku on any topic." }]
+
+[agent.poet]
+llm = "cheap"
+model = "claude-haiku-4-5"
+system = "You are a poet. Respond with a single haiku."
+```
+
+Neither needs a worker. When one does, add `worker` to that section alone —
+routing is per `(tenant, agent)`, and a child session carries the sub-agent's
+own `agent_id`, so an engine-hosted parent can delegate to a worker-hosted
+specialist, or the reverse:
 
 ```javascript title="server.mjs"
-function assistant({ trigger, proposed }) {
-    if (trigger.type === "session.start") {
-        return {
-            agent: {
-                model: "claude-haiku-4-5-20251001",
-                stream: true,
-                sub_agents: [{ id: "poet", description: "Writes a haiku on any topic." }]
-            }
-        };
-    }
-    return proposed;
-}
-
-function poet({ trigger, proposed }) {
-    if (trigger.type === "session.start") {
-        return {
-            agent: {
-                model: "claude-haiku-4-5-20251001",
-                stream: true,
-                system: "You are a poet. Respond with a single haiku."
-            }
-        };
-    }
-    return proposed;
-}
-
 // One worker, two agents told apart by agent_id.
+function assistant({ trigger, proposed }) {
+    // The declared config arrives as the proposal; amend what you need.
+    if (trigger.type === "session.start") {
+        return { agent: { ...proposed.agent, stream: true } };
+    }
+    return proposed;
+}
+
+function poet({ proposed }) {
+    return proposed;
+}
+
 const decide = (req) => (req.agent_id === "poet" ? poet(req) : assistant(req));
 ```
 

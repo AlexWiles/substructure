@@ -18,14 +18,16 @@ defmodule Worker.Router do
   end
 
   # The engine will use this agent config to generate proposed actions.
-  defp decide(%{"trigger" => %{"type" => "session.start"}}) do
-    %{
-      agent: %{
-        model: "claude-haiku-4-5-20251001",
-        stream: true,
-        tools: Enum.map(tools(), &%{name: &1.name, description: &1.description})
-      }
-    }
+  # The declared config arrives as the proposal; keep its "llm" and "model" and
+  # add only what this worker knows.
+  defp decide(%{"trigger" => %{"type" => "session.start"}, "proposed" => proposed}) do
+    agent =
+      Map.merge(proposed["agent"] || %{}, %{
+        "stream" => true,
+        "tools" => Enum.map(tools(), &%{name: &1.name, description: &1.description})
+      })
+
+    %{agent: agent}
   end
 
   # Run our tool when the model calls it.

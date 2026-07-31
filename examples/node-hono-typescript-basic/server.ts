@@ -4,18 +4,10 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import type { DecisionRequest, DecisionResponse } from "./protocol.ts";
 
-function decide({ trigger, proposed }: DecisionRequest): DecisionResponse {
-    if (trigger.type === "session.start") {
-        // The engine will use this agent config to generate proposed actions.
-        return {
-            agent: {
-                model: "claude-haiku-4-5-20251001",
-                stream: true,
-            },
-        };
-    }
-
-    // Accept the engine's proposal for every other decision.
+// The whole worker: accept the engine's proposal for every decision. The agent
+// is declared in substructure.toml, and arrives as the `session.start`
+// proposal, so there is nothing to author until you want to override something.
+function decide({ proposed }: DecisionRequest): DecisionResponse {
     return proposed;
 }
 

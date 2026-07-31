@@ -30,9 +30,12 @@ func decide(req DecisionRequest) DecisionResponse {
 			description := t.Description
 			tools[i] = AgentTool{Name: t.Name, Description: &description, Input: t.InputSchema}
 		}
-		return DecisionResponse{
-			Agent: &AgentConfig{Model: "claude-haiku-4-5-20251001", Stream: &stream, Tools: tools},
-		}
+		// The declared config arrives as the proposal; keep its `Llm` and
+		// `Model` and add only what this worker knows.
+		agent := *req.Proposed.Agent
+		agent.Stream = &stream
+		agent.Tools = tools
+		return DecisionResponse{Agent: &agent}
 	}
 
 	// Forward the call to the MCP server and settle with its output.

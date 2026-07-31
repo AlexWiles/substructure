@@ -36,9 +36,10 @@ pub async fn submit(
         .child("worker_submit");
 
     // Out-of-band submit: no answered trigger and no resolved config in scope, so
-    // every settle must name its own id and every llm.call must name its model.
-    // An unresolvable one can't be filled here — reject it.
-    let resolved = match resolve_response(req.decision, None, None) {
+    // every settle must name its own id and every llm.call must name its model
+    // and its llm block. An unresolvable one can't be filled here — reject it.
+    let blocks = state.runtime.llm_blocks(caller.tenant_id());
+    let resolved = match resolve_response(req.decision, None, None, &blocks) {
         Ok(resolved) => resolved,
         Err(e) => {
             return (

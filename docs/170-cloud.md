@@ -28,27 +28,28 @@ commands need no `--app`:
 subs link
 ```
 
-That writes a `target = "remote"` [environment
-file](./160-cli.md#environments) pinning the org and app.
+That writes the `[deployment]` section of an [environment
+file](./160-cli.md#environments), pinning the org and app.
 
 ## Point it at your worker
 
-```sh
-subs webhook set https://my-worker.example.com/agent
-```
-
-Or state the endpoint in the environment file and apply it with no argument:
+Hosting is a property of the agent. Give the one that needs code a `worker`
+URL and apply the file:
 
 ```toml title="substructure.toml"
-[worker]
-url = "https://my-worker.example.com/agent"
+[agent.support]
+llm = "claude"
+model = "claude-sonnet-4-5"
+worker = "https://my-worker.example.com/agent"
 ```
 
 ```sh
-subs webhook set
+subs apply
 ```
 
-The engine now POSTs decisions to that URL and signs each with the app's secret,
+Agents without a `worker` are decided by the engine, and need no deployment at
+all beyond the file. For those that have one, the engine POSTs decisions to
+that URL and signs each with the app's secret,
 an HMAC of the body sent as `X-Substructure-Signature`. Your worker verifies it
 with the same secret.
 
@@ -58,20 +59,19 @@ Three secrets are in play. Two are set with `subs`.
 
 | Secret | Purpose | Where it comes from |
 | --- | --- | --- |
-| Signing secret | Your worker verifies the engine's webhooks. | Printed by `apps create`; re-fetch with `subs webhook secret`, rotate with `subs webhook rotate-secret`. |
+| Signing secret | Your worker verifies the engine's webhooks. | Printed by `apps create` and by `subs apply` when it creates the app. |
 | Client API key | The bearer token your clients present to the app. | `subs keys create <label>`, printed once. |
 | Provider key | Auth to Anthropic or OpenAI. | Not a `subs` secret. See below. |
 
-`subs webhook secret` reprints the signing secret, and `subs keys create <label>`
-mints a client key. Both write only the value to stdout, so you can pipe it
-straight into your worker's or client's secret store.
+`subs keys create <label>` mints a client key and writes only the value to
+stdout, so you can pipe it straight into your client's secret store.
 
 ### Provider keys
 
-Where the model runs decides who holds the provider key. By default the hosted
-engine runs the LLM against its own provider and bills the app, so you set no
-key. If the agent declares `handler: "worker"`, the call runs in your worker,
-which calls the provider with a key from its own environment. See
+The `[llm.<id>]` block an agent names decides who holds the provider key. By
+default the hosted engine runs the LLM against its own provider and bills the
+app, so you set no key. On a `type = "worker"` block the call runs in your
+worker, which calls the provider with a key from its own environment. See
 [LLMs](./50-llms.md).
 
 ## Observe

@@ -44,8 +44,8 @@ pub async fn run(globals: CloudGlobals) -> Result<()> {
         false => Some(ctx.client.get("/api/v1/me").await?),
     };
 
-    let pinned_org = ctx.project.as_ref().and_then(|p| p.org.as_deref());
-    let pinned_app = ctx.project.as_ref().and_then(|p| p.app.as_deref());
+    let pinned_org = ctx.project.as_ref().and_then(|p| p.org());
+    let pinned_app = ctx.project.as_ref().and_then(|p| p.app());
 
     if globals.json {
         return print::json(&WhoamiOutput {

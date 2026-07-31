@@ -179,9 +179,8 @@ pub struct MessageTree {
 
 /// Where a call runs — one wire enum so `handler` has a single type on every
 /// surface. Tool calls accept `worker` (default), `client`, or `server` (set by
-/// the engine for connector tools, never declared by a worker); LLM calls accept
-/// `server` (default) or `worker`. The invalid pairing (a `client` LLM call) is
-/// rejected at the decision seam.
+/// the engine for connector tools, never declared by a worker). An LLM call has
+/// no `handler`: where it runs follows from the `[llm.*]` block it names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[schemars(title = "Handler")]
@@ -194,10 +193,10 @@ pub enum Handler {
     Client,
 }
 
-/// The wire shape of a worker-handled LLM call. Absent ⇒ the engine's neutral
-/// format. Set ⇒ `llm.execute` carries the provider's native request body, and
-/// `llm.result`/`llm.token.delta` accept the provider's native response and
-/// stream events. Requires `handler: worker`.
+/// The wire shape of a worker-run LLM call, declared on a `type = "worker"`
+/// `[llm.*]` block. Absent ⇒ the engine's neutral format. Set ⇒ `llm.execute`
+/// carries the provider's native request body, and `llm.result`/
+/// `llm.token.delta` accept the provider's native response and stream events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[schemars(title = "LlmFormat")]
@@ -253,25 +252,24 @@ pub struct WorkerState(pub Value);
 
 // ── Agent config ─────────────────────────────────────────────────────────
 
-/// A declared agent identity. `model` is the only required field; everything else
-/// refines the proposed LLM request the engine derives for `client.messages`.
+/// A declared agent identity — the same shape whether it is written in an
+/// `[agent.<id>]` section or returned by a worker.
+///
+/// `llm` names the `[llm.*]` block every proposed call runs on, and so decides
+/// both the venue (the engine with a vendor key, or the agent's own worker) and
+/// the wire shape of a worker-run call. It is effectively required: a config
+/// that names none fails when the engine resolves a call against it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "AgentConfig")]
 pub struct AgentConfig {
+    /// The `[llm.*]` block this agent's calls run on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm: Option<String>,
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
     #[serde(default)]
     pub stream: bool,
-    /// Where the proposed LLM call runs: `Some(Worker)` ⇒ the worker executes it
-    /// (answering `llm.execute`); absent or `Some(Server)` ⇒ the engine's
-    /// server-side provider. `client` is invalid and rejected at the decision seam.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub handler: Option<Handler>,
-    /// Provider wire format for worker-handled calls; requires `handler:
-    /// worker`. Absent ⇒ the neutral format.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub format: Option<LlmFormat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetryPolicy>,
     /// Worker- or client-executed tools the model can call.
@@ -1069,6 +1067,11 @@ pub enum DecisionAction {
     CallLlm {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
+        /// The `[llm.*]` block this call runs on; omitted ⇒ the merge source
+        /// config's `llm`. Naming a different block moves one call to another
+        /// venue or vendor.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        llm: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1085,9 +1088,6 @@ pub enum DecisionAction {
         stream: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry: Option<RetryPolicy>,
-        /// `server` or `worker`; omitted ⇒ `server`.
-        #[serde(default = "Handler::server")]
-        handler: Handler,
     },
     /// `id` omitted ⇒ the engine mints one (LLM-driven tools carry the model's id).
     ///

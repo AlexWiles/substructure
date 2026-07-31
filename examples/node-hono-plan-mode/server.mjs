@@ -30,14 +30,18 @@ const executingTools = [
 ];
 
 // One profile per mode: planning fills the checklist, executing walks it.
+// `llm` and `model` name what substructure.toml declares: a config built
+// outside a decision cannot inherit them from the proposal.
 const PROFILES = {
     planning: {
+        llm: "claude",
         model: "claude-haiku-4-5-20251001",
         stream: true,
         system: "You are planning. Break the goal into steps; call add_step for each. Do not execute yet.",
         tools: planningTools
     },
     executing: {
+        llm: "claude",
         model: "claude-haiku-4-5-20251001",
         stream: true,
         system: "You are executing. Work through each pending step in order; call complete_step with its number when done.",

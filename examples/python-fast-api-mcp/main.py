@@ -33,8 +33,10 @@ async def decide(req):
     if trigger["type"] == "session.start":
         # Offer every MCP tool to the model as-is.
         return {
+            # The declared config arrives as the proposal; spread it to keep
+            # the `llm` and `model` substructure.toml names.
             "agent": {
-                "model": "claude-haiku-4-5-20251001",
+                **req["proposed"]["agent"],
                 "stream": True,
                 "tools": [
                     {"name": t.name, "description": t.description, "input": t.inputSchema}

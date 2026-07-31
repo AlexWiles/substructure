@@ -84,7 +84,7 @@ async fn list(scope: OrgScope) -> Result<()> {
         return print::json(&apps);
     }
 
-    let pinned = ctx.project.as_ref().and_then(|p| p.app.as_deref());
+    let pinned = ctx.project.as_ref().and_then(|p| p.app());
     let columns = [
         print::Column::left(""),
         print::Column::left("ID"),

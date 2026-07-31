@@ -26,8 +26,8 @@ Pin the app so later commands need no `--app`:
 subs link
 ```
 
-That writes a `target = "remote"` `substructure.toml` in this directory —
-the environment your project deploys to. See
+That writes a `substructure.toml` in this directory with a `[deployment]`
+section — the server your project deploys to. See
 [Environments](./160-cli.md#environments).
 
 ## 2. Make sure to verify the signature in your worker
@@ -65,16 +65,24 @@ against its own provider and bills the app, so your worker sets no `ANTHROPIC_AP
 The engine reaches your worker over the public internet, so deploy it wherever you
 run Node and set the signing secret in its environment:
 
-```sh
-subs webhook secret   # prints the secret; set it as SUBS_SIGNING_SECRET where the worker runs
-```
+`subs apply` prints the signing secret once, when it creates the app; set it as
+`SUBS_SIGNING_SECRET` where the worker runs.
 
 The deploy gives the worker a public HTTPS URL to point the app at.
 
 ## 4. Point the app at it
 
+Hosting is a property of the agent, so it goes in the file:
+
+```toml title="substructure.toml"
+[agent.my-agent]
+llm = "claude"
+model = "claude-sonnet-4-5"
+worker = "https://my-worker.example.com/"
+```
+
 ```sh
-subs webhook set https://my-worker.example.com/
+subs apply
 ```
 
 The engine now POSTs each decision to that URL, signed with the app's secret.

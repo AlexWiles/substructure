@@ -9,18 +9,9 @@ import (
 )
 
 func decide(req DecisionRequest) DecisionResponse {
-	if req.Trigger.Type == SessionStart {
-		// The engine will use this agent config to generate proposed actions.
-		stream := true
-		return DecisionResponse{
-			Agent: &AgentConfig{
-				Model:  "claude-haiku-4-5-20251001",
-				Stream: &stream,
-			},
-		}
-	}
-
-	// Accept the engine's proposal for every other decision.
+	// The whole worker: accept the engine's proposal for every decision. The
+	// agent is declared in substructure.toml, and arrives as the
+	// `session.start` proposal, so there is nothing to author here.
 	return req.Proposed
 }
 

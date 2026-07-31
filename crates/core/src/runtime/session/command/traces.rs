@@ -136,11 +136,10 @@ fn tool_call(id: &str, name: &str) -> ToolCall {
 
 fn config() -> AgentConfig {
     AgentConfig {
+        llm: Some("claude".to_string()),
         model: "test-model".to_string(),
         system: None,
         stream: false,
-        handler: None,
-        format: None,
         retry: None,
         tools: Vec::new(),
         sub_agents: Vec::new(),
@@ -368,12 +367,13 @@ impl Trace {
 
 fn call_llm(id: &str, retry: RetryPolicy) -> Action {
     Action::CallLlm {
+        llm: "claude".to_string(),
+        format: None,
         id: id.to_string(),
         request: llm_request(),
         stream: false,
         retry,
         handler: LlmHandler::Server,
-        format: None,
     }
 }
 
@@ -1272,6 +1272,7 @@ fn flow_direct_commands_then_cancel() -> Trace {
 
     t.run(
         CommandPayload::RequestLlmCall {
+            llm: "claude".to_string(),
             call_id: "call-1".to_string(),
             request: llm_request(),
             stream: false,

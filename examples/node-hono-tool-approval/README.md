@@ -30,9 +30,7 @@ node server.mjs
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
-subs run -c substructure.toml \
-    --session approval-demo \
-    --input '{"type":"client.message","message":{"role":"user","content": "email bob@example.com a hello"}}'
+subs run -c substructure.toml --agent my-agent "email bob@example.com a hello"
 ```
 
 The run parks on the prompt and prints the interrupt id:

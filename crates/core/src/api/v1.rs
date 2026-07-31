@@ -26,29 +26,6 @@ pub struct App {
     pub session_count: Option<i64>,
 }
 
-/// Current webhook (worker) config. Snake-case on the wire, unlike the
-/// camel-case [`WorkerUpsert`] request body.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct WorkerConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub endpoint_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub signing_secret: Option<String>,
-}
-
-/// Request body for setting/disabling the webhook. Omitted fields are left
-/// unchanged; `state` is "enabled" or "disabled".
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkerUpsert {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub endpoint_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state: Option<String>,
-}
-
 /// What a deployment says about itself, so the CLI can degrade with a real
 /// message rather than a 404.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -85,11 +62,12 @@ pub struct McpConnection {
     pub granted_apps: Vec<String>,
 }
 
-/// Start an authorization. The URL is the manifest's; whether this deployment
-/// will send a credential to it is the deployment's policy.
+/// Declare a connection: the id an agent config names and the URL it points
+/// at. Inert until a human consents; whether this deployment will send a
+/// credential to that URL at all is the deployment's policy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct McpAuthorizeRequest {
+pub struct McpDeclareRequest {
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_id: Option<String>,
@@ -107,6 +85,108 @@ pub struct McpAuthorizeResponse {
 #[serde(rename_all = "camelCase")]
 pub struct McpGrantRequest {
     pub app_id: String,
+}
+
+/// An app's configuration as the deployment holds it: what a manifest says,
+/// plus the state only the deployment knows.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppConfig {
+    pub name: String,
+    #[serde(default)]
+    pub worker: ConfigWorker,
+    #[serde(default)]
+    pub mcp: Vec<ConfigConnection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_applied: Option<ConfigApplied>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigWorker {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigConnection {
+    pub id: String,
+    pub url: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub granted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigApplied {
+    pub seq: i64,
+    pub created_at: String,
+    #[serde(default)]
+    pub actor_email: Option<String>,
+}
+
+/// The manifest `subs apply` pushes. An absent field says nothing about that
+/// setting rather than unsetting it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker: Option<ConfigWorkerUpdate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<Vec<ConfigConnectionRef>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigWorkerUpdate {
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigConnectionRef {
+    pub id: String,
+    pub url: String,
+}
+
+/// One entry in an app's configuration history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigEvent {
+    pub seq: i64,
+    pub kind: String,
+    #[serde(default)]
+    pub data: serde_json::Value,
+    #[serde(default)]
+    pub actor_email: Option<String>,
+    #[serde(default)]
+    pub source: String,
+    pub created_at: String,
+}
+
+/// What an apply did. Empty `changes` means the document already held.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyResponse {
+    pub app_id: String,
+    #[serde(default)]
+    pub changes: Vec<ConfigEvent>,
+}
+
+/// A cursor-paged slice. The wire shape is snake_case, unlike the camelCase
+/// bodies around it, because it is the store's `Page<T>` verbatim.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Page<T> {
+    pub items: Vec<T>,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

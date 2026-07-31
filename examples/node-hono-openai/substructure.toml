@@ -1,7 +1,11 @@
-target = "local"
+[llm.byo]
+type = "worker"
+format = "openai"
 
-[worker]
-url = "http://localhost:4444"
+[agent.my-agent]
+llm = "byo"
+model = "gpt-5-nano"
+worker = "http://localhost:4444"
 
 [run]
 agent = "my-agent"

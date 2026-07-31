@@ -12,11 +12,11 @@ use crate::runtime::session::state::EffectKind;
 use crate::runtime::session::{execute, ConflictRetry, ExecuteInput};
 use crate::runtime::Caller;
 
-use super::{CallContext, LlmProviderTrait, LlmTask, TokenDeltaTransport};
+use super::{CallContext, LlmProviderRegistry, LlmTask, TokenDeltaTransport};
 
 pub fn spawn_llm_task_executor(
     store: Arc<dyn EventStore>,
-    provider: Arc<dyn LlmProviderTrait>,
+    providers: Arc<LlmProviderRegistry>,
     queue: Arc<dyn TaskQueue<LlmTask>>,
     token_delta_transport: Arc<dyn TokenDeltaTransport>,
     worker_count: usize,
@@ -26,7 +26,7 @@ pub fn spawn_llm_task_executor(
     let mut handles = Vec::with_capacity(worker_count);
     for _ in 0..worker_count {
         let store = store.clone();
-        let provider = provider.clone();
+        let providers = providers.clone();
         let token_delta_transport = token_delta_transport.clone();
         let mut rx = queue.subscribe();
         let cancel = cancel.clone();
@@ -40,7 +40,7 @@ pub fn spawn_llm_task_executor(
                     _ = cancel.cancelled() => break,
                 };
 
-                let resolved = provider.resolve(&task.owner).await;
+                let resolved = providers.resolve(&task.llm, &task.owner).await;
 
                 let command = match resolved {
                     Ok(client) => {

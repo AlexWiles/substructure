@@ -17,7 +17,7 @@ class AudioData(BaseModel):
     format: str
 
 
-class ClientInput3(BaseModel):
+class ClientInput4(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
@@ -28,7 +28,7 @@ class ClientInput3(BaseModel):
     type: Literal['client.action']
 
 
-class ClientInput4(BaseModel):
+class ClientInput5(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
@@ -37,7 +37,7 @@ class ClientInput4(BaseModel):
     type: Literal['interrupt.resume']
 
 
-class ClientInput5(BaseModel):
+class ClientInput6(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
@@ -47,7 +47,7 @@ class ClientInput5(BaseModel):
     type: Literal['tool.result']
 
 
-class ClientInput6(BaseModel):
+class ClientInput7(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
@@ -58,7 +58,7 @@ class ClientInput6(BaseModel):
     type: Literal['tool.error']
 
 
-class ClientPayload3(BaseModel):
+class ClientPayload4(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
@@ -176,7 +176,18 @@ class DecisionTrigger9(BaseModel):
     type: Literal['interrupt.resumed']
 
 
-class EffectKind(Enum):
+class DecisionTrigger10(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    cost: Annotated[str | None, Field(pattern='^-?\\d+(\\.\\d+)?$')] = None
+    data: Any | None = None
+    turn_id: str
+    type: Literal['turn.finished']
+    usage: dict[str, int] | None = None
+
+
+class EffectKind1(Enum):
     tool_call = 'tool_call'
     sub_agent = 'sub_agent'
     llm_call = 'llm_call'
@@ -219,10 +230,69 @@ class ImageUrl(BaseModel):
     url: str
 
 
+class InterruptOption(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    label: str
+    style: Annotated[
+        str | None,
+        Field(description='`primary` or `danger`; anything else renders plain.'),
+    ] = None
+    value: Annotated[
+        Any,
+        Field(
+            description="Delivered verbatim as the resolution's `payload`; worker vocabulary."
+        ),
+    ]
+
+
 class InterruptOrigin(Enum):
     system = 'system'
     machine = 'machine'
     frontend = 'frontend'
+
+
+class InterruptPayload(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    expiresAt: Annotated[
+        str | None, Field(description='RFC 3339; display only until engine TTLs land.')
+    ] = None
+    message: Annotated[
+        str | None,
+        Field(
+            description="Markdown; channels down-convert. Without it, channels fall back to\nthe interrupt's `reason`."
+        ),
+    ] = None
+    metadata: Annotated[
+        Any | None,
+        Field(
+            description='Free-form, delivered to clients verbatim. `metadata.options`\n([`InterruptOption`] list) renders as Slack buttons.'
+        ),
+    ] = None
+    responseSchema: Annotated[
+        Any | None,
+        Field(description='JSON Schema for the expected resolution payload.'),
+    ] = None
+    toolCallId: Annotated[
+        str | None, Field(description='Binds the interrupt to a prior tool call.')
+    ] = None
+
+
+class InterruptResponder(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    channel: Annotated[
+        str, Field(description='The channel kind, e.g. `slack`, `ag-ui`.')
+    ]
+    label: Annotated[
+        str | None,
+        Field(description="The chosen option's label, when the resolution was a pick."),
+    ] = None
+    user: Annotated[str | None, Field(description='Channel-native user id.')] = None
 
 
 class LlmFormat(Enum):
@@ -250,6 +320,17 @@ class LlmTool(BaseModel):
     ] = None
 
 
+class McpTools(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    exclude: list[str] | None = None
+    idempotent: bool | None = None
+    include: list[str] | None = None
+    non_destructive: bool | None = None
+    read_only: bool | None = None
+
+
 class ReasoningEffort(Enum):
     xhigh = 'xhigh'
     high = 'high'
@@ -264,6 +345,11 @@ class ResponseImage(BaseModel):
         extra='forbid',
     )
     url: str
+
+
+class ResumeStatus(Enum):
+    resolved = 'resolved'
+    cancelled = 'cancelled'
 
 
 class RetryPolicy(BaseModel):
@@ -398,9 +484,6 @@ class DecisionAction2(BaseModel):
         extra='forbid',
     )
     arguments: Any
-    handler: Annotated[
-        Handler | None, Field(description='`worker` or `client`; omitted ⇒ `worker`.')
-    ] = None
     id: str | None = None
     name: str
     retry: RetryPolicy | None = None
@@ -499,11 +582,47 @@ class Effect(BaseModel):
     deadline: AwareDatetime | None = None
     handler: Handler | None = None
     id: str
-    kind: EffectKind
+    kind: Annotated[
+        EffectKind1
+        | Literal['connector_sync']
+        | Literal['decision']
+        | Literal['turn_end'],
+        Field(
+            description="What kind of work an effect is. One enum for the wire and for the engine's\nown scheduling: a decision and a turn's end queue beside the calls and are\nswept the same way, so they are kinds too. Neither ever appears on an\n[`Effect`] — a decision rides the decision list, a turn end has no record.",
+            title='EffectKind',
+        ),
+    ]
     name: str | None = None
-    session_id: str | None = None
     status: EffectStatus
     stream: bool | None = None
+    tool_call_id: Annotated[
+        str | None,
+        Field(
+            description='The model tool call a delegation answers; its own `id` is the child session.'
+        ),
+    ] = None
+
+
+class InterruptResolution(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    payload: Any | None = None
+    responder: InterruptResponder | None = None
+    status: ResumeStatus
+
+
+class McpServer(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    id: str
+    tools: Annotated[
+        McpTools | None,
+        Field(
+            description='Narrows what the model sees. Absent ⇒ every tool the connection grants.'
+        ),
+    ] = None
 
 
 class ReasoningConfig(BaseModel):
@@ -564,16 +683,13 @@ class AgentConfig(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    format: Annotated[
-        LlmFormat | None,
-        Field(
-            description='Provider wire format for worker-handled calls; requires `handler:\nworker`. Absent ⇒ the neutral format.'
-        ),
+    llm: Annotated[
+        str | None, Field(description="The `[llm.*]` block this agent's calls run on.")
     ] = None
-    handler: Annotated[
-        Handler | None,
+    mcp: Annotated[
+        list[McpServer] | None,
         Field(
-            description="Where the proposed LLM call runs: `Some(Worker)` ⇒ the worker executes it\n(answering `llm.execute`); absent or `Some(Server)` ⇒ the engine's\nserver-side provider. `client` is invalid and rejected at the decision seam."
+            description='MCP servers the agent draws tools from. The engine resolves each against\nits connection registry into [`ConnectorTool`]s the model sees alongside\n`tools`. Like `sub_agents`, these are never merged into `tools` — the\nworker declares the server, not its tools.\n\nA second protocol gets its own field rather than a `type` tag here: its\nfilter would not be this one (MCP annotations mean nothing to an A2A\nagent), and a union of conditionally-valid fields generates badly in the\nGo and Python bindings.'
         ),
     ] = None
     model: str
@@ -654,7 +770,7 @@ class Message(BaseModel):
     name: str | None = None
     role: Role
     tool_call_id: str | None = None
-    tool_calls: list[ToolCall]
+    tool_calls: list[ToolCall] | None = None
 
 
 class Node(BaseModel):
@@ -679,6 +795,12 @@ class ClientInput1(BaseModel):
     )
     agent_id: str
     message: DraftMessage
+    queue: Annotated[
+        bool | None,
+        Field(
+            description='Hold this message for the next turn instead of refusing it when one\nis already running. Off by default: rejection stays the contract for\na plain submitter, and queuing is declared intent.'
+        ),
+    ] = None
     stream: bool | None = None
     turn_id: str | None = None
     type: Literal['client.message']
@@ -694,6 +816,24 @@ class ClientInput2(BaseModel):
     stream: bool | None = None
     turn_id: str | None = None
     type: Literal['client.messages']
+
+
+class ClientInput3(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    agent_id: str
+    client: ClientContext | None = None
+    messages: list[DraftMessage]
+    queue: Annotated[
+        bool | None,
+        Field(
+            description='Hold this batch for the next turn instead of refusing it when one is\nalready running. Off by default: rejection stays the contract for a\nplain submitter, and queuing is declared intent.'
+        ),
+    ] = None
+    stream: bool | None = None
+    turn_id: str | None = None
+    type: Literal['client.append']
 
 
 class ClientPayload1(BaseModel):
@@ -715,14 +855,27 @@ class ClientPayload2(BaseModel):
     type: Literal['client.messages']
 
 
+class ClientPayload3(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    client: ClientContext | None = None
+    messages: list[DraftMessage]
+    stream: bool | None = None
+    type: Literal['client.append']
+
+
 class DecisionAction1(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    handler: Annotated[
-        Handler | None, Field(description='`server` or `worker`; omitted ⇒ `server`.')
-    ] = None
     id: str | None = None
+    llm: Annotated[
+        str | None,
+        Field(
+            description="The `[llm.*]` block this call runs on; omitted ⇒ the merge source\nconfig's `llm`. Naming a different block moves one call to another\nvenue or vendor."
+        ),
+    ] = None
     max_completion_tokens: Annotated[int | None, Field(ge=0)] = None
     messages: list[DraftMessage] | None = None
     model: str | None = None
@@ -854,7 +1007,8 @@ class DecisionRequest(BaseModel):
         | DecisionTrigger6
         | DecisionTrigger7
         | DecisionTrigger8
-        | DecisionTrigger9,
+        | DecisionTrigger9
+        | DecisionTrigger10,
         Field(
             description="The trigger a worker sees on the wire — the materialized projection of the\nengine's internal decision trigger. It has no `ClientMessage`: a bare client\nmessage is always materialized to `ClientTranscript` by `to_wire_trigger`\n(`runtime::session::wire`) before delivery, so an unmaterialized message can\nnever reach a worker.",
             title='DecisionTrigger',
@@ -871,20 +1025,23 @@ class SubstructureProtocol(BaseModel):
         | ClientInput4
         | ClientInput5
         | ClientInput6
+        | ClientInput7
         | None,
         Field(
-            description='Everything a client can send on the input surface: submit a message / a full view / a\nnamed action, resume an interrupt, or settle a client tool. A flat, internally-tagged\nunion — its six tags produce serde\'s "unknown variant, expected one of …" error for\nfree. `Runtime::handle_client_input` is the single seam that dispatches it (mirroring\n`resolve_response` on the worker side).\n\nAddressing lives where it is meaningful, not in a shared envelope: `agent_id` (routes\nthe turn, creating the session if new) and the optional idempotency `turn_id` are\nfields of the three submit variants only. A resume/settle addresses an interrupt/effect\nid and continues whatever turn is active, so it carries neither — misplacing them is\nunrepresentable rather than rejected. `session_id` is the one universal address and\nrides the envelope. A submit\'s body rebuilds a [`ClientPayload`] at the seam.',
+            description='Everything a client can send on the input surface: submit a message / a full view / an\nappend batch / a named action, resume an interrupt, or settle a client tool. A flat,\ninternally-tagged union — its seven tags produce serde\'s "unknown variant, expected one\nof …" error for free. `Runtime::handle_client_input` is the single seam that dispatches\nit (mirroring `resolve_response` on the worker side).\n\nAddressing lives where it is meaningful, not in a shared envelope: `agent_id` (routes\nthe turn, creating the session if new) and the optional idempotency `turn_id` are\nfields of the four submit variants only. A resume/settle addresses an interrupt/effect\nid and continues whatever turn is active, so it carries neither — misplacing them is\nunrepresentable rather than rejected. `session_id` is the one universal address and\nrides the envelope. A submit\'s body rebuilds a [`ClientPayload`] at the seam.',
             title='ClientInput',
         ),
     ] = None
     client_payload: Annotated[
-        ClientPayload1 | ClientPayload2 | ClientPayload3 | None,
+        ClientPayload1 | ClientPayload2 | ClientPayload3 | ClientPayload4 | None,
         Field(
-            description='The client→engine inbound *submit* wire form: an untrusted client submits a message,\nits full conversation view, or a named action. Lowered to domain events at the\n`SubmitClientPayload` command seam (`runtime::session::command`); never persisted\nas-is. Carried verbatim inside [`ClientInput`], which is the full client input\nsurface.',
+            description='The client→engine inbound *submit* wire form: an untrusted client submits a message,\nits full conversation view, an append batch, or a named action. Lowered to domain events at the\n`SubmitClientPayload` command seam (`runtime::session::command`); never persisted\nas-is. Carried verbatim inside [`ClientInput`], which is the full client input\nsurface.',
             title='ClientPayload',
         ),
     ] = None
     decision_request: DecisionRequest | None = None
     decision_response: DecisionResponse | None = None
+    interrupt_payload: InterruptPayload | None = None
+    interrupt_resolution: InterruptResolution | None = None
     stream_delta: StreamDelta | None = None
     token_delta: TokenDelta | None = None

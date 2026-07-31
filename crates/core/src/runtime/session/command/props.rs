@@ -333,6 +333,8 @@ impl World {
         acts.into_iter()
             .map(|a| match a {
                 ActOp::CallLlm { worker } => Action::CallLlm {
+                    llm: "claude".to_string(),
+                    format: None,
                     id: self.mint(),
                     request: LlmRequest {
                         model: "test-model".to_string(),
@@ -349,7 +351,6 @@ impl World {
                     } else {
                         LlmHandler::Server
                     },
-                    format: None,
                 },
                 ActOp::CallTool => Action::CallTool {
                     id: self.mint(),
@@ -384,11 +385,10 @@ impl World {
     fn config(&mut self) -> AgentConfig {
         let model = self.mint();
         AgentConfig {
+            llm: Some("claude".to_string()),
             model,
             system: None,
             stream: false,
-            handler: None,
-            format: None,
             retry: None,
             tools: Vec::new(),
             sub_agents: Vec::new(),

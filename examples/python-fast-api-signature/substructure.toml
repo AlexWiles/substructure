@@ -1,11 +1,11 @@
-target = "local"
+[llm.claude]
+type = "anthropic"
 
-[worker]
-url = "http://localhost:4444"
+[agent.my-agent]
+llm = "claude"
+model = "claude-haiku-4-5-20251001"
+worker = "http://localhost:4444"
 signing_secret_env = "SUBS_SIGNING_SECRET"
-
-[llm]
-provider = "anthropic"
 
 [run]
 agent = "my-agent"

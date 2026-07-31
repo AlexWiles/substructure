@@ -1,13 +1,13 @@
-use std::path::PathBuf;
-
 use anyhow::Result;
 
+use super::context;
 use super::credentials;
+use super::CloudGlobals;
 
-pub async fn run(url_flag: Option<String>, credentials_path: Option<PathBuf>) -> Result<()> {
-    let path = credentials::resolve_path(credentials_path)?;
+pub async fn run(globals: &CloudGlobals) -> Result<()> {
+    let path = credentials::resolve_path(globals.credentials.clone())?;
     let mut creds = credentials::load(&path)?;
-    let api_url = credentials::resolve_api_url(url_flag.as_deref());
+    let api_url = context::api_url(globals)?;
     creds.clear_token(&api_url);
     credentials::save(&path, &creds)?;
     println!(

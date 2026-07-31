@@ -15,16 +15,11 @@ def sse(event, data):
 def decide(req):
     trigger = req["trigger"]
 
-    # Declare the agent; format makes the engine speak Anthropic on this wire.
+    # Refine the declared agent. `llm = "byo"` in substructure.toml is a
+    # `type = "worker"` block, so the calls come back here as `llm.execute`,
+    # shaped by that block's `format`.
     if trigger["type"] == "session.start":
-        return {
-            "agent": {
-                "model": "claude-haiku-4-5-20251001",
-                "stream": True,
-                "handler": "worker",
-                "format": "anthropic",
-            }
-        }
+        return {**req["proposed"], "agent": {**req["proposed"]["agent"], "stream": True}}
 
     # The request is already a Messages API body; raw stream events and the
     # final message go straight back.
