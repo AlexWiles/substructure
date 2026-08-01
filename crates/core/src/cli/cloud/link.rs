@@ -116,7 +116,10 @@ pub async fn run(cmd: LinkCommand) -> Result<()> {
     }
     if project.is_none() {
         println!();
-        println!("No project pinned. Commands that target a project will need --project.");
+        println!("No project pinned. `subs apply` creates one from this file and pins it.");
+    } else {
+        println!();
+        println!("`subs apply` pushes what this file declares.");
     }
     Ok(())
 }

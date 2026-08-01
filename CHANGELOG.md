@@ -36,19 +36,33 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 - Add a Slack adapter and a channel abstraction.
 - Add MCP support.
 - substructure.toml as a config file.
-- `subs init` asks questions and writes an environment file, or writes a starter file if there is no terminal.
-- `subs apply` pushes a file's `[deployment]` to that server: it creates
-  the app when nothing is pinned (printing the signing secret once and writing
-  the pin back), then applies `name`, the agents' `worker` URL, and the `[mcp.<id>]`
-  declarations and grants. Additive and idempotent — re-applying an unchanged
-  file prints `No changes.` and exits 0 — so it is safe to run on every merge.
-  The new `name` key is what an app is created from and renamed to.
-- `subs config log` shows what has changed an app's configuration, who changed
-  it, and through which surface. The imperative commands append the same
-  events, so the log is complete whichever one wrote.
 
 ### Changed
 
+- **`subs apply` replaces rather than merges.** The file is the whole
+  declaration, so an agent, `[llm.*]` block, or Slack channel absent from it is
+  one that was removed. Removal no longer needs an imperative command.
+- **A project is born from a file.** `subs apps create` and `subs apps rename`
+  are gone: apply owns a project's existence and its name. `subs link` still
+  adopts an existing project, for a fresh clone.
+- **Hosting is per agent, everywhere.** A deployment holds one worker per agent
+  rather than one for the whole tenant, so a file whose agents point at
+  different URLs is now ordinary rather than an error. The `subs webhook`
+  commands and the deployment-wide worker are gone.
+- **Signing secrets are per agent, and retrievable.** A deployment mints one on
+  the first apply that gives an agent a `worker`, so nothing is printed once and
+  lost; read it with `subs agents show <id>` and replace it with `subs agents
+  rotate-secret <id>`. An agent the engine decides for has no secret, because
+  nothing signs for it.
+- **`[slack]` asks three questions instead of one.** `agent` meant both "who
+  takes DMs" and "who takes a channel nobody named" — two decisions with very
+  different blast radii behind one key, and it resolved differently locally than
+  in the cloud. It is now `dm` and `any_channel`, each defaulting to silence, so
+  the bot answers only where it was told to. A file with the old key is a loud
+  error naming both replacements.
+- **Model calls run on your key.** An engine-run `[llm.*]` block needs a key
+  uploaded with `subs llm set-key`; a call on a block without one fails saying
+  so rather than falling back to a platform key.
 - `substructure.toml` describes one system, in groups: settings moved into
   `[llm.<id>]`, `[agent.<id>]`, `[run]`, `[server]`, and `[deployment]`. A file
   carries two roles, either or both — **an engine you run** (`db`, `log`,

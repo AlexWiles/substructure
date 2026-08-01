@@ -11,7 +11,7 @@ use anyhow::{bail, Context as _, Result};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 
-use crate::api::v1::{ApplyResponse, ConfigEvent, Page, Project};
+use crate::api::v1::{ApplyResponse, ConfigEvent, Notice, NoticeLevel, Page, Project};
 
 use super::context::Context;
 use super::pickers;
@@ -65,6 +65,8 @@ struct Applied {
     #[serde(skip_serializing_if = "Option::is_none")]
     created: Option<Created>,
     changes: Vec<ConfigEvent>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    notices: Vec<Notice>,
 }
 
 #[derive(Debug, Serialize)]
@@ -113,6 +115,7 @@ pub async fn run(cmd: ApplyCommand) -> Result<()> {
         project_id: applied.project_id,
         created,
         changes: applied.changes,
+        notices: applied.notices,
     };
     if cmd.globals.json {
         return print::json(&result);
@@ -230,6 +233,7 @@ fn report(result: &Applied, path: &std::path::Path) {
 
     if result.changes.is_empty() {
         println!("No changes.");
+        notices(result, path);
         return;
     }
 
@@ -260,21 +264,49 @@ fn report(result: &Applied, path: &std::path::Path) {
         }
     }
 
-    // A declared connection reaches nothing until a human consents, so the
-    // next command is part of the output rather than something to go look up.
-    let pending: Vec<&str> = result
-        .changes
-        .iter()
-        .filter(|c| c.kind == "mcp.connection_declared")
-        .filter_map(|c| c.data.get("id").and_then(|v| v.as_str()))
-        .collect();
-    if !pending.is_empty() {
-        println!("Pending authorization:");
-        let flag = config_flag(path);
-        for id in pending {
-            println!("  {id} — run `subs mcp login {id}{flag}` or authorize in the dashboard");
+    notices(result, path);
+}
+
+/// What the deployment has to say, as it sees it. Printed whether or not this
+/// apply changed anything: it is current state, not a record of the run.
+///
+/// The deployment writes the text and picks the level; the grouping and the
+/// order are decided here, so a level this build does not know is still shown
+/// rather than dropped.
+fn notices(result: &Applied, path: &std::path::Path) {
+    if result.notices.is_empty() {
+        return;
+    }
+    // The deployment does not know which file this ran against, so the `-c` a
+    // reader would have to repeat is added here.
+    let flag = config_flag(path);
+    for (level, group) in grouped(&result.notices) {
+        println!();
+        println!("{}", level.heading());
+        for notice in group {
+            println!();
+            println!("  {}", notice.message);
+            if let Some(command) = &notice.command {
+                println!("    {command}{flag}");
+            }
+            if let Some(url) = &notice.url {
+                println!("    {url}");
+            }
         }
     }
+}
+
+/// Notices under the heading each belongs to, loudest first, keeping the
+/// deployment's order within a level. Empty levels are absent rather than
+/// printed as a heading with nothing under it.
+fn grouped(notices: &[Notice]) -> Vec<(NoticeLevel, Vec<&Notice>)> {
+    NoticeLevel::ORDER
+        .into_iter()
+        .filter_map(|level| {
+            let group: Vec<&Notice> = notices.iter().filter(|n| n.level == level).collect();
+            (!group.is_empty()).then_some((level, group))
+        })
+        .collect()
 }
 
 /// The `-c` the user would have to repeat, omitted when discovery finds the
@@ -439,6 +471,54 @@ mod tests {
         );
         // A kind this build does not know is still a row, just without detail.
         assert_eq!(summarize(&event("something.new", json!({}))), "");
+    }
+
+    fn notice(level: &str, message: &str) -> Notice {
+        serde_json::from_value(json!({ "level": level, "message": message })).unwrap()
+    }
+
+    /// The deployment decides what it says and how loudly; the order of the
+    /// headings, and which ones appear at all, are decided here.
+    #[test]
+    fn notices_are_grouped_by_level_loudest_first() {
+        let notices = [
+            notice("info", "minted a secret"),
+            notice("action", "connect a workspace"),
+            notice("warn", "#general was taken"),
+            notice("action", "set a key"),
+        ];
+        let shape: Vec<(&str, Vec<&str>)> = grouped(&notices)
+            .iter()
+            .map(|(level, group)| {
+                (
+                    level.heading(),
+                    group.iter().map(|n| n.message.as_str()).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("Action required:", vec!["connect a workspace", "set a key"]),
+                ("Warnings:", vec!["#general was taken"]),
+                ("Notes:", vec!["minted a secret"]),
+            ]
+        );
+        // A level with nothing in it is not a heading over an empty list.
+        assert_eq!(grouped(&[notice("warn", "only this")]).len(), 1);
+    }
+
+    /// A deployment newer than this CLI must still be heard: an unknown level
+    /// reads as the loudest rather than failing the whole response.
+    #[test]
+    fn an_unknown_level_is_shown_rather_than_dropped() {
+        let parsed: Notice =
+            serde_json::from_value(json!({ "level": "critical", "message": "something new" }))
+                .expect("an unknown level must not fail the response");
+        assert_eq!(parsed.level, NoticeLevel::Action);
+        // And a deployment that sends no level at all still lands somewhere.
+        let bare: Notice = serde_json::from_value(json!({ "message": "no level" })).unwrap();
+        assert_eq!(bare.level, NoticeLevel::Action);
     }
 
     #[test]

@@ -32,44 +32,63 @@ const STATUS: &str = "is thinking…";
 /// Slack removes a status after two minutes. Set it again on this cadence.
 const STATUS_REFRESH: Duration = Duration::from_secs(90);
 
-/// Which agent answers where.
-///
-/// A channel with no entry of its own falls to the default, so an allowlist is
-/// the absence of a default rather than a second setting: without one, the bot
-/// serves only the channels named here. A DM is a channel (`D…`) and resolves
-/// the same way.
+/// Which agent answers where. Three separate questions, so three settings:
+/// who takes DMs, who takes a channel nobody named, and who takes each channel
+/// that is named. Silence is the default for all three — nothing answers
+/// anywhere until something says so.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Routing {
-    default_agent: Option<String>,
+    dm: Option<String>,
+    any_channel: Option<String>,
     /// The agent for each named channel, or `None` where the bot stays out.
     channels: HashMap<String, Option<String>>,
 }
 
 impl Routing {
-    pub fn new(default_agent: Option<String>) -> Self {
-        Self {
-            default_agent,
-            channels: HashMap::new(),
-        }
+    /// Routes nothing. Build it up with [`Routing::dm`],
+    /// [`Routing::any_channel`], and [`Routing::channel`].
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// `agent` answers in `id`; `None` keeps the bot out of it.
+    /// `agent` answers direct messages.
+    pub fn dm(mut self, agent: Option<String>) -> Self {
+        self.dm = agent;
+        self
+    }
+
+    /// `agent` answers in any channel the bot is invited to that
+    /// `channel` does not name. Absent, an unnamed channel is not served —
+    /// which is what makes the channel table an allowlist.
+    pub fn any_channel(mut self, agent: Option<String>) -> Self {
+        self.any_channel = agent;
+        self
+    }
+
+    /// `agent` answers in `id`; `None` keeps the bot out of it, even when
+    /// `any_channel` is set.
     pub fn channel(mut self, id: impl Into<String>, agent: Option<String>) -> Self {
         self.channels.insert(id.into(), agent);
         self
     }
 
     /// The agent that answers in `channel`, or `None` where the bot is silent.
+    ///
+    /// A DM (`D…`) resolves only against `dm`: `any_channel` is about channels
+    /// the bot was invited to, and nobody invites it to a DM.
     pub fn agent_for(&self, channel: &str) -> Option<&str> {
+        if channel.starts_with('D') {
+            return self.dm.as_deref();
+        }
         match self.channels.get(channel) {
             Some(entry) => entry.as_deref(),
-            None => self.default_agent.as_deref(),
+            None => self.any_channel.as_deref(),
         }
     }
 
     /// Whether this routes anything at all.
     pub fn is_empty(&self) -> bool {
-        self.default_agent.is_none() && self.channels.is_empty()
+        self.dm.is_none() && self.any_channel.is_none() && self.channels.is_empty()
     }
 }
 
@@ -77,7 +96,13 @@ impl Routing {
 /// without the file.
 impl std::fmt::Display for Routing {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut parts: Vec<String> = self.default_agent.iter().cloned().collect();
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(agent) = &self.dm {
+            parts.push(format!("dm→{agent}"));
+        }
+        if let Some(agent) = &self.any_channel {
+            parts.push(format!("any channel→{agent}"));
+        }
         let mut channels: Vec<_> = self.channels.iter().collect();
         channels.sort_by(|a, b| a.0.cmp(b.0));
         for (id, agent) in channels {
@@ -1676,7 +1701,10 @@ mod tests {
     /// channel does not take the bot out of every other.
     #[test]
     fn a_channel_falls_to_the_default() {
-        let routing = Routing::new(Some("support".into())).channel("C0ENG", Some("oncall".into()));
+        let routing = Routing::new()
+            .dm(Some("support".into()))
+            .any_channel(Some("support".into()))
+            .channel("C0ENG", Some("oncall".into()));
         assert_eq!(routing.agent_for("C0ENG"), Some("oncall"));
         assert_eq!(routing.agent_for("C0SALES"), Some("support"));
         // A DM is a channel, and resolves the same way.
@@ -1687,7 +1715,7 @@ mod tests {
     /// and nowhere else, without a second setting saying so.
     #[test]
     fn without_a_default_only_the_named_channels_are_served() {
-        let routing = Routing::new(None).channel("C0ENG", Some("oncall".into()));
+        let routing = Routing::new().channel("C0ENG", Some("oncall".into()));
         assert_eq!(routing.agent_for("C0ENG"), Some("oncall"));
         assert_eq!(routing.agent_for("C0SALES"), None);
         assert_eq!(routing.agent_for("D0USER"), None);
@@ -1696,21 +1724,28 @@ mod tests {
     /// And with a default, `off` is how one channel is carved back out.
     #[test]
     fn an_off_channel_is_silent_under_a_default() {
-        let routing = Routing::new(Some("support".into())).channel("C0RANDOM", None);
+        let routing = Routing::new()
+            .any_channel(Some("support".into()))
+            .channel("C0RANDOM", None);
         assert_eq!(routing.agent_for("C0RANDOM"), None);
         assert_eq!(routing.agent_for("C0SALES"), Some("support"));
     }
 
     #[test]
     fn routing_reads_back_for_the_startup_line() {
-        let routing = Routing::new(Some("support".into()))
+        let routing = Routing::new()
+            .dm(Some("support".into()))
+            .any_channel(Some("helper".into()))
             .channel("C0RANDOM", None)
             .channel("C0ENG", Some("oncall".into()));
-        assert_eq!(routing.to_string(), "support, C0ENG→oncall, C0RANDOM off");
+        assert_eq!(
+            routing.to_string(),
+            "dm→support, any channel→helper, C0ENG→oncall, C0RANDOM off"
+        );
 
         assert!(Routing::default().is_empty());
         assert_eq!(Routing::default().to_string(), "nothing");
-        assert!(!Routing::new(None).channel("C0ENG", None).is_empty());
+        assert!(!Routing::new().channel("C0ENG", None).is_empty());
     }
 
     fn stream(turn_id: &str, ts: Option<&str>) -> Stream {

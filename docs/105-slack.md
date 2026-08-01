@@ -57,25 +57,28 @@ export SLACK_BOT_TOKEN=xoxb-...
 subs serve --no-auth --slack-agent my-agent
 ```
 
-`--slack-agent` names the agent that handles mentions and enables the channel.
-Pin it in [`substructure.toml`](./160-cli.md#environments) to leave it off the
-command line:
+`--slack-agent` names the agent that answers DMs and any channel the file does
+not name. Pin it in [`substructure.toml`](./160-cli.md#environments) to leave it
+off the command line:
 
 ```toml
 [slack]
-agent = "my-agent"
+dm = "my-agent"
+any_channel = "my-agent"
 ```
 
 The tokens stay in the environment either way: the file names secrets, it never
 holds them.
 
-## Channels
+## Where the bot answers
 
-`agent` is the default. Where one channel differs, name it:
+Three questions, asked separately, because they have different answers and very
+different blast radii:
 
 ```toml
 [slack]
-agent = "support"            # answers wherever nothing below applies
+dm = "support"               # direct messages
+any_channel = "support"      # any channel invited to that is not named below
 
 [slack.channel.C0ENGOPS]     # eng-oncall
 agent = "oncall"
@@ -84,22 +87,31 @@ agent = "oncall"
 off = true
 ```
 
+| Where | Answered by |
+| --- | --- |
+| A DM | `dm` |
+| A channel with a `[slack.channel.<id>]` | its own `agent`, or nobody when `off` |
+| Any other channel | `any_channel` |
+
+Each defaults to silence, so the bot answers only where it was told to.
+
 A channel names an *agent*, not a prompt or a tool list, because
 [`[agent.<id>]`](./160-cli.md#agentid) already is that bundle: pointing a
 channel at another agent gives it another system prompt, model, and tool set
 at once, and the tools are that agent's own rather than a request the model may
 decline.
 
-Leaving the default off makes the table an allowlist — the bot answers in the
-channels named here and nowhere else:
+Leaving `any_channel` off makes the table an allowlist — the bot can be invited
+anywhere and still answers only in the channels named here:
 
 ```toml
 [slack.channel.C0ENGOPS]
 agent = "oncall"
 ```
 
-A DM is a channel (`D…`) and resolves the same way, so an allowlist with no
-default silences DMs too. Name a default to keep them.
+DMs are their own setting, so an allowlist does not silence them, and `dm` does
+not open up channels. Nobody invites a bot to a DM, which is why the two are not
+one key.
 
 Channels are keyed by **id**, never by name: a rename re-points a name, and the
 id does not move. Get one from the channel's **About** tab, from the channel

@@ -149,6 +149,37 @@ type LlmError = { type: "llm.error"; id?: string; attempt?: number; error: strin
 Full `LlmRequest`, `LlmResponse`, and `StreamDelta` in
 [Protocol](./150-protocol.md).
 
+## Where the key lives
+
+The block's `type` also decides who holds the credential.
+
+Running locally (`subs serve`, `subs run`), an engine-run block reads its key
+from the environment. `api_key_env` names the variable; absent, the vendor's own
+default (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`) is used.
+The key is *named*, never written — a committed file must not be able to hold
+one.
+
+```toml title="substructure.toml"
+[llm.claude]
+type = "anthropic"
+api_key_env = "MY_ANTHROPIC_KEY"   # optional; local only
+```
+
+In the [cloud](./170-cloud.md), the deployment holds the key instead — it cannot
+read a variable on your machine, so `subs apply` strips `api_key_env` and a
+deployment that receives one rejects the document. Upload the key once:
+
+```sh
+subs llm set-key claude    # reads the key from stdin, never argv
+subs llm list
+```
+
+Calls then run on your key. Until one is set, a call on that block fails saying
+so; there is no platform key to silently fall back to.
+
+A `worker` block needs no key on either side: the call never leaves your worker,
+which reaches the provider with a key from its own environment.
+
 ## Next
 
 - [Tool calls](./30-tools.md): the same trigger, answer, finished loop.

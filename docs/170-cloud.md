@@ -3,9 +3,19 @@ title: Cloud
 group: Operations
 ---
 
-Substructure cloud hosts the engine. A `subs`-managed app takes client traffic,
-delivers each decision to your worker over a signed webhook, and by default
-runs the LLM calls itself. `subs` is the control plane for that app.
+Substructure cloud hosts the engine. A project takes client traffic, delivers
+each decision to the worker that agent names — or decides it itself — and runs
+the LLM calls it is given a key for. `subs` is the control plane for that
+project.
+
+One `substructure.toml` is one project. A second environment is a second file,
+deployed as a second project:
+
+```sh
+subs apply -c substructure.staging.toml
+```
+
+Each project has its own wallet, quota, keys, and sessions.
 
 ## Sign in
 
@@ -15,31 +25,25 @@ subs login
 
 Authenticates in your browser and stores a token under `~/.config/substructure`.
 
-## Create an app
+## Deploy a project
 
-```sh
-subs apps create my-bot
-```
-
-This prints the app id and its signing secret, shown once. Pin the app so later
-commands need no `--app`:
-
-```sh
-subs link
-```
-
-That writes the `[deployment]` section of an [environment
-file](./160-cli.md#environments), pinning the org and app.
-
-## Point it at your worker
-
-Hosting is a property of the agent. Give the one that needs code a `worker`
-URL and apply the file:
+There is no create command. The file is the source of truth for a project's
+existence, its name, and everything in it — writing one and applying it is how
+a project is born:
 
 ```toml title="substructure.toml"
+name = "my-bot"
+
+[llm.claude]
+type = "anthropic"
+
+# Decided by the engine: it proposes, and accepts its own proposal.
 [agent.support]
 llm = "claude"
 model = "claude-sonnet-4-5"
+
+# Decided by your code: the engine POSTs here and waits for the reply.
+[agent.triage]
 worker = "https://my-worker.example.com/agent"
 ```
 
@@ -47,44 +51,79 @@ worker = "https://my-worker.example.com/agent"
 subs apply
 ```
 
-Agents without a `worker` are decided by the engine, and need no deployment at
-all beyond the file. For those that have one, the engine POSTs decisions to
-that URL and signs each with the app's secret,
-an HMAC of the body sent as `X-Substructure-Signature`. Your worker verifies it
-with the same secret.
+Apply creates the project, declares the agents, and writes the pin back into
+`[deployment].project`, so a second apply is a no-op rather than a second
+project. To adopt a project that already exists — a fresh clone, a teammate's
+machine — use `subs link` instead.
+
+Apply **replaces** rather than merges: the file is the whole declaration, so an
+agent, `[llm.*]` block, or Slack channel absent from it is one that was removed.
+
+## Hosting is per agent
+
+`worker` on an agent is the whole routing switch:
+
+- **Set** — decisions are POSTed there, signed with a secret the deployment
+  minted for that agent (an HMAC of the body, sent as
+  `X-Substructure-Signature`). Your worker verifies it with the same secret.
+- **Unset** — the engine decides for that agent by accepting its own proposal.
+  Nothing to deploy beyond the file.
+- **Undeclared** — a decision for an agent no file declares fails immediately,
+  naming the ids that were declared.
+
+The secret is the deployment's, not the file's, so it is never written in
+`substructure.toml`:
+
+```sh
+subs agents list
+subs agents show triage          # includes the signing secret
+subs agents rotate-secret triage # owner only
+```
 
 ## Secrets
 
-Three secrets are in play. Two are set with `subs`.
-
 | Secret | Purpose | Where it comes from |
 | --- | --- | --- |
-| Signing secret | Your worker verifies the engine's webhooks. | Printed by `apps create` and by `subs apply` when it creates the app. |
-| Client API key | The bearer token your clients present to the app. | `subs keys create <label>`, printed once. |
-| Provider key | Auth to Anthropic or OpenAI. | Not a `subs` secret. See below. |
+| Signing secret | Your worker verifies the engine's decision requests. | Minted per agent on the first apply that gives it a `worker`. Read it with `subs agents show <id>`. |
+| Client API key | The bearer token your clients present to the project. | `subs keys create <label>`, printed once. |
+| Provider key | Auth to Anthropic, OpenAI, or OpenRouter. | `subs llm set-key <block>` — see below. |
 
 `subs keys create <label>` mints a client key and writes only the value to
 stdout, so you can pipe it straight into your client's secret store.
 
 ### Provider keys
 
-The `[llm.<id>]` block an agent names decides who holds the provider key. By
-default the hosted engine runs the LLM against its own provider and bills the
-app, so you set no key. On a `type = "worker"` block the call runs in your
-worker, which calls the provider with a key from its own environment. See
-[LLMs](./50-llms.md).
+Calls run on your key. A block the engine runs (`anthropic`, `openai`,
+`openrouter`) needs one uploaded:
+
+```sh
+subs llm set-key claude              # reads the key from stdin
+subs llm set-key claude --env MY_KEY # or from an environment variable
+subs llm list
+```
+
+The key never appears in argv, and no read ever returns it. Until one is set,
+a call on that block fails saying so. On a `type = "worker"` block the call runs
+in your worker instead, which calls the provider with a key from its own
+environment — there is nothing to upload. See [LLMs](./50-llms.md).
+
+`api_key_env` in the file names a variable on *your* machine, so it applies to
+`subs serve` and `subs run` only; `subs apply` strips it, and a deployment
+that receives one rejects the document rather than ignoring the field.
 
 ## Observe
 
 ```sh
+subs projects list
 subs sessions list
 subs sessions events <session-id> --stream
+subs config log
 subs open
 ```
 
 ## Next
 
-- [Quick start](./10-quick-start.md): build the worker this app calls.
+- [Quick start](./15-quick-start-cloud.md): a project from nothing to a turn.
 - [CLI](./160-cli.md): the full command reference.
 - [LLMs](./50-llms.md): where provider keys live.
-- [Protocol](./150-protocol.md): the signed webhook the engine delivers.
+- [Protocol](./150-protocol.md): the signed request the engine delivers.

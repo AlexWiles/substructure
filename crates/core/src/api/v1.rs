@@ -201,6 +201,69 @@ pub struct ApplyResponse {
     pub project_id: String,
     #[serde(default)]
     pub changes: Vec<ConfigEvent>,
+    /// What the deployment has to say about the document it just took, with its
+    /// own links. Recomputed server-side on every apply rather than logged, so
+    /// an unchanged re-apply still reports it.
+    #[serde(default)]
+    pub notices: Vec<Notice>,
+}
+
+/// One thing the deployment wants the reader to know, and the ways to act on
+/// it. Both routes are optional: an OAuth consent has no CLI command, and a
+/// purely local fix has no page.
+///
+/// The deployment decides what it says and how loudly, so a deployment that
+/// learns to report something new needs no CLI release to say it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Notice {
+    #[serde(default)]
+    pub level: NoticeLevel,
+    pub message: String,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+/// How much of the reader's attention a notice is asking for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NoticeLevel {
+    /// The document does not fully work until a human does this.
+    #[default]
+    Action,
+    /// Something is wrong that the deployment took anyway.
+    Warn,
+    /// Worth knowing, and nothing to do.
+    Info,
+}
+
+/// A level this build has no name for reads as the loudest one rather than
+/// failing the response: the deployment decided it was worth saying, and a CLI
+/// older than the deployment must still say it.
+impl<'de> Deserialize<'de> for NoticeLevel {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match String::deserialize(deserializer)?.as_str() {
+            "warn" => NoticeLevel::Warn,
+            "info" => NoticeLevel::Info,
+            _ => NoticeLevel::Action,
+        })
+    }
+}
+
+impl NoticeLevel {
+    /// The order levels are printed in, loudest first.
+    pub const ORDER: [NoticeLevel; 3] = [NoticeLevel::Action, NoticeLevel::Warn, NoticeLevel::Info];
+
+    /// The heading notices of this level are printed under.
+    pub fn heading(self) -> &'static str {
+        match self {
+            NoticeLevel::Action => "Action required:",
+            NoticeLevel::Warn => "Warnings:",
+            NoticeLevel::Info => "Notes:",
+        }
+    }
 }
 
 /// A cursor-paged slice. The wire shape is snake_case, unlike the camelCase

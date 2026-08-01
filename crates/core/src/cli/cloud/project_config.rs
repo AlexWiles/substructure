@@ -147,8 +147,8 @@ impl ProjectConfig {
         self.db.clone().unwrap_or_else(|| DEFAULT_DB.to_string())
     }
 
-    pub fn slack_agent(&self) -> Option<String> {
-        self.slack.as_ref()?.agent.clone()
+    pub fn slack_dm_agent(&self) -> Option<String> {
+        self.slack.as_ref()?.dm.clone()
     }
 
     /// The declared blocks as the engine reads them: venue and wire shape,
@@ -256,6 +256,16 @@ fn moved_keys(value: &toml::Value, at: &impl std::fmt::Display) -> Result<()> {
         bail!(
             "{at}: `{}` belongs under `[deployment]`, with the server's `url`.",
             pins.join("`, `")
+        );
+    }
+    // `[slack].agent` meant "DMs, and any channel not named" — one key for two
+    // decisions with very different blast radii, so it became two.
+    if value.get("slack").and_then(|s| s.get("agent")).is_some() {
+        bail!(
+            "{at}: `[slack].agent` is now two settings, because it answered two questions: \
+             `dm` for direct messages, and `any_channel` for a channel no \
+             `[slack.channel.<id>]` names. Set whichever you meant — setting neither serves \
+             only the channels you name."
         );
     }
     if value.get("worker").is_some() {
@@ -858,7 +868,7 @@ mod tests {
             auth = false
 
             [slack]
-            agent = "support"
+            dm = "support"
 
             [slack.channel.C0ENGOPS]
             agent = "researcher"
@@ -902,8 +912,8 @@ mod tests {
 
     #[test]
     fn an_empty_slack_section_is_not_a_configured_bot() {
-        assert_eq!(ok("[slack]\n").slack_agent(), None);
-        assert_eq!(ProjectConfig::default().slack_agent(), None);
+        assert_eq!(ok("[slack]\n").slack_dm_agent(), None);
+        assert_eq!(ProjectConfig::default().slack_dm_agent(), None);
         assert!(!ok("[slack]\n").slack.unwrap().is_configured());
 
         // The old bare key is gone, and says so rather than doing nothing.
@@ -927,35 +937,47 @@ mod tests {
     #[test]
     fn a_channel_names_the_agent_that_answers_there() {
         let cfg = slack(
-            "[slack]\nagent = \"support\"\n\n\
+            "[slack]\ndm = \"support\"\nany_channel = \"support\"\n\n\
              [slack.channel.C0ENGOPS]\nagent = \"oncall\"\n\n\
              [slack.channel.C0RANDOM]\noff = true\n",
         )
         .unwrap();
         let s = cfg.slack.unwrap();
-        assert_eq!(s.agent.as_deref(), Some("support"));
+        assert_eq!(s.dm.as_deref(), Some("support"));
+        assert_eq!(s.any_channel.as_deref(), Some("support"));
         assert_eq!(s.channel["C0ENGOPS"].agent(), Some("oncall"));
         // `off` is the absence of an agent, however the section spelled it.
         assert_eq!(s.channel["C0RANDOM"].agent(), None);
         assert!(s.is_configured());
     }
 
-    /// A default is not required: naming channels alone is the allowlist.
+    /// Naming channels alone is the allowlist: without `any_channel` the bot
+    /// can be invited anywhere and still answers only where it was named.
     #[test]
-    fn channels_without_a_default_are_a_complete_section() {
+    fn channels_without_any_channel_are_a_complete_section() {
         let cfg = slack("[slack.channel.C0ENGOPS]\nagent = \"oncall\"\n").unwrap();
         let s = cfg.slack.unwrap();
-        assert_eq!(s.agent, None);
+        assert_eq!(s.dm, None);
+        assert_eq!(s.any_channel, None);
         assert!(s.is_configured(), "the bot is on, in one channel");
+    }
+
+    /// The old key answered two questions at once, so it is named rather than
+    /// reported as an unknown field.
+    #[test]
+    fn the_old_slack_agent_key_says_what_it_became() {
+        let err = slack("[slack]\nagent = \"support\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`dm`"), "got {err}");
+        assert!(err.contains("`any_channel`"), "got {err}");
     }
 
     /// Every name the bot routes to is declared in this same file, so a typo
     /// is caught here rather than as a bot that answers nowhere.
     #[test]
     fn a_channels_agent_is_checked_against_the_file() {
-        let err = slack("[slack]\nagent = \"suport\"\n")
-            .unwrap_err()
-            .to_string();
+        let err = slack("[slack]\ndm = \"suport\"\n").unwrap_err().to_string();
         assert!(err.contains("names no agent"), "got {err}");
         assert!(err.contains("oncall, support"), "and says which; got {err}");
 

@@ -136,8 +136,9 @@ impl Manifest {
         self.agent.keys().cloned().collect()
     }
 
-    pub fn slack_agent(&self) -> Option<String> {
-        self.slack.as_ref()?.agent.clone()
+    /// The agent answering DMs, for the engine that serves them.
+    pub fn slack_dm_agent(&self) -> Option<String> {
+        self.slack.as_ref()?.dm.clone()
     }
 }
 
@@ -270,22 +271,27 @@ impl AgentSection {
     }
 }
 
-/// The `[slack]` section: what the Socket Mode bot needs that is not a secret.
+/// The `[slack]` section: what the bot needs that is not a secret.
 ///
 /// The tokens are absent for the same reason they are absent from `[mcp]` — a
 /// committed file must not be able to hold one — so `SLACK_APP_TOKEN` and
 /// `SLACK_BOT_TOKEN` stay in the environment.
 ///
-/// `agent` is the default, and `[slack.channel.<id>]` is where one channel
-/// differs. An allowlist is the absence of a default rather than a second
-/// setting: with no `agent` here, only the declared channels are served.
+/// Three questions, asked separately, because they have different answers and
+/// different blast radii: who takes DMs, who takes a channel nobody named, and
+/// who takes each channel that is named. Every one defaults to silence, so a
+/// bot answers only where it was told to.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SlackConfig {
-    /// Agent id the bot drives wherever the channel table says nothing.
-    /// Absent, with no channel declared, leaves the bot off.
+    /// Agent for direct messages. Absent leaves DMs unanswered.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent: Option<String>,
+    pub dm: Option<String>,
+    /// Agent for any channel the bot is invited to that `channel` does not
+    /// name. Absent makes the channel table an allowlist — the bot can be
+    /// invited anywhere and still answer only where it was named.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub any_channel: Option<String>,
     /// Where one channel differs, keyed by Slack channel id. An id is the
     /// stable identity; a name is remote state that a rename re-points, so
     /// only an id is accepted.
@@ -296,7 +302,7 @@ pub struct SlackConfig {
 impl SlackConfig {
     /// Whether this section configures a bot at all.
     pub fn is_configured(&self) -> bool {
-        self.agent.is_some() || !self.channel.is_empty()
+        self.dm.is_some() || self.any_channel.is_some() || !self.channel.is_empty()
     }
 }
 
@@ -429,19 +435,26 @@ pub fn check_agent(id: &str, section: &AgentSection, manifest: &Manifest) -> Res
 /// Every agent the bot routes to is declared in this same document, so a typo
 /// is caught here rather than as a bot that answers nowhere.
 pub fn check_slack(slack: &SlackConfig, manifest: &Manifest) -> Result<()> {
-    if let Some(agent) = &slack.agent {
-        check_slack_agent(agent, manifest).map_err(|e| anyhow::anyhow!("[slack]: {e}"))?;
+    for (key, agent) in [("dm", &slack.dm), ("any_channel", &slack.any_channel)] {
+        if let Some(agent) = agent {
+            check_slack_agent(agent, manifest)
+                .map_err(|e| anyhow::anyhow!("[slack]: `{key}`: {e}"))?;
+        }
     }
     for (id, channel) in &slack.channel {
         check_channel(id, channel, manifest)
             .map_err(|e| anyhow::anyhow!("[slack.channel.{id}]: {e}"))?;
     }
-    // Channels that are all `off` and no default to fall back to: a bot that
-    // connects, listens, and can answer nowhere.
-    if slack.is_configured() && slack.agent.is_none() && !slack.channel.values().any(|c| !c.off) {
+    // Channels that are all `off`, no DM agent, and nothing for the rest: a bot
+    // that connects, listens, and can answer nowhere.
+    if slack.is_configured()
+        && slack.dm.is_none()
+        && slack.any_channel.is_none()
+        && !slack.channel.values().any(|c| !c.off)
+    {
         bail!(
-            "[slack]: nothing to answer with. Name a default `agent`, or name one in a \
-             `[slack.channel.<id>]`."
+            "[slack]: nothing to answer with. Set `dm`, set `any_channel`, or name an agent \
+             in a `[slack.channel.<id>]`."
         );
     }
     Ok(())
@@ -583,7 +596,7 @@ mod tests {
             type = "anthropic"
 
             [slack]
-            agent = "typo"
+            dm = "typo"
             "#,
         );
         let err = bad.validate().unwrap_err().to_string();

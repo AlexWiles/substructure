@@ -3,7 +3,7 @@ title: Quick start (cloud)
 group: Getting started
 ---
 
-## 1. Sign in and create an app
+## 1. Sign in
 
 ```sh
 npm install -g @substructure.ai/cli
@@ -11,29 +11,76 @@ subs login
 ```
 
 `login` authenticates in your browser and stores a token under
-`~/.config/substructure`. Create an app:
+`~/.config/substructure`.
 
-```sh
-subs apps create my-bot
+## 2. Describe the project
+
+One `substructure.toml` is one project. Write it in your project root — this is
+the whole declaration, and applying it is how the project comes into existence:
+
+```toml title="substructure.toml"
+name = "my-bot"
+
+[llm.claude]
+type = "anthropic"
+
+[agent.my-agent]
+llm = "claude"
+model = "claude-sonnet-4-5"
 ```
 
-In your project root.
-
-This prints the app id and its signing secret, shown once — save the secret now.
-Pin the app so later commands need no `--app`:
-
 ```sh
-subs link
+subs apply
 ```
 
-That writes a `substructure.toml` in this directory with a `[deployment]`
-section — the server your project deploys to. See
+That creates the project and writes `[deployment].project` back into the file,
+so a second apply is a no-op rather than a second project. See
 [Environments](./160-cli.md#environments).
 
-## 2. Make sure to verify the signature in your worker
+A second environment is a second file: `subs apply -c substructure.staging.toml`
+deploys a separate project with its own wallet, quota, and keys.
 
-The hosted engine signs every decision it POSTs with the app's signing secret. Your
-worker should verify that signature before acting on a decision. Add the check:
+## 3. Give it a key
+
+Calls run on your key, so upload one for the block the agent names:
+
+```sh
+subs llm set-key claude    # reads the key from stdin
+```
+
+The key never appears in argv, and no read ever returns it. Until one is set, a
+call on that block fails saying so.
+
+At this point `my-agent` already works: with no `worker`, the engine decides its
+turns by accepting its own proposal. Skip to step 6 to send it a message.
+
+## 4. Add a worker, if the agent needs your code
+
+`worker` on an agent is the whole routing switch — set it, and the engine POSTs
+that agent's decisions to your code instead of deciding them itself:
+
+```toml title="substructure.toml"
+[agent.triage]
+worker = "https://my-worker.example.com/agent"
+```
+
+```sh
+subs apply
+```
+
+The first apply that gives an agent a worker mints a signing secret for it. The
+secret is the deployment's, not the file's, so read it back:
+
+```sh
+subs agents show triage
+```
+
+Set it as `SUBS_SIGNING_SECRET` where the worker runs.
+
+## 5. Verify the signature in your worker
+
+The engine signs every decision it POSTs. Your worker should verify that
+signature before acting on one:
 
 ```javascript title="server.mjs"
 import { createHmac, timingSafeEqual } from "node:crypto";
@@ -57,39 +104,9 @@ if (!verify(body, req.headers["x-substructure-signature"])) {
 }
 ```
 
-The provider key stays out of this. By default the hosted engine runs the LLM
-against its own provider and bills the app, so your worker sets no `ANTHROPIC_API_KEY`.
+## 6. Send a message
 
-## 3. Deploy the worker
-
-The engine reaches your worker over the public internet, so deploy it wherever you
-run Node and set the signing secret in its environment:
-
-`subs apply` prints the signing secret once, when it creates the app; set it as
-`SUBS_SIGNING_SECRET` where the worker runs.
-
-The deploy gives the worker a public HTTPS URL to point the app at.
-
-## 4. Point the app at it
-
-Hosting is a property of the agent, so it goes in the file:
-
-```toml title="substructure.toml"
-[agent.my-agent]
-llm = "claude"
-model = "claude-sonnet-4-5"
-worker = "https://my-worker.example.com/"
-```
-
-```sh
-subs apply
-```
-
-The engine now POSTs each decision to that URL, signed with the app's secret.
-
-## 5. Send a message
-
-Mint an app API key and submit on a user's behalf through the machine API.
+Mint a client API key and submit on a user's behalf through the machine API.
 
 ```sh
 export SUBS_API_KEY=$(subs keys create --label quickstart)
@@ -105,10 +122,9 @@ curl $BASE/api/machine/sessions/submit \
     }'
 ```
 
-The response returns the `session_id` and `turn_id`. The engine delivered the
-decision to your worker, ran the loop, and called the model itself.
+The response returns the `session_id` and `turn_id`.
 
-## 6. Watch it run
+## 7. Watch it run
 
 ```sh
 subs sessions list
@@ -121,7 +137,7 @@ cloud; resume it by passing the same `session_id` to another `submit`.
 
 ## Next
 
-- [Cloud](./170-cloud.md): apps, keys, webhooks, and where provider keys live.
+- [Cloud](./170-cloud.md): projects, agents, keys, and where provider keys live.
 - [Authentication](./180-auth.md): client tokens for browsers, and worker signing.
 - [Client API](./190-api.md): the machine and client surfaces this used.
 - [Quick start](./10-quick-start.md): build the worker, add tools and a sub-agent.

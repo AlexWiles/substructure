@@ -561,7 +561,7 @@ mod tests {
     fn the_starter_states_the_auth_it_relies_on() {
         let cfg = parse(&render(&Plan::starter(Role::Engine)));
         assert!(!cfg.server_auth());
-        assert!(cfg.slack_agent().is_none(), "init declares no slack bot");
+        assert!(cfg.slack_dm_agent().is_none(), "init declares no slack bot");
     }
 
     #[test]

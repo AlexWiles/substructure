@@ -52,9 +52,9 @@ pub struct ServeArgs {
     /// this machine can reach.
     #[arg(long = "no-auth", alias = "dev")]
     no_auth: bool,
-    /// Serve a Slack Socket Mode bot driving this agent wherever
-    /// `[slack.channel.<id>]` says nothing. Requires SLACK_APP_TOKEN and
-    /// SLACK_BOT_TOKEN.
+    /// Serve a Slack Socket Mode bot driving this agent for DMs and for any
+    /// channel `[slack.channel.<id>]` does not name. Requires SLACK_APP_TOKEN
+    /// and SLACK_BOT_TOKEN.
     #[arg(long, value_name = "AGENT_ID")]
     slack_agent: Option<String>,
 }
@@ -65,13 +65,16 @@ impl ServeArgs {
     }
 }
 
-/// Who the bot answers as, per channel. `None` leaves it off.
+/// Who the bot answers as, where. `None` leaves it off.
 ///
-/// Precedence is one field at a time, so `--slack-agent` replaces the default
-/// the file names and leaves its channel table standing.
+/// `--slack-agent` is the one-flag way to serve a whole workspace, so it sets
+/// both DMs and unnamed channels; the file's channel table still stands, and
+/// `off` on a channel still wins.
 fn slack_routing(cfg: &ProjectConfig, flag: Option<String>) -> Option<Routing> {
     let slack = cfg.slack.clone().unwrap_or_default();
-    let mut routing = Routing::new(flag.or(slack.agent));
+    let mut routing = Routing::new()
+        .dm(flag.clone().or(slack.dm))
+        .any_channel(flag.or(slack.any_channel));
     for (id, channel) in &slack.channel {
         routing = routing.channel(id, channel.agent().map(str::to_string));
     }

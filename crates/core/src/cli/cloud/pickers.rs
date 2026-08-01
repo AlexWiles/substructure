@@ -41,6 +41,10 @@ pub async fn pick_org(ctx: &Context) -> Result<String> {
     Ok(orgs[pick].id.clone())
 }
 
+/// Which project this file is: an existing one to adopt, or a new one.
+///
+/// One file is one project, so binding a file that has no project yet means
+/// allocating one — the project is empty until `subs apply` says what it is.
 pub async fn pick_project(ctx: &Context, org_id: &str) -> Result<Option<String>> {
     let projects: Vec<Project> = ctx
         .client
@@ -51,17 +55,17 @@ pub async fn pick_project(ctx: &Context, org_id: &str) -> Result<Option<String>>
     const SKIP_LABEL: &str = "(skip)";
 
     if projects.is_empty() {
-        let items = vec![CREATE_LABEL, SKIP_LABEL];
+        let items = [CREATE_LABEL, SKIP_LABEL];
         let pick = Select::with_theme(&ColorfulTheme::default())
             .with_prompt("No projects in this org yet")
             .items(&items)
             .default(0)
             .interact()
             .context("project picker")?;
-        if pick == 0 {
-            return create_app(ctx, org_id).await.map(Some);
-        }
-        return Ok(None);
+        return match pick {
+            0 => create_project(ctx, org_id).await.map(Some),
+            _ => Ok(None),
+        };
     }
 
     let default_idx = ctx
@@ -87,7 +91,7 @@ pub async fn pick_project(ctx: &Context, org_id: &str) -> Result<Option<String>>
         .interact()
         .context("project picker")?;
     if pick == create_idx {
-        create_app(ctx, org_id).await.map(Some)
+        create_project(ctx, org_id).await.map(Some)
     } else if pick == skip_idx {
         Ok(None)
     } else {
@@ -104,7 +108,34 @@ struct NamePayload<'a> {
 #[serde(rename_all = "camelCase")]
 struct CreateProjectResponse {
     project: Project,
-    signing_secret: String,
+}
+
+/// Allocate an empty project for this file to pin.
+///
+/// It carries no secret: signing secrets are per agent, minted by the first
+/// apply that gives an agent a worker. Until `subs apply` runs, the project
+/// exists and declares nothing.
+pub async fn create_project(ctx: &Context, org_id: &str) -> Result<String> {
+    let name: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("Project name")
+        .interact_text()
+        .context("project name prompt")?;
+
+    let res: CreateProjectResponse = ctx
+        .client
+        .post_json(
+            &format!("/api/v1/orgs/{org_id}/projects"),
+            &NamePayload { name: &name },
+        )
+        .await?;
+
+    println!();
+    println!("Project created");
+    println!("  id:    {}", res.project.id);
+    println!("  name:  {}", res.project.name);
+    println!();
+
+    Ok(res.project.id)
 }
 
 #[derive(Debug, Deserialize)]
@@ -140,28 +171,4 @@ pub fn prompt_text(prompt: &str) -> Result<String> {
         .with_prompt(prompt)
         .interact_text()
         .context("text prompt")
-}
-
-pub async fn create_app(ctx: &Context, org_id: &str) -> Result<String> {
-    let name: String = Input::with_theme(&ColorfulTheme::default())
-        .with_prompt("Project name")
-        .interact_text()
-        .context("project name prompt")?;
-
-    let res: CreateProjectResponse = ctx
-        .client
-        .post_json(
-            &format!("/api/v1/orgs/{org_id}/projects"),
-            &NamePayload { name: &name },
-        )
-        .await?;
-
-    println!();
-    println!("Project created");
-    println!("  id:              {}", res.project.id);
-    println!("  name:            {}", res.project.name);
-    println!("  signing_secret:  {}", res.signing_secret);
-    println!();
-
-    Ok(res.project.id)
 }
