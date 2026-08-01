@@ -1,10 +1,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use std::sync::Arc;
-
-use tokio::sync::broadcast;
-
+use crate::runtime::event_store::EventTap;
 use crate::runtime::session::{NewSessionEvent, SessionAggregate, SessionEvent};
 
 /// Monotonic position in the store-wide event log, across every session.
@@ -73,6 +70,8 @@ pub trait EventStore: Send + Sync {
     /// The highest assigned global position, 0 when the log is empty.
     async fn max_global_position(&self) -> Result<GlobalPosition, StoreError>;
 
-    /// Subscribe to new events as they are appended.
-    fn subscribe(&self) -> broadcast::Receiver<Arc<Vec<SessionEvent>>>;
+    /// Tap the store's [`EventBus`](super::EventBus): a best-effort hint that
+    /// events were appended. Batches may be missed; consumers needing every
+    /// event must replay by cursor via [`query_events`](Self::query_events).
+    fn subscribe(&self) -> EventTap;
 }

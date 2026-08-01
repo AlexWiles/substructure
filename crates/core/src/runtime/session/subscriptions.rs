@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 
 use crate::runtime::event_store::{EventFilter, EventStore, Seq};
 use crate::runtime::session::events::EventPayload;
@@ -67,26 +67,20 @@ impl SessionSubscriptions {
         let (tx, event_rx) = mpsc::channel::<SessionEvent>(64);
 
         tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(batch) => {
-                        for event in batch.iter() {
-                            if event.tenant_id != spec.caller.tenant_id() {
-                                continue;
-                            }
-                            let in_scope = event.session_id == spec.session_id;
-                            if in_scope && spec.include(event) {
-                                if tx.send(event.clone()).await.is_err() {
-                                    return;
-                                }
-                                if spec.is_terminal(event) {
-                                    return;
-                                }
-                            }
+            while let Some(batch) = rx.recv().await {
+                for event in batch.iter() {
+                    if event.tenant_id != spec.caller.tenant_id() {
+                        continue;
+                    }
+                    let in_scope = event.session_id == spec.session_id;
+                    if in_scope && spec.include(event) {
+                        if tx.send(event.clone()).await.is_err() {
+                            return;
+                        }
+                        if spec.is_terminal(event) {
+                            return;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(_) => return,
                 }
             }
         });

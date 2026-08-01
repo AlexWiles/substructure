@@ -180,10 +180,8 @@ async fn extract(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::Arc;
 
     use chrono::Utc;
-    use tokio::sync::broadcast;
 
     use super::{extract, AgentDirectory};
     use crate::protocol::{
@@ -191,7 +189,8 @@ mod tests {
         SessionOwner,
     };
     use crate::runtime::event_store::{
-        AppendInput, EventFilter, EventStore, GlobalPosition, StoreError,
+        AppendInput, BroadcastBus, EventBus, EventFilter, EventStore, EventTap, GlobalPosition,
+        StoreError,
     };
     use crate::runtime::session::command::{CommandPayload, TurnTarget};
     use crate::runtime::session::events::EventPayload;
@@ -205,7 +204,7 @@ mod tests {
     /// Read-only store serving one hydrated session, as `extract` loads it.
     struct FrozenStore {
         session: SessionAggregate,
-        events: broadcast::Sender<Arc<Vec<SessionEvent>>>,
+        events: BroadcastBus,
     }
 
     #[async_trait::async_trait]
@@ -233,7 +232,7 @@ mod tests {
             Ok(GlobalPosition(0))
         }
 
-        fn subscribe(&self) -> broadcast::Receiver<Arc<Vec<SessionEvent>>> {
+        fn subscribe(&self) -> EventTap {
             self.events.subscribe()
         }
     }
@@ -359,7 +358,7 @@ mod tests {
 
         let store = FrozenStore {
             session: agg,
-            events: broadcast::channel(1).0,
+            events: BroadcastBus::new(1),
         };
         let req = extract(&store, &EmptyAgentDirectory, event)
             .await
@@ -396,7 +395,7 @@ mod tests {
 
         let store = FrozenStore {
             session: agg,
-            events: broadcast::channel(1).0,
+            events: BroadcastBus::new(1),
         };
         let req = extract(&store, agents, event)
             .await

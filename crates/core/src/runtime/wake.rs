@@ -150,7 +150,7 @@ pub fn spawn_wake_dispatcher(
                 tokio::select! {
                     _ = tokio::time::sleep(chrono_to_std(deadline - Utc::now())) => break,
                     batch = rx.recv() => {
-                        if let Ok(events) = batch {
+                        if let Some(events) = batch {
                             let earliest = events
                                 .iter()
                                 .filter_map(extract_wake_at)

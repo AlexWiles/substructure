@@ -1,13 +1,15 @@
 use std::collections::HashMap;
-use std::sync::Arc as StdArc;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension};
 use sea_query::{Expr, ExprTrait, Iden, Order, Query, SqliteQueryBuilder};
-use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use crate::event_store::{AppendInput, EventFilter, EventStore, GlobalPosition, Seq, StoreError};
+use crate::event_store::{
+    AppendInput, BroadcastBus, EventBus, EventFilter, EventStore, EventTap, GlobalPosition, Seq,
+    StoreError,
+};
 use crate::protocol::{Message, NewMessage};
 use crate::runtime::session::events::EventPayload;
 use crate::runtime::session::state::{
@@ -99,14 +101,17 @@ enum Events {
 
 pub struct SqliteEventStore {
     db: SqliteDb,
-    tx: broadcast::Sender<StdArc<Vec<SessionEvent>>>,
+    bus: Arc<dyn EventBus>,
 }
 
 impl SqliteEventStore {
     pub fn new(db: SqliteDb) -> Result<Self, StoreError> {
+        Self::with_bus(db, Arc::new(BroadcastBus::default()))
+    }
+
+    pub fn with_bus(db: SqliteDb, bus: Arc<dyn EventBus>) -> Result<Self, StoreError> {
         db.run_schema(SCHEMA)?;
-        let (tx, _) = broadcast::channel(1024);
-        Ok(Self { db, tx })
+        Ok(Self { db, bus })
     }
 }
 
@@ -136,7 +141,7 @@ impl EventStore for SqliteEventStore {
             .map(|(event, position)| event.into_event(GlobalPosition(position)))
             .collect();
 
-        let _ = self.tx.send(StdArc::new(events));
+        self.bus.publish(Arc::new(events));
         Ok(())
     }
 
@@ -183,8 +188,8 @@ impl EventStore for SqliteEventStore {
         .map_err(spawn_err)?
     }
 
-    fn subscribe(&self) -> broadcast::Receiver<StdArc<Vec<SessionEvent>>> {
-        self.tx.subscribe()
+    fn subscribe(&self) -> EventTap {
+        self.bus.subscribe()
     }
 }
 
