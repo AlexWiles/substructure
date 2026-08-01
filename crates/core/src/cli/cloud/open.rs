@@ -23,6 +23,9 @@ pub async fn run(project_id: Option<String>, no_browser: bool, scope: ProjectSco
     // --no-interaction implies --no-browser; opening a browser is never
     // appropriate in non-interactive contexts (CI, scripts).
     let no_browser = no_browser || scope.globals.no_interaction;
+    if !scope.globals.json {
+        println!("{url}");
+    }
     let opened = !no_browser && webbrowser::open(&url).is_ok();
 
     if scope.globals.json {
@@ -34,9 +37,7 @@ pub async fn run(project_id: Option<String>, no_browser: bool, scope: ProjectSco
     }
 
     if opened {
-        println!("Opened {url}");
-    } else {
-        println!("{url}");
+        println!("Opened in your browser.");
     }
     Ok(())
 }

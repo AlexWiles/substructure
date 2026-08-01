@@ -177,9 +177,8 @@ async fn login_local(id: Option<String>, no_browser: bool, cfg: ProjectConfig) -
     if let Some(scope) = &pending.scope {
         println!("Requesting: {scope}");
     }
-    if no_browser || webbrowser::open(&pending.url).is_err() {
-        println!("Open this URL to authorize:\n  {}", pending.url);
-    } else {
+    println!("Open this URL to authorize:\n  {}", pending.url);
+    if !no_browser && webbrowser::open(&pending.url).is_ok() {
         println!("Opened your browser to authorize.");
     }
 
@@ -327,9 +326,8 @@ async fn login_remote(
     if let Some(requested) = &started.scope {
         println!("Requesting: {requested}");
     }
-    if no_browser || webbrowser::open(&started.authorize_url).is_err() {
-        println!("Open this URL to authorize:\n  {}", started.authorize_url);
-    } else {
+    println!("Open this URL to authorize:\n  {}", started.authorize_url);
+    if !no_browser && webbrowser::open(&started.authorize_url).is_ok() {
         println!("Opened your browser to authorize.");
     }
 

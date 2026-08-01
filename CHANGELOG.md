@@ -23,6 +23,10 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
   subs.prod.toml` authenticates against the deployment that file names instead
   of the hosted cloud.
 
+### Changed
+
+- Commands that open a browser now print the URL before they open it.
+
 ### Added
 
 - A worker is now optional. Declare an agent in `substructure.toml`, and the engine decides its turns.
