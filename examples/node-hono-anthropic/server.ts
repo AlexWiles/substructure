@@ -20,7 +20,6 @@ app.post("/", async (c) => {
             ...proposed,
             agent: {
                 ...proposed.agent!,
-                stream: true,
                 system: "Reply using slack compatible mrkdwn",
             },
         };

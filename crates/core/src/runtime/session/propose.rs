@@ -156,7 +156,7 @@ fn resumed(transcript: &[Message], config: &AgentConfig) -> DecisionResponse {
             temperature: None,
             max_completion_tokens: None,
             reasoning: None,
-            stream: Some(config.stream),
+            stream: None,
             retry: Some(
                 config
                     .retry
@@ -205,19 +205,13 @@ fn route_tool_call(
     decision_id: &str,
 ) -> Vec<DecisionAction> {
     if let Some(sub) = config.and_then(|c| c.sub_agent(&call.function.name)) {
-        let session_id = child_session_id(decision_id, &call.id);
-        return vec![
-            DecisionAction::SpawnSubAgent {
-                session_id: session_id.clone(),
-                agent_id: sub.id.clone(),
-                tool_call_id: call.id.clone(),
-                retry: RetryPolicy::no_retry(),
-            },
-            DecisionAction::SendMessage {
-                session_id,
-                message: delegation_message(&call.function.arguments),
-            },
-        ];
+        return vec![DecisionAction::SpawnSubAgent {
+            session_id: child_session_id(decision_id, &call.id),
+            agent_id: sub.id.clone(),
+            tool_call_id: call.id.clone(),
+            message: Some(delegation_message(&call.function.arguments)),
+            retry: RetryPolicy::no_retry(),
+        }];
     }
     vec![DecisionAction::CallTool {
         id: Some(call.id.clone()),
@@ -262,7 +256,7 @@ fn child_session_id(decision_id: &str, tool_call_id: &str) -> String {
 }
 
 /// Record the client's view and prompt the model per the config: model, tools,
-/// stream, and retry from the config, with `[system?] + view` as the prompt.
+/// and retry from the config, with `[system?] + view` as the prompt.
 /// Client system messages are dropped — the config's `system` is the identity,
 /// not client input. The run's client-declared tools are layered onto the config
 /// by default; when that changes the tool set the merged config rides along as
@@ -291,7 +285,7 @@ fn client_turn(
             temperature: None,
             max_completion_tokens: None,
             reasoning: None,
-            stream: Some(effective.stream),
+            stream: None,
             retry: Some(
                 effective
                     .retry
@@ -993,7 +987,6 @@ mod tests {
             llm: Some("claude".to_string()),
             model: "cfg-model".to_string(),
             system: Some("be terse".to_string()),
-            stream: true,
             retry: None,
             tools: vec![
                 tool("confirm", Some(Handler::Client)),
@@ -1028,7 +1021,7 @@ mod tests {
                 ..
             }] => {
                 assert_eq!(model.as_deref(), Some("cfg-model"));
-                assert_eq!(*stream, Some(true));
+                assert_eq!(*stream, None, "the resolve seam settles streaming");
                 assert_eq!(
                     tools.as_ref().map(Vec::len),
                     Some(3),
@@ -1206,18 +1199,16 @@ mod tests {
                 agent_id,
                 tool_call_id,
                 session_id,
-                ..
-            }, DecisionAction::SendMessage {
-                session_id: msg_session,
+                message,
                 ..
             }, DecisionAction::CallTool { name: nb, .. }, DecisionAction::CallTool { name: nc, .. }] =>
             {
                 assert_eq!(agent_id.as_str(), "researcher");
                 assert_eq!(tool_call_id.as_str(), "tc-a");
                 assert_eq!(session_id, &child_session_id("dX", "tc-a"));
-                assert_eq!(
-                    msg_session, session_id,
-                    "the delegating message targets the spawned child"
+                assert!(
+                    message.is_some(),
+                    "the delegating message rides with the spawn"
                 );
                 // A sub-agent becomes a spawn here; every other name becomes a
                 // plain call, and where it runs is settled at dispatch.
@@ -1243,18 +1234,15 @@ mod tests {
         )
         .expect("proposes");
         match &p.actions[..] {
-            [DecisionAction::SpawnSubAgent { session_id, .. }, DecisionAction::SendMessage {
-                session_id: to,
-                message,
-            }] => {
-                assert_eq!(to, session_id);
+            [DecisionAction::SpawnSubAgent { message, .. }] => {
+                let message = message.as_ref().expect("the spawn carries the message");
                 assert_eq!(message.role, Role::User);
                 assert_eq!(
                     message.content.as_ref().and_then(Content::text),
                     Some("find X")
                 );
             }
-            other => panic!("expected spawn + delegating message; got {other:?}"),
+            other => panic!("expected one spawn carrying the message; got {other:?}"),
         }
     }
 

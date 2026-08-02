@@ -7,7 +7,6 @@ def assistant(req):
         return {
             "agent": {
                 **req["proposed"]["agent"],
-                "stream": True,
                 "system": "Delegate weather questions to the weather agent.",
                 "sub_agents": [
                     {
@@ -28,7 +27,6 @@ def weather(req):
         return {
             "agent": {
                 **req["proposed"]["agent"],
-                "stream": True,
                 "system": "You report the weather. Look it up, then answer in one line.",
                 "tools": [
                     {

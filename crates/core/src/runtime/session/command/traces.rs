@@ -139,7 +139,6 @@ fn config() -> AgentConfig {
         llm: Some("claude".to_string()),
         model: "test-model".to_string(),
         system: None,
-        stream: false,
         retry: None,
         tools: Vec::new(),
         sub_agents: Vec::new(),
@@ -1121,6 +1120,7 @@ fn flow_sub_agent_delegation() -> Trace {
             session_id: "child-1".to_string(),
             agent_id: "child".to_string(),
             tool_call_id: "tc-1".to_string(),
+            message: None,
             retry: RetryPolicy::no_retry(),
         }],
     );
@@ -1157,6 +1157,7 @@ fn flow_sub_agent_delegation() -> Trace {
             session_id: "child-2".to_string(),
             agent_id: "child".to_string(),
             tool_call_id: "tc-2".to_string(),
+            message: None,
             retry: RetryPolicy::no_retry(),
         },
         &system(),

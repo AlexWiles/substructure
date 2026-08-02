@@ -256,7 +256,6 @@ export interface AgentConfig {
     mcp?: MCPServer[];
     model: string;
     retry?: RetryPolicy | null;
-    stream?: boolean;
     /**
      * Sub-agents the model can delegate to. Presented to the model as tools (by
      * id) alongside `tools`, but each call spawns a child session rather than

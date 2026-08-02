@@ -30,7 +30,6 @@ function decide({ trigger, proposed }: DecisionRequest): DecisionResponse {
         return {
             agent: {
                 ...proposed.agent!,
-                stream: true,
                 system:
                     "You are a concise, friendly assistant. Use get_current_time for the current " +
                     "UTC time and get_timezone for the user's time zone.",

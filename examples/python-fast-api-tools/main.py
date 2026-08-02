@@ -25,7 +25,6 @@ def decide(req):
         return {
             "agent": {
                 **req["proposed"]["agent"],
-                "stream": True,
                 "tools": [
                     {"name": t["name"], "description": t["description"]} for t in TOOLS
                 ],

@@ -278,7 +278,6 @@ mod tests {
             llm: Some("claude".to_string()),
             model: model.to_string(),
             system: None,
-            stream: true,
             retry: None,
             tools: Vec::new(),
             sub_agents: Vec::new(),

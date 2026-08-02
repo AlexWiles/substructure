@@ -226,10 +226,9 @@ type AgentConfig struct {
 	// filter would not be this one (MCP annotations mean nothing to an A2A
 	// agent), and a union of conditionally-valid fields generates badly in the
 	// Go and Python bindings.
-	MCP    []MCPServer  `json:"mcp,omitempty"`
-	Model  string       `json:"model"`
-	Retry  *RetryPolicy `json:"retry"`
-	Stream *bool        `json:"stream,omitempty"`
+	MCP   []MCPServer  `json:"mcp,omitempty"`
+	Model string       `json:"model"`
+	Retry *RetryPolicy `json:"retry"`
 	// Sub-agents the model can delegate to. Presented to the model as tools (by
 	// id) alongside `tools`, but each call spawns a child session rather than
 	// executing a function.

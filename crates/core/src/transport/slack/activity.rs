@@ -634,6 +634,7 @@ mod tests {
                     id: "sub-1".into(),
                     agent_id: "researcher".into(),
                     tool_call_id: "tc1".into(),
+                    message: None,
                     retry: retry(),
                 }),
             ),

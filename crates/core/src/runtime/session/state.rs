@@ -390,6 +390,9 @@ pub struct SubAgentCallState {
     /// The model tool-call id this delegation answers.
     #[serde(default)]
     pub tool_call_id: String,
+    /// The child's opening message, held until the spawn creates its session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<DraftMessage>,
     /// The child's turn result (or error); `Some` once the turn is terminal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
@@ -1020,6 +1023,7 @@ impl SessionState {
                 EffectPayload::SubAgent(SubAgentCallState {
                     agent_id: payload.agent_id.clone(),
                     tool_call_id: payload.tool_call_id.clone(),
+                    message: payload.message.clone(),
                     result: None,
                     is_error: false,
                 }),
@@ -2137,7 +2141,6 @@ mod agent_version_tests {
             llm: Some("claude".to_string()),
             model: model.to_string(),
             system: None,
-            stream: false,
             retry: None,
             tools: Vec::new(),
             sub_agents: Vec::new(),

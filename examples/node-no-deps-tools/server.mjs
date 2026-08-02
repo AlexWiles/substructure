@@ -20,7 +20,6 @@ function decide({ trigger, proposed }) {
         return {
             agent: {
                 ...proposed.agent,
-                stream: true,
                 tools: tools.map(({ name, description }) => ({ name, description }))
             }
         };

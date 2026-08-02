@@ -2640,6 +2640,7 @@ fn request_sub_agent_emits_requested() {
             session_id: "child-1".to_string(),
             agent_id: "agent-2".to_string(),
             tool_call_id: "call-sa".to_string(),
+            message: None,
             retry: RetryPolicy::no_retry(),
         },
         &Caller::System {
@@ -2664,6 +2665,52 @@ fn request_sub_agent_emits_requested() {
     assert_eq!(sa.tracking.status(), EffectStatus::Pending);
 }
 
+/// The opening message rides on the delegation rather than following it as a
+/// separate send, so it cannot reach the child before the child exists.
+#[test]
+fn request_sub_agent_holds_the_opening_message() {
+    let mut agg = create_session("sess-1", "tenant-a", "user-1");
+
+    let events = dispatch(
+        &mut agg,
+        CommandPayload::RequestSubAgent {
+            session_id: "child-1".to_string(),
+            agent_id: "agent-2".to_string(),
+            tool_call_id: "call-sa".to_string(),
+            message: Some(DraftMessage {
+                id: None,
+                role: Role::User,
+                content: Some(Content::Text("find X".to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            }),
+            retry: RetryPolicy::no_retry(),
+        },
+        &Caller::System {
+            tenant_id: "tenant-a".to_string(),
+        },
+    );
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, EventPayload::SessionMessageRequested(_))),
+        "the delegation sends nothing of its own; got {events:?}"
+    );
+    let held = agg
+        .state
+        .sub_agent("child-1")
+        .expect("sub-agent recorded")
+        .message
+        .clone()
+        .expect("the delegation holds its opening message");
+    assert_eq!(
+        held.content.as_ref().and_then(Content::text),
+        Some("find X")
+    );
+}
+
 #[test]
 fn start_sub_agent_emits_started() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
@@ -2673,6 +2720,7 @@ fn start_sub_agent_emits_started() {
             session_id: "child-1".to_string(),
             agent_id: "agent-2".to_string(),
             tool_call_id: "call-sa".to_string(),
+            message: None,
             retry: RetryPolicy::no_retry(),
         },
         &Caller::System {
@@ -2708,6 +2756,7 @@ fn fail_sub_agent_emits_errored() {
             session_id: "child-1".to_string(),
             agent_id: "agent-2".to_string(),
             tool_call_id: "call-sa".to_string(),
+            message: None,
             retry: RetryPolicy::no_retry(),
         },
         &Caller::System {
@@ -2759,6 +2808,7 @@ fn complete_sub_agent_turn_emits_completed() {
             session_id: "child-1".to_string(),
             agent_id: "agent-2".to_string(),
             tool_call_id: "call-sa".to_string(),
+            message: None,
             retry: RetryPolicy::no_retry(),
         },
         &Caller::System {
@@ -3017,6 +3067,7 @@ fn batch_mixes_tool_and_sub_agent() {
             session_id: "child-1".to_string(),
             agent_id: "researcher".to_string(),
             tool_call_id: "s1".to_string(),
+            message: None,
             retry: RetryPolicy::no_retry(),
         },
         &system(),
@@ -3109,6 +3160,7 @@ fn tool_and_sub_agent_from_one_turn_dispatch_concurrently() {
                     session_id: "child-1".to_string(),
                     agent_id: "researcher".to_string(),
                     tool_call_id: "s1".to_string(),
+                    message: None,
                     retry: RetryPolicy::no_retry(),
                 },
             ],
@@ -3608,6 +3660,7 @@ fn cancel_voids_pending_effects() {
             session_id: "child-1".to_string(),
             agent_id: "helper".to_string(),
             tool_call_id: "call-1".to_string(),
+            message: None,
             retry: RetryPolicy::no_retry(),
         },
         &system(),
@@ -5794,7 +5847,6 @@ fn agent_config(model: &str) -> AgentConfig {
         llm: Some("claude".to_string()),
         model: model.to_string(),
         system: None,
-        stream: true,
         retry: None,
         tools: Vec::new(),
         sub_agents: Vec::new(),
@@ -7721,6 +7773,7 @@ fn void_guard_matches_kind_not_just_id() {
             session_id: "child-x".to_string(),
             agent_id: "helper".to_string(),
             tool_call_id: "shared".to_string(),
+            message: None,
             retry: RetryPolicy::no_retry(),
         },
         &system(),

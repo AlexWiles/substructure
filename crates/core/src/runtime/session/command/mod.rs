@@ -70,6 +70,7 @@ pub enum CommandPayload {
         session_id: String,
         agent_id: String,
         tool_call_id: String,
+        message: Option<DraftMessage>,
         retry: RetryPolicy,
     },
     CompleteSubAgentTurn {
@@ -222,11 +223,13 @@ impl Action {
                 session_id,
                 agent_id,
                 tool_call_id,
+                message,
                 retry,
             } => Some(CommandPayload::RequestSubAgent {
                 session_id,
                 agent_id,
                 tool_call_id,
+                message,
                 retry,
             }),
             Action::ToolResult {
@@ -940,6 +943,7 @@ impl Working {
                 session_id,
                 agent_id,
                 tool_call_id,
+                message,
                 retry,
             } => self
                 .try_then(|s| {
@@ -948,6 +952,7 @@ impl Working {
                         session_id,
                         agent_id,
                         tool_call_id,
+                        message,
                         retry,
                         caller,
                     )

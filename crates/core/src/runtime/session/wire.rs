@@ -331,7 +331,7 @@ fn lower_actions(
                         None => view.to_vec(),
                     });
                     let tools = tools.or_else(|| config.and_then(|c| c.tools_as_llm()));
-                    let stream = stream.or_else(|| config.map(|c| c.stream)).unwrap_or(false);
+                    let stream = stream.unwrap_or(true);
                     let retry = retry
                         .or_else(|| config.and_then(|c| c.retry.clone()))
                         .unwrap_or_else(RetryPolicy::llm_default);
@@ -446,11 +446,13 @@ fn lower_actions(
                     session_id,
                     agent_id,
                     tool_call_id,
+                    message,
                     retry,
                 } => Action::SpawnSubAgent {
                     session_id,
                     agent_id,
                     tool_call_id,
+                    message,
                     retry,
                 },
                 DecisionAction::SendMessage {
@@ -1053,7 +1055,6 @@ mod tests {
             llm: Some(llm.to_string()),
             model: model.to_string(),
             system: system.map(str::to_string),
-            stream: true,
             retry: None,
             tools: Vec::new(),
             sub_agents: Vec::new(),

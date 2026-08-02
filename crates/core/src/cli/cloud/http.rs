@@ -1,8 +1,9 @@
 use std::error::Error as _;
+use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{header, Method, Response, StatusCode};
@@ -11,6 +12,56 @@ use serde::{de::DeserializeOwned, Serialize};
 use crate::api::v1::ApiError;
 
 use super::telemetry;
+
+/// Nothing answered: DNS, connect, TLS or timeout. A type rather than a string
+/// so callers can tell "the server said no" from "there was no server" —
+/// nothing about the deployment may be inferred from this.
+#[derive(Debug)]
+pub struct Unreachable {
+    pub url: String,
+    kind: &'static str,
+    detail: String,
+}
+
+impl fmt::Display for Unreachable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}: {}", self.kind, self.url, self.detail)
+    }
+}
+
+impl std::error::Error for Unreachable {}
+
+/// The server answered, with a status that is not a success.
+#[derive(Debug)]
+pub struct HttpStatus {
+    pub status: StatusCode,
+    pub url: String,
+    /// The API's own error code, absent when the body did not come from one.
+    pub code: Option<String>,
+    message: String,
+    suffix: &'static str,
+}
+
+impl fmt::Display for HttpStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let prefix = match self.code.as_deref() {
+            Some(c) if !c.is_empty() => format!("HTTP {} {}", self.status.as_u16(), c),
+            _ => format!("HTTP {}", self.status.as_u16()),
+        };
+        write!(
+            f,
+            "{prefix} from {}: {}.{}",
+            self.url, self.message, self.suffix
+        )
+    }
+}
+
+impl std::error::Error for HttpStatus {}
+
+/// The status a server answered with, or None when none did.
+pub fn status_of(err: &anyhow::Error) -> Option<StatusCode> {
+    err.downcast_ref::<HttpStatus>().map(|e| e.status)
+}
 
 #[derive(Debug)]
 pub struct CloudClient {
@@ -132,12 +183,16 @@ impl CloudClient {
         let detail = deepest
             .map(|s| s.to_string())
             .unwrap_or_else(|| e.to_string());
-        anyhow!("{kind} {}: {detail}", self.base_url)
+        anyhow::Error::new(Unreachable {
+            url: self.base_url.clone(),
+            kind,
+            detail,
+        })
     }
 
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let res = self.send(self.request(Method::GET, path)).await?;
-        decode(res).await
+        decode(&self.base_url, res).await
     }
 
     pub async fn post_json<B: Serialize, T: DeserializeOwned>(
@@ -148,7 +203,7 @@ impl CloudClient {
         let res = self
             .send(self.request(Method::POST, path).json(body))
             .await?;
-        decode(res).await
+        decode(&self.base_url, res).await
     }
 
     pub async fn patch_json<B: Serialize, T: DeserializeOwned>(
@@ -159,7 +214,7 @@ impl CloudClient {
         let res = self
             .send(self.request(Method::PATCH, path).json(body))
             .await?;
-        decode(res).await
+        decode(&self.base_url, res).await
     }
 
     pub async fn put_json<B: Serialize, T: DeserializeOwned>(
@@ -170,7 +225,7 @@ impl CloudClient {
         let res = self
             .send(self.request(Method::PUT, path).json(body))
             .await?;
-        decode(res).await
+        decode(&self.base_url, res).await
     }
 
     /// A PUT whose success is a 204 — a write-only surface has nothing to
@@ -179,7 +234,7 @@ impl CloudClient {
         let res = self
             .send(self.request(Method::PUT, path).json(body))
             .await?;
-        check_status(res).await?;
+        check_status(&self.base_url, res).await?;
         Ok(())
     }
 
@@ -189,13 +244,13 @@ impl CloudClient {
         let res = self
             .send(self.request(Method::POST, path).json(body))
             .await?;
-        check_status(res).await?;
+        check_status(&self.base_url, res).await?;
         Ok(())
     }
 
     pub async fn delete_discard(&self, path: &str) -> Result<()> {
         let res = self.send(self.request(Method::DELETE, path)).await?;
-        check_status(res).await?;
+        check_status(&self.base_url, res).await?;
         Ok(())
     }
 
@@ -206,7 +261,7 @@ impl CloudClient {
                     .header(header::CONTENT_LENGTH, "0"),
             )
             .await?;
-        decode(res).await
+        decode(&self.base_url, res).await
     }
 
     // Raw Response: OAuth device-flow polling treats 400 `authorization_pending` as "keep polling".
@@ -228,12 +283,15 @@ impl CloudClient {
                     .header(header::ACCEPT, "text/event-stream"),
             )
             .await?;
-        let res = check_status(res).await?;
+        let res = check_status(&self.base_url, res).await?;
 
         let mut stream = res.bytes_stream();
         let mut buf: Vec<u8> = Vec::new();
         while let Some(chunk) = stream.next().await {
-            buf.extend_from_slice(&chunk.context("reading SSE chunk")?);
+            let chunk = chunk.with_context(|| {
+                format!("the connection to {} dropped mid-stream", self.base_url)
+            })?;
+            buf.extend_from_slice(&chunk);
             // Lines are terminated by \n; \r is tolerated and stripped.
             while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
                 let line: Vec<u8> = buf.drain(..=pos).collect();
@@ -247,34 +305,111 @@ impl CloudClient {
     }
 }
 
-async fn decode<T: DeserializeOwned>(res: Response) -> Result<T> {
-    let res = check_status(res).await?;
+/// One line of a body that is not the API's own error shape, so an HTML page
+/// from a proxy is readable rather than pasted whole.
+fn snippet(body: &str) -> String {
+    let line = body.trim().lines().next().unwrap_or("").trim();
+    match line.char_indices().nth(80) {
+        Some((cut, _)) => format!("{}…", &line[..cut]),
+        None => line.to_string(),
+    }
+}
+
+async fn decode<T: DeserializeOwned>(url: &str, res: Response) -> Result<T> {
+    let res = check_status(url, res).await?;
     res.json::<T>().await.context("decoding response JSON")
 }
 
-async fn check_status(res: Response) -> Result<Response> {
+async fn check_status(url: &str, res: Response) -> Result<Response> {
     let status = res.status();
     if status.is_success() {
         return Ok(res);
     }
 
+    let path = res.url().path().to_string();
     let body_text = res.text().await.unwrap_or_default();
     let parsed: Option<ApiError> = serde_json::from_str(&body_text).ok();
+    let from_api = parsed.is_some();
     let (code, message) = parsed
         .map(|b| (b.error.code, b.error.message))
         .unwrap_or((None, None));
 
-    let raw_msg = message.unwrap_or_else(|| body_text.lines().next().unwrap_or("").to_string());
-    let msg = raw_msg.trim_end_matches('.');
-    let prefix = match code.as_deref() {
-        Some(c) if !c.is_empty() => format!("HTTP {} {}", status.as_u16(), c),
-        _ => format!("HTTP {}", status.as_u16()),
+    // A body the API did not write means a proxy or the wrong URL answered, so
+    // its status describes that, not the account.
+    let message = match message {
+        Some(m) => m.trim_end_matches('.').to_string(),
+        None if !from_api && !body_text.trim().is_empty() => {
+            format!("not an API response: \"{}\"", snippet(&body_text))
+        }
+        None if status == StatusCode::NOT_FOUND => format!("no such endpoint: {path}"),
+        None => format!("no detail for {path}"),
     };
     let suffix = match status {
-        StatusCode::UNAUTHORIZED => " Run `subs login` to authenticate.",
-        StatusCode::FORBIDDEN => " Your account does not have access to this resource.",
+        StatusCode::UNAUTHORIZED if from_api => " Run `subs login`.",
         _ => "",
     };
 
-    bail!("{prefix}: {msg}.{suffix}")
+    Err(anyhow::Error::new(HttpStatus {
+        status,
+        url: url.to_string(),
+        code,
+        message,
+        suffix,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unreachable_server_names_the_url_and_the_reason() {
+        let e = Unreachable {
+            url: "http://127.0.0.1:1".to_string(),
+            kind: "could not connect to",
+            detail: "Connection refused (os error 61)".to_string(),
+        };
+        assert_eq!(
+            e.to_string(),
+            "could not connect to http://127.0.0.1:1: Connection refused (os error 61)"
+        );
+    }
+
+    #[test]
+    fn a_status_carries_the_api_code_and_only_the_api_gets_the_login_hint() {
+        let from_api = HttpStatus {
+            status: StatusCode::UNAUTHORIZED,
+            url: "https://api.example".to_string(),
+            code: Some("unauthenticated".to_string()),
+            message: "Not authenticated".to_string(),
+            suffix: " Run `subs login`.",
+        };
+        assert_eq!(
+            from_api.to_string(),
+            "HTTP 401 unauthenticated from https://api.example: Not authenticated. \
+             Run `subs login`."
+        );
+
+        let from_proxy = HttpStatus {
+            status: StatusCode::UNAUTHORIZED,
+            url: "https://api.example".to_string(),
+            code: None,
+            message: "not an API response: \"<html>\"".to_string(),
+            suffix: "",
+        };
+        assert_eq!(
+            from_proxy.to_string(),
+            "HTTP 401 from https://api.example: not an API response: \"<html>\"."
+        );
+    }
+
+    #[test]
+    fn a_body_that_is_not_the_api_is_cut_to_one_readable_line() {
+        assert_eq!(snippet("  <html>\n<body>\n"), "<html>");
+        assert_eq!(snippet(""), "");
+        let long = "x".repeat(300);
+        let cut = snippet(&long);
+        assert_eq!(cut.chars().count(), 81);
+        assert!(cut.ends_with('…'));
+    }
 }

@@ -17,6 +17,7 @@ use substructure_core::llm::{
 };
 use substructure_core::protocol::{
     AgentConfig, ClientInput, Content, DraftMessage, LlmRequest, LlmResponse, Role, SessionOwner,
+    SubAgent, ToolCall, ToolCallFunction,
 };
 use substructure_core::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use substructure_core::providers::sqlite::{
@@ -40,6 +41,10 @@ const TENANT: &str = "default";
 
 /// Replies with fixed text and records what it was asked, so a test can assert
 /// on the prompt the engine composed without a network.
+///
+/// An offered tool is called once, before any tool result is in the view: a
+/// config declaring a sub-agent gets one delegation, and the result that
+/// follows ends the turn with the reply.
 #[derive(Default)]
 struct StubModel {
     reply: String,
@@ -54,6 +59,25 @@ impl LlmCallable for StubModel {
         _ctx: &CallContext<'_>,
     ) -> Result<LlmResponse, LlmCallError> {
         self.seen.lock().unwrap().push(request.clone());
+        let answered = request.messages.iter().any(|m| m.role == Role::Tool);
+        if let (false, Some(tool)) = (answered, request.tools.as_ref().and_then(|t| t.first())) {
+            return Ok(LlmResponse {
+                model: request.model.clone(),
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "tc-1".to_string(),
+                    call_type: "function".to_string(),
+                    function: ToolCallFunction {
+                        name: tool.name.clone(),
+                        arguments: r#"{"message":"do it"}"#.to_string(),
+                    },
+                }],
+                finish_reason: Some("tool_calls".to_string()),
+                usage: None,
+                cost: None,
+                images: vec![],
+            });
+        }
         Ok(LlmResponse {
             model: request.model.clone(),
             content: Some(self.reply.clone()),
@@ -94,7 +118,6 @@ fn config(llm: &str) -> AgentConfig {
         llm: Some(llm.to_string()),
         model: "stub-model".to_string(),
         system: Some("Be brief.".to_string()),
-        stream: false,
         retry: None,
         tools: Vec::new(),
         sub_agents: Vec::new(),
@@ -505,4 +528,55 @@ async fn a_worker_sees_the_declared_config_as_its_start_proposal() {
         "the echo worker completes the turn: {events:#?}"
     );
     assert_eq!(h.model.seen.lock().unwrap().len(), 1);
+}
+
+/// A delegation and its opening message travel together, so the message cannot
+/// reach the child before the child's session exists. When it did, the child
+/// started with an empty transcript, never answered, and the parent's turn
+/// hung — which the drain in `turn` reports as a turn that never settled.
+#[tokio::test]
+async fn a_delegation_opens_its_child_with_the_message() {
+    let mut boss = config("claude");
+    boss.sub_agents = vec![SubAgent {
+        id: "helper".to_string(),
+        description: "Does the work.".to_string(),
+    }];
+    let h = start(BTreeMap::from([
+        (
+            "boss".to_string(),
+            AgentEntry {
+                config: Some(boss),
+                worker: None,
+            },
+        ),
+        ("helper".to_string(), engine_hosted("claude")),
+    ]))
+    .await;
+
+    let events = turn(&h, "boss", "hi").await;
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::SubAgentStarted(_))),
+        "the child session starts: {events:#?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::TurnCompleted(_))),
+        "the delegation folds back and the turn completes: {events:#?}"
+    );
+    assert!(
+        h.model
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r
+                .messages
+                .iter()
+                .any(|m| m.content.as_ref().and_then(Content::text) == Some("do it"))),
+        "the child is prompted with the delegating message"
+    );
 }

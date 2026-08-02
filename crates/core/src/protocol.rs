@@ -268,8 +268,6 @@ pub struct AgentConfig {
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
-    #[serde(default)]
-    pub stream: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetryPolicy>,
     /// Worker- or client-executed tools the model can call.
@@ -280,15 +278,7 @@ pub struct AgentConfig {
     /// executing a function.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sub_agents: Vec<SubAgent>,
-    /// MCP servers the agent draws tools from. The engine resolves each against
-    /// its connection registry into [`ConnectorTool`]s the model sees alongside
-    /// `tools`. Like `sub_agents`, these are never merged into `tools` — the
-    /// worker declares the server, not its tools.
-    ///
-    /// A second protocol gets its own field rather than a `type` tag here: its
-    /// filter would not be this one (MCP annotations mean nothing to an A2A
-    /// agent), and a union of conditionally-valid fields generates badly in the
-    /// Go and Python bindings.
+    /// MCP servers
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<McpServer>,
 }
@@ -1165,6 +1155,10 @@ pub enum DecisionAction {
         agent_id: String,
         /// The model tool-call this delegation answers — always required.
         tool_call_id: String,
+        /// The child's opening message. It travels with the spawn, so it
+        /// cannot race the creation of the session it opens.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<DraftMessage>,
         #[serde(default = "RetryPolicy::no_retry")]
         retry: RetryPolicy,
     },

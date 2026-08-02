@@ -39,11 +39,6 @@ const app = new Hono();
 app.post("/", async (c) => {
     const { trigger, proposed } = await c.req.json();
 
-    // The declared config arrives as the proposal; add streaming to it.
-    if (trigger.type === "session.start") {
-        return c.json({ agent: { ...proposed.agent, stream: true } });
-    }
-
     if (trigger.type === "llm.execute") {
         return streamSSE(c, async (sse) => {
             const stream = anthropic.messages.stream(trigger.request);

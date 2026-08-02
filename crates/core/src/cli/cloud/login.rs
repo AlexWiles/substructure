@@ -120,10 +120,22 @@ pub async fn run(globals: &CloudGlobals, no_browser: bool) -> Result<()> {
             break tok.access_token;
         }
 
-        let err: OauthError = res
-            .json()
-            .await
-            .context("decoding OAuth error body during polling")?;
+        // A body that is not an OAuth error came from something other than the
+        // server — a proxy, or a deployment that went away mid-flow.
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        let err: OauthError = serde_json::from_str(&body).with_context(|| {
+            format!(
+                "HTTP {} from {api_url} while waiting for approval: {}",
+                status.as_u16(),
+                body.lines()
+                    .next()
+                    .unwrap_or("no body")
+                    .chars()
+                    .take(80)
+                    .collect::<String>(),
+            )
+        })?;
         match err.error.as_str() {
             "authorization_pending" => continue,
             "slow_down" => {

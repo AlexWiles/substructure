@@ -34,7 +34,6 @@ var tools = []tool{
 func decide(req DecisionRequest) DecisionResponse {
 	if req.Trigger.Type == SessionStart {
 		// The engine will use this agent config to generate proposed actions.
-		stream := true
 		agentTools := make([]AgentTool, len(tools))
 		for i, t := range tools {
 			description := t.description
@@ -43,7 +42,6 @@ func decide(req DecisionRequest) DecisionResponse {
 		// The declared config arrives as the proposal; keep its `Llm` and
 		// `Model` and add only what this worker knows.
 		agent := *req.Proposed.Agent
-		agent.Stream = &stream
 		agent.Tools = agentTools
 		return DecisionResponse{Agent: &agent}
 	}

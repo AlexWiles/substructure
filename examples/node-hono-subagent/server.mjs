@@ -8,7 +8,6 @@ function assistant({ trigger, proposed }) {
             return {
                 agent: {
                     ...proposed.agent,
-                    stream: true,
                     system: "Delegate weather questions to the weather agent.",
                     sub_agents: [{ id: "weather", description: "Answers weather questions for a city." }]
                 }
@@ -25,7 +24,6 @@ function weather({ trigger, proposed }) {
             return {
                 agent: {
                     ...proposed.agent,
-                    stream: true,
                     system: "You report the weather. Look it up, then answer in one line.",
                     tools: [
                         {

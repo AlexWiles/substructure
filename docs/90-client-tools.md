@@ -19,7 +19,6 @@ function decide({ trigger, proposed }) {
         return {
             agent: {
                 model: "claude-haiku-4-5-20251001",
-                stream: true,
                 system: "For location questions, call get_location instead of guessing.",
                 tools: [
                     {

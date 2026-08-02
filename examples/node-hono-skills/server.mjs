@@ -30,7 +30,6 @@ const load_skill = {
 const agent = (loaded) => ({
     llm: "claude",
     model: "claude-haiku-4-5-20251001",
-    stream: true,
     system: `You have skills you can load when a task matches one. Load it before starting.\n\n${catalog}`,
     tools: [load_skill, ...loaded.flatMap((name) => SKILLS[name].tools)]
 });

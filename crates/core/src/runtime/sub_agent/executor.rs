@@ -4,11 +4,13 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::protocol::DraftMessage;
 use crate::providers::memory_queue::TaskQueue;
 use crate::runtime::event_store::EventStore;
 use crate::runtime::session::command::{CommandPayload, Outcome, SessionError, SettleError};
 use crate::runtime::session::state::EffectKind;
 use crate::runtime::session::{execute, ConflictRetry, ExecuteError, ExecuteInput};
+use crate::runtime::span::SpanContext;
 use crate::runtime::Caller;
 
 use super::SubAgentTask;
@@ -41,6 +43,51 @@ pub fn spawn_sub_agent_task_executor(
     handles
 }
 
+/// Deliver a freshly created child's opening message. Nothing to do when the
+/// delegation carries none — a worker may open the child its own way.
+async fn open_child(
+    store: &dyn EventStore,
+    tenant_id: &str,
+    child_session_id: &str,
+    message: Option<DraftMessage>,
+    span: &SpanContext,
+) -> Result<(), ExecuteError> {
+    let Some(message) = message else {
+        return Ok(());
+    };
+    send_message(store, tenant_id, child_session_id, message, span)
+        .await
+        .map(|_| ())
+}
+
+async fn send_message(
+    store: &dyn EventStore,
+    tenant_id: &str,
+    session_id: &str,
+    message: DraftMessage,
+    span: &SpanContext,
+) -> Result<(), ExecuteError> {
+    execute(
+        store,
+        ExecuteInput {
+            session_id: session_id.to_string(),
+            caller: Caller::System {
+                tenant_id: tenant_id.to_string(),
+            },
+            command: CommandPayload::SendMessage {
+                message,
+                stream: false,
+                turn_id: Some(Uuid::now_v7().to_string()),
+                parent_id: None,
+            },
+            span: span.child("send_session_message"),
+        },
+        &ConflictRetry::default(),
+    )
+    .await
+    .map(|_| ())
+}
+
 async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
     match task {
         SubAgentTask::SpawnSubAgent {
@@ -50,6 +97,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
             agent_id,
             owner,
             ancestry,
+            message,
             retry,
             span,
             ..
@@ -73,9 +121,20 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
             )
             .await;
 
+            // The opening message rides with the spawn, so it lands on a
+            // session that exists. A delegation whose message never arrives
+            // would leave the child idle and the parent waiting forever, so a
+            // failed send fails the delegation.
             let outcome = match create_result {
                 Ok(_) | Err(ExecuteError::Command(SessionError::SessionAlreadyCreated)) => {
-                    Outcome::SubAgentStarted
+                    match open_child(store, &tenant_id, &child_session_id, message, &span).await {
+                        Ok(()) => Outcome::SubAgentStarted,
+                        Err(err) => SettleError::new(
+                            format!("failed to send the child's opening message: {err}"),
+                            false,
+                        )
+                        .into(),
+                    }
                 }
                 Err(err) => {
                     SettleError::new(format!("failed to create child session: {err}"), false).into()
@@ -118,22 +177,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
             span,
             ..
         } => {
-            let result = execute(
-                store,
-                ExecuteInput {
-                    session_id: target_session_id.clone(),
-                    caller: Caller::System { tenant_id },
-                    command: CommandPayload::SendMessage {
-                        message,
-                        stream: false,
-                        turn_id: Some(Uuid::now_v7().to_string()),
-                        parent_id: None,
-                    },
-                    span: span.child("send_session_message"),
-                },
-                &ConflictRetry::default(),
-            )
-            .await;
+            let result = send_message(store, &tenant_id, &target_session_id, message, &span).await;
 
             if let Err(err) = result {
                 tracing::error!(

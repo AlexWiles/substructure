@@ -64,7 +64,7 @@ pub async fn run(cmd: LinkCommand) -> Result<()> {
 
     let org = if let Some(o) = cmd.org.clone() {
         o
-    } else if let Some(o) = ctx.server_default_org().await {
+    } else if let Some(o) = ctx.server_default_org().await? {
         o
     } else if interactive {
         pickers::pick_org(&ctx).await?
@@ -77,12 +77,12 @@ pub async fn run(cmd: LinkCommand) -> Result<()> {
         Some(s) if s.is_empty() => None,
         Some(s) => Some(s),
         None => {
-            if let Some(a) = ctx.server_default_project().await {
-                Some(a)
-            } else if interactive {
-                pickers::pick_project(&ctx, &org).await?
-            } else {
-                None
+            // The org is what a link needs; a server that could not say which
+            // project it holds does not stop the file being written.
+            match ctx.server_default_project().await.unwrap_or(None) {
+                Some(a) => Some(a),
+                None if interactive => pickers::pick_project(&ctx, &org).await?,
+                None => None,
             }
         }
     };

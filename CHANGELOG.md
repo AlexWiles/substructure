@@ -16,15 +16,21 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 - An LLM call that times out on its last attempt now settles the turn instead of stalling it.
 - A turn now completes when its finalizer decision settles without a `done` action.
 - The push transport no longer cuts long streams.
+- A delegation now carries its opening message, so a sub-agent turn no longer stalls when the message beats the child session.
 - A failed sub-agent and an unconfigured session now report errors.
 - A tool result that arrives after its deadline no longer reports an error.
 - `subs login` and `subs logout` now read the environment file's
   `[deployment].url` like every other cloud command, so `subs login -c
   subs.prod.toml` authenticates against the deployment that file names instead
   of the hosted cloud.
+- A CLI command that cannot reach the server now says so, instead of reporting a
+  missing org or project, or a deployment that is too old.
+- CLI errors now name the endpoint, and say when the response is not an API
+  response.
 
 ### Changed
 
+- The agent config has no `stream` field. LLM calls stream unless the `llm.call` action sets `stream: false`.
 - Commands that open a browser now print the URL before they open it.
 
 ### Added

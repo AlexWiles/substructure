@@ -24,7 +24,6 @@ var (
 func decide(req DecisionRequest) DecisionResponse {
 	if req.Trigger.Type == SessionStart {
 		// Offer every MCP tool to the model as-is.
-		stream := true
 		tools := make([]AgentTool, len(mcpTools))
 		for i, t := range mcpTools {
 			description := t.Description
@@ -33,7 +32,6 @@ func decide(req DecisionRequest) DecisionResponse {
 		// The declared config arrives as the proposal; keep its `Llm` and
 		// `Model` and add only what this worker knows.
 		agent := *req.Proposed.Agent
-		agent.Stream = &stream
 		agent.Tools = tools
 		return DecisionResponse{Agent: &agent}
 	}

@@ -66,6 +66,7 @@ impl EventProcessor for SubAgentDispatchProjection {
                     agent_id: sa.agent_id.clone(),
                     owner,
                     ancestry,
+                    message: sa.message.clone(),
                     retry: effect.tracking.retry_policy.clone(),
                     span: event.span,
                 })

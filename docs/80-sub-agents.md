@@ -40,7 +40,7 @@ specialist, or the reverse:
 function assistant({ trigger, proposed }) {
     // The declared config arrives as the proposal; amend what you need.
     if (trigger.type === "session.start") {
-        return { agent: { ...proposed.agent, stream: true } };
+        return { agent: { ...proposed.agent, system: "Delegate poetry to the poet." } };
     }
     return proposed;
 }
@@ -60,8 +60,9 @@ shares the model's tool namespace, so it must not collide with a tool name.
 
 ## Delegating
 
-When the model calls a sub-agent, `proposed` spawns a child session and sends
-its opening message, the `message` argument. The child runs as an ordinary
+When the model calls a sub-agent, `proposed` spawns a child session. The spawn
+carries the child's opening message, the `message` argument, so the message
+cannot arrive before the session it opens. The child runs as an ordinary
 session with its own `agent_id`, transcript, and cost. Its decision requests
 carry an `ancestry` list of the parent sessions above it.
 

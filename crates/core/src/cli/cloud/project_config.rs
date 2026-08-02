@@ -847,7 +847,6 @@ mod tests {
             llm = "cheap"
             model = "gpt-5-mini"
             system = "Be brief."
-            stream = true
             worker = "http://localhost:4444"
             signing_secret_env = "S"
             mcp = [{ id = "sentry" }]

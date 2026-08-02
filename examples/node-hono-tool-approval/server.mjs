@@ -56,7 +56,6 @@ function decide({ trigger, proposed, state }) {
         return {
             agent: {
                 ...proposed.agent,
-                stream: true,
                 tools: tools.map(({ name, description, input }) => ({ name, description, input }))
             },
             state

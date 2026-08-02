@@ -14,6 +14,8 @@ pub enum SubAgentTask {
         agent_id: String,
         owner: SessionOwner,
         ancestry: Vec<String>,
+        /// The child's opening message, sent right after its session exists.
+        message: Option<DraftMessage>,
         retry: RetryPolicy,
         span: SpanContext,
     },

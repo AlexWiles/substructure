@@ -195,7 +195,7 @@ type Action =
           temperature?: number
           max_completion_tokens?: number
           reasoning?: ReasoningConfig
-          stream?: boolean
+          stream?: boolean        // default true
           retry?: RetryPolicy
           handler?: "server" | "worker"  // default server
       }
@@ -241,6 +241,7 @@ type Action =
           session_id: string
           agent_id: string
           tool_call_id: string    // the model tool call this delegation answers
+          message?: DraftMessage  // the child's opening message, sent once it exists
           retry?: RetryPolicy
       }
     | { type: "message.send"; session_id: string; message: DraftMessage }
@@ -262,7 +263,6 @@ current conversation.
 type AgentConfig = {
     model: string               // the only required field
     system?: string
-    stream?: boolean            // default false
     handler?: "server" | "worker"  // where LLM calls run; default server
     format?: "openai" | "anthropic"  // wire format for worker-handled LLM
                                      // calls; requires handler worker

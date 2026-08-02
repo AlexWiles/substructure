@@ -31,7 +31,6 @@ def decide(req: DecisionRequest) -> DecisionResponse:
                 # `llm` and `model` name what substructure.toml declares.
                 llm="claude",
                 model="claude-haiku-4-5-20251001",
-                stream=True,
                 tools=[
                     AgentTool(name=t["name"], description=t["description"])
                     for t in TOOLS

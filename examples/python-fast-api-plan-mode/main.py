@@ -35,14 +35,12 @@ PROFILES = {
     "planning": {
         "llm": "claude",
         "model": "claude-haiku-4-5-20251001",
-        "stream": True,
         "system": "You are planning. Break the goal into steps; call add_step for each. Do not execute yet.",
         "tools": PLANNING_TOOLS,
     },
     "executing": {
         "llm": "claude",
         "model": "claude-haiku-4-5-20251001",
-        "stream": True,
         "system": "You are executing. Work through each pending step in order; call complete_step with its number when done.",
         "tools": EXECUTING_TOOLS,
     },
@@ -55,7 +53,6 @@ def agent(mode):
     return {
         "llm": profile["llm"],
         "model": profile["model"],
-        "stream": profile["stream"],
         "system": profile["system"],
         "tools": [
             {"name": t["name"], "description": t["description"], "input": t["input"]}

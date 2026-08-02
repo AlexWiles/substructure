@@ -367,6 +367,9 @@ pub enum Action {
         agent_id: String,
         /// The model tool-call this delegation answers.
         tool_call_id: String,
+        /// The child's opening message, delivered once its session exists.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<DraftMessage>,
         #[serde(default = "RetryPolicy::no_retry")]
         retry: RetryPolicy,
     },

@@ -23,7 +23,6 @@ function decide({ trigger, proposed }: DecisionRequest): DecisionResponse {
         return {
             agent: {
                 ...proposed.agent!,
-                stream: true,
                 tools: tools.map(({ name, description }) => ({ name, description })),
             },
         };

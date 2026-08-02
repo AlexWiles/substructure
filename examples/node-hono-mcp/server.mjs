@@ -20,7 +20,6 @@ async function decide({ trigger, proposed }) {
         return {
             agent: {
                 ...proposed.agent,
-                stream: true,
                 tools: tools.map((t) => ({
                     name: t.name,
                     description: t.description,

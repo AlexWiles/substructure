@@ -9,11 +9,13 @@
 
 use anyhow::{bail, Context as _, Result};
 use clap::Subcommand;
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 
 use crate::api::v1::{ApplyResponse, ConfigEvent, Notice, NoticeLevel, Page, Project};
 
 use super::context::Context;
+use super::http;
 use super::pickers;
 use super::print;
 use super::project_config::{self, Found, ProjectConfig};
@@ -129,9 +131,14 @@ pub async fn run(cmd: ApplyCommand) -> Result<()> {
 ///
 /// The gate is the feature, not its absence: a deployment that advertises
 /// nothing is one this CLI predates, and there is no older shape to fall back
-/// to.
+/// to. Only an answer decides that — a request that failed says nothing about
+/// what the deployment offers, so it is reported as itself.
 async fn require_agents(ctx: &Context) -> Result<()> {
-    let meta: crate::api::v1::Meta = ctx.client.get("/api/v1/meta").await.unwrap_or_default();
+    let meta: crate::api::v1::Meta = match ctx.client.get("/api/v1/meta").await {
+        Ok(meta) => meta,
+        Err(e) if http::status_of(&e) == Some(StatusCode::NOT_FOUND) => Default::default(),
+        Err(e) => return Err(e),
+    };
     if meta.has("agents") {
         return Ok(());
     }
@@ -166,7 +173,7 @@ async fn create(ctx: &Context, cmd: &ApplyCommand, config: &ProjectConfig) -> Re
     let interactive = pickers::interactive(&cmd.globals);
     let org = if let Some(org) = cmd.org.clone().or_else(|| config.org().map(str::to_string)) {
         org
-    } else if let Some(org) = ctx.server_default_org().await {
+    } else if let Some(org) = ctx.server_default_org().await? {
         org
     } else if interactive {
         pickers::pick_org(ctx).await?
@@ -362,7 +369,7 @@ async fn log(cursor: Option<String>, limit: usize, globals: CloudGlobals) -> Res
     let ctx = Context::load(&globals)?;
     let project = ctx
         .pinned_project(None)
-        .await
+        .await?
         .context("no project. Pin one with `subs apply`, or pass -c <file>.")?;
 
     let mut path = format!("/api/v1/projects/{project}/config/events?limit={limit}");

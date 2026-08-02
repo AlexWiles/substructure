@@ -37,7 +37,6 @@ async def decide(req):
             # the `llm` and `model` substructure.toml names.
             "agent": {
                 **req["proposed"]["agent"],
-                "stream": True,
                 "tools": [
                     {"name": t.name, "description": t.description, "input": t.inputSchema}
                     for t in mcp["tools"]

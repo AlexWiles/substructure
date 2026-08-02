@@ -231,6 +231,9 @@ pub struct SubAgentRequested {
     pub agent_id: String,
     #[serde(default)]
     pub tool_call_id: String,
+    /// The child's opening message, sent once its session is created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<DraftMessage>,
     pub retry: RetryPolicy,
 }
 

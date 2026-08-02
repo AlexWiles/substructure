@@ -521,6 +521,12 @@ class DecisionAction7(BaseModel):
         extra='forbid',
     )
     agent_id: str
+    message: Annotated[
+        DraftMessage | None,
+        Field(
+            description='The child\'s opening message. It travels with the spawn, so it\ncannot race the creation of the session it opens.'
+        ),
+    ] = None
     retry: RetryPolicy | None = None
     session_id: str
     tool_call_id: Annotated[
@@ -694,7 +700,6 @@ class AgentConfig(BaseModel):
     ] = None
     model: str
     retry: RetryPolicy | None = None
-    stream: bool | None = None
     sub_agents: Annotated[
         list[SubAgent] | None,
         Field(

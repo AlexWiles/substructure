@@ -348,7 +348,7 @@ async fn login_remote(
     }
     let project = ctx
         .pinned_project(scope.project.as_deref())
-        .await
+        .await?
         .context("no project to grant the connection to. Pass --project <id>, or --no-grant.")?;
     ctx.client
         .post_json_discard(

@@ -5,7 +5,7 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import OpenAI from "openai";
 import type { ChatCompletionStreamParams } from "openai/lib/ChatCompletionStream";
-import type { DecisionRequest, DecisionResponse } from "./protocol.ts";
+import type { DecisionRequest } from "./protocol.ts";
 
 const openai = new OpenAI();
 
@@ -13,17 +13,8 @@ const app = new Hono();
 app.post("/", async (c) => {
     const { trigger, proposed }: DecisionRequest = await c.req.json();
 
-    // Refine the declared agent. `llm = "byo"` in substructure.toml is a
-    // `type = "worker"` block, so the calls come back here as `llm.execute`,
-    // shaped by that block's `format`.
-    if (trigger.type === "session.start") {
-        const decision: DecisionResponse = {
-            ...proposed,
-            agent: { ...proposed.agent!, stream: true },
-        };
-        return c.json(decision);
-    }
-
+    // `llm = "byo"` in substructure.toml is a `type = "worker"` block, so the
+    // calls come back here as `llm.execute`, shaped by that block's `format`.
     // The request is already a Chat Completions body; raw stream chunks and
     // the final completion go straight back.
     if (trigger.type === "llm.execute")

@@ -1,4 +1,6 @@
-use anyhow::{bail, Result};
+use std::sync::Mutex;
+
+use anyhow::{anyhow, bail, Result};
 
 use super::credentials;
 use super::http::CloudClient;
@@ -24,6 +26,9 @@ pub struct Context {
     pub config: Option<ProjectConfig>,
     pub client: CloudClient,
     pub globals: CloudGlobals,
+    /// Why the defaults probe learned nothing, kept so a caller that finds no
+    /// default can say the server was unreachable instead of blaming the file.
+    probe_error: Mutex<Option<String>>,
 }
 
 impl Context {
@@ -49,6 +54,7 @@ impl Context {
             config,
             client,
             globals: globals.clone(),
+            probe_error: Mutex::new(None),
         })
     }
 
@@ -73,7 +79,7 @@ impl Context {
 
         // A single-tenant server (e.g. a local server) advertises its org/project
         // in response headers; adopt the project and skip the picker entirely.
-        if let Some(project) = ctx.server_default_project().await {
+        if let Some(project) = ctx.server_default_project().await? {
             return Ok((ctx, project));
         }
 
@@ -94,12 +100,12 @@ impl Context {
     /// The project to act on without a picker: flag, then the file's pin, then
     /// what a single-tenant server advertises. For callers that can carry on
     /// without one.
-    pub async fn pinned_project(&self, flag: Option<&str>) -> Option<String> {
+    pub async fn pinned_project(&self, flag: Option<&str>) -> Result<Option<String>> {
         if let Some(project) = flag {
-            return Some(project.to_string());
+            return Ok(Some(project.to_string()));
         }
         if let Some(project) = self.pinned(ProjectConfig::project) {
-            return Some(project);
+            return Ok(Some(project));
         }
         self.server_default_project().await
     }
@@ -116,7 +122,7 @@ impl Context {
         if let Some(org) = self.pinned(ProjectConfig::org) {
             return Ok(org);
         }
-        if let Some(org) = self.server_default_org().await {
+        if let Some(org) = self.server_default_org().await? {
             return Ok(org);
         }
         if pickers::interactive(&self.globals) {
@@ -126,22 +132,33 @@ impl Context {
     }
 
     /// The org a single-tenant server advertises, or None against the cloud.
-    pub async fn server_default_org(&self) -> Option<String> {
-        self.probe_server_defaults().await;
-        self.client.default_org()
+    pub async fn server_default_org(&self) -> Result<Option<String>> {
+        self.probe_server_defaults().await?;
+        Ok(self.client.default_org())
     }
 
     /// The project a single-tenant server advertises, or None against the cloud.
-    pub async fn server_default_project(&self) -> Option<String> {
-        self.probe_server_defaults().await;
-        self.client.default_project()
+    pub async fn server_default_project(&self) -> Result<Option<String>> {
+        self.probe_server_defaults().await?;
+        Ok(self.client.default_project())
     }
 
     // Defaults ride on response headers (captured in CloudClient), so one
-    // throwaway request is enough to learn them; the cloud sends none.
-    async fn probe_server_defaults(&self) {
+    // throwaway request is enough to learn them; the cloud sends none. A probe
+    // that answered headers succeeded whatever its status said — only a probe
+    // that taught us nothing reports why.
+    async fn probe_server_defaults(&self) -> Result<()> {
         if self.client.needs_default_probe() {
-            let _ = self.client.get::<serde_json::Value>("/api/v1/orgs").await;
+            if let Err(e) = self.client.get::<serde_json::Value>("/api/v1/orgs").await {
+                *self.probe_error.lock().unwrap() = Some(format!("{e:#}"));
+            }
+        }
+        if self.client.default_org().is_some() || self.client.default_project().is_some() {
+            return Ok(());
+        }
+        match &*self.probe_error.lock().unwrap() {
+            Some(e) => Err(anyhow!("{e}")),
+            None => Ok(()),
         }
     }
 }
@@ -185,6 +202,25 @@ mod tests {
             api_url(&globals(Some("https://flag.example"), Some(path))).unwrap(),
             "https://flag.example"
         );
+    }
+
+    /// The failure a caller must not read as "you pinned nothing".
+    #[tokio::test]
+    async fn a_server_that_never_answers_is_reported_as_such_not_as_a_missing_pin() {
+        let globals = globals(Some("http://127.0.0.1:1"), None);
+        let ctx = Context::with_config(&globals, None).unwrap();
+
+        let err = ctx.require_org(None).await.unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.starts_with("could not connect to http://127.0.0.1:1"),
+            "{chain}"
+        );
+        assert!(!chain.contains("no org selected"), "{chain}");
+
+        // The probe runs once; a second caller gets the same reason, not silence.
+        let err = ctx.server_default_project().await.unwrap_err();
+        assert!(format!("{err:#}").contains("could not connect to"));
     }
 
     #[test]

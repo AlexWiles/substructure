@@ -142,7 +142,6 @@ mod tests {
             llm: Some(llm.to_string()),
             model: "m".to_string(),
             system: None,
-            stream: false,
             retry: None,
             tools: Vec::new(),
             sub_agents: Vec::new(),

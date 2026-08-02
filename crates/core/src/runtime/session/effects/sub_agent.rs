@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use rust_decimal::Decimal;
 
 use super::{decision_queued, fail, mismatched, void_events, KindSpec, Outcome, SettleError};
-use crate::protocol::RetryPolicy;
+use crate::protocol::{DraftMessage, RetryPolicy};
 use crate::runtime::session::command::SessionError;
 use crate::runtime::session::decision::Trigger;
 use crate::runtime::session::events::*;
@@ -88,6 +88,7 @@ impl KindSpec for SubAgentSpec {
             id: id.to_string(),
             agent_id: sa.agent_id.clone(),
             tool_call_id: sa.tool_call_id.clone(),
+            message: sa.message.clone(),
             retry: t.retry_policy.clone(),
         })]
     }
@@ -99,6 +100,7 @@ pub(in crate::runtime::session) fn request(
     session_id: String,
     agent_id: String,
     tool_call_id: String,
+    message: Option<DraftMessage>,
     retry: RetryPolicy,
     caller: &Caller,
 ) -> Result<Vec<EventPayload>, SessionError> {
@@ -110,6 +112,7 @@ pub(in crate::runtime::session) fn request(
         id: session_id,
         agent_id,
         tool_call_id,
+        message,
         retry,
     })])
 }

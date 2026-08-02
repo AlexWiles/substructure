@@ -12,7 +12,7 @@
           ]
         },
         "mcp": {
-          "description": "MCP servers the agent draws tools from. The engine resolves each against\nits connection registry into [`ConnectorTool`]s the model sees alongside\n`tools`. Like `sub_agents`, these are never merged into `tools` — the\nworker declares the server, not its tools.\n\nA second protocol gets its own field rather than a `type` tag here: its\nfilter would not be this one (MCP annotations mean nothing to an A2A\nagent), and a union of conditionally-valid fields generates badly in the\nGo and Python bindings.",
+          "description": "MCP servers",
           "items": {
             "$ref": "#/$defs/McpServer"
           },
@@ -30,9 +30,6 @@
               "type": "null"
             }
           ]
-        },
-        "stream": {
-          "type": "boolean"
         },
         "sub_agents": {
           "description": "Sub-agents the model can delegate to. Presented to the model as tools (by\nid) alongside `tools`, but each call spawns a child session rather than\nexecuting a function.",
@@ -837,6 +834,17 @@
           "properties": {
             "agent_id": {
               "type": "string"
+            },
+            "message": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DraftMessage"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The child's opening message. It travels with the spawn, so it\ncannot race the creation of the session it opens."
             },
             "retry": {
               "$ref": "#/$defs/RetryPolicy"

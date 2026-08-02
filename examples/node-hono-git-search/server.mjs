@@ -105,7 +105,6 @@ async function decide({ trigger, proposed }) {
         return {
             agent: {
                 ...proposed.agent,
-                stream: true,
                 tools: tools.map(({ name, description, input }) => ({ name, description, input }))
             }
         };

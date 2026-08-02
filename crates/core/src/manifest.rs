@@ -204,8 +204,6 @@ pub struct AgentSection {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub stream: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetryPolicy>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<AgentTool>,
@@ -232,7 +230,6 @@ impl AgentSection {
         self.llm.is_some()
             || self.model.is_some()
             || self.system.is_some()
-            || self.stream.is_some()
             || self.retry.is_some()
             || !self.tools.is_empty()
             || !self.sub_agents.is_empty()
@@ -247,7 +244,6 @@ impl AgentSection {
             llm: self.llm.clone(),
             model: self.model.clone()?,
             system: self.system.clone(),
-            stream: self.stream.unwrap_or(false),
             retry: self.retry.clone(),
             tools: self.tools.clone(),
             sub_agents: self.sub_agents.clone(),

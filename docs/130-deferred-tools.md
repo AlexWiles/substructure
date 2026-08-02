@@ -27,7 +27,7 @@ const tools = [
 
 function decide({ trigger, proposed }) {
     if (trigger.type === "session.start") {
-        return { agent: { model: "claude-haiku-4-5-20251001", stream: true, tools } };
+        return { agent: { model: "claude-haiku-4-5-20251001", tools } };
     }
 
     // Kick off the work, keyed by the call id, and leave the call pending.

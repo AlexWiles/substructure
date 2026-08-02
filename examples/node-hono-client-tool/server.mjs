@@ -9,7 +9,6 @@ function decide({ trigger, proposed }) {
             // the `llm` and `model` substructure.toml names.
             agent: {
                 ...proposed.agent,
-                stream: true,
                 system: "For location-based questions, call get_location instead of guessing.",
                 tools: [
                     {

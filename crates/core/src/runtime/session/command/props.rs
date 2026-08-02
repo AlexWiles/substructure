@@ -365,6 +365,7 @@ impl World {
                         session_id,
                         agent_id: "child".to_string(),
                         tool_call_id,
+                        message: None,
                         retry: policy(),
                     }
                 }
@@ -388,7 +389,6 @@ impl World {
             llm: Some("claude".to_string()),
             model,
             system: None,
-            stream: false,
             retry: None,
             tools: Vec::new(),
             sub_agents: Vec::new(),
