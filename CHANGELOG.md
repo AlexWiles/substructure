@@ -38,6 +38,20 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
   credentials from before this change cannot move to the new key.
 - A connection refuses a stored credential when its `url` points to a different
   server than the login did.
+- `subs mcp login` connects a deployment's connection for the pinned project.
+  Two projects that declare one connection id hold two credentials, and a login
+  in one project does not change the other. `subs mcp list` and `subs mcp
+  logout` show and remove that project's connections.
+- `subs mcp login` has no `--no-grant`. A connection belongs to a project, so a
+  connection that belongs to none is one that nothing can use.
+- The CLI reads `substructure.toml` from the working directory only. It does not
+  look in the parent directories.
+- The engine database defaults to the name of the file that names it:
+  `subs.staging.toml` uses `subs.staging.db`, and `substructure.toml` continues
+  to use `substructure.db`. Two files in one directory are two projects with two
+  databases. A relative `db` is now relative to the directory of its file, not
+  to the working directory. If a file with a different name used
+  `substructure.db`, write `db = "substructure.db"` in it to keep that data.
 
 ### Added
 

@@ -73,6 +73,10 @@ pub struct McpDeclareRequest {
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_id: Option<String>,
+    /// The project this connection is for. A connection belongs to one project,
+    /// so the deployment answers with that project's own — two projects naming
+    /// one id hold two credentials, and neither login touches the other.
+    pub project_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

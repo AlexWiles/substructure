@@ -26,7 +26,7 @@ use super::cloud::context::Context as CloudContext;
 use super::cloud::project_config::{self, ProjectConfig};
 use super::cloud::{CloudGlobals, ProjectScope};
 use super::DEFAULT_TENANT;
-use crate::api::v1::{McpAuthorizeResponse, McpConnection, McpDeclareRequest, McpGrantRequest};
+use crate::api::v1::{McpAuthorizeResponse, McpConnection, McpDeclareRequest};
 use crate::connectors::oauth;
 use crate::providers::sqlite::{SqliteDb, SqliteTokenStore};
 
@@ -49,9 +49,6 @@ pub enum McpCommand {
         /// Print the authorization URL instead of opening a browser.
         #[arg(long)]
         no_browser: bool,
-        /// Don't grant the connection to the pinned project. Remote only.
-        #[arg(long)]
-        no_grant: bool,
         #[command(flatten)]
         scope: ProjectScope,
     },
@@ -74,11 +71,10 @@ pub async fn run(command: McpCommand) -> Result<()> {
         McpCommand::Login {
             id,
             no_browser,
-            no_grant,
             scope,
         } => match environment(&scope.globals)? {
             cfg if cfg.deployment.is_none() => login_local(id, no_browser, cfg).await,
-            cfg => login_remote(id, no_browser, no_grant, scope, cfg).await,
+            cfg => login_remote(id, no_browser, scope, cfg).await,
         },
         McpCommand::Logout { id, scope } => match environment(&scope.globals)? {
             cfg if cfg.deployment.is_none() => logout_local(id, cfg).await,
@@ -291,7 +287,6 @@ fn describe(tokens: &oauth::Tokens, url: &str) -> String {
 async fn login_remote(
     id: Option<String>,
     no_browser: bool,
-    no_grant: bool,
     scope: ProjectScope,
     cfg: ProjectConfig,
 ) -> Result<()> {
@@ -305,6 +300,13 @@ async fn login_remote(
     let ctx = CloudContext::load(&scope.globals)?;
     let org = ctx.require_org(scope.org.as_deref()).await?;
 
+    // Resolved before declaring, not after: a connection belongs to a project,
+    // so the project is what decides which credential this consent replaces.
+    let project = ctx
+        .pinned_project(scope.project.as_deref())
+        .await?
+        .context("no project to connect for. Pin one with `subs apply`, or pass --project <id>.")?;
+
     // Declaring first is idempotent and inert: `subs apply` may already have
     // done it, and either way consent is the step that matters.
     let declared: McpConnection = ctx
@@ -314,6 +316,7 @@ async fn login_remote(
             &McpDeclareRequest {
                 url: spec.url.clone(),
                 connection_id: Some(id.clone()),
+                project_id: project.clone(),
             },
         )
         .await?;
@@ -333,47 +336,30 @@ async fn login_remote(
         println!("Opened your browser to authorize.");
     }
 
-    let connection = match wait_for_connection(&ctx, &org, &id).await? {
-        Some(connection) => connection,
-        None => {
-            println!(
-                "Still waiting on consent. Finish in the browser; the connection appears \
-                 in `subs mcp list` once it lands."
-            );
-            return Ok(());
-        }
-    };
-    println!("Authorized `{id}` for {org}.");
-
-    if no_grant {
+    if wait_for_connection(&ctx, &org, &declared.id)
+        .await?
+        .is_none()
+    {
+        println!(
+            "Still waiting on consent. Finish in the browser; the connection appears \
+             in `subs mcp list` once it lands."
+        );
         return Ok(());
     }
-    let project = ctx
-        .pinned_project(scope.project.as_deref())
-        .await?
-        .context("no project to grant the connection to. Pass --project <id>, or --no-grant.")?;
-    ctx.client
-        .post_json_discard(
-            &format!(
-                "/api/v1/orgs/{org}/mcp/connections/{}/grants",
-                connection.id
-            ),
-            &McpGrantRequest {
-                project_id: project.clone(),
-            },
-        )
-        .await?;
-    println!("Granted it to {project}.");
+    println!("Authorized `{id}` for {project}.");
     Ok(())
 }
 
-/// Poll until the callback has stored the connection. Bounded: the person may
-/// have closed the tab, and a CLI that never returns is worse than one that
-/// says where to look.
+/// Poll until the callback has stored the credential. Watches the row that was
+/// declared rather than the id: two projects can hold a connection of one name,
+/// and only this one's consent is being waited on.
+///
+/// Bounded: the person may have closed the tab, and a CLI that never returns is
+/// worse than one that says where to look.
 async fn wait_for_connection(
     ctx: &CloudContext,
     org: &str,
-    id: &str,
+    row_id: &str,
 ) -> Result<Option<McpConnection>> {
     let deadline = std::time::Instant::now() + REMOTE_TIMEOUT;
     loop {
@@ -383,7 +369,7 @@ async fn wait_for_connection(
             .await?;
         if let Some(found) = connections
             .into_iter()
-            .find(|c| c.connection_id == id && c.status == "active")
+            .find(|c| c.id == row_id && c.status == "active")
         {
             return Ok(Some(found));
         }
@@ -394,15 +380,28 @@ async fn wait_for_connection(
     }
 }
 
+/// The connections a project holds, which is where a name resolves to exactly
+/// one. `project` is passed as a filter the deployment applies; an older one
+/// ignores it and answers with the org's, which is what it used to hold anyway.
+async fn connections_for(
+    ctx: &CloudContext,
+    org: &str,
+    project: Option<&str>,
+) -> Result<Vec<McpConnection>> {
+    let path = match project {
+        Some(project) => format!("/api/v1/orgs/{org}/mcp/connections?project={project}"),
+        None => format!("/api/v1/orgs/{org}/mcp/connections"),
+    };
+    ctx.client.get(&path).await
+}
+
 async fn logout_remote(id: Option<String>, scope: ProjectScope, cfg: ProjectConfig) -> Result<()> {
     let (id, _) = pick(&cfg.mcp, id)?;
     let ctx = CloudContext::load(&scope.globals)?;
     let org = ctx.require_org(scope.org.as_deref()).await?;
+    let project = ctx.pinned_project(scope.project.as_deref()).await?;
 
-    let connections: Vec<McpConnection> = ctx
-        .client
-        .get(&format!("/api/v1/orgs/{org}/mcp/connections"))
-        .await?;
+    let connections = connections_for(&ctx, &org, project.as_deref()).await?;
     let Some(found) = connections.into_iter().find(|c| c.connection_id == id) else {
         println!("`{id}` was not authorized.");
         return Ok(());
@@ -420,21 +419,12 @@ async fn list_remote(scope: ProjectScope, cfg: ProjectConfig) -> Result<()> {
     }
     let ctx = CloudContext::load(&scope.globals)?;
     let org = ctx.require_org(scope.org.as_deref()).await?;
-    let connections: Vec<McpConnection> = ctx
-        .client
-        .get(&format!("/api/v1/orgs/{org}/mcp/connections"))
-        .await?;
+    let project = ctx.pinned_project(scope.project.as_deref()).await?;
+    let connections = connections_for(&ctx, &org, project.as_deref()).await?;
 
     for (id, spec) in &cfg.mcp {
         let status = match connections.iter().find(|c| &c.connection_id == id) {
-            Some(found) if found.granted_projects.is_empty() => {
-                format!("{}, granted to no project", found.status)
-            }
-            Some(found) => format!(
-                "{}, granted to {}",
-                found.status,
-                found.granted_projects.join(", ")
-            ),
+            Some(found) => found.status.clone(),
             None => "not authorized".to_string(),
         };
         println!("{id}\t{}\t{status}", spec.url);

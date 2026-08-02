@@ -47,13 +47,20 @@ pub const DEFAULT_DB: &str = "substructure.db";
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProjectConfig {
+    /// Where this was read from, which is what `db` defaults from and what a
+    /// relative `db` is resolved against. Not a setting: it is the file's own
+    /// path, so it is never written back.
+    #[serde(skip)]
+    source: PathBuf,
     /// The project's name. `subs apply` creates the project from it when
     /// nothing is pinned, and renames when it changes: the file is the source
     /// of truth.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Engine state: events, sessions, and the credentials `subs mcp login`
-    /// authorized [default: `substructure.db`].
+    /// authorized. Defaults to this file's own name — `substructure.toml` keeps
+    /// `substructure.db`, and `subs.staging.toml` gets `subs.staging.db`, so two
+    /// files in one directory are two engines rather than one they share.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub db: Option<String>,
     /// Log filter in `RUST_LOG` syntax: a bare level (`info`) or per-target
@@ -143,8 +150,16 @@ impl ProjectConfig {
         self.manifest().connections()
     }
 
+    /// The engine's database, beside the file that names it. One file is one
+    /// project, so two files in a directory hold two engines rather than
+    /// writing each other's sessions and credentials.
     pub fn db_path(&self) -> String {
-        self.db.clone().unwrap_or_else(|| DEFAULT_DB.to_string())
+        let named = self.db.clone().unwrap_or_else(|| default_db(&self.source));
+        match self.source.parent() {
+            // `join` keeps an absolute `db` absolute.
+            Some(dir) if !dir.as_os_str().is_empty() => dir.join(named).display().to_string(),
+            _ => named,
+        }
     }
 
     pub fn slack_dm_agent(&self) -> Option<String> {
@@ -212,12 +227,24 @@ impl ProjectConfig {
         let at = path.display();
         let value: toml::Value = toml::from_str(s).map_err(|e| anyhow!("parsing {at}: {e}"))?;
         moved_keys(&value, &at)?;
-        let config: ProjectConfig = value.try_into().map_err(|e| anyhow!("parsing {at}: {e}"))?;
+        let mut config: ProjectConfig =
+            value.try_into().map_err(|e| anyhow!("parsing {at}: {e}"))?;
         config
             .manifest()
             .validate()
             .map_err(|e| anyhow!("{at}: {e}"))?;
+        config.source = path.to_path_buf();
         Ok(config)
+    }
+}
+
+/// `substructure.toml` → `substructure.db`, `subs.staging.toml` →
+/// `subs.staging.db`. A config with no file behind it keeps the plain default,
+/// which is what an engine running on flags alone uses.
+fn default_db(source: &Path) -> String {
+    match source.file_stem().and_then(|s| s.to_str()) {
+        Some(stem) if !stem.is_empty() => format!("{stem}.db"),
+        _ => DEFAULT_DB.to_string(),
     }
 }
 
@@ -312,17 +339,14 @@ pub fn load(path: Option<&Path>) -> Result<ProjectConfig> {
     Ok(resolve(path)?.map(|found| found.config).unwrap_or_default())
 }
 
-pub fn find_from(start: &Path) -> Result<Option<Found>> {
-    let mut dir: &Path = start;
-    loop {
-        let candidate = dir.join(FILENAME);
-        if candidate.is_file() {
-            return load_explicit(&candidate).map(Some);
-        }
-        match dir.parent() {
-            Some(parent) => dir = parent,
-            None => return Ok(None),
-        }
+/// The file in this directory, and only this one. Ancestors are not searched:
+/// a command run in a subdirectory acting on a project two levels up is a
+/// surprise, and `-c` already says when the file is somewhere else.
+pub fn find_from(dir: &Path) -> Result<Option<Found>> {
+    let candidate = dir.join(FILENAME);
+    match candidate.is_file() {
+        true => load_explicit(&candidate).map(Some),
+        false => Ok(None),
     }
 }
 
@@ -472,9 +496,54 @@ mod tests {
 
     #[test]
     fn an_empty_file_is_valid_and_is_the_defaults() {
-        assert_eq!(ok(""), ProjectConfig::default());
+        assert_eq!(
+            ok(""),
+            ProjectConfig {
+                source: FILENAME.into(),
+                ..Default::default()
+            }
+        );
+        // No file behind it at all: an engine running on flags alone.
         assert_eq!(ProjectConfig::default().db_path(), DEFAULT_DB);
         assert!(ProjectConfig::default().server_auth());
+    }
+
+    /// One file is one project, so a second file in a directory is a second
+    /// engine rather than one that writes the first's sessions and credentials.
+    #[test]
+    fn the_database_defaults_to_the_files_own_name() {
+        let dir = tmpdir();
+        let named = |name: &str| {
+            let path = dir.join(name);
+            fs::write(&path, "[server]\nport = 9000\n").unwrap();
+            load_explicit(&path).unwrap().config.db_path()
+        };
+
+        // The usual file keeps the name it always had.
+        assert_eq!(
+            named(FILENAME),
+            dir.join("substructure.db").to_str().unwrap()
+        );
+        assert_eq!(
+            named("subs.staging.toml"),
+            dir.join("subs.staging.db").to_str().unwrap()
+        );
+
+        // An explicit `db` still wins, and sits beside the file that names it.
+        let path = dir.join("explicit.toml");
+        fs::write(&path, "db = \"engine.db\"\n").unwrap();
+        assert_eq!(
+            load_explicit(&path).unwrap().config.db_path(),
+            dir.join("engine.db").to_str().unwrap()
+        );
+
+        // An absolute one is taken as given.
+        let elsewhere = tmpdir().join("far.db");
+        fs::write(&path, format!("db = {:?}\n", elsewhere.to_str().unwrap())).unwrap();
+        assert_eq!(
+            load_explicit(&path).unwrap().config.db_path(),
+            elsewhere.to_str().unwrap()
+        );
     }
 
     #[test]
@@ -899,7 +968,15 @@ mod tests {
         cfg.deployment_mut().project = Some("proj_1".into());
         write(&path, &cfg).unwrap();
 
-        assert_eq!(load_explicit(&path).unwrap().config, cfg);
+        // Same settings, read from where it was written: `source` is the file's
+        // own path rather than something the file declares.
+        assert_eq!(
+            load_explicit(&path).unwrap().config,
+            ProjectConfig {
+                source: path,
+                ..cfg
+            }
+        );
     }
 
     #[test]
@@ -1092,8 +1169,10 @@ mod tests {
         assert!(find_from(&root).unwrap().is_none());
     }
 
+    /// Only this directory. A command run in a subdirectory acting on a project
+    /// two levels up is a surprise, and `-c` says when the file is elsewhere.
     #[test]
-    fn find_walks_up_from_cwd_to_first_match() {
+    fn find_does_not_look_at_ancestors() {
         let root = tmpdir();
         let nested = root.join("a/b/c");
         fs::create_dir_all(&nested).unwrap();
@@ -1104,21 +1183,18 @@ mod tests {
         )
         .unwrap();
 
-        let found = find_from(&nested).unwrap().expect("should find ancestor");
+        assert!(find_from(&nested).unwrap().is_none());
+
+        let found = find_from(&root).unwrap().expect("the file is right here");
         assert_eq!(found.path, cfg_path);
         assert_eq!(found.config.org(), Some("org-x"));
         assert_eq!(found.config.project(), Some("project-y"));
-    }
 
-    #[test]
-    fn nearest_subs_toml_wins_over_ancestor() {
-        let root = tmpdir();
-        let nested = root.join("inner");
-        fs::create_dir_all(&nested).unwrap();
-        fs::write(root.join(FILENAME), "[deployment]\norg = \"outer\"\n").unwrap();
+        // And a file of its own is the one a directory uses.
         fs::write(nested.join(FILENAME), "[deployment]\norg = \"inner\"\n").unwrap();
-
-        let found = find_from(&nested).unwrap().unwrap();
-        assert_eq!(found.config.org(), Some("inner"));
+        assert_eq!(
+            find_from(&nested).unwrap().unwrap().config.org(),
+            Some("inner")
+        );
     }
 }

@@ -350,7 +350,7 @@ fn summarize(change: &ConfigEvent) -> String {
         "llm.removed" | "llm.key_set" | "llm.key_removed" => field("name"),
         "slack.routing_updated" => field("summary"),
         "mcp.connection_declared" => format!("{} (pending authorization)", field("id")),
-        "mcp.grant_added" | "mcp.grant_removed" => field("id"),
+        "mcp.grant_added" | "mcp.grant_removed" | "mcp.connection_removed" => field("id"),
         _ => String::new(),
     }
 }
