@@ -35,6 +35,50 @@ impl SqliteTokenStore {
         Ok(Self { db })
     }
 
+    /// Forget the credentials for connections `declared` does not name,
+    /// answering with the ids forgotten.
+    ///
+    /// The file is the whole declaration, so a `[mcp.<id>]` taken out of it is
+    /// a connection that was removed, and its credential goes with it. Called
+    /// as the engine starts, which is when the file is applied.
+    pub async fn retain(
+        &self,
+        tenant_id: &str,
+        declared: &[String],
+    ) -> Result<Vec<String>, StoreError> {
+        let stored = self.ids(tenant_id).await?;
+        let mut forgotten = Vec::new();
+        for id in stored {
+            if declared.iter().any(|d| d == &id) {
+                continue;
+            }
+            self.delete(tenant_id, &id).await?;
+            forgotten.push(id);
+        }
+        Ok(forgotten)
+    }
+
+    /// Every connection this tenant holds a credential for.
+    async fn ids(&self, tenant_id: &str) -> Result<Vec<String>, StoreError> {
+        let tenant_id = tenant_id.to_string();
+        let reader = self.db.reader.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = reader
+                .open()
+                .map_err(|e| StoreError::Internal(e.to_string()))?;
+            let mut stmt = conn
+                .prepare("SELECT connection_id FROM connector_credentials WHERE tenant_id = ?1")
+                .map_err(|e| StoreError::Internal(e.to_string()))?;
+            let rows = stmt
+                .query_map(rusqlite::params![tenant_id], |row| row.get(0))
+                .map_err(|e| StoreError::Internal(e.to_string()))?;
+            rows.collect::<rusqlite::Result<Vec<String>>>()
+                .map_err(|e| StoreError::Internal(e.to_string()))
+        })
+        .await
+        .map_err(|e| StoreError::Internal(e.to_string()))?
+    }
+
     /// Forget a credential. `false` when there was none to forget.
     pub async fn delete(&self, tenant_id: &str, connection_id: &str) -> Result<bool, StoreError> {
         let (tenant_id, connection_id) = (tenant_id.to_string(), connection_id.to_string());

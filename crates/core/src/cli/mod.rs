@@ -204,7 +204,6 @@ fn command_path(cmd: &Command) -> &'static str {
         },
         Command::Mcp { command } => match command {
             mcp::McpCommand::Login { .. } => "mcp login",
-            mcp::McpCommand::Logout { .. } => "mcp logout",
             mcp::McpCommand::List { .. } => "mcp list",
         },
         Command::Orgs { command } => match command {

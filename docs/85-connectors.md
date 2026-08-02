@@ -36,8 +36,12 @@ Everything else is OAuth, and consent is a human in a browser:
 
 ```sh
 subs mcp login sentry     # opens a browser; `list` shows what is authorized
-subs mcp logout sentry    # forgets the credential
 ```
+
+There is no `logout`: the file is the whole declaration, so a connection is
+disconnected by deleting its `[mcp.<id>]`. The credential goes with it — the
+engine forgets it as it next starts, and a deployment as it next takes an
+apply.
 
 The credential belongs to the id, so declaring one server twice connects two
 accounts of it. Each id is authorized on its own and prefixes its own tools, so

@@ -44,6 +44,9 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
   logout` show and remove that project's connections.
 - `subs mcp login` has no `--no-grant`. A connection belongs to a project, so a
   connection that belongs to none is one that nothing can use.
+- There is no `subs mcp logout`. Delete the `[mcp.<id>]` to disconnect a
+  connection: an engine forgets its credential as it next starts, and a
+  deployment as it next takes an apply.
 - The CLI reads `substructure.toml` from the working directory only. It does not
   look in the parent directories.
 - The engine database defaults to the name of the file that names it:

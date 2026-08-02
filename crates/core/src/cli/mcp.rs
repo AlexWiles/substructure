@@ -52,12 +52,6 @@ pub enum McpCommand {
         #[command(flatten)]
         scope: ProjectScope,
     },
-    /// Forget a connection's stored credential.
-    Logout {
-        id: Option<String>,
-        #[command(flatten)]
-        scope: ProjectScope,
-    },
     /// Show declared connections and whether each one is authorized.
     #[command(name = "list", visible_alias = "ls")]
     List {
@@ -75,10 +69,6 @@ pub async fn run(command: McpCommand) -> Result<()> {
         } => match environment(&scope.globals)? {
             cfg if cfg.deployment.is_none() => login_local(id, no_browser, cfg).await,
             cfg => login_remote(id, no_browser, scope, cfg).await,
-        },
-        McpCommand::Logout { id, scope } => match environment(&scope.globals)? {
-            cfg if cfg.deployment.is_none() => logout_local(id, cfg).await,
-            cfg => logout_remote(id, scope, cfg).await,
         },
         McpCommand::List { scope } => match environment(&scope.globals)? {
             cfg if cfg.deployment.is_none() => list_local(cfg).await,
@@ -217,21 +207,6 @@ async fn login_local(id: Option<String>, no_browser: bool, cfg: ProjectConfig) -
         println!(
             "Note: the server issued no refresh token, so this expires and needs `subs mcp login {id}` again."
         );
-    }
-    Ok(())
-}
-
-async fn logout_local(id: Option<String>, cfg: ProjectConfig) -> Result<()> {
-    let (id, _) = pick(&cfg.connections(), id)?;
-    let Some(db) = open_existing_db(&cfg)? else {
-        println!("`{id}` was not authorized.");
-        return Ok(());
-    };
-    let store = SqliteTokenStore::new(db)?;
-    if store.delete(DEFAULT_TENANT, &id).await? {
-        println!("Forgot the credential for `{id}`.");
-    } else {
-        println!("`{id}` was not authorized.");
     }
     Ok(())
 }
@@ -395,24 +370,6 @@ async fn connections_for(
     ctx.client.get(&path).await
 }
 
-async fn logout_remote(id: Option<String>, scope: ProjectScope, cfg: ProjectConfig) -> Result<()> {
-    let (id, _) = pick(&cfg.mcp, id)?;
-    let ctx = CloudContext::load(&scope.globals)?;
-    let org = ctx.require_org(scope.org.as_deref()).await?;
-    let project = ctx.pinned_project(scope.project.as_deref()).await?;
-
-    let connections = connections_for(&ctx, &org, project.as_deref()).await?;
-    let Some(found) = connections.into_iter().find(|c| c.connection_id == id) else {
-        println!("`{id}` was not authorized.");
-        return Ok(());
-    };
-    ctx.client
-        .delete_discard(&format!("/api/v1/orgs/{org}/mcp/connections/{}", found.id))
-        .await?;
-    println!("Disconnected `{id}`.");
-    Ok(())
-}
-
 async fn list_remote(scope: ProjectScope, cfg: ProjectConfig) -> Result<()> {
     if cfg.mcp.is_empty() {
         bail!("substructure.toml declares no connections under `[mcp.<id>]`");
@@ -573,23 +530,23 @@ mod tests {
             .await
             .unwrap();
 
-        // What `list` reads, and what `logout` removes.
+        // What `list` reads, and what the engine keeps: the file declares it.
         assert!(oauth::TokenStore::get(&store, DEFAULT_TENANT, "linear")
             .await
             .is_some());
-        logout_local(Some("linear".into()), cfg.clone())
+        let declared: Vec<String> = cfg.connections().keys().cloned().collect();
+        assert!(store
+            .retain(DEFAULT_TENANT, &declared)
             .await
-            .unwrap();
+            .unwrap()
+            .is_empty());
         assert!(oauth::TokenStore::get(&store, DEFAULT_TENANT, "linear")
             .await
-            .is_none());
-
-        // A second logout is a statement, not a failure.
-        logout_local(Some("linear".into()), cfg).await.unwrap();
+            .is_some());
     }
 
-    /// Two ids naming one server are two accounts: logging out of one must not
-    /// disconnect the other.
+    /// Two ids naming one server are two accounts: dropping one from the file
+    /// must not disconnect the other.
     #[tokio::test]
     async fn one_server_declared_twice_holds_two_credentials() {
         let dir = tmpdir();
@@ -621,7 +578,19 @@ mod tests {
             .await
             .unwrap();
 
-        logout_local(Some("sentry2".into()), cfg).await.unwrap();
+        // `[mcp.sentry2]` taken out of the file: the engine forgets that one
+        // credential the next time it starts, and only that one.
+        let without: ProjectConfig = toml::from_str(&format!(
+            "db = {:?}\n[mcp.sentry]\nurl = \"https://mcp.sentry.dev/mcp\"\n",
+            db_path.to_str().unwrap()
+        ))
+        .unwrap();
+        let declared: Vec<String> = without.connections().keys().cloned().collect();
+        assert_eq!(
+            store.retain(DEFAULT_TENANT, &declared).await.unwrap(),
+            ["sentry2"]
+        );
+
         assert_eq!(
             oauth::TokenStore::get(&store, DEFAULT_TENANT, "sentry")
                 .await
@@ -632,6 +601,13 @@ mod tests {
         assert!(oauth::TokenStore::get(&store, DEFAULT_TENANT, "sentry2")
             .await
             .is_none());
+
+        // And starting again on the same file has nothing left to forget.
+        assert!(store
+            .retain(DEFAULT_TENANT, &declared)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
