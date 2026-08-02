@@ -248,7 +248,7 @@ fn require_secure(url: &str) -> Result<(), OauthError> {
     )))
 }
 
-fn same_origin(a: &str, b: &str) -> bool {
+pub(crate) fn same_origin(a: &str, b: &str) -> bool {
     match (reqwest::Url::parse(a), reqwest::Url::parse(b)) {
         (Ok(a), Ok(b)) => a.origin() == b.origin(),
         _ => false,
@@ -599,16 +599,17 @@ fn random_token(bytes: usize) -> String {
 
 // ── Resolving a stored credential ────────────────────────────────────────
 
-/// Where authorized credentials live. Keyed by the connection's URL: that is
-/// what `substructure.toml` names and what the token is bound to, so two ids
-/// pointing at one server share a login.
+/// Where authorized credentials live. Keyed by the connection's id, so two ids
+/// naming one server hold two logins: `[mcp.sentry]` and `[mcp.sentry2]` at the
+/// same URL are two accounts.
 #[async_trait::async_trait]
 pub trait TokenStore: Send + Sync {
-    async fn get(&self, tenant_id: &str, url: &str) -> Option<Tokens>;
+    async fn get(&self, tenant_id: &str, connection_id: &str) -> Option<Tokens>;
     /// Called on every refresh, because a rotated refresh token invalidates
     /// the one it replaced. A failure to persist is reported, not swallowed:
     /// silently dropping a rotated token locks the connection out.
-    async fn put(&self, tenant_id: &str, url: &str, tokens: Tokens) -> Result<(), String>;
+    async fn put(&self, tenant_id: &str, connection_id: &str, tokens: Tokens)
+        -> Result<(), String>;
 }
 
 /// Credentials for connections authorized through OAuth.
@@ -635,15 +636,27 @@ impl StoredCredentials {
         }
     }
 
-    /// A live access token, refreshed if it is close to expiry.
+    /// A live access token for one connection, refreshed if it is close to
+    /// expiry. `url` is where the connection currently points, which the stored
+    /// credential has to have been issued for.
     pub async fn access_token(
         &self,
         tenant_id: &str,
+        connection_id: &str,
         url: &str,
     ) -> Result<Option<String>, OauthError> {
-        let Some(tokens) = self.store.get(tenant_id, url).await else {
+        let Some(tokens) = self.store.get(tenant_id, connection_id).await else {
             return Ok(None);
         };
+        // The id is the key, so an edited `url` would otherwise send one
+        // server's token to another. `discover` binds the two at login, which
+        // makes this the same check read back.
+        if !same_origin(&tokens.resource, url) {
+            return Err(OauthError::Token(format!(
+                "the stored credential was issued for `{}`, not `{url}`",
+                tokens.resource
+            )));
+        }
         if !tokens.stale() {
             return Ok(Some(tokens.access_token));
         }
@@ -655,14 +668,14 @@ impl StoredCredentials {
 
         let gate = {
             let mut held = self.refreshing.lock().await;
-            held.entry(format!("{tenant_id}\u{0}{url}"))
+            held.entry(format!("{tenant_id}\u{0}{connection_id}"))
                 .or_default()
                 .clone()
         };
         let _guard = gate.lock().await;
 
         // Another caller may have refreshed while we waited for the gate.
-        if let Some(current) = self.store.get(tenant_id, url).await {
+        if let Some(current) = self.store.get(tenant_id, connection_id).await {
             if !current.stale() {
                 return Ok(Some(current.access_token));
             }
@@ -670,7 +683,7 @@ impl StoredCredentials {
 
         let next = refresh(&self.http, &tokens).await?;
         self.store
-            .put(tenant_id, url, next.clone())
+            .put(tenant_id, connection_id, next.clone())
             .await
             .map_err(OauthError::Token)?;
         Ok(Some(next.access_token))
@@ -693,7 +706,7 @@ impl crate::connectors::registry::CredentialResolver for StoredCredentials {
                 .resolve(tenant_id, id, spec)
                 .await;
         }
-        match self.access_token(tenant_id, &spec.url).await {
+        match self.access_token(tenant_id, id, &spec.url).await {
             // Checked again here, not only at login: the project file can name
             // a different URL than the one authorized.
             Ok(Some(token)) => {

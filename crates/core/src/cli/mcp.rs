@@ -211,9 +211,8 @@ async fn login_local(id: Option<String>, no_browser: bool, cfg: ProjectConfig) -
 
     let store = SqliteTokenStore::new(open_db(&cfg)?)?;
     let refreshable = tokens.refreshable();
-    // Keyed by URL, not by id: the credential is bound to the server, so two
-    // ids naming one server share it.
-    oauth::TokenStore::put(&store, DEFAULT_TENANT, &spec.url, tokens)
+    // Keyed by id, not by URL: two ids naming one server are two accounts.
+    oauth::TokenStore::put(&store, DEFAULT_TENANT, &id, tokens)
         .await
         .map_err(|e| anyhow::anyhow!("storing the credential: {e}"))?;
 
@@ -227,13 +226,13 @@ async fn login_local(id: Option<String>, no_browser: bool, cfg: ProjectConfig) -
 }
 
 async fn logout_local(id: Option<String>, cfg: ProjectConfig) -> Result<()> {
-    let (id, spec) = pick(&cfg.connections(), id)?;
+    let (id, _) = pick(&cfg.connections(), id)?;
     let Some(db) = open_existing_db(&cfg)? else {
         println!("`{id}` was not authorized.");
         return Ok(());
     };
     let store = SqliteTokenStore::new(db)?;
-    if store.delete(DEFAULT_TENANT, &spec.url).await? {
+    if store.delete(DEFAULT_TENANT, &id).await? {
         println!("Forgot the credential for `{id}`.");
     } else {
         println!("`{id}` was not authorized.");
@@ -258,12 +257,10 @@ async fn list_local(cfg: ProjectConfig) -> Result<()> {
             }
             Some(auth) => format!("${} is unset", auth.token_env),
             None => match &store {
-                Some(store) => {
-                    match oauth::TokenStore::get(store, DEFAULT_TENANT, &spec.url).await {
-                        Some(tokens) => describe(&tokens),
-                        None => "not authorized".to_string(),
-                    }
-                }
+                Some(store) => match oauth::TokenStore::get(store, DEFAULT_TENANT, id).await {
+                    Some(tokens) => describe(&tokens, &spec.url),
+                    None => "not authorized".to_string(),
+                },
                 None => "not authorized".to_string(),
             },
         };
@@ -272,7 +269,12 @@ async fn list_local(cfg: ProjectConfig) -> Result<()> {
     Ok(())
 }
 
-fn describe(tokens: &oauth::Tokens) -> String {
+fn describe(tokens: &oauth::Tokens, url: &str) -> String {
+    // The credential is keyed by id, so an edited `url` leaves one that the
+    // resolver will refuse to send. Saying so beats reading as authorized.
+    if !oauth::same_origin(&tokens.resource, url) {
+        return format!("authorized for {}; log in again", tokens.resource);
+    }
     match tokens.expires_at {
         Some(at) if tokens.stale() && !tokens.refreshable() => {
             format!("expired {}", at.format("%Y-%m-%d %H:%M UTC"))
@@ -577,24 +579,69 @@ mod tests {
         .unwrap();
 
         let store = SqliteTokenStore::new(open_db(&cfg).unwrap()).unwrap();
-        let url = "https://mcp.linear.app/mcp";
-        oauth::TokenStore::put(&store, DEFAULT_TENANT, url, tokens())
+        oauth::TokenStore::put(&store, DEFAULT_TENANT, "linear", tokens())
             .await
             .unwrap();
 
         // What `list` reads, and what `logout` removes.
-        assert!(oauth::TokenStore::get(&store, DEFAULT_TENANT, url)
+        assert!(oauth::TokenStore::get(&store, DEFAULT_TENANT, "linear")
             .await
             .is_some());
         logout_local(Some("linear".into()), cfg.clone())
             .await
             .unwrap();
-        assert!(oauth::TokenStore::get(&store, DEFAULT_TENANT, url)
+        assert!(oauth::TokenStore::get(&store, DEFAULT_TENANT, "linear")
             .await
             .is_none());
 
         // A second logout is a statement, not a failure.
         logout_local(Some("linear".into()), cfg).await.unwrap();
+    }
+
+    /// Two ids naming one server are two accounts: logging out of one must not
+    /// disconnect the other.
+    #[tokio::test]
+    async fn one_server_declared_twice_holds_two_credentials() {
+        let dir = tmpdir();
+        let db_path = dir.join("engine.db");
+        let cfg: ProjectConfig = toml::from_str(&format!(
+            "db = {:?}\n\
+             [mcp.sentry]\nurl = \"https://mcp.sentry.dev/mcp\"\n\
+             [mcp.sentry2]\nurl = \"https://mcp.sentry.dev/mcp\"\n",
+            db_path.to_str().unwrap()
+        ))
+        .unwrap();
+
+        let store = SqliteTokenStore::new(open_db(&cfg).unwrap()).unwrap();
+        let sentry = oauth::Tokens {
+            access_token: "first".into(),
+            issuer: "https://mcp.sentry.dev".into(),
+            token_endpoint: "https://mcp.sentry.dev/token".into(),
+            resource: "https://mcp.sentry.dev/mcp".into(),
+            ..tokens()
+        };
+        let sentry2 = oauth::Tokens {
+            access_token: "second".into(),
+            ..sentry.clone()
+        };
+        oauth::TokenStore::put(&store, DEFAULT_TENANT, "sentry", sentry)
+            .await
+            .unwrap();
+        oauth::TokenStore::put(&store, DEFAULT_TENANT, "sentry2", sentry2)
+            .await
+            .unwrap();
+
+        logout_local(Some("sentry2".into()), cfg).await.unwrap();
+        assert_eq!(
+            oauth::TokenStore::get(&store, DEFAULT_TENANT, "sentry")
+                .await
+                .unwrap()
+                .access_token,
+            "first"
+        );
+        assert!(oauth::TokenStore::get(&store, DEFAULT_TENANT, "sentry2")
+            .await
+            .is_none());
     }
 
     #[tokio::test]
@@ -631,18 +678,28 @@ mod tests {
 
     #[test]
     fn status_distinguishes_expired_from_live() {
+        let url = "https://mcp.linear.app/mcp";
         let mut tokens = tokens();
-        assert!(describe(&tokens).starts_with("authorized, expires"));
+        assert!(describe(&tokens, url).starts_with("authorized, expires"));
 
         tokens.refresh_token = None;
         tokens.expires_at = Some(chrono::Utc::now() - chrono::Duration::hours(1));
-        assert!(describe(&tokens).starts_with("expired"));
+        assert!(describe(&tokens, url).starts_with("expired"));
 
         // Refreshable and stale is not expired: the resolver renews it.
         tokens.refresh_token = Some("r".into());
-        assert!(describe(&tokens).starts_with("authorized, expires"));
+        assert!(describe(&tokens, url).starts_with("authorized, expires"));
 
         tokens.expires_at = None;
-        assert_eq!(describe(&tokens), "authorized");
+        assert_eq!(describe(&tokens, url), "authorized");
+    }
+
+    /// A `url` edited after the login reads as what it is, rather than as a
+    /// credential the resolver would refuse to send.
+    #[test]
+    fn a_credential_for_another_server_does_not_read_as_authorized() {
+        let status = describe(&tokens(), "https://mcp.sentry.dev/mcp");
+        assert!(status.contains("mcp.linear.app"), "{status}");
+        assert!(status.contains("log in again"), "{status}");
     }
 }

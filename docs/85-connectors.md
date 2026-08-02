@@ -39,6 +39,18 @@ subs mcp login sentry     # opens a browser; `list` shows what is authorized
 subs mcp logout sentry    # forgets the credential
 ```
 
+The credential belongs to the id, so declaring one server twice connects two
+accounts of it. Each id is authorized on its own and prefixes its own tools, so
+an agent granted both sees `sentry__` and `sentry2__` tools:
+
+```toml
+[mcp.sentry]
+url = "https://mcp.sentry.dev/mcp"       # subs mcp login sentry
+
+[mcp.sentry2]
+url = "https://mcp.sentry.dev/mcp"       # subs mcp login sentry2
+```
+
 Where the credential lands follows the file. Without a `[deployment]` section
 the engine here is the one that will dial the connection, so the credential goes
 in that environment's `db`, beside the sessions that use it — a login and the

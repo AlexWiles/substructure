@@ -6,13 +6,17 @@ use crate::event_store::StoreError;
 
 use super::SqliteDb;
 
+/// The URL-keyed table this replaces is dropped rather than carried: its rows
+/// cannot be mapped back to the ids that now key a credential, so they would
+/// resolve to nothing anyway. A login run once per connection replaces them.
 const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS connector_tokens (
-    tenant_id   TEXT NOT NULL,
-    url         TEXT NOT NULL,
-    tokens      TEXT NOT NULL,
-    PRIMARY KEY (tenant_id, url)
+CREATE TABLE IF NOT EXISTS connector_credentials (
+    tenant_id     TEXT NOT NULL,
+    connection_id TEXT NOT NULL,
+    tokens        TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, connection_id)
 );
+DROP TABLE IF EXISTS connector_tokens;
 ";
 
 /// Authorized connections, in the engine's own database.
@@ -32,8 +36,8 @@ impl SqliteTokenStore {
     }
 
     /// Forget a credential. `false` when there was none to forget.
-    pub async fn delete(&self, tenant_id: &str, url: &str) -> Result<bool, StoreError> {
-        let (tenant_id, url) = (tenant_id.to_string(), url.to_string());
+    pub async fn delete(&self, tenant_id: &str, connection_id: &str) -> Result<bool, StoreError> {
+        let (tenant_id, connection_id) = (tenant_id.to_string(), connection_id.to_string());
         let writer = self.db.writer.clone();
         tokio::task::spawn_blocking(move || {
             let conn = writer
@@ -41,8 +45,9 @@ impl SqliteTokenStore {
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
             let removed = conn
                 .execute(
-                    "DELETE FROM connector_tokens WHERE tenant_id = ?1 AND url = ?2",
-                    rusqlite::params![tenant_id, url],
+                    "DELETE FROM connector_credentials
+                     WHERE tenant_id = ?1 AND connection_id = ?2",
+                    rusqlite::params![tenant_id, connection_id],
                 )
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
             Ok(removed > 0)
@@ -54,15 +59,16 @@ impl SqliteTokenStore {
 
 #[async_trait]
 impl TokenStore for SqliteTokenStore {
-    async fn get(&self, tenant_id: &str, url: &str) -> Option<Tokens> {
-        let (tenant_id, url) = (tenant_id.to_string(), url.to_string());
+    async fn get(&self, tenant_id: &str, connection_id: &str) -> Option<Tokens> {
+        let (tenant_id, connection_id) = (tenant_id.to_string(), connection_id.to_string());
         let reader = self.db.reader.clone();
         tokio::task::spawn_blocking(move || {
             let conn = reader.open().ok()?;
             let stored: String = conn
                 .query_row(
-                    "SELECT tokens FROM connector_tokens WHERE tenant_id = ?1 AND url = ?2",
-                    rusqlite::params![tenant_id, url],
+                    "SELECT tokens FROM connector_credentials
+                     WHERE tenant_id = ?1 AND connection_id = ?2",
+                    rusqlite::params![tenant_id, connection_id],
                     |row| row.get(0),
                 )
                 .optional()
@@ -73,17 +79,22 @@ impl TokenStore for SqliteTokenStore {
         .ok()?
     }
 
-    async fn put(&self, tenant_id: &str, url: &str, tokens: Tokens) -> Result<(), String> {
-        let (tenant_id, url) = (tenant_id.to_string(), url.to_string());
+    async fn put(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        tokens: Tokens,
+    ) -> Result<(), String> {
+        let (tenant_id, connection_id) = (tenant_id.to_string(), connection_id.to_string());
         let writer = self.db.writer.clone();
         tokio::task::spawn_blocking(move || {
             let encoded = serde_json::to_string(&tokens).map_err(|e| e.to_string())?;
             let conn = writer.lock().map_err(|e| e.to_string())?;
             conn.execute(
-                "INSERT INTO connector_tokens (tenant_id, url, tokens)
+                "INSERT INTO connector_credentials (tenant_id, connection_id, tokens)
                  VALUES (?1, ?2, ?3)
-                 ON CONFLICT(tenant_id, url) DO UPDATE SET tokens = excluded.tokens",
-                rusqlite::params![tenant_id, url, encoded],
+                 ON CONFLICT(tenant_id, connection_id) DO UPDATE SET tokens = excluded.tokens",
+                rusqlite::params![tenant_id, connection_id, encoded],
             )
             .map_err(|e| e.to_string())?;
             Ok(())
@@ -134,18 +145,20 @@ mod tests {
     #[tokio::test]
     async fn a_credential_round_trips_and_a_refresh_replaces_it() {
         let (store, path) = temp_store();
-        let url = "https://mcp.linear.app/mcp";
 
-        assert!(store.get("default", url).await.is_none());
+        assert!(store.get("default", "linear").await.is_none());
 
         let first = tokens("access-1");
-        store.put("default", url, first.clone()).await.unwrap();
-        assert_eq!(store.get("default", url).await.unwrap(), first);
+        store.put("default", "linear", first.clone()).await.unwrap();
+        assert_eq!(store.get("default", "linear").await.unwrap(), first);
 
         // Rotation overwrites in place rather than accumulating rows.
         let second = tokens("access-2");
-        store.put("default", url, second.clone()).await.unwrap();
-        assert_eq!(store.get("default", url).await.unwrap(), second);
+        store
+            .put("default", "linear", second.clone())
+            .await
+            .unwrap();
+        assert_eq!(store.get("default", "linear").await.unwrap(), second);
         cleanup(&path);
     }
 
@@ -153,36 +166,51 @@ mod tests {
     async fn tenants_and_connections_do_not_leak_into_each_other() {
         let (store, path) = temp_store();
 
+        store.put("a", "linear", tokens("a-linear")).await.unwrap();
+        store.put("b", "linear", tokens("b-linear")).await.unwrap();
+        store.put("a", "sentry", tokens("a-sentry")).await.unwrap();
+
+        assert_eq!(
+            store.get("a", "linear").await.unwrap().access_token,
+            "a-linear"
+        );
+        assert_eq!(
+            store.get("b", "linear").await.unwrap().access_token,
+            "b-linear"
+        );
+        assert!(store.get("b", "sentry").await.is_none());
+        cleanup(&path);
+    }
+
+    /// The point of keying by id: `[mcp.sentry]` and `[mcp.sentry2]` name one
+    /// server and hold two accounts.
+    #[tokio::test]
+    async fn two_ids_on_one_server_hold_two_credentials() {
+        let (store, path) = temp_store();
+
         store
-            .put("a", "https://mcp.linear.app/mcp", tokens("a-linear"))
+            .put("default", "sentry", tokens("first"))
             .await
             .unwrap();
         store
-            .put("b", "https://mcp.linear.app/mcp", tokens("b-linear"))
-            .await
-            .unwrap();
-        store
-            .put("a", "https://mcp.sentry.dev/mcp", tokens("a-sentry"))
+            .put("default", "sentry2", tokens("second"))
             .await
             .unwrap();
 
         assert_eq!(
-            store
-                .get("a", "https://mcp.linear.app/mcp")
-                .await
-                .unwrap()
-                .access_token,
-            "a-linear"
+            store.get("default", "sentry").await.unwrap().access_token,
+            "first"
         );
         assert_eq!(
-            store
-                .get("b", "https://mcp.linear.app/mcp")
-                .await
-                .unwrap()
-                .access_token,
-            "b-linear"
+            store.get("default", "sentry2").await.unwrap().access_token,
+            "second"
         );
-        assert!(store.get("b", "https://mcp.sentry.dev/mcp").await.is_none());
+
+        // And forgetting one leaves the other authorized.
+        assert!(store.delete("default", "sentry2").await.unwrap());
+        assert!(store.get("default", "sentry2").await.is_none());
+        assert!(store.get("default", "sentry").await.is_some());
+        assert!(!store.delete("default", "sentry2").await.unwrap());
         cleanup(&path);
     }
 }

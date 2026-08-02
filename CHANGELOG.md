@@ -32,6 +32,12 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 
 - The agent config has no `stream` field. LLM calls stream unless the `llm.call` action sets `stream: false`.
 - Commands that open a browser now print the URL before they open it.
+- A credential belongs to a connection id, not to a server URL. Declare
+  `[mcp.sentry]` and `[mcp.sentry2]` at the same `url` to connect two accounts
+  of one server. Do `subs mcp login <id>` again once for each connection: the
+  credentials from before this change cannot move to the new key.
+- A connection refuses a stored credential when its `url` points to a different
+  server than the login did.
 
 ### Added
 
