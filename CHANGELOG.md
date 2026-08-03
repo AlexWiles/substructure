@@ -91,7 +91,7 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 - **`[slack]` asks three questions instead of one.** `agent` meant both "who
   takes DMs" and "who takes a channel nobody named" — two decisions with very
   different blast radii behind one key, and it resolved differently locally than
-  in the cloud. It is now `dm` and `any_channel`, each defaulting to silence, so
+  in the cloud. It is now `dm` and `mentions`, each defaulting to silence, so
   the bot answers only where it was told to. A file with the old key is a loud
   error naming both replacements.
 - **Model calls run on your key.** An engine-run `[llm.*]` block needs a key

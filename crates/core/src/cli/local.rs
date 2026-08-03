@@ -74,7 +74,7 @@ fn slack_routing(cfg: &ProjectConfig, flag: Option<String>) -> Option<Routing> {
     let slack = cfg.slack.clone().unwrap_or_default();
     let mut routing = Routing::new()
         .dm(flag.clone().or(slack.dm))
-        .any_channel(flag.or(slack.any_channel));
+        .mentions(flag.or(slack.mentions));
     for (id, channel) in &slack.channel {
         routing = routing.channel(id, channel.agent().map(str::to_string));
     }

@@ -89,7 +89,7 @@ struct Plan {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SlackPlan {
     dm: bool,
-    any_channel: bool,
+    mentions: bool,
 }
 
 /// One `[mcp.<id>]`: where the server is and what the agent calls it. No
@@ -220,10 +220,10 @@ fn render(p: &Plan) -> String {
         if slack.dm {
             keys.push((format!("dm = \"{}\"", p.agent.id), "direct messages"));
         }
-        if slack.any_channel {
+        if slack.mentions {
             keys.push((
-                format!("any_channel = \"{}\"", p.agent.id),
-                "any channel the bot is invited to",
+                format!("mentions = \"{}\"", p.agent.id),
+                "@mentions, in any channel it is invited to",
             ));
         }
         // Comments line up whichever keys are present, and an id of any length
@@ -533,20 +533,22 @@ fn ask_slack(agent: &str) -> Result<Option<SlackPlan>> {
         .with_prompt(format!("  Should `{agent}` answer direct messages?"))
         .default(true)
         .interact()?;
-    let any_channel = Confirm::with_theme(&theme())
+    // The question says what happens, not what the key is called: a channel
+    // reaches the bot only by mentioning it, which is what `mentions` records.
+    let mentions = Confirm::with_theme(&theme())
         .with_prompt(format!(
-            "  Should `{agent}` answer in channels it is invited to?"
+            "  Should `{agent}` answer when mentioned in a channel?"
         ))
         .default(false)
         .interact()?;
 
     // Neither is a bot that would answer nowhere. Say so rather than write a
     // section whose every key is missing.
-    if !dm && !any_channel {
+    if !dm && !mentions {
         println!("  Nowhere to answer, so no Slack section.");
         return Ok(None);
     }
-    Ok(Some(SlackPlan { dm, any_channel }))
+    Ok(Some(SlackPlan { dm, mentions }))
 }
 
 /// Where it runs. Cloud leads because it is the shorter path to a bot you can
@@ -722,7 +724,7 @@ mod tests {
                     mcp: mcp.clone(),
                     slack: Some(SlackPlan {
                         dm: true,
-                        any_channel: true,
+                        mentions: true,
                     }),
                     place,
                 };
@@ -755,14 +757,14 @@ mod tests {
     /// invited to a channel it was not opened up to still answers nowhere.
     #[test]
     fn slack_writes_the_answer_it_was_given() {
-        for (dm, any_channel) in [(true, false), (false, true), (true, true)] {
+        for (dm, mentions) in [(true, false), (false, true), (true, true)] {
             let body = render(&Plan {
-                slack: Some(SlackPlan { dm, any_channel }),
+                slack: Some(SlackPlan { dm, mentions }),
                 ..Plan::starter()
             });
             let slack = parse(&body).slack.expect("a section");
             assert_eq!(slack.dm.is_some(), dm, "{body}");
-            assert_eq!(slack.any_channel.is_some(), any_channel, "{body}");
+            assert_eq!(slack.mentions.is_some(), mentions, "{body}");
         }
     }
 

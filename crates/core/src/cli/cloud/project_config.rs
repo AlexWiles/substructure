@@ -290,7 +290,7 @@ fn moved_keys(value: &toml::Value, at: &impl std::fmt::Display) -> Result<()> {
     if value.get("slack").and_then(|s| s.get("agent")).is_some() {
         bail!(
             "{at}: `[slack].agent` is now two settings, because it answered two questions: \
-             `dm` for direct messages, and `any_channel` for a channel no \
+             `dm` for direct messages, and `mentions` for being mentioned in a channel no \
              `[slack.channel.<id>]` names. Set whichever you meant — setting neither serves \
              only the channels you name."
         );
@@ -1013,28 +1013,28 @@ mod tests {
     #[test]
     fn a_channel_names_the_agent_that_answers_there() {
         let cfg = slack(
-            "[slack]\ndm = \"support\"\nany_channel = \"support\"\n\n\
+            "[slack]\ndm = \"support\"\nmentions = \"support\"\n\n\
              [slack.channel.C0ENGOPS]\nagent = \"oncall\"\n\n\
              [slack.channel.C0RANDOM]\noff = true\n",
         )
         .unwrap();
         let s = cfg.slack.unwrap();
         assert_eq!(s.dm.as_deref(), Some("support"));
-        assert_eq!(s.any_channel.as_deref(), Some("support"));
+        assert_eq!(s.mentions.as_deref(), Some("support"));
         assert_eq!(s.channel["C0ENGOPS"].agent(), Some("oncall"));
         // `off` is the absence of an agent, however the section spelled it.
         assert_eq!(s.channel["C0RANDOM"].agent(), None);
         assert!(s.is_configured());
     }
 
-    /// Naming channels alone is the allowlist: without `any_channel` the bot
+    /// Naming channels alone is the allowlist: without `mentions` the bot
     /// can be invited anywhere and still answers only where it was named.
     #[test]
-    fn channels_without_any_channel_are_a_complete_section() {
+    fn channels_without_mentions_are_a_complete_section() {
         let cfg = slack("[slack.channel.C0ENGOPS]\nagent = \"oncall\"\n").unwrap();
         let s = cfg.slack.unwrap();
         assert_eq!(s.dm, None);
-        assert_eq!(s.any_channel, None);
+        assert_eq!(s.mentions, None);
         assert!(s.is_configured(), "the bot is on, in one channel");
     }
 
@@ -1046,7 +1046,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("`dm`"), "got {err}");
-        assert!(err.contains("`any_channel`"), "got {err}");
+        assert!(err.contains("`mentions`"), "got {err}");
     }
 
     /// Every name the bot routes to is declared in this same file, so a typo

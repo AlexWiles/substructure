@@ -33,20 +33,20 @@ const STATUS: &str = "is thinking…";
 const STATUS_REFRESH: Duration = Duration::from_secs(90);
 
 /// Which agent answers where. Three separate questions, so three settings:
-/// who takes DMs, who takes a channel nobody named, and who takes each channel
-/// that is named. Silence is the default for all three — nothing answers
-/// anywhere until something says so.
+/// who takes DMs, who takes a mention in a channel nobody named, and who takes
+/// each channel that is named. Silence is the default for all three — nothing
+/// answers anywhere until something says so.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Routing {
     dm: Option<String>,
-    any_channel: Option<String>,
+    mentions: Option<String>,
     /// The agent for each named channel, or `None` where the bot stays out.
     channels: HashMap<String, Option<String>>,
 }
 
 impl Routing {
     /// Routes nothing. Build it up with [`Routing::dm`],
-    /// [`Routing::any_channel`], and [`Routing::channel`].
+    /// [`Routing::mentions`], and [`Routing::channel`].
     pub fn new() -> Self {
         Self::default()
     }
@@ -57,16 +57,17 @@ impl Routing {
         self
     }
 
-    /// `agent` answers in any channel the bot is invited to that
-    /// `channel` does not name. Absent, an unnamed channel is not served —
-    /// which is what makes the channel table an allowlist.
-    pub fn any_channel(mut self, agent: Option<String>) -> Self {
-        self.any_channel = agent;
+    /// `agent` answers a mention in any channel that `channel` does not name —
+    /// a mention being the only way a channel reaches the bot at all. Absent,
+    /// an unnamed channel is not served, which is what makes the channel table
+    /// an allowlist.
+    pub fn mentions(mut self, agent: Option<String>) -> Self {
+        self.mentions = agent;
         self
     }
 
     /// `agent` answers in `id`; `None` keeps the bot out of it, even when
-    /// `any_channel` is set.
+    /// `mentions` is set.
     pub fn channel(mut self, id: impl Into<String>, agent: Option<String>) -> Self {
         self.channels.insert(id.into(), agent);
         self
@@ -74,21 +75,21 @@ impl Routing {
 
     /// The agent that answers in `channel`, or `None` where the bot is silent.
     ///
-    /// A DM (`D…`) resolves only against `dm`: `any_channel` is about channels
-    /// the bot was invited to, and nobody invites it to a DM.
+    /// A DM (`D…`) resolves only against `dm`: `mentions` is about channels,
+    /// and a DM reaches the bot without anybody mentioning it.
     pub fn agent_for(&self, channel: &str) -> Option<&str> {
         if channel.starts_with('D') {
             return self.dm.as_deref();
         }
         match self.channels.get(channel) {
             Some(entry) => entry.as_deref(),
-            None => self.any_channel.as_deref(),
+            None => self.mentions.as_deref(),
         }
     }
 
     /// Whether this routes anything at all.
     pub fn is_empty(&self) -> bool {
-        self.dm.is_none() && self.any_channel.is_none() && self.channels.is_empty()
+        self.dm.is_none() && self.mentions.is_none() && self.channels.is_empty()
     }
 }
 
@@ -100,8 +101,8 @@ impl std::fmt::Display for Routing {
         if let Some(agent) = &self.dm {
             parts.push(format!("dm→{agent}"));
         }
-        if let Some(agent) = &self.any_channel {
-            parts.push(format!("any channel→{agent}"));
+        if let Some(agent) = &self.mentions {
+            parts.push(format!("mentions→{agent}"));
         }
         let mut channels: Vec<_> = self.channels.iter().collect();
         channels.sort_by(|a, b| a.0.cmp(b.0));
@@ -1703,7 +1704,7 @@ mod tests {
     fn a_channel_falls_to_the_default() {
         let routing = Routing::new()
             .dm(Some("support".into()))
-            .any_channel(Some("support".into()))
+            .mentions(Some("support".into()))
             .channel("C0ENG", Some("oncall".into()));
         assert_eq!(routing.agent_for("C0ENG"), Some("oncall"));
         assert_eq!(routing.agent_for("C0SALES"), Some("support"));
@@ -1725,7 +1726,7 @@ mod tests {
     #[test]
     fn an_off_channel_is_silent_under_a_default() {
         let routing = Routing::new()
-            .any_channel(Some("support".into()))
+            .mentions(Some("support".into()))
             .channel("C0RANDOM", None);
         assert_eq!(routing.agent_for("C0RANDOM"), None);
         assert_eq!(routing.agent_for("C0SALES"), Some("support"));
@@ -1735,12 +1736,14 @@ mod tests {
     fn routing_reads_back_for_the_startup_line() {
         let routing = Routing::new()
             .dm(Some("support".into()))
-            .any_channel(Some("helper".into()))
+            .mentions(Some("helper".into()))
             .channel("C0RANDOM", None)
             .channel("C0ENG", Some("oncall".into()));
+        // The line reads back in the file's own words, so a misrouted channel
+        // can be checked against the section that set it.
         assert_eq!(
             routing.to_string(),
-            "dm→support, any channel→helper, C0ENG→oncall, C0RANDOM off"
+            "dm→support, mentions→helper, C0ENG→oncall, C0RANDOM off"
         );
 
         assert!(Routing::default().is_empty());

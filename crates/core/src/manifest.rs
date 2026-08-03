@@ -283,11 +283,13 @@ pub struct SlackConfig {
     /// Agent for direct messages. Absent leaves DMs unanswered.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dm: Option<String>,
-    /// Agent for any channel the bot is invited to that `channel` does not
-    /// name. Absent makes the channel table an allowlist — the bot can be
+    /// Agent for a mention in any channel that `channel` does not name. A
+    /// channel only ever reaches the bot by mentioning it, which is what this
+    /// is named after; a DM needs no mention, which is why it is a key of its
+    /// own. Absent makes the channel table an allowlist — the bot can be
     /// invited anywhere and still answer only where it was named.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub any_channel: Option<String>,
+    pub mentions: Option<String>,
     /// Where one channel differs, keyed by Slack channel id. An id is the
     /// stable identity; a name is remote state that a rename re-points, so
     /// only an id is accepted.
@@ -298,7 +300,7 @@ pub struct SlackConfig {
 impl SlackConfig {
     /// Whether this section configures a bot at all.
     pub fn is_configured(&self) -> bool {
-        self.dm.is_some() || self.any_channel.is_some() || !self.channel.is_empty()
+        self.dm.is_some() || self.mentions.is_some() || !self.channel.is_empty()
     }
 }
 
@@ -431,7 +433,7 @@ pub fn check_agent(id: &str, section: &AgentSection, manifest: &Manifest) -> Res
 /// Every agent the bot routes to is declared in this same document, so a typo
 /// is caught here rather than as a bot that answers nowhere.
 pub fn check_slack(slack: &SlackConfig, manifest: &Manifest) -> Result<()> {
-    for (key, agent) in [("dm", &slack.dm), ("any_channel", &slack.any_channel)] {
+    for (key, agent) in [("dm", &slack.dm), ("mentions", &slack.mentions)] {
         if let Some(agent) = agent {
             check_slack_agent(agent, manifest)
                 .map_err(|e| anyhow::anyhow!("[slack]: `{key}`: {e}"))?;
@@ -445,11 +447,11 @@ pub fn check_slack(slack: &SlackConfig, manifest: &Manifest) -> Result<()> {
     // that connects, listens, and can answer nowhere.
     if slack.is_configured()
         && slack.dm.is_none()
-        && slack.any_channel.is_none()
+        && slack.mentions.is_none()
         && !slack.channel.values().any(|c| !c.off)
     {
         bail!(
-            "[slack]: nothing to answer with. Set `dm`, set `any_channel`, or name an agent \
+            "[slack]: nothing to answer with. Set `dm`, set `mentions`, or name an agent \
              in a `[slack.channel.<id>]`."
         );
     }

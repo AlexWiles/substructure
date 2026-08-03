@@ -64,7 +64,7 @@ off the command line:
 ```toml
 [slack]
 dm = "my-agent"
-any_channel = "my-agent"
+mentions = "my-agent"
 ```
 
 The tokens stay in the environment either way: the file names secrets, it never
@@ -78,7 +78,7 @@ different blast radii:
 ```toml
 [slack]
 dm = "support"               # direct messages
-any_channel = "support"      # any channel invited to that is not named below
+mentions = "support"         # @mentions, in any channel not named below
 
 [slack.channel.C0ENGOPS]     # eng-oncall
 agent = "oncall"
@@ -91,7 +91,10 @@ off = true
 | --- | --- |
 | A DM | `dm` |
 | A channel with a `[slack.channel.<id>]` | its own `agent`, or nobody when `off` |
-| Any other channel | `any_channel` |
+| A mention in any other channel | `mentions` |
+
+The two top-level keys are named after what reaches the bot rather than after
+where: a channel only ever reaches it by `@`-mention, and a DM never needs one.
 
 Each defaults to silence, so the bot answers only where it was told to.
 
@@ -101,7 +104,7 @@ channel at another agent gives it another system prompt, model, and tool set
 at once, and the tools are that agent's own rather than a request the model may
 decline.
 
-Leaving `any_channel` off makes the table an allowlist — the bot can be invited
+Leaving `mentions` off makes the table an allowlist — the bot can be invited
 anywhere and still answers only in the channels named here:
 
 ```toml
