@@ -11,7 +11,7 @@ start, no dependencies.
 
 ```sh
 npm install -g @substructure.ai/cli
-subs init engine
+subs init
 ```
 
 That writes a `substructure.toml`. The part that matters is four lines:

@@ -69,6 +69,7 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 - Add a Slack adapter and a channel abstraction.
 - Add MCP support.
 - substructure.toml as a config file.
+- `subs init` writes a starter `substructure.toml`. It asks for a project name, a provider and model, an agent id, which MCP servers to connect, whether the agent answers in Slack, and where it runs, then prints the steps for that answer.
 
 ### Changed
 
@@ -130,9 +131,6 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
   (`--dev` still works as an alias): the file said "dev" for what is really
   "authenticate clients and workers", which is a decision about reachability,
   not about a stage. `auth` defaults to true.
-- `subs init` takes `engine`, `deployment`, or `both` (`local` and `remote` are
-  aliases) — what the file is *for*, rather than which engine is at the other
-  end of it.
 - `subs mcp login` stores credentials in the environment's `db` instead of
   `credentials.toml`, so a login belongs to the environment that uses it. Run
   `subs mcp login <id>` once per environment; **gitignore `*.db*`**, which now
@@ -154,7 +152,6 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 - Remove the `subs webhook` commands and the local `PUT /apps/{app}/worker` route. `subs apply` pushes the worker URL that the file declares.
 - Remove the `--worker-url`, `--signing-secret`, and `--llm-provider` options from `subs run` and `subs serve`. The file declares all three.
 - `subs run` needs `--agent` or `[run].agent`, and checks the id before it makes a session.
-- `subs init` asks for an agent id and a model, and writes a file with no worker.
 - The engine signs a decision request only if the agent names a `signing_secret_env`.
 - LLM calls and tool routing now use the agent config from the same decision.
 - Effects and decisions queue in arrival order and dispatch when their prerequisites settle.

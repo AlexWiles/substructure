@@ -3,20 +3,15 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context as _, Result};
-use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
+use dialoguer::{theme::ColorfulTheme, Confirm, Input, MultiSelect, Select};
 
 use crate::cli::env::ProviderKind;
-use crate::cli::env_value;
+use crate::manifest::{check_id, check_url};
 
 use super::cloud::project_config::FILENAME;
 
 #[derive(Debug, clap::Args)]
 pub struct InitCommand {
-    /// What the file is for [default: engine]. `deployment` and `both` add the
-    /// `[deployment]` section, which `subs link` and `subs apply` would
-    /// otherwise write themselves the first time you deploy.
-    #[arg(value_enum)]
-    pub role: Option<Role>,
     /// Where to write it [default: substructure.toml].
     pub path: Option<PathBuf>,
     /// Overwrite an existing file.
@@ -27,48 +22,116 @@ pub struct InitCommand {
     pub no_interaction: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum Role {
-    /// An engine in this process over a SQLite file: `subs run`, `subs serve`.
-    #[value(alias = "local")]
-    Engine,
-    /// A server speaking `/api/v1`: `subs apply`, `subs sessions`.
-    #[value(alias = "remote")]
-    Deployment,
-    /// Serve it here and administer it from the same file.
-    Both,
-}
+/// The name to hold a first project under. A placeholder rather than the
+/// directory's own name: a directory is called all sorts of things a project is
+/// not — `src`, `tmp`, the CLI's own name — and a default you have to read
+/// before you can accept it is not much of a default.
+const DEFAULT_NAME: &str = "my-agent";
 
-impl Role {
-    fn engine(self) -> bool {
-        matches!(self, Role::Engine | Role::Both)
-    }
+/// Where the Slack app is built, which is a page rather than a command.
+const SLACK_NEW_APP: &str = "https://api.slack.com/apps?new_app=1";
+const SLACK_DOCS: &str = "https://substructure.ai/docs/slack";
 
-    fn deployment(self) -> bool {
-        matches!(self, Role::Deployment | Role::Both)
-    }
+/// The hosted cloud. Written out rather than left to the default it happens to
+/// equal: a file that says where it deploys can be read, and a reader of
+/// somebody else's checkout should not have to know what an absent `url` means.
+const HOSTED_URL: &str = "https://api.substructure.ai";
+
+/// Where the agent runs. The last question, and the only one that is about
+/// running rather than about the agent.
+///
+/// It is asked last because nothing before it changes with the answer, and it
+/// is asked at all because it decides which single path the next steps print.
+/// Self-hosting is deliberately not a third answer: it is `[deployment].url`
+/// pointing at your own `subs serve`, a one-line edit that a first file does
+/// not have to decide about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Place {
+    Cloud,
+    Local,
 }
 
 /// The answers a file is rendered from.
 ///
-/// It holds only what `init` cannot guess: which provider (which decides the
-/// key you have to export) and what the agent is called (which decides what you
-/// type after `--agent`). Everything else the starter needs has a defensible
-/// default, a flag, or is a one-line edit, and a question whose answer barely
+/// One topic per field, in the order they are asked: what the project is
+/// called, the agent and the model it speaks to, what that agent can reach,
+/// where it answers, and where it runs. Everything else a starter needs has a
+/// defensible default or is a one-line edit, and a question whose answer barely
 /// changes the file is a question worth not asking.
+///
+/// A cloud answer writes `[deployment]` rather than leaving it to the first
+/// `subs apply`, because the section is also what sends `subs mcp login` to the
+/// deployment: without it, authorizing a connection before deploying stores the
+/// credential in a database here — the wrong place, silently. With it, the same
+/// mistake is an error that names the login you have not done yet. A local
+/// answer writes no `[deployment]` for the same reason read the other way: its
+/// connections really are authorized here.
 ///
 /// There is no worker question either: an agent the file declares runs on the
 /// engine, and attaching a worker is a later edit to one `[agent.<id>]` — the
 /// same kind of edit as adding a tool or a second agent.
 #[derive(Debug, Clone, PartialEq)]
 struct Plan {
-    /// What `subs apply` creates the app as. An engine-only file has nobody to
-    /// name it to.
-    name: Option<String>,
+    name: String,
     agent: AgentPlan,
-    /// Whether the file describes an engine run here — the `[server]` block.
-    engine: bool,
-    deployment: Option<DeploymentPlan>,
+    /// The connections the agent draws tools from, in the order they were
+    /// picked. Declared *and* named by the agent: a `[mcp.<id>]` nobody
+    /// references reaches nothing.
+    mcp: Vec<McpPlan>,
+    /// Where the bot answers, or `None` where there is no bot. Never a section
+    /// that routes nowhere: answering no to both leaves `[slack]` unwritten.
+    slack: Option<SlackPlan>,
+    place: Place,
+}
+
+/// The two Slack questions, asked apart because they have very different blast
+/// radii: a DM is one person talking to the agent, a channel is a room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SlackPlan {
+    dm: bool,
+    any_channel: bool,
+}
+
+/// One `[mcp.<id>]`: where the server is and what the agent calls it. No
+/// `auth` — every server the wizard offers authorizes with `subs mcp login`,
+/// and a URL you bring is asked for as one too.
+#[derive(Debug, Clone, PartialEq)]
+struct McpPlan {
+    id: String,
+    url: String,
+}
+
+/// The remote MCP servers a first file is likely to name.
+///
+/// A handful, not a registry: the list exists so the common case is a
+/// keystroke rather than a URL to go and look up, and `other` covers the rest.
+/// Every entry is OAuth — one `subs mcp login <id>` and nothing to export —
+/// because a token-backed server needs an `auth` line naming a variable, and
+/// that is the engine's half alone: `subs apply` refuses a connection carrying
+/// one. Offering it here would hand a deployment file a section it cannot push.
+const CATALOG: &[Server] = &[
+    Server::new("sentry", "https://mcp.sentry.dev/mcp"),
+    Server::new("linear", "https://mcp.linear.app/mcp"),
+    Server::new("notion", "https://mcp.notion.com/mcp"),
+    Server::new("stripe", "https://mcp.stripe.com"),
+];
+
+struct Server {
+    id: &'static str,
+    url: &'static str,
+}
+
+impl Server {
+    const fn new(id: &'static str, url: &'static str) -> Self {
+        Self { id, url }
+    }
+
+    fn plan(&self) -> McpPlan {
+        McpPlan {
+            id: self.id.into(),
+            url: self.url.into(),
+        }
+    }
 }
 
 /// The one agent a starter file declares, and the block it runs on.
@@ -78,12 +141,6 @@ struct AgentPlan {
     llm: String,
     provider: ProviderKind,
     model: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct DeploymentPlan {
-    /// Absent means the hosted default, which the file need not restate.
-    url: Option<String>,
 }
 
 impl Default for AgentPlan {
@@ -98,12 +155,16 @@ impl Default for AgentPlan {
 }
 
 impl Plan {
-    fn starter(role: Role) -> Self {
+    /// Every answer at its default. `Local` rather than `Cloud`, because a
+    /// path that cannot ask cannot sign anybody in either: the local file is
+    /// the one that needs nothing but a key to run.
+    fn starter() -> Self {
         Self {
-            name: role.deployment().then(default_name).flatten(),
+            name: DEFAULT_NAME.into(),
             agent: AgentPlan::default(),
-            engine: role.engine(),
-            deployment: role.deployment().then_some(DeploymentPlan { url: None }),
+            mcp: Vec::new(),
+            slack: None,
+            place: Place::Local,
         }
     }
 }
@@ -118,24 +179,13 @@ fn default_llm_name(provider: ProviderKind) -> &'static str {
     }
 }
 
-/// The directory's own name, which is what a project is usually called.
-fn default_name() -> Option<String> {
-    std::env::current_dir()
-        .ok()?
-        .file_name()?
-        .to_str()
-        .map(str::to_string)
-}
-
 /// Starters, not schemas: what a first run needs, plus the settings most
 /// likely to be changed next, so the file works before it is edited and
 /// `docs/160-cli.md` holds the rest. Scalars lead, then a section per group —
 /// a top-level key written after a section would belong to it.
 fn render(p: &Plan) -> String {
     let mut s = String::new();
-    if let Some(name) = &p.name {
-        s.push_str(&format!("name = \"{name}\"\n\n"));
-    }
+    s.push_str(&format!("name = \"{}\"\n\n", p.name));
     s.push_str(&format!(
         "[llm.{}]\ntype = \"{}\"\n",
         p.agent.llm,
@@ -145,26 +195,60 @@ fn render(p: &Plan) -> String {
         "\n[agent.{}]\nllm = \"{}\"\nmodel = \"{}\"\n",
         p.agent.id, p.agent.llm, p.agent.model
     ));
+    // The reference is what puts the connection's tools in front of the model;
+    // the section below only says where the server is.
+    if !p.mcp.is_empty() {
+        let refs: Vec<String> = p
+            .mcp
+            .iter()
+            .map(|m| format!("{{ id = \"{}\" }}", m.id))
+            .collect();
+        s.push_str(&format!("mcp = [{}]\n", refs.join(", ")));
+    }
+
+    for m in &p.mcp {
+        s.push_str(&format!(
+            "\n[mcp.{}]\nurl = \"{}\"   # authorize with `subs mcp login {}`\n",
+            m.id, m.url, m.id
+        ));
+    }
+
+    // A key per answer, so the section says exactly what was agreed to. The
+    // unwritten half is a later edit rather than a line to go and delete.
+    if let Some(slack) = &p.slack {
+        let mut keys = Vec::new();
+        if slack.dm {
+            keys.push((format!("dm = \"{}\"", p.agent.id), "direct messages"));
+        }
+        if slack.any_channel {
+            keys.push((
+                format!("any_channel = \"{}\"", p.agent.id),
+                "any channel the bot is invited to",
+            ));
+        }
+        // Comments line up whichever keys are present, and an id of any length
+        // keeps them lined up.
+        let w = keys.iter().map(|(key, _)| key.len()).max().unwrap_or(0);
+        s.push_str("\n[slack]\n");
+        for (key, what) in keys {
+            s.push_str(&format!("{key:<w$}   # {what}\n"));
+        }
+    }
 
     // Written rather than asked, and written rather than left to the default:
     // `auth` defaults to *on*, so an unstated `[server]` would make a first
     // `subs serve` demand tokens. Stating it keeps the insecure setting visible
-    // in the file instead of silent.
-    if p.engine {
-        s.push_str(
+    // in the file instead of silent — and it is only defensible here, on a
+    // loopback engine nothing else can reach, which is why a cloud file has no
+    // `[server]` at all rather than one that says something reassuring.
+    match p.place {
+        Place::Local => s.push_str(
             "\n[server]\nhost = \"127.0.0.1\"\nport = 8080\n\
              auth = false   # no client or worker auth. Keep this off the network\n",
-        );
-    }
-
-    if let Some(d) = &p.deployment {
-        s.push_str("\n[deployment]\n");
-        match &d.url {
-            Some(url) => s.push_str(&format!("url = \"{url}\"\n")),
-            // The section is what says a deployment is in play; `subs link`
-            // fills in the pins.
-            None => s.push_str("# the hosted cloud. `subs link` pins an org and project\n"),
-        }
+        ),
+        Place::Cloud => s.push_str(&format!(
+            "\n[deployment]\nurl = \"{HOSTED_URL}\"   # `subs apply` pins the org and project\n"
+        )),
     }
     s
 }
@@ -184,10 +268,10 @@ pub fn run(cmd: InitCommand) -> Result<()> {
     }
 }
 
-/// The scripted path: no questions, so the role has to be on the command line
-/// and the answers are the defaults.
+/// The scripted path: no questions, so every answer is the default. An engine
+/// here is the one that needs nothing else to run, and a file gains
+/// `[deployment]` from `subs link` or the first `subs apply` anyway.
 fn starter(cmd: InitCommand) -> Result<()> {
-    let role = cmd.role.unwrap_or(Role::Engine);
     let path = cmd.path.unwrap_or_else(|| PathBuf::from(FILENAME));
     if path.exists() && !cmd.force {
         bail!(
@@ -195,10 +279,10 @@ fn starter(cmd: InitCommand) -> Result<()> {
             path.display()
         );
     }
-    let plan = Plan::starter(role);
+    let plan = Plan::starter();
     write_file(&path, &render(&plan))?;
     println!("Wrote {}", path.display());
-    next_steps(&plan);
+    next_steps(&plan, &path);
     Ok(())
 }
 
@@ -249,14 +333,8 @@ fn explain(text: &str) {
 
 fn wizard(cmd: InitCommand) -> Result<()> {
     restore_cursor_on_interrupt();
-    println!("substructure.toml declares your agents.");
+    println!("This creates substructure.toml, the file that describes your agent.");
     println!("Press Ctrl-C to stop. Nothing is written until you confirm.");
-
-    // Never asked. A file gains `[deployment]` the moment you deploy — `subs
-    // link` and `subs apply` both write the section themselves — so making it
-    // the first question would demand an architecture decision the file does
-    // not force, before the user has an agent to decide it about.
-    let role = cmd.role.unwrap_or(Role::Engine);
 
     let path = match cmd.path {
         Some(p) => p,
@@ -274,7 +352,7 @@ fn wizard(cmd: InitCommand) -> Result<()> {
         }
     }
 
-    let plan = ask(role)?;
+    let plan = ask()?;
     let body = render(&plan);
 
     println!("\n{}", path.display());
@@ -292,90 +370,74 @@ fn wizard(cmd: InitCommand) -> Result<()> {
     }
     write_file(&path, &body)?;
     println!("\nWrote {}", path.display());
-    next_steps(&plan);
+    next_steps(&plan, &path);
     Ok(())
 }
 
-fn ask(role: Role) -> Result<Plan> {
-    // The agent leads: it is the whole point of the file, and the only part of
-    // it whose answers cannot be guessed.
+fn ask() -> Result<Plan> {
+    // The name first: it is the one question with an answer already in hand,
+    // so the wizard opens by confirming something rather than by asking for a
+    // decision.
+    let name = ask_name()?;
     let agent = ask_agent()?;
-
-    let name = match role.deployment() {
-        false => None,
-        true => {
-            explain(
-                "The app's name. `subs apply` creates the app from it and renames when it\n\
-                 changes, so the file stays the source of truth.",
-            );
-            let entered: String = Input::with_theme(&theme())
-                .with_prompt("Project name")
-                .default(default_name().unwrap_or_else(|| "my-project".into()))
-                .interact_text()?;
-            Some(entered)
-        }
-    };
+    // What it can reach and where it answers are both about the agent just
+    // named, so they are asked while it is still the subject.
+    let mcp = ask_mcp()?;
+    let slack = ask_slack(&agent.id)?;
+    // Where it runs comes last: nothing above changes with the answer, so
+    // asking it first would spend the first question on the one topic that is
+    // about running rather than about the agent.
+    let place = ask_place(slack.is_some())?;
 
     Ok(Plan {
         name,
         agent,
-        engine: role.engine(),
-        deployment: role.deployment().then(ask_deployment).transpose()?,
+        mcp,
+        slack,
+        place,
     })
+}
+
+/// What the project is called. `subs apply` creates the cloud project from it,
+/// so answering it here is what makes deploying a single command later.
+fn ask_name() -> Result<String> {
+    explain("What do you want to call this project? You can rename it later.");
+    Ok(Input::with_theme(&theme())
+        .with_prompt("Project name")
+        .default(DEFAULT_NAME.to_string())
+        .interact_text()?)
 }
 
 /// The one thing every file needs: an agent, and the model it speaks to. The
 /// engine decides for it until you attach a worker.
+///
+/// No key is mentioned in any of it. Where the key goes depends on where the
+/// agent runs, which is not known yet, so both the variable and the check that
+/// it is set belong to the next steps instead — where the answer is in hand.
 fn ask_agent() -> Result<AgentPlan> {
     let d = AgentPlan::default();
 
-    // The provider first: it is the answer that decides which key you have to
-    // export, and it supplies the default for the model question after it.
-    explain(
-        "Which LLM your agent talks to. The engine makes the call and reads the key\n\
-         from the environment — the file names the variable and never holds the secret.",
-    );
-    let items: Vec<String> = ProviderKind::VENDORS
-        .iter()
-        .map(|p| {
-            format!(
-                "{}  ({})",
-                p.as_str(),
-                p.default_api_key_env().unwrap_or_default()
-            )
-        })
-        .collect();
+    // The provider first: it supplies the default for the model question.
+    explain("Which provider do you want to use? You can change this later, or use several.");
+    let items: Vec<&str> = ProviderKind::VENDORS.iter().map(|p| p.as_str()).collect();
     let pick = Select::with_theme(&theme())
-        .with_prompt("LLM provider")
+        .with_prompt("Provider")
         .items(&items)
         .default(0)
         .interact()?;
     let provider = ProviderKind::VENDORS[pick];
-    if let Some(var) = provider.default_api_key_env() {
-        if env_value(var).is_some() {
-            println!("  ✓ {var} is set.");
-        } else {
-            println!(
-                "  {var} is not set yet — get a key at {}",
-                provider.console_url().unwrap_or_default()
-            );
-        }
-    }
 
-    explain(
-        "Agents are named. Clients route to one by id, and `subs run --agent <id>`\n\
-         picks which to run. The engine decides every step of its turns until you\n\
-         give it a `worker` URL.",
-    );
-    let id: String = Input::with_theme(&theme())
-        .with_prompt("Agent id")
-        .default(d.id.clone())
-        .interact_text()?;
-
-    explain("Which model, from that provider.");
+    println!();
     let model: String = Input::with_theme(&theme())
         .with_prompt("Model")
         .default(provider.default_model().to_string())
+        .interact_text()?;
+
+    explain("What id do you want for your agent? You use it to talk to your agent.");
+    let id: String = Input::with_theme(&theme())
+        .with_prompt("Agent id")
+        .default(d.id.clone())
+        .validate_with(|input: &String| check_id(input).map_err(|e| e.to_string()))
         .interact_text()?;
 
     Ok(AgentPlan {
@@ -386,52 +448,185 @@ fn ask_agent() -> Result<AgentPlan> {
     })
 }
 
-fn ask_deployment() -> Result<DeploymentPlan> {
-    const HOSTED: &str = "https://api.substructure.ai";
+/// What the agent can reach. Selecting nothing is the common answer and costs
+/// one keystroke, so the question is cheap enough to ask everyone.
+fn ask_mcp() -> Result<Vec<McpPlan>> {
+    explain("Which MCP servers do you want to connect? Space selects, Enter accepts.");
 
-    explain(
-        "Which server. The hosted cloud is the default; a self-hosted deployment or\n\
-         someone else's `subs serve` is a URL here. `subs login -c this-file` signs\n\
-         in to whichever it is.",
-    );
+    let mut items: Vec<String> = CATALOG
+        .iter()
+        .map(|s| format!("{:<7}  {}", s.id, s.url))
+        .collect();
+    items.push(format!("{:<7}  a URL you have", "other"));
+    let picks = MultiSelect::with_theme(&theme())
+        .with_prompt("MCP servers")
+        .items(&items)
+        .interact()?;
+
+    let mut chosen: Vec<McpPlan> = picks
+        .iter()
+        .filter_map(|i| CATALOG.get(*i))
+        .map(Server::plan)
+        .collect();
+    if picks.contains(&CATALOG.len()) {
+        chosen.push(ask_custom_mcp(&chosen)?);
+    }
+    Ok(chosen)
+}
+
+/// A server the list does not carry. The URL leads: it is what the id is
+/// guessed from, and the one part nobody can default.
+fn ask_custom_mcp(taken: &[McpPlan]) -> Result<McpPlan> {
+    println!();
     let url: String = Input::with_theme(&theme())
-        .with_prompt("API URL")
-        .default(HOSTED.to_string())
-        .validate_with(url_is_parseable)
+        .with_prompt("MCP server URL")
+        .validate_with(|input: &String| check_url(input).map_err(|e| e.to_string()))
         .interact_text()?;
 
-    explain("The org and app are pinned by `subs link` or `subs apply` after you log in.");
+    let used: Vec<String> = taken.iter().map(|m| m.id.clone()).collect();
+    let id: String = Input::with_theme(&theme())
+        .with_prompt("Call it")
+        .default(id_from_url(&url))
+        .validate_with(move |input: &String| match used.contains(input) {
+            true => Err(format!("`{input}` is already declared")),
+            false => check_id(input).map_err(|e| e.to_string()),
+        })
+        .interact_text()?;
 
-    Ok(DeploymentPlan {
-        url: (url != HOSTED).then_some(url),
-    })
+    Ok(McpPlan { id, url })
 }
 
-/// A typo caught at the prompt beats one caught at the first request.
-#[allow(clippy::ptr_arg)] // dialoguer's validator takes &String.
-fn url_is_parseable(input: &String) -> Result<(), String> {
-    reqwest::Url::parse(input)
-        .map(|_| ())
-        .map_err(|e| format!("not a URL: {e}"))
+/// A first guess at what to call a server, from the host that serves it:
+/// `https://mcp.sentry.dev/mcp` is `sentry`. The labels that say *how* it is
+/// served say nothing about which service it is.
+fn id_from_url(url: &str) -> String {
+    let host = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_default();
+    host.split('.')
+        .find(|label| !matches!(*label, "mcp" | "api" | "www" | "docs" | "server"))
+        // A name, not an address: `127.0.0.1` has no service in it to borrow.
+        .filter(|label| label.starts_with(|c: char| c.is_ascii_alphabetic()))
+        .filter(|label| check_id(label).is_ok())
+        .unwrap_or("connection")
+        .to_string()
 }
 
-fn next_steps(plan: &Plan) {
+/// Where the bot answers, asked as a tree: one question for everybody, and the
+/// two that widen it only for whoever wants a bot at all.
+///
+/// A DM and a channel are separately answered because they are separately
+/// consequential — a DM is one person, a channel is a room — and each defaults
+/// to what it would take to be surprised by: DMs on, channels off.
+fn ask_slack(agent: &str) -> Result<Option<SlackPlan>> {
+    explain("Do you want a Slack bot?");
+    if !Confirm::with_theme(&theme())
+        .with_prompt("Slack bot?")
+        .default(false)
+        .interact()?
+    {
+        return Ok(None);
+    }
+
+    let dm = Confirm::with_theme(&theme())
+        .with_prompt(format!("  Should `{agent}` answer direct messages?"))
+        .default(true)
+        .interact()?;
+    let any_channel = Confirm::with_theme(&theme())
+        .with_prompt(format!(
+            "  Should `{agent}` answer in channels it is invited to?"
+        ))
+        .default(false)
+        .interact()?;
+
+    // Neither is a bot that would answer nowhere. Say so rather than write a
+    // section whose every key is missing.
+    if !dm && !any_channel {
+        println!("  Nowhere to answer, so no Slack section.");
+        return Ok(None);
+    }
+    Ok(Some(SlackPlan { dm, any_channel }))
+}
+
+/// Where it runs. Cloud leads because it is the shorter path to a bot you can
+/// talk to: the workspace install carries the credential, so there is no Slack
+/// app to build and no token to export.
+fn ask_place(slack: bool) -> Result<Place> {
+    explain("Last thing: where do you want to run it?");
+    let items = match slack {
+        true => [
+            "Substructure cloud   `subs apply` deploys it. Add the Slack bot in one click.",
+            "local development    `subs serve` runs it here. You create the Slack app yourself.",
+        ],
+        false => [
+            "Substructure cloud   `subs apply` deploys it.",
+            "local development    `subs serve` runs it here.",
+        ],
+    };
+    let pick = Select::with_theme(&theme())
+        .with_prompt("Run it")
+        .items(&items)
+        .default(0)
+        .interact()?;
+    Ok([Place::Cloud, Place::Local][pick])
+}
+
+/// One numbered path, for the answer that was given. Both paths at once would
+/// leave a reader to work out which half is theirs, which is the work the last
+/// question was asked to do for them.
+///
+/// The file is named on every command. It is the default one most of the time,
+/// but `subs init subs.prod.toml` is exactly when a copied line has to work.
+fn next_steps(plan: &Plan, path: &Path) {
+    let c = format!("-c {}", path.display());
+    let mut n = 0;
+    let mut step = |line: String| {
+        n += 1;
+        println!("  {n}. {line}");
+    };
+
     println!("\nNext:");
-    if let Some(var) = plan.agent.provider.default_api_key_env() {
-        if env_value(var).is_none() {
-            println!(
-                "  export {var}=...   # {}",
-                plan.agent.provider.console_url().unwrap_or_default()
-            );
+    match plan.place {
+        Place::Cloud => {
+            step(format!("subs login {c}"));
+            step(format!("subs apply {c}"));
+            // The key is uploaded rather than exported: the call runs there.
+            step(format!("subs llm set-key {} {c}", plan.agent.llm));
+            // After apply, so the credential lands in the deployment that
+            // will dial the connection rather than in the database here.
+            for m in &plan.mcp {
+                step(format!("subs mcp login {} {c}", m.id));
+            }
+            match plan.slack.is_some() {
+                true => step(format!("subs open {c}   # add the bot to Slack there")),
+                false => step(format!("subs open {c}")),
+            }
         }
-    }
-    if plan.engine {
-        println!("  subs run --agent {} -o pretty 'hello'", plan.agent.id);
-        println!("  subs serve   # the same engine behind an HTTP API");
-    }
-    if plan.deployment.is_some() {
-        println!("  subs login");
-        println!("  subs apply   # create the app this file describes, and push it");
+        Place::Local => {
+            if let Some(var) = plan.agent.provider.default_api_key_env() {
+                step(format!(
+                    "export {var}=...   # {}",
+                    plan.agent.provider.console_url().unwrap_or_default()
+                ));
+            }
+            for m in &plan.mcp {
+                step(format!("subs mcp login {} {c}", m.id));
+            }
+            match plan.slack.is_some() {
+                true => {
+                    step(format!("Create your Slack app: {SLACK_NEW_APP}"));
+                    println!("     the manifest to paste: {SLACK_DOCS}");
+                    println!("     export SLACK_APP_TOKEN=xapp-...");
+                    println!("     export SLACK_BOT_TOKEN=xoxb-...");
+                    step(format!("subs serve {c}"));
+                }
+                false => step(format!(
+                    "subs run {c} --agent {} -o pretty 'hello'",
+                    plan.agent.id
+                )),
+            }
+        }
     }
 }
 
@@ -455,9 +650,8 @@ mod tests {
 
     /// Every test drives the scripted path: a prompt in a test would block on
     /// whatever stdin happens to be.
-    fn init(role: Role, path: PathBuf, force: bool) -> InitCommand {
+    fn init(path: PathBuf, force: bool) -> InitCommand {
         InitCommand {
-            role: Some(role),
             path: Some(path),
             force,
             no_interaction: true,
@@ -472,26 +666,33 @@ mod tests {
         project_config::load_explicit(&path).unwrap().config
     }
 
+    /// One section each, and never both: `[server]` is what `subs serve` reads
+    /// and `auth = false` in it is only defensible on loopback, while
+    /// `[deployment]` is what says the credentials and the agent live
+    /// elsewhere. A file carrying both would be answering a question that was
+    /// asked once.
     #[test]
-    fn each_starter_declares_the_roles_it_was_asked_for() {
-        let dir = tmpdir();
-        for role in [Role::Engine, Role::Deployment, Role::Both] {
-            let path = dir.join(format!("{role:?}.toml"));
-            run(init(role, path.clone(), false)).unwrap();
+    fn each_place_writes_only_the_sections_it_runs_on() {
+        for place in [Place::Cloud, Place::Local] {
+            let body = render(&Plan {
+                place,
+                ..Plan::starter()
+            });
+            let cfg = parse(&body);
 
-            let cfg = project_config::load_explicit(&path).unwrap().config;
+            let local = place == Place::Local;
+            assert_eq!(cfg.server.is_some(), local, "{body}");
+            assert_eq!(cfg.deployment.is_some(), !local, "{body}");
+            // Stated rather than implied, so the file can be read for where it
+            // goes instead of for what an absent key would have meant.
             assert_eq!(
-                cfg.deployment.is_some(),
-                role.deployment(),
-                "{role:?} rendered {}",
-                fs::read_to_string(&path).unwrap()
+                cfg.deployment_url(),
+                (!local).then_some(HOSTED_URL),
+                "{body}"
             );
-            // An engine's settings are what `subs serve` reads; a
-            // deployment-only file leaves them to the defaults.
-            assert_eq!(cfg.server.is_some(), role.engine(), "{role:?}");
             // `[run]` pins which agent a bare `subs run` drives. A starter has
             // one agent and names it on the command line, so it is not written.
-            assert!(cfg.run.is_none(), "{role:?}");
+            assert!(cfg.run.is_none(), "{body}");
         }
     }
 
@@ -500,66 +701,112 @@ mod tests {
     /// only an answer reaches.
     #[test]
     fn every_answer_renders_a_file_that_parses() {
-        let deployments = [
-            None,
-            Some(DeploymentPlan { url: None }),
-            Some(DeploymentPlan {
-                url: Some("https://subs.internal".into()),
-            }),
-        ];
+        // The maximal file: every section an answer can add, so the sections
+        // are checked in each other's company rather than one at a time.
+        let mut mcp: Vec<McpPlan> = CATALOG.iter().map(Server::plan).collect();
+        mcp.push(McpPlan {
+            id: "internal".into(),
+            url: "https://mcp.internal.test/mcp".into(),
+        });
+
         for provider in ProviderKind::VENDORS {
-            for deployment in &deployments {
+            for place in [Place::Cloud, Place::Local] {
                 let plan = Plan {
-                    name: Some("support-bot".into()),
+                    name: "support-bot".into(),
                     agent: AgentPlan {
                         id: "my-agent".into(),
                         llm: default_llm_name(provider).into(),
                         provider,
                         model: provider.default_model().into(),
                     },
-                    engine: true,
-                    deployment: deployment.clone(),
+                    mcp: mcp.clone(),
+                    slack: Some(SlackPlan {
+                        dm: true,
+                        any_channel: true,
+                    }),
+                    place,
                 };
                 let body = render(&plan);
                 let cfg = parse(&body);
                 assert_eq!(cfg.name.as_deref(), Some("support-bot"));
                 assert_eq!(cfg.agent_ids(), ["my-agent"], "{body}");
                 assert_eq!(cfg.llm[default_llm_name(provider)].kind, provider, "{body}");
-                assert_eq!(
-                    cfg.deployment_url(),
-                    deployment.as_ref().and_then(|d| d.url.as_deref()),
-                    "{body}"
-                );
+                // A declared connection reaches nothing until the agent names
+                // it, so the two halves are checked together.
+                let declared: Vec<&str> = cfg.mcp.keys().map(String::as_str).collect();
+                let named: Vec<&str> = cfg.agent["my-agent"]
+                    .mcp
+                    .iter()
+                    .map(|s| s.id.as_str())
+                    .collect();
+                assert_eq!(declared.len(), mcp.len(), "{body}");
+                for m in &mcp {
+                    assert!(declared.contains(&m.id.as_str()), "{body}");
+                    assert!(named.contains(&m.id.as_str()), "{body}");
+                    assert_eq!(cfg.mcp[&m.id].url, m.url, "{body}");
+                    assert!(cfg.mcp[&m.id].auth.is_none(), "login, not a variable");
+                }
+                assert_eq!(cfg.slack_dm_agent().as_deref(), Some("my-agent"), "{body}");
             }
         }
+    }
 
-        // A deployment on its own: no engine sections to carry the scalars.
-        let cfg = parse(&render(&Plan {
-            name: None,
-            agent: AgentPlan::default(),
-            engine: false,
-            deployment: Some(DeploymentPlan { url: None }),
-        }));
-        assert!(cfg.deployment.is_some());
-        assert!(cfg.run.is_none() && cfg.server.is_none());
+    /// Each Slack answer writes the key it agreed to and no other, so a bot
+    /// invited to a channel it was not opened up to still answers nowhere.
+    #[test]
+    fn slack_writes_the_answer_it_was_given() {
+        for (dm, any_channel) in [(true, false), (false, true), (true, true)] {
+            let body = render(&Plan {
+                slack: Some(SlackPlan { dm, any_channel }),
+                ..Plan::starter()
+            });
+            let slack = parse(&body).slack.expect("a section");
+            assert_eq!(slack.dm.is_some(), dm, "{body}");
+            assert_eq!(slack.any_channel.is_some(), any_channel, "{body}");
+        }
+    }
+
+    /// A URL is named after the service it reaches, not after how it is served.
+    #[test]
+    fn a_server_is_named_after_its_host() {
+        for (url, id) in [
+            ("https://mcp.sentry.dev/mcp", "sentry"),
+            ("https://api.githubcopilot.com/mcp/", "githubcopilot"),
+            ("https://huggingface.co/mcp", "huggingface"),
+            ("http://127.0.0.1:4445/mcp", "connection"),
+            ("nonsense", "connection"),
+        ] {
+            assert_eq!(id_from_url(url), id, "{url}");
+        }
+    }
+
+    /// Every offered server has to survive the file's own checks, so a bad
+    /// entry fails here rather than at somebody's first `subs init`.
+    #[test]
+    fn every_offered_server_is_one_the_file_accepts() {
+        for s in CATALOG {
+            check_id(s.id).unwrap();
+            check_url(s.url).unwrap();
+        }
     }
 
     /// The starter is the engine-hosted minimal file: one llm block, one agent,
     /// no worker. Attaching a worker is a later edit, like every other rung.
     #[test]
     fn the_starter_declares_an_engine_hosted_agent() {
-        let cfg = parse(&render(&Plan::starter(Role::Engine)));
+        let cfg = parse(&render(&Plan::starter()));
         let agent = cfg.agent.get("assistant").expect("one agent declared");
         assert_eq!(agent.llm.as_deref(), Some("claude"));
         assert!(agent.worker.is_none(), "the engine decides for it");
         assert_eq!(cfg.llm["claude"].kind, ProviderKind::Anthropic);
+        assert_eq!(cfg.name.as_deref(), Some(DEFAULT_NAME));
     }
 
     /// `auth` defaults to on, so an unwritten `[server]` would make a first
     /// `subs serve` demand tokens. The starter states it instead.
     #[test]
     fn the_starter_states_the_auth_it_relies_on() {
-        let cfg = parse(&render(&Plan::starter(Role::Engine)));
+        let cfg = parse(&render(&Plan::starter()));
         assert!(!cfg.server_auth());
         assert!(cfg.slack_dm_agent().is_none(), "init declares no slack bot");
     }
@@ -569,40 +816,29 @@ mod tests {
         let path = tmpdir().join("substructure.toml");
         fs::write(&path, "db = \"mine.db\"\n").unwrap();
 
-        let err = run(init(Role::Deployment, path.clone(), false))
-            .unwrap_err()
-            .to_string();
+        let err = run(init(path.clone(), false)).unwrap_err().to_string();
         assert!(err.contains("already exists"), "got {err}");
         assert!(fs::read_to_string(&path).unwrap().contains("mine.db"));
 
-        run(init(Role::Deployment, path.clone(), true)).unwrap();
-        assert_eq!(
-            fs::read_to_string(&path).unwrap(),
-            render(&Plan::starter(Role::Deployment))
-        );
+        run(init(path.clone(), true)).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), render(&Plan::starter()));
     }
 
-    /// The path is taken as given, so `subs init engine api/substructure.toml`
-    /// does not fail on a directory that does not exist yet.
+    /// The path is taken as given, so `subs init api/substructure.toml` does
+    /// not fail on a directory that does not exist yet.
     #[test]
     fn a_missing_parent_directory_is_created() {
         let path = tmpdir().join("nested/deeper/substructure.toml");
-        run(init(Role::Engine, path.clone(), false)).unwrap();
+        run(init(path.clone(), false)).unwrap();
         assert!(path.exists());
     }
 
-    /// The role is never a question — a file gains `[deployment]` when you
-    /// deploy — so omitting it writes the engine file rather than failing.
+    /// Where it runs is a question, not an argument, so the path that cannot
+    /// ask writes the file that needs nothing else to run.
     #[test]
-    fn a_missing_role_writes_the_engine_file() {
+    fn the_scripted_path_writes_the_engine_file() {
         let path = tmpdir().join("substructure.toml");
-        run(InitCommand {
-            role: None,
-            path: Some(path.clone()),
-            force: false,
-            no_interaction: true,
-        })
-        .unwrap();
+        run(init(path.clone(), false)).unwrap();
 
         let cfg = project_config::load_explicit(&path).unwrap().config;
         assert_eq!(cfg.agent_ids(), ["assistant"]);
