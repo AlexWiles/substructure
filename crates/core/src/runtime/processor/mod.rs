@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use futures_util::StreamExt;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -90,6 +91,9 @@ pub struct EventProcessorRunnerConfig {
     pub batch_size: usize,
     /// Streams claimed per sweep.
     pub stream_batch: usize,
+    /// Streams drained at once. Per-stream order is unaffected — one future
+    /// per stream, and a stream is never drained by two of them.
+    pub stream_concurrency: usize,
     pub idle_poll_interval: Duration,
     pub error_backoff: Duration,
     pub owner_id: Option<String>,
@@ -102,6 +106,7 @@ impl Default for EventProcessorRunnerConfig {
             shard_count: 1,
             batch_size: 256,
             stream_batch: 128,
+            stream_concurrency: 8,
             idle_poll_interval: Duration::from_millis(500),
             error_backoff: Duration::from_secs(1),
             owner_id: None,
@@ -191,17 +196,21 @@ impl EventProcessorRunner {
                 continue;
             }
 
-            // A stuck stream backs itself off without holding up the rest.
-            let mut backoff = false;
-            for stream in &streams {
-                if self.cancel.is_cancelled() {
-                    break;
-                }
-                if self.drain(name, stream).await.is_err() {
-                    backoff = true;
-                }
-            }
-            if backoff {
+            // Streams are independent, so several drain at once. A stuck one
+            // backs itself off without holding up the rest.
+            let this = &self;
+            let results: Vec<_> = futures_util::stream::iter(streams)
+                .map(|stream| async move {
+                    if this.cancel.is_cancelled() {
+                        return Ok(());
+                    }
+                    this.drain(name, &stream).await
+                })
+                .buffer_unordered(self.config.stream_concurrency)
+                .collect()
+                .await;
+
+            if results.iter().any(Result::is_err) {
                 tokio::time::sleep(self.config.error_backoff).await;
             }
         }
