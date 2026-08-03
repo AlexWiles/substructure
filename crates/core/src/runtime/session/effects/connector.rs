@@ -20,6 +20,7 @@
 use super::{fail, mismatched, void_events, KindSpec, Outcome, SettleError};
 use crate::connectors::{filter, RemoteTool};
 use crate::protocol::{AgentConfig, RetryPolicy};
+use crate::runtime::retry::RetryTarget;
 use crate::runtime::session::events::*;
 use crate::runtime::session::schedule::Dep;
 use crate::runtime::session::state::EffectTracking;
@@ -130,6 +131,7 @@ pub(in crate::runtime::session) fn sync(
     state: &SessionState,
     config: &AgentConfig,
 ) -> Vec<EventPayload> {
+    let retry = RetryPolicy::resolve(None, config.retry.as_ref(), RetryTarget::ConnectorSync);
     config
         .mcp
         .iter()
@@ -138,7 +140,7 @@ pub(in crate::runtime::session) fn sync(
             EventPayload::ConnectorSyncRequested(ConnectorSyncRequested {
                 id: c.id.clone(),
                 attempt: 0,
-                retry: RetryPolicy::connector_default(),
+                retry: retry.clone(),
             })
         })
         .collect()

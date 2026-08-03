@@ -172,7 +172,7 @@ pub(in crate::runtime::session) fn request(
     tool_call_id: String,
     name: String,
     arguments: String,
-    retry: RetryPolicy,
+    retry: Option<RetryPolicy>,
     caller: &Caller,
 ) -> Result<Vec<EventPayload>, SessionError> {
     SessionState::ensure_internal(caller)?;
@@ -181,6 +181,10 @@ pub(in crate::runtime::session) fn request(
         connector: t.connector,
         remote_name: t.remote_name,
     });
+    // Resolved here, not at the seam: the default follows the handler, and a
+    // client tool must stay unbounded — a deferred call waits for a human.
+    let config = state.retry_config();
+    let retry = RetryPolicy::resolve(retry, config.as_ref(), handler.retry_target());
     if state.has_effect(EffectKind::ToolCall, &tool_call_id) {
         return Ok(Vec::new());
     }

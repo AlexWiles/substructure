@@ -79,9 +79,11 @@ re-prompts the model and the turn continues.
 
 ## Timeouts
 
-By default a deferred call waits indefinitely. Give the `tool.call` a `retry`
-policy with a `timeout_secs` to bound the wait: when it lapses the call fails,
-then retries or settles as a terminal error per the policy. See
+A client-handled call waits indefinitely by default — it is the one effect the
+engine leaves unbounded, because a human may be answering it. Give the
+`tool.call` a `retry` policy with an `attempt_timeout_secs` or a
+`total_timeout_secs` to bound the wait: when either lapses the call fails, then
+retries or settles as a terminal error per the policy. See
 [Retries](./120-retries.md).
 
 ## Next

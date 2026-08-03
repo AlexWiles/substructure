@@ -35,7 +35,7 @@ use super::state::EffectState;
 use super::tool_contract::{declared_tool, DeclaredTool};
 use crate::protocol::{
     AgentConfig, ClientContext, Content, DecisionAction, DecisionResponse, DecisionTrigger,
-    DraftMessage, ErrorCode, Message, RetryPolicy, Role, ToolCall,
+    DraftMessage, ErrorCode, Message, Role, ToolCall,
 };
 
 pub fn propose(
@@ -157,12 +157,8 @@ fn resumed(transcript: &[Message], config: &AgentConfig) -> DecisionResponse {
             max_completion_tokens: None,
             reasoning: None,
             stream: None,
-            retry: Some(
-                config
-                    .retry
-                    .clone()
-                    .unwrap_or_else(RetryPolicy::llm_default),
-            ),
+            // Omitted on purpose: the seam resolves it against the config.
+            retry: None,
         }],
         ..Default::default()
     }
@@ -210,14 +206,14 @@ fn route_tool_call(
             agent_id: sub.id.clone(),
             tool_call_id: call.id.clone(),
             message: Some(delegation_message(&call.function.arguments)),
-            retry: RetryPolicy::no_retry(),
+            retry: None,
         }];
     }
     vec![DecisionAction::CallTool {
         id: Some(call.id.clone()),
         name: call.function.name.clone(),
         arguments: serde_json::Value::String(call.function.arguments.clone()),
-        retry: RetryPolicy::no_retry(),
+        retry: None,
     }]
 }
 
@@ -286,12 +282,8 @@ fn client_turn(
             max_completion_tokens: None,
             reasoning: None,
             stream: None,
-            retry: Some(
-                effective
-                    .retry
-                    .clone()
-                    .unwrap_or_else(RetryPolicy::llm_default),
-            ),
+            // Omitted on purpose: the seam resolves it against the config.
+            retry: None,
         }],
         agent: merged,
         ..Default::default()
@@ -463,7 +455,9 @@ mod tests {
     use chrono::Utc;
 
     use super::*;
-    use crate::protocol::{AgentTool, Handler, LlmRequest, SubAgent, ToolCallFunction, ToolInput};
+    use crate::protocol::{
+        AgentTool, Handler, LlmRequest, RetryPolicy, SubAgent, ToolCallFunction, ToolInput,
+    };
     use crate::runtime::session::decision::LlmHandler;
     use crate::runtime::session::state::{EffectTracking, LlmCallSpec};
 

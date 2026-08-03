@@ -204,7 +204,7 @@ type Action =
           id?: string             // omitted: the engine mints one
           name: string
           arguments: unknown
-          retry?: RetryPolicy     // default: no retry
+          retry?: RetryPolicy     // default: the agent config's, else the engine's
       }
     | {
           type: "tool.result"
@@ -266,7 +266,7 @@ type AgentConfig = {
     handler?: "server" | "worker"  // where LLM calls run; default server
     format?: "openai" | "anthropic"  // wire format for worker-handled LLM
                                      // calls; requires handler worker
-    retry?: RetryPolicy
+    retry?: RetryConfig
     tools?: AgentTool[]
     sub_agents?: SubAgent[]
     mcp?: McpServer[]
@@ -300,10 +300,19 @@ type McpTools = {
 }
 
 type RetryPolicy = {
-    timeout_secs: number | null
-    max_retries: number
+    attempt_timeout_secs: number | null  // one attempt; null waits forever
+    total_timeout_secs: number | null    // the whole effect; null is unbounded
+    max_attempts: number                 // attempts, not retries
     backoff_base_secs: number
     backoff_max_secs: number
+}
+
+type RetryConfig = {                     // one policy per kind
+    default?: RetryPolicy
+    llm?: RetryPolicy
+    tool?: RetryPolicy
+    sub_agent?: RetryPolicy
+    connector?: RetryPolicy
 }
 ```
 

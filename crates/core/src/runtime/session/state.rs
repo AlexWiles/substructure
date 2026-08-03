@@ -36,8 +36,8 @@ use rust_decimal::Decimal;
 pub use crate::protocol::EffectKind;
 use crate::protocol::{
     AgentConfig, DraftMessage, Effect, EffectStatus, InterruptOrigin, LlmFormat, LlmRequest,
-    LlmTool, Message, MessageTree, NewMessage, ReasoningConfig, RetryPolicy, Role, SessionOwner,
-    WorkerState,
+    LlmTool, Message, MessageTree, NewMessage, ReasoningConfig, RetryConfig, RetryPolicy, Role,
+    SessionOwner, WorkerState,
 };
 use crate::runtime::retry::RetryState;
 
@@ -77,18 +77,26 @@ pub struct EffectTracking {
     status: EffectStatus,
     pub retry: RetryState,
     pub retry_policy: RetryPolicy,
+    /// The current attempt's deadline. Cleared once the effect is `Running`:
+    /// the attempt landed, and how long the work then takes is its own business.
     pub deadline: Option<DateTime<Utc>>,
+    /// When the effect first left the queue. Never reset, so the whole-effect
+    /// bound covers every attempt and the backoff between them — a retry cannot
+    /// buy more time by restarting the clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
 }
 
 impl EffectTracking {
     /// A fetch: requested and in flight at once, never queued.
     pub fn new(retry_policy: RetryPolicy, now: DateTime<Utc>) -> Self {
-        let deadline = retry_policy.deadline(now);
+        let deadline = retry_policy.attempt_deadline(now);
         Self {
             status: EffectStatus::Pending,
             retry: RetryState::default(),
             retry_policy,
             deadline,
+            started_at: Some(now),
         }
     }
 
@@ -98,6 +106,7 @@ impl EffectTracking {
             retry: RetryState::default(),
             retry_policy,
             deadline: None,
+            started_at: None,
         }
     }
 
@@ -138,15 +147,47 @@ impl EffectTracking {
                 EffectStatus::RetryScheduled,
             ],
         );
-        self.deadline = self.retry_policy.deadline(now);
+        self.deadline = self.retry_policy.attempt_deadline(now);
+        self.started_at.get_or_insert(now);
         self.retry.next_at = None;
     }
 
-    /// Alive and working: the spawn landed, so the deadline stops applying.
-    /// Only the result settles it now.
+    /// Alive and working: the spawn landed, so the *attempt* clock stops
+    /// applying — a child turn may legitimately run far longer than the call
+    /// that started it. The whole-effect bound stays, so a dead child still
+    /// settles instead of stalling its parent forever.
     pub fn run(&mut self) {
         self.move_to(EffectStatus::Running, &[EffectStatus::Pending]);
         self.deadline = None;
+    }
+
+    /// The whole-effect deadline, measured from the first dispatch. None until
+    /// the effect has started, or when the policy sets no total.
+    pub fn total_deadline(&self) -> Option<DateTime<Utc>> {
+        self.started_at
+            .and_then(|at| self.retry_policy.total_deadline(at))
+    }
+
+    /// When this effect is past due, whichever bound lapses first. `Pending`
+    /// answers to both clocks; `Running` only to the total, having already
+    /// cleared its attempt.
+    pub fn expiry(&self) -> Option<DateTime<Utc>> {
+        let total = self.total_deadline();
+        match self.status {
+            EffectStatus::Pending => match (self.deadline, total) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            },
+            EffectStatus::Running => total,
+            _ => None,
+        }
+    }
+
+    /// Whether the whole-effect bound is what lapsed. A retry cannot help once
+    /// it has: the budget covers every attempt, so the failure is terminal
+    /// however retryable it looks on its own.
+    pub fn total_expired(&self, now: DateTime<Utc>) -> bool {
+        self.total_deadline().is_some_and(|d| d <= now)
     }
 
     pub fn complete(&mut self) {
@@ -221,7 +262,7 @@ impl EffectTracking {
 
     pub fn earliest_wake(&self) -> Option<DateTime<Utc>> {
         match self.status {
-            EffectStatus::Pending => self.deadline,
+            EffectStatus::Pending | EffectStatus::Running => self.expiry(),
             EffectStatus::RetryScheduled => self.retry.next_at,
             _ => None,
         }
@@ -1695,6 +1736,13 @@ impl SessionState {
 
     /// Newest agent config whose anchor is on the path to `leaf`; unanchored matches
     /// any path. `None` when no config was ever written on the path.
+    /// The retry policies the config in force declares, if any. None ⇒ nothing
+    /// declared, and every kind falls to the engine's own default.
+    pub fn retry_config(&self) -> Option<RetryConfig> {
+        self.resolve_agent_for(self.head_id.as_deref())
+            .and_then(|c| c.retry)
+    }
+
     pub fn resolve_agent_for(&self, leaf: Option<&str>) -> Option<AgentConfig> {
         let on_path = leaf.map(|l| self.path_ids(l)).unwrap_or_default();
         resolve_on_path(&self.agent_versions, &on_path).map(|v| v.value.clone())

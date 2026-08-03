@@ -50,8 +50,9 @@ fn frontend() -> Caller {
 /// all the way from in-flight to terminally failed.
 fn policy() -> RetryPolicy {
     RetryPolicy {
-        timeout_secs: Some(5),
-        max_retries: 2,
+        attempt_timeout_secs: Some(5),
+        total_timeout_secs: None,
+        max_attempts: 2,
         backoff_base_secs: 1,
         backoff_max_secs: 1,
     }
@@ -356,7 +357,7 @@ impl World {
                     id: self.mint(),
                     name: "a_tool".to_string(),
                     arguments: "{}".to_string(),
-                    retry: policy(),
+                    retry: Some(policy()),
                 },
                 ActOp::SpawnSubAgent => {
                     let session_id = self.mint();

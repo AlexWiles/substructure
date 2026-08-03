@@ -172,8 +172,9 @@ fn config_with_mcp(connection: &str) -> AgentConfig {
 /// A worker-decision policy with room for one redelivery.
 fn retrying() -> RetryPolicy {
     RetryPolicy {
-        timeout_secs: Some(60),
-        max_retries: 2,
+        attempt_timeout_secs: Some(60),
+        total_timeout_secs: None,
+        max_attempts: 2,
         backoff_base_secs: 1,
         backoff_max_secs: 1,
     }
@@ -381,7 +382,7 @@ fn call_tool(id: &str, name: &str) -> Action {
         id: id.to_string(),
         name: name.to_string(),
         arguments: "{}".to_string(),
-        retry: RetryPolicy::no_retry(),
+        retry: None,
     }
 }
 
@@ -835,8 +836,9 @@ fn flow_timeout_to_exhaustion() -> Trace {
         vec![call_llm(
             "call-1",
             RetryPolicy {
-                timeout_secs: Some(1),
-                max_retries: 2,
+                attempt_timeout_secs: Some(1),
+                total_timeout_secs: None,
+                max_attempts: 2,
                 backoff_base_secs: 1,
                 backoff_max_secs: 1,
             },
@@ -1300,7 +1302,7 @@ fn flow_direct_commands_then_cancel() -> Trace {
             tool_call_id: "tc-1".to_string(),
             name: "a".to_string(),
             arguments: "{}".to_string(),
-            retry: RetryPolicy::no_retry(),
+            retry: None,
         },
         &system(),
     );

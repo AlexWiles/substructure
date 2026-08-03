@@ -14,7 +14,9 @@ together at the same version.
 - A turn that delegates to more than one sub-agent now waits for all of them to
   return before it continues.
 - Failed decisions now retry or end the run with the error.
-- Decisions and LLM calls have default timeouts and retries.
+- Every effect has a default timeout. A tool, a connection, or a sub-agent that
+  does not answer now ends its effect instead of stopping the turn. Client tools
+  continue to wait for as long as necessary.
 - An LLM call that times out on its last attempt now settles the turn instead of stalling it.
 - A turn now completes when its finalizer decision settles without a `done` action.
 - The push transport no longer cuts long streams.
@@ -32,6 +34,14 @@ together at the same version.
 
 ### Changed
 
+- The agent config `retry` field sets a policy for each effect kind: `default`,
+  `llm`, `tool`, `sub_agent`, and `connector`. Before, it applied only to LLM
+  calls.
+- A retry policy has `attempt_timeout_secs` for one attempt and
+  `total_timeout_secs` for the full effect, in place of `timeout_secs`. It has
+  `max_attempts` in place of `max_retries`.
+- An effect that passes `total_timeout_secs` ends with an error and does not
+  retry.
 - An effect has a new `running` status. Work that started but did not return
   yet has this status.
 - The event store keeps no store-wide event order. A processor holds a cursor

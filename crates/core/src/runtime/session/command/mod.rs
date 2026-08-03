@@ -14,6 +14,7 @@ use crate::protocol::{
     AgentConfig, ClientContext, ClientPayload, DraftMessage, EffectStatus, InterruptOrigin,
     LlmFormat, LlmRequest, RetryPolicy, Role, SessionOwner, WorkerState,
 };
+use crate::runtime::retry::RetryTarget;
 use crate::runtime::Caller;
 
 /// The settle vocabulary lives with the effect table; every settler names it
@@ -64,7 +65,8 @@ pub enum CommandPayload {
         tool_call_id: String,
         name: String,
         arguments: String,
-        retry: RetryPolicy,
+        /// Unresolved: settled against the handler once the call is routed.
+        retry: Option<RetryPolicy>,
     },
     RequestSubAgent {
         session_id: String,
@@ -528,11 +530,16 @@ impl Working {
     fn execute(&mut self, step: ScheduleStep) {
         match step {
             ScheduleStep::RequestFetch { connection_id } => {
+                let config = self.state.retry_config();
                 self.emit(EventPayload::ConnectorSyncRequested(
                     ConnectorSyncRequested {
                         id: connection_id,
                         attempt: 0,
-                        retry: RetryPolicy::connector_default(),
+                        retry: RetryPolicy::resolve(
+                            None,
+                            config.as_ref(),
+                            RetryTarget::ConnectorSync,
+                        ),
                     },
                 ));
             }
@@ -569,7 +576,11 @@ impl Working {
     /// terminal. No caller to authorize: the clock is the engine's own.
     fn time_out(&mut self, kind: EffectKind, id: String) {
         let spec = kind.spec();
-        self.then(|s| spec.settle(s, &id, Outcome::Error(spec.timeout_error())));
+        let now = self.plan_now;
+        self.then(|s| {
+            let total = s.tracking(kind, &id).is_some_and(|t| t.total_expired(now));
+            spec.settle(s, &id, Outcome::Error(spec.timeout_error(total)))
+        });
     }
 
     /// The one settle seam, for every kind: authorize the caller, fence the

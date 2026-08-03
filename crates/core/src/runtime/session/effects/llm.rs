@@ -69,8 +69,9 @@ impl KindSpec for LlmSpec {
         ))]
     }
 
-    fn timeout_error(&self) -> SettleError {
-        SettleError::new(super::DEADLINE, true).with_detail(Some(ErrorCode::DeadlineExceeded), None)
+    fn timeout_error(&self, total: bool) -> SettleError {
+        SettleError::new(super::DEADLINE, !total)
+            .with_detail(Some(ErrorCode::DeadlineExceeded), None)
     }
 
     fn dispatch(&self, state: &SessionState, id: &str) -> Vec<EventPayload> {

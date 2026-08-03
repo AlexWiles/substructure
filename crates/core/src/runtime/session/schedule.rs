@@ -243,10 +243,12 @@ const SWEEP_ORDER: [EffectKind; 5] = [
     EffectKind::Decision,
 ];
 
-/// The first effect past its deadline.
+/// The first effect past a deadline — its attempt's, or the whole effect's. A
+/// `Running` effect answers only to the latter, which is the one thing that ever
+/// settles a delegation whose child stopped coming back.
 fn first_timed_out(state: &SessionState, now: DateTime<Utc>) -> Option<(EffectKind, String)> {
     first_due(state, &SWEEP_ORDER, |t| {
-        t.status() == EffectStatus::Pending && t.deadline.is_some_and(|d| d <= now)
+        t.expiry().is_some_and(|d| d <= now)
     })
 }
 
@@ -382,10 +384,11 @@ mod tests {
     use crate::protocol::{
         AgentConfig, InterruptOrigin, McpServer, Message, NewMessage, RetryPolicy, Role,
     };
+    use crate::runtime::retry::RetryTarget;
     use crate::runtime::session::state::{
         AgentVersion, ConnectorSyncState, EffectPayload, EffectState, EffectTracking, LlmCallSpec,
-        LlmCallState, Logged, OpenInterrupt, QueueEntry, ToolCallState, TurnPhase,
-        WorkerDecisionState,
+        LlmCallState, Logged, OpenInterrupt, QueueEntry, SubAgentCallState, ToolCallState,
+        TurnPhase, WorkerDecisionState,
     };
 
     fn epoch() -> DateTime<Utc> {
@@ -474,6 +477,31 @@ mod tests {
             EffectPayload::Decision(WorkerDecisionState {
                 trigger,
                 source_event_sequence: seq,
+            }),
+        ));
+    }
+
+    /// A delegation whose child turn is in flight, under a policy with `total`
+    /// seconds of whole-effect budget and no attempt bound of its own.
+    fn add_running_sub_agent(s: &mut SessionState, id: &str, total: Option<u32>) {
+        let mut t = EffectTracking::new_queued(RetryPolicy {
+            attempt_timeout_secs: None,
+            total_timeout_secs: total,
+            max_attempts: 3,
+            backoff_base_secs: 1,
+            backoff_max_secs: 1,
+        });
+        t.dispatch(epoch());
+        t.run();
+        s.put_effect(EffectState::new(
+            id,
+            t,
+            EffectPayload::SubAgent(SubAgentCallState {
+                agent_id: "child".to_string(),
+                tool_call_id: "tc-1".to_string(),
+                message: None,
+                result: None,
+                is_error: false,
             }),
         ));
     }
@@ -698,7 +726,7 @@ mod tests {
         add_decision(&mut s, "d-2", EffectStatus::Queued, deferred("turn-2"));
         let at = epoch() + chrono::Duration::seconds(5);
         let t = &mut s.effect_mut(EffectKind::Decision, "d-2").unwrap().tracking;
-        t.retry_policy = RetryPolicy::worker_default();
+        t.retry_policy = RetryPolicy::default_for(RetryTarget::Decision);
         t.dispatch(epoch());
         t.record_error(true, epoch());
         t.retry.next_at = Some(at);
@@ -795,6 +823,67 @@ mod tests {
 
         assert_eq!(plan(&s, epoch()), vec![]);
         assert_eq!(wake_at(&s, epoch()), Some(later));
+    }
+
+    #[test]
+    fn a_running_delegation_is_swept_once_its_total_lapses() {
+        let mut s = state();
+        add_running_sub_agent(&mut s, "child-1", Some(60));
+        let due = epoch() + chrono::Duration::seconds(60);
+
+        assert_eq!(
+            plan(&s, due - chrono::Duration::seconds(1)),
+            vec![],
+            "a child turn may legitimately run long; only the total settles it"
+        );
+        assert_eq!(
+            plan(&s, due),
+            vec![ScheduleStep::TimeOut {
+                kind: EffectKind::SubAgent,
+                id: "child-1".to_string(),
+            }],
+            "the whole-effect bound is the only thing that recovers a dead child"
+        );
+    }
+
+    #[test]
+    fn a_running_delegation_wakes_at_its_total() {
+        let mut s = state();
+        add_running_sub_agent(&mut s, "child-1", Some(60));
+        assert_eq!(
+            wake_at(&s, epoch()),
+            Some(epoch() + chrono::Duration::seconds(60)),
+            "nothing else would ever wake the parent"
+        );
+    }
+
+    #[test]
+    fn a_running_delegation_with_no_total_is_never_swept() {
+        let mut s = state();
+        add_running_sub_agent(&mut s, "child-1", None);
+        let far = epoch() + chrono::Duration::days(365);
+        assert_eq!(plan(&s, far), vec![], "unbounded by declaration");
+        assert_eq!(wake_at(&s, far), None);
+    }
+
+    #[test]
+    fn the_total_deadline_is_not_pushed_out_by_a_retry() {
+        let mut s = state();
+        add_running_sub_agent(&mut s, "child-1", Some(60));
+        let started = epoch();
+        let t = &mut s
+            .effect_mut(EffectKind::SubAgent, "child-1")
+            .unwrap()
+            .tracking;
+        // A second attempt, a full minute after the first.
+        t.requeue();
+        t.dispatch(started + chrono::Duration::seconds(60));
+
+        assert_eq!(
+            t.total_deadline(),
+            Some(started + chrono::Duration::seconds(60)),
+            "measured from the first dispatch, so retries cannot buy more time"
+        );
     }
 
     #[test]

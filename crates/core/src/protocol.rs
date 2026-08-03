@@ -209,15 +209,44 @@ pub enum LlmFormat {
 
 // ── Retry ────────────────────────────────────────────────────────────────
 
-/// Fully-resolved retry policy — no optional fields. Stored on call state and
-/// read directly by retry logic.
+/// Fully-resolved retry policy. Stored on call state and read directly by retry
+/// logic.
+///
+/// Two timeouts, because one span cannot express both bounds: `attempt` covers a
+/// single dispatch-to-settle, `total` covers the whole effect — every attempt,
+/// the backoff between them, and any time spent `Running`. An effect with only
+/// an attempt timeout can still stall forever once it stops being `Pending`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "RetryPolicy")]
 pub struct RetryPolicy {
-    pub timeout_secs: Option<u32>,
-    pub max_retries: u32,
+    pub attempt_timeout_secs: Option<u32>,
+    pub total_timeout_secs: Option<u32>,
+    /// Cap on total attempts, not on retries: `1` allows one try and no retry.
+    pub max_attempts: u32,
     pub backoff_base_secs: u32,
     pub backoff_max_secs: u32,
+}
+
+/// An agent's retry policies, one per effect kind. `default` covers the kinds
+/// that name nothing; a kind that names nothing and has no `default` falls to
+/// the engine's own default for it.
+///
+/// Per kind because the kinds are not alike: an LLM call is idempotent and worth
+/// retrying, a tool call may not be, and a connector fetch holds up every
+/// decision behind it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "RetryConfig")]
+pub struct RetryConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<RetryPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm: Option<RetryPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<RetryPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_agent: Option<RetryPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector: Option<RetryPolicy>,
 }
 
 // ── Identity ─────────────────────────────────────────────────────────────
@@ -269,7 +298,7 @@ pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retry: Option<RetryPolicy>,
+    pub retry: Option<RetryConfig>,
     /// Worker- or client-executed tools the model can call.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<AgentTool>,
@@ -1097,8 +1126,10 @@ pub enum DecisionAction {
         name: String,
         // Any JSON value; non-strings are canonicalized to JSON text.
         arguments: Value,
-        #[serde(default = "RetryPolicy::no_retry")]
-        retry: RetryPolicy,
+        /// Omitted ⇒ the agent config's policy for this kind, else the engine's
+        /// default for where the tool runs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry: Option<RetryPolicy>,
     },
     /// `id`/`attempt` omitted ⇒ taken from the answering `tool.execute` trigger,
     /// fencing the result to the attempt that ran.
@@ -1163,8 +1194,10 @@ pub enum DecisionAction {
         /// cannot race the creation of the session it opens.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<DraftMessage>,
-        #[serde(default = "RetryPolicy::no_retry")]
-        retry: RetryPolicy,
+        /// Omitted ⇒ the agent config's `sub_agent` policy, else the engine's
+        /// default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry: Option<RetryPolicy>,
     },
     #[serde(rename = "message.send")]
     SendMessage {

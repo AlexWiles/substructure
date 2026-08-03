@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::connectors::registry::ConnectionSpec;
 use crate::protocol::{
-    AgentConfig, AgentTool, ConnectorProtocol, Handler, LlmFormat, McpServer, RetryPolicy, SubAgent,
+    AgentConfig, AgentTool, ConnectorProtocol, Handler, LlmFormat, McpServer, RetryConfig, SubAgent,
 };
 use crate::runtime::llm::{LlmBlock, LlmBlocks};
 use crate::runtime::worker::{AgentEntry, WorkerEndpoint};
@@ -204,7 +204,7 @@ pub struct AgentSection {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub retry: Option<RetryPolicy>,
+    pub retry: Option<RetryConfig>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<AgentTool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]

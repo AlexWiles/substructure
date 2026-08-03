@@ -24,7 +24,7 @@
         "retry": {
           "anyOf": [
             {
-              "$ref": "#/$defs/RetryPolicy"
+              "$ref": "#/$defs/RetryConfig"
             },
             {
               "type": "null"
@@ -661,7 +661,15 @@
               "type": "string"
             },
             "retry": {
-              "$ref": "#/$defs/RetryPolicy"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RetryPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Omitted ⇒ the agent config's policy for this kind, else the engine's\ndefault for where the tool runs."
             },
             "type": {
               "const": "tool.call",
@@ -847,7 +855,15 @@
               "description": "The child's opening message. It travels with the spawn, so it\ncannot race the creation of the session it opens."
             },
             "retry": {
-              "$ref": "#/$defs/RetryPolicy"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RetryPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Omitted ⇒ the agent config's `sub_agent` policy, else the engine's\ndefault."
             },
             "session_id": {
               "type": "string"
@@ -2154,10 +2170,76 @@
       "title": "ResumeStatus",
       "type": "string"
     },
+    "RetryConfig": {
+      "additionalProperties": false,
+      "description": "An agent's retry policies, one per effect kind. `default` covers the kinds\nthat name nothing; a kind that names nothing and has no `default` falls to\nthe engine's own default for it.\n\nPer kind because the kinds are not alike: an LLM call is idempotent and worth\nretrying, a tool call may not be, and a connector fetch holds up every\ndecision behind it.",
+      "properties": {
+        "connector": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "default": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "llm": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sub_agent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tool": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "title": "RetryConfig",
+      "type": "object"
+    },
     "RetryPolicy": {
       "additionalProperties": false,
-      "description": "Fully-resolved retry policy — no optional fields. Stored on call state and\nread directly by retry logic.",
+      "description": "Fully-resolved retry policy. Stored on call state and read directly by retry\nlogic.\n\nTwo timeouts, because one span cannot express both bounds: `attempt` covers a\nsingle dispatch-to-settle, `total` covers the whole effect — every attempt,\nthe backoff between them, and any time spent `Running`. An effect with only\nan attempt timeout can still stall forever once it stops being `Pending`.",
       "properties": {
+        "attempt_timeout_secs": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "backoff_base_secs": {
           "format": "uint32",
           "minimum": 0,
@@ -2168,12 +2250,13 @@
           "minimum": 0,
           "type": "integer"
         },
-        "max_retries": {
+        "max_attempts": {
+          "description": "Cap on total attempts, not on retries: `1` allows one try and no retry.",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
         },
-        "timeout_secs": {
+        "total_timeout_secs": {
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -2183,7 +2266,7 @@
         }
       },
       "required": [
-        "max_retries",
+        "max_attempts",
         "backoff_base_secs",
         "backoff_max_secs"
       ],

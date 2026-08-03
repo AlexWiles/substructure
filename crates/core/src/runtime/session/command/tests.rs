@@ -8,7 +8,7 @@ use super::super::aggregate::{CommitContext, SessionAggregate};
 use super::super::state::{AgentVersion, Logged};
 use super::*;
 use crate::connectors::RemoteTool;
-use crate::protocol::{AgentTool, Handler, LlmTool, McpServer, McpTools, Message};
+use crate::protocol::{AgentTool, Handler, LlmTool, McpServer, McpTools, Message, RetryConfig};
 use crate::protocol::{Content, LlmResponse};
 use crate::runtime::session::decision::ToolHandler;
 use crate::runtime::session::events::EventPayload;
@@ -121,7 +121,7 @@ fn frontend_can_complete_own_client_handled_tool_call() {
             tool_call_id: "tc-1".to_string(),
             name: "my_tool".to_string(),
             arguments: "{}".to_string(),
-            retry: RetryPolicy::no_retry(),
+            retry: None,
         },
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -176,7 +176,7 @@ fn frontend_with_mismatched_user_id_is_denied() {
             tool_call_id: "tc-1".to_string(),
             name: "my_tool".to_string(),
             arguments: "{}".to_string(),
-            retry: RetryPolicy::no_retry(),
+            retry: None,
         },
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -218,7 +218,7 @@ fn frontend_cannot_complete_worker_handled_tool_call() {
             tool_call_id: "tc-1".to_string(),
             name: "my_tool".to_string(),
             arguments: "{}".to_string(),
-            retry: RetryPolicy::no_retry(),
+            retry: None,
         },
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -337,7 +337,7 @@ fn settle_with_output_contract(result: &str) -> (SessionAggregate, Vec<EventPayl
                 id: "tc-1".to_string(),
                 name: "get_weather".to_string(),
                 arguments: "{}".to_string(),
-                retry: RetryPolicy::no_retry(),
+                retry: None,
             }],
             state: None,
             agent: None,
@@ -413,7 +413,7 @@ fn request_tool_call_with_client_handler_does_not_queue_worker_decision() {
             tool_call_id: "tc-1".to_string(),
             name: "my_tool".to_string(),
             arguments: "{}".to_string(),
-            retry: RetryPolicy::no_retry(),
+            retry: None,
         },
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -450,7 +450,7 @@ fn request_tool_call_with_worker_handler_emits_decision_to_execute() {
             tool_call_id: "tc-1".to_string(),
             name: "my_tool".to_string(),
             arguments: "{}".to_string(),
-            retry: RetryPolicy::no_retry(),
+            retry: None,
         },
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -487,7 +487,7 @@ fn machine_completes_worker_handled_tool_call_after_worker_releases_decision() {
             tool_call_id: "tc-1".to_string(),
             name: "my_tool".to_string(),
             arguments: "{}".to_string(),
-            retry: RetryPolicy::no_retry(),
+            retry: None,
         },
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -561,7 +561,7 @@ fn machine_completes_worker_handled_tool_call_before_worker_releases_decision() 
             tool_call_id: "tc-1".to_string(),
             name: "my_tool".to_string(),
             arguments: "{}".to_string(),
-            retry: RetryPolicy::no_retry(),
+            retry: None,
         },
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -612,7 +612,7 @@ fn complete_tool_call_with_wrong_attempt_fails() {
             tool_call_id: "tc-1".to_string(),
             name: "my_tool".to_string(),
             arguments: "{}".to_string(),
-            retry: RetryPolicy::no_retry(),
+            retry: None,
         },
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -736,7 +736,7 @@ fn submit_worker_decision_dispatches_action_and_completes_decision() {
                     id: "tc-1".to_string(),
                     name: "my_tool".to_string(),
                     arguments: "{}".to_string(),
-                    retry: RetryPolicy::no_retry(),
+                    retry: None,
                 }],
                 state: None,
                 agent: None,
@@ -818,7 +818,7 @@ fn duplicate_submit_worker_decision_is_no_op() {
                     id: "tc-1".to_string(),
                     name: "my_tool".to_string(),
                     arguments: "{}".to_string(),
-                    retry: RetryPolicy::no_retry(),
+                    retry: None,
                 }],
                 state: None,
                 agent: None,
@@ -1026,7 +1026,7 @@ fn reconcile_dispatch_with_nothing_pending_is_noop() {
 
 #[test]
 fn reconcile_dispatch_schedules_a_retry_for_a_pending_decision() {
-    let mut agg = create_session_with_retry(RetryPolicy::worker_default());
+    let mut agg = create_session_with_retry(RetryPolicy::default_for(RetryTarget::Decision));
     let setup = dispatch(
         &mut agg,
         CommandPayload::SendMessage {
@@ -1100,7 +1100,7 @@ fn reconcile_dispatch_retries_a_pending_server_llm_call() {
             call_id: "llm-1".to_string(),
             request: request_with(vec![]),
             stream: false,
-            retry: RetryPolicy::llm_default(),
+            retry: RetryPolicy::default_for(RetryTarget::Llm),
             handler: LlmHandler::Server,
             format: None,
         },
@@ -2287,8 +2287,9 @@ fn fail_llm_call_emits_errored() {
 fn llm_retry_reuses_the_stored_prompt() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
     let retry = RetryPolicy {
-        timeout_secs: None,
-        max_retries: 3,
+        attempt_timeout_secs: None,
+        total_timeout_secs: None,
+        max_attempts: 3,
         backoff_base_secs: 1,
         backoff_max_secs: 1,
     };
@@ -2553,7 +2554,7 @@ fn fail_tool_call_emits_errored() {
             tool_call_id: "tc-1".to_string(),
             name: "my_tool".to_string(),
             arguments: "{}".to_string(),
-            retry: RetryPolicy::no_retry(),
+            retry: None,
         },
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -2976,7 +2977,7 @@ fn request_client_tool(agg: &mut SessionAggregate, id: &str) {
             tool_call_id: id.to_string(),
             name,
             arguments: "{}".to_string(),
-            retry: RetryPolicy::no_retry(),
+            retry: None,
         },
         &system(),
     );
@@ -3086,7 +3087,7 @@ fn worker_tool_fires_tool_result_in_the_completion_commit() {
                 id: "t1".to_string(),
                 name: "getWeather".to_string(),
                 arguments: "{}".to_string(),
-                retry: RetryPolicy::no_retry(),
+                retry: None,
             }],
             state: None,
             agent: None,
@@ -3223,7 +3224,7 @@ fn tool_and_sub_agent_from_one_turn_dispatch_concurrently() {
                     id: "t1".to_string(),
                     name: "getWeather".to_string(),
                     arguments: "{}".to_string(),
-                    retry: RetryPolicy::no_retry(),
+                    retry: None,
                 },
                 Action::SpawnSubAgent {
                     session_id: "child-1".to_string(),
@@ -3287,12 +3288,13 @@ fn timed_out_effect_fires_tool_result_via_wake() {
             tool_call_id: "t1".to_string(),
             name: "tool_t1".to_string(),
             arguments: "{}".to_string(),
-            retry: RetryPolicy {
-                timeout_secs: Some(60),
-                max_retries: 0,
+            retry: Some(RetryPolicy {
+                attempt_timeout_secs: Some(60),
+                total_timeout_secs: None,
+                max_attempts: 0,
                 backoff_base_secs: 0,
                 backoff_max_secs: 0,
-            },
+            }),
         },
         &system(),
     );
@@ -3314,6 +3316,116 @@ fn timed_out_effect_fires_tool_result_via_wake() {
         fired_tool_result(&wake(&mut agg)).is_empty(),
         "the next wake does not re-fire"
     );
+}
+
+/// A tool call with no policy of its own takes the default for *where it runs*,
+/// which is the whole point of splitting them: a worker tool must not hang a
+/// turn forever, and a deferred client tool must be free to.
+#[test]
+fn a_tool_call_takes_the_default_for_where_it_runs() {
+    let mut agg = create_session("sess-1", "tenant-a", "user-1");
+    let d = open_decision(&mut agg, "hi");
+    submit_agent(
+        &mut agg,
+        d,
+        vec![node_msg("u1", Role::User, "hi")],
+        Some(AgentConfig {
+            tools: vec![
+                tool_named("worker_side", None),
+                tool_named("client_side", Some(Handler::Client)),
+            ],
+            ..agent_config("m1")
+        }),
+    );
+
+    let worker = requested_tool_retry(&mut agg, "t-worker", "worker_side", None);
+    let client = requested_tool_retry(&mut agg, "t-client", "client_side", None);
+
+    assert_eq!(worker, RetryPolicy::default_for(RetryTarget::WorkerTool));
+    assert_eq!(client, RetryPolicy::default_for(RetryTarget::ClientTool));
+    assert!(
+        worker.attempt_timeout_secs.is_some(),
+        "a dead worker must not hang the turn"
+    );
+    assert_eq!(
+        client.attempt_timeout_secs, None,
+        "a deferred call waits for a human, however long that takes"
+    );
+}
+
+/// The config reaches tool calls at all — the field used to bind LLM calls only.
+#[test]
+fn the_agent_config_binds_tool_calls_not_just_llm_calls() {
+    let mut agg = create_session("sess-1", "tenant-a", "user-1");
+    let declared = RetryPolicy {
+        attempt_timeout_secs: Some(7),
+        total_timeout_secs: Some(70),
+        max_attempts: 4,
+        backoff_base_secs: 1,
+        backoff_max_secs: 2,
+    };
+    let d = open_decision(&mut agg, "hi");
+    submit_agent(
+        &mut agg,
+        d,
+        vec![node_msg("u1", Role::User, "hi")],
+        Some(AgentConfig {
+            tools: vec![tool_named("worker_side", None)],
+            retry: Some(RetryConfig {
+                tool: Some(declared.clone()),
+                ..Default::default()
+            }),
+            ..agent_config("m1")
+        }),
+    );
+
+    assert_eq!(
+        requested_tool_retry(&mut agg, "t1", "worker_side", None),
+        declared,
+        "the declared `tool` policy wins over the engine default"
+    );
+    let asked = RetryPolicy::no_retry();
+    assert_eq!(
+        requested_tool_retry(&mut agg, "t2", "worker_side", Some(asked.clone())),
+        asked,
+        "an action that names a policy still wins over the config"
+    );
+}
+
+fn tool_named(name: &str, handler: Option<Handler>) -> AgentTool {
+    AgentTool {
+        name: name.to_string(),
+        description: String::new(),
+        input: None,
+        output: None,
+        handler,
+    }
+}
+
+/// Issue one tool call and report the policy the engine froze onto it.
+fn requested_tool_retry(
+    agg: &mut SessionAggregate,
+    id: &str,
+    name: &str,
+    retry: Option<RetryPolicy>,
+) -> RetryPolicy {
+    let events = dispatch(
+        agg,
+        CommandPayload::RequestToolCall {
+            tool_call_id: id.to_string(),
+            name: name.to_string(),
+            arguments: "{}".to_string(),
+            retry,
+        },
+        &system(),
+    );
+    events
+        .iter()
+        .find_map(|e| match e {
+            EventPayload::ToolCallRequested(r) if r.id == id => Some(r.retry.clone()),
+            _ => None,
+        })
+        .expect("the call is requested")
 }
 
 #[test]
@@ -3985,7 +4097,7 @@ fn tool_result_during_interrupt_queues_until_resume() {
                 id: "tc-1".to_string(),
                 name: "crawl".to_string(),
                 arguments: "{}".to_string(),
-                retry: RetryPolicy::no_retry(),
+                retry: None,
             }],
             state: None,
             agent: None,
@@ -4328,7 +4440,7 @@ fn parallel_tool_results_record_in_completion_order() {
                 tool_call_id: id.to_string(),
                 name: "t".to_string(),
                 arguments: "{}".to_string(),
-                retry: RetryPolicy::no_retry(),
+                retry: None,
             },
             &sys,
         );
@@ -4461,7 +4573,7 @@ fn call_tool_action(id: &str) -> Action {
         id: id.to_string(),
         name: "find".to_string(),
         arguments: "{}".to_string(),
-        retry: RetryPolicy::no_retry(),
+        retry: None,
     }
 }
 
@@ -5665,8 +5777,9 @@ fn turn_finished_terminal_failure_completes_as_failed_run() {
 #[test]
 fn turn_finished_retryable_failure_does_not_complete() {
     let mut agg = create_session_with_retry(RetryPolicy {
-        timeout_secs: None,
-        max_retries: 2,
+        attempt_timeout_secs: None,
+        total_timeout_secs: None,
+        max_attempts: 2,
         backoff_base_secs: 1,
         backoff_max_secs: 1,
     });
@@ -5710,8 +5823,9 @@ fn turn_finished_retryable_failure_does_not_complete() {
 #[test]
 fn turn_finished_deadline_completes_when_exhausted() {
     let mut agg = create_session_with_retry(RetryPolicy {
-        timeout_secs: Some(60),
-        max_retries: 0,
+        attempt_timeout_secs: Some(60),
+        total_timeout_secs: None,
+        max_attempts: 0,
         backoff_base_secs: 0,
         backoff_max_secs: 0,
     });
@@ -6076,7 +6190,7 @@ fn work_started_beside_a_new_connector_queues_its_decision_rather_than_running_i
                 id: "tc-1".to_string(),
                 name: "get_time".to_string(),
                 arguments: "{}".to_string(),
-                retry: RetryPolicy::no_retry(),
+                retry: None,
             }],
             state: None,
             agent: Some(connector_config(&["sentry"])),
@@ -6369,7 +6483,7 @@ fn connector_tools_reach_the_model_and_route_to_the_engine() {
             tool_call_id: "tc-1".to_string(),
             name: "sentry__search_issues".to_string(),
             arguments: "{}".to_string(),
-            retry: RetryPolicy::no_retry(),
+            retry: None,
         },
         &system(),
     );
@@ -6503,7 +6617,7 @@ fn strict_order_holds_work_behind_a_gated_call() {
                     id: "tc-1".to_string(),
                     name: "my_tool".to_string(),
                     arguments: "{}".to_string(),
-                    retry: RetryPolicy::no_retry(),
+                    retry: None,
                 },
             ],
             state: None,
@@ -6925,8 +7039,9 @@ fn client_message_parks_while_session_start_retry_is_scheduled() {
             },
             ancestry: vec![],
             worker_retry: RetryPolicy {
-                timeout_secs: None,
-                max_retries: 2,
+                attempt_timeout_secs: None,
+                total_timeout_secs: None,
+                max_attempts: 2,
                 backoff_base_secs: 1,
                 backoff_max_secs: 1,
             },
@@ -7249,7 +7364,7 @@ fn effect_anchor_is_the_post_reconcile_head() {
                 id: "t1".to_string(),
                 name: "slow".to_string(),
                 arguments: "{}".to_string(),
-                retry: RetryPolicy::no_retry(),
+                retry: None,
             }],
             state: None,
             agent: None,
@@ -7573,12 +7688,13 @@ fn fork_voids_a_retrying_effect() {
             tool_call_id: "tc-1".to_string(),
             name: "flaky".to_string(),
             arguments: "{}".to_string(),
-            retry: RetryPolicy {
-                timeout_secs: None,
-                max_retries: 2,
+            retry: Some(RetryPolicy {
+                attempt_timeout_secs: None,
+                total_timeout_secs: None,
+                max_attempts: 2,
                 backoff_base_secs: 1,
                 backoff_max_secs: 1,
-            },
+            }),
         },
         &system(),
     );
@@ -7690,7 +7806,7 @@ fn fork_drops_a_queued_execute_decision() {
         id: id.to_string(),
         name: "slow".to_string(),
         arguments: "{}".to_string(),
-        retry: RetryPolicy::no_retry(),
+        retry: None,
     };
     let events = dispatch(
         &mut agg,
@@ -7896,8 +8012,9 @@ fn fork_drops_a_retrying_settle_decision() {
             },
             ancestry: vec![],
             worker_retry: RetryPolicy {
-                timeout_secs: None,
-                max_retries: 2,
+                attempt_timeout_secs: None,
+                total_timeout_secs: None,
+                max_attempts: 2,
                 backoff_base_secs: 1,
                 backoff_max_secs: 1,
             },
@@ -8428,8 +8545,9 @@ fn escape_decision_retry_fires_while_the_head_is_parked() {
             },
             ancestry: vec![],
             worker_retry: RetryPolicy {
-                timeout_secs: None,
-                max_retries: 2,
+                attempt_timeout_secs: None,
+                total_timeout_secs: None,
+                max_attempts: 2,
                 backoff_base_secs: 1,
                 backoff_max_secs: 1,
             },
@@ -8497,8 +8615,9 @@ fn escape_decision_retry_fires_while_the_head_is_parked() {
 #[test]
 fn parked_branch_deadlines_are_suppressed_but_live_branch_timers_run() {
     let deadline_policy = RetryPolicy {
-        timeout_secs: Some(60),
-        max_retries: 0,
+        attempt_timeout_secs: Some(60),
+        total_timeout_secs: None,
+        max_attempts: 0,
         backoff_base_secs: 1,
         backoff_max_secs: 1,
     };
@@ -8509,7 +8628,7 @@ fn parked_branch_deadlines_are_suppressed_but_live_branch_timers_run() {
             tool_call_id: "tc-parked".to_string(),
             name: "slow".to_string(),
             arguments: "{}".to_string(),
-            retry: deadline_policy.clone(),
+            retry: Some(deadline_policy.clone()),
         },
         &system(),
     );
@@ -8527,7 +8646,7 @@ fn parked_branch_deadlines_are_suppressed_but_live_branch_timers_run() {
             tool_call_id: "tc-live".to_string(),
             name: "slow".to_string(),
             arguments: "{}".to_string(),
-            retry: deadline_policy,
+            retry: Some(deadline_policy),
         },
         &system(),
     );

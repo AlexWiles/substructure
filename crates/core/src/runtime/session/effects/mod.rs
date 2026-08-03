@@ -177,8 +177,12 @@ pub trait KindSpec: Sync {
 
     /// How this kind reports a deadline. A timeout settles through the same
     /// path as a reported failure, so nothing special-cases it.
-    fn timeout_error(&self) -> SettleError {
-        SettleError::new(DEADLINE, true)
+    ///
+    /// An attempt that lapsed is retryable — the next one may well land. A whole
+    /// effect that lapsed is not: the bound covers every attempt and the backoff
+    /// between them, so there is no budget left to retry into.
+    fn timeout_error(&self, total: bool) -> SettleError {
+        SettleError::new(DEADLINE, !total)
     }
 
     // ── Starting ────────────────────────────────────────────────────────

@@ -7,6 +7,7 @@ use crate::protocol::{
     ClientContext, DraftMessage, ErrorCode, Handler, LlmFormat, LlmRequest, LlmResponse,
     RetryPolicy,
 };
+use crate::runtime::retry::RetryTarget;
 
 impl Handler {
     pub fn as_str(self) -> &'static str {
@@ -30,6 +31,19 @@ pub enum ToolHandler {
     /// Executed by the engine against a connection. Only ever set by the engine
     /// when it expands a connector; a worker declaring it is rejected.
     Server,
+}
+
+impl ToolHandler {
+    /// Which default bounds a call routed here. The three differ: a worker tool
+    /// is bounded but never repeated, a client tool waits indefinitely because a
+    /// human may be answering it, and a connector call is the engine's own.
+    pub fn retry_target(self) -> RetryTarget {
+        match self {
+            ToolHandler::Worker => RetryTarget::WorkerTool,
+            ToolHandler::Client => RetryTarget::ClientTool,
+            ToolHandler::Server => RetryTarget::ConnectorTool,
+        }
+    }
 }
 
 /// Where an LLM call runs — the engine's strict form of the wire [`Handler`].
@@ -320,8 +334,11 @@ pub enum Action {
         id: String,
         name: String,
         arguments: String,
-        #[serde(default = "RetryPolicy::no_retry")]
-        retry: RetryPolicy,
+        /// Still unresolved here, unlike every other action's: which default
+        /// applies follows from where the tool runs, and the handler is not
+        /// settled until the aggregate routes the call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry: Option<RetryPolicy>,
     },
     #[serde(rename = "tool.result")]
     ToolResult {
