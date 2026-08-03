@@ -203,6 +203,12 @@ pub struct ConfigEvent {
 #[serde(rename_all = "camelCase")]
 pub struct ApplyResponse {
     pub project_id: String,
+    /// Where to see this project, as the deployment itself names it. Absent
+    /// from one that has no page to send a reader to, and from one that
+    /// predates the field — the CLI cannot derive it, since the server the API
+    /// answers on is not always the one the browser uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_url: Option<String>,
     #[serde(default)]
     pub changes: Vec<ConfigEvent>,
     /// What the deployment has to say about the document it just took, with its

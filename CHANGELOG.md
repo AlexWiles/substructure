@@ -40,6 +40,14 @@ together at the same version.
 - An event has no `global_position` field. Use `session_id` and `seq`.
 - The agent config has no `stream` field. LLM calls stream unless the `llm.call` action sets `stream: false`.
 - Commands that open a browser now print the URL before they open it.
+- `subs apply` starts a login when this machine has no credential for the
+  deployment, instead of failing with an error.
+- An apply notice shows its URL only when it has no command to do the same
+  thing.
+- `subs apply` shows the page to view the project on, above the notices. The
+  deployment names the page in its apply response.
+- `subs llm set-key` asks for the key at a prompt that ends at Enter and does
+  not show the key. A piped key is read as before.
 - A credential belongs to a connection id, not to a server URL. Declare
   `[mcp.sentry]` and `[mcp.sentry2]` at the same `url` to connect two accounts
   of one server. Do `subs mcp login <id>` again once for each connection: the

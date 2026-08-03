@@ -9,10 +9,32 @@ use tokio::time::sleep;
 use super::context;
 use super::credentials;
 use super::http::CloudClient;
+use super::pickers;
 use super::CloudGlobals;
 
 const CLIENT_ID: &str = "subs-cli";
 const MAX_POLL_WINDOW: Duration = Duration::from_secs(15 * 60); // matches deviceAuthorization expiresIn
+
+/// Log in when this machine holds no credential for the server the command
+/// targets. A first `subs apply` is a login as much as it is a push, and the
+/// 401 it would otherwise hit only tells the reader to run the command this
+/// runs for them.
+///
+/// Only when there is someone to ask: a script gets the error it can act on,
+/// and `--json` keeps its output machine-readable.
+pub async fn ensure(globals: &CloudGlobals) -> Result<()> {
+    let path = credentials::resolve_path(globals.credentials.clone())?;
+    let creds = credentials::load(&path)?;
+    let api_url = context::api_url(globals)?;
+    if credentials::resolve_token(&creds, &api_url).is_some() {
+        return Ok(());
+    }
+    if globals.json || !pickers::interactive(globals) {
+        bail!("not logged in to {api_url}. Run `subs login`.");
+    }
+    println!("Not logged in to {api_url}.");
+    run(globals, false).await
+}
 
 #[derive(Debug, Deserialize)]
 struct DeviceCodeResponse {

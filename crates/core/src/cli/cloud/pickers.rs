@@ -1,7 +1,7 @@
 use std::io::IsTerminal;
 
 use anyhow::{bail, Context as _, Result};
-use dialoguer::{theme::ColorfulTheme, Input, Select};
+use dialoguer::{theme::ColorfulTheme, Input, Password, Select};
 use serde::{Deserialize, Serialize};
 
 use crate::api::v1::{Org, Project};
@@ -164,6 +164,15 @@ pub async fn pick_api_key(ctx: &Context, project_id: &str) -> Result<String> {
         .interact()
         .context("api key picker")?;
     Ok(keys[pick].key_id.clone())
+}
+
+/// A secret typed at the terminal: not echoed, and ended by Enter like every
+/// other prompt.
+pub fn prompt_secret(prompt: &str) -> Result<String> {
+    Password::with_theme(&ColorfulTheme::default())
+        .with_prompt(prompt)
+        .interact()
+        .context("secret prompt")
 }
 
 pub fn prompt_text(prompt: &str) -> Result<String> {

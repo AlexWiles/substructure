@@ -13,6 +13,7 @@ use std::io::Read as _;
 use crate::api::v1::{LlmBlockView, LlmKeyRequest};
 
 use super::context::Context;
+use super::pickers;
 use super::print;
 use super::ProjectScope;
 
@@ -24,8 +25,8 @@ pub enum LlmCommand {
         #[command(flatten)]
         scope: ProjectScope,
     },
-    /// Upload the key for one block. Read from stdin, or from the environment
-    /// variable `--env` names.
+    /// Upload the key for one block. Typed at a prompt, piped in on stdin, or
+    /// read from the environment variable `--env` names.
     SetKey {
         block: String,
         /// Read the key from this environment variable instead of stdin.
@@ -95,7 +96,7 @@ async fn set_key(block: String, env: Option<String>, scope: ProjectScope) -> Res
             .with_context(|| format!("${var} is not set"))?
             .trim()
             .to_string(),
-        None => read_stdin()?,
+        None => read_key(&scope)?,
     };
     if key.is_empty() {
         bail!("no key given. Pipe it in, or pass --env <VAR>.");
@@ -135,11 +136,15 @@ async fn delete_key(block: String, scope: ProjectScope) -> Result<()> {
     Ok(())
 }
 
-/// The key from stdin, whether it was piped or typed. A trailing newline is the
-/// shell's, not the key's.
-fn read_stdin() -> Result<String> {
+/// The key, typed or piped. A person gets one prompt that ends at Enter and
+/// does not echo the key; a pipe is read to its end, since that is where the
+/// key ends. Trailing whitespace is the shell's, not the key's.
+fn read_key(scope: &ProjectScope) -> Result<String> {
     if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        eprintln!("Paste the key, then press Ctrl-D:");
+        if !pickers::interactive(&scope.globals) {
+            bail!("no key on stdin. Pipe it in, or pass --env <VAR>.");
+        }
+        return pickers::prompt_secret("Paste the key");
     }
     let mut buf = String::new();
     std::io::stdin()

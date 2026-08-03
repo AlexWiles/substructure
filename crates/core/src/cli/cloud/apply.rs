@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize};
 use crate::api::v1::{ApplyResponse, ConfigEvent, Notice, NoticeLevel, Page, Project};
 
 use super::context::Context;
+use super::credentials;
 use super::http;
+use super::login;
 use super::pickers;
 use super::print;
 use super::project_config::{self, Found, ProjectConfig};
@@ -65,6 +67,8 @@ struct CreateProjectResponse {
 struct Applied {
     project_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    project_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     created: Option<Created>,
     changes: Vec<ConfigEvent>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -84,6 +88,7 @@ pub async fn run(cmd: ApplyCommand) -> Result<()> {
     let path = found.path.clone();
     let config = found.config;
     local_credentials(&config)?;
+    login::ensure(&cmd.globals).await?;
     let ctx = Context::with_config(&cmd.globals, Some(config.clone()))?;
     require_agents(&ctx).await?;
 
@@ -114,6 +119,7 @@ pub async fn run(cmd: ApplyCommand) -> Result<()> {
         .await?;
 
     let result = Applied {
+        project_url: project_url(&applied, ctx.client.base_url()),
         project_id: applied.project_id,
         created,
         changes: applied.changes,
@@ -124,6 +130,20 @@ pub async fn run(cmd: ApplyCommand) -> Result<()> {
     }
     report(&result, &path);
     Ok(())
+}
+
+/// The page to see this project on, if there is one to send a reader to.
+///
+/// The deployment's own answer wins: only it knows the origin a browser
+/// reaches it at, which is not always the one the API answers on. Absent that,
+/// the hosted cloud is the one deployment whose page this CLI knows — anything
+/// else gets no line rather than a guessed one.
+fn project_url(applied: &ApplyResponse, api_url: &str) -> Option<String> {
+    if let Some(url) = &applied.project_url {
+        return Some(url.clone());
+    }
+    let hosted = api_url.trim_end_matches('/') == credentials::DEFAULT_API_URL;
+    hosted.then(|| print::admin_url(api_url, &applied.project_id))
 }
 
 /// A deployment that does not declare agents cannot hold this document, and
@@ -230,6 +250,9 @@ fn pin(path: &std::path::Path, env: &ProjectConfig, project: &Project) -> Result
 
 fn report(result: &Applied, path: &std::path::Path) {
     let file = path.display();
+    // Whatever ran before this — a login, most of it a browser's — is not part
+    // of the report.
+    println!();
     if let Some(created) = &result.created {
         println!(
             "Created project {} ({}) in {}",
@@ -240,34 +263,41 @@ fn report(result: &Applied, path: &std::path::Path) {
 
     if result.changes.is_empty() {
         println!("No changes.");
-        notices(result, path);
-        return;
+    } else {
+        // `config.applied` is the record of the document, not one of its changes.
+        let changes: Vec<&ConfigEvent> = result
+            .changes
+            .iter()
+            .filter(|c| c.kind != "config.applied")
+            .collect();
+        println!("Applied {} changes:", changes.len());
+        for change in &changes {
+            println!("  {:<24}{}", change.kind, summarize(change));
+        }
+
+        // A worker-hosted agent gets a secret minted on its first apply. It is
+        // retrievable, so this points at the command rather than printing it.
+        let minted: Vec<&str> = result
+            .changes
+            .iter()
+            .filter(|c| c.kind == "agent.updated")
+            .filter(|c| c.data.get("secretMinted").and_then(|v| v.as_bool()) == Some(true))
+            .filter_map(|c| c.data.get("id").and_then(|v| v.as_str()))
+            .collect();
+        if !minted.is_empty() {
+            println!("Signing secrets minted:");
+            for id in minted {
+                println!("  {id} — `subs agents show {id}`");
+            }
+        }
     }
 
-    // `config.applied` is the record of the document, not one of its changes.
-    let changes: Vec<&ConfigEvent> = result
-        .changes
-        .iter()
-        .filter(|c| c.kind != "config.applied")
-        .collect();
-    println!("Applied {} changes:", changes.len());
-    for change in &changes {
-        println!("  {:<24}{}", change.kind, summarize(change));
-    }
-
-    // A worker-hosted agent gets a secret minted on its first apply. It is
-    // retrievable, so this points at the command rather than printing it.
-    let minted: Vec<&str> = result
-        .changes
-        .iter()
-        .filter(|c| c.kind == "agent.updated")
-        .filter(|c| c.data.get("secretMinted").and_then(|v| v.as_bool()) == Some(true))
-        .filter_map(|c| c.data.get("id").and_then(|v| v.as_str()))
-        .collect();
-    if !minted.is_empty() {
-        println!("Signing secrets minted:");
-        for id in minted {
-            println!("  {id} — `subs agents show {id}`");
+    if let Some(url) = &result.project_url {
+        println!();
+        println!("View this project: {url}");
+        // Notices bring their own blank line; nothing else does.
+        if result.notices.is_empty() {
+            println!();
         }
     }
 
@@ -293,13 +323,20 @@ fn notices(result: &Applied, path: &std::path::Path) {
         for notice in group {
             println!();
             println!("  {}", notice.message);
-            if let Some(command) = &notice.command {
-                println!("    {command}{flag}");
-            }
-            if let Some(url) = &notice.url {
-                println!("    {url}");
+            if let Some(hint) = hint(notice, &flag) {
+                println!("    {hint}");
             }
         }
+    }
+}
+
+/// The one thing to do about a notice: the command when there is one, and the
+/// URL only when there is not. A reader who can stay on the command line is not
+/// sent to a browser as well.
+fn hint(notice: &Notice, flag: &str) -> Option<String> {
+    match &notice.command {
+        Some(command) => Some(format!("{command}{flag}")),
+        None => notice.url.clone(),
     }
 }
 
@@ -513,6 +550,56 @@ mod tests {
         );
         // A level with nothing in it is not a heading over an empty list.
         assert_eq!(grouped(&[notice("warn", "only this")]).len(), 1);
+    }
+
+    /// The deployment knows the origin a browser reaches it at; the CLI only
+    /// knows the hosted cloud's.
+    #[test]
+    fn the_page_to_view_a_project_comes_from_the_deployment_that_has_one() {
+        let response = |url: Option<&str>| ApplyResponse {
+            project_id: "p1".into(),
+            project_url: url.map(str::to_string),
+            changes: vec![],
+            notices: vec![],
+        };
+
+        assert_eq!(
+            project_url(
+                &response(Some("https://subs.test/p/p1")),
+                "http://localhost:5174"
+            ),
+            Some("https://subs.test/p/p1".to_string())
+        );
+        assert_eq!(
+            project_url(&response(None), credentials::DEFAULT_API_URL),
+            Some("https://app.substructure.ai/projects/p1".to_string())
+        );
+        // A deployment that says nothing gets no line rather than a guess.
+        assert_eq!(project_url(&response(None), "http://localhost:5174"), None);
+    }
+
+    /// A browser is the fallback, not the companion: a notice that names a
+    /// command is done on the command line.
+    #[test]
+    fn a_notice_sends_the_reader_to_a_browser_only_when_there_is_no_command() {
+        let both: Notice = serde_json::from_value(json!({
+            "message": "authorize it",
+            "command": "subs mcp login sentry",
+            "url": "https://app.test/mcp",
+        }))
+        .unwrap();
+        assert_eq!(
+            hint(&both, " -c other.toml").as_deref(),
+            Some("subs mcp login sentry -c other.toml")
+        );
+
+        let url_only: Notice = serde_json::from_value(
+            json!({ "message": "connect Slack", "url": "https://app.test" }),
+        )
+        .unwrap();
+        assert_eq!(hint(&url_only, "").as_deref(), Some("https://app.test"));
+
+        assert_eq!(hint(&notice("info", "nothing to do"), ""), None);
     }
 
     /// A deployment newer than this CLI must still be heard: an unknown level
