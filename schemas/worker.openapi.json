@@ -1270,15 +1270,24 @@
         "title": "EffectKind"
       },
       "EffectStatus": {
-        "enum": [
-          "pending",
-          "completed",
-          "failed",
-          "retry_scheduled",
-          "queued"
+        "oneOf": [
+          {
+            "enum": [
+              "pending",
+              "completed",
+              "failed",
+              "retry_scheduled",
+              "queued"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "running",
+            "description": "Dispatched and alive, awaiting its result. Off the deadline clock: the\nwork succeeded in starting, and how long it then runs is its own\nbusiness. A delegation sits here for as long as its child turn takes.",
+            "type": "string"
+          }
         ],
-        "title": "EffectStatus",
-        "type": "string"
+        "title": "EffectStatus"
       },
       "ErrorCode": {
         "enum": [

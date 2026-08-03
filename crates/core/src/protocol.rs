@@ -563,6 +563,10 @@ pub struct TokenDelta {
 #[schemars(title = "EffectStatus")]
 pub enum EffectStatus {
     Pending,
+    /// Dispatched and alive, awaiting its result. Off the deadline clock: the
+    /// work succeeded in starting, and how long it then runs is its own
+    /// business. A delegation sits here for as long as its child turn takes.
+    Running,
     Completed,
     Failed,
     RetryScheduled,

@@ -11,6 +11,8 @@ together at the same version.
 
 ### Fixed
 
+- A turn that delegates to more than one sub-agent now waits for all of them to
+  return before it continues.
 - Failed decisions now retry or end the run with the error.
 - Decisions and LLM calls have default timeouts and retries.
 - An LLM call that times out on its last attempt now settles the turn instead of stalling it.
@@ -30,6 +32,8 @@ together at the same version.
 
 ### Changed
 
+- An effect has a new `running` status. Work that started but did not return
+  yet has this status.
 - The event store keeps no store-wide event order. A processor holds a cursor
   for each session and reads the sessions independently, so a shard reads only
   its own sessions.

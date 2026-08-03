@@ -2852,6 +2852,75 @@ fn complete_sub_agent_turn_emits_completed() {
     assert!(!sa.is_error);
 }
 
+/// Two delegations from one assistant message: the first to return must not
+/// re-prompt the model while its sibling still runs, or the request carries a
+/// `tool_use` with no matching `tool_result` and the provider rejects it.
+#[test]
+fn a_returned_delegation_waits_for_its_running_sibling() {
+    let mut agg = create_session("sess-1", "tenant-a", "user-1");
+
+    for (child, call) in [("child-1", "call-a"), ("child-2", "call-b")] {
+        dispatch(
+            &mut agg,
+            CommandPayload::RequestSubAgent {
+                session_id: child.to_string(),
+                agent_id: "agent-2".to_string(),
+                tool_call_id: call.to_string(),
+                message: None,
+                retry: RetryPolicy::no_retry(),
+            },
+            &system(),
+        );
+        dispatch(
+            &mut agg,
+            CommandPayload::settle(
+                EffectKind::SubAgent,
+                child.to_string(),
+                None,
+                Outcome::SubAgentStarted,
+            ),
+            &system(),
+        );
+    }
+
+    // Started is not finished: both children are alive and unreturned.
+    let running = agg
+        .state
+        .event_meta(Utc::now())
+        .calls
+        .iter()
+        .filter(|c| c.kind == EffectKind::SubAgent && c.status == EffectStatus::Running)
+        .count();
+    assert_eq!(running, 2, "both delegations stay in flight once started");
+
+    let complete = |child: &str, turn: &str| CommandPayload::CompleteSubAgentTurn {
+        session_id: child.to_string(),
+        agent_id: "agent-2".to_string(),
+        turn_id: turn.to_string(),
+        data: serde_json::json!("done"),
+        cost: rust_decimal::Decimal::ZERO,
+        token_usage: std::collections::BTreeMap::new(),
+    };
+
+    dispatch(&mut agg, complete("child-1", "turn-a"), &system());
+    let (decision_id, _) = live_decision(&agg);
+    assert_eq!(
+        agg.state.event_meta(Utc::now()).pending_work(&decision_id),
+        1,
+        "child-2 is still running, so this turn must not re-prompt yet"
+    );
+
+    dispatch(&mut agg, complete("child-2", "turn-b"), &system());
+    let still_running = agg
+        .state
+        .event_meta(Utc::now())
+        .calls
+        .iter()
+        .filter(|c| c.kind == EffectKind::SubAgent && c.status == EffectStatus::Running)
+        .count();
+    assert_eq!(still_running, 0, "a returned delegation is settled");
+}
+
 // ── Batched effect completion ────────────────────────────────────────
 
 fn machine() -> Caller {

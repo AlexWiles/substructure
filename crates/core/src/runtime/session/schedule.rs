@@ -405,6 +405,10 @@ mod tests {
         match status {
             EffectStatus::Queued => {}
             EffectStatus::Pending => t.dispatch(epoch()),
+            EffectStatus::Running => {
+                t.dispatch(epoch());
+                t.run();
+            }
             EffectStatus::Completed => {
                 t.dispatch(epoch());
                 t.complete();

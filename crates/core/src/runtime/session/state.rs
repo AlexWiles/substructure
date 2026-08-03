@@ -121,6 +121,7 @@ impl EffectTracking {
             &[
                 EffectStatus::Queued,
                 EffectStatus::Pending,
+                EffectStatus::Running,
                 EffectStatus::RetryScheduled,
                 EffectStatus::Failed,
             ],
@@ -141,8 +142,18 @@ impl EffectTracking {
         self.retry.next_at = None;
     }
 
+    /// Alive and working: the spawn landed, so the deadline stops applying.
+    /// Only the result settles it now.
+    pub fn run(&mut self) {
+        self.move_to(EffectStatus::Running, &[EffectStatus::Pending]);
+        self.deadline = None;
+    }
+
     pub fn complete(&mut self) {
-        self.move_to(EffectStatus::Completed, &[EffectStatus::Pending]);
+        self.move_to(
+            EffectStatus::Completed,
+            &[EffectStatus::Pending, EffectStatus::Running],
+        );
     }
 
     /// Abandoned mid-flight — its branch was forked away, or the session ended.
@@ -152,6 +163,7 @@ impl EffectTracking {
             &[
                 EffectStatus::Queued,
                 EffectStatus::Pending,
+                EffectStatus::Running,
                 EffectStatus::RetryScheduled,
                 EffectStatus::Failed,
             ],
@@ -651,7 +663,10 @@ impl EventMeta {
                 matches!(e.kind, EffectKind::ToolCall | EffectKind::SubAgent)
                     && matches!(
                         e.status,
-                        EffectStatus::Queued | EffectStatus::Pending | EffectStatus::RetryScheduled
+                        EffectStatus::Queued
+                            | EffectStatus::Pending
+                            | EffectStatus::Running
+                            | EffectStatus::RetryScheduled
                     )
             })
             .count();
@@ -1202,9 +1217,12 @@ impl SessionState {
                 }
                 self.dequeue(EffectKind::SubAgent, &payload.id);
             }
+            // The spawn landed; the delegation is not done. It stays in flight
+            // until its turn returns, so a sibling finishing first cannot
+            // re-prompt the model with this one's result still missing.
             EventPayload::SubAgentStarted(payload) => {
                 if let Some(e) = self.effect_mut(EffectKind::SubAgent, &payload.id) {
-                    e.tracking.complete();
+                    e.tracking.run();
                 }
             }
             EventPayload::SubAgentErrored(payload) => {
@@ -1329,12 +1347,15 @@ impl SessionState {
                     *self.sub_agent_token_usage.entry(k.clone()).or_insert(0) += v;
                     *self.turn_token_usage.entry(k.clone()).or_insert(0) += v;
                 }
-                if let Some(sa) = self
-                    .effect_mut(EffectKind::SubAgent, &payload.id)
-                    .and_then(|e| e.sub_agent_mut())
-                {
-                    sa.result = Some(json_to_string(&payload.data));
-                    sa.is_error = false;
+                if let Some(e) = self.effect_mut(EffectKind::SubAgent, &payload.id) {
+                    if let Some(sa) = e.sub_agent_mut() {
+                        sa.result = Some(json_to_string(&payload.data));
+                        sa.is_error = false;
+                    }
+                    // The result is what settles a delegation.
+                    if e.tracking.status() == EffectStatus::Running {
+                        e.tracking.complete();
+                    }
                 }
             }
             EventPayload::TurnStarted(p) => {
@@ -1698,7 +1719,10 @@ impl SessionState {
             .filter(|e| {
                 matches!(
                     e.tracking.status(),
-                    EffectStatus::Queued | EffectStatus::Pending | EffectStatus::RetryScheduled
+                    EffectStatus::Queued
+                        | EffectStatus::Pending
+                        | EffectStatus::Running
+                        | EffectStatus::RetryScheduled
                 )
             })
             .map(|e| {
