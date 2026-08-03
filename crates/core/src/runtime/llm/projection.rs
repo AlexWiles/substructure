@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 use crate::providers::memory_queue::TaskQueue;
 use crate::runtime::event_store::EventStore;
 use crate::runtime::processor::{
-    EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCheckpointStore,
+    EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCursorStore,
     ProcessorError,
 };
 use crate::runtime::session::decision::LlmHandler;
@@ -100,7 +100,7 @@ impl EventProcessor for LlmDispatchProjection {
 
 pub fn spawn_llm_dispatch_processor(
     store: Arc<dyn EventStore>,
-    checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
+    cursor_store: Arc<dyn ProcessorCursorStore>,
     queue: Arc<dyn TaskQueue<LlmTask>>,
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
@@ -109,5 +109,5 @@ pub fn spawn_llm_dispatch_processor(
         owner_id: Some("llm_dispatch".to_string()),
         ..Default::default()
     };
-    EventProcessorRunner::new(store, checkpoint_store, projection, config, cancel).spawn()
+    EventProcessorRunner::new(store, cursor_store, projection, config, cancel).spawn()
 }

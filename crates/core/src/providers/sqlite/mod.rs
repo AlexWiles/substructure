@@ -1,5 +1,5 @@
-pub mod checkpoint;
 pub mod connector_tokens;
+pub mod cursor;
 pub mod event_store;
 pub mod session_index;
 pub mod wake;
@@ -13,8 +13,8 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::event_store::StoreError;
 
-pub use checkpoint::SqliteCheckpointStore;
 pub use connector_tokens::SqliteTokenStore;
+pub use cursor::SqliteCursorStore;
 pub use event_store::SqliteEventStore;
 pub use session_index::SqliteSessionIndexStore;
 pub use wake::SqliteWakeStore;

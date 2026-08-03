@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 use crate::providers::memory_queue::TaskQueue;
 use crate::runtime::event_store::EventStore;
 use crate::runtime::processor::{
-    EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCheckpointStore,
+    EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCursorStore,
     ProcessorError,
 };
 use crate::runtime::session::decision::ToolHandler;
@@ -95,7 +95,7 @@ impl EventProcessor for ConnectorDispatchProjection {
 
 pub fn spawn_connector_dispatch_processor(
     store: Arc<dyn EventStore>,
-    checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
+    cursor_store: Arc<dyn ProcessorCursorStore>,
     queue: Arc<dyn TaskQueue<ConnectorTask>>,
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
@@ -107,5 +107,5 @@ pub fn spawn_connector_dispatch_processor(
         owner_id: Some("connector_dispatch".to_string()),
         ..Default::default()
     };
-    EventProcessorRunner::new(store, checkpoint_store, projection, config, cancel).spawn()
+    EventProcessorRunner::new(store, cursor_store, projection, config, cancel).spawn()
 }

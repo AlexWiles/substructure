@@ -19,7 +19,7 @@ use llm::{
     TokenDeltaTransport,
 };
 use processor::{
-    EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCheckpointStore,
+    EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCursorStore,
 };
 use retry::{DefaultWorkerRetryResolver, WorkerRetryResolver};
 use session::command::{CommandPayload, Outcome, SessionError, SettleError, TurnTarget};
@@ -82,7 +82,7 @@ pub struct Runtime {
     session_index: Arc<dyn SessionIndexStore>,
     session_subscriptions: session::subscriptions::SessionSubscriptions,
     token_delta_transport: Arc<dyn TokenDeltaTransport>,
-    checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
+    cursor_store: Arc<dyn ProcessorCursorStore>,
     cancel: CancellationToken,
     handles: tokio::sync::Mutex<Vec<JoinHandle<()>>>,
     shutdown_timeout: Duration,
@@ -578,8 +578,8 @@ impl Runtime {
     }
 
     /// Attach a durable event processor, joined into runtime shutdown. With
-    /// `start_at_tail`, a never-committed checkpoint is initialized at the log
-    /// head so a new processor renders the future, not the whole history.
+    /// `start_at_tail`, every stream's cursor is parked at its head so a new
+    /// processor renders the future, not the whole history.
     pub async fn spawn_processor(
         &self,
         processor: Arc<dyn EventProcessor>,
@@ -587,34 +587,14 @@ impl Runtime {
         start_at_tail: bool,
     ) -> Result<(), RuntimeError> {
         if start_at_tail {
-            let checkpoint = self
-                .checkpoint_store
-                .load_checkpoint(processor.name(), config.shard_id)
+            self.cursor_store
+                .seed_at_tail(processor.name())
                 .await
                 .map_err(|e| RuntimeError::Internal(e.to_string()))?;
-            if checkpoint.version == 0 {
-                let tail = self
-                    .store
-                    .max_global_position()
-                    .await
-                    .map_err(|e| RuntimeError::Internal(e.to_string()))?;
-                // A lost CAS means another owner initialized it; either way the
-                // runner reloads the committed checkpoint.
-                let _ = self
-                    .checkpoint_store
-                    .compare_and_set_checkpoint(
-                        processor.name(),
-                        config.shard_id,
-                        checkpoint.version,
-                        tail.0,
-                        config.owner_id.as_deref(),
-                    )
-                    .await;
-            }
         }
         let handle = EventProcessorRunner::new(
             self.store.clone(),
-            self.checkpoint_store.clone(),
+            self.cursor_store.clone(),
             processor,
             config,
             self.cancel.clone(),
@@ -688,7 +668,6 @@ impl Runtime {
             tenant_id: Some(caller.tenant_id().to_string()),
             after_seq: after,
             limit,
-            ..Default::default()
         };
         self.store
             .query_events(&filter)
@@ -834,7 +813,7 @@ pub struct RuntimeDeps {
     pub connector_task_queue: Arc<dyn TaskQueue<ConnectorTask>>,
     pub worker_queue: Arc<dyn WorkerQueue>,
     pub session_index_store: Arc<dyn SessionIndexStore>,
-    pub checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
+    pub cursor_store: Arc<dyn ProcessorCursorStore>,
     pub wake_store: Arc<dyn WakeScheduleStore>,
     pub token_delta_transport: Arc<dyn TokenDeltaTransport>,
 }
@@ -850,7 +829,7 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
         connector_task_queue,
         worker_queue,
         session_index_store,
-        checkpoint_store,
+        cursor_store,
         wake_store,
         token_delta_transport,
     } = deps;
@@ -863,7 +842,7 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
     if !llm.is_empty() {
         llm_handles.push(spawn_llm_dispatch_processor(
             store.clone(),
-            checkpoint_store.clone(),
+            cursor_store.clone(),
             llm_task_queue.clone(),
             cancel.clone(),
         ));
@@ -883,7 +862,7 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
     if let Some(connections) = connections {
         connector_handles.push(spawn_connector_dispatch_processor(
             store.clone(),
-            checkpoint_store.clone(),
+            cursor_store.clone(),
             connector_task_queue.clone(),
             cancel.clone(),
         ));
@@ -898,7 +877,7 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
 
     let sub_agent_processor_handle = spawn_sub_agent_dispatch_processor(
         store.clone(),
-        checkpoint_store.clone(),
+        cursor_store.clone(),
         sub_agent_task_queue.clone(),
         cancel.clone(),
     );
@@ -911,20 +890,20 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
 
     let worker_handle = spawn_worker_processor(
         store.clone(),
-        checkpoint_store.clone(),
+        cursor_store.clone(),
         worker_queue.clone(),
         agents.clone(),
         cancel.clone(),
     );
     let session_index_processor_handle = spawn_session_index_processor(
         store.clone(),
-        checkpoint_store.clone(),
+        cursor_store.clone(),
         session_index_store.clone(),
         cancel.clone(),
     );
     let wake_processor_handle = spawn_wake_processor(
         store.clone(),
-        checkpoint_store.clone(),
+        cursor_store.clone(),
         wake_store.clone(),
         cancel.clone(),
     );
@@ -962,7 +941,7 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
         session_index: session_index_store,
         session_subscriptions,
         token_delta_transport,
-        checkpoint_store,
+        cursor_store,
         cancel,
         handles: tokio::sync::Mutex::new(handles),
         shutdown_timeout: config.shutdown_timeout,

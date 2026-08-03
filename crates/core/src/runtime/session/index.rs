@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::runtime::event_store::{EventStore, StoreError};
 use crate::runtime::processor::{
-    EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCheckpointStore,
+    EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCursorStore,
     ProcessorError,
 };
 use crate::runtime::session::state::SessionStatus;
@@ -130,7 +130,7 @@ impl EventProcessor for SessionIndexProjection {
 
 pub fn spawn_session_index_processor(
     event_store: Arc<dyn EventStore>,
-    checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
+    cursor_store: Arc<dyn ProcessorCursorStore>,
     session_index_store: Arc<dyn SessionIndexStore>,
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
@@ -140,5 +140,5 @@ pub fn spawn_session_index_processor(
         owner_id: Some("session_index".to_string()),
         ..Default::default()
     };
-    EventProcessorRunner::new(event_store, checkpoint_store, projection, config, cancel).spawn()
+    EventProcessorRunner::new(event_store, cursor_store, projection, config, cancel).spawn()
 }

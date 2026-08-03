@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::runtime::event_store::EventStore;
 use crate::runtime::processor::{
-    EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCheckpointStore,
+    EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCursorStore,
     ProcessorError,
 };
 use crate::runtime::session::command::CommandPayload;
@@ -73,14 +73,14 @@ impl EventProcessor for WakeScheduleProjection {
 
 pub fn spawn_wake_processor(
     store: Arc<dyn EventStore>,
-    checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
+    cursor_store: Arc<dyn ProcessorCursorStore>,
     wake_store: Arc<dyn WakeScheduleStore>,
     cancel: CancellationToken,
 ) -> JoinHandle<()> {
     let projection = Arc::new(WakeScheduleProjection::new(wake_store));
     EventProcessorRunner::new(
         store,
-        checkpoint_store,
+        cursor_store,
         projection,
         EventProcessorRunnerConfig::default(),
         cancel,

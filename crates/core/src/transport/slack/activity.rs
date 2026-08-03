@@ -369,7 +369,6 @@ mod tests {
     fn event(seq: u64, secs: i64, payload: EventPayload) -> SessionEvent {
         let at = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
         SessionEvent {
-            global_position: crate::event_store::GlobalPosition(seq),
             id: uuid::Uuid::nil(),
             tenant_id: "t".into(),
             session_id: "slack:C1:1.0".into(),

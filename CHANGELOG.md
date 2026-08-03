@@ -30,6 +30,10 @@ together at the same version.
 
 ### Changed
 
+- The event store keeps no store-wide event order. A processor holds a cursor
+  for each session and reads the sessions independently, so a shard reads only
+  its own sessions.
+- An event has no `global_position` field. Use `session_id` and `seq`.
 - The agent config has no `stream` field. LLM calls stream unless the `llm.call` action sets `stream: false`.
 - Commands that open a browser now print the URL before they open it.
 - A credential belongs to a connection id, not to a server URL. Declare

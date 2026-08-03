@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 use crate::protocol::{DecisionResponse, DecisionTrigger};
 use crate::runtime::event_store::EventStore;
 use crate::runtime::processor::{
-    EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCheckpointStore,
+    EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCursorStore,
     ProcessorError,
 };
 use crate::runtime::session::events::EventPayload;
@@ -58,7 +58,7 @@ impl EventProcessor for WorkerDecisionProjection {
 
 pub fn spawn_worker_processor(
     store: Arc<dyn EventStore>,
-    checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
+    cursor_store: Arc<dyn ProcessorCursorStore>,
     queue: Arc<dyn WorkerQueue>,
     agents: Arc<dyn AgentDirectory>,
     cancel: CancellationToken,
@@ -66,7 +66,7 @@ pub fn spawn_worker_processor(
     let projection = Arc::new(WorkerDecisionProjection::new(store.clone(), queue, agents));
     EventProcessorRunner::new(
         store,
-        checkpoint_store,
+        cursor_store,
         projection,
         EventProcessorRunnerConfig::default(),
         cancel,
@@ -189,13 +189,12 @@ mod tests {
         SessionOwner,
     };
     use crate::runtime::event_store::{
-        AppendInput, BroadcastBus, EventBus, EventFilter, EventStore, EventTap, GlobalPosition,
-        StoreError,
+        AppendInput, BroadcastBus, EventBus, EventFilter, EventStore, EventTap, StoreError,
     };
     use crate::runtime::session::command::{CommandPayload, TurnTarget};
     use crate::runtime::session::events::EventPayload;
     use crate::runtime::session::state::SessionState;
-    use crate::runtime::session::{CommitContext, NewSessionEvent, SessionAggregate, SessionEvent};
+    use crate::runtime::session::{CommitContext, SessionAggregate, SessionEvent};
     use crate::runtime::span::SpanContext;
     use crate::runtime::worker::directory::{AgentEntry, StaticAgentDirectory};
     use crate::runtime::worker::EmptyAgentDirectory;
@@ -228,10 +227,6 @@ mod tests {
             Ok(vec![])
         }
 
-        async fn max_global_position(&self) -> Result<GlobalPosition, StoreError> {
-            Ok(GlobalPosition(0))
-        }
-
         fn subscribe(&self) -> EventTap {
             self.events.subscribe()
         }
@@ -241,7 +236,7 @@ mod tests {
         agg: &mut SessionAggregate,
         cmd: CommandPayload,
         caller: &Caller,
-    ) -> Vec<NewSessionEvent> {
+    ) -> Vec<SessionEvent> {
         let now = Utc::now();
         let events = agg.handle(cmd, caller, now).expect("setup command failed");
         agg.commit(
@@ -352,8 +347,7 @@ mod tests {
         )
         .into_iter()
         .find(|e| matches!(e.payload, EventPayload::DecisionDispatched(_)))
-        .expect("the client decision goes live")
-        .into_event(GlobalPosition(1));
+        .expect("the client decision goes live");
 
         let store = FrozenStore {
             session: agg,
@@ -389,8 +383,7 @@ mod tests {
         )
         .into_iter()
         .find(|e| matches!(e.payload, EventPayload::DecisionDispatched(_)))
-        .expect("CreateSession opens a session.start decision")
-        .into_event(GlobalPosition(1));
+        .expect("CreateSession opens a session.start decision");
 
         let store = FrozenStore {
             session: agg,

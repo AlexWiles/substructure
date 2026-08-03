@@ -15,7 +15,7 @@ use crate::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use crate::providers::openai::{OpenAiConfig, OpenAiProvider};
 use crate::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
 use crate::providers::sqlite::{
-    SqliteCheckpointStore, SqliteDb, SqliteEventStore, SqliteSessionIndexStore, SqliteTokenStore,
+    SqliteCursorStore, SqliteDb, SqliteEventStore, SqliteSessionIndexStore, SqliteTokenStore,
     SqliteWakeStore, SqliteWorkerQueue,
 };
 use crate::runtime::connector::ConnectorTask;
@@ -212,7 +212,7 @@ pub(crate) async fn start_engine(
     let connectors = cfg.connections();
     let event_store = Arc::new(SqliteEventStore::new(db.clone())?);
     let worker_queue = Arc::new(SqliteWorkerQueue::new(db.clone())?);
-    let checkpoint_store = Arc::new(SqliteCheckpointStore::new(db.clone())?);
+    let cursor_store = Arc::new(SqliteCursorStore::new(db.clone())?);
     let wake_store = Arc::new(SqliteWakeStore::new(db.clone())?);
     let session_index_store = Arc::new(SqliteSessionIndexStore::new(db.clone())?);
     let token_store = Arc::new(SqliteTokenStore::new(db)?);
@@ -283,7 +283,7 @@ pub(crate) async fn start_engine(
             connector_task_queue,
             worker_queue,
             session_index_store,
-            checkpoint_store,
+            cursor_store,
             wake_store,
             token_delta_transport,
         },

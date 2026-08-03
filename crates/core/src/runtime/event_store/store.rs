@@ -2,16 +2,11 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::runtime::event_store::EventTap;
-use crate::runtime::session::{NewSessionEvent, SessionAggregate, SessionEvent};
+use crate::runtime::session::{SessionAggregate, SessionEvent};
 
-/// Monotonic position in the store-wide event log, across every session.
-/// The global cursor: use it to read or resume the whole log in commit order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct GlobalPosition(pub u64);
-
-/// Monotonic version within a single session's stream. The per-stream cursor:
-/// meaningful only alongside a `session_id`, since each stream numbers from 1.
+/// Monotonic version within a single session's stream. The only cursor there
+/// is: meaningful only alongside a `session_id`, since each stream numbers
+/// from 1. Streams are independent — the store defines no order between them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Seq(pub u64);
@@ -29,20 +24,17 @@ pub enum StoreError {
 }
 
 pub struct AppendInput {
-    pub events: Vec<NewSessionEvent>,
+    pub events: Vec<SessionEvent>,
     pub snapshot: SessionAggregate,
     pub expected_version: Seq,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct EventFilter {
-    /// Global cursor: keep events whose `global_position` is greater. Reads the
-    /// whole log in commit order; needs no `session_id`.
-    pub after_global_position: Option<GlobalPosition>,
     pub session_id: Option<String>,
     pub tenant_id: Option<String>,
-    /// Per-stream cursor: keep events whose `seq` is greater. Only unambiguous
-    /// with `session_id` set, since versions restart per stream.
+    /// Keep events whose `seq` is greater. Only unambiguous with `session_id`
+    /// set, since versions restart per stream.
     pub after_seq: Option<Seq>,
     pub limit: Option<usize>,
 }
@@ -51,8 +43,7 @@ pub struct EventFilter {
 pub trait EventStore: Send + Sync {
     /// Persist events and snapshot atomically, guarded by `expected_version`
     /// (`VersionConflict` on mismatch). Implementations must notify
-    /// subscribers with the position-assigned events after a successful
-    /// append.
+    /// subscribers with the appended events after a successful append.
     async fn append(&self, input: AppendInput) -> Result<(), StoreError>;
 
     /// Load the latest session, fully hydrated (tenant-scoped). History logs
@@ -63,12 +54,10 @@ pub trait EventStore: Send + Sync {
 
     /// Query events with filtering and pagination, decoded from storage.
     ///
-    /// Implementations must return events in ascending `position` order and
-    /// fail with `StoreError` on an undecodable stored event.
+    /// Implementations must return events grouped by stream and ascending by
+    /// `seq` within one, and fail with `StoreError` on an undecodable stored
+    /// event.
     async fn query_events(&self, filter: &EventFilter) -> Result<Vec<SessionEvent>, StoreError>;
-
-    /// The highest assigned global position, 0 when the log is empty.
-    async fn max_global_position(&self) -> Result<GlobalPosition, StoreError>;
 
     /// Tap the store's [`EventBus`](super::EventBus): a best-effort hint that
     /// events were appended. Batches may be missed; consumers needing every

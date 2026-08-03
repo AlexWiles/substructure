@@ -21,7 +21,7 @@ use substructure_core::protocol::{
 };
 use substructure_core::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use substructure_core::providers::sqlite::{
-    SqliteCheckpointStore, SqliteDb, SqliteEventStore, SqliteSessionIndexStore, SqliteWakeStore,
+    SqliteCursorStore, SqliteDb, SqliteEventStore, SqliteSessionIndexStore, SqliteWakeStore,
     SqliteWorkerQueue,
 };
 use substructure_core::runtime::connector::ConnectorTask;
@@ -204,7 +204,7 @@ async fn start(agents: BTreeMap<String, AgentEntry>) -> Harness {
             )) as Arc<dyn TaskQueue<ConnectorTask>>,
             worker_queue: Arc::new(SqliteWorkerQueue::new(db.clone()).unwrap()),
             session_index_store: Arc::new(SqliteSessionIndexStore::new(db.clone()).unwrap()),
-            checkpoint_store: Arc::new(SqliteCheckpointStore::new(db.clone()).unwrap()),
+            cursor_store: Arc::new(SqliteCursorStore::new(db.clone()).unwrap()),
             wake_store: Arc::new(SqliteWakeStore::new(db).unwrap()),
             token_delta_transport: Arc::new(InMemoryTokenDeltaTransport::new()),
         },

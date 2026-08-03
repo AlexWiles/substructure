@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 use crate::providers::memory_queue::TaskQueue;
 use crate::runtime::event_store::EventStore;
 use crate::runtime::processor::{
-    EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCheckpointStore,
+    EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCursorStore,
     ProcessorError,
 };
 use crate::runtime::session::events::{EffectKind, EventPayload};
@@ -129,7 +129,7 @@ impl EventProcessor for SubAgentDispatchProjection {
 
 pub fn spawn_sub_agent_dispatch_processor(
     store: Arc<dyn EventStore>,
-    checkpoint_store: Arc<dyn ProcessorCheckpointStore>,
+    cursor_store: Arc<dyn ProcessorCursorStore>,
     queue: Arc<dyn TaskQueue<SubAgentTask>>,
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
@@ -138,5 +138,5 @@ pub fn spawn_sub_agent_dispatch_processor(
         owner_id: Some("sub_agent_dispatch".to_string()),
         ..Default::default()
     };
-    EventProcessorRunner::new(store, checkpoint_store, projection, config, cancel).spawn()
+    EventProcessorRunner::new(store, cursor_store, projection, config, cancel).spawn()
 }

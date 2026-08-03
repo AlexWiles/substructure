@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::runtime::caller::Caller;
-use crate::runtime::event_store::{AppendInput, EventStore, GlobalPosition, Seq, StoreError};
+use crate::runtime::event_store::{AppendInput, EventStore, Seq, StoreError};
 use crate::runtime::span::SpanContext;
 
 use super::command::{CommandPayload, SessionError, Working};
@@ -18,44 +18,10 @@ pub struct CommitContext {
     pub occurred_at: DateTime<Utc>,
 }
 
-/// A committed-but-unpersisted event: everything but the store-assigned
-/// `global_position`. Also the persisted `data` shape.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NewSessionEvent {
-    pub id: Uuid,
-    pub tenant_id: String,
-    pub session_id: String,
-    pub seq: u64,
-    pub span: SpanContext,
-    pub occurred_at: DateTime<Utc>,
-    pub payload: EventPayload,
-    pub meta: EventMeta,
-    /// Wall-clock bounds of the execute() call that produced this event.
-    pub start_time: DateTime<Utc>,
-    pub end_time: DateTime<Utc>,
-}
-
-impl NewSessionEvent {
-    pub fn into_event(self, global_position: GlobalPosition) -> SessionEvent {
-        SessionEvent {
-            global_position,
-            id: self.id,
-            tenant_id: self.tenant_id,
-            session_id: self.session_id,
-            seq: self.seq,
-            span: self.span,
-            occurred_at: self.occurred_at,
-            payload: self.payload,
-            meta: self.meta,
-            start_time: self.start_time,
-            end_time: self.end_time,
-        }
-    }
-}
-
+/// One committed event. `(session_id, seq)` locates it; nothing orders it
+/// against another stream's events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionEvent {
-    pub global_position: GlobalPosition,
     pub id: Uuid,
     pub tenant_id: String,
     pub session_id: String,
@@ -153,7 +119,7 @@ impl SessionAggregate {
         &mut self,
         events: Vec<EventPayload>,
         context: &CommitContext,
-    ) -> Vec<NewSessionEvent> {
+    ) -> Vec<SessionEvent> {
         if events.is_empty() {
             return vec![];
         }
@@ -174,7 +140,7 @@ impl SessionAggregate {
             self.last_event_at = Some(context.occurred_at);
             let meta = self.state.event_meta(context.occurred_at);
             self.wake_at = meta.wake_at;
-            session_events.push(NewSessionEvent {
+            session_events.push(SessionEvent {
                 id: Uuid::now_v7(),
                 tenant_id: self.tenant_id.clone(),
                 session_id: self.id.clone(),

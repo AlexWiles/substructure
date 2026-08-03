@@ -7,15 +7,15 @@ use sea_query::{Expr, ExprTrait, Iden, Order, Query, SqliteQueryBuilder};
 use uuid::Uuid;
 
 use crate::event_store::{
-    AppendInput, BroadcastBus, EventBus, EventFilter, EventStore, EventTap, GlobalPosition, Seq,
-    StoreError,
+    AppendInput, BroadcastBus, EventBus, EventFilter, EventStore, EventTap, Seq, StoreError,
 };
 use crate::protocol::{Message, NewMessage};
 use crate::runtime::session::events::EventPayload;
 use crate::runtime::session::state::{
     AgentVersion, EffectKind, Logged, SessionState, StateVersion,
 };
-use crate::runtime::session::{NewSessionEvent, SessionAggregate, SessionEvent};
+use crate::runtime::session::{SessionAggregate, SessionEvent};
+use crate::shard::shard_key;
 
 use super::{parse_dt, sea_params, spawn_err, SqliteDb};
 
@@ -24,8 +24,7 @@ type VersionLogs = (Vec<Logged<StateVersion>>, Vec<Logged<AgentVersion>>);
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS events (
-    global_position  INTEGER PRIMARY KEY AUTOINCREMENT,
-    id               TEXT NOT NULL,
+    id               TEXT PRIMARY KEY,
     tenant_id        TEXT NOT NULL,
     session_id       TEXT NOT NULL,
     seq              INTEGER NOT NULL,
@@ -69,10 +68,13 @@ CREATE TABLE IF NOT EXISTS llm_prompts (
     PRIMARY KEY (tenant_id, session_id, call_id)
 );
 
+-- `seq` doubles as the stream head and `shard_key` as its shard hash: together
+-- they are what a processor reads to find streams it has not caught up on.
 CREATE TABLE IF NOT EXISTS snapshots (
     tenant_id       TEXT NOT NULL,
     session_id      TEXT NOT NULL,
     seq             INTEGER NOT NULL,
+    shard_key       INTEGER NOT NULL,
     data            TEXT NOT NULL,
     wake_at         TEXT,
     first_event_at  TEXT,
@@ -86,7 +88,6 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_last_event ON snapshots (last_event_at)
 #[derive(Iden)]
 enum Events {
     Table,
-    GlobalPosition,
     Id,
     TenantId,
     SessionId,
@@ -119,29 +120,16 @@ impl SqliteEventStore {
 impl EventStore for SqliteEventStore {
     async fn append(&self, input: AppendInput) -> Result<(), StoreError> {
         let writer = self.db.writer.clone();
-        let (positions, input) = tokio::task::spawn_blocking(move || {
+        let input = tokio::task::spawn_blocking(move || {
             let mut conn = writer
                 .lock()
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
-            do_append(&mut conn, &input).map(|positions| (positions, input))
+            do_append(&mut conn, &input).map(|()| input)
         })
         .await
         .map_err(spawn_err)??;
 
-        if input.events.len() != positions.len() {
-            return Err(StoreError::Internal(
-                "inserted event count did not match assigned positions".into(),
-            ));
-        }
-
-        let events: Vec<SessionEvent> = input
-            .events
-            .into_iter()
-            .zip(positions)
-            .map(|(event, position)| event.into_event(GlobalPosition(position)))
-            .collect();
-
-        self.bus.publish(Arc::new(events));
+        self.bus.publish(Arc::new(input.events));
         Ok(())
     }
 
@@ -172,22 +160,6 @@ impl EventStore for SqliteEventStore {
         .map_err(spawn_err)?
     }
 
-    async fn max_global_position(&self) -> Result<GlobalPosition, StoreError> {
-        let reader = self.db.reader.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = reader.open()?;
-            conn.query_row(
-                "SELECT COALESCE(MAX(global_position), 0) FROM events",
-                [],
-                |row| row.get::<_, u64>(0),
-            )
-            .map(GlobalPosition)
-            .map_err(internal)
-        })
-        .await
-        .map_err(spawn_err)?
-    }
-
     fn subscribe(&self) -> EventTap {
         self.bus.subscribe()
     }
@@ -201,21 +173,19 @@ fn internal(e: impl ToString) -> StoreError {
     StoreError::Internal(e.to_string())
 }
 
-fn do_append(conn: &mut Connection, input: &AppendInput) -> Result<Vec<u64>, StoreError> {
+fn do_append(conn: &mut Connection, input: &AppendInput) -> Result<(), StoreError> {
     let snap = &input.snapshot;
     let tx = conn.transaction().map_err(internal)?;
 
-    let positions = input
-        .events
-        .iter()
-        .map(|event| insert_event(&tx, snap, event, input.expected_version))
-        .collect::<Result<Vec<_>, _>>()?;
+    for event in &input.events {
+        insert_event(&tx, snap, event, input.expected_version)?;
+    }
 
     let snapshot_data = serde_json::to_string(&strip(&snap.state)).map_err(internal)?;
 
     tx.execute(
-        "INSERT INTO snapshots (tenant_id, session_id, seq, data, wake_at, first_event_at, last_event_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO snapshots (tenant_id, session_id, seq, shard_key, data, wake_at, first_event_at, last_event_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(tenant_id, session_id) DO UPDATE SET
              seq = excluded.seq,
              data = excluded.data,
@@ -226,6 +196,7 @@ fn do_append(conn: &mut Connection, input: &AppendInput) -> Result<Vec<u64>, Sto
             snap.tenant_id,
             snap.id,
             snap.seq,
+            shard_key(&snap.id) as i64,
             snapshot_data,
             snap.wake_at.map(|t| t.to_rfc3339()),
             snap.first_event_at.map(|t| t.to_rfc3339()),
@@ -236,17 +207,16 @@ fn do_append(conn: &mut Connection, input: &AppendInput) -> Result<Vec<u64>, Sto
 
     tx.commit().map_err(internal)?;
 
-    Ok(positions)
+    Ok(())
 }
 
 /// One event: the CAS-guarded envelope insert, then its side-table rows.
-/// Returns the assigned global position.
 fn insert_event(
     tx: &rusqlite::Transaction<'_>,
     snap: &SessionAggregate,
-    event: &NewSessionEvent,
+    event: &SessionEvent,
     expected: Seq,
-) -> Result<u64, StoreError> {
+) -> Result<(), StoreError> {
     let sid = &snap.id;
     let expected_i64 = i64::try_from(expected.0)
         .map_err(|_| StoreError::Internal("expected_version exceeds i64".into()))?;
@@ -296,9 +266,6 @@ fn insert_event(
             actual: Seq(actual_version),
         });
     }
-
-    let position = u64::try_from(tx.last_insert_rowid())
-        .map_err(|_| StoreError::Internal("event position exceeds u64".into()))?;
 
     // OR IGNORE keeps appends idempotent under the conflict-retry loop.
     match &event.payload {
@@ -362,7 +329,7 @@ fn insert_event(
         _ => {}
     }
 
-    Ok(position)
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -579,7 +546,6 @@ fn do_query_events(
 ) -> Result<Vec<SessionEvent>, StoreError> {
     let (sql, values) = Query::select()
         .columns([
-            Events::GlobalPosition,
             Events::Id,
             Events::TenantId,
             Events::SessionId,
@@ -592,9 +558,6 @@ fn do_query_events(
             Events::Meta,
         ])
         .from(Events::Table)
-        .apply_if(filter.after_global_position, |q, pos| {
-            q.and_where(Expr::col(Events::GlobalPosition).gt(pos.0 as i64));
-        })
         .apply_if(filter.session_id.as_ref(), |q, id| {
             q.and_where(Expr::col(Events::SessionId).eq(id));
         })
@@ -607,7 +570,10 @@ fn do_query_events(
         .apply_if(filter.limit, |q, n| {
             q.limit(n as u64);
         })
-        .order_by(Events::GlobalPosition, Order::Asc)
+        // Grouped by stream, ascending within one: the only order there is.
+        .order_by(Events::TenantId, Order::Asc)
+        .order_by(Events::SessionId, Order::Asc)
+        .order_by(Events::Seq, Order::Asc)
         .build(SqliteQueryBuilder);
 
     let params = sea_params(values);
@@ -618,24 +584,22 @@ fn do_query_events(
     let rows = stmt
         .query_map(param_refs.as_slice(), |row| {
             Ok((
-                row.get::<_, u64>(0)?,
+                row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, u64>(4)?,
+                row.get::<_, u64>(3)?,
+                row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
                 row.get::<_, String>(6)?,
                 row.get::<_, String>(7)?,
                 row.get::<_, String>(8)?,
                 row.get::<_, String>(9)?,
-                row.get::<_, String>(10)?,
             ))
         })
         .map_err(internal)?;
 
     rows.map(|row| {
         let (
-            position,
             id,
             tenant_id,
             session_id,
@@ -648,7 +612,6 @@ fn do_query_events(
             meta,
         ) = row.map_err(internal)?;
         Ok(SessionEvent {
-            global_position: GlobalPosition(position),
             id: Uuid::parse_str(&id).map_err(internal)?,
             tenant_id,
             session_id,
@@ -871,7 +834,7 @@ mod tests {
                 serde_json::to_value(&wrote.meta).unwrap(),
             );
         }
-        assert!(events[0].global_position.0 < events[1].global_position.0);
+        assert!(events[0].seq < events[1].seq);
         cleanup(&path);
     }
 
