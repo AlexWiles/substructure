@@ -72,11 +72,10 @@ Report the outcome with a `tool.result` or `tool.error`, addressed by the call
 { type: "tool.error"; id: string; error: string; retryable: boolean; attempt?: number }
 ```
 
-Your service submits it to the engine's client API, or calls `settle_effect`
-in an embedded runtime. `attempt` is optional; include it to fence a settle
-from a stale executor that a retry has superseded. The engine records the
-result and, once nothing is in flight, re-prompts the model and the turn
-continues.
+Your service submits it to the engine's client API. `attempt` is optional;
+include it to fence a settle from a stale executor that a retry has
+superseded. The engine records the result and, once nothing is in flight,
+re-prompts the model and the turn continues.
 
 ## Timeouts
 

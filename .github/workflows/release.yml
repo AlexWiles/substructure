@@ -80,26 +80,6 @@ jobs:
       - name: Install workspace deps
         run: pnpm install --no-frozen-lockfile
 
-      # ── NAPI runtime build ───────────────────────────────────────────────
-      - name: Build NAPI runtime
-        working-directory: packages/runtime
-        run: |
-          pnpm exec napi build \
-            --manifest-path ../../crates/napi/Cargo.toml \
-            --platform \
-            --release \
-            --target ${{ matrix.target }} \
-            --js false \
-            --dts false \
-            --output-dir ./artifacts
-
-      - name: Upload NAPI artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: napi-${{ matrix.platform }}
-          path: packages/runtime/artifacts/*.node
-          if-no-files-found: error
-
       # ── CLI binary build ────────────────────────────────────────────────
       - name: Build CLI binary
         run: cargo build --release --bin subs -p substructure-core --target ${{ matrix.target }}
@@ -158,13 +138,6 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Publishing version $VERSION"
 
-      - name: Download NAPI artifacts
-        uses: actions/download-artifact@v8
-        with:
-          pattern: napi-*
-          path: packages/runtime/artifacts
-          merge-multiple: true
-
       - name: Download CLI platform packages
         uses: actions/download-artifact@v8
         with:
@@ -173,26 +146,6 @@ jobs:
 
       - name: Restore executable bit on CLI binaries
         run: chmod +x packages/cli/npm/*/bin/subs
-
-      # ── Publish runtime (platform packages + main wrapper) ────────────────
-      - name: Scaffold runtime npm/<triple> dirs
-        working-directory: packages/runtime
-        run: pnpm exec napi create-npm-dirs
-
-      - name: Stage runtime platform packages
-        working-directory: packages/runtime
-        run: pnpm exec napi artifacts --output-dir ./artifacts
-
-      - name: Publish runtime platform packages and main
-        working-directory: packages/runtime
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          # napi prepublish publishes each npm/<triple>/ subpackage
-          pnpm exec napi prepublish -t npm --no-gh-release
-          # then publish the main wrapper
-          npm publish --access public
 
       # ── Publish CLI platform packages and main wrapper ───────────────────
       - name: Publish CLI platform packages

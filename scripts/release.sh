@@ -74,9 +74,7 @@ fi
 
 echo "Bumping $CURRENT -> $VERSION"
 
-for pkg in packages/cli packages/runtime; do
-  npm --prefix "$pkg" version "$VERSION" --no-git-tag-version --allow-same-version >/dev/null
-done
+npm --prefix packages/cli version "$VERSION" --no-git-tag-version --allow-same-version >/dev/null
 
 # Keep the Rust crate version in lockstep — `env!("CARGO_PKG_VERSION")`
 # bakes it into the CLI's User-Agent header. `cargo set-version` (from
@@ -87,22 +85,20 @@ cargo set-version --package substructure-core "$VERSION"
 # Fails (and aborts the release) if there are no unreleased entries.
 node scripts/promote-changelog.mjs "$VERSION" "$(date +%F)" "$CURRENT"
 
-# Keep optionalDependencies in cli + runtime aligned with the new version.
+# Keep the CLI's optionalDependencies aligned with the new version.
 node -e "
   const fs = require('fs');
-  for (const f of ['packages/cli/package.json', 'packages/runtime/package.json']) {
-    const j = JSON.parse(fs.readFileSync(f, 'utf8'));
-    if (j.optionalDependencies) {
-      for (const k of Object.keys(j.optionalDependencies)) {
-        if (k.startsWith('@substructure.ai/')) j.optionalDependencies[k] = process.argv[1];
-      }
+  const f = 'packages/cli/package.json';
+  const j = JSON.parse(fs.readFileSync(f, 'utf8'));
+  if (j.optionalDependencies) {
+    for (const k of Object.keys(j.optionalDependencies)) {
+      if (k.startsWith('@substructure.ai/')) j.optionalDependencies[k] = process.argv[1];
     }
-    fs.writeFileSync(f, JSON.stringify(j, null, 2) + '\n');
   }
+  fs.writeFileSync(f, JSON.stringify(j, null, 2) + '\n');
 " "$VERSION"
 
-git add packages/cli/package.json packages/runtime/package.json \
-  crates/core/Cargo.toml Cargo.lock CHANGELOG.md
+git add packages/cli/package.json crates/core/Cargo.toml Cargo.lock CHANGELOG.md
 git commit -m "release $TAG"
 git tag -a "$TAG" -m "$TAG"
 

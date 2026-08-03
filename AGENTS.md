@@ -1,13 +1,11 @@
 ### Rust crates
 ```
 crates/core              → Rust agent-loop engine, server, CLI
-crates/napi              → N-API bindings exposing core to Node
 ```
 
 ### TypeScript packages
 ```
 @substructure.ai/cli     → npm wrapper shipping the Rust CLI binary
-@substructure.ai/runtime → In-process Substructure runtime for Node (napi build)
 ```
 
 ### Coding guidelines:

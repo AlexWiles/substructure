@@ -4,8 +4,8 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
-`substructure-core` crate release together at the same version.
+The `@substructure.ai/cli` package and the `substructure-core` crate release
+together at the same version.
 
 ## [Unreleased]
 
@@ -161,6 +161,10 @@ All packages (`@substructure.ai/runtime`, `@substructure.ai/cli`) and the
 - A sub-agent effect is named by its child session. In `calls[]`, `id` is the child session and the new `tool_call_id` field gives the call the delegation answers.
 - `calls[]` reports a connector fetch with the `connector_sync` kind.
 - Each event of an effect names that effect with `id`, in place of `call_id`, `tool_call_id`, `session_id`, `connection_id` and `decision_id`.
+
+### Removed
+
+- Remove the N-API bindings and the `@substructure.ai/runtime` package. Use the CLI or the server.
 - A client submit during an active turn now gives a conflict error and does not start a second turn.
 - An AG-UI run that resumes an interrupt and sends messages now continues the resumed turn.
 - An AG-UI run with a missing or partial `resume` for its open interrupts now ends with `RUN_ERROR`.

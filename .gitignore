@@ -19,9 +19,6 @@ target/
 *.db-shm
 *.db-wal
 
-# NAPI build artifacts
-*.node
-
 # Nx
 .nx
 

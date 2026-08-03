@@ -24,7 +24,6 @@ Run `subs --help` for the full command list. Cloud management commands (`apps`, 
 
 - [Repository and documentation](https://github.com/substructureai/substructure)
 - [SDK (`@substructure.ai/sdk`)](https://www.npmjs.com/package/@substructure.ai/sdk)
-- [Embedded runtime (`@substructure.ai/runtime`)](https://www.npmjs.com/package/@substructure.ai/runtime)
 
 ## License
 
