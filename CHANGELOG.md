@@ -24,7 +24,7 @@ together at the same version.
 - A failed sub-agent and an unconfigured session now report errors.
 - A tool result that arrives after its deadline no longer reports an error.
 - `subs login` and `subs logout` now read the environment file's
-  `[deployment].url` like every other cloud command, so `subs login -c
+  `[remote].url` like every other cloud command, so `subs login -c
   subs.prod.toml` authenticates against the deployment that file names instead
   of the hosted cloud.
 - A CLI command that cannot reach the server now says so, instead of reporting a
@@ -37,6 +37,8 @@ together at the same version.
 
 ### Changed
 
+- `[deployment]` in `substructure.toml` is `[remote]`, and `[server]` is
+  `[serve]`. A file with an old name gives an error that says the new one.
 - `sub_agents` in `substructure.toml` is a list of agent ids. Each description
   comes from the `description` field on the section it names.
 - `substructure.toml` rejects a `sub_agents` id that names no agent or that a
@@ -109,6 +111,7 @@ together at the same version.
 - Add MCP support.
 - substructure.toml as a config file.
 - `subs init` writes a starter `substructure.toml`. It asks for a project name, a provider and model, an agent id, which MCP servers to connect, whether the agent answers in Slack, and where it runs, then prints the steps for that answer.
+- `subs slack connect` adds the bot to a Slack workspace. A deployment that installs no Slack app, and a file that names no deployment, get the Socket Mode steps instead.
 
 ### Changed
 

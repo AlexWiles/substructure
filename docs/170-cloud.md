@@ -52,7 +52,7 @@ subs apply
 ```
 
 Apply creates the project, declares the agents, and writes the pin back into
-`[deployment].project`, so a second apply is a no-op rather than a second
+`[remote].project`, so a second apply is a no-op rather than a second
 project. To adopt a project that already exists — a fresh clone, a teammate's
 machine — use `subs link` instead.
 
@@ -87,6 +87,7 @@ subs agents rotate-secret triage # owner only
 | Signing secret | Your worker verifies the engine's decision requests. | Minted per agent on the first apply that gives it a `worker`. Read it with `subs agents show <id>`. |
 | Client API key | The bearer token your clients present to the project. | `subs keys create <label>`, printed once. |
 | Provider key | Auth to Anthropic, OpenAI, or OpenRouter. | `subs llm set-key <block>` — see below. |
+| Slack bot token | The bot reads and posts as your app. | `subs slack connect` installs the app into a workspace, and the token stays in the deployment. |
 
 `subs keys create <label>` mints a client key and writes only the value to
 stdout, so you can pipe it straight into your client's secret store.

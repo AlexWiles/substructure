@@ -10,7 +10,7 @@ worker = "http://localhost:4444"
 agent = "my-agent"
 output = "pretty"
 
-[server]
+[serve]
 auth = false
 
 [slack]

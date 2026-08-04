@@ -15,6 +15,7 @@ mod print;
 pub(crate) mod project_config;
 pub mod projects;
 pub mod sessions;
+pub mod slack;
 pub mod telemetry;
 pub mod whoami;
 
@@ -34,11 +35,11 @@ Global Options:
 #[derive(Debug, clap::Args, Clone, Default)]
 pub struct CloudGlobals {
     /// Override the cloud API URL (precedence: flag > the environment file's
-    /// `[deployment].url` > $SUBS_API_URL > prod).
+    /// `[remote].url` > $SUBS_API_URL > prod).
     #[arg(long, global = true)]
     pub url: Option<String>,
     /// Environment file (default: walks up from cwd looking for
-    /// `substructure.toml`). Its `[deployment]` section names the server and
+    /// `substructure.toml`). Its `[remote]` section names the server and
     /// pins which org/project commands target without flags.
     #[arg(short = 'c', long, global = true)]
     pub config: Option<PathBuf>,

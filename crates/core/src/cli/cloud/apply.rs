@@ -240,9 +240,9 @@ fn default_name() -> Option<String> {
 fn pin(path: &std::path::Path, env: &ProjectConfig, project: &Project) -> Result<()> {
     let mut pinned = env.clone();
     pinned.name = Some(project.name.clone());
-    let deployment = pinned.deployment_mut();
-    deployment.project = Some(project.id.clone());
-    deployment.org = Some(project.organization_id.clone());
+    let remote = pinned.remote_mut();
+    remote.project = Some(project.id.clone());
+    remote.org = Some(project.organization_id.clone());
     project_config::write(path, &pinned)
 }
 

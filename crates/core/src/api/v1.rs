@@ -93,6 +93,66 @@ pub struct McpGrantRequest {
     pub project_id: String,
 }
 
+/// An install the deployment has started. `install_url` is Slack's own consent
+/// page: the deployment holds the app credentials and the redirect, so it is
+/// the only side that can build one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlackInstallStarted {
+    pub id: String,
+    pub install_url: String,
+    /// What the app is asking the workspace for, when the deployment says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<String>,
+}
+
+/// How one install is going, polled while the browser is open. `status` is a
+/// string rather than an enum: a deployment that learns a new one must not
+/// fail a CLI that predates it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlackInstall {
+    pub id: String,
+    /// `pending`, `active`, `denied`, or `expired`.
+    #[serde(default)]
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<SlackWorkspace>,
+    /// The workspace this one took the place of. A Slack app installs once per
+    /// workspace and an org holds one install, so connecting a second workspace
+    /// is a replacement rather than an addition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced: Option<SlackWorkspace>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// A workspace an org has connected.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlackWorkspace {
+    pub team_id: String,
+    #[serde(default)]
+    pub team_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_user_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connected_at: Option<String>,
+}
+
+impl SlackWorkspace {
+    /// The workspace as a reader knows it. A deployment that sends no name
+    /// leaves the id, which is still the workspace.
+    pub fn label(&self) -> String {
+        match self.team_name.trim() {
+            "" => self.team_id.clone(),
+            name => format!("{name} ({})", self.team_id),
+        }
+    }
+}
+
 /// A project's configuration as the deployment holds it: the manifest it was
 /// last applied, plus the state only the deployment knows — which agents have a
 /// signing secret, which blocks have a key. Status is not config, so it is a

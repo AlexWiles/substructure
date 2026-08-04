@@ -69,6 +69,11 @@ pub fn router(admin: AdminHttpState) -> Router {
             "/api/v1/projects/{project}/api-keys/{key_id}",
             delete(unsupported),
         )
+        .route("/api/v1/orgs/{org}/slack/install", post(no_slack_install))
+        .route(
+            "/api/v1/orgs/{org}/slack/installs/{install}",
+            get(no_slack_install),
+        )
         .route_layer(middleware::from_fn_with_state(
             admin,
             machine_auth_middleware,
@@ -162,6 +167,20 @@ fn local_project() -> Project {
         balance_usd: None,
         session_count: None,
     }
+}
+
+/// A local server holds no Slack app, so there is no workspace for it to
+/// install one into. `meta` leaves the feature out, so the CLI says this
+/// before asking; the route answers the same for anything that asks directly.
+async fn no_slack_install() -> impl IntoResponse {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ApiError::new(
+            "unsupported_on_local",
+            "a local server takes its Slack credential from SLACK_APP_TOKEN and SLACK_BOT_TOKEN \
+             and answers over Socket Mode, so there is no workspace to connect",
+        )),
+    )
 }
 
 async fn unsupported() -> impl IntoResponse {

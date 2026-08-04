@@ -1,7 +1,7 @@
 //! Authorizing the connections `substructure.toml` declares.
 //!
 //! Consent is always a human in a browser; what differs is where the credential
-//! lands, and the file says which. A file naming a `[deployment]` asks that
+//! lands, and the file says which. A file naming a `[remote]` asks that
 //! server to run the flow, and the credential never touches this machine.
 //! Otherwise the engine here is the one that will dial the connection, so
 //! consent comes back over a loopback redirect into that engine's database,
@@ -67,11 +67,11 @@ pub async fn run(command: McpCommand) -> Result<()> {
             no_browser,
             scope,
         } => match environment(&scope.globals)? {
-            cfg if cfg.deployment.is_none() => login_local(id, no_browser, cfg).await,
+            cfg if cfg.remote.is_none() => login_local(id, no_browser, cfg).await,
             cfg => login_remote(id, no_browser, scope, cfg).await,
         },
         McpCommand::List { scope } => match environment(&scope.globals)? {
-            cfg if cfg.deployment.is_none() => list_local(cfg).await,
+            cfg if cfg.remote.is_none() => list_local(cfg).await,
             cfg => list_remote(scope, cfg).await,
         },
     }

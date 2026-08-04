@@ -91,7 +91,7 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
     let cfg = project_config::load(args.config.as_deref())?;
 
     let slack_routing = slack_routing(&cfg, args.slack_agent);
-    let server = cfg.server.clone().unwrap_or_default();
+    let server = cfg.serve.clone().unwrap_or_default();
 
     let host = args
         .host
@@ -99,7 +99,7 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
         .unwrap_or_else(|| "127.0.0.1".into());
     let port = args.port.or(server.port).unwrap_or(8080);
     let db_path = args.db.unwrap_or_else(|| cfg.db_path());
-    let authenticate = !args.no_auth && cfg.server_auth();
+    let authenticate = !args.no_auth && cfg.serve_auth();
 
     let env = match EnvVars::load(cfg.provider_bindings(), authenticate) {
         Some(e) => e,

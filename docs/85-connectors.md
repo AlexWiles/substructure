@@ -55,13 +55,13 @@ url = "https://mcp.sentry.dev/mcp"       # subs mcp login sentry
 url = "https://mcp.sentry.dev/mcp"       # subs mcp login sentry2
 ```
 
-Where the credential lands follows the file. Without a `[deployment]` section
+Where the credential lands follows the file. Without a `[remote]` section
 the engine here is the one that will dial the connection, so the credential goes
 in that environment's `db`, beside the sessions that use it — a login and the
 engine that uses it cannot drift apart, and two environments authorize
 independently. **That database now holds credentials: gitignore `*.db*`.**
 
-A file naming a `[deployment]` has that server run the flow instead, and the
+A file naming a `[remote]` has that server run the flow instead, and the
 credential never touches your machine. In two steps: **declaring** a connection
 records the id and the URL and nothing else — `subs apply` does that for every
 `[mcp.<id>]` the file names, and grants it to the pinned app — and

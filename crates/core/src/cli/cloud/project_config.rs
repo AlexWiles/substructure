@@ -21,8 +21,8 @@ pub const DEFAULT_DB: &str = "substructure.db";
 /// second project with its own wallet, quota, and keys.
 ///
 /// A file carries two roles, either or both: **an engine you run** (`db`,
-/// `log`, `[run]`, `[server]`) and **a deployment you administer**
-/// (`[deployment]`). What the project *is* — `name`, `[agent.<id>]`,
+/// `log`, `[run]`, `[serve]`) and **a remote you administer**
+/// (`[remote]`). What the project *is* — `name`, `[agent.<id>]`,
 /// `[llm.<id>]`, `[slack]`, `[mcp.<id>]` — is one declaration whichever role
 /// reads it, and it is exactly [`Manifest`], so a self-hosted system is served
 /// and administered from the same file rather than two that have to agree.
@@ -31,9 +31,9 @@ pub const DEFAULT_DB: &str = "substructure.db";
 /// `#[serde(flatten)]` because flattening would cost `deny_unknown_fields`, and
 /// a typo'd section name being loud matters more than the repetition.
 ///
-/// A role is present when its keys are: `[deployment]` is what `subs apply`
+/// A role is present when its keys are: `[remote]` is what `subs apply`
 /// and `subs sessions` act on, and it is also what decides that a connection's
-/// credential belongs to the deployment rather than to the engine here.
+/// credential belongs to the remote rather than to the engine here.
 ///
 /// Precedence for anything the CLI also accepts as a flag is
 /// **flag > environment > this > default**, so pinning something here never
@@ -79,23 +79,23 @@ pub struct ProjectConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<RunConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub server: Option<ServerConfig>,
+    pub serve: Option<ServeConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slack: Option<SlackConfig>,
     /// MCP servers this project may reach, keyed by the id an agent names. An
-    /// engine here dials them itself; a deployment is told the id and URL and
+    /// engine here dials them itself; a remote is told the id and URL and
     /// holds the credential, so `auth` is the engine's half alone.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub mcp: BTreeMap<String, ConnectionSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub deployment: Option<Deployment>,
+    pub remote: Option<Remote>,
 }
 
-/// The server this file administers — the hosted cloud, a self-hosted
-/// deployment, or someone else's `subs serve` — and what it is pinned to there.
+/// The deployment this file administers — the hosted cloud, a self-hosted one,
+/// or someone else's `subs serve` — and what it is pinned to there.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct Deployment {
+pub struct Remote {
     /// The API to talk to [default: `https://api.substructure.ai`]. A `--url`
     /// flag still overrides it; `$SUBS_API_URL` only fills in when neither is
     /// set. `subs login` reads it too, so the token is stored under the same
@@ -121,7 +121,7 @@ pub struct RunConfig {
 /// `subs serve` only.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct ServerConfig {
+pub struct ServeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -134,7 +134,7 @@ pub struct ServerConfig {
 }
 
 impl ProjectConfig {
-    /// The half of this file a deployment holds. Cheap enough to build on
+    /// The half of this file a remote holds. Cheap enough to build on
     /// demand: it is read at startup and at `subs apply`, never per decision.
     pub fn manifest(&self) -> Manifest {
         Manifest {
@@ -201,26 +201,26 @@ impl ProjectConfig {
 
     /// Whether an engine here authenticates its clients and workers
     /// [default: yes].
-    pub fn server_auth(&self) -> bool {
-        self.server.as_ref().and_then(|s| s.auth).unwrap_or(true)
+    pub fn serve_auth(&self) -> bool {
+        self.serve.as_ref().and_then(|s| s.auth).unwrap_or(true)
     }
 
-    pub fn deployment_url(&self) -> Option<&str> {
-        self.deployment.as_ref()?.url.as_deref()
+    pub fn remote_url(&self) -> Option<&str> {
+        self.remote.as_ref()?.url.as_deref()
     }
 
     pub fn org(&self) -> Option<&str> {
-        self.deployment.as_ref()?.org.as_deref()
+        self.remote.as_ref()?.org.as_deref()
     }
 
     pub fn project(&self) -> Option<&str> {
-        self.deployment.as_ref()?.project.as_deref()
+        self.remote.as_ref()?.project.as_deref()
     }
 
-    /// The deployment section, creating it if the file has none — for the
+    /// The remote section, creating it if the file has none — for the
     /// commands that pin (`subs link`, `subs apply`).
-    pub fn deployment_mut(&mut self) -> &mut Deployment {
-        self.deployment.get_or_insert_with(Deployment::default)
+    pub fn remote_mut(&mut self) -> &mut Remote {
+        self.remote.get_or_insert_with(Remote::default)
     }
 
     fn parse(s: &str, path: &Path) -> Result<Self> {
@@ -252,11 +252,19 @@ fn default_db(source: &Path) -> String {
 /// `deny_unknown_fields`' "unknown field", which says nothing about the file
 /// this one is.
 fn moved_keys(value: &toml::Value, at: &impl std::fmt::Display) -> Result<()> {
+    // Both sections were named for a server, which left the file with two of
+    // them and no way to tell which one a line was about.
+    if value.get("deployment").is_some() {
+        bail!("{at}: `[deployment]` is now `[remote]`.");
+    }
+    if value.get("server").is_some() {
+        bail!("{at}: `[server]` is now `[serve]`, beside `[run]`.");
+    }
     // The unit is a project now, so `app` anywhere is named rather than left to
     // `deny_unknown_fields`, which would only say the field is unknown.
-    if value.get("deployment").and_then(|d| d.get("app")).is_some() {
+    if value.get("remote").and_then(|d| d.get("app")).is_some() {
         bail!(
-            "{at}: `[deployment].app` is now `[deployment].project`. One file is one project; \
+            "{at}: `[remote].app` is now `[remote].project`. One file is one project; \
              a second environment is a second file (`subs apply -c substructure.staging.toml`)."
         );
     }
@@ -271,17 +279,17 @@ fn moved_keys(value: &toml::Value, at: &impl std::fmt::Display) -> Result<()> {
     if value.get("target").is_some() {
         let and_pins = match pins.is_empty() {
             true => String::new(),
-            false => format!(", and move `{}` under `[deployment]`", pins.join("`, `")),
+            false => format!(", and move `{}` under `[remote]`", pins.join("`, `")),
         };
         bail!(
             "{at}: `target` is no longer a setting. Delete it{and_pins} — a file describes an \
-             engine you run (`db`, `[run]`, `[server]`), a deployment you administer \
-             (`[deployment]`), or both."
+             engine you run (`db`, `[run]`, `[serve]`), a remote you administer \
+             (`[remote]`), or both."
         );
     }
     if !pins.is_empty() {
         bail!(
-            "{at}: `{}` belongs under `[deployment]`, with the server's `url`.",
+            "{at}: `{}` belongs under `[remote]`, with the server's `url`.",
             pins.join("`, `")
         );
     }
@@ -463,11 +471,11 @@ mod tests {
 
     #[test]
     fn a_file_carries_either_role_or_both() {
-        let engine = ok("db = \"dev.db\"\n[server]\nport = 9000\n");
+        let engine = ok("db = \"dev.db\"\n[serve]\nport = 9000\n");
         assert_eq!(engine.db_path(), "dev.db");
-        assert!(engine.deployment.is_none());
+        assert!(engine.remote.is_none());
 
-        let deployment = ok("[deployment]\norg = \"org_1\"\n");
+        let deployment = ok("[remote]\norg = \"org_1\"\n");
         assert_eq!(deployment.org(), Some("org_1"));
         assert_eq!(deployment.db_path(), DEFAULT_DB);
 
@@ -484,13 +492,13 @@ mod tests {
             model = "claude-sonnet-4-5"
             worker = "https://bot.example.com/agent"
 
-            [deployment]
+            [remote]
             url = "https://subs.internal"
             project = "proj_1"
         "#);
         assert_eq!(both.name.as_deref(), Some("support-bot"));
         assert_eq!(both.db_path(), "prod.db");
-        assert_eq!(both.deployment_url(), Some("https://subs.internal"));
+        assert_eq!(both.remote_url(), Some("https://subs.internal"));
         assert_eq!(both.project(), Some("proj_1"));
     }
 
@@ -505,7 +513,7 @@ mod tests {
         );
         // No file behind it at all: an engine running on flags alone.
         assert_eq!(ProjectConfig::default().db_path(), DEFAULT_DB);
-        assert!(ProjectConfig::default().server_auth());
+        assert!(ProjectConfig::default().serve_auth());
     }
 
     /// One file is one project, so a second file in a directory is a second
@@ -515,7 +523,7 @@ mod tests {
         let dir = tmpdir();
         let named = |name: &str| {
             let path = dir.join(name);
-            fs::write(&path, "[server]\nport = 9000\n").unwrap();
+            fs::write(&path, "[serve]\nport = 9000\n").unwrap();
             load_explicit(&path).unwrap().config.db_path()
         };
 
@@ -565,7 +573,7 @@ mod tests {
             agent = "support"
             output = "pretty"
 
-            [server]
+            [serve]
             port = 9000
             auth = false
         "#);
@@ -578,11 +586,28 @@ mod tests {
         assert_eq!(cfg.llm["claude"].kind, ProviderKind::Anthropic);
         assert_eq!(cfg.run.as_ref().unwrap().agent.as_deref(), Some("support"));
         assert_eq!(cfg.run.clone().unwrap().output, Some(OutputFormat::Pretty));
-        assert!(!cfg.server_auth());
-        let server = cfg.server.unwrap();
-        assert_eq!(server.port, Some(9000));
+        assert!(!cfg.serve_auth());
+        let serve = cfg.serve.unwrap();
+        assert_eq!(serve.port, Some(9000));
         // Absent is absent, not a default the flag would then have to beat.
-        assert_eq!(server.host, None);
+        assert_eq!(serve.host, None);
+    }
+
+    /// Both sections were named for a server, so a line about "the server" said
+    /// nothing about which one. Renamed, and reported by name rather than as an
+    /// unknown field.
+    #[test]
+    fn the_two_server_sections_say_where_they_went() {
+        let err = parse("[deployment]\norg = \"acme\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("`[deployment]` is now `[remote]`"),
+            "got {err}"
+        );
+
+        let err = parse("[server]\nport = 9000\n").unwrap_err().to_string();
+        assert!(err.contains("`[server]` is now `[serve]`"), "got {err}");
     }
 
     #[test]
@@ -591,7 +616,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("`target` is no longer"), "got {err}");
-        assert!(err.contains("[deployment]"), "got {err}");
+        assert!(err.contains("[remote]"), "got {err}");
 
         // The pins moved with it, so one message covers the whole edit — and a
         // top-level `app` is reported under the name it now has.
@@ -603,7 +628,7 @@ mod tests {
         // And on their own, without a target to hang the message on.
         let err = parse("org = \"acme\"\n").unwrap_err().to_string();
         assert!(
-            err.contains("`org`") && err.contains("[deployment]"),
+            err.contains("`org`") && err.contains("[remote]"),
             "got {err}"
         );
     }
@@ -620,9 +645,7 @@ mod tests {
         .to_string();
         assert!(err.contains("sytem"), "got {err}");
 
-        let err = parse("[deployment]\nnmae = \"x\"\n")
-            .unwrap_err()
-            .to_string();
+        let err = parse("[remote]\nnmae = \"x\"\n").unwrap_err().to_string();
         assert!(err.contains("nmae"), "got {err}");
 
         // There is no catalog key: a connection always declares a URL.
@@ -931,7 +954,7 @@ mod tests {
             agent = "support"
             output = "jsonl"
 
-            [server]
+            [serve]
             host = "0.0.0.0"
             port = 9000
             auth = false
@@ -949,7 +972,7 @@ mod tests {
             url = "https://mcp.sentry.dev/mcp"
             prefix_tools = false
 
-            [deployment]
+            [remote]
             url = "https://subs.internal"
             org = "org_1"
             project = "proj_1"
@@ -966,7 +989,7 @@ mod tests {
         let mut cfg = ok("db = \"dev.db\"\n[llm.claude]\ntype = \"anthropic\"\n\n\
              [agent.a]\nllm = \"claude\"\nmodel = \"m\"\n");
         cfg.name = Some("support-bot".into());
-        cfg.deployment_mut().project = Some("proj_1".into());
+        cfg.remote_mut().project = Some("proj_1".into());
         write(&path, &cfg).unwrap();
 
         // Same settings, read from where it was written: `source` is the file's
@@ -982,9 +1005,9 @@ mod tests {
 
     #[test]
     fn unset_settings_are_not_written_back() {
-        let cfg = ok("[deployment]\norg = \"acme\"\n");
+        let cfg = ok("[remote]\norg = \"acme\"\n");
         let out = toml::to_string_pretty(&cfg).unwrap();
-        assert_eq!(out.trim(), "[deployment]\norg = \"acme\"", "got {out}");
+        assert_eq!(out.trim(), "[remote]\norg = \"acme\"", "got {out}");
     }
 
     #[test]
@@ -1118,14 +1141,14 @@ mod tests {
              [mcp.sentry]\n\
              url = \"https://mcp.sentry.dev/mcp\"\n\
              \n\
-             [deployment]\n\
+             [remote]\n\
              org = \"old\"        # pinned by hand\n",
         )
         .unwrap();
 
         let mut cfg = load_explicit(&path).unwrap().config;
-        cfg.deployment_mut().org = Some("new".into());
-        cfg.deployment_mut().project = Some("proj_1".into());
+        cfg.remote_mut().org = Some("new".into());
+        cfg.remote_mut().project = Some("proj_1".into());
         write(&path, &cfg).unwrap();
 
         let after = fs::read_to_string(&path).unwrap();
@@ -1142,14 +1165,10 @@ mod tests {
     #[test]
     fn writing_removes_a_setting_that_is_no_longer_set() {
         let path = tmpdir().join(FILENAME);
-        fs::write(
-            &path,
-            "[deployment]\norg = \"acme\"\nproject = \"proj_1\"\n",
-        )
-        .unwrap();
+        fs::write(&path, "[remote]\norg = \"acme\"\nproject = \"proj_1\"\n").unwrap();
 
         let mut cfg = load_explicit(&path).unwrap().config;
-        cfg.deployment_mut().project = None;
+        cfg.remote_mut().project = None;
         write(&path, &cfg).unwrap();
 
         let after = fs::read_to_string(&path).unwrap();
@@ -1180,7 +1199,7 @@ mod tests {
         let cfg_path = root.join(FILENAME);
         fs::write(
             &cfg_path,
-            "[deployment]\norg = \"org-x\"\nproject = \"project-y\"\n",
+            "[remote]\norg = \"org-x\"\nproject = \"project-y\"\n",
         )
         .unwrap();
 
@@ -1192,7 +1211,7 @@ mod tests {
         assert_eq!(found.config.project(), Some("project-y"));
 
         // And a file of its own is the one a directory uses.
-        fs::write(nested.join(FILENAME), "[deployment]\norg = \"inner\"\n").unwrap();
+        fs::write(nested.join(FILENAME), "[remote]\norg = \"inner\"\n").unwrap();
         assert_eq!(
             find_from(&nested).unwrap().unwrap().config.org(),
             Some("inner")

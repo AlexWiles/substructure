@@ -90,11 +90,11 @@ pub async fn run(cmd: LinkCommand) -> Result<()> {
     // A `--url` this invocation did not pass leaves the file's own alone: the
     // API a linked tree talks to is the file's, not this command's.
     let mut config = existing;
-    let deployment = config.deployment_mut();
-    deployment.org = Some(org.clone());
-    deployment.project = project.clone();
-    deployment.url = cmd.globals.url.clone().or(deployment.url.take());
-    let url = deployment.url.clone();
+    let remote = config.remote_mut();
+    remote.org = Some(org.clone());
+    remote.project = project.clone();
+    remote.url = cmd.globals.url.clone().or(remote.url.take());
+    let url = remote.url.clone();
     project_config::write(&path, &config)?;
 
     if cmd.globals.json {

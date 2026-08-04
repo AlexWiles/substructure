@@ -11,7 +11,34 @@ conversation. DM the bot and every message is answered, no mention needed —
 same model: a top-level DM message starts a thread, and that thread is the
 session.
 
+## Connect a workspace
+
+Where the bot token lives is where the bot runs, and the file says which.
+
+A file naming a [`[remote]`](./170-cloud.md) has the deployment install its
+own Slack app for you:
+
+```sh
+subs slack connect
+```
+
+That opens Slack's consent page, and the token lands there rather than on this
+machine. An org holds one workspace: a Slack app installs once per workspace, so
+running it again on the same workspace refreshes the token, and connecting a
+different workspace replaces the first.
+
+The workspace is only half of it — `[slack]` below is what routes a message to
+an agent, and it reaches the deployment through `subs apply`. A connected
+workspace with no `[slack]` is a bot that never answers.
+
+An engine you run yourself has no app to install for you: `subs serve` talks to
+Slack over Socket Mode with a Slack app you own, so `subs slack connect` says so
+and points at the steps below. Same answer from a deployment that does not
+install Slack apps.
+
 ## Setup
+
+This is the Socket Mode path, for an engine you run.
 
 Create a Slack app with a manifest like:
 

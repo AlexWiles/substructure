@@ -33,7 +33,7 @@ model = "claude-sonnet-4-5"
 subs apply
 ```
 
-That creates the project and writes `[deployment].project` back into the file,
+That creates the project and writes `[remote].project` back into the file,
 so a second apply is a no-op rather than a second project. See
 [Environments](./160-cli.md#environments).
 

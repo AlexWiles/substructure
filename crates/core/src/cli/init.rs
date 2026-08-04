@@ -9,6 +9,9 @@ use crate::cli::env::ProviderKind;
 use crate::manifest::{check_id, check_url};
 
 use super::cloud::project_config::FILENAME;
+// The Slack app a local engine needs is built where `subs slack connect` says
+// it is, so both paths name one page.
+use super::cloud::slack::{SLACK_DOCS, SLACK_NEW_APP};
 
 #[derive(Debug, clap::Args)]
 pub struct InitCommand {
@@ -28,10 +31,6 @@ pub struct InitCommand {
 /// before you can accept it is not much of a default.
 const DEFAULT_NAME: &str = "my-agent";
 
-/// Where the Slack app is built, which is a page rather than a command.
-const SLACK_NEW_APP: &str = "https://api.slack.com/apps?new_app=1";
-const SLACK_DOCS: &str = "https://substructure.ai/docs/slack";
-
 /// The hosted cloud. Written out rather than left to the default it happens to
 /// equal: a file that says where it deploys can be read, and a reader of
 /// somebody else's checkout should not have to know what an absent `url` means.
@@ -42,7 +41,7 @@ const HOSTED_URL: &str = "https://api.substructure.ai";
 ///
 /// It is asked last because nothing before it changes with the answer, and it
 /// is asked at all because it decides which single path the next steps print.
-/// Self-hosting is deliberately not a third answer: it is `[deployment].url`
+/// Self-hosting is deliberately not a third answer: it is `[remote].url`
 /// pointing at your own `subs serve`, a one-line edit that a first file does
 /// not have to decide about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,12 +58,12 @@ enum Place {
 /// defensible default or is a one-line edit, and a question whose answer barely
 /// changes the file is a question worth not asking.
 ///
-/// A cloud answer writes `[deployment]` rather than leaving it to the first
+/// A cloud answer writes `[remote]` rather than leaving it to the first
 /// `subs apply`, because the section is also what sends `subs mcp login` to the
 /// deployment: without it, authorizing a connection before deploying stores the
 /// credential in a database here — the wrong place, silently. With it, the same
 /// mistake is an error that names the login you have not done yet. A local
-/// answer writes no `[deployment]` for the same reason read the other way: its
+/// answer writes no `[remote]` for the same reason read the other way: its
 /// connections really are authorized here.
 ///
 /// There is no worker question either: an agent the file declares runs on the
@@ -232,18 +231,18 @@ fn render(p: &Plan) -> String {
     }
 
     // Written rather than asked, and written rather than left to the default:
-    // `auth` defaults to *on*, so an unstated `[server]` would make a first
+    // `auth` defaults to *on*, so an unstated `[serve]` would make a first
     // `subs serve` demand tokens. Stating it keeps the insecure setting visible
     // in the file instead of silent — and it is only defensible here, on a
     // loopback engine nothing else can reach, which is why a cloud file has no
-    // `[server]` at all rather than one that says something reassuring.
+    // `[serve]` at all rather than one that says something reassuring.
     match p.place {
         Place::Local => s.push_str(
-            "\n[server]\nhost = \"127.0.0.1\"\nport = 8080\n\
+            "\n[serve]\nhost = \"127.0.0.1\"\nport = 8080\n\
              auth = false   # no client or worker auth. Keep this off the network\n",
         ),
         Place::Cloud => s.push_str(&format!(
-            "\n[deployment]\nurl = \"{HOSTED_URL}\"   # `subs apply` pins the org and project\n"
+            "\n[remote]\nurl = \"{HOSTED_URL}\"   # `subs apply` pins the org and project\n"
         )),
     }
     s
@@ -266,7 +265,7 @@ pub fn run(cmd: InitCommand) -> Result<()> {
 
 /// The scripted path: no questions, so every answer is the default. An engine
 /// here is the one that needs nothing else to run, and a file gains
-/// `[deployment]` from `subs link` or the first `subs apply` anyway.
+/// `[remote]` from `subs link` or the first `subs apply` anyway.
 fn starter(cmd: InitCommand) -> Result<()> {
     let path = cmd.path.unwrap_or_else(|| PathBuf::from(FILENAME));
     if path.exists() && !cmd.force {
@@ -596,10 +595,12 @@ fn next_steps(plan: &Plan, path: &Path) {
             for m in &plan.mcp {
                 step(format!("subs mcp login {} {c}", m.id));
             }
-            match plan.slack.is_some() {
-                true => step(format!("subs open {c}   # add the bot to Slack there")),
-                false => step(format!("subs open {c}")),
+            // After apply, for the same reason a connection is: the workspace
+            // is connected to the deployment that will answer from it.
+            if plan.slack.is_some() {
+                step(format!("subs slack connect {c}"));
             }
+            step(format!("subs open {c}"));
         }
         Place::Local => {
             if let Some(var) = plan.agent.provider.default_api_key_env() {
@@ -664,9 +665,9 @@ mod tests {
         project_config::load_explicit(&path).unwrap().config
     }
 
-    /// One section each, and never both: `[server]` is what `subs serve` reads
+    /// One section each, and never both: `[serve]` is what `subs serve` reads
     /// and `auth = false` in it is only defensible on loopback, while
-    /// `[deployment]` is what says the credentials and the agent live
+    /// `[remote]` is what says the credentials and the agent live
     /// elsewhere. A file carrying both would be answering a question that was
     /// asked once.
     #[test]
@@ -679,15 +680,11 @@ mod tests {
             let cfg = parse(&body);
 
             let local = place == Place::Local;
-            assert_eq!(cfg.server.is_some(), local, "{body}");
-            assert_eq!(cfg.deployment.is_some(), !local, "{body}");
+            assert_eq!(cfg.serve.is_some(), local, "{body}");
+            assert_eq!(cfg.remote.is_some(), !local, "{body}");
             // Stated rather than implied, so the file can be read for where it
             // goes instead of for what an absent key would have meant.
-            assert_eq!(
-                cfg.deployment_url(),
-                (!local).then_some(HOSTED_URL),
-                "{body}"
-            );
+            assert_eq!(cfg.remote_url(), (!local).then_some(HOSTED_URL), "{body}");
             // `[run]` pins which agent a bare `subs run` drives. A starter has
             // one agent and names it on the command line, so it is not written.
             assert!(cfg.run.is_none(), "{body}");
@@ -796,12 +793,12 @@ mod tests {
         assert_eq!(cfg.name.as_deref(), Some(DEFAULT_NAME));
     }
 
-    /// `auth` defaults to on, so an unwritten `[server]` would make a first
+    /// `auth` defaults to on, so an unwritten `[serve]` would make a first
     /// `subs serve` demand tokens. The starter states it instead.
     #[test]
     fn the_starter_states_the_auth_it_relies_on() {
         let cfg = parse(&render(&Plan::starter()));
-        assert!(!cfg.server_auth());
+        assert!(!cfg.serve_auth());
         assert!(cfg.slack_dm_agent().is_none(), "init declares no slack bot");
     }
 
@@ -836,7 +833,7 @@ mod tests {
 
         let cfg = project_config::load_explicit(&path).unwrap().config;
         assert_eq!(cfg.agent_ids(), ["assistant"]);
-        assert!(cfg.server.is_some(), "an engine to run it");
-        assert!(cfg.deployment.is_none(), "nothing to administer yet");
+        assert!(cfg.serve.is_some(), "an engine to run it");
+        assert!(cfg.remote.is_none(), "nothing to administer yet");
     }
 }

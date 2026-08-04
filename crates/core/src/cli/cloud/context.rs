@@ -10,14 +10,14 @@ use super::project_config::{self, ProjectConfig};
 use super::{CloudGlobals, OrgScope, ProjectScope};
 
 /// The server a credential command targets, without building a [`Context`]:
-/// flag > the environment file's `[deployment].url` > `$SUBS_API_URL` >
+/// flag > the environment file's `[remote].url` > `$SUBS_API_URL` >
 /// default. Same order [`Context::with_config`] applies, so `subs login -c
 /// f.toml` writes the token under the URL every other command run with `-c
 /// f.toml` reads.
 pub fn api_url(globals: &CloudGlobals) -> Result<String> {
     let project = project_config::load(globals.config.as_deref())?;
     Ok(credentials::resolve_api_url(
-        globals.url.as_deref().or(project.deployment_url()),
+        globals.url.as_deref().or(project.remote_url()),
     ))
 }
 
@@ -71,11 +71,11 @@ impl Context {
     ) -> Result<Self> {
         let credentials_path = credentials::resolve_path(globals.credentials.clone())?;
         let creds = credentials::load(&credentials_path)?;
-        // Precedence: --url flag > the file's [deployment].url > $SUBS_API_URL > default.
+        // Precedence: --url flag > the file's [remote].url > $SUBS_API_URL > default.
         let url_override = globals
             .url
             .as_deref()
-            .or_else(|| config.as_ref().and_then(|p| p.deployment_url()));
+            .or_else(|| config.as_ref().and_then(|p| p.remote_url()));
         let api_url = credentials::resolve_api_url(url_override);
         let token = credentials::resolve_token(&creds, &api_url);
         let client = CloudClient::new(api_url.clone(), token);
@@ -225,7 +225,7 @@ mod tests {
 
     #[test]
     fn the_deployment_names_the_server_and_the_flag_still_wins() {
-        let path = write_config("[deployment]\nurl = \"https://self.example\"\n");
+        let path = write_config("[remote]\nurl = \"https://self.example\"\n");
 
         assert_eq!(
             api_url(&globals(None, Some(path.clone()))).unwrap(),

@@ -144,6 +144,12 @@ pub enum Command {
         #[command(subcommand)]
         command: mcp::McpCommand,
     },
+    /// Connect a Slack workspace to the deployment that answers for it.
+    #[command(after_help = GLOBAL_FLAGS_HELP)]
+    Slack {
+        #[command(subcommand)]
+        command: cloud::slack::SlackCommand,
+    },
 }
 
 pub async fn run(command: Command) -> anyhow::Result<()> {
@@ -178,6 +184,7 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
         Command::Apply(cmd) => cloud::apply::run(cmd).await,
         Command::Config { command } => cloud::apply::config(command).await,
         Command::Mcp { command } => mcp::run(command).await,
+        Command::Slack { command } => cloud::slack::run(command).await,
     }
 }
 
@@ -205,6 +212,9 @@ fn command_path(cmd: &Command) -> &'static str {
         Command::Mcp { command } => match command {
             mcp::McpCommand::Login { .. } => "mcp login",
             mcp::McpCommand::List { .. } => "mcp list",
+        },
+        Command::Slack { command } => match command {
+            cloud::slack::SlackCommand::Connect { .. } => "slack connect",
         },
         Command::Orgs { command } => match command {
             OrgsCommand::List { .. } => "orgs list",
