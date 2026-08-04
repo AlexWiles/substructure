@@ -38,7 +38,7 @@ struct WhoamiOutput<'a> {
 }
 
 pub async fn run(globals: CloudGlobals) -> Result<()> {
-    let ctx = Context::load(&globals)?;
+    let ctx = Context::reporting(&globals)?;
     // A deployment that predates `/meta` is the hosted cloud, which has users.
     // Any other failure is the failure itself, not an old deployment.
     let meta: Meta = match ctx.client.get("/api/v1/meta").await {

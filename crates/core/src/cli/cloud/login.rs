@@ -15,25 +15,31 @@ use super::CloudGlobals;
 const CLIENT_ID: &str = "subs-cli";
 const MAX_POLL_WINDOW: Duration = Duration::from_secs(15 * 60); // matches deviceAuthorization expiresIn
 
-/// Log in when this machine holds no credential for the server the command
-/// targets. A first `subs apply` is a login as much as it is a push, and the
-/// 401 it would otherwise hit only tells the reader to run the command this
-/// runs for them.
+/// Log in because `api_url` refused what the command sent it, and answer with
+/// the credential it issued. Missing and stale look the same from here — only
+/// the deployment knows an expired or revoked token, and either way the reader
+/// gets the login the 401 would only have named.
 ///
-/// Only when there is someone to ask: a script gets the error it can act on,
-/// and `--json` keeps its output machine-readable.
-pub async fn ensure(globals: &CloudGlobals) -> Result<()> {
-    let path = credentials::resolve_path(globals.credentials.clone())?;
-    let creds = credentials::load(&path)?;
-    let api_url = context::api_url(globals)?;
-    if credentials::resolve_token(&creds, &api_url).is_some() {
-        return Ok(());
-    }
+/// None when there is nobody to run it: a script gets the error it can act on,
+/// `--json` keeps its output machine-readable, and $SUBS_API_TOKEN is a
+/// credential its operator chose, which a login would not replace.
+pub async fn refresh(globals: &CloudGlobals, api_url: &str) -> Result<Option<String>> {
     if globals.json || !pickers::interactive(globals) {
-        bail!("not logged in to {api_url}. Run `subs login`.");
+        return Ok(None);
     }
-    println!("Not logged in to {api_url}.");
-    run(globals, false).await
+    if std::env::var(credentials::TOKEN_ENV).is_ok_and(|t| !t.is_empty()) {
+        return Ok(None);
+    }
+    let path = credentials::resolve_path(globals.credentials.clone())?;
+    println!();
+    match credentials::load(&path)?.token_for(api_url).is_some() {
+        true => println!("The credential for {api_url} is no longer accepted."),
+        false => println!("Not logged in to {api_url}."),
+    }
+    run(globals, false).await?;
+    Ok(credentials::load(&path)?
+        .token_for(api_url)
+        .map(str::to_string))
 }
 
 #[derive(Debug, Deserialize)]

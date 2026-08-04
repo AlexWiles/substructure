@@ -283,6 +283,9 @@ impl OpenRouterClient {
         self.http
             .post(&url)
             .bearer_auth(&self.config.api_key)
+            .header("HTTP-Referer", "https://app.substructure.ai")
+            .header("X-OpenRouter-Title", "substructure.ai")
+            .header("X-OpenRouter-Categories", "cloud-agent")
             .json(&wire)
             .send()
             .await

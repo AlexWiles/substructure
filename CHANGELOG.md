@@ -61,8 +61,10 @@ together at the same version.
 - An event has no `global_position` field. Use `session_id` and `seq`.
 - The agent config has no `stream` field. LLM calls stream unless the `llm.call` action sets `stream: false`.
 - Commands that open a browser now print the URL before they open it.
-- `subs apply` starts a login when this machine has no credential for the
-  deployment, instead of failing with an error.
+- A cloud command starts a login when the deployment refuses the credential
+  this machine sent, then sends the request again. Before, it stopped with a
+  401 error. `subs whoami` shows the refusal, and a script, `--json`, and
+  `$SUBS_API_TOKEN` get the error as before.
 - An apply notice shows its URL only when it has no command to do the same
   thing.
 - `subs apply` shows the page to view the project on, above the notices. The

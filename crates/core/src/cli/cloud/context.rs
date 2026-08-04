@@ -3,7 +3,8 @@ use std::sync::Mutex;
 use anyhow::{anyhow, bail, Result};
 
 use super::credentials;
-use super::http::CloudClient;
+use super::http::{self, CloudClient};
+use super::login;
 use super::pickers;
 use super::project_config::{self, ProjectConfig};
 use super::{CloudGlobals, OrgScope, ProjectScope};
@@ -18,6 +19,18 @@ pub fn api_url(globals: &CloudGlobals) -> Result<String> {
     Ok(credentials::resolve_api_url(
         globals.url.as_deref().or(project.deployment_url()),
     ))
+}
+
+/// What every cloud command does about a credential the deployment refuses:
+/// log in and carry on, rather than stop at a 401 whose only advice is to run
+/// `subs login` and start over.
+fn reauth(globals: &CloudGlobals, api_url: String) -> http::Reauth {
+    let globals = globals.clone();
+    Box::new(move || {
+        let globals = globals.clone();
+        let api_url = api_url.clone();
+        Box::pin(async move { login::refresh(&globals, &api_url).await })
+    })
 }
 
 pub struct Context {
@@ -37,9 +50,25 @@ impl Context {
         Self::with_config(globals, config)
     }
 
+    /// A context for a command that reports rather than acts: a refusal is the
+    /// answer it prints, not a reason to log in. `subs whoami` says who this
+    /// machine is, and a login would make that true instead of reporting it.
+    pub fn reporting(globals: &CloudGlobals) -> Result<Self> {
+        let config = project_config::resolve(globals.config.as_deref())?.map(|found| found.config);
+        Self::build(globals, config, false)
+    }
+
     /// A context over a file the caller resolved itself, for `subs link` —
     /// which may be creating the file every other command reads.
     pub fn with_config(globals: &CloudGlobals, config: Option<ProjectConfig>) -> Result<Self> {
+        Self::build(globals, config, true)
+    }
+
+    fn build(
+        globals: &CloudGlobals,
+        config: Option<ProjectConfig>,
+        login_on_refusal: bool,
+    ) -> Result<Self> {
         let credentials_path = credentials::resolve_path(globals.credentials.clone())?;
         let creds = credentials::load(&credentials_path)?;
         // Precedence: --url flag > the file's [deployment].url > $SUBS_API_URL > default.
@@ -49,7 +78,11 @@ impl Context {
             .or_else(|| config.as_ref().and_then(|p| p.deployment_url()));
         let api_url = credentials::resolve_api_url(url_override);
         let token = credentials::resolve_token(&creds, &api_url);
-        let client = CloudClient::new(api_url, token);
+        let client = CloudClient::new(api_url.clone(), token);
+        let client = match login_on_refusal {
+            true => client.with_reauth(reauth(globals, api_url)),
+            false => client,
+        };
         Ok(Self {
             config,
             client,

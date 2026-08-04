@@ -17,7 +17,6 @@ use crate::api::v1::{ApplyResponse, ConfigEvent, Notice, NoticeLevel, Page, Proj
 use super::context::Context;
 use super::credentials;
 use super::http;
-use super::login;
 use super::pickers;
 use super::print;
 use super::project_config::{self, Found, ProjectConfig};
@@ -88,7 +87,6 @@ pub async fn run(cmd: ApplyCommand) -> Result<()> {
     let path = found.path.clone();
     let config = found.config;
     local_credentials(&config)?;
-    login::ensure(&cmd.globals).await?;
     let ctx = Context::with_config(&cmd.globals, Some(config.clone()))?;
     require_agents(&ctx).await?;
 
