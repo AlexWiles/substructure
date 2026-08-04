@@ -69,9 +69,9 @@ pub fn router(admin: AdminHttpState) -> Router {
             "/api/v1/projects/{project}/api-keys/{key_id}",
             delete(unsupported),
         )
-        .route("/api/v1/orgs/{org}/slack/install", post(no_slack_install))
+        .route("/api/v1/orgs/{org}/slack", get(no_slack_install))
         .route(
-            "/api/v1/orgs/{org}/slack/installs/{install}",
+            "/api/v1/orgs/{org}/slack/install-url",
             get(no_slack_install),
         )
         .route_layer(middleware::from_fn_with_state(

@@ -7,10 +7,14 @@
 //! Mode reads its two tokens out of the environment — so that side is
 //! explained rather than pretended.
 //!
-//! An org holds one workspace: a Slack app installs once per workspace, so
-//! connecting again is a refresh, and connecting a different workspace is a
-//! replacement.
+//! The browser is where consent lands, and it lands on the deployment rather
+//! than here, so the outcome is read from what the org holds: the workspaces
+//! before, against the workspaces after. A Slack app installs once per
+//! workspace, so a second install of one already connected refreshes its token
+//! and shows up as nothing new — which is what the wait says when it ends
+//! having seen none.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::{bail, Result};
@@ -18,7 +22,7 @@ use clap::Subcommand;
 use reqwest::StatusCode;
 use serde::Serialize;
 
-use crate::api::v1::{Meta, SlackInstall, SlackInstallStarted, SlackWorkspace};
+use crate::api::v1::{Meta, SlackConnection, SlackInstallUrl, SlackStatus};
 
 use super::context::Context;
 use super::project_config::{self, Found};
@@ -55,18 +59,21 @@ pub async fn run(command: SlackCommand) -> Result<()> {
 #[serde(rename_all = "camelCase")]
 struct Connected<'a> {
     org_id: &'a str,
+    /// `connected` when a workspace arrived, `pending` when the wait ended
+    /// without one.
     status: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    workspace: Option<&'a SlackWorkspace>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    replaced: Option<&'a SlackWorkspace>,
+    workspace: Option<&'a SlackConnection>,
+    /// What the org already held, which is also what a refresh of one of these
+    /// leaves unchanged.
+    connected: &'a [SlackConnection],
 }
 
 async fn connect(no_browser: bool, scope: OrgScope) -> Result<()> {
     let found = project_config::resolve(scope.globals.config.as_deref())?;
-    // A file that names no deployment is an engine run from here, which holds
-    // its own credential. No file at all names no engine either: the command
-    // means the server the flags and the default resolve to.
+    // A file that names no remote is an engine run from here, which holds its
+    // own credential. No file at all names no engine either: the command means
+    // the server the flags and the default resolve to.
     if let Some(found) = &found {
         if found.config.remote.is_none() {
             bail!("{}", engine_here(found));
@@ -81,9 +88,17 @@ async fn connect(no_browser: bool, scope: OrgScope) -> Result<()> {
     require_slack(&ctx).await?;
     let org = ctx.require_org(scope.org.as_deref()).await?;
 
-    let started: SlackInstallStarted = ctx
+    // What the org holds before consent, which is what the outcome is read
+    // against. Also the deployment's own answer about whether it connects
+    // workspaces at all, which `meta` only says for the deployment as a whole.
+    let before = status(&ctx, &org).await?;
+    if !before.configured {
+        bail!("{}", no_slack_app());
+    }
+
+    let install: SlackInstallUrl = ctx
         .client
-        .post_empty(&format!("/api/v1/orgs/{org}/slack/install"))
+        .get(&format!("/api/v1/orgs/{org}/slack/install-url"))
         .await?;
 
     // The URL is the one thing the reader cannot do without, so `--json` puts
@@ -92,42 +107,33 @@ async fn connect(no_browser: bool, scope: OrgScope) -> Result<()> {
         true => eprintln!("{line}"),
         false => println!("{line}"),
     };
-    if let Some(scopes) = &started.scopes {
-        say(format!("Requesting: {scopes}"));
-    }
     say(format!(
         "Open this URL to add the bot to your workspace:\n  {}",
-        started.install_url
+        install.url
     ));
-    if !no_browser && webbrowser::open(&started.install_url).is_ok() {
+    if !no_browser && webbrowser::open(&install.url).is_ok() {
         say("Opened your browser to install.".into());
     }
 
-    let install = wait_for_install(&ctx, &org, &started.id).await?;
+    let arrived = wait_for_workspace(&ctx, &org, &before.connections).await?;
 
     if scope.globals.json {
         return print::json(&Connected {
             org_id: &org,
-            status: install.as_ref().map_or("pending", |i| i.status.as_str()),
-            workspace: install.as_ref().and_then(|i| i.workspace.as_ref()),
-            replaced: install.as_ref().and_then(|i| i.replaced.as_ref()),
+            status: match arrived.is_some() {
+                true => "connected",
+                false => "pending",
+            },
+            workspace: arrived.as_ref(),
+            connected: &before.connections,
         });
     }
 
-    let Some(install) = install else {
-        println!(
-            "Still waiting on consent. Finish in the browser; the workspace is \
-             connected once it lands."
-        );
+    let Some(workspace) = arrived else {
+        waiting(&before.connections);
         return Ok(());
     };
-    match &install.workspace {
-        Some(workspace) => println!("Connected {} to {org}.", workspace.label()),
-        None => println!("Connected to {org}."),
-    }
-    if let Some(replaced) = &install.replaced {
-        println!("Replaced the connection to {}.", replaced.label());
-    }
+    println!("Connected {} to {org}.", workspace.label());
     routing_note(found.as_ref());
     Ok(())
 }
@@ -148,10 +154,19 @@ async fn require_slack(ctx: &Context) -> Result<()> {
     if meta.has("slack") {
         return Ok(());
     }
-    bail!(
+    bail!("{}", no_slack_app())
+}
+
+async fn status(ctx: &Context, org: &str) -> Result<SlackStatus> {
+    ctx.client.get(&format!("/api/v1/orgs/{org}/slack")).await
+}
+
+/// The deployment holds no Slack app, so it has no workspace to install one
+/// into — whether it said so in `meta` or in the status it answered.
+fn no_slack_app() -> String {
+    format!(
         "this deployment does not install Slack apps, so it has no workspace to connect.\n\
-         An engine you run answers Slack over Socket Mode instead, with its own credential:\n\
-         {}",
+         An engine you run answers Slack over Socket Mode instead, with its own credential:\n{}",
         socket_mode_steps()
     )
 }
@@ -178,6 +193,26 @@ fn socket_mode_steps() -> String {
          export SLACK_BOT_TOKEN=xoxb-...\n  \
          3. subs serve --slack-agent <agent>"
     )
+}
+
+/// Nothing new arrived. Consent may still be in a browser, and a workspace
+/// already connected may have been reinstalled — that refreshes a token and
+/// changes nothing anyone can see from here, so it is said rather than left to
+/// read as a failure.
+fn waiting(before: &[SlackConnection]) {
+    println!("No new workspace connected.");
+    if before.is_empty() {
+        println!("Finish in the browser; the workspace is connected once it lands.");
+        return;
+    }
+    println!("Already connected:");
+    for connection in before {
+        println!("  {}", connection.label());
+    }
+    println!();
+    println!(
+        "Installing again into one of these refreshes its token, which shows as no change here."
+    );
 }
 
 /// A workspace with nothing routed to it is a bot that never answers, which is
@@ -208,26 +243,17 @@ fn routed(found: Option<&Found>) -> bool {
         .is_some_and(|slack| slack.is_configured())
 }
 
-/// Poll until Slack has sent the deployment a token, or until there is more
-/// value in saying where to finish than in waiting longer.
-///
-/// A status this build has no name for keeps the wait going: a deployment that
-/// learns a new step of its own must not read as an outcome.
-async fn wait_for_install(ctx: &Context, org: &str, id: &str) -> Result<Option<SlackInstall>> {
+/// Poll the org's workspaces until one of them is new, or until there is more
+/// value in saying what is there than in waiting longer.
+async fn wait_for_workspace(
+    ctx: &Context,
+    org: &str,
+    before: &[SlackConnection],
+) -> Result<Option<SlackConnection>> {
     let deadline = std::time::Instant::now() + INSTALL_TIMEOUT;
     loop {
-        let install: SlackInstall = ctx
-            .client
-            .get(&format!("/api/v1/orgs/{org}/slack/installs/{id}"))
-            .await?;
-        match install.status.as_str() {
-            "active" => return Ok(Some(install)),
-            "denied" => bail!("the install was declined in Slack{}", detail(&install)),
-            "expired" => bail!(
-                "the install expired before it was approved{}. Run `subs slack connect` again.",
-                detail(&install)
-            ),
-            _ => {}
+        if let Some(arrived) = arrival(before, &status(ctx, org).await?.connections) {
+            return Ok(Some(arrived));
         }
         if std::time::Instant::now() + POLL_INTERVAL > deadline {
             return Ok(None);
@@ -236,17 +262,19 @@ async fn wait_for_install(ctx: &Context, org: &str, id: &str) -> Result<Option<S
     }
 }
 
-/// What the deployment said about a failure, when it said anything.
-fn detail(install: &SlackInstall) -> String {
-    match install
-        .error
-        .as_deref()
-        .map(str::trim)
-        .filter(|e| !e.is_empty())
-    {
-        Some(error) => format!(": {error}"),
-        None => String::new(),
-    }
+/// The workspace this install added, if the org now holds one it did not.
+///
+/// A connection whose status has changed counts too: a workspace that was
+/// revoked and is installed again is the same row coming back to life, and
+/// reads as an arrival to the person who just consented.
+fn arrival(before: &[SlackConnection], now: &[SlackConnection]) -> Option<SlackConnection> {
+    let was: HashMap<&str, &str> = before
+        .iter()
+        .map(|c| (c.id.as_str(), c.status.as_str()))
+        .collect();
+    now.iter()
+        .find(|c| was.get(c.id.as_str()) != Some(&c.status.as_str()))
+        .cloned()
 }
 
 #[cfg(test)]
@@ -284,10 +312,19 @@ mod tests {
         ))
     }
 
+    fn connection(id: &str, team: &str, status: &str) -> SlackConnection {
+        SlackConnection {
+            id: id.into(),
+            team_id: format!("T{team}"),
+            team_name: team.into(),
+            status: status.into(),
+        }
+    }
+
     /// The file that describes an engine run from here is answered with the
     /// path that machine has, not with a browser.
     #[tokio::test]
-    async fn a_file_naming_no_deployment_is_told_how_that_side_works() {
+    async fn a_file_naming_no_remote_is_told_how_that_side_works() {
         let file = with_agents("[slack]\ndm = \"support\"\n");
         let scope = OrgScope {
             org: None,
@@ -321,6 +358,41 @@ mod tests {
         .has("slack"));
     }
 
+    /// What the whole wait rests on: the workspace that was not there before.
+    #[test]
+    fn the_workspace_that_arrived_is_the_one_the_org_did_not_hold() {
+        let acme = connection("c1", "Acme", "active");
+        let other = connection("c2", "Other", "active");
+
+        assert_eq!(
+            arrival(&[], std::slice::from_ref(&acme)).map(|c| c.id),
+            Some("c1".to_string())
+        );
+        // A workspace that was already there is not this install's outcome.
+        let held = std::slice::from_ref(&acme);
+        assert!(arrival(held, held).is_none());
+        assert_eq!(
+            arrival(held, &[acme.clone(), other]).map(|c| c.id),
+            Some("c2".to_string())
+        );
+        // Nothing at all is not an arrival either.
+        assert!(arrival(&[], &[]).is_none());
+    }
+
+    /// A workspace that was revoked and installed again is the same row, so
+    /// the status is part of what "new" means.
+    #[test]
+    fn a_revoked_workspace_installed_again_reads_as_an_arrival() {
+        let revoked = connection("c1", "Acme", "revoked");
+        let active = connection("c1", "Acme", "active");
+        let live = std::slice::from_ref(&active);
+        assert_eq!(
+            arrival(&[revoked], live).map(|c| c.id),
+            Some("c1".to_string())
+        );
+        assert!(arrival(live, live).is_none());
+    }
+
     /// A connected workspace nothing routes to is a bot that never answers.
     #[test]
     fn a_file_that_routes_nowhere_is_the_case_worth_a_note() {
@@ -333,34 +405,11 @@ mod tests {
         assert!(!routed(None));
     }
 
-    /// A failure the deployment explained reads as that explanation; one it
-    /// did not is still a whole sentence.
-    #[test]
-    fn a_declined_install_says_what_the_deployment_said() {
-        let install = |error: Option<&str>| SlackInstall {
-            id: "i1".into(),
-            status: "denied".into(),
-            error: error.map(str::to_string),
-            ..Default::default()
-        };
-        assert_eq!(
-            detail(&install(Some("user is not an admin"))),
-            ": user is not an admin"
-        );
-        assert_eq!(detail(&install(None)), "");
-        assert_eq!(detail(&install(Some("  "))), "");
-    }
-
     /// The id is what a reader recognizes when the deployment sends no name.
     #[test]
     fn a_workspace_reads_as_its_name_and_falls_back_to_its_id() {
-        let workspace = |name: &str| SlackWorkspace {
-            team_id: "T0123".into(),
-            team_name: name.into(),
-            ..Default::default()
-        };
-        assert_eq!(workspace("Acme").label(), "Acme (T0123)");
-        assert_eq!(workspace("").label(), "T0123");
+        assert_eq!(connection("c1", "Acme", "active").label(), "Acme (TAcme)");
+        assert_eq!(connection("c1", "", "active").label(), "T");
     }
 
     /// The engine-here message names the file it read, since `-c` makes that a

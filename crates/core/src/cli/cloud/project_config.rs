@@ -20,19 +20,19 @@ pub const DEFAULT_DB: &str = "substructure.db";
 /// is a second file (`subs apply -c substructure.staging.toml`), deployed as a
 /// second project with its own wallet, quota, and keys.
 ///
-/// A file carries two roles, either or both: **an engine you run** (`db`,
-/// `log`, `[run]`, `[serve]`) and **a remote you administer**
-/// (`[remote]`). What the project *is* — `name`, `[agent.<id>]`,
-/// `[llm.<id>]`, `[slack]`, `[mcp.<id>]` — is one declaration whichever role
-/// reads it, and it is exactly [`Manifest`], so a self-hosted system is served
-/// and administered from the same file rather than two that have to agree.
+/// A file carries two roles, either or both: **an engine you run** (`db`, `log`,
+/// `[run]`, `[serve]`) and **a remote you administer** (`[remote]`). What the
+/// project *is* — `name`, `[agent.<id>]`, `[llm.<id>]`, `[slack]`, `[mcp.<id>]`
+/// — is one declaration whichever role reads it, and it is exactly
+/// [`Manifest`], so a self-hosted system is served and administered from the
+/// same file rather than two that have to agree.
 ///
 /// The manifest's sections are spelled out here rather than nested behind
 /// `#[serde(flatten)]` because flattening would cost `deny_unknown_fields`, and
 /// a typo'd section name being loud matters more than the repetition.
 ///
-/// A role is present when its keys are: `[remote]` is what `subs apply`
-/// and `subs sessions` act on, and it is also what decides that a connection's
+/// A role is present when its keys are: `[remote]` is what `subs apply` and
+/// `subs sessions` act on, and it is also what decides that a connection's
 /// credential belongs to the remote rather than to the engine here.
 ///
 /// Precedence for anything the CLI also accepts as a flag is

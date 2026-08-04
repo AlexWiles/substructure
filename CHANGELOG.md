@@ -111,7 +111,7 @@ together at the same version.
 - Add MCP support.
 - substructure.toml as a config file.
 - `subs init` writes a starter `substructure.toml`. It asks for a project name, a provider and model, an agent id, which MCP servers to connect, whether the agent answers in Slack, and where it runs, then prints the steps for that answer.
-- `subs slack connect` adds the bot to a Slack workspace. A deployment that installs no Slack app, and a file that names no deployment, get the Socket Mode steps instead.
+- `subs slack connect` adds the bot to a Slack workspace. A deployment that installs no Slack app, and a file that names no `[remote]`, get the Socket Mode steps instead.
 
 ### Changed
 

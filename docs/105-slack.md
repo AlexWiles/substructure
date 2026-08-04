@@ -23,9 +23,12 @@ subs slack connect
 ```
 
 That opens Slack's consent page, and the token lands there rather than on this
-machine. An org holds one workspace: a Slack app installs once per workspace, so
-running it again on the same workspace refreshes the token, and connecting a
-different workspace replaces the first.
+machine. The command waits for the workspace to arrive, then names it.
+
+A Slack app installs once per workspace, so running it again on a workspace the
+org already holds refreshes that token and adds nothing — the command says so
+rather than reporting a new workspace it did not see. A workspace belongs to one
+org, and an org may hold several.
 
 The workspace is only half of it — `[slack]` below is what routes a message to
 an agent, and it reaches the deployment through `subs apply`. A connected
