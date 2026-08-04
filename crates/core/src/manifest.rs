@@ -18,7 +18,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::connectors::registry::ConnectionSpec;
 use crate::protocol::{
-    AgentConfig, AgentTool, ConnectorProtocol, Handler, LlmFormat, McpServer, RetryConfig, SubAgent,
+    AgentConfig, AgentTool, ConnectorProtocol, Handler, LlmFormat, McpServer, McpTools,
+    RetryConfig, SubAgent,
 };
 use crate::runtime::llm::{LlmBlock, LlmBlocks};
 use crate::runtime::worker::{AgentEntry, WorkerEndpoint};
@@ -128,7 +129,7 @@ impl Manifest {
     pub fn agents(&self) -> BTreeMap<String, AgentEntry> {
         self.agent
             .iter()
-            .map(|(id, section)| (id.clone(), section.to_entry()))
+            .map(|(id, section)| (id.clone(), section.to_entry(self)))
             .collect()
     }
 
@@ -197,6 +198,17 @@ impl ProviderSpec {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AgentSection {
+    /// What this agent is for, read by whoever delegates to it: naming it in
+    /// another section's `sub_agents` is what puts this text in front of a
+    /// model. Declared on the agent rather than on each edge pointing at it,
+    /// so two parents delegating to one specialist cannot describe it
+    /// differently.
+    ///
+    /// Not part of the wire config — it is expanded into the *parent's*
+    /// `sub_agents` at load, which is why an agent that declares nothing but
+    /// this and a `worker` is still a useful declaration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub llm: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -207,10 +219,12 @@ pub struct AgentSection {
     pub retry: Option<RetryConfig>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<AgentTool>,
+    /// The agents this one may delegate to, named by id. Each one's
+    /// description comes from the section it names.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub sub_agents: Vec<SubAgent>,
+    pub sub_agents: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub mcp: Vec<McpServer>,
+    pub mcp: Vec<McpRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker: Option<String>,
     /// Environment variable holding the secret an engine here signs this
@@ -239,23 +253,45 @@ impl AgentSection {
     /// The wire config this section seeds, with the hosting stripped. `None`
     /// when the section seeds nothing — validation has already made sure a
     /// worker is there to author one.
-    pub fn to_agent_config(&self) -> Option<AgentConfig> {
+    pub fn to_agent_config(&self, manifest: &Manifest) -> Option<AgentConfig> {
         Some(AgentConfig {
             llm: self.llm.clone(),
             model: self.model.clone()?,
             system: self.system.clone(),
             retry: self.retry.clone().map(Box::new),
             tools: self.tools.clone(),
-            sub_agents: self.sub_agents.clone(),
-            mcp: self.mcp.clone(),
+            sub_agents: self.to_sub_agents(manifest),
+            mcp: self.mcp.iter().map(McpRef::to_server).collect(),
         })
+    }
+
+    /// The named agents as the wire carries them, each description read from
+    /// the section it names. Resolved here rather than at delegation time
+    /// because a parent builds its tool list before any child session exists,
+    /// so there is nobody else to ask.
+    ///
+    /// An unresolved name yields an empty description rather than being
+    /// dropped: validation rejects one, and a tool the model can still call is
+    /// a better failure than a silently missing teammate.
+    fn to_sub_agents(&self, manifest: &Manifest) -> Vec<SubAgent> {
+        self.sub_agents
+            .iter()
+            .map(|id| SubAgent {
+                id: id.clone(),
+                description: manifest
+                    .agent
+                    .get(id)
+                    .and_then(|s| s.description.clone())
+                    .unwrap_or_default(),
+            })
+            .collect()
     }
 
     /// This agent as the engine routes it: the config it seeds, and the endpoint
     /// its decisions go to with whatever secret the named variable held.
-    pub fn to_entry(&self) -> AgentEntry {
+    pub fn to_entry(&self, manifest: &Manifest) -> AgentEntry {
         AgentEntry {
-            config: self.to_agent_config(),
+            config: self.to_agent_config(manifest),
             worker: self.worker.clone().map(|url| WorkerEndpoint {
                 url,
                 signing_secret: self
@@ -264,6 +300,97 @@ impl AgentSection {
                     .and_then(crate::cli::env_value),
             }),
         }
+    }
+}
+
+/// One connection an agent draws tools from: a bare id for everything the
+/// connection grants, or a table where the agent narrows it.
+///
+/// Two spellings for two different things rather than one thing twice — the
+/// filter belongs to the *pair*, not to the connection, so one `[mcp.<id>]`
+/// with one credential serves an agent that gets `read_only` and one that gets
+/// everything. Most agents narrow nothing, and `{ id = "sentry" }` is a table
+/// wrapped around a string for them.
+#[derive(Debug, Clone, PartialEq)]
+pub enum McpRef {
+    /// `"sentry"` — every tool the connection grants.
+    All(String),
+    /// `{ id = "sentry", tools = { … } }` — narrowed for this agent.
+    Filtered(McpEntry),
+}
+
+/// The table form of an [`McpRef`]. `deny_unknown_fields` because the wire
+/// [`McpServer`] has none: a misspelled `tools` would otherwise deserialize to
+/// no filter at all, handing the model every tool the connection grants when
+/// the file asked for a few.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpEntry {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<McpTools>,
+}
+
+impl McpRef {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::All(id) => id,
+            Self::Filtered(entry) => &entry.id,
+        }
+    }
+
+    /// The wire form. The two spellings differ only in whether a filter rides
+    /// along, so this is where they stop differing.
+    fn to_server(&self) -> McpServer {
+        match self {
+            Self::All(id) => McpServer {
+                id: id.clone(),
+                tools: None,
+            },
+            Self::Filtered(entry) => McpServer {
+                id: entry.id.clone(),
+                tools: entry.tools.clone(),
+            },
+        }
+    }
+}
+
+impl Serialize for McpRef {
+    /// Written back as it was written: a bare id stays bare, so a command that
+    /// rewrites the file does not wrap every connection in a table.
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::All(id) => s.serialize_str(id),
+            Self::Filtered(entry) => entry.serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for McpRef {
+    /// Dispatched on the shape written, not by trying each variant: an
+    /// `#[serde(untagged)]` here would answer a misspelled field with "matched
+    /// no variant" instead of naming the field.
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = McpRef;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a connection id, or a table with `id` and `tools`")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, id: &str) -> Result<McpRef, E> {
+                Ok(McpRef::All(id.to_string()))
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(self, map: M) -> Result<McpRef, M::Error> {
+                McpEntry::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(McpRef::Filtered)
+            }
+        }
+
+        d.deserialize_any(V)
     }
 }
 
@@ -403,13 +530,18 @@ pub fn check_agent(id: &str, section: &AgentSection, manifest: &Manifest) -> Res
     }
 
     for server in &section.mcp {
-        if !manifest.mcp.contains_key(&server.id) {
+        if !manifest.mcp.contains_key(server.id()) {
             bail!(
                 "`mcp` names no connection `{}`. Declared: {}",
-                server.id,
+                server.id(),
                 declared(manifest.mcp.keys())
             );
         }
+    }
+
+    for sub in &section.sub_agents {
+        check_sub_agent(sub, section, manifest)
+            .map_err(|e| anyhow::anyhow!("`sub_agents`: {e}"))?;
     }
 
     // A worker-executed tool comes from worker code, so a document that
@@ -426,6 +558,35 @@ pub fn check_agent(id: &str, section: &AgentSection, manifest: &Manifest) -> Res
 
     if section.worker.is_none() && block.kind == ProviderKind::Worker {
         bail!("`llm = \"{llm}\"` is a `worker` block, so this agent needs a `worker` to run its calls");
+    }
+    Ok(())
+}
+
+/// One name in a `sub_agents` list. The description is the delegating model's
+/// only account of what the teammate is for, so an absent one is checked here
+/// — but only where nothing later could supply it.
+fn check_sub_agent(sub: &str, section: &AgentSection, manifest: &Manifest) -> Result<()> {
+    let Some(child) = manifest.agent.get(sub) else {
+        bail!(
+            "`{sub}` names no agent. Declared: {}",
+            declared(manifest.agent.keys())
+        );
+    };
+    // One namespace: a sub-agent reaches the model as a tool named by its id,
+    // so a collision would leave one of the two unreachable.
+    if section.tools.iter().any(|t| t.name == sub) {
+        bail!("`{sub}` is also a tool name, and the model sees one namespace for both");
+    }
+    // A worker receives the expanded config as its `session.start` proposal and
+    // may rewrite it, so it is a legitimate source of the description. An agent
+    // the engine decides for has no such later chance — the document is the
+    // whole account of it — so a missing description there is a delegation tool
+    // the model cannot choose between.
+    if child.description.is_none() && section.worker.is_none() {
+        bail!(
+            "`{sub}` has no description, and there is no `worker` to supply one. Set \
+             `description` on [agent.{sub}]."
+        );
     }
     Ok(())
 }
@@ -580,6 +741,170 @@ mod tests {
         let err = bad.validate().unwrap_err().to_string();
         assert!(err.contains("[agent.support]"), "{err}");
         assert!(err.contains("names no block"), "{err}");
+    }
+
+    /// A two-agent team: `assistant` delegates to `poet`, with each section's
+    /// remaining lines supplied by the test.
+    fn team(assistant_extra: &str, poet_extra: &str) -> Manifest {
+        manifest(&format!(
+            r#"
+            [llm.claude]
+            type = "anthropic"
+
+            [agent.assistant]
+            llm = "claude"
+            model = "m"
+            {assistant_extra}
+
+            [agent.poet]
+            llm = "claude"
+            model = "m"
+            {poet_extra}
+            "#
+        ))
+    }
+
+    #[test]
+    fn a_sub_agent_takes_its_description_from_the_agent_it_names() {
+        let m = team(
+            r#"sub_agents = ["poet"]"#,
+            r#"description = "Writes a haiku.""#,
+        );
+        m.validate().unwrap();
+        let agents = m.agents();
+        let subs = &agents["assistant"]
+            .config
+            .as_ref()
+            .expect("seeded")
+            .sub_agents;
+        assert_eq!(
+            subs,
+            &[SubAgent {
+                id: "poet".to_string(),
+                description: "Writes a haiku.".to_string(),
+            }],
+            "declared once, on the agent it describes"
+        );
+    }
+
+    #[test]
+    fn a_sub_agent_names_a_declared_agent() {
+        let bad = team(r#"sub_agents = ["potet"]"#, r#"description = "d""#);
+        let err = bad.validate().unwrap_err().to_string();
+        assert!(err.contains("[agent.assistant]"), "{err}");
+        assert!(err.contains("names no agent"), "{err}");
+    }
+
+    #[test]
+    fn a_sub_agent_cannot_take_a_tool_s_name() {
+        let bad = team(
+            r#"sub_agents = ["poet"]
+               tools = [{ name = "poet", description = "d", handler = "client" }]"#,
+            r#"description = "d""#,
+        );
+        let err = bad.validate().unwrap_err().to_string();
+        assert!(err.contains("one namespace"), "{err}");
+    }
+
+    #[test]
+    fn an_engine_hosted_parent_needs_its_teammate_described() {
+        let bad = team(r#"sub_agents = ["poet"]"#, "");
+        let err = bad.validate().unwrap_err().to_string();
+        assert!(err.contains("no description"), "{err}");
+
+        // A worker receives the config and may write the description itself.
+        team(
+            r#"sub_agents = ["poet"]
+               worker = "https://bot.example.com/agent""#,
+            "",
+        )
+        .validate()
+        .expect("the worker can supply it");
+    }
+
+    #[test]
+    fn a_description_alone_does_not_seed_a_config() {
+        let m = manifest(
+            r#"
+            [agent.poet]
+            description = "Writes a haiku."
+            worker = "https://bot.example.com/agent"
+            "#,
+        );
+        m.validate().unwrap();
+        assert!(
+            m.agents()["poet"].config.is_none(),
+            "the worker still authors the config"
+        );
+    }
+
+    /// One agent drawing on one connection, its `mcp` line supplied by the test.
+    fn connected(mcp: &str) -> Result<Manifest, toml::de::Error> {
+        toml::from_str(&format!(
+            r#"
+            [llm.claude]
+            type = "anthropic"
+
+            [agent.support]
+            llm = "claude"
+            model = "m"
+            mcp = {mcp}
+
+            [mcp.sentry]
+            url = "https://mcp.sentry.dev/mcp"
+            "#
+        ))
+    }
+
+    #[test]
+    fn a_connection_is_named_bare_or_narrowed() {
+        for spelling in [r#"["sentry"]"#, r#"[{ id = "sentry" }]"#] {
+            let m = connected(spelling).unwrap();
+            m.validate().unwrap();
+            let agents = m.agents();
+            let mcp = &agents["support"].config.as_ref().expect("seeded").mcp;
+            assert_eq!(mcp.len(), 1, "{spelling}");
+            assert_eq!(mcp[0].id, "sentry", "{spelling}");
+            assert!(mcp[0].tools.is_none(), "no filter ⇒ everything: {spelling}");
+        }
+
+        let m = connected(r#"[{ id = "sentry", tools = { read_only = true } }]"#).unwrap();
+        m.validate().unwrap();
+        let agents = m.agents();
+        let mcp = &agents["support"].config.as_ref().expect("seeded").mcp;
+        assert_eq!(
+            mcp[0].tools.as_ref().expect("a filter").read_only,
+            Some(true)
+        );
+    }
+
+    /// The wire `McpServer` allows unknown fields, so a misspelled `tools` used
+    /// to parse as *no* filter — the file asking for a few tools and the model
+    /// getting all of them.
+    #[test]
+    fn a_misspelled_filter_is_an_error_rather_than_no_filter() {
+        let err = connected(r#"[{ id = "sentry", tool = { read_only = true } }]"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("tool"), "{err}");
+        assert!(err.contains("unknown field"), "names the field: {err}");
+    }
+
+    #[test]
+    fn a_bare_id_is_written_back_bare() {
+        let m = connected(r#"["sentry"]"#).unwrap();
+        let written = toml::to_string(&m).unwrap();
+        assert!(
+            written.contains(r#"mcp = ["sentry"]"#),
+            "a rewrite does not wrap it in a table: {written}"
+        );
+    }
+
+    #[test]
+    fn a_connection_an_agent_names_is_declared() {
+        let m = connected(r#"["sentyr"]"#).unwrap();
+        let err = m.validate().unwrap_err().to_string();
+        assert!(err.contains("names no connection"), "{err}");
     }
 
     #[test]

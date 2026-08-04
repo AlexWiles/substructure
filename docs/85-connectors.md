@@ -81,6 +81,22 @@ the ones it does.
 
 ## Declare it on the agent
 
+An agent names a connection by id. A bare id draws every tool the connection
+grants; the table form narrows it:
+
+```toml title="substructure.toml"
+[agent.support]
+mcp = ["sentry"]
+
+[agent.triage]
+mcp = [{ id = "sentry", tools = { read_only = true } }]
+```
+
+The filter belongs to the agent, not to the connection, so those two draw on
+one `[mcp.sentry]` and one credential and still see different tools.
+
+A worker declares the same thing in the config it returns:
+
 ```javascript
 function decide({ trigger, proposed }) {
     if (trigger.type === "session.start") {

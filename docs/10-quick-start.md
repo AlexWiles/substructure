@@ -58,7 +58,7 @@ Declare a connection and point the agent at it:
 [agent.assistant]
 llm = "claude"
 model = "claude-sonnet-4-5"
-mcp = [{ id = "files" }]
+mcp = ["files"]
 
 [mcp.files]
 url = "https://mcp.example.com/mcp"
@@ -109,9 +109,10 @@ type = "anthropic"
 llm = "claude"
 model = "claude-sonnet-4-5"
 system = "Delegate poems to the poet, then answer."
-sub_agents = [{ id = "poet", description = "Writes a haiku on any topic." }]
+sub_agents = ["poet"]
 
 [agent.poet]
+description = "Writes a haiku on any topic."
 llm = "cheap"
 model = "claude-haiku-4-5"
 system = "You are a poet. Respond with a single haiku."

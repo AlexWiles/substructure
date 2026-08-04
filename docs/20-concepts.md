@@ -125,8 +125,9 @@ A decision's `actions` say what the engine should do.
 ## Agent config
 
 The config declares what the agent is: `llm`, `model`, `system`, `tools`,
-`sub_agents`. An `[agent.<id>]` section *is* this config — same field names —
-so what the file declares arrives as the `session.start` proposal. A worker
+`sub_agents`. An `[agent.<id>]` section *is* this config — same field names,
+with `sub_agents` naming other sections by id — so what the file declares
+arrives as the `session.start` proposal. A worker
 takes it from there: echo it, amend it, or replace it, and rewrite it again
 mid-conversation to swap the model, add a tool, change the system prompt.
 

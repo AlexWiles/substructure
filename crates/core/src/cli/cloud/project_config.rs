@@ -734,7 +734,7 @@ mod tests {
 
         let err = parse(
             "[llm.claude]\ntype = \"anthropic\"\n\n\
-             [agent.a]\nllm = \"claude\"\nmodel = \"m\"\nmcp = [{ id = \"sentry\" }]\n",
+             [agent.a]\nllm = \"claude\"\nmodel = \"m\"\nmcp = [\"sentry\"]\n",
         )
         .unwrap_err()
         .to_string();
@@ -918,11 +918,12 @@ mod tests {
             system = "Be brief."
             worker = "http://localhost:4444"
             signing_secret_env = "S"
-            mcp = [{ id = "sentry" }]
-            sub_agents = [{ id = "researcher", description = "Finds sources" }]
+            mcp = ["sentry"]
+            sub_agents = ["researcher"]
             tools = [{ name = "confirm", description = "Ask", handler = "client" }]
 
             [agent.researcher]
+            description = "Finds sources"
             llm = "cheap"
             model = "gpt-5-mini"
 

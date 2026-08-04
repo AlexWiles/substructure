@@ -31,9 +31,18 @@ together at the same version.
   missing org or project, or a deployment that is too old.
 - CLI errors now name the endpoint, and say when the response is not an API
   response.
+- An unknown field in an agent's `mcp` entry in `substructure.toml` is now an
+  error. A misspelled `tools` applied no filter, and the model saw every tool
+  the connection grants.
 
 ### Changed
 
+- `sub_agents` in `substructure.toml` is a list of agent ids. Each description
+  comes from the `description` field on the section it names.
+- `substructure.toml` rejects a `sub_agents` id that names no agent or that a
+  tool in the same section also names.
+- An agent's `mcp` entry in `substructure.toml` accepts a bare connection id.
+  Use the table form to narrow the tools for that agent.
 - The agent config `retry` field sets a policy for each effect kind: `default`,
   `llm`, `tool`, `sub_agent`, and `connector`. Before, it applied only to LLM
   calls.

@@ -22,9 +22,10 @@ type = "anthropic"
 [agent.assistant]
 llm = "claude"
 model = "claude-sonnet-4-5"
-sub_agents = [{ id = "poet", description = "Writes a haiku on any topic." }]
+sub_agents = ["poet"]
 
 [agent.poet]
+description = "Writes a haiku on any topic."
 llm = "cheap"
 model = "claude-haiku-4-5"
 system = "You are a poet. Respond with a single haiku."
@@ -54,9 +55,20 @@ const decide = (req) => (req.agent_id === "poet" ? poet(req) : assistant(req));
 
 ## Declaring
 
-`sub_agents` lists the agents this one can delegate to. Each appears to the
-model as a tool named by its `id`, taking a single `message` argument. That id
-shares the model's tool namespace, so it must not collide with a tool name.
+`sub_agents` lists the agents this one can delegate to, by id. Each appears to
+the model as a tool named by that id, taking a single `message` argument. The
+id shares the model's tool namespace, so it must not collide with a tool name.
+
+The tool's description is the `description` on the section it names — declared
+once, on the agent it describes, so two parents delegating to one specialist
+cannot describe it differently. An agent whose whole job is to be delegated to
+can carry nothing but a `description` and a `worker`.
+
+A worker may supply or replace it instead: the expanded `sub_agents` arrive in
+the `session.start` proposal, and a worker that returns its own `agent` writes
+whatever descriptions it likes. So `description` is required only where nothing
+later could fill it in — an agent with no `worker`, whose file is the whole
+account of it.
 
 ## Delegating
 

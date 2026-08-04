@@ -198,11 +198,7 @@ fn render(p: &Plan) -> String {
     // The reference is what puts the connection's tools in front of the model;
     // the section below only says where the server is.
     if !p.mcp.is_empty() {
-        let refs: Vec<String> = p
-            .mcp
-            .iter()
-            .map(|m| format!("{{ id = \"{}\" }}", m.id))
-            .collect();
+        let refs: Vec<String> = p.mcp.iter().map(|m| format!("\"{}\"", m.id)).collect();
         s.push_str(&format!("mcp = [{}]\n", refs.join(", ")));
     }
 
@@ -736,11 +732,7 @@ mod tests {
                 // A declared connection reaches nothing until the agent names
                 // it, so the two halves are checked together.
                 let declared: Vec<&str> = cfg.mcp.keys().map(String::as_str).collect();
-                let named: Vec<&str> = cfg.agent["my-agent"]
-                    .mcp
-                    .iter()
-                    .map(|s| s.id.as_str())
-                    .collect();
+                let named: Vec<&str> = cfg.agent["my-agent"].mcp.iter().map(|s| s.id()).collect();
                 assert_eq!(declared.len(), mcp.len(), "{body}");
                 for m in &mcp {
                     assert!(declared.contains(&m.id.as_str()), "{body}");
