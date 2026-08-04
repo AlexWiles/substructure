@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use crate::protocol::{
     ClientContext, DraftMessage, ErrorCode, Handler, LlmFormat, LlmRequest, LlmResponse,
-    RetryPolicy,
+    RetryOverride, RetryPolicy,
 };
 use crate::runtime::retry::RetryTarget;
 
@@ -335,10 +335,10 @@ pub enum Action {
         name: String,
         arguments: String,
         /// Still unresolved here, unlike every other action's: which default
-        /// applies follows from where the tool runs, and the handler is not
-        /// settled until the aggregate routes the call.
+        /// the override lands on follows from where the tool runs, and the
+        /// handler is not settled until the aggregate routes the call.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        retry: Option<RetryPolicy>,
+        retry: Option<RetryOverride>,
     },
     #[serde(rename = "tool.result")]
     ToolResult {

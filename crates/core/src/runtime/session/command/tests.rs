@@ -8,8 +8,11 @@ use super::super::aggregate::{CommitContext, SessionAggregate};
 use super::super::state::{AgentVersion, Logged};
 use super::*;
 use crate::connectors::RemoteTool;
-use crate::protocol::{AgentTool, Handler, LlmTool, McpServer, McpTools, Message, RetryConfig};
+use crate::protocol::{
+    AgentTool, Handler, LlmTool, McpServer, McpTools, Message, RetryConfig, RetryOverride,
+};
 use crate::protocol::{Content, LlmResponse};
+use crate::runtime::retry::RetryTarget;
 use crate::runtime::session::decision::ToolHandler;
 use crate::runtime::session::events::EventPayload;
 use crate::runtime::span::SpanContext;
@@ -3288,12 +3291,12 @@ fn timed_out_effect_fires_tool_result_via_wake() {
             tool_call_id: "t1".to_string(),
             name: "tool_t1".to_string(),
             arguments: "{}".to_string(),
-            retry: Some(RetryPolicy {
+            retry: Some(RetryOverride {
                 attempt_timeout_secs: Some(60),
                 total_timeout_secs: None,
-                max_attempts: 0,
-                backoff_base_secs: 0,
-                backoff_max_secs: 0,
+                max_attempts: Some(0),
+                backoff_base_secs: Some(0),
+                backoff_max_secs: Some(0),
             }),
         },
         &system(),
@@ -3357,12 +3360,12 @@ fn a_tool_call_takes_the_default_for_where_it_runs() {
 #[test]
 fn the_agent_config_binds_tool_calls_not_just_llm_calls() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
-    let declared = RetryPolicy {
+    let declared = RetryOverride {
         attempt_timeout_secs: Some(7),
         total_timeout_secs: Some(70),
-        max_attempts: 4,
-        backoff_base_secs: 1,
-        backoff_max_secs: 2,
+        max_attempts: Some(4),
+        backoff_base_secs: Some(1),
+        backoff_max_secs: Some(2),
     };
     let d = open_decision(&mut agg, "hi");
     submit_agent(
@@ -3371,24 +3374,27 @@ fn the_agent_config_binds_tool_calls_not_just_llm_calls() {
         vec![node_msg("u1", Role::User, "hi")],
         Some(AgentConfig {
             tools: vec![tool_named("worker_side", None)],
-            retry: Some(RetryConfig {
+            retry: Some(Box::new(RetryConfig {
                 tool: Some(declared.clone()),
                 ..Default::default()
-            }),
+            })),
             ..agent_config("m1")
         }),
     );
 
     assert_eq!(
         requested_tool_retry(&mut agg, "t1", "worker_side", None),
-        declared,
+        RetryPolicy::default_for(RetryTarget::WorkerTool).with_override(&declared),
         "the declared `tool` policy wins over the engine default"
     );
-    let asked = RetryPolicy::no_retry();
+    let asked = RetryOverride {
+        max_attempts: Some(9),
+        ..Default::default()
+    };
     assert_eq!(
-        requested_tool_retry(&mut agg, "t2", "worker_side", Some(asked.clone())),
-        asked,
-        "an action that names a policy still wins over the config"
+        requested_tool_retry(&mut agg, "t2", "worker_side", Some(asked)).max_attempts,
+        9,
+        "an action that names a field still wins over the config"
     );
 }
 
@@ -3407,7 +3413,7 @@ fn requested_tool_retry(
     agg: &mut SessionAggregate,
     id: &str,
     name: &str,
-    retry: Option<RetryPolicy>,
+    retry: Option<RetryOverride>,
 ) -> RetryPolicy {
     let events = dispatch(
         agg,
@@ -7688,12 +7694,12 @@ fn fork_voids_a_retrying_effect() {
             tool_call_id: "tc-1".to_string(),
             name: "flaky".to_string(),
             arguments: "{}".to_string(),
-            retry: Some(RetryPolicy {
+            retry: Some(RetryOverride {
                 attempt_timeout_secs: None,
                 total_timeout_secs: None,
-                max_attempts: 2,
-                backoff_base_secs: 1,
-                backoff_max_secs: 1,
+                max_attempts: Some(2),
+                backoff_base_secs: Some(1),
+                backoff_max_secs: Some(1),
             }),
         },
         &system(),
@@ -8614,12 +8620,12 @@ fn escape_decision_retry_fires_while_the_head_is_parked() {
 
 #[test]
 fn parked_branch_deadlines_are_suppressed_but_live_branch_timers_run() {
-    let deadline_policy = RetryPolicy {
+    let deadline_policy = RetryOverride {
         attempt_timeout_secs: Some(60),
         total_timeout_secs: None,
-        max_attempts: 0,
-        backoff_base_secs: 1,
-        backoff_max_secs: 1,
+        max_attempts: Some(1),
+        backoff_base_secs: Some(1),
+        backoff_max_secs: Some(1),
     };
     let mut agg = parked_session();
     dispatch(

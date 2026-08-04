@@ -131,7 +131,7 @@ pub(in crate::runtime::session) fn sync(
     state: &SessionState,
     config: &AgentConfig,
 ) -> Vec<EventPayload> {
-    let retry = RetryPolicy::resolve(None, config.retry.as_ref(), RetryTarget::ConnectorSync);
+    let retry = RetryPolicy::resolve(None, config.retry.as_deref(), RetryTarget::ConnectorSync);
     config
         .mcp
         .iter()

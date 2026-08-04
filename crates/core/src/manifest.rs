@@ -244,7 +244,7 @@ impl AgentSection {
             llm: self.llm.clone(),
             model: self.model.clone()?,
             system: self.system.clone(),
-            retry: self.retry.clone(),
+            retry: self.retry.clone().map(Box::new),
             tools: self.tools.clone(),
             sub_agents: self.sub_agents.clone(),
             mcp: self.mcp.clone(),

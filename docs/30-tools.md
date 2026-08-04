@@ -161,7 +161,7 @@ type ToolCall = {
     id?: string                 // omitted: the engine mints one
     name: string
     arguments: unknown
-    retry?: RetryPolicy         // default: the agent config's, else the engine's
+    retry?: RetryOverride       // layered over the agent config's, else the engine's
 }
 
 type ToolResult = {

@@ -436,7 +436,7 @@ fn reissue(
         max_completion_tokens: call.spec.max_completion_tokens,
         reasoning: call.spec.reasoning.clone(),
         stream: Some(call.stream),
-        retry: Some(effect.tracking.retry_policy.clone()),
+        retry: Some(effect.tracking.retry_policy.as_override()),
     })
 }
 

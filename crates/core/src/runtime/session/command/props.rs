@@ -357,7 +357,7 @@ impl World {
                     id: self.mint(),
                     name: "a_tool".to_string(),
                     arguments: "{}".to_string(),
-                    retry: Some(policy()),
+                    retry: Some(policy().as_override()),
                 },
                 ActOp::SpawnSubAgent => {
                     let session_id = self.mint();

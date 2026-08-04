@@ -196,7 +196,7 @@ type Action =
           max_completion_tokens?: number
           reasoning?: ReasoningConfig
           stream?: boolean        // default true
-          retry?: RetryPolicy
+          retry?: RetryOverride
           handler?: "server" | "worker"  // default server
       }
     | {
@@ -204,7 +204,7 @@ type Action =
           id?: string             // omitted: the engine mints one
           name: string
           arguments: unknown
-          retry?: RetryPolicy     // default: the agent config's, else the engine's
+          retry?: RetryOverride     // default: the agent config's, else the engine's
       }
     | {
           type: "tool.result"
@@ -242,7 +242,7 @@ type Action =
           agent_id: string
           tool_call_id: string    // the model tool call this delegation answers
           message?: DraftMessage  // the child's opening message, sent once it exists
-          retry?: RetryPolicy
+          retry?: RetryOverride
       }
     | { type: "message.send"; session_id: string; message: DraftMessage }
     | {
@@ -307,12 +307,19 @@ type RetryPolicy = {
     backoff_max_secs: number
 }
 
-type RetryConfig = {                     // one policy per kind
-    default?: RetryPolicy
-    llm?: RetryPolicy
-    tool?: RetryPolicy
-    sub_agent?: RetryPolicy
-    connector?: RetryPolicy
+type RetryOverride = {            // names only what it changes
+    attempt_timeout_secs?: number
+    total_timeout_secs?: number
+    max_attempts?: number
+    backoff_base_secs?: number
+    backoff_max_secs?: number
+}
+type RetryConfig = {              // one override per kind, layered
+    default?: RetryOverride
+    llm?: RetryOverride
+    tool?: RetryOverride
+    sub_agent?: RetryOverride
+    connector?: RetryOverride
 }
 ```
 

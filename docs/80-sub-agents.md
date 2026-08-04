@@ -79,7 +79,7 @@ token usage roll up into the parent's turn.
 type SubAgent = { id: string; description?: string }
 
 // actions that open a child, proposed for you
-{ type: "sub_agent.spawn"; session_id: string; agent_id: string; tool_call_id: string; retry?: RetryPolicy }
+{ type: "sub_agent.spawn"; session_id: string; agent_id: string; tool_call_id: string; retry?: RetryOverride }
 { type: "message.send"; session_id: string; message: DraftMessage }
 
 // trigger

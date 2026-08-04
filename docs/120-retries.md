@@ -59,38 +59,60 @@ counts as success, so re-issuing one is safe.
 
 ## Overrides
 
-Declare policies per kind on the agent config, in `substructure.toml` or in the
-`agent` a worker returns on a decision:
+Declare overrides per kind on the agent config, in `substructure.toml` or in the
+`agent` a worker returns on a decision. An override names only the fields it
+changes — everything it leaves out keeps the default above:
 
 ```toml
 [agent.assistant.retry]
-default = { attempt_timeout_secs = 180, total_timeout_secs = 900, max_attempts = 3, backoff_base_secs = 2, backoff_max_secs = 30 }
-tool    = { attempt_timeout_secs = 120, total_timeout_secs = 600, max_attempts = 1 }
+tool = { max_attempts = 3 }
 ```
 
-The keys are `default`, `llm`, `tool`, `sub_agent`, and `connector`. `default`
-covers every kind that names nothing. A kind that names nothing and has no
-`default` falls to the engine's default above.
+That worker tool now allows three attempts and keeps its 120s attempt bound and
+600s total. Naming one field changes one field; it never silently removes the
+bounds it did not restate.
 
-A single action may still carry its own `retry`, which wins over all of it:
+```typescript
+type RetryOverride = {
+    attempt_timeout_secs?: number
+    total_timeout_secs?: number
+    max_attempts?: number
+    backoff_base_secs?: number
+    backoff_max_secs?: number
+}
+```
+
+The keys are `default`, `llm`, `tool`, `sub_agent`, and `connector`. They layer
+rather than replace, so `default` sets the shape and a kind adjusts it:
+
+```toml
+[agent.assistant.retry]
+default = { max_attempts = 3, backoff_max_secs = 30 }
+tool    = { max_attempts = 1 }          # tools alone are never repeated
+connector = { attempt_timeout_secs = 10 }
+```
+
+A single action may carry its own `retry`, applied last:
 
 ```jsonc
 {
     "type": "tool.call",
     "name": "render_report",
     "arguments": { "topic": "q3" },
-    "retry": { "attempt_timeout_secs": 30, "total_timeout_secs": 300, "max_attempts": 3, "backoff_base_secs": 2, "backoff_max_secs": 60 }
+    "retry": { "attempt_timeout_secs": 30, "max_attempts": 3 }
 }
 ```
 
-Resolution runs most specific first:
+So the layers are, broadest first:
 
 ```
-action retry → agent per-kind → agent default → engine default
+engine default → agent default → agent per-kind → action retry
 ```
 
-Worker decisions are the exception: they are not the agent's to declare, since
-the decision is the call that produces the config.
+Two things an override cannot do. It cannot set a timeout back to unbounded —
+waiting effectively forever is a large number, which is also the honest way to
+say it. And it cannot reach a worker decision: that is the call which produces
+the config, so reading the policy from there would be circular.
 
 ## Backoff
 

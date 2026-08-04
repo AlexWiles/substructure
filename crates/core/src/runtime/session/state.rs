@@ -1741,6 +1741,7 @@ impl SessionState {
     pub fn retry_config(&self) -> Option<RetryConfig> {
         self.resolve_agent_for(self.head_id.as_deref())
             .and_then(|c| c.retry)
+            .map(|b| *b)
     }
 
     pub fn resolve_agent_for(&self, leaf: Option<&str>) -> Option<AgentConfig> {

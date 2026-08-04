@@ -17,7 +17,7 @@
 //! the tool failing, not the model.
 
 use super::{decision_queued, fail, mismatched, void_events, KindSpec, Outcome, SettleError};
-use crate::protocol::RetryPolicy;
+use crate::protocol::{RetryOverride, RetryPolicy};
 use crate::runtime::session::command::SessionError;
 use crate::runtime::session::decision::{ToolHandler, Trigger};
 use crate::runtime::session::events::*;
@@ -172,7 +172,7 @@ pub(in crate::runtime::session) fn request(
     tool_call_id: String,
     name: String,
     arguments: String,
-    retry: Option<RetryPolicy>,
+    retry: Option<RetryOverride>,
     caller: &Caller,
 ) -> Result<Vec<EventPayload>, SessionError> {
     SessionState::ensure_internal(caller)?;
@@ -184,7 +184,7 @@ pub(in crate::runtime::session) fn request(
     // Resolved here, not at the seam: the default follows the handler, and a
     // client tool must stay unbounded — a deferred call waits for a human.
     let config = state.retry_config();
-    let retry = RetryPolicy::resolve(retry, config.as_ref(), handler.retry_target());
+    let retry = RetryPolicy::resolve(retry.as_ref(), config.as_ref(), handler.retry_target());
     if state.has_effect(EffectKind::ToolCall, &tool_call_id) {
         return Ok(Vec::new());
     }

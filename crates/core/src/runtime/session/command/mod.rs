@@ -12,7 +12,7 @@ use super::state::{
 };
 use crate::protocol::{
     AgentConfig, ClientContext, ClientPayload, DraftMessage, EffectStatus, InterruptOrigin,
-    LlmFormat, LlmRequest, RetryPolicy, Role, SessionOwner, WorkerState,
+    LlmFormat, LlmRequest, RetryOverride, RetryPolicy, Role, SessionOwner, WorkerState,
 };
 use crate::runtime::retry::RetryTarget;
 use crate::runtime::Caller;
@@ -65,8 +65,8 @@ pub enum CommandPayload {
         tool_call_id: String,
         name: String,
         arguments: String,
-        /// Unresolved: settled against the handler once the call is routed.
-        retry: Option<RetryPolicy>,
+        /// Unresolved: layered onto the handler's default once routed.
+        retry: Option<RetryOverride>,
     },
     RequestSubAgent {
         session_id: String,

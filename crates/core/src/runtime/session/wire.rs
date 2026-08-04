@@ -306,7 +306,7 @@ fn lower_actions(
     trigger: Option<&DecisionTrigger>,
     blocks: &LlmBlocks,
 ) -> Result<Vec<Action>, ResolveError> {
-    let config_retry = config.and_then(|c| c.retry.as_ref());
+    let config_retry = config.and_then(|c| c.retry.as_deref());
     actions
         .into_iter()
         .map(|action| {
@@ -334,7 +334,8 @@ fn lower_actions(
                     });
                     let tools = tools.or_else(|| config.and_then(|c| c.tools_as_llm()));
                     let stream = stream.unwrap_or(true);
-                    let retry = RetryPolicy::resolve(retry, config_retry, RetryTarget::Llm);
+                    let retry =
+                        RetryPolicy::resolve(retry.as_ref(), config_retry, RetryTarget::Llm);
                     // The block settles the venue and, for a worker-run call,
                     // the wire shape; a server call is always neutral.
                     let llm = llm
@@ -453,7 +454,11 @@ fn lower_actions(
                     agent_id,
                     tool_call_id,
                     message,
-                    retry: RetryPolicy::resolve(retry, config_retry, RetryTarget::SubAgent),
+                    retry: RetryPolicy::resolve(
+                        retry.as_ref(),
+                        config_retry,
+                        RetryTarget::SubAgent,
+                    ),
                 },
                 DecisionAction::SendMessage {
                     session_id,

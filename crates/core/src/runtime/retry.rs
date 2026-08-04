@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::{RetryConfig, RetryPolicy};
+use crate::protocol::{RetryConfig, RetryOverride, RetryPolicy};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RetryState {
@@ -81,17 +81,62 @@ impl RetryPolicy {
         }
     }
 
-    /// The policy in force, most specific first: what the action asked for, then
-    /// what the agent declared for this kind, then the agent's `default`, then
-    /// the engine's default for the target.
+    /// The policy in force: the engine's default for the target, with each
+    /// override layered on top — the agent's `default`, then what it declared
+    /// for this kind, then what the action asked for.
+    ///
+    /// Layered rather than replaced so that naming one field changes one field.
+    /// A whole-policy override would make every partial config a silent way to
+    /// drop the bounds it did not restate.
     pub fn resolve(
-        action: Option<RetryPolicy>,
+        action: Option<&RetryOverride>,
         config: Option<&RetryConfig>,
         target: RetryTarget,
     ) -> Self {
-        action
-            .or_else(|| config.and_then(|c| c.for_target(target)))
-            .unwrap_or_else(|| RetryPolicy::default_for(target))
+        let mut policy = RetryPolicy::default_for(target);
+        for layer in config.map(|c| c.layers_for(target)).unwrap_or_default() {
+            policy = policy.with_override(layer);
+        }
+        match action {
+            Some(o) => policy.with_override(o),
+            None => policy,
+        }
+    }
+
+    /// This policy as an override that pins every field — for re-proposing a
+    /// call under exactly the policy it already ran on.
+    ///
+    /// An unset timeout stays unset, which an override cannot express, so it
+    /// re-resolves to the default instead. Unreachable in practice: only a
+    /// client tool defaults to unbounded, and its calls are never re-proposed.
+    pub fn as_override(&self) -> RetryOverride {
+        RetryOverride {
+            attempt_timeout_secs: self.attempt_timeout_secs,
+            total_timeout_secs: self.total_timeout_secs,
+            max_attempts: Some(self.max_attempts),
+            backoff_base_secs: Some(self.backoff_base_secs),
+            backoff_max_secs: Some(self.backoff_max_secs),
+        }
+    }
+
+    /// This policy with `o`'s named fields replaced and the rest left alone.
+    pub fn with_override(mut self, o: &RetryOverride) -> Self {
+        if let Some(v) = o.attempt_timeout_secs {
+            self.attempt_timeout_secs = Some(v);
+        }
+        if let Some(v) = o.total_timeout_secs {
+            self.total_timeout_secs = Some(v);
+        }
+        if let Some(v) = o.max_attempts {
+            self.max_attempts = v;
+        }
+        if let Some(v) = o.backoff_base_secs {
+            self.backoff_base_secs = v;
+        }
+        if let Some(v) = o.backoff_max_secs {
+            self.backoff_max_secs = v;
+        }
+        self
     }
 
     /// The deadline for one attempt started at `now`. None ⇒ waits indefinitely.
@@ -143,9 +188,10 @@ impl RetryPolicy {
 }
 
 impl RetryConfig {
-    /// What this config declares for `target`, falling back to its own
-    /// `default`. None ⇒ it says nothing, and the engine default applies.
-    fn for_target(&self, target: RetryTarget) -> Option<RetryPolicy> {
+    /// The overrides that apply to `target`, broadest first: `default`, then
+    /// what the config declares for the kind. Both apply, so a `default` sets
+    /// the shape and a kind adjusts it.
+    fn layers_for(&self, target: RetryTarget) -> Vec<&RetryOverride> {
         let declared = match target {
             RetryTarget::Llm => &self.llm,
             RetryTarget::WorkerTool | RetryTarget::ClientTool | RetryTarget::ConnectorTool => {
@@ -156,9 +202,9 @@ impl RetryConfig {
             // Not the agent's to declare, and `default` must not reach it
             // either: it bounds the call that produces the config, so reading
             // the policy from there would be circular.
-            RetryTarget::Decision => return None,
+            RetryTarget::Decision => return Vec::new(),
         };
-        declared.clone().or_else(|| self.default.clone())
+        self.default.iter().chain(declared.iter()).collect()
     }
 }
 
@@ -189,49 +235,86 @@ impl WorkerRetryResolver for DefaultWorkerRetryResolver {
 mod tests {
     use super::*;
 
-    fn policy(max_attempts: u32) -> RetryPolicy {
-        RetryPolicy {
-            attempt_timeout_secs: Some(1),
-            total_timeout_secs: Some(9),
-            max_attempts,
-            backoff_base_secs: 2,
-            backoff_max_secs: 30,
+    /// An override naming only `max_attempts` — the partial shape that used to
+    /// be impossible to write.
+    fn attempts(n: u32) -> RetryOverride {
+        RetryOverride {
+            max_attempts: Some(n),
+            ..Default::default()
         }
     }
 
-    fn config(default: Option<u32>, tool: Option<u32>) -> RetryConfig {
+    fn config(default: Option<RetryOverride>, tool: Option<RetryOverride>) -> RetryConfig {
         RetryConfig {
-            default: default.map(policy),
-            tool: tool.map(policy),
+            default,
+            tool,
             ..Default::default()
         }
     }
 
     #[test]
-    fn the_action_wins_over_every_config_level() {
+    fn an_override_changes_only_the_fields_it_names() {
+        let base = RetryPolicy::default_for(RetryTarget::WorkerTool);
         let resolved = RetryPolicy::resolve(
-            Some(policy(7)),
-            Some(&config(Some(3), Some(5))),
+            None,
+            Some(&config(None, Some(attempts(5)))),
             RetryTarget::WorkerTool,
         );
-        assert_eq!(resolved.max_attempts, 7);
+        assert_eq!(resolved.max_attempts, 5, "the named field changes");
+        assert_eq!(
+            resolved.attempt_timeout_secs, base.attempt_timeout_secs,
+            "an unnamed timeout keeps the default bound; it is not removed"
+        );
+        assert_eq!(resolved.total_timeout_secs, base.total_timeout_secs);
+        assert_eq!(resolved.backoff_base_secs, base.backoff_base_secs);
+        assert_eq!(resolved.backoff_max_secs, base.backoff_max_secs);
     }
 
     #[test]
-    fn a_declared_kind_wins_over_the_agent_default() {
+    fn a_kind_layers_over_the_agent_default_rather_than_replacing_it() {
         let resolved = RetryPolicy::resolve(
             None,
-            Some(&config(Some(3), Some(5))),
+            Some(&config(
+                Some(RetryOverride {
+                    attempt_timeout_secs: Some(11),
+                    max_attempts: Some(3),
+                    ..Default::default()
+                }),
+                Some(attempts(5)),
+            )),
             RetryTarget::WorkerTool,
         );
-        assert_eq!(resolved.max_attempts, 5);
+        assert_eq!(resolved.max_attempts, 5, "the kind wins where both name it");
+        assert_eq!(
+            resolved.attempt_timeout_secs,
+            Some(11),
+            "`default` still applies where the kind is silent"
+        );
+    }
+
+    #[test]
+    fn the_action_is_the_last_layer() {
+        let resolved = RetryPolicy::resolve(
+            Some(&attempts(7)),
+            Some(&config(Some(attempts(3)), Some(attempts(5)))),
+            RetryTarget::WorkerTool,
+        );
+        assert_eq!(resolved.max_attempts, 7);
+        assert_eq!(
+            resolved.attempt_timeout_secs,
+            RetryPolicy::default_for(RetryTarget::WorkerTool).attempt_timeout_secs,
+            "a partial action override still keeps the engine bound"
+        );
     }
 
     #[test]
     fn a_kind_that_declares_nothing_takes_the_agent_default() {
-        let resolved =
-            RetryPolicy::resolve(None, Some(&config(Some(3), None)), RetryTarget::WorkerTool);
-        assert_eq!(resolved.max_attempts, 3, "no `tool` ⇒ `default` applies");
+        let resolved = RetryPolicy::resolve(
+            None,
+            Some(&config(Some(attempts(3)), None)),
+            RetryTarget::WorkerTool,
+        );
+        assert_eq!(resolved.max_attempts, 3);
     }
 
     #[test]
@@ -242,7 +325,7 @@ mod tests {
 
     #[test]
     fn every_tool_kind_reads_the_one_tool_entry() {
-        let cfg = config(None, Some(5));
+        let cfg = config(None, Some(attempts(5)));
         for target in [
             RetryTarget::WorkerTool,
             RetryTarget::ClientTool,
@@ -257,13 +340,40 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_override_does_not_bound_a_client_tool_by_accident() {
+        let resolved = RetryPolicy::resolve(
+            None,
+            Some(&config(None, Some(attempts(3)))),
+            RetryTarget::ClientTool,
+        );
+        assert_eq!(
+            resolved.attempt_timeout_secs, None,
+            "a deferred call stays open unless the override says otherwise"
+        );
+        assert_eq!(resolved.total_timeout_secs, None);
+    }
+
+    #[test]
     fn a_decision_ignores_the_agent_config() {
-        let resolved =
-            RetryPolicy::resolve(None, Some(&config(Some(3), None)), RetryTarget::Decision);
+        let resolved = RetryPolicy::resolve(
+            None,
+            Some(&config(Some(attempts(3)), None)),
+            RetryTarget::Decision,
+        );
         assert_eq!(
             resolved,
             RetryPolicy::default_for(RetryTarget::Decision),
             "the call that produces the config cannot be bounded by it"
+        );
+    }
+
+    #[test]
+    fn as_override_round_trips_a_resolved_policy() {
+        let policy = RetryPolicy::default_for(RetryTarget::Llm);
+        assert_eq!(
+            RetryPolicy::resolve(Some(&policy.as_override()), None, RetryTarget::WorkerTool),
+            policy,
+            "pinning every field ignores the target's own default"
         );
     }
 
@@ -299,7 +409,7 @@ mod tests {
 
     #[test]
     fn max_attempts_counts_attempts_not_retries() {
-        let p = policy(3);
+        let p = RetryPolicy::default_for(RetryTarget::Llm).with_override(&attempts(3));
         let mut state = RetryState::default();
         for attempt in 1..3 {
             assert!(!p.exhausted(&state, true), "attempt {attempt} of 3");
@@ -313,19 +423,27 @@ mod tests {
 
     #[test]
     fn a_zero_attempt_policy_still_tries_once() {
-        assert!(policy(0).exhausted(&RetryState::default(), true));
+        let p = RetryPolicy::default_for(RetryTarget::Llm).with_override(&attempts(0));
+        assert!(p.exhausted(&RetryState::default(), true));
     }
 
     #[test]
     fn a_failure_that_is_not_retryable_is_terminal_with_attempts_left() {
-        assert!(policy(9).exhausted(&RetryState::default(), false));
+        let p = RetryPolicy::default_for(RetryTarget::Llm).with_override(&attempts(9));
+        assert!(p.exhausted(&RetryState::default(), false));
     }
 
     #[test]
     fn the_total_deadline_runs_from_the_first_dispatch() {
         let started = Utc::now();
         let later = started + chrono::Duration::seconds(60);
-        let p = policy(3);
+        let p = RetryPolicy {
+            attempt_timeout_secs: Some(1),
+            total_timeout_secs: Some(9),
+            max_attempts: 3,
+            backoff_base_secs: 2,
+            backoff_max_secs: 30,
+        };
         assert_eq!(
             p.total_deadline(started),
             Some(started + chrono::Duration::seconds(9)),

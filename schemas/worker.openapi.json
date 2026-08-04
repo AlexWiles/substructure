@@ -30,7 +30,8 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "description": "Boxed: five per-kind overrides is a lot of bytes to carry inline\nthrough every command that holds a config."
           },
           "sub_agents": {
             "description": "Sub-agents the model can delegate to. Presented to the model as tools (by\nid) alongside `tools`, but each call spawns a child session rather than\nexecuting a function.",
@@ -286,12 +287,13 @@
               "retry": {
                 "anyOf": [
                   {
-                    "$ref": "#/components/schemas/RetryPolicy"
+                    "$ref": "#/components/schemas/RetryOverride"
                   },
                   {
                     "type": "null"
                   }
-                ]
+                ],
+                "description": "Layered over the agent config's `llm` policy, else over the engine's\ndefault."
               },
               "stream": {
                 "type": [
@@ -342,13 +344,13 @@
               "retry": {
                 "anyOf": [
                   {
-                    "$ref": "#/components/schemas/RetryPolicy"
+                    "$ref": "#/components/schemas/RetryOverride"
                   },
                   {
                     "type": "null"
                   }
                 ],
-                "description": "Omitted ⇒ the agent config's policy for this kind, else the engine's\ndefault for where the tool runs."
+                "description": "Layered over the agent config's policy for this kind, else over the\nengine's default for where the tool runs."
               },
               "type": {
                 "const": "tool.call",
@@ -536,13 +538,13 @@
               "retry": {
                 "anyOf": [
                   {
-                    "$ref": "#/components/schemas/RetryPolicy"
+                    "$ref": "#/components/schemas/RetryOverride"
                   },
                   {
                     "type": "null"
                   }
                 ],
-                "description": "Omitted ⇒ the agent config's `sub_agent` policy, else the engine's\ndefault."
+                "description": "Layered over the agent config's `sub_agent` policy, else over the\nengine's default."
               },
               "session_id": {
                 "type": "string"
@@ -1603,12 +1605,12 @@
       },
       "RetryConfig": {
         "additionalProperties": false,
-        "description": "An agent's retry policies, one per effect kind. `default` covers the kinds\nthat name nothing; a kind that names nothing and has no `default` falls to\nthe engine's own default for it.\n\nPer kind because the kinds are not alike: an LLM call is idempotent and worth\nretrying, a tool call may not be, and a connector fetch holds up every\ndecision behind it.",
+        "description": "An agent's retry overrides, one per effect kind. `default` covers the kinds\nthat name nothing; a kind is layered on top of it, so the two compose.\n\nPer kind because the kinds are not alike: an LLM call is idempotent and worth\nretrying, a tool call may not be, and a connector fetch holds up every\ndecision behind it.",
         "properties": {
           "connector": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/RetryPolicy"
+                "$ref": "#/components/schemas/RetryOverride"
               },
               {
                 "type": "null"
@@ -1618,7 +1620,7 @@
           "default": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/RetryPolicy"
+                "$ref": "#/components/schemas/RetryOverride"
               },
               {
                 "type": "null"
@@ -1628,7 +1630,7 @@
           "llm": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/RetryPolicy"
+                "$ref": "#/components/schemas/RetryOverride"
               },
               {
                 "type": "null"
@@ -1638,7 +1640,7 @@
           "sub_agent": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/RetryPolicy"
+                "$ref": "#/components/schemas/RetryOverride"
               },
               {
                 "type": "null"
@@ -1648,7 +1650,7 @@
           "tool": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/RetryPolicy"
+                "$ref": "#/components/schemas/RetryOverride"
               },
               {
                 "type": "null"
@@ -1659,9 +1661,9 @@
         "title": "RetryConfig",
         "type": "object"
       },
-      "RetryPolicy": {
+      "RetryOverride": {
         "additionalProperties": false,
-        "description": "Fully-resolved retry policy. Stored on call state and read directly by retry\nlogic.\n\nTwo timeouts, because one span cannot express both bounds: `attempt` covers a\nsingle dispatch-to-settle, `total` covers the whole effect — every attempt,\nthe backoff between them, and any time spent `Running`. An effect with only\nan attempt timeout can still stall forever once it stops being `Pending`.",
+        "description": "A partial retry policy: only the fields it names change, and the rest are\ninherited. Every override is a layer over the engine's default for the effect\nkind, so tuning one knob does not mean restating the other four — and leaving\na timeout out keeps the default bound rather than removing it.\n\nAn override cannot set a timeout back to unbounded. Waiting effectively\nforever is a large number, which is also the honest way to say it.",
         "properties": {
           "attempt_timeout_secs": {
             "format": "uint32",
@@ -1674,18 +1676,26 @@
           "backoff_base_secs": {
             "format": "uint32",
             "minimum": 0,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "backoff_max_secs": {
             "format": "uint32",
             "minimum": 0,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "max_attempts": {
-            "description": "Cap on total attempts, not on retries: `1` allows one try and no retry.",
             "format": "uint32",
             "minimum": 0,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "total_timeout_secs": {
             "format": "uint32",
@@ -1696,12 +1706,7 @@
             ]
           }
         },
-        "required": [
-          "max_attempts",
-          "backoff_base_secs",
-          "backoff_max_secs"
-        ],
-        "title": "RetryPolicy",
+        "title": "RetryOverride",
         "type": "object"
       },
       "Role": {

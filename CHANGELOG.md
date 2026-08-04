@@ -37,6 +37,8 @@ together at the same version.
 - The agent config `retry` field sets a policy for each effect kind: `default`,
   `llm`, `tool`, `sub_agent`, and `connector`. Before, it applied only to LLM
   calls.
+- A retry policy in a config or on an action changes only the fields it names.
+  The other fields keep their default values.
 - A retry policy has `attempt_timeout_secs` for one attempt and
   `total_timeout_secs` for the full effect, in place of `timeout_secs`. It has
   `max_attempts` in place of `max_retries`.
