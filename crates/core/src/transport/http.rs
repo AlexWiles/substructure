@@ -89,6 +89,50 @@ pub fn runtime_error_response(err: RuntimeError) -> Response {
     (status, Json(serde_json::json!({"error": message}))).into_response()
 }
 
+/// What a request body is called when it is wrong, for the caller who has to
+/// fix it. Axum's own `Json` rejection says only "Failed to deserialize the
+/// JSON body into the target type", which names neither the field nor the
+/// value, so every ingress type states its name and uses [`Body`] instead.
+pub trait NamedBody {
+    const WHAT: &'static str;
+}
+
+/// `Json<T>`, except a malformed body is rejected with the path to the
+/// offending field and an excerpt of what it held.
+pub struct Body<T>(pub T);
+
+impl<S, T> axum::extract::FromRequest<S> for Body<T>
+where
+    T: serde::de::DeserializeOwned + NamedBody,
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        let bytes = axum::body::Bytes::from_request(req, state)
+            .await
+            .map_err(|e| {
+                (
+                    e.status(),
+                    Json(serde_json::json!({"ok": false, "error": e.body_text()})),
+                )
+                    .into_response()
+            })?;
+        match crate::json::from_slice::<T>(T::WHAT, &bytes) {
+            Ok(value) => Ok(Body(value)),
+            Err(e) => Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "error": e.to_string(),
+                    "param": e.param(),
+                })),
+            )
+                .into_response()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

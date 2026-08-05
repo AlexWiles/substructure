@@ -253,7 +253,7 @@ impl AgUiTranslator {
                 out
             }
             EventPayload::ToolCallErrored(t) => {
-                let mut out = vec![tool_result(t.id.clone(), t.error)];
+                let mut out = vec![tool_result(t.id.clone(), t.error.message)];
                 let yield_now = if let Some(batch) = self.batch.as_mut() {
                     batch.pending_worker_tool_calls.remove(&t.id);
                     batch.is_yield_point()
@@ -302,8 +302,8 @@ impl AgUiTranslator {
             EventPayload::SubAgentTurnCompleted(s) => {
                 self.settle_sub_agent(&s.id, sub_agent_result(&s.data))
             }
-            EventPayload::SubAgentErrored(s) => self.settle_sub_agent(&s.id, s.error),
-            EventPayload::LlmCallErrored(e) if !e.retryable => self.finalize_error(e.error),
+            EventPayload::SubAgentErrored(s) => self.settle_sub_agent(&s.id, s.error.message),
+            EventPayload::LlmCallErrored(e) if !e.retryable => self.finalize_error(e.error.message),
             EventPayload::SessionCancelled => self.finalize_error("session cancelled".to_string()),
             EventPayload::SessionInterrupted(p) => {
                 if self.terminated {
@@ -324,7 +324,7 @@ impl AgUiTranslator {
             EventPayload::TurnCompleted(t) => {
                 // A terminally-failed finalizer completes the turn as a failed run.
                 if let Some(err) = t.error {
-                    return self.finalize_error(err);
+                    return self.finalize_error(err.message);
                 }
                 let mut out = self.close_all_open();
                 out.push(AgUiEvent::RunFinished {
@@ -1098,7 +1098,7 @@ mod tests {
         let _ = t.on_delta(delta("c1", "r1", "partial"));
         let e = vals(t.on_event(ev(json!({
             "type": "llm.call.errored", "id": "c1", "attempt": 0,
-            "error": "boom", "retryable": false,
+            "error": {"message": "boom", "code": "internal"}, "retryable": false,
         }))));
         assert_eq!(kinds(&e), ["TEXT_MESSAGE_END", "RUN_ERROR"]);
         assert_eq!(e[1]["message"], "boom");
@@ -1111,7 +1111,7 @@ mod tests {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
         let e = t.on_event(ev(json!({
             "type": "llm.call.errored", "id": "c1", "attempt": 0,
-            "error": "temporary", "retryable": true,
+            "error": {"message": "temporary", "code": "internal"}, "retryable": true,
         })));
         assert!(e.is_empty());
         assert!(!t.terminated);
@@ -1229,7 +1229,7 @@ mod tests {
         let err = vals(t.on_event(ev(json!({
             "type": "sub_agent.errored",
             "id": "child-1",
-            "error": "child boom",
+            "error": {"message": "child boom", "code": "internal"},
         }))));
         assert_eq!(kinds(&err), ["TOOL_CALL_RESULT"]);
         assert_eq!(err[0]["toolCallId"], "call-1");

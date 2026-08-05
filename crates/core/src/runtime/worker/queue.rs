@@ -3,8 +3,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::{
-    AgentConfig, DecisionResponse, DecisionTrigger, DraftMessage, Effect, Message, MessageTree,
-    SessionOwner, WorkerState,
+    AgentConfig, DecisionResponse, DecisionTrigger, DraftMessage, Effect, ErrorInfo, Message,
+    MessageTree, SessionOwner, WorkerState,
 };
 use crate::runtime::session::decision::Action;
 use crate::runtime::span::SpanContext;
@@ -80,7 +80,7 @@ pub struct FailDecision {
     pub session_id: String,
     pub caller: Caller,
     pub decision_id: String,
-    pub error: String,
+    pub error: ErrorInfo,
     pub retryable: bool,
     pub span: SpanContext,
 }

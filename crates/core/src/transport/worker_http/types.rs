@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::protocol::{ClientPayload, DecisionResponse, ErrorCode, LlmResponse};
 use crate::span::SpanContext;
+use crate::transport::http::NamedBody;
 
 /// A decision pushed to the engine out-of-band via the submit route: the
 /// `session_id`/`decision_id` that route it, wrapping the worker-authored
@@ -14,6 +15,22 @@ pub struct SubmitDecisionRequest {
     pub span: Option<SpanContext>,
     #[serde(flatten)]
     pub decision: DecisionResponse,
+}
+
+impl NamedBody for SubmitDecisionRequest {
+    const WHAT: &'static str = "decision submit";
+}
+
+impl NamedBody for SettleEffectRequest {
+    const WHAT: &'static str = "effect settlement";
+}
+
+impl NamedBody for MintClientTokenRequest {
+    const WHAT: &'static str = "client token request";
+}
+
+impl NamedBody for SubmitClientPayloadRequest {
+    const WHAT: &'static str = "client payload submit";
 }
 
 #[derive(Debug, Serialize)]

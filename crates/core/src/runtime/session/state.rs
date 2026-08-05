@@ -1244,7 +1244,7 @@ impl SessionState {
                     e.tracking.record_error(payload.retryable, now);
                     let failed = e.tracking.status == EffectStatus::Failed;
                     if let Some(tc) = e.tool_mut().filter(|_| failed) {
-                        tc.result = Some(payload.error.clone());
+                        tc.result = Some(payload.error.message.clone());
                         tc.is_error = true;
                     }
                 }
@@ -1271,7 +1271,7 @@ impl SessionState {
                     e.tracking.record_error(payload.retryable, now);
                     let failed = e.tracking.status == EffectStatus::Failed;
                     if let Some(sa) = e.sub_agent_mut().filter(|_| failed) {
-                        sa.result = Some(payload.error.clone());
+                        sa.result = Some(payload.error.message.clone());
                         sa.is_error = true;
                     }
                 }
@@ -1339,7 +1339,7 @@ impl SessionState {
                 if let Some(e) = self.effect_mut(EffectKind::ConnectorSync, &p.id) {
                     e.tracking.record_error(p.retryable, now);
                     if let Some(sync) = e.connector_mut() {
-                        sync.error = Some(p.error.clone());
+                        sync.error = Some(p.error.message.clone());
                         sync.needs_reauth = p.needs_reauth;
                     }
                 }

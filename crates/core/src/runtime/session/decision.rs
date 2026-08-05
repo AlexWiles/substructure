@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::protocol::{
-    ClientContext, DraftMessage, ErrorCode, Handler, LlmFormat, LlmRequest, LlmResponse,
+    ClientContext, DraftMessage, ErrorInfo, Handler, LlmFormat, LlmRequest, LlmResponse,
     RetryOverride, RetryPolicy,
 };
 use crate::runtime::retry::RetryTarget;
@@ -169,7 +169,7 @@ pub enum Trigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         result: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
+        error: Option<ErrorInfo>,
     },
     /// `id` is the model tool call the delegation answers; `session_id` the child session.
     #[serde(rename = "sub_agent.finished")]
@@ -181,7 +181,7 @@ pub enum Trigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         result: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
+        error: Option<ErrorInfo>,
     },
     #[serde(rename = "llm.finished")]
     LlmFinished {
@@ -197,11 +197,7 @@ pub enum Trigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cost: Option<Decimal>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        code: Option<ErrorCode>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        detail: Option<serde_json::Value>,
+        error: Option<ErrorInfo>,
     },
     #[serde(rename = "interrupt.resumed")]
     InterruptResumed {
@@ -248,17 +244,10 @@ impl Trigger {
             usage,
             cost,
             error: None,
-            code: None,
-            detail: None,
         }
     }
 
-    pub fn llm_err(
-        id: String,
-        error: String,
-        code: Option<ErrorCode>,
-        detail: Option<serde_json::Value>,
-    ) -> Self {
+    pub fn llm_err(id: String, error: ErrorInfo) -> Self {
         Trigger::LlmFinished {
             id,
             ok: false,
@@ -267,8 +256,6 @@ impl Trigger {
             usage: None,
             cost: None,
             error: Some(error),
-            code,
-            detail,
         }
     }
 
@@ -359,24 +346,16 @@ pub enum Action {
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attempt: Option<u32>,
-        error: String,
+        error: ErrorInfo,
         retryable: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        code: Option<ErrorCode>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        detail: Option<serde_json::Value>,
     },
     #[serde(rename = "llm.error")]
     LlmError {
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attempt: Option<u32>,
-        error: String,
+        error: ErrorInfo,
         retryable: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        code: Option<ErrorCode>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        detail: Option<serde_json::Value>,
     },
     #[serde(rename = "sub_agent.spawn")]
     SpawnSubAgent {

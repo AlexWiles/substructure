@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::protocol::SessionOwner;
 use crate::session::command::SessionError;
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
-use crate::transport::http::runtime_error_response;
+use crate::transport::http::{runtime_error_response, Body};
 use crate::transport::session_sse::{merge_session_stream, resume_cursor};
 use crate::{Caller, HandleClientInput, InterruptSessionInput, RuntimeError};
 
@@ -28,7 +28,7 @@ pub async fn client_input(
     State(state): State<ClientHttpState>,
     Extension(caller): Extension<Caller>,
     Extension(owner): Extension<SessionOwner>,
-    Json(req): Json<ClientInputRequest>,
+    Body(req): Body<ClientInputRequest>,
 ) -> Response {
     let session_id = req.session_id.unwrap_or_else(|| Uuid::now_v7().to_string());
 
@@ -61,7 +61,7 @@ pub async fn interrupt_session(
     State(state): State<ClientHttpState>,
     Extension(caller): Extension<Caller>,
     Path(session_id): Path<String>,
-    Json(req): Json<InterruptSessionRequest>,
+    Body(req): Body<InterruptSessionRequest>,
 ) -> Response {
     let interrupt_id = req
         .interrupt_id

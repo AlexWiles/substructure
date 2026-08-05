@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::protocol::{ClientInput, InterruptOrigin, Message, MessageTree};
 use crate::session::state::{SessionState, SessionStatus};
+use crate::transport::http::NamedBody;
 
 /// The one client input request body. `input` is the tagged union of everything a client
 /// can send, carrying its own addressing (a submit's `agent_id`/`turn_id`; a settle's effect
@@ -11,6 +12,14 @@ pub struct ClientInputRequest {
     #[serde(default)]
     pub session_id: Option<String>,
     pub input: ClientInput,
+}
+
+impl NamedBody for ClientInputRequest {
+    const WHAT: &'static str = "client input";
+}
+
+impl NamedBody for InterruptSessionRequest {
+    const WHAT: &'static str = "interrupt request";
 }
 
 #[derive(Debug, Serialize)]

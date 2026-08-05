@@ -55,7 +55,7 @@ impl KindSpec for ConnectorSpec {
         if let Some(t) = state.tracking(EffectKind::ConnectorSync, id) {
             report_failure(
                 id,
-                &e.error,
+                &e.error.message,
                 e.needs_reauth,
                 t.is_terminal_failure(e.retryable),
                 t.retry.attempts,

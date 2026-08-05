@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::protocol::{ErrorCode, LlmRequest, LlmResponse, LlmTool, SessionOwner, StreamDelta};
+use crate::protocol::{
+    ErrorCode, ErrorInfo, LlmRequest, LlmResponse, LlmTool, SessionOwner, StreamDelta,
+};
 
 impl LlmTool {
     /// The schema providers receive: the declared `input`, or the empty
@@ -125,10 +127,31 @@ pub trait LlmCallable: Send + Sync + 'static {
     }
 }
 
+/// A model call that failed: the failure, plus whether this attempt is worth
+/// repeating.
 #[derive(Debug, Clone)]
 pub struct LlmCallError {
-    pub message: String,
+    pub error: ErrorInfo,
     pub retryable: bool,
-    pub code: Option<ErrorCode>,
-    pub detail: Option<serde_json::Value>,
+}
+
+impl LlmCallError {
+    pub fn new(code: ErrorCode, message: impl Into<String>, retryable: bool) -> Self {
+        Self {
+            error: ErrorInfo::new(code, message),
+            retryable,
+        }
+    }
+}
+
+/// A provider reply the engine could not read. Never retryable: the same bytes
+/// parse the same way, and a provider that changed its shape needs a fix here,
+/// not another call.
+impl From<crate::json::JsonParseError> for LlmCallError {
+    fn from(e: crate::json::JsonParseError) -> Self {
+        Self {
+            error: ErrorInfo::from(e),
+            retryable: false,
+        }
+    }
 }

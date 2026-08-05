@@ -34,9 +34,25 @@ together at the same version.
 - An unknown field in an agent's `mcp` entry in `substructure.toml` is now an
   error. A misspelled `tools` applied no filter, and the model saw every tool
   the connection grants.
+- A decision response that does not parse now reports the field that failed and
+  the value that was wrong. All failures reported only "failed to parse
+  response".
+- A worker that answers with an error status or an error body now reports that
+  error. Only the status came through.
+- A malformed request body on the worker and client HTTP surfaces now reports
+  the field that failed.
+- A provider response that does not parse now reports the field that failed.
+- An error message no longer quotes the document that caused it. The document
+  goes to the log, with the id of the decision it belongs to.
 
 ### Changed
 
+- Every error has one shape: a `message`, a `code`, the `param` to correct, and
+  `detail`. Events, triggers, and actions carried an error as a bare string with
+  optional siblings. A worker can still send a plain string, and the engine
+  classifies it.
+- `turn.completed` reports the error that ended the run as an object, so a
+  renderer can tell one kind of failure from another without reading the text.
 - `[deployment]` in `substructure.toml` is `[remote]`, and `[server]` is
   `[serve]`. A file with an old name gives an error that says the new one.
 - `sub_agents` in `substructure.toml` is a list of agent ids. Each description
@@ -99,6 +115,11 @@ together at the same version.
 
 ### Added
 
+- A Slack deployment can supply its own controller. It decides everything the
+  bot shows — the answer, a failure, each step card, the prompt buttons, the
+  thread status, and how a message is put together — and what happens when a
+  user presses a button it added. It inherits the engine's behaviour for what it
+  does not change.
 - A worker is now optional. Declare an agent in `substructure.toml`, and the engine decides its turns.
 - `[agent.<id>]` sections declare each agent. The section mirrors the wire agent config, plus a `worker` URL and a `signing_secret_env`.
 - An agent can give its whole config to its worker. Declare only a `worker` URL, and the worker declares the agent at `session.start`.

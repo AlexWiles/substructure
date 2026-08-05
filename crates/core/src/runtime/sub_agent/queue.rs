@@ -1,6 +1,7 @@
 use rust_decimal::Decimal;
 use uuid::Uuid;
 
+use crate::protocol::ErrorInfo;
 use crate::protocol::{DraftMessage, RetryPolicy, SessionOwner};
 use crate::runtime::span::SpanContext;
 
@@ -38,7 +39,7 @@ pub enum SubAgentTask {
         token_usage: std::collections::BTreeMap<String, u64>,
         /// Set when the child's turn ended as a failed run; settles the parent's
         /// delegation as an error instead of an empty result.
-        error: Option<String>,
+        error: Option<ErrorInfo>,
         span: SpanContext,
     },
     CancelSubAgent {

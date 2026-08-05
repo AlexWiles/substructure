@@ -547,6 +547,18 @@ pub struct LlmResponse {
     pub images: Vec<ResponseImage>,
 }
 
+/// What kind of failure, for a consumer that branches instead of reading the
+/// sentence. A closed set, and required on every [`ErrorInfo`]: an optional
+/// code is one nobody fills in, which leaves every consumer handling a `None`
+/// that should not exist.
+///
+/// `provider_error`, `rate_limited`, `refused`, `budget_exceeded` and
+/// `deadline_exceeded` describe a call that ran and went wrong.
+/// `invalid_response` — a document did not parse, or parsed into something
+/// unusable. `handler_error` — whoever was asked to do the work (a worker, a
+/// client) reported a failure of its own. `worker_unreachable` — it was never
+/// reached. `unroutable` — nothing could decide. `internal` — the engine's own
+/// fault, and the honest answer when nothing else fits.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[schemars(title = "ErrorCode")]
@@ -556,6 +568,89 @@ pub enum ErrorCode {
     Refused,
     BudgetExceeded,
     DeadlineExceeded,
+    InvalidResponse,
+    HandlerError,
+    WorkerUnreachable,
+    Unroutable,
+    Internal,
+}
+
+/// Why something failed. One shape on every event, on the wire, and in the
+/// internal carriers that produce them — shaped after a Stripe API error.
+///
+/// `retryable` is deliberately absent: whether to try again is a decision the
+/// engine makes about one attempt, not a fact about the failure, and it is
+/// meaningless on a terminal like `turn.completed`. It rides on the events
+/// that settle an attempt instead.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "ErrorInfo")]
+pub struct ErrorInfo {
+    /// One engine-authored sentence, safe to show a human. Never a raw
+    /// document — an unbounded body belongs in the log.
+    pub message: String,
+    pub code: ErrorCode,
+    /// The one input to go and fix, when the failure names one: `agent.llm`,
+    /// `actions[0].type`. Stripe's `param`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub param: Option<String>,
+    /// Small structured particulars: a status, the llm blocks that exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<Value>,
+}
+
+impl ErrorInfo {
+    pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            code,
+            param: None,
+            detail: None,
+        }
+    }
+
+    /// The engine's own fault, or a failure nothing else describes.
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::Internal, message)
+    }
+
+    /// Whoever ran the work reported a failure — the default for an error a
+    /// worker or client authored without classifying it.
+    pub fn handler(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::HandlerError, message)
+    }
+
+    pub fn with_param(mut self, param: impl Into<String>) -> Self {
+        self.param = Some(param.into());
+        self
+    }
+
+    pub fn with_detail(mut self, detail: Value) -> Self {
+        self.detail = Some(detail);
+        self
+    }
+
+    /// Take what an author supplied, keeping the default where they said
+    /// nothing. The seam for a worker- or client-authored error, which arrives
+    /// flat and may classify itself or not.
+    pub fn or_code(mut self, code: Option<ErrorCode>) -> Self {
+        if let Some(code) = code {
+            self.code = code;
+        }
+        self
+    }
+
+    pub fn or_detail(mut self, detail: Option<Value>) -> Self {
+        if detail.is_some() {
+            self.detail = detail;
+        }
+        self
+    }
+}
+
+impl std::fmt::Display for ErrorInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
 }
 
 // ── Streaming ────────────────────────────────────────────────────────────
@@ -1008,7 +1103,7 @@ pub enum DecisionTrigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         result: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
+        error: Option<ErrorInfo>,
     },
     /// Answer with `llm.result`/`llm.error`.
     #[serde(rename = "llm.execute")]
@@ -1037,11 +1132,7 @@ pub enum DecisionTrigger {
         #[schemars(schema_with = "decimal_string_schema")]
         cost: Option<Decimal>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        code: Option<ErrorCode>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        detail: Option<Value>,
+        error: Option<ErrorInfo>,
     },
     #[serde(rename = "sub_agent.finished")]
     SubAgentFinished {
@@ -1052,7 +1143,7 @@ pub enum DecisionTrigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         result: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
+        error: Option<ErrorInfo>,
     },
     #[serde(rename = "interrupt.resumed")]
     InterruptResumed {
@@ -1261,6 +1352,18 @@ pub struct DecisionResponse {
     /// A new agent config write; omitted keeps the current config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentConfig>,
+}
+
+impl DecisionResponse {
+    /// Writes nothing: no transcript, no actions, no state or config. Settling
+    /// a decision with one is a silent no-op, so both the engine's own proposal
+    /// and a worker's answer are checked for it before they are accepted.
+    pub fn authors_nothing(&self) -> bool {
+        self.messages.is_empty()
+            && self.actions.is_empty()
+            && self.state.is_none()
+            && self.agent.is_none()
+    }
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

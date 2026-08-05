@@ -345,9 +345,9 @@ pub(crate) fn request_to_wire(request: &LlmRequest) -> serde_json::Value {
 
 /// A raw Messages API response → the neutral `LlmResponse`.
 pub(crate) fn response_from_wire(value: serde_json::Value) -> Result<LlmResponse, String> {
-    serde_json::from_value::<MessagesResponse>(value)
+    crate::json::from_value::<MessagesResponse>("anthropic response", value)
         .map(MessagesResponse::into_llm_response)
-        .map_err(|e| format!("invalid anthropic response: {e}"))
+        .map_err(|e| e.to_string())
 }
 
 // ── Streaming events ─────────────────────────────────────────────────────
@@ -553,15 +553,14 @@ impl StreamParser {
                     }
                 }))
             }
-            StreamEvent::Error { error } => Err(LlmCallError {
-                message: format!(
+            StreamEvent::Error { error } => Err(LlmCallError::new(
+                ErrorCode::ProviderError,
+                format!(
                     "Anthropic stream error ({}): {}",
                     error.error_type, error.message
                 ),
-                retryable: matches!(error.error_type.as_str(), "overloaded_error" | "api_error"),
-                code: Some(ErrorCode::ProviderError),
-                detail: None,
-            }),
+                matches!(error.error_type.as_str(), "overloaded_error" | "api_error"),
+            )),
             StreamEvent::ContentBlockStop {}
             | StreamEvent::MessageStop {}
             | StreamEvent::Ping {}
@@ -667,11 +666,12 @@ impl AnthropicClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| LlmCallError {
-                message: format!("HTTP request failed: {e}"),
-                retryable: e.is_timeout() || e.is_connect(),
-                code: Some(ErrorCode::ProviderError),
-                detail: None,
+            .map_err(|e| {
+                LlmCallError::new(
+                    ErrorCode::ProviderError,
+                    format!("HTTP request failed: {e}"),
+                    e.is_timeout() || e.is_connect(),
+                )
             })
     }
 }
@@ -684,12 +684,14 @@ fn classify_error(status: reqwest::StatusCode, body: &str) -> LlmCallError {
     } else {
         ErrorCode::ProviderError
     };
-    LlmCallError {
-        message: format!("Anthropic API error {status}: {body}"),
-        retryable,
-        code: Some(code),
-        detail: None,
-    }
+    // The provider says why in `error.message`; the rest of the body is a
+    // request id and echoed request, which the log keeps and the reader does
+    // not need.
+    let message = match crate::json::error_message(body.as_bytes()) {
+        Some(reported) => format!("Anthropic API error {status}: {reported}"),
+        None => format!("Anthropic API error {status}"),
+    };
+    LlmCallError::new(code, message, retryable)
 }
 
 fn build_usage(input_tokens: Option<u64>, output_tokens: Option<u64>) -> Option<serde_json::Value> {
@@ -711,23 +713,17 @@ impl LlmCallable for AnthropicClient {
     ) -> Result<LlmResponse, LlmCallError> {
         let resp = self.post_messages(request, false).await?;
         let status = resp.status();
-        let body = resp.text().await.map_err(|e| LlmCallError {
-            message: format!("read body: {e}"),
-            retryable: true,
-            code: Some(ErrorCode::ProviderError),
-            detail: None,
+        let body = resp.text().await.map_err(|e| {
+            LlmCallError::new(ErrorCode::ProviderError, format!("read body: {e}"), true)
         })?;
 
         if !status.is_success() {
+            tracing::warn!(status = status.as_u16(), body = %crate::json::excerpt(body.as_bytes()), "anthropic api call failed");
             return Err(classify_error(status, &body));
         }
 
-        let parsed: MessagesResponse = serde_json::from_str(&body).map_err(|e| LlmCallError {
-            message: format!("parse response: {e}"),
-            retryable: false,
-            code: Some(ErrorCode::ProviderError),
-            detail: None,
-        })?;
+        let parsed: MessagesResponse =
+            crate::json::from_str("anthropic response", &body).map_err(LlmCallError::from)?;
 
         Ok(parsed.into_llm_response())
     }
@@ -742,11 +738,8 @@ impl LlmCallable for AnthropicClient {
         let status = resp.status();
 
         if !status.is_success() {
-            let body = resp.text().await.map_err(|e| LlmCallError {
-                message: format!("read body: {e}"),
-                retryable: true,
-                code: Some(ErrorCode::ProviderError),
-                detail: None,
+            let body = resp.text().await.map_err(|e| {
+                LlmCallError::new(ErrorCode::ProviderError, format!("read body: {e}"), true)
             })?;
             return Err(classify_error(status, &body));
         }
@@ -759,11 +752,8 @@ impl LlmCallable for AnthropicClient {
         let mut line_buf = String::new();
 
         while let Some(chunk_result) = stream.next().await {
-            let bytes = chunk_result.map_err(|e| LlmCallError {
-                message: format!("stream read: {e}"),
-                retryable: true,
-                code: Some(ErrorCode::ProviderError),
-                detail: None,
+            let bytes = chunk_result.map_err(|e| {
+                LlmCallError::new(ErrorCode::ProviderError, format!("stream read: {e}"), true)
             })?;
             line_buf.push_str(&String::from_utf8_lossy(&bytes));
 

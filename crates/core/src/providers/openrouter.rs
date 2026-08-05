@@ -289,11 +289,12 @@ impl OpenRouterClient {
             .json(&wire)
             .send()
             .await
-            .map_err(|e| LlmCallError {
-                message: format!("HTTP request failed: {e}"),
-                retryable: e.is_timeout() || e.is_connect(),
-                code: Some(ErrorCode::ProviderError),
-                detail: None,
+            .map_err(|e| {
+                LlmCallError::new(
+                    ErrorCode::ProviderError,
+                    format!("HTTP request failed: {e}"),
+                    e.is_timeout() || e.is_connect(),
+                )
             })
     }
 }
@@ -306,12 +307,14 @@ fn classify_error(status: reqwest::StatusCode, body: &str) -> LlmCallError {
     } else {
         ErrorCode::ProviderError
     };
-    LlmCallError {
-        message: format!("OpenRouter API error {status}: {body}"),
-        retryable,
-        code: Some(code),
-        detail: None,
-    }
+    // The provider says why in `error.message`; the rest of the body is a
+    // request id and echoed request, which the log keeps and the reader does
+    // not need.
+    let message = match crate::json::error_message(body.as_bytes()) {
+        Some(reported) => format!("OpenRouter API error {status}: {reported}"),
+        None => format!("OpenRouter API error {status}"),
+    };
+    LlmCallError::new(code, message, retryable)
 }
 
 #[async_trait]
@@ -323,24 +326,17 @@ impl LlmCallable for OpenRouterClient {
     ) -> Result<LlmResponse, LlmCallError> {
         let resp = self.post_chat_completion(request, false).await?;
         let status = resp.status();
-        let body = resp.text().await.map_err(|e| LlmCallError {
-            message: format!("read body: {e}"),
-            retryable: true,
-            code: Some(ErrorCode::ProviderError),
-            detail: None,
+        let body = resp.text().await.map_err(|e| {
+            LlmCallError::new(ErrorCode::ProviderError, format!("read body: {e}"), true)
         })?;
 
         if !status.is_success() {
+            tracing::warn!(status = status.as_u16(), body = %crate::json::excerpt(body.as_bytes()), "openrouter api call failed");
             return Err(classify_error(status, &body));
         }
 
         let parsed: ChatCompletionResponse =
-            serde_json::from_str(&body).map_err(|e| LlmCallError {
-                message: format!("parse response: {e}"),
-                retryable: false,
-                code: Some(ErrorCode::ProviderError),
-                detail: None,
-            })?;
+            crate::json::from_str("openrouter response", &body).map_err(LlmCallError::from)?;
 
         Ok(parsed.into_llm_response())
     }
@@ -355,11 +351,8 @@ impl LlmCallable for OpenRouterClient {
         let status = resp.status();
 
         if !status.is_success() {
-            let body = resp.text().await.map_err(|e| LlmCallError {
-                message: format!("read body: {e}"),
-                retryable: true,
-                code: Some(ErrorCode::ProviderError),
-                detail: None,
+            let body = resp.text().await.map_err(|e| {
+                LlmCallError::new(ErrorCode::ProviderError, format!("read body: {e}"), true)
             })?;
             return Err(classify_error(status, &body));
         }
@@ -377,11 +370,8 @@ impl LlmCallable for OpenRouterClient {
         let mut line_buf = String::new();
 
         while let Some(chunk_result) = stream.next().await {
-            let bytes = chunk_result.map_err(|e| LlmCallError {
-                message: format!("stream read: {e}"),
-                retryable: true,
-                code: Some(ErrorCode::ProviderError),
-                detail: None,
+            let bytes = chunk_result.map_err(|e| {
+                LlmCallError::new(ErrorCode::ProviderError, format!("stream read: {e}"), true)
             })?;
             line_buf.push_str(&String::from_utf8_lossy(&bytes));
 

@@ -10,6 +10,7 @@ use super::schedule::{self, ScheduleStep};
 use super::state::{
     new_call_id, EffectKind, EffectTracking, SessionState, SessionStatus, TurnPhase,
 };
+use crate::protocol::ErrorInfo;
 use crate::protocol::{
     AgentConfig, ClientContext, ClientPayload, DraftMessage, EffectStatus, InterruptOrigin,
     LlmFormat, LlmRequest, RetryOverride, RetryPolicy, Role, SessionOwner, WorkerState,
@@ -271,13 +272,11 @@ impl Action {
                 attempt,
                 error,
                 retryable,
-                code,
-                detail,
             } => Some(CommandPayload::settle(
                 EffectKind::LlmCall,
                 id,
                 attempt,
-                Outcome::from(SettleError::new(error, retryable).with_detail(code, detail)),
+                Outcome::from(SettleError::new(error, retryable)),
             )),
             Action::SendMessage { .. } | Action::Interrupt { .. } | Action::Done { .. } => None,
         }
@@ -1117,7 +1116,7 @@ impl Working {
     /// Worker tool calls are never touched: their async settle may still arrive.
     fn run_reconcile_dispatch(&mut self) -> Result<(), SessionError> {
         const LOST: &str = "dispatch lost on engine restart";
-        let lost = || Outcome::Error(SettleError::new(LOST, true));
+        let lost = || Outcome::Error(SettleError::new(ErrorInfo::internal(LOST), true));
         for (id, terminal) in self.pending_decisions() {
             self.then(|s| EffectKind::Decision.spec().settle(s, &id, lost()));
             // A terminal one already ended the run; nothing after it can run.

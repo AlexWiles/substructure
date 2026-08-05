@@ -14,8 +14,8 @@
 
 use super::{decision_queued, fail, mismatched, void_events, KindSpec, Outcome, SettleError};
 use crate::protocol::{
-    Content, ContentPart, DraftMessage, EffectStatus, ErrorCode, ImageUrl, LlmFormat, LlmRequest,
-    LlmResponse, RetryPolicy, Role,
+    Content, ContentPart, DraftMessage, EffectStatus, ErrorCode, ErrorInfo, ImageUrl, LlmFormat,
+    LlmRequest, LlmResponse, RetryPolicy, Role,
 };
 use crate::runtime::session::command::SessionError;
 use crate::runtime::session::decision::{LlmHandler, Trigger};
@@ -54,8 +54,6 @@ impl KindSpec for LlmSpec {
             attempt: attempt(state, id),
             error: e.error.clone(),
             retryable: e.retryable,
-            code: e.code.clone(),
-            detail: e.detail.clone(),
         }))
     }
 
@@ -64,14 +62,14 @@ impl KindSpec for LlmSpec {
         vec![decision_queued(Trigger::llm_err(
             id.to_string(),
             e.error.clone(),
-            e.code.clone(),
-            e.detail.clone(),
         ))]
     }
 
     fn timeout_error(&self, total: bool) -> SettleError {
-        SettleError::new(super::DEADLINE, !total)
-            .with_detail(Some(ErrorCode::DeadlineExceeded), None)
+        SettleError::new(
+            ErrorInfo::new(ErrorCode::DeadlineExceeded, super::DEADLINE),
+            !total,
+        )
     }
 
     fn dispatch(&self, state: &SessionState, id: &str) -> Vec<EventPayload> {

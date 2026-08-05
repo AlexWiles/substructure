@@ -1,10 +1,10 @@
 use serde_json::Value;
 
 use super::clip;
+use super::controller::{SlackController, StepStatus, StepView};
 use crate::session::events::EventPayload;
 use crate::session::SessionEvent;
 
-const MAX_TITLE: usize = 60;
 /// Keeps a chatty tool from bloating the message; not a Slack limit.
 const MAX_TEXT: usize = 1500;
 /// A message takes 50 blocks; the answer and footer need two of them.
@@ -12,22 +12,7 @@ const MAX_BLOCKS: usize = 48;
 /// Of Slack's 40,000-character message cap; the rest is headroom.
 const MAX_CHARS: usize = 36_000;
 
-#[derive(Clone, Copy, PartialEq)]
-enum Status {
-    InProgress,
-    Complete,
-    Error,
-}
-
-impl Status {
-    fn wire(self) -> &'static str {
-        match self {
-            Status::InProgress => "in_progress",
-            Status::Complete => "complete",
-            Status::Error => "error",
-        }
-    }
-}
+type Status = StepStatus;
 
 /// One thing the turn showed, in the order it happened.
 enum Item {
@@ -40,17 +25,10 @@ enum Item {
 }
 
 impl Item {
-    fn block(&self) -> Value {
+    fn block(&self, controller: &dyn SlackController) -> Value {
         match self {
-            Item::Said { text, .. } => super::section_block(text),
-            Item::Step(step) => step.block(),
-        }
-    }
-
-    fn chars(&self) -> usize {
-        match self {
-            Item::Said { text, .. } => text.chars().count(),
-            Item::Step(step) => step.chars(),
+            Item::Said { text, .. } => controller.said_block(text),
+            Item::Step(step) => controller.step_block(&step.view()),
         }
     }
 }
@@ -67,71 +45,17 @@ struct Step {
 }
 
 impl Step {
-    fn chars(&self) -> usize {
-        let len = |t: &Option<String>| t.as_deref().unwrap_or_default().chars().count();
-        self.title().chars().count() + len(&self.input) + len(&self.output)
-    }
-
-    fn title(&self) -> String {
-        match &self.took {
-            Some(took) => format!("{} · {took}", self.name),
-            None => self.name.clone(),
+    /// The folded facts, for the controller to render.
+    fn view(&self) -> StepView<'_> {
+        StepView {
+            id: &self.id,
+            name: &self.name,
+            status: self.status,
+            took: self.took.as_deref(),
+            input: self.input.as_deref(),
+            output: self.output.as_deref(),
         }
     }
-
-    /// The live card. Slack caps a `task_update` chunk at 256 characters;
-    /// a re-send with the same `id` sets the card.
-    fn chunk(&self) -> Value {
-        serde_json::json!({
-            "type": "task_update",
-            "id": self.id,
-            "title": clip(&self.title(), MAX_TITLE),
-            "status": self.status.wire(),
-        })
-    }
-
-    /// The finished card; `details` and `output` are rich text.
-    fn block(&self) -> Value {
-        let mut card = serde_json::json!({
-            "type": "task_card",
-            "task_id": self.id,
-            "title": clip(&self.title(), MAX_TITLE),
-            "status": self.status.wire(),
-        });
-        for (field, heading, text) in [
-            ("details", None, &self.input),
-            ("output", Some("Result:"), &self.output),
-        ] {
-            // Slack rejects an empty text element.
-            if let Some(text) = text.as_deref().filter(|t| !t.trim().is_empty()) {
-                card[field] = rich_text(heading, text);
-            }
-        }
-        card
-    }
-}
-
-fn rich_text(heading: Option<&str>, text: &str) -> Value {
-    let mut elements = Vec::new();
-    if let Some(heading) = heading {
-        elements.push(serde_json::json!({
-            "type": "text",
-            "text": format!("{heading}\n"),
-            "style": { "bold": true },
-        }));
-    }
-    elements.push(serde_json::json!({ "type": "text", "text": text }));
-    serde_json::json!({
-        "type": "rich_text",
-        "elements": [{ "type": "rich_text_section", "elements": elements }],
-    })
-}
-
-fn context_block(text: &str) -> Value {
-    serde_json::json!({
-        "type": "context",
-        "elements": [{ "type": "mrkdwn", "text": text }],
-    })
 }
 
 /// A turn's visible work, folded from the event log. Every render is
@@ -169,7 +93,7 @@ impl TurnActivity {
                 self.start(&t.id, t.name.clone(), Some(&t.arguments), event)
             }
             EventPayload::ToolCallCompleted(t) => self.end(&t.id, event, Ok(Some(&t.result))),
-            EventPayload::ToolCallErrored(t) => self.end(&t.id, event, Err(&t.error)),
+            EventPayload::ToolCallErrored(t) => self.end(&t.id, event, Err(&t.error.message)),
             EventPayload::SubAgentRequested(s) => {
                 self.start(&s.id, format!("agent {}", s.agent_id), None, event)
             }
@@ -177,7 +101,7 @@ impl TurnActivity {
                 let data = (!s.data.is_null()).then(|| s.data.to_string());
                 self.end(&s.id, event, Ok(data.as_deref()))
             }
-            EventPayload::SubAgentErrored(s) => self.end(&s.id, event, Err(&s.error)),
+            EventPayload::SubAgentErrored(s) => self.end(&s.id, event, Err(&s.error.message)),
             // A response with no calls is the answer, not a preamble.
             EventPayload::LlmCallCompleted(c) if !c.response.tool_calls.is_empty() => {
                 if let Some(text) = c.response.content.as_deref().map(str::trim) {
@@ -255,7 +179,7 @@ impl TurnActivity {
 
     /// One chunk per item, in order. The sender dedupes on the key;
     /// appended text cannot be set again the way a card can.
-    pub(super) fn chunks(&self) -> Vec<(String, Value)> {
+    pub(super) fn chunks(&self, controller: &dyn SlackController) -> Vec<(String, Value)> {
         self.items
             .iter()
             .map(|item| match item {
@@ -263,43 +187,43 @@ impl TurnActivity {
                     format!("say:{id}"),
                     serde_json::json!({ "type": "markdown_text", "text": text }),
                 ),
-                Item::Step(step) => (step.id.clone(), step.chunk()),
+                Item::Step(step) => (step.id.clone(), controller.step_chunk(&step.view())),
             })
             .collect()
     }
 
-    /// The finished turn as blocks. Replaces the streamed content.
-    pub(super) fn blocks(&self, answer: &str, footer: Option<&str>) -> Vec<Value> {
-        let mut blocks = self.item_blocks();
-        blocks.push(super::section_block(answer));
-        if let Some(footer) = footer {
-            blocks.push(context_block(footer));
-        }
-        blocks
+    /// The finished turn as blocks. Replaces the streamed content: the turn's
+    /// visible work; what surrounds it is the controller's business.
+    pub(super) fn blocks(&self, controller: &dyn SlackController) -> Vec<Value> {
+        self.item_blocks(controller)
     }
 
     /// Drop the oldest items until the message fits; one line stands for them.
-    fn item_blocks(&self) -> Vec<Value> {
+    ///
+    /// Measured on the rendered blocks, not estimated from the fields behind
+    /// them: a controller may render a step any way it likes, and what Slack
+    /// counts is what we send.
+    fn item_blocks(&self, controller: &dyn SlackController) -> Vec<Value> {
+        let rendered: Vec<Value> = self.items.iter().map(|i| i.block(controller)).collect();
         let mut earlier = 0;
-        while earlier < self.items.len() && !self.fits(earlier) {
+        while earlier < rendered.len() && !fits(&rendered[earlier..], earlier > 0) {
             earlier += 1;
         }
-        let shown = self.items[earlier..].iter().map(Item::block);
+        let shown = rendered[earlier..].iter().cloned();
         if earlier == 0 {
             return shown.collect();
         }
-        std::iter::once(context_block(&format!("_… {earlier} earlier steps_")))
+        std::iter::once(controller.elided_block(earlier))
             .chain(shown)
             .collect()
     }
+}
 
-    /// True if the message fits without the oldest `earlier` items.
-    fn fits(&self, earlier: usize) -> bool {
-        let shown = &self.items[earlier..];
-        let blocks = usize::from(earlier > 0) + shown.len();
-        let chars: usize = shown.iter().map(Item::chars).sum();
-        blocks <= MAX_BLOCKS && chars <= MAX_CHARS
-    }
+/// True if `shown` fits Slack's block and character limits.
+fn fits(shown: &[Value], elided: bool) -> bool {
+    let blocks = usize::from(elided) + shown.len();
+    let chars: usize = shown.iter().map(|b| b.to_string().chars().count()).sum();
+    blocks <= MAX_BLOCKS && chars <= MAX_CHARS
 }
 
 pub(super) fn elapsed(
@@ -320,6 +244,7 @@ fn flatten(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::ErrorInfo;
     use crate::session::events::{
         SubAgentRequested, SubAgentTurnCompleted, ToolCallCompleted, ToolCallErrored,
         ToolCallRequested, TurnStarted,
@@ -442,7 +367,7 @@ mod tests {
         ];
         let turn = TurnActivity::fold(&events, None).unwrap();
         assert_eq!(turn.turn_id, "turn-1");
-        let chunks = turn.chunks();
+        let chunks = turn.chunks(&crate::transport::slack::controller::DefaultController);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].0, "tc1");
         assert_eq!(
@@ -455,7 +380,7 @@ mod tests {
             })
         );
         // The call itself arrives with the blocks, not the live card.
-        let card = &turn.blocks("done", None)[0];
+        let card = &turn.blocks(&crate::transport::slack::controller::DefaultController)[0];
         assert_eq!(card["type"], "task_card");
         assert_eq!(card["details"]["elements"][0]["elements"][0]["text"], "{}");
         // The result reads under a bold heading of its own.
@@ -474,7 +399,7 @@ mod tests {
             tool_completed("tc1", 4, 1),
         ];
         let turn = TurnActivity::fold(&events, None).unwrap();
-        let chunks = turn.chunks();
+        let chunks = turn.chunks(&crate::transport::slack::controller::DefaultController);
         assert_eq!(chunks.len(), 2);
         // Its own text, ahead of the card, keyed apart from any call id.
         assert_eq!(chunks[0].0, "say:llm1");
@@ -488,7 +413,7 @@ mod tests {
         assert_eq!(chunks[1].0, "tc1");
         assert_eq!(chunks[1].1["type"], "task_update");
         // The rebuild keeps it in place, above the card.
-        let blocks = turn.blocks("done", None);
+        let blocks = turn.blocks(&crate::transport::slack::controller::DefaultController);
         assert_eq!(blocks[0]["type"], "section");
         assert_eq!(blocks[0]["text"]["text"], "Let me look that up.");
         assert_eq!(blocks[1]["type"], "task_card");
@@ -503,7 +428,7 @@ mod tests {
         ];
         assert!(TurnActivity::fold(&events, None)
             .unwrap()
-            .chunks()
+            .chunks(&crate::transport::slack::controller::DefaultController)
             .is_empty());
     }
 
@@ -512,7 +437,7 @@ mod tests {
         let events = vec![started("turn-1", 1), said("llm1", "   ", true, 2)];
         assert!(TurnActivity::fold(&events, None)
             .unwrap()
-            .chunks()
+            .chunks(&crate::transport::slack::controller::DefaultController)
             .is_empty());
     }
 
@@ -523,9 +448,20 @@ mod tests {
         let turn = TurnActivity::fold(&events, Some("turn-1".into())).unwrap();
         assert_eq!(turn.turn_id, "turn-1");
         // A call still running has no duration in its title yet.
-        assert_eq!(turn.chunks()[0].1["status"], "in_progress");
-        assert_eq!(turn.chunks()[0].1["title"], "search_web");
-        assert!(turn.chunks()[0].1.get("output").is_none());
+        assert_eq!(
+            turn.chunks(&crate::transport::slack::controller::DefaultController)[0].1["status"],
+            "in_progress"
+        );
+        assert_eq!(
+            turn.chunks(&crate::transport::slack::controller::DefaultController)[0].1["title"],
+            "search_web"
+        );
+        assert!(
+            turn.chunks(&crate::transport::slack::controller::DefaultController)[0]
+                .1
+                .get("output")
+                .is_none()
+        );
         // Without a seed there is no turn to attach the work to.
         assert!(TurnActivity::fold(&events, None).is_none());
     }
@@ -541,8 +477,15 @@ mod tests {
         ];
         let turn = TurnActivity::fold(&events, Some("stale".into())).unwrap();
         assert_eq!(turn.turn_id, "turn-2");
-        assert_eq!(turn.chunks().len(), 1);
-        assert_eq!(turn.chunks()[0].0, "tc2");
+        assert_eq!(
+            turn.chunks(&crate::transport::slack::controller::DefaultController)
+                .len(),
+            1
+        );
+        assert_eq!(
+            turn.chunks(&crate::transport::slack::controller::DefaultController)[0].0,
+            "tc2"
+        );
     }
 
     #[test]
@@ -556,18 +499,18 @@ mod tests {
                 EventPayload::ToolCallErrored(ToolCallErrored {
                     id: "tc1".into(),
                     name: "send_email".into(),
-                    error: "permission\n  denied".into(),
+                    error: ErrorInfo::handler("permission\n  denied"),
                     retryable: false,
                 }),
             ),
         ];
         let turn = TurnActivity::fold(&events, None).unwrap();
-        let chunks = turn.chunks();
+        let chunks = turn.chunks(&crate::transport::slack::controller::DefaultController);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].1["status"], "error");
         assert_eq!(chunks[0].1["title"], "send_email · 1.0s");
         // The reason is the finished card's output, on one line.
-        let card = &turn.blocks("done", None)[0];
+        let card = &turn.blocks(&crate::transport::slack::controller::DefaultController)[0];
         assert_eq!(card["status"], "error");
         assert_eq!(
             card["output"]["elements"][0]["elements"][1]["text"],
@@ -593,7 +536,7 @@ mod tests {
         ];
         let card = &TurnActivity::fold(&events, None)
             .unwrap()
-            .blocks("ok", None)[0];
+            .blocks(&crate::transport::slack::controller::DefaultController)[0];
         assert!(card.get("output").is_none());
         assert_eq!(card["details"]["elements"][0]["elements"][0]["text"], "{}");
     }
@@ -609,7 +552,7 @@ mod tests {
                 EventPayload::ToolCallErrored(ToolCallErrored {
                     id: "tc1".into(),
                     name: "search_web".into(),
-                    error: "rate limited".into(),
+                    error: ErrorInfo::handler("rate limited"),
                     retryable: true,
                 }),
             ),
@@ -617,7 +560,9 @@ mod tests {
             tool_completed("tc1", 5, 3),
         ];
         // The retry clears the first attempt's failure.
-        let chunks = TurnActivity::fold(&events, None).unwrap().chunks();
+        let chunks = TurnActivity::fold(&events, None)
+            .unwrap()
+            .chunks(&crate::transport::slack::controller::DefaultController);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].1["status"], "complete");
         assert_eq!(chunks[0].1["title"], "search_web · 1.0s");
@@ -649,7 +594,9 @@ mod tests {
                 }),
             ),
         ];
-        let chunks = TurnActivity::fold(&events, None).unwrap().chunks();
+        let chunks = TurnActivity::fold(&events, None)
+            .unwrap()
+            .chunks(&crate::transport::slack::controller::DefaultController);
         assert_eq!(chunks[0].1["title"], "agent researcher · 1m 30s");
         // A sub-agent has no arguments of its own to preview.
         assert!(chunks[0].1.get("details").is_none());
@@ -665,11 +612,16 @@ mod tests {
         }
         let turn = TurnActivity::fold(&events, None).unwrap();
         // Every step still streams as its own card; only the rebuild packs.
-        assert_eq!(turn.chunks().len(), 300);
+        assert_eq!(
+            turn.chunks(&crate::transport::slack::controller::DefaultController)
+                .len(),
+            300
+        );
 
         // One line for what did not fit, then the newest cards.
-        let blocks = turn.blocks("done", Some("5.0s"));
-        assert_eq!(blocks.len(), 50);
+        // The activity alone; what surrounds it is the controller's.
+        let blocks = turn.blocks(&crate::transport::slack::controller::DefaultController);
+        assert_eq!(blocks.len(), 48);
         assert_eq!(blocks[0]["elements"][0]["text"], "_… 253 earlier steps_");
         assert_eq!(blocks[1]["title"], "tool_253 · 1.0s");
         assert_eq!(blocks[47]["title"], "tool_299 · 1.0s");
@@ -695,10 +647,25 @@ mod tests {
         }
         let blocks = TurnActivity::fold(&events, None)
             .unwrap()
-            .blocks("done", Some("5.0s"));
-        // Twenty-three of them fit whole; the other seven stand on the line.
-        assert_eq!(blocks[0]["elements"][0]["text"], "_… 7 earlier steps_");
-        assert_eq!(blocks.len(), 26);
+            .blocks(&crate::transport::slack::controller::DefaultController);
+        // The budget is measured on the rendered blocks, which carry the card's
+        // JSON as well as its text, so fewer fit than the raw output alone
+        // suggests. What Slack counts is what we send.
+        let elided: usize = blocks[0]["elements"][0]["text"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .filter(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .unwrap();
+        let shown = blocks.len() - 1; // all but the line that stands for the rest
+        assert_eq!(elided + shown, 30, "every step is either shown or counted");
+        let chars: usize = blocks.iter().map(|b| b.to_string().chars().count()).sum();
+        assert!(
+            chars <= 36_000 + 200,
+            "the message stays inside the cap: {chars}"
+        );
         // What survives keeps everything it carried.
         let out = &blocks[1]["output"]["elements"][0]["elements"][1]["text"];
         assert_eq!(out.as_str().unwrap().chars().count(), MAX_TEXT);
@@ -709,7 +676,7 @@ mod tests {
         let events = vec![started("turn-1", 1), tool_completed("ghost", 2, 1)];
         assert!(TurnActivity::fold(&events, None)
             .unwrap()
-            .chunks()
+            .chunks(&crate::transport::slack::controller::DefaultController)
             .is_empty());
     }
 
@@ -722,9 +689,23 @@ mod tests {
 
     #[test]
     fn a_card_stays_inside_the_chunk_budget() {
-        assert_eq!(clip("short", MAX_TITLE), "short");
+        assert_eq!(
+            clip(
+                "short",
+                crate::transport::slack::controller::MAX_TITLE_FOR_TESTS
+            ),
+            "short"
+        );
         let long = "x".repeat(MAX_TEXT + 100);
-        assert_eq!(clip(&long, MAX_TITLE).chars().count(), MAX_TITLE);
+        assert_eq!(
+            clip(
+                &long,
+                crate::transport::slack::controller::MAX_TITLE_FOR_TESTS
+            )
+            .chars()
+            .count(),
+            crate::transport::slack::controller::MAX_TITLE_FOR_TESTS
+        );
         assert!(clip(&long, MAX_TEXT).ends_with('…'));
 
         // A live card carries no payload; it cannot pass Slack's 256.
@@ -738,7 +719,9 @@ mod tests {
             ),
         ];
         let turn = TurnActivity::fold(&events, None).unwrap();
-        let rendered = turn.chunks()[0].1.to_string();
+        let rendered = turn.chunks(&crate::transport::slack::controller::DefaultController)[0]
+            .1
+            .to_string();
         assert!(rendered.chars().count() <= 256, "{rendered}");
     }
 }

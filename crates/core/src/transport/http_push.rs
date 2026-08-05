@@ -10,8 +10,9 @@ use reqwest::Client;
 use serde::Deserialize;
 use sha2::Sha256;
 
+use crate::json;
 use crate::protocol::{
-    DecisionRequest, DecisionResponse, DecisionTrigger, StreamDelta, TokenDelta,
+    DecisionRequest, DecisionResponse, DecisionTrigger, ErrorCode, StreamDelta, TokenDelta,
 };
 use crate::providers::format::DeltaParser;
 use crate::runtime::llm::TokenDeltaTransport;
@@ -55,9 +56,11 @@ impl PushTransport for HttpPushTransport {
         decision: &WorkerDecisionRequest,
         token_delta_transport: Arc<dyn TokenDeltaTransport>,
     ) -> Result<DecisionResponse, PushError> {
-        let body = serde_json::to_vec(&DecisionRequest::from(decision)).map_err(|e| PushError {
-            message: format!("failed to serialize decision: {e}"),
-            retryable: false,
+        let body = serde_json::to_vec(&DecisionRequest::from(decision)).map_err(|e| {
+            PushError::fatal(
+                ErrorCode::WorkerUnreachable,
+                format!("failed to serialize decision: {e}"),
+            )
         })?;
 
         let mut builder = self
@@ -87,13 +90,23 @@ impl PushTransport for HttpPushTransport {
 
         let resp = tokio::time::timeout(self.idle_timeout, builder.body(body).send())
             .await
-            .map_err(|_| PushError {
-                message: format!("no response within {:?}", self.idle_timeout),
-                retryable: true,
+            .map_err(|_| {
+                PushError::retryable(
+                    ErrorCode::WorkerUnreachable,
+                    format!(
+                        "no response from {} within {:?}",
+                        self.endpoint_url, self.idle_timeout
+                    ),
+                )
             })?
-            .map_err(|e| PushError {
-                message: format!("HTTP request failed: {e}"),
-                retryable: e.is_timeout() || e.is_connect(),
+            .map_err(|e| {
+                // reqwest's `Display` names only the stage that failed; the
+                // cause (DNS, refused, TLS) is one link down the source chain.
+                PushError::retryable(
+                    ErrorCode::WorkerUnreachable,
+                    format!("request to {} failed: {}", self.endpoint_url, describe(&e)),
+                )
+                .retryable_if(e.is_timeout() || e.is_connect())
             })?;
 
         let status = resp.status();
@@ -104,14 +117,6 @@ impl PushTransport for HttpPushTransport {
             "worker responded"
         );
 
-        if !status.is_success() {
-            let retryable = status.is_server_error();
-            return Err(PushError {
-                message: format!("endpoint returned {status}"),
-                retryable,
-            });
-        }
-
         let content_type = resp
             .headers()
             .get(CONTENT_TYPE)
@@ -119,32 +124,130 @@ impl PushTransport for HttpPushTransport {
             .unwrap_or_default()
             .to_ascii_lowercase();
 
-        let submit = if content_type.starts_with("text/event-stream") {
-            read_sse_response(
+        // A failing worker says why in its body — an unset API key, a model it
+        // does not know. Reporting only the status throws that away and leaves
+        // the operator with a number. The body itself is logged, never carried
+        // into the error: it is unbounded, and it is whatever the worker
+        // happened to print.
+        if !status.is_success() {
+            let body = self.read_body(resp).await.unwrap_or_default();
+            tracing::warn!(
+                decision_id = %decision.decision_id,
+                endpoint = %self.endpoint_url,
+                status = status.as_u16(),
+                body = %json::excerpt(&body),
+                "worker endpoint failed"
+            );
+            let message = match json::error_message(&body) {
+                Some(reported) => format!("worker endpoint returned {status}: {reported}"),
+                None => format!("worker endpoint returned {status}"),
+            };
+            return Err(PushError::fatal(ErrorCode::HandlerError, message)
+                .retryable_if(status.is_server_error())
+                .with_detail(serde_json::json!({ "status": status.as_u16() })));
+        }
+
+        if content_type.starts_with("text/event-stream") {
+            return read_sse_response(
                 resp.bytes_stream(),
                 decision,
                 token_delta_transport,
                 Some(self.idle_timeout),
             )
-            .await?
-        } else {
-            // `null` is the empty decision — the natural "nothing to add" reply
-            // from JSON-language workers.
-            tokio::time::timeout(self.idle_timeout, resp.json::<Option<DecisionResponse>>())
-                .await
-                .map_err(|_| PushError {
-                    message: format!("no response body within {:?}", self.idle_timeout),
-                    retryable: true,
-                })?
-                .map_err(|e| PushError {
-                    message: format!("failed to parse response: {e}"),
-                    retryable: false,
-                })?
-                .unwrap_or_default()
-        };
+            .await;
+        }
 
-        Ok(submit)
+        let body = self.read_body(resp).await?;
+        parse_decision(decision, &body).map(Option::unwrap_or_default)
     }
+}
+
+impl HttpPushTransport {
+    /// The whole body in hand, so a failure can quote it. `.json()` would
+    /// consume the body and hand back an error that names neither.
+    async fn read_body(&self, resp: reqwest::Response) -> Result<Vec<u8>, PushError> {
+        tokio::time::timeout(self.idle_timeout, resp.bytes())
+            .await
+            .map_err(|_| {
+                PushError::retryable(
+                    ErrorCode::WorkerUnreachable,
+                    format!("no response body within {:?}", self.idle_timeout),
+                )
+            })?
+            .map(|b| b.to_vec())
+            .map_err(|e| {
+                PushError::retryable(
+                    ErrorCode::WorkerUnreachable,
+                    format!("reading the response body failed: {}", describe(&e)),
+                )
+            })
+    }
+}
+
+/// A worker's answer → the decision it encodes. `null` is the empty decision —
+/// the natural "nothing to add" reply from JSON-language workers.
+///
+/// A body that carries an error message and authors nothing is reported as the
+/// worker's error rather than accepted: a handler that catches its own
+/// exception and answers `{"error": …}` outside the protocol still knows why it
+/// failed, and that sentence is the one worth forwarding. Every field of a
+/// decision is optional, so such a body would otherwise parse as the empty
+/// decision and settle the turn as a silent no-op — the failure reported as
+/// nothing at all.
+/// `decision` is carried only to key the log line: the body it quotes is the
+/// operator's copy of what went wrong, and it is worth nothing without the
+/// decision it belongs to.
+fn parse_decision(
+    decision: &WorkerDecisionRequest,
+    body: &[u8],
+) -> Result<Option<DecisionResponse>, PushError> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Err(PushError::fatal(ErrorCode::InvalidResponse, "worker returned an empty body; a decision must be a JSON object, or `null` for the empty decision",));
+    }
+    let reported = || {
+        json::error_message(body).map(|message| {
+            PushError::fatal(
+                ErrorCode::HandlerError,
+                format!("worker reported: {message}"),
+            )
+        })
+    };
+    match json::from_slice::<Option<DecisionResponse>>("decision response", body) {
+        Ok(decision) => match decision {
+            Some(d) if d.authors_nothing() => match reported() {
+                Some(e) => Err(e),
+                None => Ok(Some(d)),
+            },
+            other => Ok(other),
+        },
+        Err(e) => {
+            tracing::warn!(
+                decision_id = %decision.decision_id,
+                session_id = %decision.session_id,
+                agent_id = %decision.agent_id,
+                error = %e,
+                body = %e.excerpt,
+                "worker decision did not parse"
+            );
+            Err(reported().unwrap_or_else(|| e.into()))
+        }
+    }
+}
+
+/// A `reqwest::Error` says only which stage failed — "error sending request",
+/// "error decoding response body". Every cause worth reading is in the source
+/// chain behind it.
+fn describe(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut parts = vec![e.to_string()];
+    let mut source = e.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !parts.iter().any(|p| p == &text) {
+            parts.push(text);
+        }
+        source = cause.source();
+    }
+    parts.join(": ")
 }
 
 #[derive(Deserialize)]
@@ -195,7 +298,7 @@ async fn read_sse_response<S, B, E>(
 where
     S: futures_util::Stream<Item = Result<B, E>>,
     B: AsRef<[u8]>,
-    E: std::error::Error,
+    E: std::error::Error + Send + Sync + 'static,
 {
     let mut events = Box::pin(stream.eventsource());
     let mut seq: u32 = 0;
@@ -209,18 +312,23 @@ where
 
     loop {
         let next = match idle_timeout {
-            Some(t) => tokio::time::timeout(t, events.next())
-                .await
-                .map_err(|_| PushError {
-                    message: format!("no stream event within {t:?}"),
-                    retryable: true,
-                })?,
+            Some(t) => tokio::time::timeout(t, events.next()).await.map_err(|_| {
+                PushError::retryable(
+                    ErrorCode::WorkerUnreachable,
+                    format!("no stream event within {t:?}"),
+                )
+            })?,
             None => events.next().await,
         };
         let Some(event) = next else { break };
-        let event = event.map_err(|e| PushError {
-            message: format!("failed to read streaming worker response: {e}"),
-            retryable: true,
+        let event = event.map_err(|e| {
+            PushError::retryable(
+                ErrorCode::WorkerUnreachable,
+                format!(
+                    "reading the streaming worker response failed: {}",
+                    describe(&e)
+                ),
+            )
         })?;
 
         match event.event.as_str() {
@@ -232,46 +340,34 @@ where
                     }
                 }
                 None => {
-                    let delta: StreamDelta =
-                        serde_json::from_str(&event.data).map_err(|e| PushError {
-                            message: format!("failed to parse llm.token.delta frame: {e}"),
-                            retryable: false,
-                        })?;
+                    let delta: StreamDelta = json::from_str("llm.token.delta frame", &event.data)?;
                     publish_worker_delta(decision, delta, &token_delta_transport, &mut seq).await?;
                 }
             },
             "decision.result" => {
-                return serde_json::from_str::<Option<DecisionResponse>>(&event.data)
-                    .map(Option::unwrap_or_default)
-                    .map_err(|e| PushError {
-                        message: format!("failed to parse decision.result frame: {e}"),
-                        retryable: false,
-                    });
+                return parse_decision(decision, event.data.as_bytes())
+                    .map(Option::unwrap_or_default);
             }
             "decision.error" => {
-                let err: DecisionError =
-                    serde_json::from_str(&event.data).map_err(|e| PushError {
-                        message: format!("failed to parse decision.error frame: {e}"),
-                        retryable: false,
-                    })?;
-                return Err(PushError {
-                    message: err.message,
-                    retryable: err.retryable,
-                });
+                let err: DecisionError = json::from_str("decision.error frame", &event.data)?;
+                return Err(PushError::fatal(ErrorCode::HandlerError, err.message)
+                    .retryable_if(err.retryable)
+                    .with_detail(
+                        serde_json::json!({ "frame": json::excerpt(event.data.as_bytes()) }),
+                    ));
             }
             other => {
-                return Err(PushError {
-                    message: format!("unknown worker stream event: {other}"),
-                    retryable: false,
-                });
+                return Err(PushError::fatal(ErrorCode::InvalidResponse, format!(
+                    "unknown worker stream event `{other}`; expected llm.token.delta, decision.result or decision.error"
+                )));
             }
         }
     }
 
-    Err(PushError {
-        message: "streaming worker response ended before decision.result".to_string(),
-        retryable: true,
-    })
+    Err(PushError::retryable(
+        ErrorCode::HandlerError,
+        "streaming worker response ended before decision.result",
+    ))
 }
 
 async fn publish_worker_delta(
@@ -287,17 +383,20 @@ async fn publish_worker_delta(
         ..
     } = &decision.trigger
     else {
-        return Err(PushError {
-            message: "llm.token.delta is only valid for llm.execute decisions".to_string(),
-            retryable: false,
-        });
+        return Err(PushError::fatal(
+            ErrorCode::InvalidResponse,
+            format!(
+                "llm.token.delta is only valid for an llm.execute decision; this one answers {}",
+                decision.trigger.kind()
+            ),
+        ));
     };
 
     if !stream {
-        return Err(PushError {
-            message: "llm.token.delta received for a non-streaming llm call".to_string(),
-            retryable: false,
-        });
+        return Err(PushError::fatal(
+            ErrorCode::InvalidResponse,
+            "llm.token.delta received for a call the engine did not ask to stream",
+        ));
     }
 
     token_delta_transport
@@ -484,7 +583,7 @@ mod tests {
         let err = read_sse_response(chunked(body), &decision, transport, None)
             .await
             .expect_err("a decision.error frame should fail the read");
-        assert_eq!(err.message, "handler threw");
+        assert_eq!(err.error.message, "handler threw");
         assert!(!err.retryable);
     }
 

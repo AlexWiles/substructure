@@ -18,10 +18,10 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
-use crate::protocol::DecisionResponse;
+use crate::protocol::{DecisionResponse, ErrorCode};
 use crate::session::wire::resolve_response;
 use crate::worker::directory::declared;
-use crate::worker::push::{PushTransport, TransportRegistry};
+use crate::worker::push::{PushError, PushTransport, TransportRegistry};
 use crate::worker::{
     AgentDirectory, DequeueFilter, FailDecision, SubmitDecision, WorkerDecisionRequest,
 };
@@ -162,7 +162,8 @@ async fn decide(runtime: &Runtime, router: &Router, decision: WorkerDecisionRequ
         // now rather than climbing a ten-minute retry ladder.
         Err(e) => {
             tracing::warn!(agent_id = %decision.agent_id, error = %e, "decision is unroutable");
-            record_failure(runtime, &decision, &tenant_id, e, false).await;
+            let failure = PushError::fatal(ErrorCode::Unroutable, e);
+            record_failure(runtime, &decision, &tenant_id, failure).await;
         }
         Ok(Route::Engine) => decide_in_engine(runtime, decision, &tenant_id).await,
         Ok(Route::Push(transport)) => {
@@ -173,9 +174,11 @@ async fn decide(runtime: &Runtime, router: &Router, decision: WorkerDecisionRequ
                     tracing::warn!(
                         decision_id = %decision.decision_id,
                         error = %e,
+                        code = ?e.error.code,
+                        param = ?e.error.param,
                         "push dispatch failed"
                     );
-                    record_failure(runtime, &decision, &tenant_id, e.message, e.retryable).await;
+                    record_failure(runtime, &decision, &tenant_id, e).await;
                 }
             }
         }
@@ -187,14 +190,15 @@ async fn decide(runtime: &Runtime, router: &Router, decision: WorkerDecisionRequ
 /// answer, so it fails loudly instead of quietly climbing the ladder.
 async fn decide_in_engine(runtime: &Runtime, decision: WorkerDecisionRequest, tenant_id: &str) {
     let span = decision.span.child("engine_decide");
-    if is_empty(&decision.proposed) {
+    if decision.proposed.authors_nothing() {
         let error = format!(
             "the engine has no proposal for `{}`, and no worker is attached to agent `{}`",
             decision.trigger.kind(),
             decision.agent_id
         );
         tracing::warn!(decision_id = %decision.decision_id, %error, "engine cannot decide");
-        record_failure(runtime, &decision, tenant_id, error, false).await;
+        let failure = PushError::fatal(ErrorCode::Unroutable, error);
+        record_failure(runtime, &decision, tenant_id, failure).await;
         return;
     }
     tracing::debug!(
@@ -209,15 +213,6 @@ async fn decide_in_engine(runtime: &Runtime, decision: WorkerDecisionRequest, te
     submit(runtime, decision, tenant_id, proposed, "engine_decide").await;
 }
 
-/// A proposal that authors nothing. Echoing it would settle the decision as a
-/// silent no-op.
-fn is_empty(proposed: &DecisionResponse) -> bool {
-    proposed.messages.is_empty()
-        && proposed.actions.is_empty()
-        && proposed.state.is_none()
-        && proposed.agent.is_none()
-}
-
 /// Record the failure now: the queue never redelivers a dequeued decision, so an
 /// unrecorded failure hangs its turn until the decision's deadline. `retryable`
 /// comes from the transport — a 4xx or an unparseable reply won't get better on a
@@ -226,8 +221,7 @@ async fn record_failure(
     runtime: &Runtime,
     decision: &WorkerDecisionRequest,
     tenant_id: &str,
-    error: String,
-    retryable: bool,
+    error: PushError,
 ) {
     let failed = runtime
         .fail_decision(FailDecision {
@@ -236,8 +230,8 @@ async fn record_failure(
                 tenant_id: tenant_id.to_string(),
             },
             decision_id: decision.decision_id.clone(),
-            error,
-            retryable,
+            error: error.error,
+            retryable: error.retryable,
             span: decision.span.child("push_fail_decision"),
         })
         .await;
@@ -273,7 +267,12 @@ async fn submit(
                 error = %e,
                 "unresolvable decision"
             );
-            record_failure(runtime, &decision, tenant_id, e.to_string(), false).await;
+            let mut failure =
+                PushError::fatal(ErrorCode::InvalidResponse, e.to_string()).with_detail(e.detail());
+            if let Some(param) = e.param() {
+                failure = failure.with_param(param);
+            }
+            record_failure(runtime, &decision, tenant_id, failure).await;
             return;
         }
     };

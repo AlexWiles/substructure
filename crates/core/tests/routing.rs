@@ -16,8 +16,8 @@ use substructure_core::llm::{
     LlmProviderRegistry, LlmProviderTrait, LlmTask,
 };
 use substructure_core::protocol::{
-    AgentConfig, ClientInput, Content, DraftMessage, LlmRequest, LlmResponse, Role, SessionOwner,
-    SubAgent, ToolCall, ToolCallFunction,
+    AgentConfig, ClientInput, Content, DraftMessage, ErrorCode, LlmRequest, LlmResponse, Role,
+    SessionOwner, SubAgent, ToolCall, ToolCallFunction,
 };
 use substructure_core::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use substructure_core::providers::sqlite::{
@@ -227,7 +227,40 @@ async fn start(agents: BTreeMap<String, AgentEntry>) -> Harness {
 }
 
 /// Send one user message and drain the turn, returning its events.
+///
+/// Stops at the first terminal. A non-retryable decision failure counts as one:
+/// a `session.start` that fails before any turn opens never emits
+/// `TurnCompleted`, so waiting for one would just time out.
 async fn turn(h: &Harness, agent_id: &str, text: &str) -> Vec<EventPayload> {
+    drain(h, agent_id, text, |e| {
+        matches!(
+            e,
+            EventPayload::TurnCompleted(_)
+                | EventPayload::DecisionErrored(DecisionErrored {
+                    retryable: false,
+                    ..
+                })
+        )
+    })
+    .await
+}
+
+/// [`turn`], draining until the turn's own terminal. A failure emits its
+/// `DecisionErrored` and its `TurnCompleted` in one commit, so a test that
+/// wants the second must not stop at the first.
+async fn turn_completed(h: &Harness, agent_id: &str, text: &str) -> Vec<EventPayload> {
+    drain(h, agent_id, text, |e| {
+        matches!(e, EventPayload::TurnCompleted(_))
+    })
+    .await
+}
+
+async fn drain(
+    h: &Harness,
+    agent_id: &str,
+    text: &str,
+    stop: impl Fn(&EventPayload) -> bool,
+) -> Vec<EventPayload> {
     let session_id = uuid::Uuid::now_v7().to_string();
     let caller = Caller::System {
         tenant_id: TENANT.to_string(),
@@ -278,16 +311,7 @@ async fn turn(h: &Harness, agent_id: &str, text: &str) -> Vec<EventPayload> {
     let mut seen = Vec::new();
     let drained = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         while let Some(event) = events.recv().await {
-            // A non-retryable decision failure ends the turn as surely as a
-            // completion; without it an unroutable agent would just time out.
-            let terminal = matches!(
-                event.payload,
-                EventPayload::TurnCompleted(_)
-                    | EventPayload::DecisionErrored(DecisionErrored {
-                        retryable: false,
-                        ..
-                    })
-            );
+            let terminal = stop(&event.payload);
             seen.push(event.payload);
             if terminal {
                 return;
@@ -346,14 +370,14 @@ async fn an_undeclared_agent_fails_fast() {
     });
     let failed = failed.expect("the decision fails: {events:#?}");
     assert!(
-        failed.error.contains("no [agent.assistnat]"),
+        failed.error.message.contains("no [agent.assistnat]"),
         "the error names the file and the agent; got {}",
-        failed.error
+        failed.error.message
     );
     assert!(
-        failed.error.contains("assistant"),
+        failed.error.message.contains("assistant"),
         "and says what was declared; got {}",
-        failed.error
+        failed.error.message
     );
     assert!(h.model.seen.lock().unwrap().is_empty(), "no model call");
 }
@@ -437,6 +461,210 @@ async fn echo_worker() -> StubWorker {
         seen,
         _handle: handle,
     }
+}
+
+// ── What a broken worker tells the operator ──────────────────────────────
+
+/// A worker that answers every decision with `status` and `body`, whatever
+/// those are — the shapes a handler produces when it breaks rather than
+/// decides.
+async fn broken_worker(status: u16, body: &'static str) -> StubWorker {
+    use axum::http::{header, StatusCode};
+    use axum::routing::post;
+    use axum::Router;
+
+    let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder = seen.clone();
+    let app = Router::new().route(
+        "/agent",
+        post(move |axum::Json(req): axum::Json<serde_json::Value>| {
+            let recorder = recorder.clone();
+            async move {
+                recorder.lock().unwrap().push(req);
+                (
+                    StatusCode::from_u16(status).unwrap(),
+                    [(header::CONTENT_TYPE, "application/json")],
+                    body,
+                )
+            }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    StubWorker {
+        addr,
+        seen,
+        _handle: handle,
+    }
+}
+
+/// The events a broken worker produces, end to end.
+async fn events_from(status: u16, body: &'static str) -> Vec<EventPayload> {
+    let worker = broken_worker(status, body).await;
+    let h = start(BTreeMap::from([(
+        "triage".to_string(),
+        worker_hosted("claude", &worker.url()),
+    )]))
+    .await;
+    turn(&h, "triage", "hi").await
+}
+
+/// The decision error a broken worker produces, end to end.
+async fn failure_from(status: u16, body: &'static str) -> DecisionErrored {
+    let events = events_from(status, body).await;
+    events
+        .iter()
+        .find_map(|e| match e {
+            EventPayload::DecisionErrored(f) => Some(f.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the decision fails: {events:#?}"))
+}
+
+/// A worker whose own configuration is wrong says so in its body. Reporting
+/// only the status leaves the operator with a number, and that number is what
+/// reaches Slack.
+#[tokio::test]
+async fn a_worker_error_body_reaches_the_decision_error() {
+    let failed = failure_from(400, r#"{"error":"ANTHROPIC_API_KEY is not set"}"#).await;
+    assert!(
+        failed
+            .error
+            .message
+            .contains("ANTHROPIC_API_KEY is not set"),
+        "the worker's own message comes through; got {}",
+        failed.error.message
+    );
+    assert!(
+        failed.error.message.contains("400"),
+        "and the status it came with; got {}",
+        failed.error.message
+    );
+    assert_eq!(failed.error.detail.as_ref().unwrap()["status"], 400);
+}
+
+/// A handler that catches its own exception and answers `{"error": …}` with a
+/// 200 knows why it failed. That sentence is worth more than the parse failure
+/// its non-protocol shape would otherwise produce.
+#[tokio::test]
+async fn an_error_shaped_body_is_reported_as_the_workers_error() {
+    let failed = failure_from(200, r#"{"error":"llm block `claud` is not configured"}"#).await;
+    assert!(
+        failed
+            .error
+            .message
+            .contains("llm block `claud` is not configured"),
+        "got {}",
+        failed.error.message
+    );
+    assert!(
+        !failed.error.message.contains("invalid decision response"),
+        "an error body is the worker's failure, not a parse failure; got {}",
+        failed.error.message
+    );
+}
+
+/// The reported bug: every malformed decision said "failed to parse response:
+/// error decoding response body" — reqwest's constant, with serde's own message
+/// one link down a source chain nobody printed.
+#[tokio::test]
+async fn a_malformed_decision_names_the_field_that_failed() {
+    let failed = failure_from(
+        200,
+        r#"{"messages":[],"actions":[{"type":"llm.call","model":17}]}"#,
+    )
+    .await;
+    assert!(
+        failed.error.message.contains("invalid type") || failed.error.message.contains("expected"),
+        "the error says what was wrong; got {}",
+        failed.error.message
+    );
+    assert!(
+        failed.error.message.contains("17"),
+        "and quotes the value that was wrong, as Stripe quotes `cus_123`; got {}",
+        failed.error.message
+    );
+    assert!(!failed.retryable, "the same bytes parse the same way");
+    // An action is an internally-tagged enum, so serde buffers its body and the
+    // param stops at the element rather than reaching `.model`.
+    assert_eq!(failed.error.param.as_deref(), Some("actions[0]"));
+    assert!(
+        !failed.error.message.contains("{"),
+        "the raw body is never quoted into the message; got {}",
+        failed.error.message
+    );
+    assert!(
+        failed.error.detail.is_none(),
+        "nor into the event that is persisted and streamed; got {:?}",
+        failed.error.detail
+    );
+}
+
+/// `TurnCompleted` is the only terminal every consumer watches, so it is where
+/// a renderer decides how a failure reads. Carrying only the sentence forced
+/// one to match on prose to tell a budget failure from a malformed decision.
+#[tokio::test]
+async fn the_turn_terminal_carries_the_failure_code() {
+    let worker = broken_worker(
+        200,
+        r#"{"messages":[],"actions":[{"type":"llm.call","model":17}]}"#,
+    )
+    .await;
+    let h = start(BTreeMap::from([(
+        "triage".to_string(),
+        worker_hosted("claude", &worker.url()),
+    )]))
+    .await;
+    let events = turn_completed(&h, "triage", "hi").await;
+    let completed = events
+        .iter()
+        .find_map(|e| match e {
+            EventPayload::TurnCompleted(t) => Some(t),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the turn ends: {events:#?}"));
+
+    assert_eq!(
+        completed.error.as_ref().unwrap().code,
+        ErrorCode::InvalidResponse
+    );
+    assert_eq!(
+        completed.error.as_ref().unwrap().param.as_deref(),
+        Some("actions[0]")
+    );
+    assert!(
+        completed
+            .error
+            .as_ref()
+            .is_some_and(|e| e.message.contains("invalid decision response")),
+        "the sentence still rides along; got {:?}",
+        completed.error
+    );
+}
+
+/// An `llm` block the file does not declare is the misconfiguration a worker
+/// hits most, and the engine — not the worker — is the only party that knows
+/// what *was* declared.
+#[tokio::test]
+async fn an_unknown_llm_block_names_the_blocks_that_exist() {
+    let failed = failure_from(
+        200,
+        r#"{"messages":[],"actions":[{"type":"llm.call","llm":"claud","model":"m"}]}"#,
+    )
+    .await;
+    assert!(
+        failed.error.message.contains("claud") && failed.error.message.contains("claude"),
+        "the error names what was asked for and what exists; got {}",
+        failed.error.message
+    );
+    assert_eq!(failed.error.param.as_deref(), Some("llm"));
+    let detail = failed.error.detail.as_ref().expect("a structured detail");
+    assert_eq!(detail["reason"], "unknown_llm");
+    assert_eq!(detail["name"], "claud");
 }
 
 /// A section that declares nothing but a `worker` URL seeds no config, so its

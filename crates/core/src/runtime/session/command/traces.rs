@@ -624,7 +624,7 @@ fn flow_connector_failure_releases_the_gate() -> Trace {
             EffectKind::ConnectorSync,
             "conn-1".to_string(),
             Some(0),
-            SettleError::new("unreachable", false).reauth(true),
+            SettleError::new(ErrorInfo::internal("unreachable"), false).reauth(true),
         ),
         &system(),
     );
@@ -905,7 +905,7 @@ fn flow_decision_failure() -> Trace {
             EffectKind::Decision,
             decision_id.clone(),
             None,
-            SettleError::new("worker down".to_string(), true),
+            SettleError::new(ErrorInfo::internal("worker down".to_string()), true),
         ),
         &system(),
     );
@@ -924,7 +924,7 @@ fn flow_decision_failure() -> Trace {
             EffectKind::Decision,
             decision_id,
             None,
-            SettleError::new("worker down".to_string(), true),
+            SettleError::new(ErrorInfo::internal("worker down".to_string()), true),
         ),
         &system(),
     );
@@ -1169,7 +1169,7 @@ fn flow_sub_agent_delegation() -> Trace {
             EffectKind::SubAgent,
             "child-2".to_string(),
             None,
-            SettleError::new("spawn failed".to_string(), false),
+            SettleError::new(ErrorInfo::internal("spawn failed".to_string()), false),
         ),
         &system(),
     );
@@ -1290,8 +1290,10 @@ fn flow_direct_commands_then_cancel() -> Trace {
             EffectKind::LlmCall,
             "call-1".to_string(),
             Some(0),
-            SettleError::new("provider down".to_string(), false)
-                .with_detail(Some(ErrorCode::ProviderError), None),
+            SettleError::new(
+                ErrorInfo::new(ErrorCode::ProviderError, "provider down"),
+                false,
+            ),
         ),
         &system(),
     );
@@ -1312,7 +1314,7 @@ fn flow_direct_commands_then_cancel() -> Trace {
             EffectKind::ToolCall,
             "tc-1".to_string(),
             Some(0),
-            SettleError::new("tool down".to_string(), false),
+            SettleError::new(ErrorInfo::internal("tool down".to_string()), false),
         ),
         &system(),
     );

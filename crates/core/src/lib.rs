@@ -1,3 +1,4 @@
+pub mod json;
 pub mod protocol;
 pub mod runtime;
 mod shard;

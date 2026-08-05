@@ -35,7 +35,7 @@ use super::state::EffectState;
 use super::tool_contract::{declared_tool, DeclaredTool};
 use crate::protocol::{
     AgentConfig, ClientContext, Content, DecisionAction, DecisionResponse, DecisionTrigger,
-    DraftMessage, ErrorCode, Message, Role, ToolCall,
+    DraftMessage, ErrorInfo, Message, Role, ToolCall,
 };
 
 pub fn propose(
@@ -66,15 +66,8 @@ pub fn propose(
             ok,
             truncated,
             error,
-            code,
             ..
-        } if !*ok || *truncated => Some(llm_failed(
-            id,
-            error.as_deref(),
-            code,
-            *truncated,
-            transcript,
-        )),
+        } if !*ok || *truncated => Some(llm_failed(id, error.as_ref(), *truncated, transcript)),
         DecisionTrigger::ToolFinished {
             id,
             ok,
@@ -84,9 +77,7 @@ pub fn propose(
         } => tool_finished(
             id,
             name,
-            if *ok { result } else { error }
-                .as_deref()
-                .unwrap_or_default(),
+            &settled_text(*ok, result, error),
             transcript,
             llm_calls,
             pending_calls,
@@ -101,9 +92,7 @@ pub fn propose(
         } => tool_finished(
             id,
             agent_id,
-            if *ok { result } else { error }
-                .as_deref()
-                .unwrap_or_default(),
+            &settled_text(*ok, result, error),
             transcript,
             llm_calls,
             pending_calls,
@@ -313,10 +302,21 @@ fn unconfigured(view: &[DraftMessage]) -> DecisionResponse {
 /// not news the model can react to, and `done` would unilaterally end a turn
 /// that may be salvageable. Nothing is recorded — a truncation's partial
 /// message lives durably on the finished event.
+/// What a settled call reads as to the model: its result when it worked, the
+/// failure's sentence when it did not.
+fn settled_text(ok: bool, result: &Option<String>, error: &Option<ErrorInfo>) -> String {
+    match ok {
+        true => result.clone().unwrap_or_default(),
+        false => error
+            .as_ref()
+            .map(|e| e.message.clone())
+            .unwrap_or_default(),
+    }
+}
+
 fn llm_failed(
     id: &str,
-    error: Option<&str>,
-    code: &Option<ErrorCode>,
+    error: Option<&ErrorInfo>,
     truncated: bool,
     transcript: &[Message],
 ) -> DecisionResponse {
@@ -334,7 +334,6 @@ fn llm_failed(
                 "type": "llm.failed",
                 "id": id,
                 "error": error,
-                "code": code,
                 "truncated": truncated,
             }),
         }],
@@ -455,6 +454,7 @@ mod tests {
     use chrono::Utc;
 
     use super::*;
+    use crate::protocol::ErrorCode;
     use crate::protocol::{
         AgentTool, Handler, LlmRequest, RetryPolicy, SubAgent, ToolCallFunction, ToolInput,
     };
@@ -524,8 +524,6 @@ mod tests {
             usage: None,
             cost: None,
             error: None,
-            code: None,
-            detail: None,
         }
     }
 
@@ -535,7 +533,7 @@ mod tests {
             ok: outcome.is_ok(),
             name: name.to_string(),
             result: outcome.ok().map(str::to_string),
-            error: outcome.err().map(str::to_string),
+            error: outcome.err().map(ErrorInfo::handler),
         }
     }
 
@@ -709,9 +707,7 @@ mod tests {
             truncated: false,
             usage: None,
             cost: None,
-            error: Some("rate limited".to_string()),
-            code: Some(ErrorCode::RateLimited),
-            detail: None,
+            error: Some(ErrorInfo::new(ErrorCode::RateLimited, "rate limited")),
         };
         let p = propose(&trigger, &[], &HashMap::new(), 0, None, "d0").expect("proposes");
         match &p.actions[..] {
@@ -719,8 +715,8 @@ mod tests {
                 reason, payload, ..
             }] => {
                 assert_eq!(reason, "llm call failed: rate limited");
-                assert_eq!(payload["error"], serde_json::json!("rate limited"));
-                assert_eq!(payload["code"], serde_json::json!("rate_limited"));
+                assert_eq!(payload["error"]["message"], "rate limited");
+                assert_eq!(payload["error"]["code"], "rate_limited");
             }
             other => panic!("expected an interrupt; got {other:?}"),
         }

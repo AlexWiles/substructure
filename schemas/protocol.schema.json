@@ -1206,9 +1206,13 @@
           "additionalProperties": false,
           "properties": {
             "error": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ErrorInfo"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "id": {
@@ -1291,16 +1295,6 @@
         {
           "additionalProperties": false,
           "properties": {
-            "code": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/ErrorCode"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
             "cost": {
               "pattern": "^-?\\d+(\\.\\d+)?$",
               "type": [
@@ -1308,11 +1302,14 @@
                 "null"
               ]
             },
-            "detail": {},
             "error": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ErrorInfo"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "id": {
@@ -1355,9 +1352,13 @@
               "type": "string"
             },
             "error": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ErrorInfo"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "id": {
@@ -1629,15 +1630,50 @@
       "title": "EffectStatus"
     },
     "ErrorCode": {
+      "description": "What kind of failure, for a consumer that branches instead of reading the\nsentence. A closed set, and required on every [`ErrorInfo`]: an optional\ncode is one nobody fills in, which leaves every consumer handling a `None`\nthat should not exist.\n\n`provider_error`, `rate_limited`, `refused`, `budget_exceeded` and\n`deadline_exceeded` describe a call that ran and went wrong.\n`invalid_response` — a document did not parse, or parsed into something\nunusable. `handler_error` — whoever was asked to do the work (a worker, a\nclient) reported a failure of its own. `worker_unreachable` — it was never\nreached. `unroutable` — nothing could decide. `internal` — the engine's own\nfault, and the honest answer when nothing else fits.",
       "enum": [
         "provider_error",
         "rate_limited",
         "refused",
         "budget_exceeded",
-        "deadline_exceeded"
+        "deadline_exceeded",
+        "invalid_response",
+        "handler_error",
+        "worker_unreachable",
+        "unroutable",
+        "internal"
       ],
       "title": "ErrorCode",
       "type": "string"
+    },
+    "ErrorInfo": {
+      "additionalProperties": false,
+      "description": "Why something failed. One shape on every event, on the wire, and in the\ninternal carriers that produce them — shaped after a Stripe API error.\n\n`retryable` is deliberately absent: whether to try again is a decision the\nengine makes about one attempt, not a fact about the failure, and it is\nmeaningless on a terminal like `turn.completed`. It rides on the events\nthat settle an attempt instead.",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "detail": {
+          "description": "Small structured particulars: a status, the llm blocks that exist."
+        },
+        "message": {
+          "description": "One engine-authored sentence, safe to show a human. Never a raw\ndocument — an unbounded body belongs in the log.",
+          "type": "string"
+        },
+        "param": {
+          "description": "The one input to go and fix, when the failure names one: `agent.llm`,\n`actions[0].type`. Stripe's `param`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "message",
+        "code"
+      ],
+      "title": "ErrorInfo",
+      "type": "object"
     },
     "FileData": {
       "additionalProperties": false,

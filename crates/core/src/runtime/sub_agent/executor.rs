@@ -14,6 +14,7 @@ use crate::runtime::span::SpanContext;
 use crate::runtime::Caller;
 
 use super::SubAgentTask;
+use crate::protocol::ErrorInfo;
 
 pub fn spawn_sub_agent_task_executor(
     store: Arc<dyn EventStore>,
@@ -130,15 +131,19 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
                     match open_child(store, &tenant_id, &child_session_id, message, &span).await {
                         Ok(()) => Outcome::SubAgentStarted,
                         Err(err) => SettleError::new(
-                            format!("failed to send the child's opening message: {err}"),
+                            ErrorInfo::internal(format!(
+                                "failed to send the child's opening message: {err}"
+                            )),
                             false,
                         )
                         .into(),
                     }
                 }
-                Err(err) => {
-                    SettleError::new(format!("failed to create child session: {err}"), false).into()
-                }
+                Err(err) => SettleError::new(
+                    ErrorInfo::internal(format!("failed to create child session: {err}")),
+                    false,
+                )
+                .into(),
             };
             let parent_command = CommandPayload::settle(
                 EffectKind::SubAgent,

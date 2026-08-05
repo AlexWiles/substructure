@@ -75,7 +75,7 @@ impl KindSpec for DecisionSpec {
     /// the run ends. A failed `turn.finished` still completes its turn: the
     /// output is durable, the finalizer is not.
     fn terminal(&self, state: &SessionState, _id: &str, e: &SettleError) -> Vec<EventPayload> {
-        state.fail_run(e.error.clone())
+        state.fail_run(e)
     }
 
     /// A decision left the queue at its first dispatch, so the walk cannot see

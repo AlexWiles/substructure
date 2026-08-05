@@ -47,7 +47,7 @@ use super::state::{
     new_call_id, EffectKind, EffectPayload, EffectTracking, QueueEntry, SessionState,
 };
 use crate::connectors::RemoteTool;
-use crate::protocol::{EffectStatus, ErrorCode, LlmResponse};
+use crate::protocol::{EffectStatus, ErrorCode, ErrorInfo, LlmResponse};
 use crate::runtime::Caller;
 
 pub mod connector;
@@ -75,37 +75,23 @@ pub enum Outcome {
     Error(SettleError),
 }
 
-/// A failed settle. `code`/`detail` are LLM-only and `needs_reauth` is
-/// connector-only; each is absent for every other kind rather than modelled as
-/// its own command.
+/// A failed settle: the failure itself, plus what the engine decided about
+/// this attempt. `needs_reauth` is connector-only, absent for every other kind
+/// rather than modelled as its own command.
 #[derive(Debug, Clone)]
 pub struct SettleError {
-    pub error: String,
+    pub error: ErrorInfo,
     pub retryable: bool,
-    pub code: Option<ErrorCode>,
-    pub detail: Option<serde_json::Value>,
     pub needs_reauth: bool,
 }
 
 impl SettleError {
-    pub fn new(error: impl Into<String>, retryable: bool) -> Self {
+    pub fn new(error: ErrorInfo, retryable: bool) -> Self {
         Self {
-            error: error.into(),
+            error,
             retryable,
-            code: None,
-            detail: None,
             needs_reauth: false,
         }
-    }
-
-    pub fn with_detail(
-        mut self,
-        code: Option<ErrorCode>,
-        detail: Option<serde_json::Value>,
-    ) -> Self {
-        self.code = code;
-        self.detail = detail;
-        self
     }
 
     pub fn reauth(mut self, needs_reauth: bool) -> Self {
@@ -182,7 +168,10 @@ pub trait KindSpec: Sync {
     /// effect that lapsed is not: the bound covers every attempt and the backoff
     /// between them, so there is no budget left to retry into.
     fn timeout_error(&self, total: bool) -> SettleError {
-        SettleError::new(DEADLINE, !total)
+        SettleError::new(
+            ErrorInfo::new(ErrorCode::DeadlineExceeded, DEADLINE),
+            !total,
+        )
     }
 
     // ── Starting ────────────────────────────────────────────────────────

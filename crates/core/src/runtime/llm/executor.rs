@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::protocol::{ErrorCode, StreamDelta, TokenDelta};
+use crate::protocol::{ErrorCode, ErrorInfo, StreamDelta, TokenDelta};
 use crate::providers::memory_queue::TaskQueue;
 use crate::runtime::event_store::EventStore;
 use crate::runtime::session::command::{CommandPayload, Outcome, SettleError};
@@ -64,9 +64,7 @@ pub fn spawn_llm_task_executor(
                         };
                         let outcome = match result {
                             Ok(response) => Outcome::Llm(Box::new(response)),
-                            Err(err) => SettleError::new(err.message, err.retryable)
-                                .with_detail(err.code, err.detail)
-                                .into(),
+                            Err(err) => SettleError::new(err.error, err.retryable).into(),
                         };
                         CommandPayload::settle(
                             EffectKind::LlmCall,
@@ -79,8 +77,7 @@ pub fn spawn_llm_task_executor(
                         EffectKind::LlmCall,
                         task.call_id.clone(),
                         Some(task.attempt),
-                        SettleError::new(err, false)
-                            .with_detail(Some(ErrorCode::ProviderError), None),
+                        SettleError::new(ErrorInfo::new(ErrorCode::ProviderError, err), false),
                     ),
                 };
 

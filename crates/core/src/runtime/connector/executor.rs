@@ -14,6 +14,7 @@ use crate::runtime::span::SpanContext;
 use crate::runtime::Caller;
 
 use super::ConnectorTask;
+use crate::protocol::{ErrorCode, ErrorInfo};
 
 pub fn spawn_connector_task_executor(
     store: Arc<dyn EventStore>,
@@ -69,7 +70,11 @@ async fn handle_task(store: &dyn EventStore, connections: &Connections, task: Co
                     EffectKind::ConnectorSync,
                     connection_id.clone(),
                     Some(attempt),
-                    SettleError::new(err.message.clone(), err.retryable).reauth(err.needs_reauth),
+                    SettleError::new(
+                        ErrorInfo::new(ErrorCode::HandlerError, err.message.clone()),
+                        err.retryable,
+                    )
+                    .reauth(err.needs_reauth),
                 ),
             };
             submit(
@@ -121,7 +126,11 @@ fn settle_call(
     result: Result<ToolOutcome, ConnectorError>,
 ) -> CommandPayload {
     let outcome = match result {
-        Ok(outcome) if outcome.is_error => SettleError::new(outcome.content, false).into(),
+        Ok(outcome) if outcome.is_error => SettleError::new(
+            ErrorInfo::new(ErrorCode::HandlerError, outcome.content),
+            false,
+        )
+        .into(),
         // Prefer the structured form when the connection sent one: it round
         // trips through a declared `output` schema, where rendered text would not.
         Ok(outcome) => Outcome::Tool {
@@ -130,7 +139,11 @@ fn settle_call(
                 None => outcome.content,
             },
         },
-        Err(err) => SettleError::new(err.message, err.retryable).into(),
+        Err(err) => SettleError::new(
+            ErrorInfo::new(ErrorCode::HandlerError, err.message),
+            err.retryable,
+        )
+        .into(),
     };
     CommandPayload::settle(EffectKind::ToolCall, tool_call_id, Some(attempt), outcome)
 }
@@ -193,7 +206,7 @@ mod tests {
                 outcome: Outcome::Error(e),
                 ..
             } => {
-                assert_eq!(e.error, "no such issue");
+                assert_eq!(e.error.message, "no such issue");
                 assert!(!e.retryable, "the tool ran; running it again says the same");
             }
             other => panic!("expected a terminal failure; got {other:?}"),

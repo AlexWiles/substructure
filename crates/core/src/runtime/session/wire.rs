@@ -28,8 +28,8 @@ use super::state::{new_call_id, new_message_id, EffectState};
 use super::tool_contract::{classify_arguments, declared_tool, DeclaredTool};
 use crate::protocol::{
     AgentConfig, DecisionAction, DecisionRequest, DecisionResponse, DecisionTrigger, DraftMessage,
-    Handler, InterruptResumption, LlmFormat, LlmRequest, LlmResponse, Message, MessageTree,
-    RetryPolicy, WorkerIdentity, WorkerState,
+    ErrorInfo, Handler, InterruptResumption, LlmFormat, LlmRequest, LlmResponse, Message,
+    MessageTree, RetryPolicy, WorkerIdentity, WorkerState,
 };
 use crate::runtime::llm::LlmBlocks;
 use crate::runtime::retry::RetryTarget;
@@ -150,6 +150,43 @@ pub enum ResolveError {
     InvalidLlmResponse { message: String },
 }
 
+impl ResolveError {
+    /// The one field to go and fix, in the sense of Stripe's `param`.
+    pub fn param(&self) -> Option<String> {
+        Some(match self {
+            ResolveError::UnresolvableSettleId { kind } => format!("{kind}.result.id"),
+            ResolveError::MissingModel => "model".to_string(),
+            ResolveError::MissingLlm { .. } | ResolveError::UnknownLlm { .. } => "llm".to_string(),
+            ResolveError::InvalidHandler { .. } => "handler".to_string(),
+            ResolveError::InvalidLlmResponse { .. } => "response".to_string(),
+        })
+    }
+
+    /// The machine-readable form, for the error event's `detail`. A consumer
+    /// that wants to say "you named `claud`, did you mean `claude`?" needs the
+    /// names, not the sentence they were rendered into.
+    pub fn detail(&self) -> Value {
+        match self {
+            ResolveError::UnresolvableSettleId { kind } => {
+                serde_json::json!({ "reason": "unresolvable_settle_id", "kind": kind })
+            }
+            ResolveError::MissingModel => serde_json::json!({ "reason": "missing_model" }),
+            ResolveError::MissingLlm { declared } => {
+                serde_json::json!({ "reason": "missing_llm", "declared": declared })
+            }
+            ResolveError::UnknownLlm { name, declared } => {
+                serde_json::json!({ "reason": "unknown_llm", "name": name, "declared": declared })
+            }
+            ResolveError::InvalidHandler { surface, handler } => serde_json::json!({
+                "reason": "invalid_handler", "surface": surface, "handler": handler,
+            }),
+            ResolveError::InvalidLlmResponse { message } => {
+                serde_json::json!({ "reason": "invalid_llm_response", "message": message })
+            }
+        }
+    }
+}
+
 impl std::fmt::Display for ResolveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -239,7 +276,10 @@ fn parse_llm_response(
 ) -> Result<LlmResponse, ResolveError> {
     match format {
         Some(f) => f.response_from_wire(response),
-        None => serde_json::from_value(response).map_err(|e| e.to_string()),
+        // Path-aware: `llm.result` bodies are the deepest thing a worker
+        // authors, so "response does not parse" without a field name is the
+        // least actionable error the engine can give.
+        None => crate::json::from_value("llm.result response", response).map_err(|e| e.to_string()),
     }
     .map_err(|message| ResolveError::InvalidLlmResponse { message })
 }
@@ -419,10 +459,8 @@ fn lower_actions(
                     Action::ToolError {
                         id,
                         attempt,
-                        error,
+                        error: ErrorInfo::handler(error).or_code(code).or_detail(detail),
                         retryable,
-                        code,
-                        detail,
                     }
                 }
                 DecisionAction::LlmError {
@@ -437,10 +475,8 @@ fn lower_actions(
                     Action::LlmError {
                         id,
                         attempt,
-                        error,
+                        error: ErrorInfo::handler(error).or_code(code).or_detail(detail),
                         retryable,
-                        code,
-                        detail,
                     }
                 }
                 DecisionAction::SpawnSubAgent {
@@ -614,8 +650,6 @@ pub fn to_wire_trigger(
             usage,
             cost,
             error,
-            code,
-            detail,
         } => DecisionTrigger::LlmFinished {
             id,
             ok,
@@ -624,8 +658,6 @@ pub fn to_wire_trigger(
             usage,
             cost,
             error,
-            code,
-            detail,
         },
         Trigger::InterruptResumed {
             interrupt_id,

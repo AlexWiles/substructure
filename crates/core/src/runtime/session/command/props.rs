@@ -455,7 +455,7 @@ impl World {
                         EffectKind::Decision,
                         decision_id,
                         None,
-                        SettleError::new("boom", retryable),
+                        SettleError::new(ErrorInfo::internal("boom"), retryable),
                     ),
                     &system(),
                 );
@@ -489,7 +489,7 @@ impl World {
                         EffectKind::LlmCall,
                         call_id,
                         None,
-                        SettleError::new("boom", retryable),
+                        SettleError::new(ErrorInfo::internal("boom"), retryable),
                     )
                 };
                 self.run(cmd, &system());
@@ -517,7 +517,7 @@ impl World {
                         EffectKind::ToolCall,
                         tool_call_id,
                         None,
-                        SettleError::new("boom", retryable),
+                        SettleError::new(ErrorInfo::internal("boom"), retryable),
                     )
                 };
                 self.run(cmd, &system());
@@ -545,7 +545,7 @@ impl World {
                         EffectKind::SubAgent,
                         session_id,
                         None,
-                        SettleError::new("boom", retryable),
+                        SettleError::new(ErrorInfo::internal("boom"), retryable),
                     )
                 };
                 self.run(cmd, &system());
@@ -574,7 +574,7 @@ impl World {
                         EffectKind::ConnectorSync,
                         connection_id,
                         None,
-                        SettleError::new("boom", retryable),
+                        SettleError::new(ErrorInfo::internal("boom"), retryable),
                     )
                 };
                 self.run(cmd, &system());

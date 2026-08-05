@@ -374,7 +374,7 @@ fn a_result_violating_the_declared_output_schema_settles_as_an_error() {
         decision_with(&events, |t| matches!(
             t,
             Trigger::ToolFinished { id, ok: false, error: Some(e), .. }
-                if id == "tc-1" && e.contains("tool output violated its declared schema")
+                if id == "tc-1" && e.message.contains("tool output violated its declared schema")
         ))
         .is_some(),
         "the violation reaches the model as the tool's error; got {events:?}"
@@ -2260,7 +2260,7 @@ fn fail_llm_call_emits_errored() {
             EffectKind::LlmCall,
             "llm-1".to_string(),
             Some(0),
-            SettleError::new("provider down".to_string(), false).with_detail(None, None),
+            SettleError::new(ErrorInfo::internal("provider down".to_string()), false),
         ),
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -2341,7 +2341,7 @@ fn llm_retry_reuses_the_stored_prompt() {
             EffectKind::LlmCall,
             "llm-1".to_string(),
             Some(0),
-            SettleError::new("provider hiccup".to_string(), true).with_detail(None, None),
+            SettleError::new(ErrorInfo::internal("provider hiccup".to_string()), true),
         ),
         &system(),
     );
@@ -2595,7 +2595,7 @@ fn fail_tool_call_emits_errored() {
             EffectKind::ToolCall,
             "tc-1".to_string(),
             Some(0),
-            SettleError::new("boom".to_string(), false),
+            SettleError::new(ErrorInfo::internal("boom".to_string()), false),
         ),
         &machine,
     );
@@ -2774,7 +2774,7 @@ fn fail_sub_agent_emits_errored() {
             EffectKind::SubAgent,
             "child-1".to_string(),
             None,
-            SettleError::new("child crashed".to_string(), false),
+            SettleError::new(ErrorInfo::internal("child crashed".to_string()), false),
         ),
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -4333,7 +4333,7 @@ fn fail_worker_decision_emits_errored() {
             EffectKind::Decision,
             decision_id.clone(),
             None,
-            SettleError::new("worker offline".to_string(), false),
+            SettleError::new(ErrorInfo::internal("worker offline".to_string()), false),
         ),
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -4356,7 +4356,7 @@ fn fail_worker_decision_emits_errored() {
     let completed = turn_completed(&events).expect("the turn ends");
     assert_eq!(completed.turn_id, "turn-1");
     assert_eq!(
-        completed.error.as_deref(),
+        completed.error.as_ref().map(|e| e.message.as_str()),
         Some("worker offline"),
         "the turn carries the failure; got {completed:?}"
     );
@@ -5185,7 +5185,7 @@ fn machine_fails_worker_handled_llm_call() {
             EffectKind::LlmCall,
             "llm-1".to_string(),
             Some(0),
-            SettleError::new("boom".to_string(), false).with_detail(None, None),
+            SettleError::new(ErrorInfo::internal("boom".to_string()), false),
         ),
         &machine(),
     );
@@ -5757,7 +5757,7 @@ fn turn_finished_terminal_failure_completes_as_failed_run() {
             EffectKind::Decision,
             tf.clone(),
             None,
-            SettleError::new("worker crashed".to_string(), false),
+            SettleError::new(ErrorInfo::internal("worker crashed".to_string()), false),
         ),
         &machine(),
     );
@@ -5773,7 +5773,10 @@ fn turn_finished_terminal_failure_completes_as_failed_run() {
     let tc = turn_completed(&events).expect("a failed finalizer still completes the turn");
     assert_eq!(tc.turn_id, "t1");
     assert_eq!(tc.data, serde_json::json!("answer"), "output stays durable");
-    assert_eq!(tc.error.as_deref(), Some("worker crashed"));
+    assert_eq!(
+        tc.error.as_ref().map(|e| e.message.as_str()),
+        Some("worker crashed")
+    );
     assert!(has_session_done(&events));
     assert!(!agg.state.has_effect(EffectKind::Decision, &tf));
     assert_eq!(agg.state.completed_turn_ids.len(), 1);
@@ -5798,7 +5801,7 @@ fn turn_finished_retryable_failure_does_not_complete() {
             EffectKind::Decision,
             tf.clone(),
             None,
-            SettleError::new("transient".to_string(), true),
+            SettleError::new(ErrorInfo::internal("transient".to_string()), true),
         ),
         &machine(),
     );
@@ -5854,7 +5857,10 @@ fn turn_finished_deadline_completes_when_exhausted() {
         "the timed-out finalizer errors; got {events:?}"
     );
     let tc = turn_completed(&events).expect("a terminal timeout completes the turn");
-    assert_eq!(tc.error.as_deref(), Some("deadline exceeded"));
+    assert_eq!(
+        tc.error.as_ref().map(|e| e.message.as_str()),
+        Some("deadline exceeded")
+    );
     assert!(has_session_done(&events));
 }
 
@@ -6339,7 +6345,8 @@ fn a_terminally_failed_fetch_releases_the_turn_rather_than_parking_it() {
             EffectKind::ConnectorSync,
             "sentry".to_string(),
             None,
-            SettleError::new("connection refused".to_string(), false).reauth(false),
+            SettleError::new(ErrorInfo::internal("connection refused".to_string()), false)
+                .reauth(false),
         ),
         &system(),
     );
@@ -6376,7 +6383,7 @@ fn a_retryable_failure_keeps_parking_until_it_is_exhausted() {
             EffectKind::ConnectorSync,
             "sentry".to_string(),
             None,
-            SettleError::new("503".to_string(), true).reauth(false),
+            SettleError::new(ErrorInfo::internal("503".to_string()), true).reauth(false),
         ),
         &system(),
     );
@@ -6590,7 +6597,7 @@ fn a_dead_connection_dispatches_the_call_without_its_tools() {
             EffectKind::ConnectorSync,
             "sentry".to_string(),
             None,
-            SettleError::new("unreachable".to_string(), false).reauth(false),
+            SettleError::new(ErrorInfo::internal("unreachable".to_string()), false).reauth(false),
         ),
         &system(),
     );
@@ -7068,7 +7075,7 @@ fn client_message_parks_while_session_start_retry_is_scheduled() {
             EffectKind::Decision,
             start.clone(),
             None,
-            SettleError::new("transient".to_string(), true),
+            SettleError::new(ErrorInfo::internal("transient".to_string()), true),
         ),
         &machine(),
     );
@@ -7206,7 +7213,7 @@ fn terminal_session_start_failure_restarts_on_the_next_message() {
             EffectKind::Decision,
             start,
             None,
-            SettleError::new("worker crashed".to_string(), false),
+            SettleError::new(ErrorInfo::internal("worker crashed".to_string()), false),
         ),
         &machine(),
     );
@@ -7710,7 +7717,7 @@ fn fork_voids_a_retrying_effect() {
             EffectKind::ToolCall,
             "tc-1".to_string(),
             Some(0),
-            SettleError::new("flake".to_string(), true),
+            SettleError::new(ErrorInfo::internal("flake".to_string()), true),
         ),
         &machine(),
     );
@@ -8054,7 +8061,7 @@ fn fork_drops_a_retrying_settle_decision() {
             EffectKind::Decision,
             settle_id.clone(),
             None,
-            SettleError::new("worker crashed".to_string(), true),
+            SettleError::new(ErrorInfo::internal("worker crashed".to_string()), true),
         ),
         &machine(),
     );
@@ -8593,7 +8600,7 @@ fn escape_decision_retry_fires_while_the_head_is_parked() {
             EffectKind::Decision,
             escape.clone(),
             None,
-            SettleError::new("worker flaked".to_string(), true),
+            SettleError::new(ErrorInfo::internal("worker flaked".to_string()), true),
         ),
         &machine(),
     );
@@ -8954,7 +8961,7 @@ fn a_failed_turn_does_not_un_ask_the_turn_queued_behind_it() {
             EffectKind::Decision,
             live,
             None,
-            SettleError::new("worker crashed".to_string(), false),
+            SettleError::new(ErrorInfo::internal("worker crashed".to_string()), false),
         ),
         &machine(),
     );

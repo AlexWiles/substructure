@@ -15,7 +15,7 @@
 //! the worker emits `TurnCompleted` itself and removes the entry before the plan
 //! reaches it; this entry covers a finalizer that settles any other way.
 
-use super::{KindSpec, Outcome};
+use super::{KindSpec, Outcome, SettleError};
 use crate::protocol::EffectStatus;
 use crate::runtime::session::decision::Trigger;
 use crate::runtime::session::events::*;
@@ -67,7 +67,7 @@ impl SessionState {
     /// Falls back to a bare `SessionDone` if nothing is finalizing.
     pub(in crate::runtime::session) fn finalize_run(
         &self,
-        error: Option<String>,
+        error: Option<&SettleError>,
     ) -> Vec<EventPayload> {
         match self.phase.finalizing().cloned() {
             Some(f) => vec![
@@ -76,7 +76,7 @@ impl SessionState {
                     data: f.data,
                     turn_cost: f.cost,
                     turn_token_usage: f.usage,
-                    error,
+                    error: error.map(|e| e.error.clone()),
                 }),
                 EventPayload::SessionDone(SessionDone {}),
             ],
@@ -86,7 +86,7 @@ impl SessionState {
 
     /// End the turn as a failed run: void what is in flight, drop what is
     /// queued, then report the failure against the turn that was running.
-    pub(in crate::runtime::session) fn fail_run(&self, error: String) -> Vec<EventPayload> {
+    pub(in crate::runtime::session) fn fail_run(&self, error: &SettleError) -> Vec<EventPayload> {
         // The finalizer itself failed: the frozen output is already held, and
         // `finalize_run` reports it against the turn that produced it.
         if self.phase.finalizing().is_some() {
@@ -111,7 +111,7 @@ impl SessionState {
             data: serde_json::Value::Null,
             turn_cost: self.turn_cost,
             turn_token_usage: self.turn_token_usage.clone(),
-            error: Some(error),
+            error: Some(error.error.clone()),
         }));
         events.push(EventPayload::SessionDone(SessionDone {}));
         events

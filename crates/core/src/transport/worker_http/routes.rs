@@ -14,6 +14,7 @@ use crate::session::decision::{EffectResultPayload, WorkKind};
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use crate::session::wire::{resolve_response, result_to_string};
 use crate::span::SpanContext;
+use crate::transport::http::Body;
 use crate::transport::session_sse::{merge_session_stream, resume_cursor};
 use crate::worker::SubmitDecision;
 use crate::{Caller, EffectSettlement, RuntimeError, SettleEffectInput, SubmitClientPayload};
@@ -28,7 +29,7 @@ use super::WorkerHttpState;
 pub async fn submit(
     State(state): State<WorkerHttpState>,
     Extension(caller): Extension<Caller>,
-    Json(req): Json<SubmitDecisionRequest>,
+    Body(req): Body<SubmitDecisionRequest>,
 ) -> Response {
     let span = req
         .span
@@ -90,7 +91,7 @@ pub async fn submit(
 pub async fn mint_client_token(
     State(state): State<WorkerHttpState>,
     Extension(caller): Extension<Caller>,
-    Json(req): Json<MintClientTokenRequest>,
+    Body(req): Body<MintClientTokenRequest>,
 ) -> impl IntoResponse {
     if req.identity.id.trim().is_empty() {
         return (
@@ -130,7 +131,7 @@ pub async fn settle_effect(
     State(state): State<WorkerHttpState>,
     Extension(caller): Extension<Caller>,
     Path(session_id): Path<String>,
-    Json(req): Json<SettleEffectRequest>,
+    Body(req): Body<SettleEffectRequest>,
 ) -> Response {
     let (kind, id, attempt, settlement) = match req {
         SettleEffectRequest::ToolResult {
@@ -252,7 +253,7 @@ pub(crate) fn runtime_error_status(err: &RuntimeError) -> (StatusCode, String) {
 pub async fn submit_client_payload(
     State(state): State<WorkerHttpState>,
     Extension(caller): Extension<Caller>,
-    Json(req): Json<SubmitClientPayloadRequest>,
+    Body(req): Body<SubmitClientPayloadRequest>,
 ) -> Response {
     if req.identity.id.trim().is_empty() {
         let body = serde_json::json!({"error": "id is required"});

@@ -7,7 +7,7 @@ use super::decision::{LlmHandler, ToolHandler, Trigger};
 use crate::connectors::RemoteTool;
 pub use crate::protocol::EffectKind;
 use crate::protocol::{
-    AgentConfig, DraftMessage, ErrorCode, InterruptOrigin, LlmFormat, LlmRequest, LlmResponse,
+    AgentConfig, DraftMessage, ErrorInfo, InterruptOrigin, LlmFormat, LlmRequest, LlmResponse,
     Message, MessageTree, NewMessage, RetryPolicy, SessionOwner, WorkerState,
 };
 
@@ -182,13 +182,9 @@ fn default_true() -> bool {
 pub struct LlmCallErrored {
     pub id: String,
     pub attempt: u32,
-    pub error: String,
+    pub error: ErrorInfo,
     #[serde(default = "default_true")]
     pub retryable: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub code: Option<ErrorCode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<serde_json::Value>,
 }
 
 /// Fetch one connection's tool list. Keyed on the connection id, not on the
@@ -216,7 +212,7 @@ pub struct ConnectorSyncCompleted {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectorSyncErrored {
     pub id: String,
-    pub error: String,
+    pub error: ErrorInfo,
     #[serde(default)]
     pub retryable: bool,
     /// The connection rejected the credential; a retry cannot help until it is
@@ -245,7 +241,7 @@ pub struct SubAgentStarted {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentErrored {
     pub id: String,
-    pub error: String,
+    pub error: ErrorInfo,
     #[serde(default)]
     pub retryable: bool,
 }
@@ -285,7 +281,7 @@ pub struct ToolCallCompleted {
 pub struct ToolCallErrored {
     pub id: String,
     pub name: String,
-    pub error: String,
+    pub error: ErrorInfo,
     #[serde(default)]
     pub retryable: bool,
 }
@@ -332,7 +328,7 @@ pub struct DecisionCompleted {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionErrored {
     pub id: String,
-    pub error: String,
+    pub error: ErrorInfo,
     #[serde(default = "default_true")]
     pub retryable: bool,
 }
@@ -376,8 +372,11 @@ pub struct TurnCompleted {
     pub turn_cost: Decimal,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub turn_token_usage: BTreeMap<String, u64>,
+    /// Set when the run failed. The turn terminal is the only event every
+    /// consumer watches, so this is where a renderer decides how a failure
+    /// reads — by its `code`, not by matching on the sentence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub error: Option<ErrorInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

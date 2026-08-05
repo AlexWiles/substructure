@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::connectors::registry::Connections;
 use crate::protocol::{
     ClientAction, ClientAppend, ClientInput, ClientMessage, ClientMessages, ClientPayload,
-    ErrorCode, InterruptResumption, SessionOwner, TokenDelta,
+    ErrorCode, ErrorInfo, InterruptResumption, SessionOwner, TokenDelta,
 };
 use crate::providers::memory_queue::TaskQueue;
 use connector::{spawn_connector_dispatch_processor, spawn_connector_task_executor, ConnectorTask};
@@ -705,14 +705,19 @@ impl Runtime {
             EffectSettlement::Result(EffectResultPayload::LlmCall { response }) => {
                 Outcome::Llm(Box::new(response))
             }
+            // Worker- and client-authored: flat on the wire, and it may
+            // classify itself or not. Unclassified is a handler failure — the
+            // thing asked to do the work reported that it could not.
             EffectSettlement::Error {
                 error,
                 retryable,
                 code,
                 detail,
-            } => SettleError::new(error, retryable)
-                .with_detail(code, detail)
-                .into(),
+            } => SettleError::new(
+                ErrorInfo::handler(error).or_code(code).or_detail(detail),
+                retryable,
+            )
+            .into(),
         };
         let kind = match input.kind {
             WorkKind::ToolCall => EffectKind::ToolCall,

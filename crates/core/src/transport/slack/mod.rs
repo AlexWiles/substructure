@@ -1,10 +1,15 @@
 mod activity;
 mod bot;
+mod controller;
 mod socket;
 mod state;
 mod webhook;
 
 pub use bot::{Routing, SlackBot, Workspace, WorkspaceResolver};
+pub use controller::{
+    context_block, section_block, Action, ActionOutcome, Context, DefaultController, PromptOption,
+    PromptView, Rendered, SlackController, StepStatus, StepView,
+};
 pub use socket::{MissingEnv, SlackChannel};
 pub use state::StreamStore;
 pub use webhook::webhook_router;
@@ -165,22 +170,6 @@ fn parse_replies(resp: &Value, mine: &[String]) -> Vec<SlackMsg> {
 }
 
 /// The blocks with the buttons removed and the outcome added.
-fn settled_blocks(blocks: &[Value], text: &str, resolution: &str) -> Vec<Value> {
-    let mut settled: Vec<Value> = blocks
-        .iter()
-        .filter(|b| b["type"] != "actions")
-        .cloned()
-        .collect();
-    if settled.is_empty() {
-        settled.push(section_block(text));
-    }
-    settled.push(serde_json::json!({
-        "type": "context",
-        "elements": [{ "type": "mrkdwn", "text": resolution }],
-    }));
-    settled
-}
-
 /// The unseen thread delta as drafts. Our stamped replies map to their
 /// recorded assistant nodes.
 fn build_batch(
@@ -255,51 +244,50 @@ fn display_of(payload: &Value) -> Option<Display> {
     })
 }
 
-/// A button carries only the interrupt id and the option index. The value
-/// is read from the recorded interrupt at click time.
-fn prompt_blocks(display: &Display, interrupt_id: &str) -> Vec<Value> {
-    let mut blocks = vec![section_block(&display.message)];
-    if !display.options.is_empty() {
-        let buttons: Vec<Value> = display
-            .options
-            .iter()
-            .enumerate()
-            .map(|(idx, option)| {
-                let mut button = serde_json::json!({
-                    "type": "button",
-                    "action_id": format!("prompt_option_{idx}"),
-                    "text": { "type": "plain_text", "text": option.label },
-                    "value": serde_json::json!({
-                        "interrupt_id": interrupt_id,
-                        "option": idx,
-                    })
-                    .to_string(),
-                });
-                if let Some(style @ ("primary" | "danger")) = option.style.as_deref() {
-                    button["style"] = style.into();
-                }
-                button
-            })
-            .collect();
-        blocks.push(serde_json::json!({ "type": "actions", "elements": buttons }));
-    }
-    if let Some((raw, ts)) = display
-        .expires_at
-        .as_deref()
-        .and_then(|e| Some((e, chrono::DateTime::parse_from_rfc3339(e).ok()?)))
-    {
-        blocks.push(serde_json::json!({ "type": "context", "elements": [{
-            "type": "mrkdwn",
-            "text": format!("Expires <!date^{}^{{date_short_pretty}} {{time}}|{raw}>", ts.timestamp()),
-        }]}));
-    }
-    blocks
+/// A button carries only the interrupt id and the option index. The value is
+/// read from the recorded interrupt at click time, and the coordinates are the
+/// bot's — `block_action` reads them straight back out.
+fn prompt_options(display: &Display, interrupt_id: &str) -> Vec<PromptOption> {
+    display
+        .options
+        .iter()
+        .enumerate()
+        .map(|(idx, option)| PromptOption {
+            label: option.label.clone(),
+            style: option.style.clone(),
+            action_id: format!("prompt_option_{idx}"),
+            value: serde_json::json!({ "interrupt_id": interrupt_id, "option": idx }).to_string(),
+        })
+        .collect()
 }
 
-fn section_block(text: &str) -> Value {
-    serde_json::json!({
-        "type": "section",
-        "text": { "type": "mrkdwn", "text": clip(text, MAX_SECTION) },
+/// A press on a button the controller invented: everything `block_action`
+/// could not read as one of the bot's own prompt buttons.
+struct ForeignClick {
+    action_id: String,
+    value: String,
+    user: String,
+    channel: String,
+    message_ts: String,
+    thread_ts: String,
+}
+
+fn foreign_action(payload: &Value) -> Option<ForeignClick> {
+    if payload["type"].as_str() != Some("block_actions") {
+        return None;
+    }
+    let action = payload["actions"].as_array()?.first()?;
+    let message_ts = payload["message"]["ts"].as_str()?;
+    Some(ForeignClick {
+        action_id: action["action_id"].as_str().unwrap_or_default().to_string(),
+        value: action["value"].as_str().unwrap_or_default().to_string(),
+        user: payload["user"]["id"].as_str()?.to_string(),
+        channel: payload["channel"]["id"].as_str()?.to_string(),
+        message_ts: message_ts.to_string(),
+        thread_ts: payload["message"]["thread_ts"]
+            .as_str()
+            .unwrap_or(message_ts)
+            .to_string(),
     })
 }
 
@@ -379,17 +367,6 @@ fn clip(text: &str, max: usize) -> String {
     }
     let cut: String = text.chars().take(max.saturating_sub(1)).collect();
     format!("{cut}…")
-}
-
-fn turn_result_text(t: &crate::session::events::TurnCompleted) -> String {
-    if let Some(err) = &t.error {
-        return format!("Error: {err}");
-    }
-    match &t.data {
-        Value::Null => "(no result)".to_string(),
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
-    }
 }
 
 #[cfg(test)]
@@ -775,7 +752,12 @@ mod tests {
             ]},
         }))
         .unwrap();
-        let blocks = prompt_blocks(&display, "int-1");
+        let options = prompt_options(&display, "int-1");
+        let blocks = controller::DefaultController.prompt_blocks(&controller::PromptView {
+            message: &display.message,
+            options: &options,
+            expires_at: display.expires_at.as_deref(),
+        });
         assert_eq!(blocks.len(), 3);
         assert_eq!(blocks[0]["text"]["text"], "Run it?");
         let buttons = blocks[1]["elements"].as_array().unwrap();
@@ -796,7 +778,13 @@ mod tests {
     #[test]
     fn message_only_prompt_renders_without_buttons() {
         let display = display_of(&serde_json::json!({ "message": "hold" })).unwrap();
-        assert_eq!(prompt_blocks(&display, "int-1").len(), 1);
+        let options = prompt_options(&display, "int-1");
+        let blocks = controller::DefaultController.prompt_blocks(&controller::PromptView {
+            message: &display.message,
+            options: &options,
+            expires_at: display.expires_at.as_deref(),
+        });
+        assert_eq!(blocks.len(), 1);
     }
 
     #[test]
@@ -846,7 +834,11 @@ mod tests {
             section_block("Run `send_email`?"),
             serde_json::json!({ "type": "actions", "elements": [{ "type": "button" }] }),
         ];
-        let settled = settled_blocks(&blocks, "Run `send_email`?", "✅ Approve — <@U9>");
+        let settled = controller::DefaultController.settled_prompt_blocks(
+            &blocks,
+            "Run `send_email`?",
+            "✅ Approve — <@U9>",
+        );
         assert_eq!(settled.len(), 3);
         assert_eq!(settled[0]["type"], "task_card");
         assert_eq!(settled[1]["type"], "section");
@@ -854,7 +846,8 @@ mod tests {
         assert!(settled.iter().all(|b| b["type"] != "actions"));
 
         // A message with no blocks still settles.
-        let bare = settled_blocks(&[], "Run it?", "✖ Cancelled");
+        let bare =
+            controller::DefaultController.settled_prompt_blocks(&[], "Run it?", "✖ Cancelled");
         assert_eq!(bare[0]["text"]["text"], "Run it?");
         assert_eq!(bare[1]["elements"][0]["text"], "✖ Cancelled");
     }
@@ -921,22 +914,5 @@ mod tests {
                 .count(),
             MAX_SECTION
         );
-    }
-
-    #[test]
-    fn turn_result_renders_string_json_and_error() {
-        use crate::session::events::TurnCompleted;
-        let mut t = TurnCompleted {
-            turn_id: "t".into(),
-            data: Value::String("done".into()),
-            turn_cost: Default::default(),
-            turn_token_usage: Default::default(),
-            error: None,
-        };
-        assert_eq!(turn_result_text(&t), "done");
-        t.data = serde_json::json!({"a": 1});
-        assert_eq!(turn_result_text(&t), r#"{"a":1}"#);
-        t.error = Some("boom".into());
-        assert_eq!(turn_result_text(&t), "Error: boom");
     }
 }

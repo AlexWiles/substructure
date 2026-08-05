@@ -83,6 +83,14 @@ impl SlackChannel {
         &self.routing
     }
 
+    /// Speak with a different voice. A deployment that has more to say than the
+    /// open-source engine — billing copy, a link into an admin panel — supplies
+    /// a controller here and keeps every other behaviour of the bot.
+    pub fn with_controller(mut self, controller: Arc<dyn super::SlackController>) -> Self {
+        self.bot = self.bot.with_controller(controller);
+        self
+    }
+
     /// Reads SLACK_APP_TOKEN and SLACK_BOT_TOKEN. SLACK_API_BASE overrides
     /// the API origin (tests).
     pub fn from_env(

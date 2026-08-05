@@ -17,6 +17,7 @@
 //! the tool failing, not the model.
 
 use super::{decision_queued, fail, mismatched, void_events, KindSpec, Outcome, SettleError};
+use crate::protocol::{ErrorCode, ErrorInfo};
 use crate::protocol::{RetryOverride, RetryPolicy};
 use crate::runtime::session::command::SessionError;
 use crate::runtime::session::decision::{ToolHandler, Trigger};
@@ -58,7 +59,11 @@ impl KindSpec for ToolSpec {
                         state,
                         id,
                         &SettleError::new(
-                            format!("tool output violated its declared schema: {v}"),
+                            ErrorInfo::new(
+                                ErrorCode::InvalidResponse,
+                                format!("tool output violated its declared schema: {v}"),
+                            )
+                            .with_param("output"),
                             false,
                         ),
                     ),

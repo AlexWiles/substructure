@@ -5,13 +5,15 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::sync::Notify;
 
-use super::activity::{self, TurnActivity};
+use super::activity::TurnActivity;
+use super::controller::{
+    Action, ActionOutcome, Context, DefaultController, PromptView, Rendered, SlackController,
+};
 use super::state::StreamStore;
 use super::{
-    app_mention, block_action, build_batch, clip, display_of, dm_message, draft, prompt_blocks,
-    resolution_text, section_block, settled_blocks, slack_session, turn_result_text,
-    unstamped_ours, with_footer, Click, Inbound, ReplyMeta, MAX_FALLBACK, MAX_MARKDOWN,
-    REPLY_EVENT_TYPE,
+    app_mention, block_action, build_batch, clip, display_of, dm_message, draft, foreign_action,
+    prompt_options, resolution_text, section_block, slack_session, unstamped_ours, Click,
+    ForeignClick, Inbound, ReplyMeta, MAX_FALLBACK, MAX_MARKDOWN, REPLY_EVENT_TYPE,
 };
 use crate::event_store::Seq;
 use crate::processor::{EventProcessor, EventProcessorRunnerConfig, ProcessorError};
@@ -28,7 +30,6 @@ use crate::{Caller, HandleClientInput, RuntimeError};
 /// Slack limits the rate of `chat.appendStream`.
 const ACTIVITY_INTERVAL: Duration = Duration::from_secs(1);
 /// Shown as `<app> is thinking…`.
-const STATUS: &str = "is thinking…";
 /// Slack removes a status after two minutes. Set it again on this cadence.
 const STATUS_REFRESH: Duration = Duration::from_secs(90);
 
@@ -332,6 +333,8 @@ pub struct SlackBot {
     ctx: Arc<OnceLock<ChannelContext>>,
     streams: Arc<Streams>,
     store: Option<Arc<StreamStore>>,
+    /// What a turn says. Delivery stays here; the words are the controller's.
+    controller: Arc<dyn SlackController>,
 }
 
 impl SlackBot {
@@ -349,7 +352,15 @@ impl SlackBot {
             ctx: Arc::new(OnceLock::new()),
             streams: Arc::new(Streams::default()),
             store: store.map(Arc::new),
+            controller: Arc::new(DefaultController),
         }
+    }
+
+    /// Speak with a different voice: billing copy for a `budget_exceeded`, a
+    /// link under every message. Delivery is unchanged.
+    pub fn with_controller(mut self, controller: Arc<dyn SlackController>) -> Self {
+        self.controller = controller;
+        self
     }
 
     /// Start the outbound processor and the activity worker.
@@ -400,28 +411,110 @@ impl SlackBot {
     }
 
     /// Handle an `interactive` payload (a `block_actions` body).
+    ///
+    /// A press on one of the bot's own prompt buttons answers its interrupt.
+    /// Anything else is a button the controller invented, and goes back to it.
     pub async fn handle_interaction(&self, payload: &Value) {
-        let Some(click) = block_action(payload) else {
-            return;
-        };
         let Some(ctx) = self.ctx.get().cloned() else {
             tracing::warn!("slack: interaction before start; dropped");
             return;
+        };
+        let channel = match block_action(payload) {
+            Some(click) => click.channel.clone(),
+            None => match foreign_action(payload) {
+                Some(click) => click.channel.clone(),
+                None => return,
+            },
         };
         let team = payload["team"]["id"]
             .as_str()
             .or_else(|| payload["user"]["team_id"].as_str());
         let app = payload["api_app_id"].as_str();
-        let Some(ws) = self.resolver.by_install(team, app, &click.channel).await else {
+        let Some(ws) = self.resolver.by_install(team, app, &channel).await else {
             tracing::warn!(
                 team = %team.unwrap_or(""),
                 app = %app.unwrap_or(""),
-                channel = %click.channel,
+                %channel,
                 "slack: click for unknown workspace"
             );
             return;
         };
-        self.resolve_click(&ctx, &ws, click).await;
+        match block_action(payload) {
+            Some(click) => self.resolve_click(&ctx, &ws, click).await,
+            None => {
+                if let Some(click) = foreign_action(payload) {
+                    self.controller_action(&ctx, &ws, click).await;
+                }
+            }
+        }
+    }
+
+    /// Hand a controller's own button back to it and perform what it asks for.
+    async fn controller_action(&self, ctx: &ChannelContext, ws: &Workspace, click: ForeignClick) {
+        let session_id = format!("slack:{}:{}", click.channel, click.thread_ts);
+        let outcome = self
+            .controller
+            .on_action(&Action {
+                action_id: &click.action_id,
+                value: &click.value,
+                tenant_id: &ws.tenant_id,
+                session_id: &session_id,
+                user: &click.user,
+                channel: &click.channel,
+                message_ts: &click.message_ts,
+                thread_ts: &click.thread_ts,
+            })
+            .await;
+        let thread = Thread::new(&click.channel, &click.thread_ts);
+        let result = match outcome {
+            ActionOutcome::Ignored => {
+                tracing::debug!(action_id = %click.action_id, "slack: click ignored");
+                return;
+            }
+            ActionOutcome::Update(r) => {
+                let meta = ReplyMeta {
+                    session_id: Some(session_id),
+                    ..Default::default()
+                };
+                self.update(
+                    ws,
+                    &click.channel,
+                    &click.message_ts,
+                    &r.text,
+                    r.blocks,
+                    &meta,
+                )
+                .await
+            }
+            ActionOutcome::Reply(r) => {
+                let meta = ReplyMeta {
+                    session_id: Some(session_id),
+                    ..Default::default()
+                };
+                self.post_blocks(ws, &thread, &r.text, r.blocks, &meta)
+                    .await
+            }
+            // The click becomes a turn, as though the user had typed it.
+            ActionOutcome::Submit(text) => {
+                self.submit(
+                    ctx,
+                    ws,
+                    Inbound {
+                        channel: click.channel.clone(),
+                        thread_ts: click.thread_ts.clone(),
+                        ts: format!("{}:{}", click.message_ts, click.action_id),
+                        user: click.user.clone(),
+                        team: None,
+                        text,
+                    },
+                )
+                .await;
+                Ok(())
+            }
+        };
+        if let Err(e) = result {
+            tracing::warn!(error = %e, action_id = %click.action_id, "slack: action outcome failed");
+        }
     }
 
     async fn identity<'a>(&self, ws: &'a Workspace) -> Option<&'a Identity> {
@@ -687,6 +780,13 @@ impl SlackBot {
     }
 
     /// Best-effort thread status. An empty status clears it.
+    /// The working indicator, as the controller words it. `None` clears it, and
+    /// so does the end of a turn.
+    async fn set_working(&self, ws: &Workspace, thread: &Thread, ctx: &Context<'_>) {
+        let status = self.controller.status(ctx).unwrap_or_default();
+        self.set_status(ws, thread, &status).await;
+    }
+
     async fn set_status(&self, ws: &Workspace, thread: &Thread, status: &str) {
         let body = serde_json::json!({
             "channel_id": thread.channel,
@@ -815,7 +915,7 @@ impl SlackBot {
                 ..Default::default()
             };
             let text = format!("{}\n\n(no longer active)", click.message_text);
-            let blocks = settled_blocks(
+            let blocks = self.controller.settled_prompt_blocks(
                 &click.message_blocks,
                 &click.message_text,
                 "(no longer active)",
@@ -899,7 +999,16 @@ impl EventProcessor for SlackBot {
             EventPayload::TurnCompleted(_) | EventPayload::SessionInterrupted(_) => {
                 self.set_status(&ws, &thread, "").await;
             }
-            EventPayload::TurnStarted(_) => self.set_status(&ws, &thread, STATUS).await,
+            EventPayload::TurnStarted(t) => {
+                let ctx = Context {
+                    tenant_id: &event.tenant_id,
+                    session_id: &event.session_id,
+                    turn_id: &t.turn_id,
+                    agent_id: event.meta.agent_id.as_deref(),
+                    elapsed: None,
+                };
+                self.set_working(&ws, &thread, &ctx).await
+            }
             _ => {}
         }
         let result = match &event.payload {
@@ -970,18 +1079,34 @@ impl SlackBot {
             Some(live) => Some(live),
             None => self.recover(ws, &key, seq).await,
         };
-        let footer = live.as_ref().map(|s| activity::elapsed(s.started_at, at));
+        let elapsed = live
+            .as_ref()
+            .and_then(|s| (at - s.started_at).to_std().ok());
+        let present_ctx = Context {
+            tenant_id: &ws.tenant_id,
+            session_id,
+            turn_id: &t.turn_id,
+            agent_id: ws.routing.agent_for(&thread.channel),
+            elapsed,
+        };
+        // The turn's visible work, rendered and trimmed. `None` when there is
+        // nothing to rebuild from — then the streamed text stands as posted.
+        let activity = self.activity_blocks(ws, live.as_ref()).await;
+        let Some(rendered) =
+            self.controller
+                .message(&present_ctx, t, activity.as_deref().unwrap_or_default())
+        else {
+            tracing::debug!(%session_id, "slack: the controller posts nothing for this turn");
+            return Ok(());
+        };
         let Some(ts) = live.as_ref().and_then(|s| s.ts.clone()) else {
-            return self
-                .post_turn(ws, thread, session_id, t, footer.as_deref())
-                .await;
+            return self.post_turn(ws, thread, session_id, t, &rendered).await;
         };
         if self.already_replied(ws, thread, t).await {
             return Ok(());
         }
-        let answer = turn_result_text(t);
         let meta = self.reply_meta(ws, session_id, t).await;
-        let text = with_footer(&answer, footer.as_deref());
+        let text = rendered.text.clone();
         let chunk = serde_json::json!({
             "type": "markdown_text",
             "text": clip(&text, MAX_MARKDOWN),
@@ -993,12 +1118,9 @@ impl SlackBot {
             Ok(()) => {
                 // Rebuild from blocks, which have no 256-character chunk
                 // limit, so each card settles with its full detail.
-                if let Some(blocks) = self
-                    .expanded_blocks(ws, live.as_ref(), &answer, footer.as_deref())
-                    .await
-                {
+                if activity.is_some() {
                     if let Err(e) = self
-                        .update(ws, &thread.channel, &ts, &text, blocks, &meta)
+                        .update(ws, &thread.channel, &ts, &text, rendered.blocks, &meta)
                         .await
                     {
                         tracing::warn!(error = %e, %session_id, "slack: cards not expanded");
@@ -1009,27 +1131,28 @@ impl SlackBot {
             // The stream is gone (expired, or already stopped) but the
             // message remains: finalize it in place, not as an orphan.
             Err(e) if e.code() == "message_not_in_streaming_state" => {
-                let blocks = self
-                    .expanded_blocks(ws, live.as_ref(), &answer, footer.as_deref())
-                    .await
-                    .unwrap_or_else(|| vec![section_block(&text)]);
                 match self
-                    .update(ws, &thread.channel, &ts, &text, blocks, &meta)
+                    .update(
+                        ws,
+                        &thread.channel,
+                        &ts,
+                        &text,
+                        rendered.blocks.clone(),
+                        &meta,
+                    )
                     .await
                 {
                     Ok(()) => Ok(()),
                     Err(e) => {
                         tracing::warn!(error = %e, %session_id, "slack: in-place finalize failed; posting reply");
-                        self.post_turn(ws, thread, session_id, t, footer.as_deref())
-                            .await
+                        self.post_turn(ws, thread, session_id, t, &rendered).await
                     }
                 }
             }
             // Do not lose the answer to a bad stream.
             Err(e) => {
                 tracing::warn!(error = %e, %session_id, "slack: stream finalize failed; posting reply");
-                self.post_turn(ws, thread, session_id, t, footer.as_deref())
-                    .await
+                self.post_turn(ws, thread, session_id, t, &rendered).await
             }
         }
     }
@@ -1040,14 +1163,14 @@ impl SlackBot {
         thread: &Thread,
         session_id: &str,
         t: &crate::session::events::TurnCompleted,
-        footer: Option<&str>,
+        rendered: &Rendered,
     ) -> Result<(), Error> {
         if self.already_replied(ws, thread, t).await {
             return Ok(());
         }
         let meta = self.reply_meta(ws, session_id, t).await;
-        let text = with_footer(&turn_result_text(t), footer);
-        self.post(ws, thread, &text, &meta).await
+        self.post_blocks(ws, thread, &rendered.text, rendered.blocks.clone(), &meta)
+            .await
     }
 
     /// True if the thread has the turn's stamped reply. A failed fetch
@@ -1112,10 +1235,15 @@ impl SlackBot {
             ..Default::default()
         };
         let (text, blocks) = match display_of(&p.payload) {
-            Some(display) => (
-                display.message.clone(),
-                prompt_blocks(&display, &p.interrupt_id),
-            ),
+            Some(display) => {
+                let options = prompt_options(&display, &p.interrupt_id);
+                let blocks = self.controller.prompt_blocks(&PromptView {
+                    message: &display.message,
+                    options: &options,
+                    expires_at: display.expires_at.as_deref(),
+                });
+                (display.message.clone(), blocks)
+            }
             None => {
                 let text = format!("Paused: {}", p.reason);
                 let block = section_block(&text);
@@ -1184,7 +1312,9 @@ impl SlackBot {
             session_id: Some(session_id),
             ..Default::default()
         };
-        let blocks = settled_blocks(&msg.blocks, &msg.text, &resolution);
+        let blocks = self
+            .controller
+            .settled_prompt_blocks(&msg.blocks, &msg.text, &resolution);
         self.update(ws, &thread.channel, &msg.ts, &text, blocks, &meta)
             .await
     }
@@ -1304,7 +1434,14 @@ impl SlackBot {
                 continue;
             };
             if let Some((channel, thread_ts)) = slack_session(&key.session_id) {
-                self.set_status(&ws, &Thread::new(channel, thread_ts), STATUS)
+                let ctx = Context {
+                    tenant_id: &key.tenant_id,
+                    session_id: &key.session_id,
+                    turn_id: &key.turn_id,
+                    agent_id: ws.routing.agent_for(channel),
+                    elapsed: None,
+                };
+                self.set_working(&ws, &Thread::new(channel, thread_ts), &ctx)
                     .await;
             }
         }
@@ -1347,14 +1484,21 @@ impl SlackBot {
             return;
         }
         let changed: Vec<(String, Value)> = turn
-            .chunks()
+            .chunks(self.controller.as_ref())
             .into_iter()
             .filter(|(id, chunk)| open.sent.get(id) != Some(chunk))
             .collect();
         // No changes: only keep the status up.
         if changed.is_empty() {
             if open.ts.is_none() {
-                self.set_status(ws, &thread, STATUS).await;
+                let ctx = Context {
+                    tenant_id: &key.tenant_id,
+                    session_id: &key.session_id,
+                    turn_id: &key.turn_id,
+                    agent_id: ws.routing.agent_for(&thread.channel),
+                    elapsed: None,
+                };
+                self.set_working(ws, &thread, &ctx).await;
             }
             return;
         }
@@ -1444,13 +1588,9 @@ impl SlackBot {
     }
 
     /// The finished turn rendered as blocks, ready to replace the stream.
-    async fn expanded_blocks(
-        &self,
-        ws: &Workspace,
-        stream: Option<&Stream>,
-        answer: &str,
-        footer: Option<&str>,
-    ) -> Option<Vec<Value>> {
+    /// The turn's visible work as blocks, rendered by the controller and
+    /// trimmed to Slack's limits. `None` when there is no stream to read from.
+    async fn activity_blocks(&self, ws: &Workspace, stream: Option<&Stream>) -> Option<Vec<Value>> {
         let (ctx, stream) = (self.ctx.get()?, stream?);
         let caller = Caller::System {
             tenant_id: ws.tenant_id.clone(),
@@ -1465,7 +1605,7 @@ impl SlackBot {
             .await
             .ok()?;
         let turn = TurnActivity::fold(&events, Some(stream.turn_id.clone()))?;
-        Some(turn.blocks(answer, footer))
+        Some(turn.blocks(self.controller.as_ref()))
     }
 
     /// Abandon a rejected stream. The answer posts as a message.
@@ -1521,7 +1661,7 @@ impl SlackBot {
         // it as sent — a chunk lost mid-crash reappears at finalize.
         let sent: HashMap<String, Value> = TurnActivity::fold(&events, Some(row.turn_id.clone()))
             .map(|turn| {
-                turn.chunks()
+                turn.chunks(self.controller.as_ref())
                     .into_iter()
                     .filter(|(id, _)| id.starts_with("say:"))
                     .collect()
@@ -1695,8 +1835,159 @@ impl Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::{ErrorCode, ErrorInfo};
+    use crate::session::events::TurnCompleted;
+    use std::sync::Mutex as StdMutex;
 
     const SESSION: &str = "slack:C1:1.0";
+
+    /// A Slack that records what it was posted. `conversations.replies` answers
+    /// empty so the bot's idempotency check passes and it goes on to post.
+    async fn fake_slack() -> (String, Arc<StdMutex<Vec<Value>>>) {
+        use axum::routing::post;
+        use axum::{Json, Router};
+
+        let posted: Arc<StdMutex<Vec<Value>>> = Arc::new(StdMutex::new(Vec::new()));
+        let recorder = posted.clone();
+        let app = Router::new()
+            .route(
+                "/chat.postMessage",
+                post(move |Json(body): Json<Value>| {
+                    let recorder = recorder.clone();
+                    async move {
+                        recorder.lock().unwrap().push(body);
+                        Json(serde_json::json!({"ok": true, "ts": "1.1"}))
+                    }
+                }),
+            )
+            .route(
+                "/conversations.replies",
+                post(|| async { Json(serde_json::json!({"ok": true, "messages": []})) }),
+            )
+            .route(
+                "/auth.test",
+                post(|| async {
+                    Json(serde_json::json!({"ok": true, "user_id": "U0", "bot_id": "B0"}))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), posted)
+    }
+
+    struct OneWorkspace(Arc<Workspace>);
+
+    #[async_trait::async_trait]
+    impl WorkspaceResolver for OneWorkspace {
+        async fn by_install(
+            &self,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &str,
+        ) -> Option<Arc<Workspace>> {
+            Some(self.0.clone())
+        }
+        async fn by_tenant(&self, _: &str) -> Option<Arc<Workspace>> {
+            Some(self.0.clone())
+        }
+    }
+
+    fn failed_turn(error: ErrorInfo) -> TurnCompleted {
+        TurnCompleted {
+            turn_id: "turn-1".into(),
+            data: Value::Null,
+            turn_cost: Default::default(),
+            turn_token_usage: Default::default(),
+            error: Some(error),
+        }
+    }
+
+    /// A deployment supplies its own voice and keeps every other behaviour of
+    /// the bot: this controller rewrites one error code and adds a link under
+    /// every message, and inherits the rest.
+    struct CloudController;
+
+    impl SlackController for CloudController {
+        fn turn(&self, ctx: &Context<'_>, t: &TurnCompleted) -> Rendered {
+            match &t.error {
+                Some(e) if e.code == ErrorCode::BudgetExceeded => Rendered {
+                    text: "You are out of credits.".into(),
+                    blocks: vec![section_block("You are out of credits.")],
+                },
+                _ => DefaultController.turn(ctx, t),
+            }
+        }
+        fn trailing_blocks(&self, ctx: &Context<'_>) -> Vec<Value> {
+            vec![serde_json::json!({
+                "type": "context",
+                "elements": [{
+                    "type": "mrkdwn",
+                    "text": format!("<https://admin.example/s/{}|View in admin>", ctx.session_id),
+                }],
+            })]
+        }
+    }
+
+    async fn post_with(controller: Arc<dyn SlackController>, t: &TurnCompleted) -> Value {
+        let (api_base, posted) = fake_slack().await;
+        let ws = Arc::new(Workspace::new(
+            "xoxb-test".into(),
+            "tenant-a".into(),
+            Routing::new().dm(Some("a".into())),
+        ));
+        let bot = SlackBot::new(Arc::new(OneWorkspace(ws.clone())), api_base, None)
+            .with_controller(controller);
+        let thread = Thread {
+            channel: "C1".into(),
+            ts: "1.0".into(),
+        };
+        bot.complete_turn(&ws, &thread, SESSION, t, chrono::Utc::now(), 0)
+            .await
+            .expect("posts");
+        let sent = posted.lock().unwrap();
+        sent.first().cloned().expect("one message posted")
+    }
+
+    /// The engine's own voice, unchanged: the failure's sentence and nothing
+    /// appended.
+    #[tokio::test]
+    async fn the_default_controller_posts_the_failure_sentence() {
+        let t = failed_turn(ErrorInfo::new(ErrorCode::BudgetExceeded, "budget spent"));
+        let body = post_with(Arc::new(DefaultController), &t).await;
+        assert_eq!(body["text"], "Error: budget spent");
+        assert_eq!(body["blocks"].as_array().map(Vec::len), Some(1));
+    }
+
+    /// The point of the seam: cloud copy for the code it cares about, and a
+    /// link under the message, with delivery untouched.
+    #[tokio::test]
+    async fn a_controller_rewrites_one_code_and_appends_a_link() {
+        let t = failed_turn(ErrorInfo::new(ErrorCode::BudgetExceeded, "budget spent"));
+        let body = post_with(Arc::new(CloudController), &t).await;
+
+        assert_eq!(body["text"], "You are out of credits.");
+        let blocks = body["blocks"].as_array().expect("blocks");
+        assert_eq!(blocks.len(), 2, "the card and the trailing link");
+        assert!(blocks[1]["elements"][0]["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("https://admin.example/s/slack:C1:1.0")));
+        // Delivery is the bot's: the reply is still stamped for idempotency.
+        assert_eq!(body["metadata"]["event_payload"]["turn_id"], "turn-1");
+    }
+
+    /// Every other code falls through to the inherited implementation, so a
+    /// deployment overrides one branch rather than forking the renderer.
+    #[tokio::test]
+    async fn an_uninteresting_code_keeps_the_engines_wording() {
+        let t = failed_turn(ErrorInfo::new(ErrorCode::InvalidResponse, "bad decision"));
+        let body = post_with(Arc::new(CloudController), &t).await;
+        assert_eq!(body["text"], "Error: bad decision");
+        let blocks = body["blocks"].as_array().expect("blocks");
+        assert_eq!(blocks.len(), 2, "still carries the deployment's link");
+    }
 
     /// A channel with nothing of its own is the default's, so declaring one
     /// channel does not take the bot out of every other.
