@@ -15,12 +15,8 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
-    /// The vendors the engine can call itself, in the order `subs init` offers
-    /// them.
-    pub const VENDORS: [ProviderKind; 3] = [Self::Anthropic, Self::Openai, Self::Openrouter];
-
     /// The variable a key is read from when the file names none. Named here
-    /// rather than at each use so `subs init` tells you the same name the
+    /// rather than at each use so every command tells you the same name the
     /// engine will look for.
     pub fn default_api_key_env(self) -> Option<&'static str> {
         match self {
@@ -48,16 +44,6 @@ impl ProviderKind {
             Self::Anthropic => Some("https://console.anthropic.com/settings/keys"),
             Self::Openai => Some("https://platform.openai.com/api-keys"),
             Self::Worker => None,
-        }
-    }
-
-    /// A model that exists, so a file `subs init` writes runs before it is edited.
-    pub fn default_model(self) -> &'static str {
-        match self {
-            Self::Openrouter => "anthropic/claude-sonnet-4.5",
-            Self::Anthropic => "claude-sonnet-4-5",
-            Self::Openai => "gpt-5",
-            Self::Worker => "claude-sonnet-4-5",
         }
     }
 

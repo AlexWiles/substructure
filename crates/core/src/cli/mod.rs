@@ -2,7 +2,6 @@ pub mod auth;
 pub mod cloud;
 pub mod doctor;
 pub mod env;
-pub mod init;
 pub mod local;
 pub mod mcp;
 mod pretty;
@@ -55,8 +54,6 @@ impl Command {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Write a starter `substructure.toml` describing one system.
-    Init(init::InitCommand),
     /// Run a local Substructure server.
     Serve(local::ServeArgs),
     /// Run a single turn against a worker in-process and stream events, then exit.
@@ -163,7 +160,6 @@ pub enum Command {
 pub async fn run(command: Command) -> anyhow::Result<()> {
     cloud::telemetry::init(command_path(&command));
     match command {
-        Command::Init(cmd) => init::run(cmd),
         Command::Serve(args) => local::serve(args).await,
         Command::Run(args) => run::run(args).await,
         Command::Login {
@@ -206,7 +202,6 @@ fn command_path(cmd: &Command) -> &'static str {
     use cloud::sessions::SessionsCommand;
     use cloud::{keys::KeysCommand, orgs::OrgsCommand, projects::ProjectsCommand};
     match cmd {
-        Command::Init(_) => "init",
         Command::Serve(_) => "serve",
         Command::Run(_) => "run",
         Command::Login { .. } => "login",

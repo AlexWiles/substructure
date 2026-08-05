@@ -10,22 +10,25 @@ engine keeps its state in a SQLite file beside your config.
 
 ## Set up a file
 
-```sh
-subs init
+Write `substructure.toml` in your project root.
+
+```toml title="substructure.toml"
+name = "oncall-bot"
+
+[llm.openrouter]
+type = "openrouter"
+
+[agent.oncall]
+llm = "openrouter"
+model = "anthropic/claude-sonnet-4-5"
+system = "You are the on-call assistant."
+
+[serve]
+port = 8080
 ```
 
-`init` asks six questions and writes `substructure.toml`.
-
-| Question | Writes |
-| --- | --- |
-| What the project is called | `name` |
-| Which provider and which model | `[llm.<provider>]` and the agent's `model` |
-| What id the agent has | `[agent.<id>]` |
-| Which MCP servers to connect | one `[mcp.<id>]` each, and the agent's `mcp` list |
-| Whether it answers in Slack | `[slack]`, one key per yes |
-| Where it runs | `[serve]` for local, `[remote]` for the cloud |
-
-It writes nothing until you confirm.
+`[serve]` runs the engine here. Name a `[remote]` instead to point the CLI at a
+deployment. See [Config](./220-config.md) for every section.
 
 ## Run one turn
 

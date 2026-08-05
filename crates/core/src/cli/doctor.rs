@@ -25,7 +25,7 @@ const SLACK_TOKENS: [(&str, &str); 2] = [
 
 pub async fn run(scope: ProjectScope) -> Result<()> {
     let found = project_config::resolve(scope.globals.config.as_deref())?
-        .context("no substructure.toml found. Write one with `subs init`, or pass -c.")?;
+        .context("no substructure.toml found. Write one, or pass -c.")?;
 
     let notices = match found.config.remote.is_none() {
         true => here(&found).await?,
