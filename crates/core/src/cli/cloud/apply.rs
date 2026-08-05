@@ -11,13 +11,14 @@ use anyhow::{bail, Context as _, Result};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 
-use crate::api::v1::{ApplyResponse, ConfigEvent, Notice, NoticeLevel, Page, Project};
+use crate::api::v1::{ApplyResponse, ConfigEvent, Notice, Page, Project};
 
 use super::context::Context;
 use super::credentials;
+use super::notices;
 use super::pickers;
 use super::print;
-use super::project_config::{self, Found, ProjectConfig};
+use super::project_config::{self, ProjectConfig};
 use super::CloudGlobals;
 
 #[derive(Debug, clap::Args)]
@@ -124,7 +125,7 @@ pub async fn run(cmd: ApplyCommand) -> Result<()> {
     if cmd.globals.json {
         return print::json(&result);
     }
-    report(&result, &path);
+    report(&result, &path, &cmd.globals);
     Ok(())
 }
 
@@ -238,7 +239,7 @@ fn pin(path: &std::path::Path, env: &ProjectConfig, project: &Project) -> Result
     project_config::write(path, &pinned)
 }
 
-fn report(result: &Applied, path: &std::path::Path) {
+fn report(result: &Applied, path: &std::path::Path, globals: &CloudGlobals) {
     let file = path.display();
     // Whatever ran before this — a login, most of it a browser's — is not part
     // of the report.
@@ -291,69 +292,9 @@ fn report(result: &Applied, path: &std::path::Path) {
         }
     }
 
-    notices(result, path);
-}
-
-/// What the deployment has to say, as it sees it. Printed whether or not this
-/// apply changed anything: it is current state, not a record of the run.
-///
-/// The deployment writes the text and picks the level; the grouping and the
-/// order are decided here, so a level this build does not know is still shown
-/// rather than dropped.
-fn notices(result: &Applied, path: &std::path::Path) {
-    if result.notices.is_empty() {
-        return;
-    }
-    // The deployment does not know which file this ran against, so the `-c` a
-    // reader would have to repeat is added here.
-    let flag = config_flag(path);
-    for (level, group) in grouped(&result.notices) {
-        println!();
-        println!("{}", level.heading());
-        for notice in group {
-            println!();
-            println!("  {}", notice.message);
-            if let Some(hint) = hint(notice, &flag) {
-                println!("    {hint}");
-            }
-        }
-    }
-}
-
-/// The one thing to do about a notice: the command when there is one, and the
-/// URL only when there is not. A reader who can stay on the command line is not
-/// sent to a browser as well.
-fn hint(notice: &Notice, flag: &str) -> Option<String> {
-    match &notice.command {
-        Some(command) => Some(format!("{command}{flag}")),
-        None => notice.url.clone(),
-    }
-}
-
-/// Notices under the heading each belongs to, loudest first, keeping the
-/// deployment's order within a level. Empty levels are absent rather than
-/// printed as a heading with nothing under it.
-fn grouped(notices: &[Notice]) -> Vec<(NoticeLevel, Vec<&Notice>)> {
-    NoticeLevel::ORDER
-        .into_iter()
-        .filter_map(|level| {
-            let group: Vec<&Notice> = notices.iter().filter(|n| n.level == level).collect();
-            (!group.is_empty()).then_some((level, group))
-        })
-        .collect()
-}
-
-/// The `-c` the user would have to repeat, omitted when discovery finds the
-/// same file anyway.
-fn config_flag(path: &std::path::Path) -> String {
-    let discovered = project_config::find()
-        .ok()
-        .flatten()
-        .map(|found: Found| found.path);
-    match discovered {
-        Some(d) if d == path => String::new(),
-        _ => format!(" -c {}", path.display()),
-    }
+    // What the deployment has to say, as it sees it. Printed whether or not
+    // this apply changed anything: it is current state, not a record of the run.
+    notices::print(&result.notices, &notices::flag(globals));
 }
 
 fn summarize(change: &ConfigEvent) -> String {
@@ -507,41 +448,6 @@ mod tests {
         assert_eq!(summarize(&event("something.new", json!({}))), "");
     }
 
-    fn notice(level: &str, message: &str) -> Notice {
-        serde_json::from_value(json!({ "level": level, "message": message })).unwrap()
-    }
-
-    /// The deployment decides what it says and how loudly; the order of the
-    /// headings, and which ones appear at all, are decided here.
-    #[test]
-    fn notices_are_grouped_by_level_loudest_first() {
-        let notices = [
-            notice("info", "minted a secret"),
-            notice("action", "connect a workspace"),
-            notice("warn", "#general was taken"),
-            notice("action", "set a key"),
-        ];
-        let shape: Vec<(&str, Vec<&str>)> = grouped(&notices)
-            .iter()
-            .map(|(level, group)| {
-                (
-                    level.heading(),
-                    group.iter().map(|n| n.message.as_str()).collect(),
-                )
-            })
-            .collect();
-        assert_eq!(
-            shape,
-            [
-                ("Action required:", vec!["connect a workspace", "set a key"]),
-                ("Warnings:", vec!["#general was taken"]),
-                ("Notes:", vec!["minted a secret"]),
-            ]
-        );
-        // A level with nothing in it is not a heading over an empty list.
-        assert_eq!(grouped(&[notice("warn", "only this")]).len(), 1);
-    }
-
     /// The deployment knows the origin a browser reaches it at; the CLI only
     /// knows the hosted cloud's.
     #[test]
@@ -566,43 +472,6 @@ mod tests {
         );
         // A deployment that says nothing gets no line rather than a guess.
         assert_eq!(project_url(&response(None), "http://localhost:5174"), None);
-    }
-
-    /// A browser is the fallback, not the companion: a notice that names a
-    /// command is done on the command line.
-    #[test]
-    fn a_notice_sends_the_reader_to_a_browser_only_when_there_is_no_command() {
-        let both: Notice = serde_json::from_value(json!({
-            "message": "authorize it",
-            "command": "subs mcp login sentry",
-            "url": "https://app.test/mcp",
-        }))
-        .unwrap();
-        assert_eq!(
-            hint(&both, " -c other.toml").as_deref(),
-            Some("subs mcp login sentry -c other.toml")
-        );
-
-        let url_only: Notice = serde_json::from_value(
-            json!({ "message": "connect Slack", "url": "https://app.test" }),
-        )
-        .unwrap();
-        assert_eq!(hint(&url_only, "").as_deref(), Some("https://app.test"));
-
-        assert_eq!(hint(&notice("info", "nothing to do"), ""), None);
-    }
-
-    /// A deployment newer than this CLI must still be heard: an unknown level
-    /// reads as the loudest rather than failing the whole response.
-    #[test]
-    fn an_unknown_level_is_shown_rather_than_dropped() {
-        let parsed: Notice =
-            serde_json::from_value(json!({ "level": "critical", "message": "something new" }))
-                .expect("an unknown level must not fail the response");
-        assert_eq!(parsed.level, NoticeLevel::Action);
-        // And a deployment that sends no level at all still lands somewhere.
-        let bare: Notice = serde_json::from_value(json!({ "message": "no level" })).unwrap();
-        assert_eq!(bare.level, NoticeLevel::Action);
     }
 
     #[test]

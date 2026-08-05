@@ -51,6 +51,9 @@ subs llm set-key claude    # reads the key from stdin
 The key never appears in argv, and no read ever returns it. Until one is set, a
 call on that block fails saying so.
 
+Every command that finishes a step prints what is left, and `subs doctor` asks
+at any time — so the setup is one command following the next.
+
 At this point `my-agent` already works: with no `worker`, the engine decides its
 turns by accepting its own proposal. Skip to step 6 to send it a message.
 

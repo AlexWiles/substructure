@@ -11,6 +11,15 @@ together at the same version.
 
 ### Fixed
 
+- The Slack bot now ends every step card when the turn ends, when the engine
+  drops the call, and when the session is cancelled. A tool call that did not
+  finish showed as running for as long as anyone looked at the message.
+- The Slack bot now closes the message it streams into on every path: a turn
+  the deployment posts nothing for, a stream that refuses the answer, and a
+  cancelled session. These messages stayed open until Slack expired them.
+- The Slack bot now shows the working indicator for as long as a turn runs. It
+  stopped after the first step card, during a turn that streams continuously,
+  and when a turn ended while the turn behind it was still running.
 - A turn that delegates to more than one sub-agent now waits for all of them to
   return before it continues.
 - Failed decisions now retry or end the run with the error.
@@ -118,10 +127,10 @@ together at the same version.
 ### Added
 
 - A Slack deployment can supply its own controller. It decides everything the
-  bot shows — the answer, a failure, each step card, the prompt buttons, the
-  thread status, and how a message is put together — and what happens when a
-  user presses a button it added. It inherits the engine's behaviour for what it
-  does not change.
+  bot shows — the answer, a failure, a cancelled run, each step card, the prompt
+  buttons, the thread status, and how a message is put together — and what
+  happens when a user presses a button it added. It inherits the engine's
+  behaviour for what it does not change.
 - A worker is now optional. Declare an agent in `substructure.toml`, and the engine decides its turns.
 - `[agent.<id>]` sections declare each agent. The section mirrors the wire agent config, plus a `worker` URL and a `signing_secret_env`.
 - An agent can give its whole config to its worker. Declare only a `worker` URL, and the worker declares the agent at `session.start`.
@@ -135,6 +144,8 @@ together at the same version.
 - substructure.toml as a config file.
 - `subs init` writes a starter `substructure.toml`. It asks for a project name, a provider and model, an agent id, which MCP servers to connect, whether the agent answers in Slack, and where it runs, then prints the steps for that answer.
 - `subs slack connect` adds the bot to a Slack workspace. A deployment that installs no Slack app, and a file that names no `[remote]`, get the Socket Mode steps instead.
+- `subs doctor` shows what the project still needs, and the command for each step. A file that names a `[remote]` asks the deployment; a file that names none reports the variables and the connection credentials an engine here is missing.
+- `subs llm set-key`, `subs mcp login`, and `subs slack connect` print the steps that remain when they finish.
 
 ### Changed
 

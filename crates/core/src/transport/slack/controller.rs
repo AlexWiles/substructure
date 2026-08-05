@@ -54,6 +54,9 @@ use crate::session::events::TurnCompleted;
 
 /// Keeps a chatty tool from bloating a card; not a Slack limit.
 const MAX_TITLE: usize = 60;
+/// The engine's own wording for work that ended with no result — a card that
+/// never finished, and a run that was cancelled with one open.
+const CANCELLED: &str = "Cancelled.";
 #[cfg(test)]
 pub(super) const MAX_TITLE_FOR_TESTS: usize = MAX_TITLE;
 
@@ -87,14 +90,20 @@ pub enum StepStatus {
     InProgress,
     Complete,
     Error,
+    /// Ended with no result: the engine dropped the call, or the turn it
+    /// belonged to ended while it was still running. A fact rather than a
+    /// sentence, so a deployment words it — or renders it — its own way.
+    Cancelled,
 }
 
 impl StepStatus {
+    /// Slack knows three states; a card that ended without a result takes the
+    /// one that is not "still going" or "worked".
     pub fn wire(self) -> &'static str {
         match self {
             StepStatus::InProgress => "in_progress",
             StepStatus::Complete => "complete",
-            StepStatus::Error => "error",
+            StepStatus::Error | StepStatus::Cancelled => "error",
         }
     }
 }
@@ -218,6 +227,23 @@ pub trait SlackController: Send + Sync {
         })
     }
 
+    /// The message a cancelled run leaves behind, whole. A cancel completes no
+    /// turn, so it arrives here rather than at [`Self::message`] — the work it
+    /// had done, and a line saying it stopped.
+    ///
+    /// `None` leaves the message as it was streamed. The stream closes either
+    /// way: what it says is this seam's, that it stops is the bot's.
+    fn cancelled(&self, ctx: &Context<'_>, activity: &[Value]) -> Option<Rendered> {
+        let _ = ctx;
+        let mut blocks = activity.to_vec();
+        blocks.push(section_block(CANCELLED));
+        blocks.extend(self.trailing_blocks(ctx));
+        Some(Rendered {
+            text: CANCELLED.to_string(),
+            blocks,
+        })
+    }
+
     /// What a completed turn says. A failed run arrives here too, as
     /// `turn.error` — a deployment that only wants to reword one failure
     /// branches on the code and delegates the rest.
@@ -255,9 +281,15 @@ pub trait SlackController: Send + Sync {
             "title": clip(&step.title(), MAX_TITLE),
             "status": step.status.wire(),
         });
+        // A call that ended with no result has nothing to show, and a card
+        // that shows nothing reads as one still waiting for it.
+        let outcome = step.output.or(match step.status {
+            StepStatus::Cancelled => Some(CANCELLED),
+            _ => None,
+        });
         for (field, heading, text) in [
             ("details", None, step.input),
-            ("output", Some("Result:"), step.output),
+            ("output", Some("Result:"), outcome),
         ] {
             // Slack rejects an empty text element.
             if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
@@ -566,10 +598,20 @@ mod tests {
             fn trailing_blocks(&self, _: &Context<'_>) -> Vec<Value> {
                 vec![context_block("brand")]
             }
+            fn cancelled(&self, _: &Context<'_>, _: &[Value]) -> Option<Rendered> {
+                Some(Rendered {
+                    text: "stopped".into(),
+                    blocks: vec![section_block("stopped")],
+                })
+            }
         }
 
         let p = Rebrand;
         assert_eq!(p.turn(&ctx(), &completed(Value::Null)).text, "answer");
+        assert_eq!(
+            p.cancelled(&ctx(), &[]).map(|r| r.text).as_deref(),
+            Some("stopped")
+        );
         assert_eq!(p.step_block(&step())["text"]["text"], "step search");
         assert_eq!(p.step_chunk(&step())["title"], "…");
         assert_eq!(p.said_block("hi")["text"]["text"], "said hi");
@@ -593,6 +635,38 @@ mod tests {
             "a deployment can clear the indicator"
         );
         assert_eq!(p.trailing_blocks(&ctx())[0]["elements"][0]["text"], "brand");
+    }
+
+    /// A card that ended with no result is a fact the fold records; what it
+    /// reads as, and whether it reads as anything, is the controller's.
+    #[test]
+    fn work_that_ended_with_no_result_is_a_status_not_a_sentence() {
+        let ended = StepView {
+            status: StepStatus::Cancelled,
+            output: None,
+            took: Some("2.0s"),
+            ..step()
+        };
+        // Slack knows three states, so the card is not still going.
+        let card = DefaultController.step_block(&ended);
+        assert_eq!(card["status"], "error");
+        assert_eq!(
+            card["output"]["elements"][0]["elements"][1]["text"],
+            "Cancelled."
+        );
+
+        // A deployment reads the status, not the sentence.
+        struct Own;
+        impl SlackController for Own {
+            fn step_block(&self, s: &StepView<'_>) -> Value {
+                match s.status {
+                    StepStatus::Cancelled => section_block(&format!("{} — abandoned", s.name)),
+                    _ => DefaultController.step_block(s),
+                }
+            }
+        }
+        assert_eq!(Own.step_block(&ended)["text"]["text"], "search — abandoned");
+        assert_eq!(Own.step_block(&step())["status"], "complete");
     }
 
     /// The controller composes the whole message, so it can reorder or drop

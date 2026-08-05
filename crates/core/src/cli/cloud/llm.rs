@@ -13,6 +13,7 @@ use std::io::Read as _;
 use crate::api::v1::{LlmBlockView, LlmKeyRequest};
 
 use super::context::Context;
+use super::notices;
 use super::pickers;
 use super::print;
 use super::ProjectScope;
@@ -117,6 +118,7 @@ async fn set_key(block: String, env: Option<String>, scope: ProjectScope) -> Res
         });
     }
     println!("Key set for [llm.{block}].");
+    notices::remaining(&ctx, &project, &scope.globals).await;
     Ok(())
 }
 

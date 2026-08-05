@@ -263,6 +263,16 @@ pub struct ApplyResponse {
     pub notices: Vec<Notice>,
 }
 
+/// What a project still needs, as it stands. Its own response rather than a
+/// bare list, so a deployment that learns to report something beside the
+/// notices has somewhere to put it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoticesResponse {
+    #[serde(default)]
+    pub notices: Vec<Notice>,
+}
+
 /// One thing the deployment wants the reader to know, and the ways to act on
 /// it. Both routes are optional: an OAuth consent has no CLI command, and a
 /// purely local fix has no page.
@@ -279,6 +289,32 @@ pub struct Notice {
     pub command: Option<String>,
     #[serde(default)]
     pub url: Option<String>,
+}
+
+impl Notice {
+    /// A step nobody has finished yet. Written by the deployment that holds the
+    /// state, or by the CLI itself for an engine you run here — which has no
+    /// deployment to ask.
+    pub fn action(message: impl Into<String>) -> Self {
+        Self {
+            level: NoticeLevel::Action,
+            message: message.into(),
+            command: None,
+            url: None,
+        }
+    }
+
+    /// The command that finishes it, for the steps a CLI can do.
+    pub fn with_command(mut self, command: impl Into<String>) -> Self {
+        self.command = Some(command.into());
+        self
+    }
+
+    /// Where it is done, for the steps a CLI cannot.
+    pub fn with_url(mut self, url: impl Into<String>) -> Self {
+        self.url = Some(url.into());
+        self
+    }
 }
 
 /// How much of the reader's attention a notice is asking for.

@@ -23,6 +23,7 @@ use serde::Deserialize;
 use tokio::sync::{mpsc, Mutex, Notify};
 
 use super::cloud::context::Context as CloudContext;
+use super::cloud::notices;
 use super::cloud::project_config::{self, ProjectConfig};
 use super::cloud::{CloudGlobals, ProjectScope};
 use super::DEFAULT_TENANT;
@@ -247,12 +248,45 @@ fn describe(tokens: &oauth::Tokens, url: &str) -> String {
         return format!("authorized for {}; log in again", tokens.resource);
     }
     match tokens.expires_at {
-        Some(at) if tokens.stale() && !tokens.refreshable() => {
-            format!("expired {}", at.format("%Y-%m-%d %H:%M UTC"))
-        }
+        Some(at) if expired(tokens) => format!("expired {}", at.format("%Y-%m-%d %H:%M UTC")),
         Some(at) => format!("authorized, expires {}", at.format("%Y-%m-%d %H:%M UTC")),
         None => "authorized".to_string(),
     }
+}
+
+/// Run out and unable to renew, which the resolver cannot send.
+fn expired(tokens: &oauth::Tokens) -> bool {
+    tokens.stale() && !tokens.refreshable()
+}
+
+/// Declared connections an engine here could not dial: never authorized,
+/// expired with nothing to renew from, or authorized for another server. The
+/// `token_env` ones are the environment's business and are left out.
+pub(crate) async fn unauthorized_local(cfg: &ProjectConfig) -> Result<Vec<String>> {
+    let declared: Vec<(String, String)> = cfg
+        .connections()
+        .into_iter()
+        .filter(|(_, spec)| spec.auth.is_none())
+        .map(|(id, spec)| (id, spec.url))
+        .collect();
+    let store = match open_existing_db(cfg)? {
+        Some(db) => SqliteTokenStore::new(db)?,
+        // No engine has ever run here, so nothing is authorized — and a
+        // database is not worth creating to say so.
+        None => return Ok(declared.into_iter().map(|(id, _)| id).collect()),
+    };
+
+    let mut out = Vec::new();
+    for (id, url) in declared {
+        let usable = match oauth::TokenStore::get(&store, DEFAULT_TENANT, &id).await {
+            Some(tokens) => oauth::same_origin(&tokens.resource, &url) && !expired(&tokens),
+            None => false,
+        };
+        if !usable {
+            out.push(id);
+        }
+    }
+    Ok(out)
 }
 
 // ── Remote: the server runs the flow, the credential stays there ─────────────
@@ -322,6 +356,7 @@ async fn login_remote(
         return Ok(());
     }
     println!("Authorized `{id}` for {project}.");
+    notices::remaining(&ctx, &project, &scope.globals).await;
     Ok(())
 }
 

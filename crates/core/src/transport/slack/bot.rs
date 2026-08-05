@@ -252,9 +252,16 @@ impl Streams {
         lock(&self.open).remove(key);
     }
 
-    /// Every turn of the session: a cancel ends them all.
-    fn remove_session(&self, tenant_id: &str, session_id: &str) {
-        lock(&self.open).retain(|k, _| k.tenant_id != tenant_id || k.session_id != session_id);
+    /// Every turn of the session, removed and handed back: a cancel ends them
+    /// all, and each one that opened a message has to close it.
+    fn take_session(&self, tenant_id: &str, session_id: &str) -> Vec<Stream> {
+        let mut open = lock(&self.open);
+        let mine: Vec<StreamKey> = open
+            .keys()
+            .filter(|k| k.tenant_id == tenant_id && k.session_id == session_id)
+            .cloned()
+            .collect();
+        mine.iter().filter_map(|key| open.remove(key)).collect()
     }
 
     /// Remove the slot; the worker cannot append after this.
@@ -294,11 +301,29 @@ impl Streams {
         stream.sent.extend(sent);
     }
 
-    /// Live turns with no card yet.
-    fn waiting(&self) -> Vec<StreamKey> {
+    /// A turn of this session other than `turn_id` that is still running.
+    fn live_elsewhere(
+        &self,
+        tenant_id: &str,
+        session_id: &str,
+        turn_id: Option<&str>,
+    ) -> Option<String> {
         lock(&self.open)
             .values()
-            .filter(|s| !s.dead && s.ts.is_none())
+            .find(|s| {
+                s.tenant_id == tenant_id
+                    && s.session_id == session_id
+                    && Some(s.turn_id.as_str()) != turn_id
+                    && !s.dead
+            })
+            .map(|s| s.turn_id.clone())
+    }
+
+    /// Every turn still running, whether or not it has opened a message.
+    fn live(&self) -> Vec<StreamKey> {
+        lock(&self.open)
+            .values()
+            .filter(|s| !s.dead)
             .map(Stream::key)
             .collect()
     }
@@ -787,6 +812,32 @@ impl SlackBot {
         self.set_status(ws, thread, &status).await;
     }
 
+    /// The indicator belongs to the thread, not to one turn: a turn ending
+    /// hands it to the turn queued behind it rather than clearing it, so a
+    /// thread that is still working never looks idle.
+    async fn settle_status(
+        &self,
+        ws: &Workspace,
+        thread: &Thread,
+        event: &SessionEvent,
+        ended: Option<&str>,
+    ) {
+        let Some(turn_id) = self
+            .streams
+            .live_elsewhere(&event.tenant_id, &event.session_id, ended)
+        else {
+            return self.set_status(ws, thread, "").await;
+        };
+        let ctx = Context {
+            tenant_id: &event.tenant_id,
+            session_id: &event.session_id,
+            turn_id: &turn_id,
+            agent_id: ws.routing.agent_for(&thread.channel),
+            elapsed: None,
+        };
+        self.set_working(ws, thread, &ctx).await
+    }
+
     async fn set_status(&self, ws: &Workspace, thread: &Thread, status: &str) {
         let body = serde_json::json!({
             "channel_id": thread.channel,
@@ -890,6 +941,19 @@ impl SlackBot {
         )
         .await
         .map(|_| ())
+    }
+
+    /// Stop the stream without adding to it, for the paths that have nothing
+    /// left to say. A message left streaming shows a spinner until Slack
+    /// expires it, so every path that opens one closes it.
+    ///
+    /// Best effort by nature: a stream already stopped, expired, or on a
+    /// deleted message is one that is no longer open, which is the point.
+    async fn close_stream(&self, ws: &Workspace, channel: &str, ts: &str) {
+        let body = serde_json::json!({ "channel": channel, "ts": ts });
+        if let Err(e) = self.api_call(ws, "chat.stopStream", body).await {
+            tracing::debug!(error = %e, channel, "slack: stream already closed");
+        }
     }
 
     /// Resume the interrupt with the recorded option value, not the wire
@@ -996,8 +1060,13 @@ impl EventProcessor for SlackBot {
         // The indicator is the turn's, start to end: nothing else lights it, so
         // a message waiting its turn does not claim the thread is working.
         match &event.payload {
-            EventPayload::TurnCompleted(_) | EventPayload::SessionInterrupted(_) => {
-                self.set_status(&ws, &thread, "").await;
+            EventPayload::TurnCompleted(t) => {
+                self.settle_status(&ws, &thread, &event, Some(&t.turn_id))
+                    .await
+            }
+            EventPayload::SessionInterrupted(_) => {
+                self.settle_status(&ws, &thread, &event, event.meta.turn_id.as_deref())
+                    .await
             }
             EventPayload::TurnStarted(t) => {
                 let ctx = Context {
@@ -1097,6 +1166,11 @@ impl SlackBot {
                 .message(&present_ctx, t, activity.as_deref().unwrap_or_default())
         else {
             tracing::debug!(%session_id, "slack: the controller posts nothing for this turn");
+            // Nothing to say is not nothing to do: the turn's message is still
+            // open, and only this path is left to close it.
+            if let Some(ts) = live.as_ref().and_then(|s| s.ts.as_deref()) {
+                self.close_stream(ws, &thread.channel, ts).await;
+            }
             return Ok(());
         };
         let Some(ts) = live.as_ref().and_then(|s| s.ts.clone()) else {
@@ -1152,7 +1226,11 @@ impl SlackBot {
             // Do not lose the answer to a bad stream.
             Err(e) => {
                 tracing::warn!(error = %e, %session_id, "slack: stream finalize failed; posting reply");
-                self.post_turn(ws, thread, session_id, t, &rendered).await
+                let posted = self.post_turn(ws, thread, session_id, t, &rendered).await;
+                // The answer is in the thread, and the stream that would not
+                // take it is still open above it.
+                self.close_stream(ws, &thread.channel, &ts).await;
+                posted
             }
         }
     }
@@ -1381,8 +1459,10 @@ impl SlackBot {
             | EventPayload::SubAgentErrored(_) => {}
             // A cancel ends every turn of the session.
             EventPayload::SessionCancelled => {
-                self.streams
-                    .remove_session(&event.tenant_id, &event.session_id);
+                let open = self
+                    .streams
+                    .take_session(&event.tenant_id, &event.session_id);
+                self.close_turns(ws, &event.session_id, open).await;
                 if let Some(store) = self.store.as_deref() {
                     if let Err(e) = store.clear(&event.tenant_id, &event.session_id).await {
                         tracing::warn!(session_id = %event.session_id, error = %e, "slack: stream state not cleared");
@@ -1405,14 +1485,24 @@ impl SlackBot {
 
     /// One worker; the tick is the global append budget.
     async fn stream_activity(&self, ctx: &ChannelContext) {
+        let mut refreshed = std::time::Instant::now();
         loop {
+            // Slack drops a status after two minutes, so every live turn has
+            // it set again on this cadence. Off the clock rather than off the
+            // queue: a turn that streams a card every second never lets the
+            // idle branch run, and it is the turns that work the longest that
+            // most need to look like they are working.
+            if refreshed.elapsed() >= STATUS_REFRESH {
+                self.refresh_statuses().await;
+                refreshed = std::time::Instant::now();
+            }
             let Some(key) = self.streams.take_dirty() else {
-                // No events come while a turn thinks; refresh the status on
-                // a timer.
+                // Nothing to render: wait for work, or for the status to be
+                // due again.
                 tokio::select! {
                     _ = ctx.shutdown.cancelled() => return,
                     _ = self.streams.notified() => {}
-                    _ = tokio::time::sleep(STATUS_REFRESH) => self.refresh_statuses().await,
+                    _ = tokio::time::sleep(STATUS_REFRESH) => {}
                 }
                 continue;
             };
@@ -1427,9 +1517,11 @@ impl SlackBot {
         }
     }
 
-    /// Set the status again for each turn that has no card yet.
+    /// Set the status again for every turn still running — with a card or
+    /// without one. A turn between two cards shows nothing else, and a
+    /// thread that has gone quiet reads as one that has finished.
     async fn refresh_statuses(&self) {
-        for key in self.streams.waiting() {
+        for key in self.streams.live() {
             let Some(ws) = self.resolver.by_tenant(&key.tenant_id).await else {
                 continue;
             };
@@ -1606,6 +1698,50 @@ impl SlackBot {
             .ok()?;
         let turn = TurnActivity::fold(&events, Some(stream.turn_id.clone()))?;
         Some(turn.blocks(self.controller.as_ref()))
+    }
+
+    /// Close every message these turns left open: the cards settled, a line
+    /// saying the run ended, and the stream stopped. A cancel completes no
+    /// turn, so nothing else will come along to finish the message.
+    async fn close_turns(&self, ws: &Workspace, session_id: &str, open: Vec<Stream>) {
+        let Some((channel, thread_ts)) = slack_session(session_id) else {
+            return;
+        };
+        for stream in open {
+            let Some(ts) = stream.ts.clone() else {
+                continue;
+            };
+            // The fold settles the cards on the cancel itself, so this is the
+            // same work the message was showing, each card ended.
+            let activity = self.activity_blocks(ws, Some(&stream)).await;
+            let ctx = Context {
+                tenant_id: &stream.tenant_id,
+                session_id,
+                turn_id: &stream.turn_id,
+                agent_id: ws.routing.agent_for(channel),
+                elapsed: None,
+            };
+            if let Some(rendered) = self
+                .controller
+                .cancelled(&ctx, activity.as_deref().unwrap_or_default())
+            {
+                let meta = ReplyMeta {
+                    session_id: Some(session_id.to_string()),
+                    ..Default::default()
+                };
+                if let Err(e) = self
+                    .update(ws, channel, &ts, &rendered.text, rendered.blocks, &meta)
+                    .await
+                {
+                    tracing::warn!(error = %e, %session_id, "slack: cancelled turn not settled");
+                }
+            }
+            // Whatever the controller decided to say, the message it was
+            // streamed into still has to stop.
+            self.close_stream(ws, channel, &ts).await;
+        }
+        self.set_status(ws, &Thread::new(channel, thread_ts), "")
+            .await;
     }
 
     /// Abandon a rejected stream. The answer posts as a message.
@@ -1841,41 +1977,79 @@ mod tests {
 
     const SESSION: &str = "slack:C1:1.0";
 
-    /// A Slack that records what it was posted. `conversations.replies` answers
-    /// empty so the bot's idempotency check passes and it goes on to post.
-    async fn fake_slack() -> (String, Arc<StdMutex<Vec<Value>>>) {
+    /// Every call the bot made, in order.
+    #[derive(Clone, Default)]
+    struct Calls(Arc<StdMutex<Vec<(String, Value)>>>);
+
+    impl Calls {
+        fn record(&self, method: &str, body: Value) {
+            self.0.lock().unwrap().push((method.to_string(), body));
+        }
+
+        fn to(&self, method: &str) -> Vec<Value> {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(m, _)| m == method)
+                .map(|(_, b)| b.clone())
+                .collect()
+        }
+    }
+
+    /// A Slack that records what it was called with. `conversations.replies`
+    /// answers empty so the bot's idempotency check passes and it goes on to
+    /// post. `stops` is what `chat.stopStream` answers, for the paths that
+    /// only happen when a stream refuses to close.
+    async fn fake_slack_with(stops: Value) -> (String, Calls) {
         use axum::routing::post;
         use axum::{Json, Router};
 
-        let posted: Arc<StdMutex<Vec<Value>>> = Arc::new(StdMutex::new(Vec::new()));
-        let recorder = posted.clone();
-        let app = Router::new()
-            .route(
-                "/chat.postMessage",
+        let calls = Calls::default();
+        let route = |app: Router, method: &'static str, answer: Value| {
+            let calls = calls.clone();
+            app.route(
+                &format!("/{method}"),
                 post(move |Json(body): Json<Value>| {
-                    let recorder = recorder.clone();
+                    let (calls, answer) = (calls.clone(), answer.clone());
                     async move {
-                        recorder.lock().unwrap().push(body);
-                        Json(serde_json::json!({"ok": true, "ts": "1.1"}))
+                        calls.record(method, body);
+                        Json(answer)
                     }
                 }),
             )
-            .route(
-                "/conversations.replies",
-                post(|| async { Json(serde_json::json!({"ok": true, "messages": []})) }),
-            )
-            .route(
-                "/auth.test",
-                post(|| async {
-                    Json(serde_json::json!({"ok": true, "user_id": "U0", "bot_id": "B0"}))
-                }),
-            );
+        };
+        let ok = serde_json::json!({"ok": true, "ts": "1.1"});
+        let app = Router::new();
+        let app = route(app, "chat.postMessage", ok.clone());
+        let app = route(app, "chat.update", ok.clone());
+        let app = route(app, "chat.stopStream", stops);
+        let app = route(
+            app,
+            "conversations.replies",
+            serde_json::json!({"ok": true, "messages": []}),
+        );
+        let app = route(
+            app,
+            "auth.test",
+            serde_json::json!({"ok": true, "user_id": "U0", "bot_id": "B0"}),
+        );
+        let app = route(
+            app,
+            "assistant.threads.setStatus",
+            serde_json::json!({"ok": true}),
+        );
+
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        (format!("http://{addr}"), posted)
+        (format!("http://{addr}"), calls)
+    }
+
+    async fn fake_slack() -> (String, Calls) {
+        fake_slack_with(serde_json::json!({"ok": true})).await
     }
 
     struct OneWorkspace(Arc<Workspace>);
@@ -1931,24 +2105,39 @@ mod tests {
         }
     }
 
-    async fn post_with(controller: Arc<dyn SlackController>, t: &TurnCompleted) -> Value {
-        let (api_base, posted) = fake_slack().await;
+    /// The bot, its workspace, and the Slack it talks to.
+    fn bot_for(
+        api_base: String,
+        controller: Arc<dyn SlackController>,
+    ) -> (SlackBot, Arc<Workspace>) {
         let ws = Arc::new(Workspace::new(
             "xoxb-test".into(),
-            "tenant-a".into(),
+            "t".into(),
             Routing::new().dm(Some("a".into())),
         ));
         let bot = SlackBot::new(Arc::new(OneWorkspace(ws.clone())), api_base, None)
             .with_controller(controller);
-        let thread = Thread {
+        (bot, ws)
+    }
+
+    fn thread() -> Thread {
+        Thread {
             channel: "C1".into(),
             ts: "1.0".into(),
-        };
-        bot.complete_turn(&ws, &thread, SESSION, t, chrono::Utc::now(), 0)
+        }
+    }
+
+    async fn post_with(controller: Arc<dyn SlackController>, t: &TurnCompleted) -> Value {
+        let (api_base, calls) = fake_slack().await;
+        let (bot, ws) = bot_for(api_base, controller);
+        bot.complete_turn(&ws, &thread(), SESSION, t, chrono::Utc::now(), 0)
             .await
             .expect("posts");
-        let sent = posted.lock().unwrap();
-        sent.first().cloned().expect("one message posted")
+        calls
+            .to("chat.postMessage")
+            .first()
+            .cloned()
+            .expect("one message posted")
     }
 
     /// The engine's own voice, unchanged: the failure's sentence and nothing
@@ -1987,6 +2176,139 @@ mod tests {
         assert_eq!(body["text"], "Error: bad decision");
         let blocks = body["blocks"].as_array().expect("blocks");
         assert_eq!(blocks.len(), 2, "still carries the deployment's link");
+    }
+
+    /// A controller may decide a turn is not worth a message — but the turn
+    /// opened one, and a message left streaming spins until Slack expires it.
+    #[tokio::test]
+    async fn a_turn_nobody_posts_for_still_closes_its_message() {
+        struct Silent;
+        impl SlackController for Silent {
+            fn message(&self, _: &Context<'_>, _: &TurnCompleted, _: &[Value]) -> Option<Rendered> {
+                None
+            }
+        }
+
+        let (api_base, calls) = fake_slack().await;
+        let (bot, ws) = bot_for(api_base, Arc::new(Silent));
+        bot.streams.insert(stream("turn-1", Some("1.1")));
+
+        let t = failed_turn(ErrorInfo::new(ErrorCode::InvalidResponse, "bad decision"));
+        bot.complete_turn(&ws, &thread(), SESSION, &t, chrono::Utc::now(), 0)
+            .await
+            .expect("nothing to post is not a failure");
+
+        assert!(
+            calls.to("chat.postMessage").is_empty(),
+            "nothing was posted"
+        );
+        let stopped = calls.to("chat.stopStream");
+        assert_eq!(stopped.len(), 1, "the message it opened is closed");
+        assert_eq!(stopped[0]["ts"], "1.1");
+    }
+
+    /// The stream will not take the answer. The answer goes to the thread —
+    /// and the stream above it still has to stop, or it spins over the reply.
+    #[tokio::test]
+    async fn a_stream_that_refuses_the_answer_is_closed_behind_it() {
+        let (api_base, calls) =
+            fake_slack_with(serde_json::json!({"ok": false, "error": "invalid_arguments"})).await;
+        let (bot, ws) = bot_for(api_base, Arc::new(DefaultController));
+        bot.streams.insert(stream("turn-1", Some("1.1")));
+
+        let t = failed_turn(ErrorInfo::new(ErrorCode::InvalidResponse, "bad decision"));
+        bot.complete_turn(&ws, &thread(), SESSION, &t, chrono::Utc::now(), 0)
+            .await
+            .expect("the reply lands as a message");
+
+        let posted = calls.to("chat.postMessage");
+        assert_eq!(posted.len(), 1, "the answer is not lost");
+        assert!(posted[0]["text"]
+            .as_str()
+            .is_some_and(|t| t.starts_with("Error: bad decision")));
+        // Once with the answer, once bare after it was refused.
+        assert_eq!(calls.to("chat.stopStream").len(), 2);
+    }
+
+    /// A cancel completes no turn, so nothing else comes along to finish the
+    /// message it left open.
+    #[tokio::test]
+    async fn a_cancelled_session_settles_and_closes_every_message_it_held() {
+        let (api_base, calls) = fake_slack().await;
+        let (bot, ws) = bot_for(api_base, Arc::new(DefaultController));
+
+        let open = vec![stream("turn-1", Some("1.1")), stream("turn-2", None)];
+        bot.close_turns(&ws, SESSION, open).await;
+
+        let stopped = calls.to("chat.stopStream");
+        assert_eq!(stopped.len(), 1, "only the turn that opened a message");
+        assert_eq!(stopped[0]["ts"], "1.1");
+        assert_eq!(calls.to("chat.update")[0]["text"], "Cancelled.");
+        // And the thread stops claiming it is working.
+        let status = calls.to("assistant.threads.setStatus");
+        assert_eq!(status.len(), 1);
+        assert_eq!(status[0]["status"], "");
+    }
+
+    /// The split the seam rests on: a deployment decides what a cancel says,
+    /// and saying nothing is one of the answers — but the message it was
+    /// streamed into stops either way.
+    #[tokio::test]
+    async fn a_controller_that_says_nothing_about_a_cancel_still_gets_it_closed() {
+        struct Quiet;
+        impl SlackController for Quiet {
+            fn cancelled(&self, _: &Context<'_>, _: &[Value]) -> Option<Rendered> {
+                None
+            }
+        }
+
+        let (api_base, calls) = fake_slack().await;
+        let (bot, ws) = bot_for(api_base, Arc::new(Quiet));
+        bot.close_turns(&ws, SESSION, vec![stream("turn-1", Some("1.1"))])
+            .await;
+
+        assert!(calls.to("chat.update").is_empty(), "nothing was rewritten");
+        assert_eq!(calls.to("chat.stopStream").len(), 1, "and it still closed");
+    }
+
+    /// The indicator is the thread's, and a queued turn inherits it: only the
+    /// last turn to end may say the thread has stopped working.
+    #[test]
+    fn a_turn_ending_hands_the_indicator_to_the_one_behind_it() {
+        let streams = Streams::default();
+        streams.insert(stream("turn-1", Some("1.1")));
+        streams.insert(stream("turn-2", None));
+
+        assert_eq!(
+            streams.live_elsewhere("t", SESSION, Some("turn-1")),
+            Some("turn-2".to_string()),
+            "the queued turn is still working"
+        );
+        // The turn that ends is not itself a reason to keep it lit.
+        streams.remove(&key("turn-2"));
+        assert_eq!(streams.live_elsewhere("t", SESSION, Some("turn-1")), None);
+        // Nor is one Slack refused: it will never render again.
+        streams.insert(stream("turn-2", None));
+        streams.kill(&key("turn-2"));
+        assert_eq!(streams.live_elsewhere("t", SESSION, Some("turn-1")), None);
+        // Another session's turn is another thread's indicator.
+        assert_eq!(streams.live_elsewhere("t", "slack:C9:9.0", None), None);
+    }
+
+    /// Every live turn is refreshed, not only the ones with nothing on screen
+    /// yet: Slack drops a status after two minutes, and the turns that take
+    /// longest are the ones that need it most.
+    #[test]
+    fn the_status_is_refreshed_for_every_turn_still_running() {
+        let streams = Streams::default();
+        streams.insert(stream("turn-1", Some("1.1")));
+        streams.insert(stream("turn-2", None));
+        assert_eq!(streams.live().len(), 2);
+
+        streams.kill(&key("turn-1"));
+        let live = streams.live();
+        assert_eq!(live.len(), 1);
+        assert!(live.contains(&key("turn-2")));
     }
 
     /// A channel with nothing of its own is the default's, so declaring one
@@ -2101,8 +2423,11 @@ mod tests {
         streams.kill(&key("turn-1"));
         assert!(!streams.open_elsewhere(&key("turn-2")));
 
-        // A cancel takes the whole session.
-        streams.remove_session("t", SESSION);
+        // A cancel takes the whole session, and hands back every message it
+        // has to close.
+        let taken = streams.take_session("t", SESSION);
+        assert_eq!(taken.len(), 2);
+        assert!(taken.iter().any(|s| s.ts.as_deref() == Some("100.1")));
         assert!(streams.get(&key("turn-1")).is_none());
         assert!(streams.get(&key("turn-2")).is_none());
     }

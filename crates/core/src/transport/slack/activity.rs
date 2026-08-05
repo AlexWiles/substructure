@@ -102,6 +102,13 @@ impl TurnActivity {
                 self.end(&s.id, event, Ok(data.as_deref()))
             }
             EventPayload::SubAgentErrored(s) => self.end(&s.id, event, Err(&s.error.message)),
+            // The engine dropped the call: an interrupt, a branch it left, a
+            // state it could not settle against. It is over, so the card is.
+            EventPayload::CallVoided(v) => self.cancel(&v.id, event),
+            // Nothing outlives the turn that asked for it. A card left running
+            // on a finished message spins for as long as anyone looks at it,
+            // which reads as work still going on.
+            EventPayload::TurnCompleted(_) | EventPayload::SessionCancelled => self.settle(event),
             // A response with no calls is the answer, not a preamble.
             EventPayload::LlmCallCompleted(c) if !c.response.tool_calls.is_empty() => {
                 if let Some(text) = c.response.content.as_deref().map(str::trim) {
@@ -157,6 +164,36 @@ impl TurnActivity {
             input,
             output: None,
         }));
+    }
+
+    /// End every step still running, for the events that end all of them at
+    /// once. Derived like the rest of the fold, so a replay converges on the
+    /// same settled cards.
+    fn settle(&mut self, event: &SessionEvent) {
+        let running: Vec<String> = self
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Step(step) if step.status == Status::InProgress => Some(step.id.clone()),
+                _ => None,
+            })
+            .collect();
+        for id in running {
+            self.cancel(&id, event);
+        }
+    }
+
+    /// End one step with no result. The card carries the fact; the wording is
+    /// the controller's — see [`Status::Cancelled`].
+    fn cancel(&mut self, id: &str, event: &SessionEvent) {
+        let Some(step) = self.step(id) else {
+            return;
+        };
+        if step.status != Status::InProgress {
+            return;
+        }
+        step.status = Status::Cancelled;
+        step.took = Some(elapsed(step.started_at, event.occurred_at));
     }
 
     fn end(&mut self, id: &str, event: &SessionEvent, result: Result<Option<&str>, &str>) {
@@ -515,6 +552,106 @@ mod tests {
         assert_eq!(
             card["output"]["elements"][0]["elements"][1]["text"],
             "permission denied"
+        );
+    }
+
+    fn turn_ended(seq: u64, secs: i64, error: Option<&str>) -> SessionEvent {
+        event(
+            seq,
+            secs,
+            EventPayload::TurnCompleted(crate::session::events::TurnCompleted {
+                turn_id: "turn-1".into(),
+                data: serde_json::Value::Null,
+                turn_cost: Default::default(),
+                turn_token_usage: Default::default(),
+                error: error.map(ErrorInfo::handler),
+            }),
+        )
+    }
+
+    /// A card still running on a message nobody will touch again spins for as
+    /// long as anyone looks at it — the turn is over, and so is the call.
+    #[test]
+    fn a_failed_turn_settles_the_calls_it_was_still_waiting_on() {
+        let events = vec![
+            started("turn-1", 1),
+            tool_requested("tc1", "search_web", 2, 0),
+            tool_completed("tc1", 3, 1),
+            tool_requested("tc2", "send_email", 4, 1),
+            turn_ended(5, 4, Some("the model gave up")),
+        ];
+        let turn = TurnActivity::fold(&events, None).unwrap();
+        let chunks = turn.chunks(&crate::transport::slack::controller::DefaultController);
+        // The one that landed keeps its own outcome.
+        assert_eq!(chunks[0].1["status"], "complete");
+        // The one that never did is ended and timed. The card says so in the
+        // engine's default wording, which is the controller's to change.
+        assert_eq!(chunks[1].1["status"], "error");
+        assert_eq!(chunks[1].1["title"], "send_email · 3.0s");
+        let card = &turn.blocks(&crate::transport::slack::controller::DefaultController)[1];
+        assert_eq!(
+            card["output"]["elements"][0]["elements"][1]["text"],
+            "Cancelled."
+        );
+    }
+
+    /// A turn that answered is no different: nothing outlives it.
+    #[test]
+    fn a_turn_that_ended_well_settles_them_too() {
+        let events = vec![
+            started("turn-1", 1),
+            tool_requested("tc1", "search_web", 2, 0),
+            turn_ended(3, 2, None),
+        ];
+        let chunks = TurnActivity::fold(&events, None)
+            .unwrap()
+            .chunks(&crate::transport::slack::controller::DefaultController);
+        assert_eq!(chunks[0].1["status"], "error");
+    }
+
+    /// The engine dropped the call — an interrupt, a branch it left behind.
+    /// The card settles where it stopped rather than on the turn's terminal.
+    #[test]
+    fn a_voided_call_settles_when_it_is_dropped() {
+        let events = vec![
+            started("turn-1", 1),
+            tool_requested("tc1", "search_web", 2, 0),
+            event(
+                3,
+                2,
+                EventPayload::CallVoided(crate::session::events::CallVoided {
+                    kind: crate::protocol::EffectKind::ToolCall,
+                    id: "tc1".into(),
+                }),
+            ),
+        ];
+        let turn = TurnActivity::fold(&events, None).unwrap();
+        let chunks = turn.chunks(&crate::transport::slack::controller::DefaultController);
+        assert_eq!(chunks[0].1["status"], "error");
+        assert_eq!(chunks[0].1["title"], "search_web · 2.0s");
+        let card = &turn.blocks(&crate::transport::slack::controller::DefaultController)[0];
+        assert_eq!(
+            card["output"]["elements"][0]["elements"][1]["text"],
+            "Cancelled."
+        );
+    }
+
+    /// A cancel ends the turn without completing it, so it is the cancel that
+    /// has to settle the cards.
+    #[test]
+    fn a_cancelled_session_settles_what_was_running() {
+        let events = vec![
+            started("turn-1", 1),
+            tool_requested("tc1", "search_web", 2, 0),
+            event(3, 5, EventPayload::SessionCancelled),
+        ];
+        let card = &TurnActivity::fold(&events, None)
+            .unwrap()
+            .blocks(&crate::transport::slack::controller::DefaultController)[0];
+        assert_eq!(card["status"], "error");
+        assert_eq!(
+            card["output"]["elements"][0]["elements"][1]["text"],
+            "Cancelled."
         );
     }
 

@@ -34,6 +34,10 @@ The workspace is only half of it — `[slack]` below is what routes a message to
 an agent, and it reaches the deployment through `subs apply`. A connected
 workspace with no `[slack]` is a bot that never answers.
 
+The two may be done in either order. Routing applied before the workspace exists
+binds nothing until it arrives, and connecting is what binds it — so `subs
+apply` then `subs slack connect` is enough, with no second apply.
+
 An engine you run yourself has no app to install for you: `subs serve` talks to
 Slack over Socket Mode with a Slack app you own, so `subs slack connect` says so
 and points at the steps below. Same answer from a deployment that does not

@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod cloud;
+pub mod doctor;
 pub mod env;
 pub mod init;
 pub mod local;
@@ -150,6 +151,13 @@ pub enum Command {
         #[command(subcommand)]
         command: cloud::slack::SlackCommand,
     },
+    /// Show what this project still needs before it works: the keys, the
+    /// consents, and the workspaces nobody has set up yet.
+    #[command(after_help = GLOBAL_FLAGS_HELP)]
+    Doctor {
+        #[command(flatten)]
+        scope: ProjectScope,
+    },
 }
 
 pub async fn run(command: Command) -> anyhow::Result<()> {
@@ -185,6 +193,7 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
         Command::Config { command } => cloud::apply::config(command).await,
         Command::Mcp { command } => mcp::run(command).await,
         Command::Slack { command } => cloud::slack::run(command).await,
+        Command::Doctor { scope } => doctor::run(scope).await,
     }
 }
 
@@ -216,6 +225,7 @@ fn command_path(cmd: &Command) -> &'static str {
         Command::Slack { command } => match command {
             cloud::slack::SlackCommand::Connect { .. } => "slack connect",
         },
+        Command::Doctor { .. } => "doctor",
         Command::Orgs { command } => match command {
             OrgsCommand::List { .. } => "orgs list",
         },

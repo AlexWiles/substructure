@@ -25,7 +25,7 @@ use crate::api::v1::{SlackConnection, SlackInstallUrl, SlackStatus};
 
 use super::context::Context;
 use super::project_config::{self, Found};
-use super::{print, OrgScope};
+use super::{notices, print, OrgScope};
 
 /// How long the CLI waits for the browser before saying where to finish.
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(300);
@@ -134,6 +134,11 @@ async fn connect(no_browser: bool, scope: OrgScope) -> Result<()> {
     };
     println!("Connected {} to {org}.", workspace.label());
     routing_note(found.as_ref());
+    // Org-scoped, so there may be no project to report on: this command
+    // connects a workspace whether or not this file pins one.
+    if let Ok(Some(project)) = ctx.pinned_project(None).await {
+        notices::remaining(&ctx, &project, &scope.globals).await;
+    }
     Ok(())
 }
 
