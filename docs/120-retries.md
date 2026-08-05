@@ -3,42 +3,43 @@ title: Retries and timeouts
 group: Reliability
 ---
 
-Every effect the engine runs — an LLM call, a tool call, a sub-agent spawn, a
-connector fetch, a worker decision — carries a retry policy. It bounds the
-effect with two timeouts and re-issues it after a backoff when a failure is
-retryable, until the attempts run out or the failure is terminal.
+Every effect the engine runs has a retry policy. An effect is an LLM call, a tool
+call, a sub-agent start, a connector fetch, or a worker decision. The policy sets
+two timeouts. When an effect fails and can be retried, the engine waits, then
+sends it again. It stops when the attempts run out or when a failure cannot be
+retried.
 
 ## Policy
 
 ```typescript
 type RetryPolicy = {
-    attempt_timeout_secs: number | null  // deadline for one attempt; null waits forever
-    total_timeout_secs: number | null    // deadline for the whole effect; null is unbounded
-    max_attempts: number                 // cap on total attempts, not on retries
-    backoff_base_secs: number            // backoff delay base
-    backoff_max_secs: number             // backoff delay ceiling
+    attempt_timeout_secs: number | null  // limit for one attempt; null waits forever
+    total_timeout_secs: number | null    // limit for the whole effect; null has no limit
+    max_attempts: number                 // limit on total attempts, not on retries
+    backoff_base_secs: number            // base of the wait between attempts
+    backoff_max_secs: number             // longest wait between attempts
 }
 ```
 
 ## Two timeouts
 
-`attempt_timeout_secs` bounds a single dispatch-to-settle span and is carried on
-the `tool.execute` and `llm.execute` triggers as `deadline`. It restarts with
-each attempt. An attempt that lapses fails and retries.
+`attempt_timeout_secs` limits one attempt, from start to end. The engine sends it
+on the `tool.execute` and `llm.execute` triggers as `deadline`. It restarts with
+each attempt. An attempt that passes it fails, and the engine retries.
 
-`total_timeout_secs` bounds the effect as a whole, measured from its first
-dispatch — every attempt, the backoff between them, and any time the effect
-spends running. A retry cannot buy more time by restarting the clock.
+`total_timeout_secs` limits the whole effect, measured from the first attempt. It
+covers every attempt, the waits between them, and all the time the effect runs. A
+retry does not restart this clock.
 
-The second exists because the first cannot express everything. A delegation
-whose child turn is in flight has already cleared its attempt: the spawn landed,
-and the child may legitimately run far longer than the call that started it.
-Only the total bounds it, which is what settles a parent whose child stopped
-coming back.
+The second timeout exists because the first cannot cover everything. Take a
+sub-agent whose child turn is running. Its attempt is already complete: the
+child started, and the child can run much longer than the call that started it.
+Only the total timeout limits it. That is what ends a parent whose child stopped
+answering.
 
 ## Defaults
 
-Each kind gets its own, because the kinds are not alike:
+Each kind of effect has its own defaults:
 
 | Effect | attempt | total | attempts |
 |---|---|---|---|
@@ -46,31 +47,32 @@ Each kind gets its own, because the kinds are not alike:
 | Tool call — worker | 120s | 600s | **1** |
 | Tool call — client | none | none | 1 |
 | Tool call — connector | 60s | 300s | 2 |
-| Sub-agent spawn | 60s | 3600s | 3 |
+| Sub-agent start | 60s | 3600s | 3 |
 | Connector fetch | 30s | 120s | 3 |
 | Worker decision | 300s | 1800s | 10 |
 
-A worker tool is bounded but never repeated: the engine cannot vouch for a
-tool's idempotency, so a retry is the author's call. A client tool is the one
-thing left unbounded — a deferred call waits for a human (see
-[Deferred tools](./130-deferred-tools.md)). A sub-agent spawn does retry: the
-child session id is derived deterministically and an already-created session
-counts as success, so re-issuing one is safe.
+A worker tool has timeouts, but the engine never repeats it. The engine cannot
+know whether your tool is safe to run twice, so you decide when to retry. A
+client tool is the one effect with no limit, because a deferred call can wait
+for a person. See [Deferred tools](./130-deferred-tools.md). The engine does
+retry a sub-agent start. The child session id is derived from the call, and a
+session that already exists counts as success, so a second attempt is safe.
 
 ## Overrides
 
-Declare overrides per kind on the agent config, in `substructure.toml` or in the
-`agent` a worker returns on a decision. An override names only the fields it
-changes — everything it leaves out keeps the default above:
+Set an override for each kind on the agent config. Write it in
+`substructure.toml`, or in the `agent` your worker returns on a decision. An
+override names only the fields it changes. Every field it leaves out keeps the
+default above:
 
 ```toml
 [agent.assistant.retry]
 tool = { max_attempts = 3 }
 ```
 
-That worker tool now allows three attempts and keeps its 120s attempt bound and
-600s total. Naming one field changes one field; it never silently removes the
-bounds it did not restate.
+That worker tool now has three attempts. It keeps the 120s attempt timeout and
+the 600s total. One field changes one field. An override never removes the
+timeouts it does not name.
 
 ```typescript
 type RetryOverride = {
@@ -82,17 +84,18 @@ type RetryOverride = {
 }
 ```
 
-The keys are `default`, `llm`, `tool`, `sub_agent`, and `connector`. They layer
-rather than replace, so `default` sets the shape and a kind adjusts it:
+The keys are `default`, `llm`, `tool`, `sub_agent`, and `connector`. They stack
+instead of replacing each other. `default` sets the base, and each kind changes
+it:
 
 ```toml
 [agent.assistant.retry]
 default = { max_attempts = 3, backoff_max_secs = 30 }
-tool    = { max_attempts = 1 }          # tools alone are never repeated
+tool    = { max_attempts = 1 }          # only tools are never repeated
 connector = { attempt_timeout_secs = 10 }
 ```
 
-A single action may carry its own `retry`, applied last:
+One action can carry its own `retry`. The engine applies it last:
 
 ```jsonc
 {
@@ -103,42 +106,43 @@ A single action may carry its own `retry`, applied last:
 }
 ```
 
-So the layers are, broadest first:
+So the layers are, widest first:
 
 ```
 engine default → agent default → agent per-kind → action retry
 ```
 
-Two things an override cannot do. It cannot set a timeout back to unbounded —
-waiting effectively forever is a large number, which is also the honest way to
-say it. And it cannot reach a worker decision: that is the call which produces
-the config, so reading the policy from there would be circular.
+An override cannot do two things. It cannot remove a timeout. To wait almost
+forever, set a large number. And it cannot change a worker decision, because
+that call produces the config, so the policy cannot come from it.
 
 ## Backoff
 
-The delay before attempt `n` is `min(backoff_base_secs ^ n, backoff_max_secs)`
-seconds, for `n` = 1, 2, 3… So `backoff_base_secs: 2` gives 2s, 4s, 8s, capped
-at `backoff_max_secs`.
+The wait before attempt `n` is `min(backoff_base_secs ^ n, backoff_max_secs)`
+seconds, for `n` = 1, 2, 3, and so on. So `backoff_base_secs: 2` gives 2s, 4s,
+and 8s, up to `backoff_max_secs`.
 
-## Terminal and retryable
+## Which failures retry
 
-A `tool.error` or `llm.error` is terminal unless it sets `retryable: true`. A
-retryable failure is re-issued while attempts remain. `max_attempts` counts
-attempts, so `1` allows a single try and `3` allows up to two retries.
+The engine does not retry a `tool.error` or an `llm.error` unless it sets
+`retryable: true`. It sends a retryable failure again while attempts remain.
+`max_attempts` counts attempts, so `1` allows one try and `3` allows two
+retries.
 
-A failure that is not retryable, a policy out of attempts, or a lapsed
-`total_timeout_secs` settles as a terminal error. An attempt timeout is
-retryable — the next attempt may well land. A total timeout is not: the budget
-covers every attempt, so there is nothing left to retry into.
+The call ends with a final error in three cases: a failure that is not
+retryable, a policy with no attempts left, or an expired `total_timeout_secs`.
+An attempt timeout is retryable, because the next attempt may work. A total
+timeout is not, because it covers every attempt and there is no time left.
 
-`code` labels a failure but does not decide whether it retries; `retryable`
-does. The engine stamps `deadline_exceeded` on either timeout.
+`code` describes a failure. It does not decide whether the engine retries.
+`retryable` decides that. The engine sets `deadline_exceeded` on both kinds of
+timeout.
 
 ```typescript
 type ErrorCode = "provider_error" | "rate_limited" | "refused" | "budget_exceeded" | "deadline_exceeded"
 ```
 
-A worker signals a retryable failure with:
+A worker reports a retryable failure like this:
 
 ```javascript
 return { actions: [{ type: "tool.error", id: trigger.id, error: "upstream 503", retryable: true, code: "provider_error" }] };
@@ -146,6 +150,6 @@ return { actions: [{ type: "tool.error", id: trigger.id, error: "upstream 503", 
 
 ## Next
 
-- [Tool calls](./30-tools.md): the `tool.error` a retry acts on.
-- [Deferred tools](./130-deferred-tools.md): bounding an open-ended wait.
+- [Tool calls](./30-tools.md): the `tool.error` that a retry acts on.
+- [Deferred tools](./130-deferred-tools.md): put a limit on a long wait.
 - [Protocol](./150-protocol.md): `RetryPolicy`, `ErrorCode`, and `Call.status`.

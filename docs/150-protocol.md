@@ -3,16 +3,16 @@ title: Protocol
 group: Reference
 ---
 
-The wire reference. The engine and your worker exchange JSON over HTTP.
+The wire reference. The engine and your worker send JSON over HTTP.
 
-Types are shown in TypeScript notation. `?` marks a field that may be
-omitted. `unknown` is any JSON value. Timestamps are RFC 3339 strings.
-Decimal money values are strings.
+The types below use TypeScript notation. `?` marks a field you can omit.
+`unknown` is any JSON value. Timestamps are RFC 3339 strings. Money values are
+decimal strings.
 
 The machine-readable source of truth is
-[`schemas/protocol.schema.json`](../schemas/protocol.schema.json) (all
-types) and [`schemas/worker.openapi.json`](../schemas/worker.openapi.json)
-(the worker endpoint). To generate bindings instead of writing them, see
+[`schemas/protocol.schema.json`](../schemas/protocol.schema.json) for all types,
+and [`schemas/worker.openapi.json`](../schemas/worker.openapi.json) for the
+worker endpoint. To generate types instead of writing them, see
 [Typed bindings](./40-typed-bindings.md).
 
 ## Delivery
@@ -24,10 +24,10 @@ The engine POSTs a `DecisionRequest` to your worker's endpoint.
 | `Content-Type` | `application/json` |
 | `Accept` | `text/event-stream, application/json` |
 | `traceparent` | W3C trace context |
-| `X-Substructure-Signature` | `sha256=<hex HMAC-SHA256 of the body>`, when a signing secret is configured |
+| `X-Substructure-Signature` | `sha256=<hex HMAC-SHA256 of the body>`, when there is a signing secret |
 
-Respond with `application/json` (a `DecisionResponse`), or
-`text/event-stream` to stream (see [Streaming](#streaming)).
+Answer with `application/json`, which holds a `DecisionResponse`. To stream,
+answer with `text/event-stream`. See [Streaming](#streaming).
 
 ## Decision request
 
@@ -38,15 +38,15 @@ type DecisionRequest = {
     agent_id: string
     identity: WorkerIdentity
     trigger: Trigger
-    proposed: DecisionResponse      // empty when the engine has no default
-    state: unknown              // your agent state, stored verbatim
+    proposed: DecisionResponse      // empty when the engine has no plan
+    state: unknown              // your agent state, stored exactly as it is
     agent: AgentConfig | null
-    calls: Call[]               // in-flight calls
-    pending_calls: number       // in-flight tool and sub-agent calls
+    calls: Call[]               // calls in flight
+    pending_calls: number       // tool and sub-agent calls in flight
     messages: Message[]         // the active conversation path
     message_tree: MessageTree
-    ancestry: string[]          // ancestor session ids, for sub-agents
-    attempts: number            // delivery attempts for this decision
+    ancestry: string[]          // parent session ids, for sub-agents
+    attempts: number            // how many times this decision was delivered
     deadline: string | null
     turn_id: string | null      // the turn's idempotency id
 }
@@ -62,28 +62,28 @@ type Call = {
     status: "pending" | "completed" | "failed" | "retry_scheduled" | "queued"
     attempt: number
     deadline?: string
-    anchor?: string             // the tree node the call was requested at
+    anchor?: string             // the tree node where the call was requested
     name?: string               // tool calls; fetches: the connection
     arguments?: string          // tool calls
     handler?: Handler
     stream?: boolean            // llm calls
     agent_id?: string           // sub-agents
-    tool_call_id?: string       // sub-agents: the call the delegation answers
+    tool_call_id?: string       // sub-agents: the call this child answers
 }
 
 type Handler = "server" | "worker" | "client"
 ```
 
-`proposed` is the engine's default continuation. Accept it by echoing it as
-the decision. It is `null` when only the worker knows what to do, such as
-running one of its own tools.
+`proposed` is what the engine plans to do next. Return it unchanged to accept
+it. It is `null` when only the worker knows what to do, such as when it must run
+one of its own tools.
 
-Every call and decision is queued first and dispatched when its
-prerequisites settle, in arrival order. A `queued` call has not started: it
-is still waiting on a fetch the agent's config owes, the live decision slot,
-a parked branch, a running turn, or a blocked entry ahead of it in the
-queue. Waits are bounded: every prerequisite carries a deadline and always
-settles.
+The engine queues every call and decision first. It starts each one when the
+things it waits for are ready, in the order they arrived. A `queued` call has
+not started. It is waiting for a tool fetch the agent's config needs, for the
+decision slot, for a paused branch, for a running turn, or for an entry ahead of
+it in the queue. Every wait has a limit, because each of those things has a
+deadline and always ends.
 
 ## Decision response
 
@@ -91,12 +91,12 @@ settles.
 type DecisionResponse = {
     messages?: DraftMessage[]   // messages to record
     actions?: Action[]          // what the engine should do next
-    state?: unknown             // omitted or null keeps current state
-    agent?: AgentConfig         // omitted keeps current config
+    state?: unknown             // omitted or null keeps the current state
+    agent?: AgentConfig         // omitted keeps the current config
 }
 ```
 
-To clear state, write a non-null empty value such as `{}`.
+To clear the state, write an empty value that is not null, such as `{}`.
 
 ## Triggers
 
@@ -105,8 +105,8 @@ type Trigger =
     | { type: "session.start" }
     | {
           type: "client.messages"
-          messages: DraftMessage[]  // the client's full conversation view
-          new_from: number          // index of the first new message
+          messages: DraftMessage[]  // the client's full view of the conversation
+          new_from: number          // the index of the first new message
           client: ClientContext
       }
     | { type: "client.action"; name: string; args?: unknown }
@@ -130,7 +130,7 @@ type Trigger =
     | {
           type: "llm.execute"
           id: string
-          request: unknown          // LlmRequest, or provider-native when format is set
+          request: unknown          // LlmRequest, or the provider's own body when format is set
           format?: "openai" | "anthropic"
           stream: boolean
           attempt: number
@@ -160,7 +160,7 @@ type Trigger =
     | { type: "interrupt.resumed"; interrupt_id: string; payload?: unknown }
 
 type ToolInput =
-    | { status: "valid"; value: unknown }     // parsed, conforms to the tool's input schema
+    | { status: "valid"; value: unknown }     // an object that matches the tool's input schema
     | { status: "invalid"; value: unknown; error: string }
     | { status: "malformed"; error: string }  // not a JSON object
 
@@ -172,25 +172,25 @@ type ErrorCode =
     | "deadline_exceeded"
 
 type ClientContext = {
-    tools?: AgentTool[]         // client-executed tools, layered onto the proposed config
+    tools?: AgentTool[]         // tools the client runs, added to the proposed config
     context?: unknown[]
     state?: unknown
     forwarded_props?: unknown
 }
 ```
 
-Answer `tool.execute` with `tool.result` or `tool.error`. Answer
-`llm.execute` with `llm.result` or `llm.error`, or stream.
+Answer `tool.execute` with `tool.result` or `tool.error`. Answer `llm.execute`
+with `llm.result` or `llm.error`, or stream the answer.
 
 ## Actions
 
 ```typescript
 type Action =
     | {
-          type: "llm.call"        // all fields optional; omitted fields fill
-          id?: string             // from the agent config, then engine defaults
-          model?: string
-          messages?: DraftMessage[]  // explicit messages suppress system-prompt injection
+          type: "llm.call"        // every field is optional; the engine fills a
+          id?: string             // missing field from the agent config, then
+          model?: string          // from its own defaults
+          messages?: DraftMessage[]  // if you set messages, the engine adds no system prompt
           tools?: LlmTool[]
           temperature?: number
           max_completion_tokens?: number
@@ -201,15 +201,15 @@ type Action =
       }
     | {
           type: "tool.call"
-          id?: string             // omitted: the engine mints one
+          id?: string             // omitted: the engine creates one
           name: string
           arguments: unknown
-          retry?: RetryOverride     // default: the agent config's, else the engine's
+          retry?: RetryOverride     // default: from the agent config, else from the engine
       }
     | {
           type: "tool.result"
-          id?: string             // id and attempt omitted: taken from the
-          attempt?: number        // answering tool.execute trigger
+          id?: string             // if you omit id and attempt, they come from
+          attempt?: number        // the tool.execute trigger you answer
           result: unknown
       }
     | {
@@ -217,7 +217,7 @@ type Action =
           id?: string
           attempt?: number
           error: string
-          retryable?: boolean     // default false: terminal
+          retryable?: boolean     // default false: no retry
           code?: ErrorCode
           detail?: unknown
       }
@@ -225,14 +225,14 @@ type Action =
           type: "llm.result"
           id?: string
           attempt?: number
-          response: unknown       // LlmResponse, or provider-native when the
-      }                           // answered llm.execute carried a format
+          response: unknown       // LlmResponse, or the provider's own response
+      }                           // when the llm.execute carried a format
     | {
           type: "llm.error"
           id?: string
           attempt?: number
           error: string
-          retryable?: boolean     // default false: terminal
+          retryable?: boolean     // default false: no retry
           code?: ErrorCode
           detail?: unknown
       }
@@ -240,22 +240,22 @@ type Action =
           type: "sub_agent.spawn"
           session_id: string
           agent_id: string
-          tool_call_id: string    // the model tool call this delegation answers
-          message?: DraftMessage  // the child's opening message, sent once it exists
+          tool_call_id: string    // the model's tool call that this child answers
+          message?: DraftMessage  // the child's first message, sent once it exists
           retry?: RetryOverride
       }
     | { type: "message.send"; session_id: string; message: DraftMessage }
     | {
           type: "interrupt"
-          interrupt_id?: string   // omitted: the engine mints one
+          interrupt_id?: string   // omitted: the engine creates one
           reason: string
           payload?: unknown
       }
     | { type: "done"; data?: unknown }
 ```
 
-A bare `{ "type": "llm.call" }` prompts per the agent's identity over the
-current conversation.
+`{ "type": "llm.call" }` on its own prompts the model with the agent's config
+over the current conversation.
 
 ## Agent config
 
@@ -264,8 +264,8 @@ type AgentConfig = {
     model: string               // the only required field
     system?: string
     handler?: "server" | "worker"  // where LLM calls run; default server
-    format?: "openai" | "anthropic"  // wire format for worker-handled LLM
-                                     // calls; requires handler worker
+    format?: "openai" | "anthropic"  // wire format for LLM calls the worker
+                                     // makes; needs handler = worker
     retry?: RetryConfig
     tools?: AgentTool[]
     sub_agents?: SubAgent[]
@@ -275,46 +275,46 @@ type AgentConfig = {
 type AgentTool = {
     name: string
     description?: string
-    input?: unknown             // JSON Schema for arguments; omitted: no arguments
-    output?: unknown            // JSON Schema results must satisfy; a violating
-                                // result settles as a terminal error
+    input?: unknown             // JSON Schema for the arguments; omitted: no arguments
+    output?: unknown            // JSON Schema the result must match; a result that
+                                // does not match ends the call with an error
     handler?: "worker" | "client"  // default worker
 }
 
 type SubAgent = {
-    id: string                  // the agent to spawn, and the tool name the model sees
+    id: string                  // the agent to start, and the tool name the model sees
     description?: string
 }
 
 type McpServer = {
     id: string                  // a connection the engine holds; never a URL
-    tools?: McpTools            // omitted: every tool the connection grants
+    tools?: McpTools            // omitted: every tool the connection offers
 }
 
 type McpTools = {
     include?: string[]          // globs over the tool's name on the connection
     exclude?: string[]
-    read_only?: boolean         // capability predicates read MCP annotations;
-    non_destructive?: boolean   // an unannotated tool fails them
+    read_only?: boolean         // these read the MCP annotations; a tool with
+    non_destructive?: boolean   // no annotation fails them
     idempotent?: boolean
 }
 
 type RetryPolicy = {
     attempt_timeout_secs: number | null  // one attempt; null waits forever
-    total_timeout_secs: number | null    // the whole effect; null is unbounded
+    total_timeout_secs: number | null    // the whole effect; null has no limit
     max_attempts: number                 // attempts, not retries
     backoff_base_secs: number
     backoff_max_secs: number
 }
 
-type RetryOverride = {            // names only what it changes
+type RetryOverride = {            // names only the fields it changes
     attempt_timeout_secs?: number
     total_timeout_secs?: number
     max_attempts?: number
     backoff_base_secs?: number
     backoff_max_secs?: number
 }
-type RetryConfig = {              // one override per kind, layered
+type RetryConfig = {              // one override per kind; they stack
     default?: RetryOverride
     llm?: RetryOverride
     tool?: RetryOverride
@@ -343,8 +343,8 @@ type ToolCall = {
     function: { name: string; arguments: string }
 }
 
-// A recorded message. DraftMessage is the same shape with an optional id,
-// used wherever a message is not yet recorded.
+// A recorded message. DraftMessage has the same shape with an optional id.
+// Use DraftMessage for a message the engine has not recorded yet.
 type Message = {
     id: string
     role: Role
@@ -362,7 +362,7 @@ type MessageTree = {
 
 ## LLM requests and responses
 
-The neutral shapes used when the agent config sets no `format`.
+The engine uses these shapes when the agent config sets no `format`.
 
 ```typescript
 type LlmRequest = {
@@ -377,7 +377,7 @@ type LlmRequest = {
 type LlmTool = {
     name: string
     description: string
-    input?: unknown             // JSON Schema; omitted: no arguments
+    input?: unknown             // JSON Schema; omitted: the tool takes no arguments
     output?: unknown
 }
 
@@ -401,8 +401,8 @@ type LlmResponse = {
 
 ## Client inputs
 
-What clients submit. The target session rides the envelope: the CLI's
-`--session`, or the client API's request body.
+What a client submits. The session comes from outside the input itself: from the
+CLI's `--session`, or from the client API's request body.
 
 ```typescript
 type ClientInput =
@@ -412,13 +412,13 @@ type ClientInput =
           turn_id?: string        // idempotency key
           message: DraftMessage
           stream?: boolean
-          queue?: boolean         // hold for the next turn instead of refusing
+          queue?: boolean         // wait for the next turn instead of being refused
       }
     | {
           type: "client.messages"
           agent_id: string
           turn_id?: string
-          messages: DraftMessage[]  // the client's full conversation view
+          messages: DraftMessage[]  // the client's full view of the conversation
           stream?: boolean
           client?: ClientContext
       }
@@ -440,28 +440,28 @@ type ClientInput =
       }
 ```
 
-`agent_id` routes the turn and creates the session if new. Resubmitting a
-completed `turn_id` returns the existing turn instead of running it again.
+`agent_id` routes the turn. It also creates the session if the session is new.
+If you submit a `turn_id` that is complete, the engine returns that turn instead
+of running it again.
 
 ### Queuing a message
 
-A session runs one turn at a time, so a submit that arrives while a turn is
-running is refused with `turn_already_active`. `queue: true` asks for the other
-behaviour: the engine takes the message, holds it, and starts it as the next
-turn the moment the running one completes. The reply carries `queued: true`
-when the turn has been taken but has not started.
+A session runs one turn at a time. A submit that arrives while a turn runs is
+refused with `turn_already_active`. `queue: true` changes that. The engine takes
+the message, holds it, and starts it as the next turn when the running turn
+completes. The reply carries `queued: true` while the message waits.
 
-Only `client.message` and `client.append` accept the flag. A full
-`client.messages` view and a `client.action` are refused as before: a view
-settles pending client tool calls as it arrives, so it cannot be held.
+Only `client.message` and `client.append` take this flag. The engine still
+refuses a full `client.messages` view and a `client.action`. A view ends open
+client tool calls as it arrives, so the engine cannot hold it.
 
-Queued turns run one at a time, in arrival order. A `turn_id` that is running,
-queued, or completed is refused, so a retrying transport cannot ask the same
-question twice.
+Queued turns run one at a time, in the order they arrived. The engine refuses a
+`turn_id` that is running, queued, or complete, so a transport that retries
+cannot ask the same question twice.
 
 ## Streaming
 
-A worker answering an `llm.execute` with `stream: true` may respond with
+A worker that answers an `llm.execute` with `stream: true` can reply with
 `text/event-stream` instead of JSON:
 
 ```
@@ -475,10 +475,11 @@ event: decision.result
 data: { "actions": [{ "type": "llm.result", "response": … }] }
 ```
 
-`llm.token.delta` frames carry a `StreamDelta`, or the provider's native
-stream events when the `llm.execute` carried a `format`. The stream must end
-with one `decision.result` frame (a `DecisionResponse`), or `decision.error`
-with `message` and `retryable` (default `true`).
+Each `llm.token.delta` frame carries a `StreamDelta`, or a provider stream event
+when the `llm.execute` carried a `format`. The stream must end with one
+`decision.result` frame that holds a `DecisionResponse`. It can end with a
+`decision.error` frame instead, which holds `message` and `retryable`. The
+default for `retryable` is `true`.
 
 ```typescript
 type StreamDelta = {

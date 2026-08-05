@@ -3,46 +3,44 @@ title: Conversations
 group: Building agents
 ---
 
-A session's history is a tree of messages, persisted by the engine. The worker
-builds no chat backend. A client edits, regenerates, and branches by
-resubmitting its view of the conversation, which the engine reconciles into the
-tree.
+A session's history is a tree of messages. The engine saves it. Your worker does
+not build a chat backend. To edit, regenerate, or branch, a client sends its
+view of the conversation again, and the engine merges that view into the tree.
 
 ## The tree
 
-Each message is a node with a parent. The `head` is the active leaf, and the
-path from head to root is the conversation the model sees. A decision request
-carries that active path as `messages`, and the whole tree as `message_tree`.
+Each message is a node with a parent. The `head` is the active leaf. The path
+from the head to the root is the conversation the model sees. A decision request
+holds that active path as `messages` and the whole tree as `message_tree`.
 
 ## Submitting
 
-A client sends input two ways.
+A client sends input in two ways.
 
 | Input | Effect |
 | --- | --- |
-| `client.message` | Append one message to the active path. |
-| `client.messages` | Submit the full conversation view; edits and branches reconcile against the tree. |
+| `client.message` | Adds one message to the active path. |
+| `client.messages` | Sends the full conversation view. The engine merges edits and branches into the tree. |
 
-The engine matches a submitted view against the tree by message `id`. Known ids
-at the front line up with existing nodes; the first new or id-less message
-begins a new branch, and `new_from` on the trigger marks its index.
+The engine matches the view against the tree by message `id`. Known ids at the
+start match existing nodes. The first message that is new or has no id starts a
+new branch. `new_from` on the trigger gives the index of that message.
 
 ## Editing and branching
 
-To edit, resubmit the view with an earlier message changed and given a new id
-or none. The engine forks a branch at the last matching node, records the
-changed message and everything after it, and moves the head to the tip. The
-original branch stays in the tree. Regenerating is the same move: resubmit
-without the last assistant reply, and a new one is recorded as a sibling.
+To edit, send the view again with an earlier message changed. Give that message
+a new id, or no id. The engine starts a branch at the last matching node,
+records the changed message and everything after it, and moves the head to the
+end. The original branch stays in the tree. To regenerate, send the view without
+the last assistant reply. The engine records a new reply beside the old one.
 
-Resubmitting a message under its existing id changes nothing, since
-reconciliation keys on id, not content.
+If you send a message again under its existing id, nothing changes. The engine
+matches on id, not on content.
 
-A view that stops at an earlier node — or resends another branch's view —
-writes nothing but moves the head there (`head.moved` on the event stream);
-the next reply forks at that node, and in-flight work on the abandoned
-branch is voided. Submitting a recorded branch's view is how a client
-switches branches.
+A view that stops at an earlier node writes nothing. It moves the head to that
+node and emits `head.moved` on the event stream. The next reply branches at that
+node, and work in flight on the branch you left is cancelled. Sending the view
+of a recorded branch is how a client changes branches.
 
 ## Example
 
@@ -59,11 +57,11 @@ An active path of `u1 → a1 → u2`. The client edits back to the first questio
 }
 ```
 
-`u1` matches; the id-less message forks a branch under it. The worker sees
-`messages: [u1, e1]` with `new_from: 1`, and the `a1 → u2` branch is kept.
+`u1` matches. The message with no id starts a branch under it. The worker sees
+`messages: [u1, e1]` with `new_from: 1`. The `a1 → u2` branch stays.
 
 ## Next
 
-- [Agent state](./60-state.md): state resolves along the active path.
-- [AG-UI](./100-ag-ui.md): drives this from a browser chat UI.
+- [Agent state](./60-state.md): the engine reads state along the active path.
+- [AG-UI](./100-ag-ui.md): do this from a browser chat UI.
 - [Protocol](./150-protocol.md): messages, the tree, and client inputs.

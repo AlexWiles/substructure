@@ -126,11 +126,25 @@ together at the same version.
 
 ### Added
 
-- A Slack deployment can supply its own controller. It decides everything the
-  bot shows — the answer, a failure, a cancelled run, each step card, the prompt
-  buttons, the thread status, and how a message is put together — and what
-  happens when a user presses a button it added. It inherits the engine's
-  behaviour for what it does not change.
+- A decision response can carry a `channels` map with presentation for each
+  channel. The Slack transport reads the `slack` key: the thread status, the
+  turn's message view, an interrupt's prompt, or an update to one message.
+- The engine proposes the Slack view for each decision — the cards, the
+  answer, and how long the turn took — derived from the turn's events. An
+  echo worker posts the default; a custom worker amends the proposed view.
+- Add the `interrupt.resolve` decision action. It resolves an open interrupt
+  and resumes the session.
+- A Slack click becomes a `client.action` decision. The engine proposes the
+  default meaning — resolve the prompt with the recorded option value, or
+  clear a stale prompt — and the worker can change it. A button a worker adds
+  gets no proposal.
+- A `client.action` decision dispatches while the session is interrupted.
+- The Slack bot delivers each session addressed by its owner's `slack_channel`
+  and `slack_thread_ts` metadata. An API client can set the address on its
+  first submit, and the bot posts that session's turns into the thread.
+- A click on a stamped message routes to the session that posted it.
+- A `client.action` answer that starts work opens a turn. An answer without
+  work opens none.
 - A worker is now optional. Declare an agent in `substructure.toml`, and the engine decides its turns.
 - `[agent.<id>]` sections declare each agent. The section mirrors the wire agent config, plus a `worker` URL and a `signing_secret_env`.
 - An agent can give its whole config to its worker. Declare only a `worker` URL, and the worker declares the agent at `session.start`.

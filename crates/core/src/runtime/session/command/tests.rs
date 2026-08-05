@@ -80,6 +80,7 @@ fn create_session_with_config(
             actions: vec![],
             state: None,
             agent,
+            channels: Default::default(),
         },
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -109,6 +110,7 @@ fn drain_session_start(agg: &mut SessionAggregate) {
             actions: vec![],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -344,6 +346,7 @@ fn settle_with_output_contract(result: &str) -> (SessionAggregate, Vec<EventPayl
             }],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -517,6 +520,7 @@ fn machine_completes_worker_handled_tool_call_after_worker_releases_decision() {
             actions: vec![],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine,
     );
@@ -743,6 +747,7 @@ fn submit_worker_decision_dispatches_action_and_completes_decision() {
                 }],
                 state: None,
                 agent: None,
+                channels: Default::default(),
             },
             &machine,
         )
@@ -807,6 +812,7 @@ fn duplicate_submit_worker_decision_is_no_op() {
             actions: vec![],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine,
     );
@@ -825,6 +831,7 @@ fn duplicate_submit_worker_decision_is_no_op() {
                 }],
                 state: None,
                 agent: None,
+                channels: Default::default(),
             },
             &machine,
         )
@@ -1222,6 +1229,7 @@ fn append_via_worker(agg: &mut SessionAggregate, transcript: Vec<DraftMessage>) 
             actions: vec![],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -1402,6 +1410,7 @@ fn seed_tree(agg: &mut SessionAggregate, transcript: Vec<DraftMessage>) {
             actions: vec![],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -1992,6 +2001,7 @@ fn reconcile_re_records_known_ids_past_the_first_new_node() {
             actions: vec![],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -2024,6 +2034,7 @@ fn reconcile_re_records_known_ids_past_the_first_new_node() {
             actions: vec![],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -2170,6 +2181,7 @@ fn agui_resend_of_a_prior_assistant_turn_appends_without_forking() {
             actions: vec![],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -2197,6 +2209,7 @@ fn agui_resend_of_a_prior_assistant_turn_appends_without_forking() {
             actions: vec![],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -2523,6 +2536,7 @@ fn return_llm_result_completes_worker_handled_call() {
             }],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine,
     );
@@ -2585,6 +2599,7 @@ fn fail_tool_call_emits_errored() {
             actions: vec![],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine,
     );
@@ -3094,6 +3109,7 @@ fn worker_tool_fires_tool_result_in_the_completion_commit() {
             }],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -3112,6 +3128,7 @@ fn worker_tool_fires_tool_result_in_the_completion_commit() {
             }],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -3239,6 +3256,7 @@ fn tool_and_sub_agent_from_one_turn_dispatch_concurrently() {
             ],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -3772,8 +3790,9 @@ fn machine_resumes_frontend_interrupt() {
     );
 }
 
+/// A click may be what answers the prompt.
 #[test]
-fn client_action_rejected_while_interrupted() {
+fn client_action_dispatches_while_interrupted() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
     dispatch(
         &mut agg,
@@ -3787,24 +3806,327 @@ fn client_action_rejected_while_interrupted() {
         },
     );
 
-    let err = agg
+    let events = dispatch(
+        &mut agg,
+        CommandPayload::SubmitClientPayload {
+            payload: ClientPayload::Action(crate::protocol::ClientAction {
+                name: "refresh".to_string(),
+                args: None,
+            }),
+            turn: TurnTarget::Detached,
+            queue: false,
+        },
+        &Caller::System {
+            tenant_id: "tenant-a".to_string(),
+        },
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::DecisionDispatched(_))),
+        "the action decision goes live past the interrupt; got {events:?}"
+    );
+}
+
+fn dispatched_action_decision(agg: &mut SessionAggregate) -> String {
+    dispatch(
+        agg,
+        CommandPayload::SubmitClientPayload {
+            payload: ClientPayload::Action(crate::protocol::ClientAction {
+                name: "summarize".to_string(),
+                args: None,
+            }),
+            turn: TurnTarget::Detached,
+            queue: false,
+        },
+        &Caller::System {
+            tenant_id: "tenant-a".to_string(),
+        },
+    )
+    .iter()
+    .find_map(|e| match e {
+        EventPayload::DecisionDispatched(p) => Some(p.id.clone()),
+        _ => None,
+    })
+    .expect("the action decision dispatches")
+}
+
+#[test]
+fn an_action_answer_with_work_opens_a_turn() {
+    let mut agg = create_session("sess-1", "tenant-a", "user-1");
+    let decision_id = dispatched_action_decision(&mut agg);
+
+    let events = agg
         .try_handle(
-            CommandPayload::SubmitClientPayload {
-                payload: ClientPayload::Action(crate::protocol::ClientAction {
-                    name: "refresh".to_string(),
-                    args: None,
-                }),
-                turn: TurnTarget::Detached,
-                queue: false,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: decision_id.clone(),
+                transcript: vec![],
+                actions: vec![Action::CallTool {
+                    id: "tc-1".to_string(),
+                    name: "my_tool".to_string(),
+                    arguments: "{}".to_string(),
+                    retry: None,
+                }],
+                state: None,
+                agent: None,
+                channels: Default::default(),
             },
             &Caller::System {
                 tenant_id: "tenant-a".to_string(),
             },
         )
-        .expect_err("client actions should be rejected while interrupted");
+        .expect("submit succeeds");
+    let turn = events
+        .iter()
+        .find_map(|e| match e {
+            EventPayload::TurnStarted(t) => Some(t.turn_id.clone()),
+            _ => None,
+        })
+        .expect("work opens a turn");
+    assert_eq!(turn, format!("action:{decision_id}"));
+}
+
+#[test]
+fn an_action_answer_without_work_opens_no_turn() {
+    let mut agg = create_session("sess-1", "tenant-a", "user-1");
+    let decision_id = dispatched_action_decision(&mut agg);
+
+    let events = agg
+        .try_handle(
+            CommandPayload::SubmitWorkerDecision {
+                decision_id,
+                transcript: vec![],
+                actions: vec![],
+                state: Some(crate::protocol::WorkerState(serde_json::json!({
+                    "handled": ["click-1"]
+                }))),
+                agent: None,
+                channels: Default::default(),
+            },
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
+        )
+        .expect("submit succeeds");
     assert!(
-        matches!(err, SessionError::SessionInterrupted),
-        "expected SessionInterrupted; got {err:?}"
+        !events
+            .iter()
+            .any(|e| matches!(e, EventPayload::TurnStarted(_))),
+        "no work, no turn; got {events:?}"
+    );
+}
+
+#[test]
+fn a_decision_with_channels_emits_channels_updated() {
+    let mut agg = create_session("sess-1", "tenant-a", "user-1");
+    let decision_id = dispatched_action_decision(&mut agg);
+
+    let events = agg
+        .try_handle(
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: decision_id.clone(),
+                transcript: vec![],
+                actions: vec![],
+                state: None,
+                agent: None,
+                channels: [("slack".to_string(), serde_json::json!({"status": "ok"}))].into(),
+            },
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
+        )
+        .expect("submit succeeds");
+    let emitted = events
+        .iter()
+        .find_map(|e| match e {
+            EventPayload::ChannelsUpdated(c) => Some(c),
+            _ => None,
+        })
+        .expect("channels ride out as an event");
+    assert_eq!(emitted.decision_id, decision_id);
+    assert_eq!(emitted.channels["slack"]["status"], "ok");
+}
+
+#[test]
+fn an_action_answer_can_resolve_an_open_interrupt() {
+    let mut agg = create_session("sess-1", "tenant-a", "user-1");
+    let raise = dispatched_action_decision(&mut agg);
+    dispatch(
+        &mut agg,
+        CommandPayload::SubmitWorkerDecision {
+            decision_id: raise,
+            transcript: vec![],
+            actions: vec![Action::Interrupt {
+                interrupt_id: "int-1".to_string(),
+                reason: "hold".to_string(),
+                payload: serde_json::Value::Null,
+            }],
+            state: None,
+            agent: None,
+            channels: Default::default(),
+        },
+        &Caller::System {
+            tenant_id: "tenant-a".to_string(),
+        },
+    );
+    let decision_id = dispatched_action_decision(&mut agg);
+
+    let events = agg
+        .try_handle(
+            CommandPayload::SubmitWorkerDecision {
+                decision_id,
+                transcript: vec![],
+                actions: vec![Action::ResolveInterrupt {
+                    interrupt_id: "int-1".to_string(),
+                    payload: serde_json::json!({"status": "resolved"}),
+                }],
+                state: None,
+                agent: None,
+                channels: Default::default(),
+            },
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
+        )
+        .expect("submit succeeds");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::InterruptResumed(p) if p.interrupt_id == "int-1")),
+        "the resolve resumes the interrupt; got {events:?}"
+    );
+}
+
+/// A worker's resolve acts at machine privilege.
+#[test]
+fn a_worker_resolve_cannot_answer_a_system_interrupt() {
+    let mut agg = create_session("sess-1", "tenant-a", "user-1");
+    dispatch(
+        &mut agg,
+        CommandPayload::Interrupt {
+            interrupt_id: "int-1".to_string(),
+            reason: "ops hold".to_string(),
+            payload: serde_json::Value::Null,
+        },
+        &Caller::System {
+            tenant_id: "tenant-a".to_string(),
+        },
+    );
+    let decision_id = dispatched_action_decision(&mut agg);
+
+    let events = agg
+        .try_handle(
+            CommandPayload::SubmitWorkerDecision {
+                decision_id,
+                transcript: vec![],
+                actions: vec![Action::ResolveInterrupt {
+                    interrupt_id: "int-1".to_string(),
+                    payload: serde_json::json!({"status": "resolved"}),
+                }],
+                state: None,
+                agent: None,
+                channels: Default::default(),
+            },
+            &Caller::System {
+                tenant_id: "tenant-a".to_string(),
+            },
+        )
+        .expect("submit succeeds; the refused action is dropped");
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, EventPayload::InterruptResumed(_))),
+        "a system interrupt outranks a worker resolve; got {events:?}"
+    );
+}
+
+#[test]
+fn a_failed_action_decision_does_not_end_the_running_turn() {
+    let mut agg = create_session("sess-1", "tenant-a", "user-1");
+    let setup_events = dispatch(
+        &mut agg,
+        CommandPayload::SubmitClientPayload {
+            payload: ClientPayload::Message(ClientMessage {
+                message: DraftMessage {
+                    id: None,
+                    role: Role::User,
+                    content: Some(Content::Text("hi".to_string())),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    name: None,
+                },
+                stream: false,
+            }),
+            turn: TurnTarget::Open("turn-1".to_string()),
+            queue: false,
+        },
+        &Caller::System {
+            tenant_id: "tenant-a".to_string(),
+        },
+    );
+    let first = setup_events
+        .iter()
+        .find_map(|e| match e {
+            EventPayload::DecisionDispatched(p) => Some(p.id.clone()),
+            _ => None,
+        })
+        .expect("the message decision dispatches");
+    // Settle it into a server-run call, so the decision slot is free.
+    dispatch(
+        &mut agg,
+        CommandPayload::SubmitWorkerDecision {
+            decision_id: first,
+            transcript: vec![],
+            actions: vec![Action::CallLlm {
+                id: "call-1".to_string(),
+                llm: "claude".to_string(),
+                request: LlmRequest {
+                    model: "m".to_string(),
+                    messages: vec![],
+                    tools: None,
+                    temperature: None,
+                    max_completion_tokens: None,
+                    reasoning: None,
+                },
+                stream: false,
+                retry: RetryPolicy::no_retry(),
+                handler: LlmHandler::Server,
+                format: None,
+            }],
+            state: None,
+            agent: None,
+            channels: Default::default(),
+        },
+        &Caller::System {
+            tenant_id: "tenant-a".to_string(),
+        },
+    );
+    let action_decision = dispatched_action_decision(&mut agg);
+
+    let events = dispatch(
+        &mut agg,
+        CommandPayload::settle(
+            EffectKind::Decision,
+            action_decision,
+            None,
+            SettleError::new(ErrorInfo::internal("no proposal"), false),
+        ),
+        &Caller::System {
+            tenant_id: "tenant-a".to_string(),
+        },
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::DecisionErrored(_))),
+        "the failure is recorded; got {events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            EventPayload::TurnCompleted(_) | EventPayload::CallVoided(_)
+        )),
+        "the running turn and its work survive; got {events:?}"
     );
 }
 
@@ -3892,6 +4214,7 @@ fn cancel_voids_pending_effects() {
             }],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -3957,6 +4280,7 @@ fn interrupt_action_voids_llm_calls_requested_in_the_same_submit() {
             ],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -4027,6 +4351,7 @@ fn interrupt_voids_pending_worker_decision() {
             }],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -4107,6 +4432,7 @@ fn tool_result_during_interrupt_queues_until_resume() {
             }],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &system,
     );
@@ -4187,6 +4513,7 @@ fn tool_result_during_interrupt_queues_until_resume() {
             actions: vec![],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &system,
     );
@@ -4249,6 +4576,7 @@ fn worker_interrupt_action_pauses_session_and_resume_carries_payload() {
             }],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -4510,6 +4838,7 @@ fn worker_append_action_writes_a_tree_node() {
             actions: vec![],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -4569,6 +4898,7 @@ fn submit_decision(
             actions,
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     )
@@ -4967,6 +5297,7 @@ fn submit_decision_with(agg: &mut SessionAggregate, actions: Vec<Action>) -> Vec
             actions,
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     )
@@ -5345,6 +5676,7 @@ fn drive_turn_done(
             actions: vec![Action::Done { data }],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     )
@@ -5436,6 +5768,7 @@ fn a_submit_during_an_active_turn_is_refused() {
             actions: vec![call_llm_action("call-1", LlmHandler::Server)],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -5545,6 +5878,7 @@ fn a_continuing_submit_joins_the_running_turn() {
             actions: vec![call_llm_action("call-1", LlmHandler::Server)],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -5622,6 +5956,7 @@ fn turn_finished_echo_completes_the_turn() {
             }],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -5669,6 +6004,7 @@ fn turn_finished_settled_without_done_still_completes_the_turn() {
             actions: vec![],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -5704,6 +6040,7 @@ fn turn_finished_worker_runs_side_effect_before_completion() {
             ],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -5899,6 +6236,7 @@ fn submit_state(
             actions: vec![],
             state: state.map(WorkerState::from),
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     )
@@ -6063,6 +6401,7 @@ fn submit_agent(
             actions: vec![],
             state: None,
             agent,
+            channels: Default::default(),
         },
         &machine(),
     )
@@ -6206,6 +6545,7 @@ fn work_started_beside_a_new_connector_queues_its_decision_rather_than_running_i
             }],
             state: None,
             agent: Some(connector_config(&["sentry"])),
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -6528,6 +6868,7 @@ fn a_call_beside_a_new_connector_waits_for_the_fetch_and_gets_its_tools() {
             actions: vec![call_llm_action("call-1", LlmHandler::Server)],
             state: None,
             agent: Some(connector_config(&["sentry"])),
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -6588,6 +6929,7 @@ fn a_dead_connection_dispatches_the_call_without_its_tools() {
             actions: vec![call_llm_action("call-1", LlmHandler::Server)],
             state: None,
             agent: Some(connector_config(&["sentry"])),
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -6635,6 +6977,7 @@ fn strict_order_holds_work_behind_a_gated_call() {
             ],
             state: None,
             agent: Some(connector_config(&["sentry"])),
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -6679,6 +7022,7 @@ fn a_worker_run_call_gets_its_execute_decision_at_dispatch_with_the_tools() {
             actions: vec![call_llm_action("call-1", LlmHandler::Worker)],
             state: None,
             agent: Some(connector_config(&["sentry"])),
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -7007,6 +7351,7 @@ fn session_start_config_is_visible_to_a_queued_client_decision() {
             actions: vec![],
             state: None,
             agent: Some(agent_config("m1")),
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -7138,6 +7483,7 @@ fn client_message_parks_while_session_start_retry_is_scheduled() {
             actions: vec![],
             state: None,
             agent: Some(agent_config("m1")),
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -7284,6 +7630,7 @@ fn terminal_session_start_failure_restarts_on_the_next_message() {
             actions: vec![],
             state: None,
             agent: Some(agent_config("m1")),
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -7381,6 +7728,7 @@ fn effect_anchor_is_the_post_reconcile_head() {
             }],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -7829,6 +8177,7 @@ fn fork_drops_a_queued_execute_decision() {
             actions: vec![call_tool("t1"), call_tool("t2")],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -7889,6 +8238,7 @@ fn submit_settling_work_it_forked_away_voids_it_instead() {
             }],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -7927,6 +8277,7 @@ fn submit_settling_a_call_its_own_interrupt_voided_swallows_it() {
             ],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -7995,6 +8346,7 @@ fn void_guard_matches_kind_not_just_id() {
             }],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -8389,6 +8741,7 @@ fn worker_interrupt_anchors_at_the_post_reconcile_head() {
             }],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -8436,6 +8789,7 @@ fn worker_interrupt_on_an_escaped_branch_is_not_deduped_by_the_old_one() {
             }],
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     );
@@ -8734,6 +9088,7 @@ fn decide(agg: &mut SessionAggregate, actions: Vec<Action>) -> Vec<EventPayload>
             actions,
             state: None,
             agent: None,
+            channels: Default::default(),
         },
         &machine(),
     )

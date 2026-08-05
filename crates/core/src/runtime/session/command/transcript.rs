@@ -215,15 +215,12 @@ impl SessionState {
                 stream: _,
                 client,
             }) => self.client_view_events(messages, client),
-            ClientPayload::Action(action) => {
-                if self.head_parked() {
-                    return Err(SessionError::SessionInterrupted);
-                }
-                Ok(vec![decision_queued(Trigger::ClientAction {
-                    name: action.name,
-                    args: action.args,
-                })])
-            }
+            // Actions pass an interrupted session: a click may be what
+            // answers the prompt.
+            ClientPayload::Action(action) => Ok(vec![decision_queued(Trigger::ClientAction {
+                name: action.name,
+                args: action.args,
+            })]),
         }
     }
 

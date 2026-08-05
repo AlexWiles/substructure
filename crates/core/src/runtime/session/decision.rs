@@ -382,6 +382,13 @@ pub enum Action {
         #[serde(default)]
         payload: serde_json::Value,
     },
+    /// Resolve an open interrupt and resume the session.
+    #[serde(rename = "interrupt.resolve")]
+    ResolveInterrupt {
+        interrupt_id: String,
+        #[serde(default)]
+        payload: serde_json::Value,
+    },
     #[serde(rename = "done")]
     Done {
         #[serde(default)]

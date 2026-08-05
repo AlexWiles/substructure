@@ -293,6 +293,7 @@ pub struct ResolvedResponse {
     pub actions: Vec<Action>,
     pub state: Option<WorkerState>,
     pub agent: Option<AgentConfig>,
+    pub channels: std::collections::BTreeMap<String, Value>,
 }
 
 /// Lower a worker-authored decision response to its canonical internal form.
@@ -319,6 +320,7 @@ pub fn resolve_response(
         actions,
         state,
         agent,
+        channels,
     } = response;
     if let Some(cfg) = &agent {
         for t in &cfg.tools {
@@ -334,6 +336,7 @@ pub fn resolve_response(
         actions: resolved,
         state,
         agent,
+        channels,
     })
 }
 
@@ -510,6 +513,13 @@ fn lower_actions(
                 } => Action::Interrupt {
                     interrupt_id: interrupt_id.unwrap_or_else(new_call_id),
                     reason,
+                    payload,
+                },
+                DecisionAction::ResolveInterrupt {
+                    interrupt_id,
+                    payload,
+                } => Action::ResolveInterrupt {
+                    interrupt_id,
                     payload,
                 },
                 DecisionAction::Done { data } => Action::Done { data },
@@ -716,6 +726,7 @@ mod tests {
                 actions,
                 state: None,
                 agent: None,
+                channels: Default::default(),
             },
             None,
             trigger,
@@ -791,6 +802,7 @@ mod tests {
                 actions: vec![],
                 state: None,
                 agent: Some(config),
+                channels: Default::default(),
             },
             None,
             None,
@@ -1137,6 +1149,7 @@ mod tests {
                 actions: vec![call],
                 state: None,
                 agent: response_agent,
+                channels: Default::default(),
             },
             echoed,
             None,

@@ -203,6 +203,7 @@ async fn start(agents: BTreeMap<String, AgentEntry>) -> Harness {
                 config.connector_executor_workers as u32,
             )) as Arc<dyn TaskQueue<ConnectorTask>>,
             worker_queue: Arc::new(SqliteWorkerQueue::new(db.clone()).unwrap()),
+            channel_proposers: Vec::new(),
             session_index_store: Arc::new(SqliteSessionIndexStore::new(db.clone()).unwrap()),
             cursor_store: Arc::new(SqliteCursorStore::new(db.clone()).unwrap()),
             wake_store: Arc::new(SqliteWakeStore::new(db).unwrap()),

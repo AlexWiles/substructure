@@ -74,6 +74,8 @@ pub enum EventPayload {
     DecisionDropped(DecisionDropped),
     #[serde(rename = "call.voided")]
     CallVoided(CallVoided),
+    #[serde(rename = "channels.updated")]
+    ChannelsUpdated(ChannelsUpdated),
     #[serde(rename = "session.cancelled")]
     SessionCancelled,
     #[serde(rename = "session.done")]
@@ -389,6 +391,14 @@ pub struct DecisionQueued {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionDropped {
     pub id: String,
+}
+
+/// How each channel shows a settled decision, keyed by channel kind. Opaque
+/// to the engine.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelsUpdated {
+    pub decision_id: String,
+    pub channels: BTreeMap<String, serde_json::Value>,
 }
 
 /// An abandoned in-flight call, named the way its kind names itself: a

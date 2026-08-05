@@ -827,6 +827,10 @@ pub struct SessionState {
     #[serde(default)]
     pub phase: TurnPhase,
 
+    /// The seq of the running turn's `turn.started` event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_started_seq: Option<u64>,
+
     /// Turn IDs that have completed, used for idempotency checks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub completed_turn_ids: Vec<String>,
@@ -874,6 +878,7 @@ impl SessionState {
             effects: BTreeMap::new(),
             schedule_queue: Vec::new(),
             phase: TurnPhase::default(),
+            turn_started_seq: None,
             completed_turn_ids: Vec::new(),
             head_id: None,
             nodes: Vec::new(),
@@ -1399,10 +1404,12 @@ impl SessionState {
                     }
                 }
             }
+            EventPayload::ChannelsUpdated(_) => {}
             EventPayload::TurnStarted(p) => {
                 self.phase = TurnPhase::Active {
                     turn_id: p.turn_id.clone(),
                 };
+                self.turn_started_seq = Some(ctx.sequence);
                 self.turn_cost = Decimal::ZERO;
                 self.turn_token_usage.clear();
             }
@@ -1414,6 +1421,7 @@ impl SessionState {
                 self.turn_cost = Decimal::ZERO;
                 self.turn_token_usage.clear();
                 self.phase = TurnPhase::Idle;
+                self.turn_started_seq = None;
                 self.dequeue(EffectKind::TurnEnd, &payload.turn_id);
             }
         }
@@ -1564,7 +1572,11 @@ impl SessionState {
 
     /// The open interrupt parking a decision's landing branch, if any:
     /// transcripts gate at their landing leaf, effect settles at their anchor.
+    /// Actions are exempt: a click may be what answers the prompt.
     fn decision_park_interrupt(&self, trigger: &Trigger) -> Option<&OpenInterrupt> {
+        if matches!(trigger, Trigger::ClientAction { .. }) {
+            return None;
+        }
         if let Trigger::ClientTranscript { messages, .. } = trigger {
             let messages = self.normalize_client_view(messages.clone());
             let known: std::collections::HashSet<&str> =

@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use super::clip;
-use super::controller::{SlackController, StepStatus, StepView};
+use super::render::{self, StepStatus, StepView};
 use crate::session::events::EventPayload;
 use crate::session::SessionEvent;
 
@@ -25,10 +25,10 @@ enum Item {
 }
 
 impl Item {
-    fn block(&self, controller: &dyn SlackController) -> Value {
+    fn block(&self) -> Value {
         match self {
-            Item::Said { text, .. } => controller.said_block(text),
-            Item::Step(step) => controller.step_block(&step.view()),
+            Item::Said { text, .. } => render::said_block(text),
+            Item::Step(step) => render::step_block(&step.view()),
         }
     }
 }
@@ -61,23 +61,16 @@ impl Step {
 /// A turn's visible work, folded from the event log. Every render is
 /// derived, so a replay converges.
 pub(super) struct TurnActivity {
-    pub(super) turn_id: String,
     items: Vec<Item>,
 }
 
 impl TurnActivity {
-    /// The last turn in `events`. `open` seeds a turn already under way.
-    pub(super) fn fold(events: &[SessionEvent], open: Option<String>) -> Option<Self> {
-        let mut turn = open.map(|turn_id| Self {
-            turn_id,
-            items: Vec::new(),
-        });
+    /// The last turn in `events`, or `None` if there is no turn.
+    pub(super) fn fold(events: &[SessionEvent]) -> Option<Self> {
+        let mut turn: Option<Self> = None;
         for event in events {
-            if let EventPayload::TurnStarted(t) = &event.payload {
-                turn = Some(Self {
-                    turn_id: t.turn_id.clone(),
-                    items: Vec::new(),
-                });
+            if let EventPayload::TurnStarted(_) = &event.payload {
+                turn = Some(Self { items: Vec::new() });
                 continue;
             }
             if let Some(turn) = turn.as_mut() {
@@ -214,34 +207,14 @@ impl TurnActivity {
         step.output = output.map(|o| clip(&flatten(o), MAX_TEXT));
     }
 
-    /// One chunk per item, in order. The sender dedupes on the key;
-    /// appended text cannot be set again the way a card can.
-    pub(super) fn chunks(&self, controller: &dyn SlackController) -> Vec<(String, Value)> {
-        self.items
-            .iter()
-            .map(|item| match item {
-                Item::Said { id, text } => (
-                    format!("say:{id}"),
-                    serde_json::json!({ "type": "markdown_text", "text": text }),
-                ),
-                Item::Step(step) => (step.id.clone(), controller.step_chunk(&step.view())),
-            })
-            .collect()
-    }
-
-    /// The finished turn as blocks. Replaces the streamed content: the turn's
-    /// visible work; what surrounds it is the controller's business.
-    pub(super) fn blocks(&self, controller: &dyn SlackController) -> Vec<Value> {
-        self.item_blocks(controller)
+    /// The turn's visible work as blocks.
+    pub(super) fn blocks(&self) -> Vec<Value> {
+        self.item_blocks()
     }
 
     /// Drop the oldest items until the message fits; one line stands for them.
-    ///
-    /// Measured on the rendered blocks, not estimated from the fields behind
-    /// them: a controller may render a step any way it likes, and what Slack
-    /// counts is what we send.
-    fn item_blocks(&self, controller: &dyn SlackController) -> Vec<Value> {
-        let rendered: Vec<Value> = self.items.iter().map(|i| i.block(controller)).collect();
+    fn item_blocks(&self) -> Vec<Value> {
+        let rendered: Vec<Value> = self.items.iter().map(Item::block).collect();
         let mut earlier = 0;
         while earlier < rendered.len() && !fits(&rendered[earlier..], earlier > 0) {
             earlier += 1;
@@ -250,7 +223,7 @@ impl TurnActivity {
         if earlier == 0 {
             return shown.collect();
         }
-        std::iter::once(controller.elided_block(earlier))
+        std::iter::once(render::elided_block(earlier))
             .chain(shown)
             .collect()
     }
@@ -402,25 +375,12 @@ mod tests {
             tool_requested("tc1", "search_web", 2, 0),
             tool_completed("tc1", 3, 1),
         ];
-        let turn = TurnActivity::fold(&events, None).unwrap();
-        assert_eq!(turn.turn_id, "turn-1");
-        let chunks = turn.chunks(&crate::transport::slack::controller::DefaultController);
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].0, "tc1");
-        assert_eq!(
-            chunks[0].1,
-            serde_json::json!({
-                "type": "task_update",
-                "id": "tc1",
-                "title": "search_web · 1.0s",
-                "status": "complete",
-            })
-        );
-        // The call itself arrives with the blocks, not the live card.
-        let card = &turn.blocks(&crate::transport::slack::controller::DefaultController)[0];
+        let card = &TurnActivity::fold(&events).unwrap().blocks()[0];
         assert_eq!(card["type"], "task_card");
+        assert_eq!(card["task_id"], "tc1");
+        assert_eq!(card["title"], "search_web · 1.0s");
+        assert_eq!(card["status"], "complete");
         assert_eq!(card["details"]["elements"][0]["elements"][0]["text"], "{}");
-        // The result reads under a bold heading of its own.
         let out = &card["output"]["elements"][0]["elements"];
         assert_eq!(out[0]["text"], "Result:\n");
         assert_eq!(out[0]["style"]["bold"], true);
@@ -435,22 +395,7 @@ mod tests {
             tool_requested("tc1", "search_web", 3, 0),
             tool_completed("tc1", 4, 1),
         ];
-        let turn = TurnActivity::fold(&events, None).unwrap();
-        let chunks = turn.chunks(&crate::transport::slack::controller::DefaultController);
-        assert_eq!(chunks.len(), 2);
-        // Its own text, ahead of the card, keyed apart from any call id.
-        assert_eq!(chunks[0].0, "say:llm1");
-        assert_eq!(
-            chunks[0].1,
-            serde_json::json!({
-                "type": "markdown_text",
-                "text": "Let me look that up.",
-            })
-        );
-        assert_eq!(chunks[1].0, "tc1");
-        assert_eq!(chunks[1].1["type"], "task_update");
-        // The rebuild keeps it in place, above the card.
-        let blocks = turn.blocks(&crate::transport::slack::controller::DefaultController);
+        let blocks = TurnActivity::fold(&events).unwrap().blocks();
         assert_eq!(blocks[0]["type"], "section");
         assert_eq!(blocks[0]["text"]["text"], "Let me look that up.");
         assert_eq!(blocks[1]["type"], "task_card");
@@ -463,48 +408,17 @@ mod tests {
             started("turn-1", 1),
             said("llm1", "Here is the answer.", false, 2),
         ];
-        assert!(TurnActivity::fold(&events, None)
-            .unwrap()
-            .chunks(&crate::transport::slack::controller::DefaultController)
-            .is_empty());
+        assert!(TurnActivity::fold(&events).unwrap().blocks().is_empty());
     }
 
     #[test]
     fn a_silent_call_says_nothing() {
         let events = vec![started("turn-1", 1), said("llm1", "   ", true, 2)];
-        assert!(TurnActivity::fold(&events, None)
-            .unwrap()
-            .chunks(&crate::transport::slack::controller::DefaultController)
-            .is_empty());
+        assert!(TurnActivity::fold(&events).unwrap().blocks().is_empty());
     }
 
     #[test]
-    fn an_open_turn_seeds_a_read_that_starts_past_it() {
-        // The warm path reads past `turn.started`, so the turn id is carried.
-        let events = vec![tool_requested("tc1", "search_web", 5, 0)];
-        let turn = TurnActivity::fold(&events, Some("turn-1".into())).unwrap();
-        assert_eq!(turn.turn_id, "turn-1");
-        // A call still running has no duration in its title yet.
-        assert_eq!(
-            turn.chunks(&crate::transport::slack::controller::DefaultController)[0].1["status"],
-            "in_progress"
-        );
-        assert_eq!(
-            turn.chunks(&crate::transport::slack::controller::DefaultController)[0].1["title"],
-            "search_web"
-        );
-        assert!(
-            turn.chunks(&crate::transport::slack::controller::DefaultController)[0]
-                .1
-                .get("output")
-                .is_none()
-        );
-        // Without a seed there is no turn to attach the work to.
-        assert!(TurnActivity::fold(&events, None).is_none());
-    }
-
-    #[test]
-    fn only_the_latest_turn_renders() {
+    fn only_the_latest_turn_folds() {
         let events = vec![
             started("turn-1", 1),
             tool_requested("tc1", "old", 2, 0),
@@ -512,17 +426,10 @@ mod tests {
             started("turn-2", 4),
             tool_requested("tc2", "new", 5, 2),
         ];
-        let turn = TurnActivity::fold(&events, Some("stale".into())).unwrap();
-        assert_eq!(turn.turn_id, "turn-2");
-        assert_eq!(
-            turn.chunks(&crate::transport::slack::controller::DefaultController)
-                .len(),
-            1
-        );
-        assert_eq!(
-            turn.chunks(&crate::transport::slack::controller::DefaultController)[0].0,
-            "tc2"
-        );
+        let blocks = TurnActivity::fold(&events).unwrap().blocks();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["task_id"], "tc2");
+        assert!(TurnActivity::fold(&[tool_requested("tc1", "t", 1, 0)]).is_none());
     }
 
     #[test]
@@ -541,14 +448,9 @@ mod tests {
                 }),
             ),
         ];
-        let turn = TurnActivity::fold(&events, None).unwrap();
-        let chunks = turn.chunks(&crate::transport::slack::controller::DefaultController);
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].1["status"], "error");
-        assert_eq!(chunks[0].1["title"], "send_email · 1.0s");
-        // The reason is the finished card's output, on one line.
-        let card = &turn.blocks(&crate::transport::slack::controller::DefaultController)[0];
+        let card = &TurnActivity::fold(&events).unwrap().blocks()[0];
         assert_eq!(card["status"], "error");
+        assert_eq!(card["title"], "send_email · 1.0s");
         assert_eq!(
             card["output"]["elements"][0]["elements"][1]["text"],
             "permission denied"
@@ -580,17 +482,12 @@ mod tests {
             tool_requested("tc2", "send_email", 4, 1),
             turn_ended(5, 4, Some("the model gave up")),
         ];
-        let turn = TurnActivity::fold(&events, None).unwrap();
-        let chunks = turn.chunks(&crate::transport::slack::controller::DefaultController);
-        // The one that landed keeps its own outcome.
-        assert_eq!(chunks[0].1["status"], "complete");
-        // The one that never did is ended and timed. The card says so in the
-        // engine's default wording, which is the controller's to change.
-        assert_eq!(chunks[1].1["status"], "error");
-        assert_eq!(chunks[1].1["title"], "send_email · 3.0s");
-        let card = &turn.blocks(&crate::transport::slack::controller::DefaultController)[1];
+        let blocks = TurnActivity::fold(&events).unwrap().blocks();
+        assert_eq!(blocks[0]["status"], "complete");
+        assert_eq!(blocks[1]["status"], "error");
+        assert_eq!(blocks[1]["title"], "send_email · 3.0s");
         assert_eq!(
-            card["output"]["elements"][0]["elements"][1]["text"],
+            blocks[1]["output"]["elements"][0]["elements"][1]["text"],
             "Cancelled."
         );
     }
@@ -603,10 +500,8 @@ mod tests {
             tool_requested("tc1", "search_web", 2, 0),
             turn_ended(3, 2, None),
         ];
-        let chunks = TurnActivity::fold(&events, None)
-            .unwrap()
-            .chunks(&crate::transport::slack::controller::DefaultController);
-        assert_eq!(chunks[0].1["status"], "error");
+        let blocks = TurnActivity::fold(&events).unwrap().blocks();
+        assert_eq!(blocks[0]["status"], "error");
     }
 
     /// The engine dropped the call — an interrupt, a branch it left behind.
@@ -625,11 +520,9 @@ mod tests {
                 }),
             ),
         ];
-        let turn = TurnActivity::fold(&events, None).unwrap();
-        let chunks = turn.chunks(&crate::transport::slack::controller::DefaultController);
-        assert_eq!(chunks[0].1["status"], "error");
-        assert_eq!(chunks[0].1["title"], "search_web · 2.0s");
-        let card = &turn.blocks(&crate::transport::slack::controller::DefaultController)[0];
+        let card = &TurnActivity::fold(&events).unwrap().blocks()[0];
+        assert_eq!(card["status"], "error");
+        assert_eq!(card["title"], "search_web · 2.0s");
         assert_eq!(
             card["output"]["elements"][0]["elements"][1]["text"],
             "Cancelled."
@@ -645,9 +538,7 @@ mod tests {
             tool_requested("tc1", "search_web", 2, 0),
             event(3, 5, EventPayload::SessionCancelled),
         ];
-        let card = &TurnActivity::fold(&events, None)
-            .unwrap()
-            .blocks(&crate::transport::slack::controller::DefaultController)[0];
+        let card = &TurnActivity::fold(&events).unwrap().blocks()[0];
         assert_eq!(card["status"], "error");
         assert_eq!(
             card["output"]["elements"][0]["elements"][1]["text"],
@@ -671,9 +562,7 @@ mod tests {
                 }),
             ),
         ];
-        let card = &TurnActivity::fold(&events, None)
-            .unwrap()
-            .blocks(&crate::transport::slack::controller::DefaultController)[0];
+        let card = &TurnActivity::fold(&events).unwrap().blocks()[0];
         assert!(card.get("output").is_none());
         assert_eq!(card["details"]["elements"][0]["elements"][0]["text"], "{}");
     }
@@ -697,12 +586,10 @@ mod tests {
             tool_completed("tc1", 5, 3),
         ];
         // The retry clears the first attempt's failure.
-        let chunks = TurnActivity::fold(&events, None)
-            .unwrap()
-            .chunks(&crate::transport::slack::controller::DefaultController);
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].1["status"], "complete");
-        assert_eq!(chunks[0].1["title"], "search_web · 1.0s");
+        let blocks = TurnActivity::fold(&events).unwrap().blocks();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["status"], "complete");
+        assert_eq!(blocks[0]["title"], "search_web · 1.0s");
     }
 
     #[test]
@@ -731,12 +618,10 @@ mod tests {
                 }),
             ),
         ];
-        let chunks = TurnActivity::fold(&events, None)
-            .unwrap()
-            .chunks(&crate::transport::slack::controller::DefaultController);
-        assert_eq!(chunks[0].1["title"], "agent researcher · 1m 30s");
+        let card = &TurnActivity::fold(&events).unwrap().blocks()[0];
+        assert_eq!(card["title"], "agent researcher · 1m 30s");
         // A sub-agent has no arguments of its own to preview.
-        assert!(chunks[0].1.get("details").is_none());
+        assert!(card.get("details").is_none());
     }
 
     #[test]
@@ -747,17 +632,8 @@ mod tests {
             events.push(tool_requested(&id, &format!("tool_{i}"), 2 + i * 2, 0));
             events.push(tool_completed(&id, 3 + i * 2, 1));
         }
-        let turn = TurnActivity::fold(&events, None).unwrap();
-        // Every step still streams as its own card; only the rebuild packs.
-        assert_eq!(
-            turn.chunks(&crate::transport::slack::controller::DefaultController)
-                .len(),
-            300
-        );
-
         // One line for what did not fit, then the newest cards.
-        // The activity alone; what surrounds it is the controller's.
-        let blocks = turn.blocks(&crate::transport::slack::controller::DefaultController);
+        let blocks = TurnActivity::fold(&events).unwrap().blocks();
         assert_eq!(blocks.len(), 48);
         assert_eq!(blocks[0]["elements"][0]["text"], "_… 253 earlier steps_");
         assert_eq!(blocks[1]["title"], "tool_253 · 1.0s");
@@ -782,12 +658,7 @@ mod tests {
                 }),
             ));
         }
-        let blocks = TurnActivity::fold(&events, None)
-            .unwrap()
-            .blocks(&crate::transport::slack::controller::DefaultController);
-        // The budget is measured on the rendered blocks, which carry the card's
-        // JSON as well as its text, so fewer fit than the raw output alone
-        // suggests. What Slack counts is what we send.
+        let blocks = TurnActivity::fold(&events).unwrap().blocks();
         let elided: usize = blocks[0]["elements"][0]["text"]
             .as_str()
             .unwrap()
@@ -811,10 +682,7 @@ mod tests {
     #[test]
     fn an_unmatched_completion_is_ignored() {
         let events = vec![started("turn-1", 1), tool_completed("ghost", 2, 1)];
-        assert!(TurnActivity::fold(&events, None)
-            .unwrap()
-            .chunks(&crate::transport::slack::controller::DefaultController)
-            .is_empty());
+        assert!(TurnActivity::fold(&events).unwrap().blocks().is_empty());
     }
 
     #[test]
@@ -822,43 +690,5 @@ mod tests {
         let at = |s: i64| chrono::DateTime::from_timestamp(1_700_000_000 + s, 0).unwrap();
         assert_eq!(elapsed(at(0), at(4)), "4.0s");
         assert_eq!(elapsed(at(0), at(90)), "1m 30s");
-    }
-
-    #[test]
-    fn a_card_stays_inside_the_chunk_budget() {
-        assert_eq!(
-            clip(
-                "short",
-                crate::transport::slack::controller::MAX_TITLE_FOR_TESTS
-            ),
-            "short"
-        );
-        let long = "x".repeat(MAX_TEXT + 100);
-        assert_eq!(
-            clip(
-                &long,
-                crate::transport::slack::controller::MAX_TITLE_FOR_TESTS
-            )
-            .chars()
-            .count(),
-            crate::transport::slack::controller::MAX_TITLE_FOR_TESTS
-        );
-        assert!(clip(&long, MAX_TEXT).ends_with('…'));
-
-        // A live card carries no payload; it cannot pass Slack's 256.
-        let events = vec![
-            started("turn-1", 1),
-            tool_requested(
-                &format!("toolu_{}", "0".repeat(40)),
-                &"deeply_namespaced_tool".repeat(4),
-                2,
-                0,
-            ),
-        ];
-        let turn = TurnActivity::fold(&events, None).unwrap();
-        let rendered = turn.chunks(&crate::transport::slack::controller::DefaultController)[0]
-            .1
-            .to_string();
-        assert!(rendered.chars().count() <= 256, "{rendered}");
     }
 }

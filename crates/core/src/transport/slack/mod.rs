@@ -1,14 +1,15 @@
 mod activity;
 mod bot;
-mod controller;
+mod proposer;
+mod render;
 mod socket;
 mod state;
 mod webhook;
 
 pub use bot::{Routing, SlackBot, Workspace, WorkspaceResolver};
-pub use controller::{
-    context_block, section_block, Action, ActionOutcome, Context, DefaultController, PromptOption,
-    PromptView, Rendered, SlackController, StepStatus, StepView,
+pub use proposer::SlackProposer;
+pub use render::{
+    context_block, section_block, PromptOption, PromptView, Rendered, StepStatus, StepView,
 };
 pub use socket::{MissingEnv, SlackChannel};
 pub use state::StreamStore;
@@ -82,11 +83,6 @@ fn dm_message(payload: &Value) -> Option<Inbound> {
         team: asker_team(payload),
         text: event["text"].as_str()?.to_string(),
     })
-}
-
-/// The `(channel, thread_ts)` behind a `slack:{channel}:{thread_ts}` session.
-fn slack_session(session_id: &str) -> Option<(&str, &str)> {
-    session_id.strip_prefix("slack:")?.split_once(':')
 }
 
 const REPLY_EVENT_TYPE: &str = "substructure_reply";
@@ -244,9 +240,17 @@ fn display_of(payload: &Value) -> Option<Display> {
     })
 }
 
-/// A button carries only the interrupt id and the option index. The value is
-/// read from the recorded interrupt at click time, and the coordinates are the
-/// bot's — `block_action` reads them straight back out.
+/// What the bot puts in the `value` of a button it makes. A value that does
+/// not deserialize as one of these belongs to the worker.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type")]
+enum ButtonValue {
+    /// One of a prompt's answers. The button holds only its position; the
+    /// open interrupt holds the value.
+    #[serde(rename = "interrupt.option")]
+    InterruptOption { interrupt_id: String, option: usize },
+}
+
 fn prompt_options(display: &Display, interrupt_id: &str) -> Vec<PromptOption> {
     display
         .options
@@ -256,52 +260,44 @@ fn prompt_options(display: &Display, interrupt_id: &str) -> Vec<PromptOption> {
             label: option.label.clone(),
             style: option.style.clone(),
             action_id: format!("prompt_option_{idx}"),
-            value: serde_json::json!({ "interrupt_id": interrupt_id, "option": idx }).to_string(),
+            value: serde_json::to_string(&ButtonValue::InterruptOption {
+                interrupt_id: interrupt_id.to_string(),
+                option: idx,
+            })
+            .unwrap_or_default(),
         })
         .collect()
 }
 
-/// A press on a button the controller invented: everything `block_action`
-/// could not read as one of the bot's own prompt buttons.
-struct ForeignClick {
+/// A button click, read out of a `block_actions` payload.
+#[derive(Debug, PartialEq)]
+struct Click {
     action_id: String,
     value: String,
     user: String,
     channel: String,
     message_ts: String,
     thread_ts: String,
-}
-
-fn foreign_action(payload: &Value) -> Option<ForeignClick> {
-    if payload["type"].as_str() != Some("block_actions") {
-        return None;
-    }
-    let action = payload["actions"].as_array()?.first()?;
-    let message_ts = payload["message"]["ts"].as_str()?;
-    Some(ForeignClick {
-        action_id: action["action_id"].as_str().unwrap_or_default().to_string(),
-        value: action["value"].as_str().unwrap_or_default().to_string(),
-        user: payload["user"]["id"].as_str()?.to_string(),
-        channel: payload["channel"]["id"].as_str()?.to_string(),
-        message_ts: message_ts.to_string(),
-        thread_ts: payload["message"]["thread_ts"]
-            .as_str()
-            .unwrap_or(message_ts)
-            .to_string(),
-    })
-}
-
-/// A button click from a `block_actions` payload.
-#[derive(Debug, PartialEq)]
-struct Click {
-    interrupt_id: String,
-    option: usize,
-    user: String,
-    channel: String,
-    message_ts: String,
-    thread_ts: String,
     message_text: String,
     message_blocks: Vec<Value>,
+    /// The session stamped on the clicked message, if it has one.
+    session: Option<String>,
+}
+
+impl Click {
+    /// The click as the action's `args`.
+    fn args(&self) -> Value {
+        serde_json::json!({
+            "action_id": self.action_id,
+            "value": self.value,
+            "user": self.user,
+            "channel": self.channel,
+            "message_ts": self.message_ts,
+            "thread_ts": self.thread_ts,
+            "message_text": self.message_text,
+            "message_blocks": self.message_blocks,
+        })
+    }
 }
 
 fn block_action(payload: &Value) -> Option<Click> {
@@ -309,11 +305,18 @@ fn block_action(payload: &Value) -> Option<Click> {
         return None;
     }
     let action = payload["actions"].as_array()?.first()?;
-    let value: Value = serde_json::from_str(action["value"].as_str()?).ok()?;
     let message_ts = payload["message"]["ts"].as_str()?;
+    let session = (payload["message"]["metadata"]["event_type"].as_str() == Some(REPLY_EVENT_TYPE))
+        .then(|| {
+            payload["message"]["metadata"]["event_payload"]["session_id"]
+                .as_str()
+                .map(str::to_string)
+        })
+        .flatten();
     Some(Click {
-        interrupt_id: value["interrupt_id"].as_str()?.to_string(),
-        option: usize::try_from(value["option"].as_u64()?).ok()?,
+        session,
+        action_id: action["action_id"].as_str().unwrap_or_default().to_string(),
+        value: action["value"].as_str().unwrap_or_default().to_string(),
         user: payload["user"]["id"].as_str()?.to_string(),
         channel: payload["channel"]["id"].as_str()?.to_string(),
         message_ts: message_ts.to_string(),
@@ -513,13 +516,6 @@ mod tests {
             "channel": "C1",
         }));
         assert_eq!(app_mention(&message), None);
-    }
-
-    #[test]
-    fn session_id_round_trips_channel_and_thread() {
-        assert_eq!(slack_session("slack:C1:1.0"), Some(("C1", "1.0")));
-        assert_eq!(slack_session("other:C1:1.0"), None);
-        assert_eq!(slack_session("slack:C1"), None);
     }
 
     fn text_of(d: &DraftMessage) -> &str {
@@ -753,7 +749,7 @@ mod tests {
         }))
         .unwrap();
         let options = prompt_options(&display, "int-1");
-        let blocks = controller::DefaultController.prompt_blocks(&controller::PromptView {
+        let blocks = render::prompt_blocks(&render::PromptView {
             message: &display.message,
             options: &options,
             expires_at: display.expires_at.as_deref(),
@@ -764,7 +760,7 @@ mod tests {
         let value: Value = serde_json::from_str(buttons[0]["value"].as_str().unwrap()).unwrap();
         assert_eq!(
             value,
-            serde_json::json!({ "interrupt_id": "int-1", "option": 0 })
+            serde_json::json!({ "type": "interrupt.option", "interrupt_id": "int-1", "option": 0 })
         );
         assert_eq!(buttons[0]["style"], "primary");
         // Unknown styles are dropped.
@@ -779,7 +775,7 @@ mod tests {
     fn message_only_prompt_renders_without_buttons() {
         let display = display_of(&serde_json::json!({ "message": "hold" })).unwrap();
         let options = prompt_options(&display, "int-1");
-        let blocks = controller::DefaultController.prompt_blocks(&controller::PromptView {
+        let blocks = render::prompt_blocks(&render::PromptView {
             message: &display.message,
             options: &options,
             expires_at: display.expires_at.as_deref(),
@@ -799,8 +795,9 @@ mod tests {
         assert_eq!(
             block_action(&payload),
             Some(Click {
-                interrupt_id: "int-1".into(),
-                option: 1,
+                session: None,
+                action_id: String::new(),
+                value: "{\"interrupt_id\":\"int-1\",\"option\":1}".into(),
                 user: "U9".into(),
                 channel: "D1".into(),
                 message_ts: "8.0".into(),
@@ -808,6 +805,16 @@ mod tests {
                 message_text: "Run it?".into(),
                 message_blocks: Vec::new(),
             })
+        );
+        // A stamped message sends the click to the session it names.
+        let mut stamped = payload.clone();
+        stamped["message"]["metadata"] = serde_json::json!({
+            "event_type": "substructure_reply",
+            "event_payload": { "session_id": "my-api-session" },
+        });
+        assert_eq!(
+            block_action(&stamped).unwrap().session.as_deref(),
+            Some("my-api-session")
         );
         // A prompt on a top-level message anchors its own thread.
         let mut top_level = payload.clone();
@@ -820,10 +827,10 @@ mod tests {
         let mut wrong_type = payload.clone();
         wrong_type["type"] = "view_submission".into();
         assert_eq!(block_action(&wrong_type), None);
-        // A foreign button value is not a click.
+        // A worker's own button is still a click; its value passes through.
         let mut foreign = payload;
         foreign["actions"][0]["value"] = "not json".into();
-        assert_eq!(block_action(&foreign), None);
+        assert_eq!(block_action(&foreign).unwrap().value, "not json");
     }
 
     #[test]
@@ -834,11 +841,8 @@ mod tests {
             section_block("Run `send_email`?"),
             serde_json::json!({ "type": "actions", "elements": [{ "type": "button" }] }),
         ];
-        let settled = controller::DefaultController.settled_prompt_blocks(
-            &blocks,
-            "Run `send_email`?",
-            "✅ Approve — <@U9>",
-        );
+        let settled =
+            render::settled_prompt_blocks(&blocks, "Run `send_email`?", "✅ Approve — <@U9>");
         assert_eq!(settled.len(), 3);
         assert_eq!(settled[0]["type"], "task_card");
         assert_eq!(settled[1]["type"], "section");
@@ -846,8 +850,7 @@ mod tests {
         assert!(settled.iter().all(|b| b["type"] != "actions"));
 
         // A message with no blocks still settles.
-        let bare =
-            controller::DefaultController.settled_prompt_blocks(&[], "Run it?", "✖ Cancelled");
+        let bare = render::settled_prompt_blocks(&[], "Run it?", "✖ Cancelled");
         assert_eq!(bare[0]["text"]["text"], "Run it?");
         assert_eq!(bare[1]["elements"][0]["text"], "✖ Cancelled");
     }

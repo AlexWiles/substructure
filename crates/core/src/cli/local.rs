@@ -282,6 +282,7 @@ pub(crate) async fn start_engine(
             connections,
             connector_task_queue,
             worker_queue,
+            channel_proposers: vec![Arc::new(crate::transport::slack::SlackProposer)],
             session_index_store,
             cursor_store,
             wake_store,

@@ -101,6 +101,8 @@ pub enum CommandPayload {
         state: Option<WorkerState>,
         /// `None` = no opinion, keep the current agent config.
         agent: Option<AgentConfig>,
+        /// How each channel shows this decision, keyed by channel kind.
+        channels: BTreeMap<String, serde_json::Value>,
     },
     CancelSession,
     /// The agent finished its turn: begin finalization by notifying the worker
@@ -278,7 +280,10 @@ impl Action {
                 attempt,
                 Outcome::from(SettleError::new(error, retryable)),
             )),
-            Action::SendMessage { .. } | Action::Interrupt { .. } | Action::Done { .. } => None,
+            Action::SendMessage { .. }
+            | Action::Interrupt { .. }
+            | Action::ResolveInterrupt { .. }
+            | Action::Done { .. } => None,
         }
     }
 }
@@ -803,6 +808,29 @@ impl Working {
                     self.raise_interrupt(InterruptOrigin::Frontend, interrupt_id, reason, payload);
                     Ok(())
                 }
+                // A worker's resolve acts at machine privilege.
+                Action::ResolveInterrupt {
+                    interrupt_id,
+                    payload,
+                } => {
+                    let allowed = self.open_interrupt(&interrupt_id).is_none_or(|open| {
+                        InterruptOrigin::Machine.privilege() >= open.origin.privilege()
+                    });
+                    if !allowed {
+                        tracing::warn!(
+                            %interrupt_id,
+                            "interrupt.resolve refused: the interrupt outranks the worker"
+                        );
+                        continue;
+                    }
+                    self.run_active(
+                        CommandPayload::ResumeInterrupt {
+                            interrupt_id,
+                            payload,
+                        },
+                        &system,
+                    )
+                }
                 // A `done` while finalizing completes the turn; otherwise it
                 // ends the agent's turn and starts finalization.
                 Action::Done { data } => {
@@ -1037,6 +1065,7 @@ impl Working {
                 actions,
                 state,
                 agent,
+                channels,
             } => {
                 SessionState::ensure_machine_or_system(caller)?;
                 match self
@@ -1046,18 +1075,47 @@ impl Working {
                     Some(EffectStatus::Pending) => {}
                     _ => return Ok(()),
                 }
+                let is_action = self
+                    .worker_decision(&decision_id)
+                    .is_some_and(|d| matches!(d.trigger, Trigger::ClientAction { .. }));
                 // Each step is a pure function of the world the steps before it
                 // left. The transcript moves `head_id`, so the reap and the two
                 // writes all anchor against the post-reconcile head.
                 self.then(|_| {
                     vec![EventPayload::DecisionCompleted(DecisionCompleted {
-                        id: decision_id,
+                        id: decision_id.clone(),
                     })]
                 })
                 .then(|s| s.reconcile_transcript(transcript).0)
                 .then(|s| s.void_stranded_work(s.head_id.as_deref()))
                 .then(|s| s.worker_state_events(state))
                 .then(|s| s.agent_config_events(agent));
+
+                // An action runs outside any turn; work in its answer opens one.
+                let starts_work = actions.iter().any(|a| {
+                    matches!(
+                        a,
+                        Action::CallLlm { .. }
+                            | Action::CallTool { .. }
+                            | Action::SpawnSubAgent { .. }
+                    )
+                });
+                if is_action && starts_work && !matches!(self.phase, TurnPhase::Active { .. }) {
+                    if self.phase.finalizing().is_some() {
+                        self.then(|s| s.finalize_run(None));
+                    }
+                    self.emit(EventPayload::TurnStarted(TurnStarted {
+                        turn_id: format!("action:{decision_id}"),
+                    }));
+                }
+
+                // After the turn opens, so the event carries the turn id.
+                if !channels.is_empty() {
+                    self.emit(EventPayload::ChannelsUpdated(ChannelsUpdated {
+                        decision_id: decision_id.clone(),
+                        channels,
+                    }));
+                }
 
                 // Actions are sub-commands, not steps: each re-enters the
                 // handler and must see what the actions before it emitted.

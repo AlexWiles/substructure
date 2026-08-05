@@ -1329,6 +1329,13 @@ pub enum DecisionAction {
         #[serde(default)]
         payload: Value,
     },
+    /// Resolve an open interrupt and resume the session.
+    #[serde(rename = "interrupt.resolve")]
+    ResolveInterrupt {
+        interrupt_id: String,
+        #[serde(default)]
+        payload: Value,
+    },
     #[serde(rename = "done")]
     Done {
         #[serde(default)]
@@ -1352,17 +1359,20 @@ pub struct DecisionResponse {
     /// A new agent config write; omitted keeps the current config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentConfig>,
+    /// How each channel shows this decision, keyed by channel kind (e.g.
+    /// `slack`). Opaque to the engine.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub channels: BTreeMap<String, Value>,
 }
 
 impl DecisionResponse {
-    /// Writes nothing: no transcript, no actions, no state or config. Settling
-    /// a decision with one is a silent no-op, so both the engine's own proposal
-    /// and a worker's answer are checked for it before they are accepted.
+    /// The response writes nothing, so settling with it changes nothing.
     pub fn authors_nothing(&self) -> bool {
         self.messages.is_empty()
             && self.actions.is_empty()
             && self.state.is_none()
             && self.agent.is_none()
+            && self.channels.is_empty()
     }
 }
 

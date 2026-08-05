@@ -442,6 +442,7 @@ impl World {
                         actions,
                         state: None,
                         agent,
+                        channels: Default::default(),
                     },
                     &system(),
                 );

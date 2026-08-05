@@ -15,8 +15,8 @@ subs login
 
 ## 2. Describe the project
 
-One `substructure.toml` is one project. Write it in your project root — this is
-the whole declaration, and applying it is how the project comes into existence:
+One `substructure.toml` is one project. Write it in your project root. This file
+is the whole declaration, and you create the project by applying it:
 
 ```toml title="substructure.toml"
 name = "my-bot"
@@ -33,11 +33,11 @@ model = "claude-sonnet-4-5"
 subs apply
 ```
 
-That creates the project and writes `[remote].project` back into the file,
-so a second apply is a no-op rather than a second project. See
+That creates the project and writes `[remote].project` into the file. So a second
+apply changes nothing. It does not create a second project. See
 [Environments](./160-cli.md#environments).
 
-A second environment is a second file: `subs apply -c substructure.staging.toml`
+A second environment is a second file. `subs apply -c substructure.staging.toml`
 deploys a separate project with its own wallet, quota, and keys.
 
 ## 3. Give it a key
@@ -48,19 +48,20 @@ Calls run on your key, so upload one for the block the agent names:
 subs llm set-key claude    # reads the key from stdin
 ```
 
-The key never appears in argv, and no read ever returns it. Until one is set, a
-call on that block fails saying so.
+The key never appears in the command line, and no read returns it. Until you set
+one, every call on that block fails with an error that says so.
 
-Every command that finishes a step prints what is left, and `subs doctor` asks
-at any time — so the setup is one command following the next.
+Every command that finishes a step prints what is left, and `subs doctor` shows
+the same list at any time. So you set up the project by following one command to
+the next.
 
-At this point `my-agent` already works: with no `worker`, the engine decides its
-turns by accepting its own proposal. Skip to step 6 to send it a message.
+`my-agent` already works. It has no `worker`, so the engine decides its turns by
+accepting its own proposal. Go to step 6 to send it a message.
 
 ## 4. Add a worker, if the agent needs your code
 
-`worker` on an agent is the whole routing switch — set it, and the engine POSTs
-that agent's decisions to your code instead of deciding them itself:
+`worker` on an agent selects who decides. Set it, and the engine POSTs that
+agent's decisions to your code instead of deciding them itself:
 
 ```toml title="substructure.toml"
 [agent.triage]
@@ -71,8 +72,8 @@ worker = "https://my-worker.example.com/agent"
 subs apply
 ```
 
-The first apply that gives an agent a worker mints a signing secret for it. The
-secret is the deployment's, not the file's, so read it back:
+The first apply that gives an agent a worker creates a signing secret for it. The
+secret belongs to the deployment, not to the file, so read it back:
 
 ```sh
 subs agents show triage
@@ -82,8 +83,8 @@ Set it as `SUBS_SIGNING_SECRET` where the worker runs.
 
 ## 5. Verify the signature in your worker
 
-The engine signs every decision it POSTs. Your worker should verify that
-signature before acting on one:
+The engine signs every decision it POSTs. Verify the signature before your worker
+acts on a decision:
 
 ```javascript title="server.mjs"
 import { createHmac, timingSafeEqual } from "node:crypto";
@@ -98,7 +99,7 @@ function verify(body, header) {
 }
 ```
 
-Then reject unsigned requests in the server's handler, before calling `decide`:
+Then refuse unsigned requests in the server's handler, before it calls `decide`:
 
 ```javascript title="server.mjs"
 if (!verify(body, req.headers["x-substructure-signature"])) {
@@ -109,7 +110,7 @@ if (!verify(body, req.headers["x-substructure-signature"])) {
 
 ## 6. Send a message
 
-Mint a client API key and submit on a user's behalf through the machine API.
+Create a client API key and submit for a user through the machine API.
 
 ```sh
 export SUBS_API_KEY=$(subs keys create --label quickstart)
@@ -125,7 +126,7 @@ curl $BASE/api/machine/sessions/submit \
     }'
 ```
 
-The response returns the `session_id` and `turn_id`.
+The response holds the `session_id` and the `turn_id`.
 
 ## 7. Watch it run
 
@@ -135,12 +136,12 @@ subs sessions events <session-id> --stream
 subs open
 ```
 
-The reply, tool calls, and results stream as events. The whole session lives in the
-cloud; resume it by passing the same `session_id` to another `submit`.
+The reply, the tool calls, and the results stream as events. The whole session is
+in the cloud. To continue it, pass the same `session_id` to another `submit`.
 
 ## Next
 
 - [Cloud](./170-cloud.md): projects, agents, keys, and where provider keys live.
 - [Authentication](./180-auth.md): client tokens for browsers, and worker signing.
-- [Client API](./190-api.md): the machine and client surfaces this used.
+- [Client API](./190-api.md): the machine and client APIs this used.
 - [Quick start](./10-quick-start.md): build the worker, add tools and a sub-agent.

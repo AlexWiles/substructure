@@ -279,11 +279,14 @@ impl Runtime {
                 session_id: session_id.clone(),
                 caller: input.caller,
                 command: CommandPayload::SubmitClientPayload {
-                    payload: input.payload,
-                    turn: match input.continue_turn {
-                        true => TurnTarget::Continue(turn_id.clone()),
-                        false => TurnTarget::Open(turn_id.clone()),
+                    // An action does not ask for a turn; work in its answer
+                    // opens one.
+                    turn: match (&input.payload, input.continue_turn) {
+                        (ClientPayload::Action(_), _) => TurnTarget::Detached,
+                        (_, true) => TurnTarget::Continue(turn_id.clone()),
+                        (_, false) => TurnTarget::Open(turn_id.clone()),
                     },
+                    payload: input.payload,
                     queue: input.queue,
                 },
                 span: span.child("submit_client_payload"),
@@ -687,6 +690,7 @@ impl Runtime {
                     actions: input.actions,
                     state: input.state,
                     agent: input.agent,
+                    channels: input.channels,
                 },
                 span: input.span,
             },
@@ -817,6 +821,7 @@ pub struct RuntimeDeps {
     pub connections: Option<Arc<Connections>>,
     pub connector_task_queue: Arc<dyn TaskQueue<ConnectorTask>>,
     pub worker_queue: Arc<dyn WorkerQueue>,
+    pub channel_proposers: Vec<Arc<dyn worker::ChannelProposer>>,
     pub session_index_store: Arc<dyn SessionIndexStore>,
     pub cursor_store: Arc<dyn ProcessorCursorStore>,
     pub wake_store: Arc<dyn WakeScheduleStore>,
@@ -833,6 +838,7 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
         connections,
         connector_task_queue,
         worker_queue,
+        channel_proposers,
         session_index_store,
         cursor_store,
         wake_store,
@@ -898,6 +904,7 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
         cursor_store.clone(),
         worker_queue.clone(),
         agents.clone(),
+        channel_proposers,
         cancel.clone(),
     );
     let session_index_processor_handle = spawn_session_index_processor(

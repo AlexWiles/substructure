@@ -286,6 +286,7 @@ async fn submit(
         actions: resolved.actions,
         state: resolved.state,
         agent: resolved.agent,
+        channels: resolved.channels,
         span: decision.span.child(span_name),
     };
     if let Err(e) = runtime.submit_decision(submit).await {

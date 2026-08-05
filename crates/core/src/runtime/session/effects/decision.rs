@@ -73,8 +73,15 @@ impl KindSpec for DecisionSpec {
 
     /// A turn whose driving decision is dead can never settle on its own, so
     /// the run ends. A failed `turn.finished` still completes its turn: the
-    /// output is durable, the finalizer is not.
-    fn terminal(&self, state: &SessionState, _id: &str, e: &SettleError) -> Vec<EventPayload> {
+    /// output is durable, the finalizer is not. An action decision drives no
+    /// turn, so its failure ends nothing.
+    fn terminal(&self, state: &SessionState, id: &str, e: &SettleError) -> Vec<EventPayload> {
+        let turnless = state
+            .worker_decision(id)
+            .is_some_and(|d| matches!(d.trigger, Trigger::ClientAction { .. }));
+        if turnless {
+            return Vec::new();
+        }
         state.fail_run(e)
     }
 

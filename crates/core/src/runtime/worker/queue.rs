@@ -72,6 +72,8 @@ pub struct SubmitDecision {
     pub state: Option<WorkerState>,
     /// `None` = no opinion, keep the current agent config.
     pub agent: Option<AgentConfig>,
+    /// How each channel shows this decision, keyed by channel kind.
+    pub channels: std::collections::BTreeMap<String, serde_json::Value>,
     pub span: SpanContext,
 }
 

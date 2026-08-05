@@ -3,15 +3,14 @@ title: Client-side tools
 group: Building agents
 ---
 
-A client-side tool runs in the client, usually the browser, not on your
-worker. You declare it with `handler: "client"`. When the model calls it, the
-engine hands the call to the client, waits for the result, and folds it back
-into the conversation.
+A client-side tool runs in the client, usually the browser. It does not run on
+your worker. Declare it with `handler: "client"`. When the model calls it, the
+engine sends the call to the client, waits for the result, and adds the result
+to the conversation.
 
 ## Example
 
-The worker declares the tool and marks it `handler: "client"`. It runs nothing
-itself.
+The worker declares the tool with `handler: "client"`. The worker runs nothing.
 
 ```javascript title="server.mjs"
 function decide({ trigger, proposed }) {
@@ -36,8 +35,8 @@ function decide({ trigger, proposed }) {
 }
 ```
 
-No `tool.execute` reaches the worker for `get_location`. When the model calls
-it, the run yields with the call pending, and the client settles it by `id`:
+No `tool.execute` reaches the worker for `get_location`. When the model calls it,
+the run stops with the call open. The client then ends the call by `id`:
 
 ```jsonc
 { "type": "tool.result", "id": "<toolCallId>", "result": "Lisbon" }
@@ -45,21 +44,21 @@ it, the run yields with the call pending, and the client settles it by `id`:
 
 ## The round trip
 
-1. The worker declares the tool `handler: "client"`.
-2. The model calls it. The engine dispatches the call to the client, not the
-   worker, and the run yields with the call pending.
-3. The client runs the tool and settles the call by `id` with a `tool.result`
-   or `tool.error`.
-4. The engine records the result, fires `tool.finished`, and re-prompts the
-   model, exactly as for a worker tool. The worker returns `proposed`.
+1. The worker declares the tool with `handler: "client"`.
+2. The model calls it. The engine sends the call to the client, not to the
+   worker. The run stops with the call open.
+3. The client runs the tool and ends the call by `id` with a `tool.result` or a
+   `tool.error`.
+4. The engine records the result, sends `tool.finished`, and prompts the model
+   again, the same way it does for a worker tool. The worker returns `proposed`.
 
-Input and output schemas apply as they do for worker tools (see
-[Tool calls](./30-tools.md)).
+Input and output schemas work the same as for worker tools. See
+[Tool calls](./30-tools.md).
 
-## Settling
+## Ending a call
 
-The client answers a pending call with one of these inputs, addressing it by
-the call `id`:
+The client answers an open call with one of these inputs. It names the call by
+`id`:
 
 ```typescript
 type ClientInput =
@@ -67,27 +66,27 @@ type ClientInput =
     | { type: "tool.error"; id: string; error: string; retryable: boolean; attempt?: number }
 ```
 
-Only the session's owner may settle, and only a call whose handler is
-`client`. A tool message carried in a `client.messages` submit settles a
-pending client call the same way, which is how a browser transcript answers
-without a separate input.
+Only the session's owner can end a call, and only a call with the `client`
+handler. A tool message inside a `client.messages` submit ends an open client
+call the same way. This lets a browser answer from its transcript, with no
+separate input.
 
-## Client-contributed tools
+## Tools from the client
 
-A client can also add tools at submit time, layered onto the config through
-the submit's `client` context:
+A client can also add tools when it submits. The engine adds them to the config
+through the submit's `client` context:
 
 ```typescript
 type ClientContext = {
-    tools?: AgentTool[]   // client-executed tools, added to the config
+    tools?: AgentTool[]   // tools the client runs, added to the config
     // …
 }
 ```
 
-Each tool is declared `handler: "client"` and dispatched to the client like
-any other. Layering is additive: a name already taken by a worker tool or
-sub-agent is ignored, so the worker always wins its own names. Use it for
-browser-native capabilities the worker doesn't know up front. See
+Each of these tools has `handler: "client"`, and the engine sends its calls to
+the client. The engine only adds tools. It ignores a name that a worker tool or
+a sub-agent already uses, so the worker keeps its own names. Use this for
+browser features that the worker does not know about. See
 [AG-UI](./100-ag-ui.md).
 
 ## Next

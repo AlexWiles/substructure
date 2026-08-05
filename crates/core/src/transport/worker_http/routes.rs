@@ -64,6 +64,7 @@ pub async fn submit(
             actions: resolved.actions,
             state: resolved.state,
             agent: resolved.agent,
+            channels: resolved.channels,
             span,
         })
         .await;

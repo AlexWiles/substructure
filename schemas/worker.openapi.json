@@ -614,6 +614,25 @@
           },
           {
             "additionalProperties": false,
+            "description": "Resolve an open interrupt and resume the session.",
+            "properties": {
+              "interrupt_id": {
+                "type": "string"
+              },
+              "payload": {},
+              "type": {
+                "const": "interrupt.resolve",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "interrupt_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
             "properties": {
               "data": {},
               "type": {
@@ -749,6 +768,11 @@
               }
             ],
             "description": "A new agent config write; omitted keeps the current config."
+          },
+          "channels": {
+            "additionalProperties": {},
+            "description": "How each channel shows this decision, keyed by channel kind (e.g.\n`slack`). Opaque to the engine.",
+            "type": "object"
           },
           "messages": {
             "items": {

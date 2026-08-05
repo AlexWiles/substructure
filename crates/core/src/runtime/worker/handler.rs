@@ -2,23 +2,40 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::protocol::{DecisionResponse, DecisionTrigger};
-use crate::runtime::event_store::EventStore;
+use crate::protocol::{DecisionResponse, DecisionTrigger, Message};
+use crate::runtime::event_store::{EventFilter, EventStore, Seq};
 use crate::runtime::processor::{
     EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCursorStore,
     ProcessorError,
 };
 use crate::runtime::session::events::EventPayload;
 use crate::runtime::session::propose::propose;
+use crate::runtime::session::state::SessionState;
 use crate::runtime::session::wire::to_wire_trigger;
 use crate::runtime::session::SessionEvent;
 
 use super::{AgentDirectory, WorkerDecisionRequest, WorkerQueue};
 
+/// A channel's own proposal for a decision, added at delivery. Takes the
+/// proposal so far and returns it amended, replaced, or untouched. Must be a
+/// pure function of its inputs, so a redelivery proposes the same thing.
+pub trait ChannelProposer: Send + Sync {
+    fn propose(
+        &self,
+        session_id: &str,
+        trigger: &DecisionTrigger,
+        state: &SessionState,
+        events: &[SessionEvent],
+        transcript: &[Message],
+        proposed: DecisionResponse,
+    ) -> DecisionResponse;
+}
+
 struct WorkerDecisionProjection {
     store: Arc<dyn EventStore>,
     queue: Arc<dyn WorkerQueue>,
     agents: Arc<dyn AgentDirectory>,
+    proposers: Vec<Arc<dyn ChannelProposer>>,
 }
 
 impl WorkerDecisionProjection {
@@ -26,11 +43,13 @@ impl WorkerDecisionProjection {
         store: Arc<dyn EventStore>,
         queue: Arc<dyn WorkerQueue>,
         agents: Arc<dyn AgentDirectory>,
+        proposers: Vec<Arc<dyn ChannelProposer>>,
     ) -> Self {
         Self {
             store,
             queue,
             agents,
+            proposers,
         }
     }
 }
@@ -42,7 +61,14 @@ impl EventProcessor for WorkerDecisionProjection {
     }
 
     async fn apply(&self, event: SessionEvent) -> Result<(), ProcessorError> {
-        if let Some(decision) = extract(self.store.as_ref(), self.agents.as_ref(), event).await? {
+        if let Some(decision) = extract(
+            self.store.as_ref(),
+            self.agents.as_ref(),
+            &self.proposers,
+            event,
+        )
+        .await?
+        {
             tracing::debug!(
                 session_id = %decision.session_id,
                 decision_id = %decision.decision_id,
@@ -61,9 +87,15 @@ pub fn spawn_worker_processor(
     cursor_store: Arc<dyn ProcessorCursorStore>,
     queue: Arc<dyn WorkerQueue>,
     agents: Arc<dyn AgentDirectory>,
+    proposers: Vec<Arc<dyn ChannelProposer>>,
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
-    let projection = Arc::new(WorkerDecisionProjection::new(store.clone(), queue, agents));
+    let projection = Arc::new(WorkerDecisionProjection::new(
+        store.clone(),
+        queue,
+        agents,
+        proposers,
+    ));
     EventProcessorRunner::new(
         store,
         cursor_store,
@@ -81,6 +113,7 @@ pub fn spawn_worker_processor(
 async fn extract(
     store: &dyn EventStore,
     agents: &dyn AgentDirectory,
+    proposers: &[Arc<dyn ChannelProposer>],
     event: SessionEvent,
 ) -> Result<Option<WorkerDecisionRequest>, ProcessorError> {
     let req = match &event.payload {
@@ -155,6 +188,44 @@ async fn extract(
             })
     })
     .unwrap_or_default();
+    // The current turn's events, as of this delivery. Bounded by the turn's
+    // start, so the read costs one turn and not the whole session.
+    let turn_events: Vec<SessionEvent> = match (proposers.is_empty(), state.turn_started_seq) {
+        (false, Some(start)) => store
+            .query_events(&EventFilter {
+                session_id: Some(event.session_id.clone()),
+                tenant_id: Some(event.tenant_id.clone()),
+                after_seq: Some(Seq(start.saturating_sub(1))),
+                limit: None,
+            })
+            .await
+            .map_err(|e| ProcessorError::Apply(format!("load turn events: {e}")))?
+            .into_iter()
+            .filter(|e| e.seq <= event.seq)
+            .collect(),
+        _ => Vec::new(),
+    };
+    // Give no events rather than the wrong turn's.
+    let turn_events = match event.meta.turn_id.as_deref() {
+        Some(stamped)
+            if !turn_events.iter().any(
+                |e| matches!(&e.payload, EventPayload::TurnStarted(t) if t.turn_id == stamped),
+            ) =>
+        {
+            Vec::new()
+        }
+        _ => turn_events,
+    };
+    let proposed = proposers.iter().fold(proposed, |p, proposer| {
+        proposer.propose(
+            &event.session_id,
+            &trigger,
+            &state,
+            &turn_events,
+            &transcript,
+            p,
+        )
+    });
 
     Ok(Some(WorkerDecisionRequest {
         session_id: event.session_id.clone(),
@@ -330,6 +401,7 @@ mod tests {
                 actions: vec![],
                 state: None,
                 agent,
+                channels: Default::default(),
             },
             &system(),
         );
@@ -353,7 +425,7 @@ mod tests {
             session: agg,
             events: BroadcastBus::new(1),
         };
-        let req = extract(&store, &EmptyAgentDirectory, event)
+        let req = extract(&store, &EmptyAgentDirectory, &[], event)
             .await
             .expect("extract succeeds")
             .expect("a deliverable request");
@@ -389,7 +461,7 @@ mod tests {
             session: agg,
             events: BroadcastBus::new(1),
         };
-        let req = extract(&store, agents, event)
+        let req = extract(&store, agents, &[], event)
             .await
             .expect("extract succeeds")
             .expect("a deliverable request");

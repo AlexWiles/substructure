@@ -338,6 +338,7 @@ impl Trace {
                 actions,
                 state: None,
                 agent,
+                channels: Default::default(),
             },
             &system(),
         );

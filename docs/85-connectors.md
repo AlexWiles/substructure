@@ -3,17 +3,17 @@ title: Connectors
 group: Building agents
 ---
 
-A connector draws tools from a service the engine connects to — Sentry, GitHub,
-anything speaking MCP. The agent names a connection by id; the engine holds the
-URL and the credential, fetches what that connection offers, and executes the
-calls the model makes against it. Your worker never sees a token, and never runs
-the tool.
+A connector gives an agent the tools of a service that the engine connects to:
+Sentry, GitHub, or anything that speaks MCP. The agent names a connection by id.
+The engine holds the URL and the credential, reads the tools the connection
+offers, and runs the calls the model makes. Your worker never sees a token, and
+never runs the tool.
 
 ## Configure a connection
 
-MCP servers live under `[mcp.<id>]` in
-[`substructure.toml`](./160-cli.md#environments), next to the rest of the
-environment. The file holds names and references only — never a token.
+Declare MCP servers under `[mcp.<id>]` in
+[`substructure.toml`](./160-cli.md#environments). The file holds names and
+references only. It never holds a token.
 
 ```toml
 [mcp.sentry]
@@ -25,27 +25,27 @@ auth = { token_env = "GITHUB_TOKEN" }   # default: Authorization: Bearer
 prefix_tools = false                    # default true
 ```
 
-An inline `token` is a parse error, not a secret you can commit by accident.
+A `token` written in the file is a parse error. You cannot commit a secret by
+accident.
 
 ## Authorize it
 
-A server taking a static credential needs nothing more: the engine reads
-`$token_env` at call time.
+A server that takes a static credential needs nothing more. The engine reads
+`$token_env` when it makes the call.
 
-Everything else is OAuth, and consent is a human in a browser:
+Every other server uses OAuth, and a person must consent in a browser:
 
 ```sh
 subs mcp login sentry     # opens a browser; `list` shows what is authorized
 ```
 
-There is no `logout`: the file is the whole declaration, so a connection is
-disconnected by deleting its `[mcp.<id>]`. The credential goes with it — the
-engine forgets it as it next starts, and a deployment as it next takes an
-apply.
+There is no `logout`. The file is the whole declaration, so you disconnect a
+connection by deleting its `[mcp.<id>]`. The credential goes with it. A local
+engine drops it at its next start, and a deployment drops it at its next apply.
 
-The credential belongs to the id, so declaring one server twice connects two
-accounts of it. Each id is authorized on its own and prefixes its own tools, so
-an agent granted both sees `sentry__` and `sentry2__` tools:
+The credential belongs to the id. Declare one server twice to connect two
+accounts of it. You authorize each id on its own, and each prefixes its own
+tools. An agent that has both sees `sentry__` and `sentry2__` tools:
 
 ```toml
 [mcp.sentry]
@@ -55,34 +55,40 @@ url = "https://mcp.sentry.dev/mcp"       # subs mcp login sentry
 url = "https://mcp.sentry.dev/mcp"       # subs mcp login sentry2
 ```
 
-Where the credential lands follows the file. Without a `[remote]` section
-the engine here is the one that will dial the connection, so the credential goes
-in that environment's `db`, beside the sessions that use it — a login and the
-engine that uses it cannot drift apart, and two environments authorize
-independently. **That database now holds credentials: gitignore `*.db*`.**
+The file decides where the credential is stored.
 
-A file naming a `[remote]` has that server run the flow instead, and the
-credential never touches your machine. In two steps: **declaring** a connection
-records the id and the URL and nothing else — `subs apply` does that for every
-`[mcp.<id>]` the file names, and grants it to the pinned app — and
-**authorizing** it is consent. `subs mcp login` does both: it declares (a no-op
-if apply already did), opens the deployment's consent URL, waits for it to land,
-and grants the connection to the app the file pins (`--no-grant` to skip). A
-declared connection reaches nothing until that consent, which is why declaring
-is safe to do from a manifest and consenting is not. The dashboard's connectors
-page starts the same flow; either surface finishes the other's.
+Without a `[remote]` section, the engine on this machine makes the connection.
+The credential goes in that environment's `db`, with the sessions that use it. A
+login and the engine that uses it stay together, and two environments authorize
+on their own. **That database now holds credentials. Add `*.db*` to
+`.gitignore`.**
 
-`auth` is the engine's half alone: it names a variable on this machine, which a
-deployment cannot read. `subs apply` and `subs mcp login` refuse a connection
-carrying one rather than push a URL the deployment could not authenticate — drop
-it and authorize there. What a deployment is told is the id and the URL, and
-where it enforces a catalog, that URL has to be one it offers — the error lists
-the ones it does.
+With a `[remote]` section, the server runs the flow, and the credential never
+reaches your machine. This takes two steps:
+
+- **Declaring** records the id and the URL, and nothing else. `subs apply`
+  declares every `[mcp.<id>]` in the file and grants it to the pinned app.
+- **Authorizing** is the consent.
+
+`subs mcp login` does both. It declares the connection, which does nothing if
+apply already did. It opens the deployment's consent URL, waits for the consent,
+and grants the connection to the app the file pins. Pass `--no-grant` to skip the
+grant. A declared connection reaches nothing until someone consents. So it is
+safe to declare from a manifest, but not to consent. The connectors page in the
+dashboard starts the same flow, and either one can finish what the other
+started.
+
+`auth` belongs to a local engine only. It names a variable on this machine, and a
+deployment cannot read it. `subs apply` and `subs mcp login` refuse a connection
+that carries one, because the deployment could not authenticate with that URL.
+Remove `auth` and authorize on the deployment instead. A deployment is told the
+id and the URL. Some deployments allow only the URLs in their own catalog. The
+error lists those URLs.
 
 ## Declare it on the agent
 
-An agent names a connection by id. A bare id draws every tool the connection
-grants; the table form narrows it:
+An agent names a connection by id. An id on its own takes every tool the
+connection offers. Use the table form to take fewer:
 
 ```toml title="substructure.toml"
 [agent.support]
@@ -92,8 +98,8 @@ mcp = ["sentry"]
 mcp = [{ id = "sentry", tools = { read_only = true } }]
 ```
 
-The filter belongs to the agent, not to the connection, so those two draw on
-one `[mcp.sentry]` and one credential and still see different tools.
+The filter belongs to the agent, not to the connection. So these two agents use
+one `[mcp.sentry]` and one credential, and still see different tools.
 
 A worker declares the same thing in the config it returns:
 
@@ -113,14 +119,14 @@ function decide({ trigger, proposed }) {
 }
 ```
 
-The model now sees `sentry__search_issues` alongside your own tools, and calling
-one settles without your worker being asked to run it. You still see the call:
-`tool.finished` fires with the outcome, like any other tool.
+The model now sees `sentry__search_issues` next to your own tools. When it calls
+one, the engine runs it and your worker is not asked. You still see the call:
+`tool.finished` arrives with the result, as it does for any other tool.
 
 ## Filtering
 
-A connection can offer a hundred tools. Past roughly forty, model selection
-degrades badly, so narrow it:
+A connection can offer a hundred tools. Above about forty tools, a model
+chooses badly. Take fewer:
 
 ```typescript
 type McpTools = {
@@ -132,50 +138,52 @@ type McpTools = {
 }
 ```
 
-Applied in order — capability predicates, then `include`, then `exclude` — and
-only ever narrowing. A filter can never widen what the connection grants.
+The engine applies these in order: the capability keys, then `include`, then
+`exclude`. Each one can only remove tools. A filter can never add a tool that
+the connection does not offer.
 
-The globs match the tool's name **on the connection** (the name its own docs
-use), not the prefixed name the model sees.
+The globs match the tool's name **on the connection**, the name its own docs
+use. They do not match the prefixed name the model sees.
 
-Capability predicates read the connection's MCP annotations, and an
-**unannotated tool fails them**. A server that annotates nothing yields nothing
-under `read_only: true` rather than quietly passing everything through.
-Annotations are hints from the server, not guarantees — treat them as a way to
-narrow, not as a security boundary.
+The capability keys read the connection's MCP annotations. A tool with no
+annotation **fails them**. So a server that annotates nothing offers no tools
+under `read_only: true`. It does not pass them all through. Annotations are
+hints from the server, not guarantees. Use them to take fewer tools, not as a
+security boundary.
 
 ## Names
 
-By default a connection's tools are prefixed with its id — `sentry__search`.
-Set `prefix_tools = false` on the connection to offer them under their own
+By default the engine prefixes a connection's tools with its id, such as
+`sentry__search`. Set `prefix_tools = false` on the connection to use their own
 names.
 
-Names are resolved against everything else the model can call, and a clash is
-dropped rather than shadowed:
+The engine resolves each name against everything else the model can call. If two
+names match, it drops one:
 
-- A tool you declared, or a sub-agent id, always wins its name.
-- Two connectors landing on the same name both lose it.
+- A tool you declared, or a sub-agent id, always keeps its name.
+- If two connectors have the same name, both lose it.
 
-Every dropped name is reported, so turning prefixing off is safe — you find out
-rather than silently losing a tool.
+The engine reports every name it drops. So it is safe to turn off the prefix.
+You are told, instead of losing a tool without notice.
 
 ## When tools are fetched
 
 The engine fetches a connection's tool list the first time a config names it,
-and records what it offered. Filtering is applied to that record, so editing a
-filter, flipping `prefix_tools`, or forking the conversation costs no round
-trip; only naming a connection the session has never fetched does.
+and records what the connection offered. It applies the filter to that record.
+So it makes no new request when you change a filter, change `prefix_tools`, or
+branch the conversation. It makes a request only when a config names a
+connection this session has not fetched.
 
-While a fetch is in flight the turn waits, and the fetch appears on your
-decision as an in-flight effect (`kind: "connector_sync"`). If it fails, the
-turn runs anyway — without those tools — so you can decide whether a connector
-you cannot reach is fatal.
+The turn waits while a fetch runs. The fetch appears on your decision as a call
+in flight, with `kind: "connector_sync"`. If the fetch fails, the turn runs
+anyway, without those tools. You decide whether a connector you cannot reach
+should stop the turn.
 
-The list is never refreshed mid-session. A server that changes underneath a live
-conversation cannot rewrite what already happened, and the model is never left
-having called a tool that no longer exists.
+The engine never refreshes the list during a session. So a server that changes
+during a conversation cannot change what already happened, and the model never
+calls a tool that no longer exists.
 
 ## Next
 
 - [Tool calls](./30-tools.md): tools your worker runs.
-- [Sub-agents](./80-sub-agents.md): put a large connector behind a delegate.
+- [Sub-agents](./80-sub-agents.md): put a large connector behind a sub-agent.

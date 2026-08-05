@@ -4,15 +4,15 @@ group: Building agents
 ---
 
 A tool is a function the model can call. You declare it in the agent config.
-When the model calls one, the engine sends your worker a `tool.execute`
-trigger; the worker runs it and answers with a `tool.result` or `tool.error`.
-The engine settles the call, fires a `tool.finished` trigger, and re-prompts
-the model with the outcome.
+When the model calls one, the engine sends your worker a `tool.execute` trigger.
+The worker runs the tool and answers with a `tool.result` or a `tool.error`. The
+engine then ends the call, sends a `tool.finished` trigger, and prompts the
+model again with the result.
 
 ## Example
 
-A tool with an input schema. The engine validates the model's arguments; the
-worker returns a `tool.error` when the tool itself fails.
+A tool with an input schema. The engine validates the model's arguments. The
+worker returns a `tool.error` when the tool fails.
 
 ```javascript title="server.mjs"
 const forecasts = { "San Francisco": "foggy", Tokyo: "clear" };
@@ -45,7 +45,7 @@ function decide({ trigger, proposed }) {
         };
     }
 
-    // The model called a tool. Run it, or report why it failed.
+    // The model called a tool. Run it, or say why it failed.
     if (trigger.type === "tool.execute") {
         const tool = tools.find((t) => t.name === trigger.name);
         try {
@@ -62,8 +62,8 @@ function decide({ trigger, proposed }) {
 
 ## Declaration
 
-Tools live in the agent config. The model sees `name`, `description`, and
-`input`; the rest is for the engine.
+Tools go in the agent config. The model sees `name`, `description`, and `input`.
+The other fields are for the engine.
 
 ```typescript
 type AgentTool = {
@@ -75,42 +75,43 @@ type AgentTool = {
 }
 ```
 
-`input` and `output` are optional JSON Schemas; the engine enforces them (see
-[Schemas](#schemas)).
+`input` and `output` are optional JSON Schemas. The engine applies them. See
+[Schemas](#schemas).
 
 ## Schemas
 
-The engine enforces a tool's declared schemas in both directions. It only
-validates and never mutates: a passing value is exactly what came in, with no
-coercion or default-filling. Tools with no schema pass through unchecked.
+The engine checks a tool's schemas in both directions. It only validates. It
+never changes a value: a value that passes is exactly the value that came in.
+The engine does not convert types or add defaults. A tool with no schema is not
+checked.
 
 ### input
 
-Before the `tool.execute` trigger reaches your worker, the engine classifies
-the raw `arguments` against `input` and reports the outcome in `trigger.input`:
+Before the `tool.execute` trigger reaches your worker, the engine checks the raw
+`arguments` against `input`. It reports the result in `trigger.input`:
 
 | `status` | Meaning |
 | --- | --- |
-| `valid` | Parsed to an object and conforms. `value` holds the arguments. |
-| `invalid` | Parsed to an object but violates the schema. |
-| `malformed` | Not a JSON object at all. |
+| `valid` | The arguments are an object and match the schema. `value` holds them. |
+| `invalid` | The arguments are an object, but they do not match the schema. |
+| `malformed` | The arguments are not a JSON object. |
 
-Validation never blocks the call. Every case reaches your worker, so you
-decide whether to run, coerce, or reject it. When the arguments are `invalid`
-or `malformed`, the engine sets `proposed` to a ready-made `tool.error` you can
-return as-is.
+Validation never stops a call. All three cases reach your worker, so you decide
+whether to run the tool, correct the arguments, or refuse. For `invalid` and
+`malformed` arguments, the engine puts a `tool.error` in `proposed`. You can
+return it unchanged.
 
 ### output
 
-When a call settles with a result, the engine checks it against `output`. A
-result that violates the schema never reaches the model. It settles as a
-terminal `tool.error` instead. The result is read as JSON when it parses, else
-as a plain string.
+When a call ends with a result, the engine checks the result against `output`. A
+result that does not match the schema does not reach the model. The call ends
+with a `tool.error` that cannot be retried. The engine reads the result as JSON
+if it parses, and as a string if it does not.
 
 ## Triggers
 
-Two triggers concern a tool call. Your worker answers `tool.execute`; it
-usually accepts the proposal on `tool.finished`.
+Two triggers are part of a tool call. Your worker answers `tool.execute`. It
+usually accepts the proposal for `tool.finished`.
 
 ```typescript
 type ToolExecute = {
@@ -140,34 +141,33 @@ type ToolFinished = {
 
 ### `tool.execute`
 
-The model called a tool; run it. `input` carries the engine's validation of
-the raw `arguments` (see [Schemas](#schemas)). `proposed` is empty on a clean
-call, because only your worker can run the tool, so you answer with a
-`tool.result` or `tool.error`. When validation fails or the model named a tool
-you never declared, `proposed` is instead a ready-made `tool.error` to return
-as-is.
+The model called a tool. Run it. `input` holds the engine's validation of the
+raw `arguments`. See [Schemas](#schemas). For a valid call, `proposed` is empty,
+because only your worker can run the tool. Answer with a `tool.result` or a
+`tool.error`. If validation failed, or if the model named a tool you did not
+declare, `proposed` holds a `tool.error` that you can return unchanged.
 
 ### `tool.finished`
 
-A tool call settled, after its result or error and any retries. `proposed`
-records the outcome as a tool message, then re-prompts the model, or holds
-when sibling calls are still in flight. Return it to continue the loop.
+A tool call ended, after its result or error and after any retries. `proposed`
+records the result as a tool message and prompts the model again. If other calls
+are still in flight, `proposed` waits instead. Return it to continue the loop.
 
 ## Actions
 
 ```typescript
 type ToolCall = {
     type: "tool.call"
-    id?: string                 // omitted: the engine mints one
+    id?: string                 // omitted: the engine creates one
     name: string
     arguments: unknown
-    retry?: RetryOverride       // layered over the agent config's, else the engine's
+    retry?: RetryOverride       // applied over the agent config, else the engine default
 }
 
 type ToolResult = {
     type: "tool.result"
-    id?: string                 // id and attempt default to the answered
-    attempt?: number            // tool.execute trigger
+    id?: string                 // id and attempt default to those of the
+    attempt?: number            // tool.execute trigger you answer
     result: unknown
 }
 
@@ -184,31 +184,31 @@ type ToolError = {
 
 ### `tool.call`
 
-Dispatch a tool call. The engine proposes these for the model's calls, and
-your worker can issue one directly. `retry` bounds the attempts.
+Start a tool call. The engine proposes one for each call the model makes. Your
+worker can also send one. `retry` limits the attempts.
 
-Where the call runs follows from its name: a tool you declared `handler:
-"client"` runs on the client, anything else runs on your worker. The engine
-resolves this against the config in force and freezes it onto the call, so a
-config change can't reroute a call already in flight.
+The tool's name decides where the call runs. A tool you declared with `handler:
+"client"` runs on the client. All other tools run on your worker. The engine
+reads this from the current config and writes it onto the call, so a later
+config change cannot move a call that is already in flight.
 
 ### `tool.result`
 
-Settle a call with a result. A result checked against a declared `output`
-schema may settle as a terminal error instead (see [Schemas](#schemas)).
+End a call with a result. If the tool declares an `output` schema and the result
+does not match it, the call ends with an error. See [Schemas](#schemas).
 
 ### `tool.error`
 
-Settle a call with a failure. It's terminal by default; set `retryable: true`
-to retry under the call's `retry` policy. `code` and `detail` carry structured
-info. The error text reaches the model as the tool's result, so write it to be
-read.
+End a call with a failure. By default the engine does not retry it. Set
+`retryable: true` to retry under the call's `retry` policy. `code` and `detail`
+hold structured information. The model reads the error text as the tool's
+result, so write it for the model to read.
 
-Full types in [Protocol](./150-protocol.md).
+For the full types, see [Protocol](./150-protocol.md).
 
 ## Next
 
 - [Client-side tools](./90-client-tools.md): tools that run in the browser.
-- [Sub-agents](./80-sub-agents.md): delegation as a tool call.
-- [Connectors](./85-connectors.md): tools the engine runs against a service.
+- [Sub-agents](./80-sub-agents.md): a tool call that starts another agent.
+- [Connectors](./85-connectors.md): tools the engine runs on a service.
 - [Retries](./120-retries.md): timeouts and backoff.

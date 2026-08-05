@@ -3,48 +3,50 @@ title: Durability
 group: Reliability
 ---
 
-Every session is an event log. Each trigger, decision, and effect is recorded
-before it is acted on, so a crash of the engine or your worker resumes from the
-last saved step. Resubmitting the same work does not repeat it.
+Every session is an event log. The engine records each trigger, decision, and
+effect before it acts on it. If the engine or your worker stops, the run
+continues from the last saved step. If you submit the same work twice, it runs
+once.
 
-## What's persisted
+## What is saved
 
-The session's events are the source of truth: messages, tool and LLM calls with
-their results, state and config updates, and turn boundaries. Each is appended
-with a snapshot atomically, under optimistic concurrency, before any external
-call runs. Side effects are dispatched only from committed events, so intent is
-durable first.
+A session's events are the source of truth. They hold the messages, the tool and
+LLM calls with their results, the state and config updates, and the start and
+end of each turn. The engine writes each event and a snapshot together, in one
+atomic write, before it makes any external call. It starts an effect only after
+the event is committed, so the intent is saved first.
 
 ## Recovery
 
-A call or decision past its deadline fails and retries per its policy —
-decisions default to ten attempts, so a worker deploy or transient failure is
-ridden out rather than surfaced. A restarted engine fails its own in-flight
-dispatches immediately and re-issues them, instead of waiting out their
-deadlines. Because every step was committed first, a restarted engine or
-worker continues where it stopped rather than redoing finished work.
+A call or decision that passes its deadline fails, and the engine retries it
+under its policy. A decision has ten attempts by default, so a worker deploy or
+a short outage does not fail the run. When the engine restarts, it fails its own
+calls that were in flight and sends them again. It does not wait for their
+deadlines. Because the engine commits every step first, a restarted engine or
+worker continues from where it stopped. It does not repeat finished work.
 
 ## Idempotency
 
-| Resubmit | Result |
+| You submit | Result |
 | --- | --- |
-| A completed or active `turn_id` | Returns the existing turn; it does not re-run. |
-| A `decision_id` already answered | No-op. At most one decision is live at a time. |
-| A settle for a call that is not pending | Rejected. An `attempt` fences a stale executor. |
+| A `turn_id` that is running or complete | The engine returns that turn. It does not run again. |
+| A `decision_id` that is answered | Nothing happens. Only one decision is live at a time. |
+| A result for a call that is not open | The engine refuses it. An `attempt` blocks an old executor. |
 
 ## Reconnects
 
-A dropped client resumes its event stream from a cursor, replaying what it
-missed before going live. A resent conversation view is deduplicated against the
-tree by id, so a reconnect re-records nothing.
+A client that lost its connection resumes the event stream from a cursor. It
+reads the events it missed, then goes live. If it sends its conversation view
+again, the engine matches the messages against the tree by id, so a reconnect
+records nothing new.
 
 ## Storage
 
-The engine persists through a pluggable store. The CLI uses SQLite in `substructure.db`;
-stop it, come back later, and the session resumes.
+The engine saves to a store that you can replace. The CLI uses SQLite in
+`substructure.db`. Stop the engine, come back later, and the session continues.
 
 ## Next
 
-- [Deferred tools](./130-deferred-tools.md): in-flight work that survives a restart.
-- [Interrupts](./140-interrupts.md): a paused branch held as durable state.
+- [Deferred tools](./130-deferred-tools.md): work in flight that survives a restart.
+- [Interrupts](./140-interrupts.md): a paused branch, saved to disk.
 - [Retries and timeouts](./120-retries.md): deadlines and redelivery.

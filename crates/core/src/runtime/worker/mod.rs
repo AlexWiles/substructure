@@ -7,5 +7,5 @@ mod state;
 pub use directory::{
     AgentDirectory, AgentEntry, EmptyAgentDirectory, StaticAgentDirectory, WorkerEndpoint,
 };
-pub use handler::spawn_worker_processor;
+pub use handler::{spawn_worker_processor, ChannelProposer};
 pub use queue::{DequeueFilter, FailDecision, SubmitDecision, WorkerDecisionRequest, WorkerQueue};

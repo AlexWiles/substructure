@@ -3,9 +3,9 @@ title: Interrupts
 group: Building agents
 ---
 
-An interrupt is a durable pause. A worker stops the session to wait for a
-human, and a later resume hands it back the human's answer. A paused session
-holds no compute and survives a restart.
+An interrupt is a saved pause. A worker stops the session to wait for a person.
+A later resume gives the worker that person's answer. A paused session uses no
+compute and survives a restart.
 
 ## Example
 
@@ -27,7 +27,7 @@ function decide({ trigger, proposed }) {
 }
 ```
 
-A human resumes it, addressing the interrupt by id:
+A person resumes it, and names the interrupt by id:
 
 ```jsonc
 { "type": "interrupt.resume", "interrupt_id": "int-1", "payload": { "approved": true } }
@@ -35,45 +35,45 @@ A human resumes it, addressing the interrupt by id:
 
 ## Pausing
 
-Return an `interrupt` action. `reason` is required; `payload` carries whatever
-the human needs; the engine mints an `interrupt_id` when you omit one.
+Return an `interrupt` action. `reason` is required. `payload` carries whatever
+the person needs to see. The engine creates an `interrupt_id` if you omit one.
 
-An interrupt is anchored to the conversation head where it was raised: it
-parks that branch, not the whole session. Several interrupts can be open at
-once, on the same or different branches. An interrupt raised before any
-message exists has no anchor and parks every branch (the global case — how
-system-level pauses like budget stops behave).
+An interrupt attaches to the conversation head where it was raised. It pauses
+that branch, not the whole session. Several interrupts can be open at once, on
+the same branch or on different ones. An interrupt raised before any message
+exists has nothing to attach to, so it pauses every branch. System pauses, such
+as a budget stop, work this way.
 
-LLM calls in flight on the parked branch are voided; calls on other branches,
-and tools and sub-agents already running, keep going.
+The engine cancels the LLM calls in flight on the paused branch. Calls on other
+branches keep running, and so do tools and sub-agents that already started.
 
 ## Resuming
 
-An `interrupt.resume` input clears the interrupt by id. If the interrupt was
-parking the active branch, the worker gets an `interrupt.resumed` trigger with
-the resume payload; clearing an interrupt left behind on an abandoned branch
-delivers nothing. A stale or duplicate id is a no-op.
+An `interrupt.resume` input clears the interrupt by id. If that interrupt paused
+the active branch, the worker receives an `interrupt.resumed` trigger with the
+resume payload. Clearing an interrupt on a branch nobody uses sends nothing. An
+old or repeated id does nothing.
 
-## While parked
+## While paused
 
-New messages extending the parked branch are refused until it resumes. Work
-that settles an in-flight call is still recorded, but its follow-on decision
-is held and delivered only after the resume.
+The engine refuses new messages on the paused branch until it resumes. It still
+records work that ends an open call, but it holds the next decision until the
+resume.
 
-A parked turn is still the same turn. Pausing emits no `turn.completed`, and
-resuming starts no new turn: the `interrupt.resumed` trigger arrives inside the
-turn that raised the interrupt, and events on both sides of the pause carry the
+A paused turn is still the same turn. A pause emits no `turn.completed`, and a
+resume starts no new turn. The `interrupt.resumed` trigger arrives inside the
+turn that raised the interrupt, and events before and after the pause carry the
 same `turn_id`.
 
-A transport may still draw its own boundary. [AG-UI](./100-ag-ui.md) ends the
-run at an interrupt — `RUN_FINISHED` with an interrupt outcome — because a run
-is one HTTP request; the resume opens a new run over the same engine turn.
+A transport can still end its own unit of work. [AG-UI](./100-ag-ui.md) ends the
+run at an interrupt, with `RUN_FINISHED` and an interrupt result, because a run
+is one HTTP request. The resume opens a new run inside the same engine turn.
 
-The rest of the tree stays live. A client view that edits an earlier message
-— branching off below the interrupt's anchor — dispatches normally: the user
-walks away from the parked question and the interrupt stays open on the
-abandoned branch. Switching back to that branch re-enters the parked state,
-and the interrupt is still there to answer or clear.
+The rest of the tree stays live. If a client view edits an earlier message, it
+branches below the interrupt's anchor and runs as normal. The user leaves the
+paused question, and the interrupt stays open on the branch they left. If they
+go back to that branch, the session is paused again, and the interrupt is still
+there to answer or clear.
 
 ## Spec
 
@@ -90,6 +90,6 @@ and the interrupt is still there to answer or clear.
 
 ## Next
 
-- [Durability](./110-durability.md): the pause is persisted state.
-- [Deferred tools](./130-deferred-tools.md): waiting on one call instead of the session.
+- [Durability](./110-durability.md): the engine saves the pause.
+- [Deferred tools](./130-deferred-tools.md): wait on one call instead of the session.
 - [Protocol](./150-protocol.md): the interrupt action, trigger, and input.
