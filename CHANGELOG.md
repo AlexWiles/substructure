@@ -28,7 +28,9 @@ together at the same version.
   subs.prod.toml` authenticates against the deployment that file names instead
   of the hosted cloud.
 - A CLI command that cannot reach the server now says so, instead of reporting a
-  missing org or project, or a deployment that is too old.
+  missing org or project, or a deployment that is too old. Only a 404 from the
+  API shows a deployment that is too old. A 404 from a proxy or from the wrong
+  URL shows the 404.
 - CLI errors now name the endpoint, and say when the response is not an API
   response.
 - An unknown field in an agent's `mcp` entry in `substructure.toml` is now an

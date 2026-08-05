@@ -9,14 +9,12 @@
 
 use anyhow::{bail, Context as _, Result};
 use clap::Subcommand;
-use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 
 use crate::api::v1::{ApplyResponse, ConfigEvent, Notice, NoticeLevel, Page, Project};
 
 use super::context::Context;
 use super::credentials;
-use super::http;
 use super::pickers;
 use super::print;
 use super::project_config::{self, Found, ProjectConfig};
@@ -149,15 +147,9 @@ fn project_url(applied: &ApplyResponse, api_url: &str) -> Option<String> {
 ///
 /// The gate is the feature, not its absence: a deployment that advertises
 /// nothing is one this CLI predates, and there is no older shape to fall back
-/// to. Only an answer decides that — a request that failed says nothing about
-/// what the deployment offers, so it is reported as itself.
+/// to. Only the deployment's own answer decides that — see [`Context::meta`].
 async fn require_agents(ctx: &Context) -> Result<()> {
-    let meta: crate::api::v1::Meta = match ctx.client.get("/api/v1/meta").await {
-        Ok(meta) => meta,
-        Err(e) if http::status_of(&e) == Some(StatusCode::NOT_FOUND) => Default::default(),
-        Err(e) => return Err(e),
-    };
-    if meta.has("agents") {
+    if ctx.meta().await?.has("agents") {
         return Ok(());
     }
     bail!(

@@ -1,6 +1,9 @@
 use std::sync::Mutex;
 
 use anyhow::{anyhow, bail, Result};
+use reqwest::StatusCode;
+
+use crate::api::v1::Meta;
 
 use super::credentials;
 use super::http::{self, CloudClient};
@@ -164,6 +167,20 @@ impl Context {
         bail!("no org selected. Pass --org <id>.")
     }
 
+    /// What the deployment says it is and what it offers.
+    ///
+    /// A deployment that answers 404 from the API predates this endpoint, and
+    /// reads as one that advertises nothing. A 404 the API did not write is a
+    /// proxy or the wrong URL answering, and every other failure is itself —
+    /// neither says anything about the deployment, so both are reported.
+    pub async fn meta(&self) -> Result<Meta> {
+        match self.client.get::<Meta>("/api/v1/meta").await {
+            Ok(meta) => Ok(meta),
+            Err(e) if http::api_status_of(&e) == Some(StatusCode::NOT_FOUND) => Ok(Meta::default()),
+            Err(e) => Err(e),
+        }
+    }
+
     /// The org a single-tenant server advertises, or None against the cloud.
     pub async fn server_default_org(&self) -> Result<Option<String>> {
         self.probe_server_defaults().await?;
@@ -254,6 +271,37 @@ mod tests {
         // The probe runs once; a second caller gets the same reason, not silence.
         let err = ctx.server_default_project().await.unwrap_err();
         assert!(format!("{err:#}").contains("could not connect to"));
+    }
+
+    /// A server that answers 404 to everything, with the body given.
+    async fn serve_404(body: &'static str) -> String {
+        let app =
+            axum::Router::new().fallback(move || async move { (StatusCode::NOT_FOUND, body) });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// Only the API's own 404 means a deployment that predates `/meta`. A proxy,
+    /// a dev server, or the wrong port answering says nothing about what the
+    /// deployment offers, so it must not read as one that offers nothing.
+    #[tokio::test]
+    async fn a_404_the_api_did_not_write_is_not_a_deployment_that_advertises_nothing() {
+        let url = serve_404("<html>404 not found</html>").await;
+        let ctx = Context::with_config(&globals(Some(&url), None), None).unwrap();
+        let err = format!("{:#}", ctx.meta().await.unwrap_err());
+        assert!(err.contains("not an API response"), "{err}");
+
+        let url = serve_404(r#"{"error":{"code":"not_found","message":"No such endpoint"}}"#).await;
+        let ctx = Context::with_config(&globals(Some(&url), None), None).unwrap();
+        let meta = ctx
+            .meta()
+            .await
+            .expect("a 404 from the API predates `/meta`");
+        assert!(meta.features.is_empty());
     }
 
     #[test]

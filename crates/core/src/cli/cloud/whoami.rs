@@ -1,12 +1,9 @@
 use anyhow::Result;
-use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 
 use super::context::Context;
-use super::http;
 use super::print;
 use super::CloudGlobals;
-use crate::api::v1::Meta;
 
 /// The account behind the session token. Cloud-only: a single-tenant server
 /// authenticates a machine, not a person, and answers `/meta` instead.
@@ -40,12 +37,7 @@ struct WhoamiOutput<'a> {
 pub async fn run(globals: CloudGlobals) -> Result<()> {
     let ctx = Context::reporting(&globals)?;
     // A deployment that predates `/meta` is the hosted cloud, which has users.
-    // Any other failure is the failure itself, not an old deployment.
-    let meta: Meta = match ctx.client.get("/api/v1/meta").await {
-        Ok(meta) => meta,
-        Err(e) if http::status_of(&e) == Some(StatusCode::NOT_FOUND) => Meta::default(),
-        Err(e) => return Err(e),
-    };
+    let meta = ctx.meta().await?;
     let me: Option<Me> = match meta.single_tenant {
         true => None,
         false => Some(ctx.client.get("/api/v1/me").await?),

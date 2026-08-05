@@ -19,14 +19,13 @@ use std::time::Duration;
 
 use anyhow::{bail, Result};
 use clap::Subcommand;
-use reqwest::StatusCode;
 use serde::Serialize;
 
-use crate::api::v1::{Meta, SlackConnection, SlackInstallUrl, SlackStatus};
+use crate::api::v1::{SlackConnection, SlackInstallUrl, SlackStatus};
 
 use super::context::Context;
 use super::project_config::{self, Found};
-use super::{http, print, OrgScope};
+use super::{print, OrgScope};
 
 /// How long the CLI waits for the browser before saying where to finish.
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(300);
@@ -143,15 +142,9 @@ async fn connect(no_browser: bool, scope: OrgScope) -> Result<()> {
 ///
 /// The gate is the feature, not its absence: a deployment that advertises
 /// nothing is one this CLI predates, and there is no older shape to fall back
-/// to. A request that failed says nothing about what the deployment offers, so
-/// it is reported as itself.
+/// to. Only the deployment's own answer decides that — see [`Context::meta`].
 async fn require_slack(ctx: &Context) -> Result<()> {
-    let meta: Meta = match ctx.client.get("/api/v1/meta").await {
-        Ok(meta) => meta,
-        Err(e) if http::status_of(&e) == Some(StatusCode::NOT_FOUND) => Default::default(),
-        Err(e) => return Err(e),
-    };
-    if meta.has("slack") {
+    if ctx.meta().await?.has("slack") {
         return Ok(());
     }
     bail!("{}", no_slack_app())
@@ -280,6 +273,7 @@ fn arrival(before: &[SlackConnection], now: &[SlackConnection]) -> Option<SlackC
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::v1::Meta;
     use std::path::PathBuf;
 
     fn tmpdir() -> PathBuf {

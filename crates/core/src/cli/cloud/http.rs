@@ -39,6 +39,8 @@ pub struct HttpStatus {
     pub url: String,
     /// The API's own error code, absent when the body did not come from one.
     pub code: Option<String>,
+    /// The body was the API's error shape, so the API itself answered.
+    from_api: bool,
     message: String,
     suffix: &'static str,
 }
@@ -59,9 +61,13 @@ impl fmt::Display for HttpStatus {
 
 impl std::error::Error for HttpStatus {}
 
-/// The status a server answered with, or None when none did.
-pub fn status_of(err: &anyhow::Error) -> Option<StatusCode> {
-    err.downcast_ref::<HttpStatus>().map(|e| e.status)
+/// The status the API itself answered with, or None when something else did.
+/// A 404 from a proxy, a dev server, or the wrong port says nothing about the
+/// deployment, so nothing about it may be inferred from one.
+pub fn api_status_of(err: &anyhow::Error) -> Option<StatusCode> {
+    err.downcast_ref::<HttpStatus>()
+        .filter(|e| e.from_api)
+        .map(|e| e.status)
 }
 
 /// How to get a credential the deployment will take, once it has refused the
@@ -425,6 +431,7 @@ async fn check_status(url: &str, res: Response) -> Result<Response> {
         status,
         url: url.to_string(),
         code,
+        from_api,
         message,
         suffix,
     }))
@@ -525,7 +532,7 @@ mod tests {
             .with_reauth(reauth(calls.clone(), None));
 
         let err = client.get::<Ok_>("/guarded").await.expect_err("401");
-        assert_eq!(status_of(&err), Some(StatusCode::UNAUTHORIZED));
+        assert_eq!(api_status_of(&err), Some(StatusCode::UNAUTHORIZED));
         assert!(err.to_string().ends_with("Run `subs login`."));
         assert_eq!(calls.seen.lock().unwrap().len(), 1, "no second attempt");
     }
@@ -576,6 +583,7 @@ mod tests {
             status: StatusCode::UNAUTHORIZED,
             url: "https://api.example".to_string(),
             code: Some("unauthenticated".to_string()),
+            from_api: true,
             message: "Not authenticated".to_string(),
             suffix: " Run `subs login`.",
         };
@@ -589,6 +597,7 @@ mod tests {
             status: StatusCode::UNAUTHORIZED,
             url: "https://api.example".to_string(),
             code: None,
+            from_api: false,
             message: "not an API response: \"<html>\"".to_string(),
             suffix: "",
         };
