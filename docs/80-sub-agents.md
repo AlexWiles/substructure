@@ -3,14 +3,15 @@ title: Sub-agents
 group: Building agents
 ---
 
-A sub-agent is another agent that the model sees as a tool. When the model calls
-it, the engine starts a child session. The child's result goes back to the
-parent as the tool's result.
+A sub-agent is another agent that the model sees as a tool.
+
+When the model calls it, the engine starts a child session. The child's result
+goes back to the parent as the tool's result.
 
 ## Example
 
-Two agents are two sections. The parent names the sub-agent. The child can use a
-different model, often a cheaper one:
+Two agents are two sections. The parent names the child. The child can use a
+cheaper model.
 
 ```toml title="substructure.toml"
 [llm.claude]
@@ -31,24 +32,20 @@ model = "claude-haiku-4-5"
 system = "You are a poet. Respond with a single haiku."
 ```
 
-Neither agent needs a worker. If one does, add `worker` to that section only.
-Routing is per agent, and a child session carries the sub-agent's own
-`agent_id`. So an engine-hosted parent can call a worker-hosted child, or the
-reverse:
+Neither agent needs a worker. Routing is per agent, so an engine-hosted parent
+can call a worker-hosted child.
+
+One worker can serve both. Route on `agent_id`.
 
 ```javascript title="server.mjs"
-// One worker, two agents, identified by agent_id.
 function assistant({ trigger, proposed }) {
-    // The config from the file arrives as the proposal. Change what you need.
     if (trigger.type === "session.start") {
         return { agent: { ...proposed.agent, system: "Delegate poetry to the poet." } };
     }
     return proposed;
 }
 
-function poet({ proposed }) {
-    return proposed;
-}
+const poet = ({ proposed }) => proposed;
 
 const decide = (req) => (req.agent_id === "poet" ? poet(req) : assistant(req));
 ```
@@ -56,53 +53,52 @@ const decide = (req) => (req.agent_id === "poet" ? poet(req) : assistant(req));
 ## Declaring
 
 `sub_agents` lists by id the agents this agent can call. The model sees each one
-as a tool with that id as its name. The tool takes one `message` argument. The
-ids and the tool names share one namespace, so an id must not match a tool name.
+as a tool with that id as its name. The tool takes one `message` argument.
 
-The tool's description comes from the `description` on the section it names. You
-write it once, on the agent it describes, so two parents that call the same
-child describe it the same way. An agent that exists only to be called can carry
-just a `description` and a `worker`.
+Ids and tool names share one namespace. An id must not match a tool name.
 
-A worker can also write or replace the description. The expanded `sub_agents`
-arrive in the `session.start` proposal, and a worker that returns its own `agent`
-sets its own descriptions. So `description` is required only when nothing else
-can supply it: an agent with no `worker`, where the file is the whole
-declaration.
+The tool's description comes from the `description` on the section it names. Two
+parents that call the same child describe it the same way.
+
+An agent that exists only to be called can carry just a `description` and a
+`worker`.
+
+A worker can also write the description. The expanded `sub_agents` arrive in the
+`session.start` proposal. So `description` is required only for an agent with no
+worker.
 
 ## Calling
 
-When the model calls a sub-agent, `proposed` starts a child session. It also
-carries the child's first message, taken from the `message` argument, so the
-message cannot arrive before its session exists. The child runs as a normal
-session with its own `agent_id`, transcript, and cost. Its decision requests
-carry an `ancestry` list of the parent sessions above it.
+When the model calls a sub-agent, `proposed` starts a child session. It carries
+the child's first message, taken from the `message` argument.
+
+The child runs as a normal session with its own `agent_id`, transcript, and
+cost. Its decision requests carry an `ancestry` list of the sessions above it.
 
 ## Completing
 
 When the child's turn ends, the parent receives a `sub_agent.finished` trigger.
-`proposed` records the result as the tool's result and prompts the parent again,
-the same way `tool.finished` does. The child's cost and token use are added to
-the parent's turn.
+
+`proposed` records the result as the tool's result and prompts the parent again.
+The child's cost and token use are added to the parent's turn.
 
 ## Spec
 
 ```typescript
 type SubAgent = { id: string; description?: string }
 
-// the actions that start a child; the engine proposes them for you
-{ type: "sub_agent.spawn"; session_id: string; agent_id: string; tool_call_id: string; retry?: RetryOverride }
-{ type: "message.send"; session_id: string; message: DraftMessage }
+// the actions that start a child. the engine proposes them for you
+{ type: "sub_agent.spawn", session_id: string, agent_id: string, tool_call_id: string }
+{ type: "message.send", session_id: string, message: DraftMessage }
 
-// trigger
-{ type: "sub_agent.finished"; id: string; ok: boolean; session_id: string; agent_id: string; result?: string; error?: string }
+// the trigger
+{ type: "sub_agent.finished", id: string, ok: boolean, session_id: string, agent_id: string }
 ```
 
-On `sub_agent.finished`, `id` is the tool call and `session_id` is the child. For
-the full types, see [Protocol](./150-protocol.md).
+On `sub_agent.finished`, `id` is the tool call and `session_id` is the child.
 
 ## Next
 
-- [Tool calls](./30-tools.md): the child's result comes back as a tool result.
-- [Durability](./110-durability.md): the engine saves child sessions and restores them.
-- [Protocol](./150-protocol.md): the spawn actions and the finish trigger.
+- [Tool calls](./60-tools.md): the child's result comes back as a tool result.
+- [Agents](./30-agents.md): the section a child agent declares.
+- [Durability](./200-durability.md): the engine saves child sessions.

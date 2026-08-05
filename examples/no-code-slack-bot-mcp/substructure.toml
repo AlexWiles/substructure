@@ -1,0 +1,20 @@
+name = "example"
+
+[llm.openrouter]
+type = "openrouter"
+
+[agent.docs]
+llm = "openrouter"
+model = "anthropic/claude-haiku-4.5"
+system = "You answer questions about public GitHub repositories. Read the repository before you answer, and name what you read."
+mcp = ["deepwiki"]
+
+[mcp.deepwiki]
+url = "https://mcp.deepwiki.com/mcp"
+
+[slack]
+dm = "docs"
+mentions = "docs"
+
+[remote]
+url = "https://api.substructure.ai"

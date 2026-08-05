@@ -1,0 +1,27 @@
+name = "example"
+
+[llm.openrouter]
+type = "openrouter"
+
+[agent.support]
+llm = "openrouter"
+model = "anthropic/claude-haiku-4.5"
+system = "You are the support assistant. Answer in the thread, and keep it short."
+
+[agent.oncall]
+llm = "openrouter"
+model = "anthropic/claude-sonnet-4.5"
+system = "You are the on-call assistant. Say what is broken, what you checked, and what to do next."
+
+[slack]
+dm = "support"
+mentions = "support"
+
+[slack.channel.C01ABCD2EFG]      # #eng-oncall
+agent = "oncall"
+
+[slack.channel.C03HIJK4LMN]      # #random
+off = true
+
+[remote]
+url = "https://api.substructure.ai"

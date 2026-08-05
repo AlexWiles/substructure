@@ -1,0 +1,162 @@
+---
+title: Local development
+group: Running it
+---
+
+Run the engine on your machine. Iterate on an agent before it goes live.
+
+Everything works locally: Slack, MCP connections, workers, and sub-agents. The
+engine keeps its state in a SQLite file beside your config.
+
+## Set up a file
+
+```sh
+subs init
+```
+
+`init` asks six questions and writes `substructure.toml`.
+
+| Question | Writes |
+| --- | --- |
+| What the project is called | `name` |
+| Which provider and which model | `[llm.<provider>]` and the agent's `model` |
+| What id the agent has | `[agent.<id>]` |
+| Which MCP servers to connect | one `[mcp.<id>]` each, and the agent's `mcp` list |
+| Whether it answers in Slack | `[slack]`, one key per yes |
+| Where it runs | `[serve]` for local, `[remote]` for the cloud |
+
+It writes nothing until you confirm.
+
+## Run one turn
+
+```sh
+export OPENROUTER_API_KEY=sk-or-...
+subs run --agent oncall -o pretty "hi"
+```
+
+The reply streams to your terminal. `-o pretty` shows the turn as text. The
+default, `ag-ui`, streams protocol events.
+
+Put the flags in the file so you stop repeating them.
+
+```toml title="substructure.toml"
+[run]
+agent = "oncall"
+output = "pretty"
+```
+
+```sh
+subs run "hi"
+```
+
+## Continue a session
+
+After every run the CLI prints the command to continue it.
+
+```
+continue this session with:
+  subs run --agent oncall --session <session-id> '...'
+```
+
+```sh
+subs run --session <session-id> "what was my first question?"
+```
+
+The agent remembers. The engine saves the whole session in `substructure.db`.
+Stop everything, come back tomorrow, and the session continues.
+
+## Run a server
+
+```sh
+subs serve --no-auth
+```
+
+This serves the [REST API](./250-api.md) and the [AG-UI](./140-ag-ui.md)
+endpoints on `127.0.0.1:8080`. Point a frontend at it.
+
+`--no-auth` turns off client and worker authentication. Use it only for a server
+nothing off this machine can reach.
+
+## Develop a worker
+
+Run your worker and point an agent at it.
+
+```toml title="substructure.toml"
+[agent.oncall]
+llm = "openrouter"
+model = "anthropic/claude-sonnet-4-5"
+worker = "http://localhost:4444"
+```
+
+```sh
+node server.mjs
+subs run "hi"
+```
+
+Every decision now POSTs to your code. See [Workers](./50-workers.md).
+
+A local engine signs decisions only when the agent names
+`signing_secret_env`. Leave it off while you develop.
+
+## Connect Slack locally
+
+A local engine uses a Slack app you own, over Socket Mode. See
+[Self-hosting](./180-self-hosting.md#slack).
+
+```sh
+export SLACK_APP_TOKEN=xapp-...
+export SLACK_BOT_TOKEN=xoxb-...
+subs serve --no-auth --slack-agent my-agent
+```
+
+## Connect MCP servers locally
+
+```sh
+subs mcp login sentry
+```
+
+The engine on this machine runs the OAuth flow. The credential goes into that
+environment's `db`.
+
+**That database now holds credentials. Add `*.db*` to `.gitignore`.**
+
+## Two environments
+
+A second environment is a second file. Each one gets its own database.
+
+```sh
+subs run -c substructure.dev.toml "hi"
+subs serve -c substructure.dev.toml
+```
+
+`db` defaults to the file's name. `substructure.toml` uses `substructure.db`.
+`substructure.dev.toml` uses `substructure.dev.db`.
+
+## Develop against a cloud project
+
+One file can do both. Keep the engine keys and a `[remote]` section together.
+
+```sh
+subs serve                       # run it here
+subs apply                       # deploy the same declaration
+```
+
+`subs run` and `subs serve` read `api_key_env` and `signing_secret_env`. `subs
+apply` strips them.
+
+## Logs
+
+```toml title="substructure.toml"
+log = "info"
+```
+
+`log` takes `RUST_LOG` syntax: a level on its own, or per-target directives such
+as `substructure_core=debug,warn`. `$RUST_LOG` wins over it. Without it, `subs
+run` shows errors and `subs serve` shows info.
+
+## Next
+
+- [Workers](./50-workers.md): the code the engine calls.
+- [CLI](./260-cli.md): every command and flag.
+- [Self-hosting](./180-self-hosting.md): run the engine for other people.
+- [Cloud](./170-cloud.md): deploy the same file.

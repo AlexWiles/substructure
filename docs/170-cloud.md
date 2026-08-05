@@ -1,35 +1,18 @@
 ---
 title: Cloud
-group: Operations
+group: Running it
 ---
 
-Substructure cloud hosts the engine. A project receives client traffic. It sends
-each decision to the worker its agent names, or decides itself. It makes the LLM
-calls you gave it a key for. You manage the project with `subs`.
+Substructure cloud hosts the engine. A project receives client traffic, decides
+each turn, and makes the model calls you gave it a key for.
 
-One `substructure.toml` is one project. A second environment is a second file,
-deployed as a second project:
+You manage a project with `subs`. There is no dashboard step you cannot do from
+the terminal.
 
-```sh
-subs apply -c substructure.staging.toml
-```
+## One file is one project
 
-Each project has its own wallet, quota, keys, and sessions.
-
-## Sign in
-
-```sh
-subs login
-```
-
-This authenticates in your browser and stores a token under
-`~/.config/substructure`.
-
-## Deploy a project
-
-There is no create command. The file is the source of truth for the project: that
-it exists, its name, and everything in it. You create a project by writing the
-file and applying it:
+`substructure.toml` is the whole declaration: that the project exists, its name,
+and everything in it. You create a project by applying the file.
 
 ```toml title="substructure.toml"
 name = "my-bot"
@@ -37,12 +20,12 @@ name = "my-bot"
 [llm.claude]
 type = "anthropic"
 
-# The engine decides. It proposes, then accepts its own proposal.
+# The engine decides.
 [agent.support]
 llm = "claude"
 model = "claude-sonnet-4-5"
 
-# Your code decides. The engine POSTs here and waits for the reply.
+# Your code decides.
 [agent.triage]
 worker = "https://my-worker.example.com/agent"
 ```
@@ -51,52 +34,31 @@ worker = "https://my-worker.example.com/agent"
 subs apply
 ```
 
-Apply creates the project, declares the agents, and writes the pin into
-`[remote].project`. So a second apply changes nothing. It does not create a
-second project. To use a project that already exists, from a fresh clone or a
-teammate's machine, use `subs link`.
+Apply creates the project and writes the pin into `[remote].project`. A second
+apply changes nothing.
 
-Apply **replaces**. It does not merge. The file is the whole declaration, so an
-agent, an `[llm.*]` block, or a Slack channel that is not in the file is one you
-removed.
-
-## Each agent chooses its own host
-
-`worker` on an agent selects who decides:
-
-- **Set** — the engine POSTs decisions there. It signs each one with a secret it
-  created for that agent. The signature is an HMAC of the body, sent as
-  `X-Substructure-Signature`. Your worker checks it with the same secret.
-- **Unset** — the engine decides for that agent by accepting its own proposal.
-  You deploy nothing but the file.
-- **Not declared** — a decision for an agent that no file declares fails
-  immediately. The error lists the ids that are declared.
-
-The secret belongs to the deployment, not to the file, so it is never written in
-`substructure.toml`:
+A second environment is a second file.
 
 ```sh
-subs agents list
-subs agents show triage          # includes the signing secret
-subs agents rotate-secret triage # owner only
+subs apply -c substructure.staging.toml
 ```
 
-## Secrets
+Each project has its own wallet, quota, keys, and sessions.
 
-| Secret | Purpose | Where it comes from |
-| --- | --- | --- |
-| Signing secret | Your worker uses it to verify the engine's decision requests. | The deployment creates one for each agent, on the first apply that gives it a `worker`. Read it with `subs agents show <id>`. |
-| Client API key | The bearer token your clients send to the project. | `subs keys create <label>`. It is printed once. |
-| Provider key | Authenticates to Anthropic, OpenAI, or OpenRouter. | `subs llm set-key <block>`. See below. |
-| Slack bot token | The bot reads and posts as your app. | `subs slack connect` installs the app into a workspace. The token stays in the deployment. |
+To use a project that already exists, from a fresh clone or a teammate's
+machine, run `subs link`.
 
-`subs keys create <label>` creates a client key and writes only the value to
-stdout, so you can pipe it into your client's secret store.
+## Apply replaces
 
-### Provider keys
+Apply does not merge. An agent, an LLM block, a connection, or a Slack channel
+that is not in the file is one you removed.
 
-Calls run on your key. A block the engine calls — `anthropic`, `openai`, or
-`openrouter` — needs one:
+Apply is idempotent. An unchanged file writes nothing and exits 0. It is safe to
+run on every merge.
+
+## Provider keys
+
+Calls run on your key. A block the engine calls needs one.
 
 ```sh
 subs llm set-key claude              # reads the key from stdin
@@ -104,20 +66,60 @@ subs llm set-key claude --env MY_KEY # or from an environment variable
 subs llm list
 ```
 
-The key never appears in the command line, and no read returns it. Until you set
-one, every call on that block fails with an error that says so. On a `type =
-"worker"` block, the call runs in your worker, which calls the provider with a
-key from its own environment. There is nothing to upload. See
-[LLMs](./50-llms.md).
+The key never appears in the command line. No read returns it. Until you set
+one, every call on that block fails with an error that says so.
 
-`api_key_env` in the file names a variable on *your* machine, so it applies only
-to `subs serve` and `subs run`. `subs apply` removes it, and a deployment that
-receives one refuses the document. It does not ignore the field.
+A `type = "worker"` block needs no key here. The call runs in your worker. See
+[LLMs](./70-llms.md).
 
-## Observe
+`api_key_env` names a variable on your machine, so it applies to `subs serve`
+and `subs run`. `subs apply` removes it. A deployment refuses a document that
+carries one.
+
+## Secrets
+
+| Secret | Purpose | Where it comes from |
+| --- | --- | --- |
+| Signing secret | Your worker verifies the engine's decision requests with it. | The deployment creates one per agent, on the first apply that gives it a `worker`. Read it with `subs agents show <id>`. |
+| Client API key | The bearer token your clients send. | `subs keys create --label <label>`. Printed once. |
+| Provider key | Authenticates to Anthropic, OpenAI, or OpenRouter. | `subs llm set-key <block>`. |
+| Slack bot token | The bot reads and posts as your app. | `subs slack connect`. The token stays in the deployment. |
+
+The signing secret belongs to the deployment. It is never written in the file.
 
 ```sh
-subs projects list
+subs agents list
+subs agents show triage          # includes the signing secret
+subs agents rotate-secret triage # owner only
+```
+
+## Send a message from your backend
+
+Create an API key and submit for a user through the machine API.
+
+```sh
+export SUBS_API_KEY=$(subs keys create --label backend)
+export BASE=https://api.substructure.ai
+
+curl $BASE/api/machine/sessions/submit \
+    -H "Authorization: Bearer $SUBS_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "agent_id": "support",
+      "identity": { "id": "user_42" },
+      "payload": { "type": "client.message", "message": { "role": "user", "content": "hi" } }
+    }'
+```
+
+The response holds the `session_id` and the `turn_id`. Pass the same
+`session_id` to another submit to continue the conversation.
+
+For a browser, mint a short-lived client token instead. See
+[Authentication](./190-auth.md).
+
+## Watch it run
+
+```sh
 subs sessions list
 subs sessions events <session-id> --stream
 subs config log
@@ -126,7 +128,7 @@ subs open
 
 ## Next
 
-- [Quick start](./15-quick-start-cloud.md): build a project and run a turn.
-- [CLI](./160-cli.md): the full command reference.
-- [LLMs](./50-llms.md): where provider keys live.
-- [Protocol](./150-protocol.md): the signed request the engine sends.
+- [Config](./220-config.md): every key `subs apply` sends.
+- [Authentication](./190-auth.md): client tokens and worker signing.
+- [REST API](./250-api.md): the endpoints your clients call.
+- [Self-hosting](./180-self-hosting.md): run the same engine yourself.

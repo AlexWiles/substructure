@@ -4,8 +4,9 @@ group: Reference
 ---
 
 The worker protocol comes with machine-readable schemas. Point a code generator
-at them to get typed request and response types in your language. You do not
-have to write the wire types yourself.
+at them to get typed request and response types in your language.
+
+You do not write the wire types yourself.
 
 ## Files
 
@@ -32,7 +33,8 @@ npx quicktype --src-lang schema --lang typescript \
 
 Swap `--lang go --package main -o protocol.go` for Go.
 
-Python, with [datamodel-code-generator](https://github.com/koxudaxi/datamodel-code-generator):
+Python, with
+[datamodel-code-generator](https://github.com/koxudaxi/datamodel-code-generator):
 
 ```sh
 datamodel-codegen \
@@ -44,5 +46,5 @@ For OpenAPI tools, generate from `worker.openapi.json` instead.
 
 ## Next
 
-- [Protocol](./150-protocol.md): the types these schemas describe.
-- [Core concepts](./20-concepts.md): what the worker sends and receives.
+- [Protocol](./230-protocol.md): the types these schemas describe.
+- [Workers](./50-workers.md): the code that uses them.

@@ -1,0 +1,21 @@
+name = "example"
+
+[llm.openrouter]
+type = "openrouter"
+
+[agent.assistant]
+llm = "openrouter"
+model = "anthropic/claude-haiku-4.5"
+system = "Call get_location when an answer depends on where the user is."
+
+[[agent.assistant.tools]]
+name = "get_location"
+description = "The city the user is in"
+handler = "client"
+
+[run]
+agent = "assistant"
+output = "pretty"
+
+[remote]
+url = "https://api.substructure.ai"

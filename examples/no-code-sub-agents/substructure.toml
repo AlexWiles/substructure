@@ -1,0 +1,29 @@
+name = "example"
+
+[llm.openrouter]
+type = "openrouter"
+
+[agent.assistant]
+llm = "openrouter"
+model = "anthropic/claude-haiku-4.5"
+system = "You run a small copy desk. Give the brief to the writer, then give the draft to the critic, then answer with the final text."
+sub_agents = ["writer", "critic"]
+
+[agent.writer]
+description = "Drafts short copy from a brief"
+llm = "openrouter"
+model = "anthropic/claude-sonnet-4.5"
+system = "Write the draft. Plain words, short sentences, no adjectives you do not need."
+
+[agent.critic]
+description = "Reviews a draft against its brief and lists what to fix"
+llm = "openrouter"
+model = "anthropic/claude-haiku-4.5"
+system = "List what the draft gets wrong, one line each. Do not rewrite it."
+
+[run]
+agent = "assistant"
+output = "pretty"
+
+[remote]
+url = "https://api.substructure.ai"
