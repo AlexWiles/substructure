@@ -15,11 +15,14 @@ together at the same version.
   drops the call, and when the session is cancelled. A tool call that did not
   finish showed as running for as long as anyone looked at the message.
 - The Slack bot now closes the message it streams into on every path: a turn
-  the deployment posts nothing for, a stream that refuses the answer, and a
-  cancelled session. These messages stayed open until Slack expired them.
-- The Slack bot now shows the working indicator for as long as a turn runs. It
-  stopped after the first step card, during a turn that streams continuously,
-  and when a turn ended while the turn behind it was still running.
+  the deployment posts nothing for, a stream that refuses the answer or a card,
+  a cancelled session, and a message opened while the turn was settling. These
+  messages stayed open until Slack expired them.
+- A turn now shows one Slack message. A turn that started twice opened a second
+  message.
+- The Slack bot now shows the working indicator for as long as the turn runs,
+  and puts it out when the turn ends. It stopped after the first step card, and
+  it stayed on after the turn ended.
 - A turn that delegates to more than one sub-agent now waits for all of them to
   return before it continues.
 - Failed decisions now retry or end the run with the error.

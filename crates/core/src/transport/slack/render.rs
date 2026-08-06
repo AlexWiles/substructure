@@ -189,7 +189,7 @@ pub fn settled_prompt_blocks(posted: &[Value], text: &str, resolution: &str) -> 
 }
 
 /// The thread status while a turn runs.
-pub const WORKING_STATUS: &str = "is thinking…";
+pub const WORKING_STATUS: &str = "is typing…";
 
 pub fn section_block(text: &str) -> Value {
     serde_json::json!({

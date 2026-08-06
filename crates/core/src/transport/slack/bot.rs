@@ -17,13 +17,14 @@ use crate::processor::{EventProcessor, EventProcessorRunnerConfig, ProcessorErro
 use crate::protocol::{ClientInput, Role, SessionOwner};
 use crate::session::command::SessionError;
 use crate::session::events::EventPayload;
+use crate::session::state::SessionStatus;
 use crate::session::SessionEvent;
 use crate::transport::channel::ChannelContext;
 use crate::{Caller, HandleClientInput, RuntimeError};
 
 /// Slack limits the rate of `chat.appendStream`.
 const ACTIVITY_INTERVAL: Duration = Duration::from_secs(1);
-/// Shown as `<app> is thinking…`.
+/// Shown as `<app> is typing…`.
 /// Slack removes a status after two minutes. Set it again on this cadence.
 const STATUS_REFRESH: Duration = Duration::from_secs(90);
 
@@ -303,6 +304,12 @@ impl Streams {
         lock(&self.open).insert(stream.key(), stream);
     }
 
+    /// Track a turn that is not tracked yet. A turn can start twice, and the
+    /// slot it already holds knows its message.
+    fn track_new(&self, stream: Stream) {
+        lock(&self.open).entry(stream.key()).or_insert(stream);
+    }
+
     fn remove(&self, key: &StreamKey) {
         lock(&self.open).remove(key);
     }
@@ -345,15 +352,22 @@ impl Streams {
         })
     }
 
-    /// Record what was sent, unless the turn ended during the append.
-    fn commit(&self, key: &StreamKey, ts: String, version: u64, sent: Vec<(String, Value)>) {
+    /// Record what was sent. False when the turn ended during the append.
+    fn commit(
+        &self,
+        key: &StreamKey,
+        ts: String,
+        version: u64,
+        sent: Vec<(String, Value)>,
+    ) -> bool {
         let mut open = lock(&self.open);
         let Some(stream) = open.get_mut(key) else {
-            return;
+            return false;
         };
         stream.ts = Some(ts);
         stream.version = version;
         stream.sent.extend(sent);
+        true
     }
 
     /// A turn of this session other than `turn_id` that is still running.
@@ -842,6 +856,29 @@ impl SlackBot {
         .map(|_| ())
     }
 
+    /// Whether the event is a running turn's work. A session names its last
+    /// turn after that turn ends, so the event's turn id does not say. The
+    /// slot does: it is opened at the turn's start and taken by its reply.
+    fn working(&self, event: &SessionEvent) -> bool {
+        // The prompt took the slot with it; the resume speaks for itself.
+        if matches!(event.payload, EventPayload::InterruptResumed(_)) {
+            return true;
+        }
+        // The events that end a turn, and a prompt waiting on a person.
+        let stops = matches!(
+            event.payload,
+            EventPayload::TurnCompleted(_)
+                | EventPayload::SessionInterrupted(_)
+                | EventPayload::SessionCancelled
+                | EventPayload::SessionDone(_)
+        ) || matches!(event.meta.status, SessionStatus::Interrupted { .. });
+        let Some(turn_id) = event.meta.turn_id.as_deref() else {
+            return false;
+        };
+        let key = StreamKey::new(&event.tenant_id, &event.session_id, turn_id);
+        !stops && self.streams.get(&key).is_some()
+    }
+
     /// The working indicator. An empty status clears it.
     async fn set_working(&self, ws: &Workspace, thread: &Thread) {
         self.set_status(ws, thread, render::WORKING_STATUS).await;
@@ -1006,19 +1043,10 @@ impl EventProcessor for SlackBot {
         if let Err(e) = self.track(&ws, &thread, &event).await {
             return Err(ProcessorError::Apply(e.to_string()));
         }
-        // The indicator is the turn's, start to end: nothing else lights it, so
-        // a message waiting its turn does not claim the thread is working.
-        match &event.payload {
-            EventPayload::TurnCompleted(t) => {
-                self.settle_status(&ws, &thread, &event, Some(&t.turn_id))
-                    .await
-            }
-            EventPayload::SessionInterrupted(_) => {
-                self.settle_status(&ws, &thread, &event, event.meta.turn_id.as_deref())
-                    .await
-            }
-            EventPayload::TurnStarted(_) => self.set_working(&ws, &thread).await,
-            _ => {}
+        // Slack clears the indicator on every write to the thread, so each
+        // event of a running turn sets it again.
+        if self.working(&event) {
+            self.set_working(&ws, &thread).await;
         }
         let result = match &event.payload {
             EventPayload::TurnCompleted(t) => {
@@ -1047,6 +1075,19 @@ impl EventProcessor for SlackBot {
             EventPayload::ChannelsUpdated(c) => self.apply_channels(&ws, &thread, &event, c).await,
             _ => return Ok(()),
         };
+        // The turn's end puts the indicator out, after the reply and not
+        // before it: the reply takes the slot, so no card can light it again.
+        match &event.payload {
+            EventPayload::TurnCompleted(t) => {
+                self.settle_status(&ws, &thread, &event, Some(&t.turn_id))
+                    .await
+            }
+            EventPayload::SessionInterrupted(_) => {
+                self.settle_status(&ws, &thread, &event, event.meta.turn_id.as_deref())
+                    .await
+            }
+            _ => {}
+        }
         // The turn is settled (or undeliverable) either way: drop its row.
         if matches!(result, Ok(()) | Err(Error::Terminal(_))) {
             if let EventPayload::TurnCompleted(t) = &event.payload {
@@ -1443,7 +1484,7 @@ impl SlackBot {
                         }
                     }
                 }
-                self.streams.insert(stream);
+                self.streams.track_new(stream);
             }
             EventPayload::ToolCallRequested(_)
             | EventPayload::ToolCallCompleted(_)
@@ -1513,9 +1554,8 @@ impl SlackBot {
         }
     }
 
-    /// Set the status again for every turn still running — with a card or
-    /// without one. A turn between two cards shows nothing else, and a
-    /// thread that has gone quiet reads as one that has finished.
+    /// Set the status again for every running turn. Slack drops one after two
+    /// minutes, and the longest turns need it most.
     async fn refresh_statuses(&self) {
         for stream in self.streams.live() {
             let Some(ws) = self.resolver.by_tenant(&stream.tenant_id).await else {
@@ -1559,48 +1599,97 @@ impl SlackBot {
             return;
         }
 
+        // Set when this tick opens the message: only that one is ours to take
+        // back.
+        let mut opened = false;
         let (ts, version) = match open.ts.clone() {
             Some(ts) => (ts, open.version),
-            None => {
-                // A thread shows one open stream. A queued turn waits for the
-                // turn before it to settle rather than opening a second one
-                // beside it; the tick that follows tries again.
-                if self.stream_open_elsewhere(key).await {
-                    self.streams.mark_dirty(key.clone());
-                    return;
-                }
-                let ts = match self
-                    .start_stream(
-                        ws,
-                        &thread,
-                        open.recipient.as_deref(),
-                        open.recipient_team.as_deref(),
-                    )
-                    .await
-                {
-                    Ok(ts) => ts,
-                    Err(e) => return self.kill_stream(key, e),
-                };
-                match self.persist_ts(&open, &ts).await {
-                    TsPersist::Kept(version) => (ts, version),
-                    // Another writer opened this turn's stream first.
-                    TsPersist::Adopted(theirs, version) => {
-                        self.delete_message(ws, &thread.channel, &ts).await;
-                        (theirs, version)
-                    }
-                    TsPersist::TurnOver => {
-                        self.delete_message(ws, &thread.channel, &ts).await;
-                        self.streams.remove(key);
+            // The slot has no message, but the row may name one: this slot
+            // is younger than the turn.
+            None => match self.recorded_ts(key).await {
+                Some(recorded) => recorded,
+                None => {
+                    // A thread shows one open stream. A queued turn waits for
+                    // the turn before it to settle rather than opening a second
+                    // one beside it; the tick that follows tries again.
+                    if self.stream_open_elsewhere(key).await {
+                        self.streams.mark_dirty(key.clone());
                         return;
                     }
+                    let ts = match self
+                        .start_stream(
+                            ws,
+                            &thread,
+                            open.recipient.as_deref(),
+                            open.recipient_team.as_deref(),
+                        )
+                        .await
+                    {
+                        Ok(ts) => ts,
+                        Err(e) => return self.kill_stream(key, e),
+                    };
+                    match self.persist_ts(&open, &ts).await {
+                        TsPersist::Kept(version) => {
+                            // The reply can take the slot while this opens, and
+                            // then it posts a message of its own.
+                            if self.streams.get(key).is_none() {
+                                self.discard_stream(ws, &thread.channel, &ts).await;
+                                return;
+                            }
+                            opened = true;
+                            (ts, version)
+                        }
+                        // Another writer opened this turn's stream first.
+                        TsPersist::Adopted(theirs, version) => {
+                            self.discard_stream(ws, &thread.channel, &ts).await;
+                            (theirs, version)
+                        }
+                        TsPersist::TurnOver => {
+                            self.discard_stream(ws, &thread.channel, &ts).await;
+                            self.streams.remove(key);
+                            return;
+                        }
+                    }
                 }
-            }
+            },
         };
         let chunks = changed.iter().map(|(_, c)| c.clone()).collect();
         if let Err(e) = self.append_stream(ws, &thread.channel, &ts, chunks).await {
+            // The message takes nothing more, and the answer posts beside it.
+            // Delete one this tick opened; stop one that holds cards.
+            match opened {
+                true => self.discard_stream(ws, &thread.channel, &ts).await,
+                false => self.close_stream(ws, &thread.channel, &ts).await,
+            }
             return self.kill_stream(key, e);
         }
-        self.streams.commit(key, ts, version, changed);
+        // The card cleared the indicator; the turn goes on, so set it again.
+        if self.streams.commit(key, ts.clone(), version, changed) {
+            return self.set_working(ws, &thread).await;
+        }
+        // The turn ended during the append. A message this tick opened is one
+        // the reply never saw.
+        if opened {
+            self.discard_stream(ws, &thread.channel, &ts).await;
+        }
+    }
+
+    /// The message the row records for the turn, if it records one.
+    async fn recorded_ts(&self, key: &StreamKey) -> Option<(String, u64)> {
+        let row = self
+            .store
+            .as_deref()?
+            .load(&key.tenant_id, &key.session_id, &key.turn_id)
+            .await
+            .ok()??;
+        Some((row.ts?, row.version))
+    }
+
+    /// Take back a message this writer opened: stop the stream, then delete
+    /// the message.
+    async fn discard_stream(&self, ws: &Workspace, channel: &str, ts: &str) {
+        self.close_stream(ws, channel, ts).await;
+        self.delete_message(ws, channel, ts).await;
     }
 
     /// True while another turn of this session still holds an open message.
@@ -1930,6 +2019,16 @@ mod tests {
             self.0.lock().unwrap().push((method.to_string(), body));
         }
 
+        /// The methods called, in order.
+        fn methods(&self) -> Vec<String> {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(m, _)| m.clone())
+                .collect()
+        }
+
         fn to(&self, method: &str) -> Vec<Value> {
             self.0
                 .lock()
@@ -1944,8 +2043,9 @@ mod tests {
     /// A Slack that records what it was called with. `conversations.replies`
     /// answers empty so the bot's idempotency check passes and it goes on to
     /// post. `stops` is what `chat.stopStream` answers, for the paths that
-    /// only happen when a stream refuses to close.
-    async fn fake_slack_with(stops: Value) -> (String, Calls) {
+    /// only happen when a stream refuses to close, and `appends` what
+    /// `chat.appendStream` answers.
+    async fn fake_slack_with(stops: Value, appends: Value) -> (String, Calls) {
         use axum::routing::post;
         use axum::{Json, Router};
 
@@ -1968,7 +2068,7 @@ mod tests {
         let app = route(app, "chat.postMessage", ok.clone());
         let app = route(app, "chat.update", ok.clone());
         let app = route(app, "chat.startStream", ok.clone());
-        let app = route(app, "chat.appendStream", ok.clone());
+        let app = route(app, "chat.appendStream", appends);
         let app = route(app, "chat.stopStream", stops);
         let app = route(
             app,
@@ -1995,7 +2095,11 @@ mod tests {
     }
 
     async fn fake_slack() -> (String, Calls) {
-        fake_slack_with(serde_json::json!({"ok": true})).await
+        fake_slack_with(
+            serde_json::json!({"ok": true}),
+            serde_json::json!({"ok": true}),
+        )
+        .await
     }
 
     struct OneWorkspace(Arc<Workspace>);
@@ -2131,8 +2235,11 @@ mod tests {
     /// and the stream above it still has to stop, or it spins over the reply.
     #[tokio::test]
     async fn a_stream_that_refuses_the_answer_is_closed_behind_it() {
-        let (api_base, calls) =
-            fake_slack_with(serde_json::json!({"ok": false, "error": "invalid_arguments"})).await;
+        let (api_base, calls) = fake_slack_with(
+            serde_json::json!({"ok": false, "error": "invalid_arguments"}),
+            serde_json::json!({"ok": true}),
+        )
+        .await;
         let (bot, ws) = bot_for(api_base);
         bot.streams.insert(stream("turn-1", Some("1.1")));
 
@@ -2266,6 +2373,291 @@ mod tests {
         assert_eq!(streams.live_elsewhere("t", "slack:C9:9.0", None), None);
     }
 
+    /// A turn can start twice, and the second start builds a slot with no
+    /// message. The row still names the one the turn opened.
+    #[tokio::test]
+    async fn a_turn_whose_slot_lost_its_message_takes_it_back() {
+        let (api_base, calls) = fake_slack().await;
+        let path = std::env::temp_dir().join(format!("core-slack-bot-{}.db", uuid::Uuid::now_v7()));
+        let db = crate::providers::sqlite::SqliteDb::open(
+            path.to_str().expect("a path"),
+            std::time::Duration::from_secs(5),
+        )
+        .expect("a db");
+        let store = StreamStore::new(db).expect("a store");
+        let slot = store
+            .upsert_turn("t", SESSION, "turn-1", 1, chrono::Utc::now())
+            .await
+            .expect("a row");
+        store
+            .set_ts("t", SESSION, "turn-1", "1.1", slot.version)
+            .await
+            .expect("the message is recorded");
+
+        let ws = Arc::new(Workspace::new(
+            "xoxb-test".into(),
+            "t".into(),
+            Routing::new().dm(Some("a".into())),
+        ));
+        let bot = SlackBot::new(Arc::new(OneWorkspace(ws.clone())), api_base, Some(store));
+        bot.streams.insert(stream("turn-1", None));
+        bot.streams.set_view(
+            key("turn-1"),
+            View {
+                text: "working".into(),
+                blocks: vec![section_block("working")],
+            },
+        );
+
+        bot.stream_turn(&ws, &key("turn-1")).await;
+
+        assert!(
+            calls.to("chat.startStream").is_empty(),
+            "no second message opens"
+        );
+        let appended = calls.to("chat.appendStream");
+        assert_eq!(appended.len(), 1);
+        assert_eq!(appended[0]["ts"], "1.1", "the message the row names");
+    }
+
+    /// The second start must not take the first one's place: its slot holds
+    /// no message, and the next tick would open one.
+    #[test]
+    fn a_turn_that_starts_twice_keeps_the_message_it_opened() {
+        let streams = Streams::default();
+        streams.track_new(stream("turn-1", None));
+        streams.commit(&key("turn-1"), "1.1".into(), 1, vec![]);
+
+        streams.track_new(stream("turn-1", None));
+        let slot = streams.get(&key("turn-1")).expect("the slot");
+        assert_eq!(slot.ts.as_deref(), Some("1.1"));
+    }
+
+    /// A stream that refuses a card takes nothing more. It still has to stop,
+    /// or Slack streams it until it expires.
+    #[tokio::test]
+    async fn a_stream_that_refuses_a_card_is_closed() {
+        let (api_base, calls) = fake_slack_with(
+            serde_json::json!({"ok": true}),
+            serde_json::json!({"ok": false, "error": "invalid_blocks"}),
+        )
+        .await;
+        let (bot, ws) = bot_for(api_base);
+        bot.streams.insert(stream("turn-1", Some("1.1")));
+        bot.streams.set_view(
+            key("turn-1"),
+            View {
+                text: "working".into(),
+                blocks: vec![section_block("working")],
+            },
+        );
+
+        bot.stream_turn(&ws, &key("turn-1")).await;
+
+        assert_eq!(calls.to("chat.appendStream").len(), 1);
+        let stopped = calls.to("chat.stopStream");
+        assert_eq!(
+            stopped.len(),
+            1,
+            "the message it cannot append to is stopped"
+        );
+        assert_eq!(stopped[0]["ts"], "1.1");
+        assert!(bot.streams.get(&key("turn-1")).expect("the slot").dead);
+    }
+
+    /// How a writer learns the turn settled under it.
+    #[test]
+    fn a_commit_after_the_reply_took_the_slot_says_so() {
+        let streams = Streams::default();
+        streams.insert(stream("turn-1", None));
+        assert!(streams.commit(&key("turn-1"), "1.1".into(), 1, vec![]));
+
+        streams.take(&key("turn-1"));
+        assert!(!streams.commit(&key("turn-1"), "1.2".into(), 2, vec![]));
+    }
+
+    /// The reply goes out first and the indicator after it, so a card still
+    /// in flight cannot light it again.
+    #[tokio::test]
+    async fn the_indicator_goes_out_after_the_reply_not_before_it() {
+        let (api_base, calls) = fake_slack().await;
+        let (bot, _ws) = bot_for(api_base);
+
+        let done = EventPayload::TurnCompleted(TurnCompleted {
+            turn_id: "turn-1".into(),
+            data: Value::Null,
+            turn_cost: Default::default(),
+            turn_token_usage: Default::default(),
+            error: None,
+        });
+        bot.apply(turn_event(done, None, None))
+            .await
+            .expect("applies");
+
+        let status = calls.to("assistant.threads.setStatus");
+        assert_eq!(status.len(), 1);
+        assert_eq!(status[0]["status"], "");
+        assert_eq!(
+            calls.methods().last().map(String::as_str),
+            Some("assistant.threads.setStatus"),
+            "the thread's last word is that it stopped working"
+        );
+    }
+
+    /// A card is a write, and a write clears the indicator. The turn goes on,
+    /// so the card lands with the indicator behind it.
+    #[tokio::test]
+    async fn a_card_lands_with_the_indicator_behind_it() {
+        let (api_base, calls) = fake_slack().await;
+        let (bot, ws) = bot_for(api_base);
+        bot.streams.insert(stream("turn-1", Some("1.1")));
+        bot.streams.set_view(
+            key("turn-1"),
+            View {
+                text: "working".into(),
+                blocks: vec![section_block("working")],
+            },
+        );
+
+        bot.stream_turn(&ws, &key("turn-1")).await;
+
+        assert_eq!(calls.to("chat.appendStream").len(), 1);
+        let status = calls.to("assistant.threads.setStatus");
+        assert_eq!(status.len(), 1, "the card cleared it; the turn lights it");
+        assert_eq!(status[0]["status"], render::WORKING_STATUS);
+    }
+
+    /// Only the end of a turn puts the indicator out. A prompt's resume, and
+    /// the work after it, set it again.
+    #[tokio::test]
+    async fn a_running_turn_shows_the_indicator_on_every_event() {
+        let (api_base, calls) = fake_slack().await;
+        let (bot, _ws) = bot_for(api_base);
+
+        // The prompt took the turn's slot with it; the resume speaks for itself.
+        let resumed = EventPayload::InterruptResumed(crate::session::events::InterruptResumed {
+            interrupt_id: "i1".into(),
+            payload: Value::Null,
+        });
+        bot.apply(turn_event(resumed, Some("turn-1"), None))
+            .await
+            .expect("applies");
+
+        // The work that follows is the running turn's, and it holds a slot.
+        bot.streams.insert(stream("turn-1", Some("1.1")));
+        let work = EventPayload::DecisionCompleted(crate::session::events::DecisionCompleted {
+            id: "d1".into(),
+        });
+        bot.apply(turn_event(work, Some("turn-1"), None))
+            .await
+            .expect("applies");
+
+        let status = calls.to("assistant.threads.setStatus");
+        assert_eq!(status.len(), 2, "the resume, and the work after it");
+        assert!(status.iter().all(|s| s["status"] == render::WORKING_STATUS));
+    }
+
+    /// `session.done` carries the turn id of the turn that just ended, and it
+    /// lands after the reply put the indicator out. Nothing follows it.
+    #[tokio::test]
+    async fn the_events_after_a_turn_do_not_light_it_again() {
+        let (api_base, calls) = fake_slack().await;
+        let (bot, _ws) = bot_for(api_base);
+        bot.streams.insert(stream("turn-1", None));
+
+        let done = EventPayload::TurnCompleted(TurnCompleted {
+            turn_id: "turn-1".into(),
+            data: Value::Null,
+            turn_cost: Default::default(),
+            turn_token_usage: Default::default(),
+            error: None,
+        });
+        bot.apply(turn_event(done, None, None))
+            .await
+            .expect("applies");
+        // As the log writes it: the turn id outlives the turn.
+        let after = EventPayload::SessionDone(crate::session::events::SessionDone {});
+        bot.apply(turn_event(after, Some("turn-1"), None))
+            .await
+            .expect("applies");
+
+        let status = calls.to("assistant.threads.setStatus");
+        assert_eq!(status.len(), 1, "the reply put it out, and it stayed out");
+        assert_eq!(status[0]["status"], "");
+    }
+
+    /// A parked session waits for a person, and an event outside a turn is
+    /// nobody's work.
+    #[tokio::test]
+    async fn a_parked_or_turnless_event_leaves_the_indicator_out() {
+        let (api_base, calls) = fake_slack().await;
+        let (bot, _ws) = bot_for(api_base);
+
+        let event = || {
+            EventPayload::DecisionCompleted(crate::session::events::DecisionCompleted {
+                id: "d1".into(),
+            })
+        };
+        bot.apply(turn_event(event(), Some("turn-1"), Some("i1")))
+            .await
+            .expect("applies");
+        bot.apply(turn_event(event(), None, None))
+            .await
+            .expect("applies");
+
+        assert!(calls.to("assistant.threads.setStatus").is_empty());
+    }
+
+    /// An event of a Slack-owned session: its turn, and the interrupt that
+    /// parks it, if one does.
+    fn turn_event(
+        payload: EventPayload,
+        turn_id: Option<&str>,
+        parked: Option<&str>,
+    ) -> SessionEvent {
+        let status = match parked {
+            Some(interrupt_id) => crate::session::state::SessionStatus::Interrupted {
+                interrupt_id: interrupt_id.into(),
+                origin: crate::protocol::InterruptOrigin::Machine,
+                reason: "confirmation".into(),
+            },
+            None => crate::session::state::SessionStatus::Idle,
+        };
+        let meta = crate::session::state::EventMeta {
+            status,
+            wake_at: None,
+            owner: Some(SessionOwner {
+                tenant_id: "t".into(),
+                id: None,
+                metadata: [
+                    ("slack_channel".to_string(), "C1".to_string()),
+                    ("slack_thread_ts".to_string(), "1.0".to_string()),
+                ]
+                .into(),
+            }),
+            agent_id: None,
+            ancestry: Vec::new(),
+            turn_id: turn_id.map(str::to_string),
+            cost: Default::default(),
+            sub_agent_cost: Default::default(),
+            head_id: None,
+            calls: Vec::new(),
+            decisions: Vec::new(),
+        };
+        SessionEvent {
+            id: uuid::Uuid::nil(),
+            tenant_id: "t".into(),
+            session_id: SESSION.into(),
+            seq: 1,
+            span: crate::span::SpanContext::root(),
+            occurred_at: chrono::Utc::now(),
+            payload,
+            meta,
+            start_time: chrono::Utc::now(),
+            end_time: chrono::Utc::now(),
+        }
+    }
+
     /// Every live turn is refreshed, not only the ones with nothing on screen
     /// yet: Slack drops a status after two minutes, and the turns that take
     /// longest are the ones that need it most.
@@ -2276,6 +2668,7 @@ mod tests {
         streams.insert(stream("turn-2", None));
         assert_eq!(streams.live().len(), 2);
 
+        // Nor one Slack refused: it will never render again.
         streams.kill(&key("turn-1"));
         let live = streams.live();
         assert_eq!(live.len(), 1);
