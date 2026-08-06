@@ -1075,9 +1075,11 @@ impl Working {
                     Some(EffectStatus::Pending) => {}
                     _ => return Ok(()),
                 }
-                let is_action = self
-                    .worker_decision(&decision_id)
-                    .is_some_and(|d| matches!(d.trigger, Trigger::ClientAction { .. }));
+                let decision = self.worker_decision(&decision_id);
+                let is_action =
+                    decision.is_some_and(|d| matches!(d.trigger, Trigger::ClientAction { .. }));
+                let finishes_turn =
+                    decision.is_some_and(|d| matches!(d.trigger, Trigger::TurnFinished { .. }));
                 // Each step is a pure function of the world the steps before it
                 // left. The transcript moves `head_id`, so the reap and the two
                 // writes all anchor against the post-reconcile head.
@@ -1113,6 +1115,7 @@ impl Working {
                 if !channels.is_empty() {
                     self.emit(EventPayload::ChannelsUpdated(ChannelsUpdated {
                         decision_id: decision_id.clone(),
+                        finishes_turn,
                         channels,
                     }));
                 }

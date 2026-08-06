@@ -398,6 +398,9 @@ pub struct DecisionDropped {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelsUpdated {
     pub decision_id: String,
+    /// True when the decision answered `turn.finished`.
+    #[serde(default)]
+    pub finishes_turn: bool,
     pub channels: BTreeMap<String, serde_json::Value>,
 }
 

@@ -292,6 +292,8 @@ struct Streams {
     open: Mutex<HashMap<StreamKey, Stream>>,
     dirty: Mutex<HashSet<StreamKey>>,
     views: Mutex<HashMap<StreamKey, View>>,
+    /// The finished message. It does not stream.
+    finals: Mutex<HashMap<StreamKey, View>>,
     prompts: Mutex<HashMap<StreamKey, View>>,
     notify: Notify,
 }
@@ -389,8 +391,14 @@ impl Streams {
         lock(&self.views).get(key).cloned()
     }
 
-    fn take_view(&self, key: &StreamKey) -> Option<View> {
-        lock(&self.views).remove(key)
+    fn set_final(&self, key: StreamKey, view: View) {
+        lock(&self.finals).insert(key, view);
+    }
+
+    /// The finished message, or how far the stream got. Both slots are spent.
+    fn take_message(&self, key: &StreamKey) -> Option<View> {
+        let streamed = lock(&self.views).remove(key);
+        lock(&self.finals).remove(key).or(streamed)
     }
 
     fn set_prompt(&self, key: StreamKey, prompt: View) {
@@ -404,6 +412,7 @@ impl Streams {
     fn clear_session_views(&self, tenant_id: &str, session_id: &str) {
         let mine = |k: &StreamKey| k.tenant_id == tenant_id && k.session_id == session_id;
         lock(&self.views).retain(|k, _| !mine(k));
+        lock(&self.finals).retain(|k, _| !mine(k));
         lock(&self.prompts).retain(|k, _| !mine(k));
     }
 
@@ -1094,8 +1103,13 @@ impl SlackBot {
         if let Some(turn_id) = event.meta.turn_id.as_deref() {
             let key = StreamKey::new(&event.tenant_id, &event.session_id, turn_id);
             if let Some(view) = slack.get("view").and_then(View::parse) {
-                self.streams.set_view(key.clone(), view);
-                self.streams.mark_dirty(key.clone());
+                // `complete_turn` posts the finished message.
+                if c.finishes_turn {
+                    self.streams.set_final(key.clone(), view);
+                } else {
+                    self.streams.set_view(key.clone(), view);
+                    self.streams.mark_dirty(key.clone());
+                }
             }
             if let Some(prompt) = slack.get("prompt").and_then(View::parse) {
                 self.streams.set_prompt(key, prompt);
@@ -1123,8 +1137,8 @@ impl SlackBot {
         let elapsed = live
             .as_ref()
             .and_then(|s| (at - s.started_at).to_std().ok());
-        // The last view is the final message; an error goes on top of it.
-        let rendered = match (self.streams.take_view(&key), &t.error) {
+        // The turn's message is the final one; an error goes on top of it.
+        let rendered = match (self.streams.take_message(&key), &t.error) {
             (Some(view), None) => Rendered {
                 text: view.text,
                 blocks: view.blocks,
@@ -1642,7 +1656,7 @@ impl SlackBot {
             let Some(ts) = stream.ts.clone() else {
                 continue;
             };
-            let view = self.streams.take_view(&stream.key());
+            let view = self.streams.take_message(&stream.key());
             let blocks = view.map(|v| v.blocks).unwrap_or_default();
             let rendered = render::render_cancelled(&blocks);
             let meta = ReplyMeta {
@@ -1717,10 +1731,12 @@ impl SlackBot {
                 _ => {}
             }
         }
-        // The last view is in the log. Cards can be sent twice, text cannot,
-        // so only its chunks seed `sent`.
+        // The last streamed view is in the log. Cards can be sent twice, text
+        // cannot, so only its chunks seed `sent`.
         let view = events.iter().rev().find_map(|e| match &e.payload {
-            EventPayload::ChannelsUpdated(c) if e.meta.turn_id.as_deref() == Some(&row.turn_id) => {
+            EventPayload::ChannelsUpdated(c)
+                if e.meta.turn_id.as_deref() == Some(&row.turn_id) && !c.finishes_turn =>
+            {
                 c.channels.get("slack")?.get("view").and_then(View::parse)
             }
             _ => None,
@@ -1951,6 +1967,8 @@ mod tests {
         let app = Router::new();
         let app = route(app, "chat.postMessage", ok.clone());
         let app = route(app, "chat.update", ok.clone());
+        let app = route(app, "chat.startStream", ok.clone());
+        let app = route(app, "chat.appendStream", ok.clone());
         let app = route(app, "chat.stopStream", stops);
         let app = route(
             app,
@@ -2047,7 +2065,7 @@ mod tests {
     async fn a_decision_authored_view_is_the_final_message() {
         let (api_base, calls) = fake_slack().await;
         let (bot, ws) = bot_for(api_base);
-        bot.streams.set_view(
+        bot.streams.set_final(
             key("turn-1"),
             View {
                 text: "custom answer".into(),
@@ -2076,7 +2094,7 @@ mod tests {
             "the worker's view, not the default"
         );
         assert!(
-            bot.streams.view(&key("turn-1")).is_none(),
+            bot.streams.take_message(&key("turn-1")).is_none(),
             "the view is spent"
         );
     }
@@ -2130,6 +2148,78 @@ mod tests {
             .is_some_and(|t| t.starts_with("Error: bad decision")));
         // Once with the answer, once bare after it was refused.
         assert_eq!(calls.to("chat.stopStream").len(), 2);
+    }
+
+    /// The finished message does not stream. A stream that took it would say
+    /// the answer twice.
+    #[tokio::test]
+    async fn the_finished_message_is_not_streamed() {
+        let (api_base, calls) = fake_slack().await;
+        let (bot, ws) = bot_for(api_base);
+        bot.streams.insert(stream("turn-1", None));
+
+        let finished = channels_event(true, "the answer");
+        let EventPayload::ChannelsUpdated(c) = finished.payload.clone() else {
+            unreachable!()
+        };
+        bot.apply_channels(&ws, &thread(), &finished, &c)
+            .await
+            .expect("applies");
+        bot.stream_turn(&ws, &key("turn-1")).await;
+        assert!(
+            calls.to("chat.startStream").is_empty(),
+            "no message opens for the answer"
+        );
+        assert!(calls.to("chat.appendStream").is_empty());
+
+        // Work in progress still streams.
+        let working = channels_event(false, "working");
+        let EventPayload::ChannelsUpdated(c) = working.payload.clone() else {
+            unreachable!()
+        };
+        bot.apply_channels(&ws, &thread(), &working, &c)
+            .await
+            .expect("applies");
+        bot.stream_turn(&ws, &key("turn-1")).await;
+        assert_eq!(calls.to("chat.appendStream").len(), 1);
+
+        // The answer is still there for the reply.
+        let view = bot.streams.take_message(&key("turn-1")).expect("a message");
+        assert_eq!(view.text, "the answer");
+    }
+
+    /// A decision's channels, as the engine records them.
+    fn channels_event(finishes_turn: bool, text: &str) -> SessionEvent {
+        let view = serde_json::json!({ "text": text, "blocks": [section_block(text)] });
+        let meta = crate::session::state::EventMeta {
+            status: crate::session::state::SessionStatus::Idle,
+            wake_at: None,
+            owner: None,
+            agent_id: None,
+            ancestry: Vec::new(),
+            turn_id: Some("turn-1".into()),
+            cost: Default::default(),
+            sub_agent_cost: Default::default(),
+            head_id: None,
+            calls: Vec::new(),
+            decisions: Vec::new(),
+        };
+        SessionEvent {
+            id: uuid::Uuid::nil(),
+            tenant_id: "t".into(),
+            session_id: SESSION.into(),
+            seq: 1,
+            span: crate::span::SpanContext::root(),
+            occurred_at: chrono::Utc::now(),
+            payload: EventPayload::ChannelsUpdated(crate::session::events::ChannelsUpdated {
+                decision_id: "d1".into(),
+                finishes_turn,
+                channels: [("slack".to_string(), serde_json::json!({ "view": view }))].into(),
+            }),
+            meta,
+            start_time: chrono::Utc::now(),
+            end_time: chrono::Utc::now(),
+        }
     }
 
     /// A cancel completes no turn, so nothing else comes along to finish the

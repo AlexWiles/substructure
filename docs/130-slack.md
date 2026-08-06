@@ -181,6 +181,9 @@ your value wins.
 On every decision the engine proposes the default `view`. A worker that
 customizes changes the proposed view instead of building a new one.
 
+A view streams while the turn runs. The `turn.finished` view is the finished
+message: the reply that ends the turn posts it.
+
 Blocks with buttons pass through unchanged. Give each button an `action_id` and
 a `value`, and the click comes back as a `client.action` decision with both.
 
