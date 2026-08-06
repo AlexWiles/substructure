@@ -22,69 +22,6 @@ use super::{parse_dt, sea_params, spawn_err, SqliteDb};
 /// The two version logs, split by kind, as loaded from `session_versions`.
 type VersionLogs = (Vec<Logged<StateVersion>>, Vec<Logged<AgentVersion>>);
 
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS events (
-    id               TEXT PRIMARY KEY,
-    tenant_id        TEXT NOT NULL,
-    session_id       TEXT NOT NULL,
-    seq              INTEGER NOT NULL,
-    occurred_at      TEXT NOT NULL,
-    start_time       TEXT NOT NULL,
-    end_time         TEXT NOT NULL,
-    span             TEXT NOT NULL,
-    payload          TEXT NOT NULL,
-    meta             TEXT NOT NULL
-);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_events_session_seq ON events (tenant_id, session_id, seq);
-CREATE INDEX IF NOT EXISTS idx_events_session ON events (tenant_id, session_id);
-
-CREATE TABLE IF NOT EXISTS messages (
-    tenant_id   TEXT NOT NULL,
-    session_id  TEXT NOT NULL,
-    message_id  TEXT NOT NULL,
-    parent_id   TEXT,
-    seq         INTEGER NOT NULL,
-    data        TEXT NOT NULL,
-    PRIMARY KEY (tenant_id, session_id, message_id)
-);
-CREATE INDEX IF NOT EXISTS idx_messages_session ON messages (tenant_id, session_id, seq);
-
-CREATE TABLE IF NOT EXISTS session_versions (
-    tenant_id   TEXT NOT NULL,
-    session_id  TEXT NOT NULL,
-    kind        TEXT NOT NULL,
-    seq         INTEGER NOT NULL,
-    anchor      TEXT,
-    data        TEXT NOT NULL,
-    PRIMARY KEY (tenant_id, session_id, kind, seq)
-);
-
-CREATE TABLE IF NOT EXISTS llm_prompts (
-    tenant_id   TEXT NOT NULL,
-    session_id  TEXT NOT NULL,
-    call_id     TEXT NOT NULL,
-    seq         INTEGER NOT NULL,
-    data        TEXT NOT NULL,
-    PRIMARY KEY (tenant_id, session_id, call_id)
-);
-
--- `seq` doubles as the stream head and `shard_key` as its shard hash: together
--- they are what a processor reads to find streams it has not caught up on.
-CREATE TABLE IF NOT EXISTS snapshots (
-    tenant_id       TEXT NOT NULL,
-    session_id      TEXT NOT NULL,
-    seq             INTEGER NOT NULL,
-    shard_key       INTEGER NOT NULL,
-    data            TEXT NOT NULL,
-    wake_at         TEXT,
-    first_event_at  TEXT,
-    last_event_at   TEXT,
-    PRIMARY KEY (tenant_id, session_id)
-);
-CREATE INDEX IF NOT EXISTS idx_snapshots_wake_at ON snapshots (wake_at);
-CREATE INDEX IF NOT EXISTS idx_snapshots_last_event ON snapshots (last_event_at);
-";
-
 #[derive(Iden)]
 enum Events {
     Table,
@@ -111,7 +48,6 @@ impl SqliteEventStore {
     }
 
     pub fn with_bus(db: SqliteDb, bus: Arc<dyn EventBus>) -> Result<Self, StoreError> {
-        db.run_schema(SCHEMA)?;
         Ok(Self { db, bus })
     }
 }

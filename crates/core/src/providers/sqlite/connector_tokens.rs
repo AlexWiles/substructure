@@ -6,19 +6,6 @@ use crate::event_store::StoreError;
 
 use super::SqliteDb;
 
-/// The URL-keyed table this replaces is dropped rather than carried: its rows
-/// cannot be mapped back to the ids that now key a credential, so they would
-/// resolve to nothing anyway. A login run once per connection replaces them.
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS connector_credentials (
-    tenant_id     TEXT NOT NULL,
-    connection_id TEXT NOT NULL,
-    tokens        TEXT NOT NULL,
-    PRIMARY KEY (tenant_id, connection_id)
-);
-DROP TABLE IF EXISTS connector_tokens;
-";
-
 /// Authorized connections, in the engine's own database.
 ///
 /// The credential lives beside the sessions that use it: `subs mcp login`
@@ -31,7 +18,6 @@ pub struct SqliteTokenStore {
 
 impl SqliteTokenStore {
     pub fn new(db: SqliteDb) -> Result<Self, StoreError> {
-        db.run_schema(SCHEMA)?;
         Ok(Self { db })
     }
 

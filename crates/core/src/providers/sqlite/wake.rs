@@ -7,24 +7,12 @@ use crate::wake::{WakeScheduleItem, WakeScheduleStore};
 
 use super::{parse_dt, SqliteDb};
 
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS wake_schedule (
-    tenant_id       TEXT NOT NULL,
-    session_id    TEXT NOT NULL,
-    wake_at         TEXT NOT NULL,
-    updated_at      TEXT NOT NULL,
-    PRIMARY KEY (tenant_id, session_id)
-);
-CREATE INDEX IF NOT EXISTS idx_wake_schedule_wake_at ON wake_schedule (wake_at);
-";
-
 pub struct SqliteWakeStore {
     db: SqliteDb,
 }
 
 impl SqliteWakeStore {
     pub fn new(db: SqliteDb) -> Result<Self, StoreError> {
-        db.run_schema(SCHEMA)?;
         Ok(Self { db })
     }
 }

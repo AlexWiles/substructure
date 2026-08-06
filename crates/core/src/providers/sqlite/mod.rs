@@ -1,6 +1,7 @@
 pub mod connector_tokens;
 pub mod cursor;
 pub mod event_store;
+pub mod migrate;
 pub mod session_index;
 pub mod wake;
 pub mod worker_queue;
@@ -47,8 +48,9 @@ pub struct SqliteDb {
 }
 
 impl SqliteDb {
-    /// Opens a SQLite database at `path` and configures pragmas.
-    /// Does **not** run any schema — each store does that in its own `new()`.
+    /// Opens a SQLite database at `path`, configures pragmas, and migrates the
+    /// tables core owns. A host with tables of its own runs `migrate::run`
+    /// against its own ledger afterwards.
     pub fn open(path: &str, busy_timeout: Duration) -> Result<Self, StoreError> {
         let in_memory = path == ":memory:";
 
@@ -80,21 +82,15 @@ impl SqliteDb {
             busy_timeout,
         };
 
-        Ok(Self {
+        let db = Self {
             writer: Arc::new(Mutex::new(writer)),
             reader,
-        })
-    }
+        };
 
-    /// Runs an idempotent DDL schema string on the writer connection.
-    pub fn run_schema(&self, schema: &str) -> Result<(), StoreError> {
-        let conn = self
-            .writer
-            .lock()
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
-        conn.execute_batch(schema)
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
-        Ok(())
+        let version = migrate::run(&db, migrate::CORE_LEDGER, migrate::CORE_MIGRATIONS)?;
+        tracing::debug!(version, path, "opened database");
+
+        Ok(db)
     }
 }
 

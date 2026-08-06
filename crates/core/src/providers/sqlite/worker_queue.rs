@@ -10,18 +10,6 @@ use crate::worker::{DequeueFilter, WorkerDecisionRequest, WorkerQueue};
 
 use super::SqliteDb;
 
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS worker_queue (
-    decision_id    TEXT PRIMARY KEY,
-    tenant_id      TEXT NOT NULL,
-    agent_id       TEXT NOT NULL,
-    payload        TEXT NOT NULL,
-    enqueued_at    TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_worker_queue_tenant_agent_order
-    ON worker_queue (tenant_id, agent_id, enqueued_at, decision_id);
-";
-
 const DEQUEUE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 pub struct SqliteWorkerQueue {
@@ -31,7 +19,6 @@ pub struct SqliteWorkerQueue {
 
 impl SqliteWorkerQueue {
     pub fn new(db: SqliteDb) -> Result<Self, StoreError> {
-        db.run_schema(SCHEMA)?;
         Ok(Self {
             db,
             notify: Notify::new(),
@@ -98,7 +85,7 @@ fn do_enqueue(conn: &Connection, decision: WorkerDecisionRequest) -> Result<(), 
     let payload = serde_json::to_string(&decision).map_err(|e| e.to_string())?;
     let enqueued_at = Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT INTO worker_queue (decision_id, tenant_id, agent_id, payload, enqueued_at)
+        "INSERT INTO engine_worker_queue (decision_id, tenant_id, agent_id, payload, enqueued_at)
          VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(decision_id) DO UPDATE SET
             tenant_id = excluded.tenant_id,
@@ -126,7 +113,7 @@ fn do_dequeue(
     let row = tx
         .query_row(
             "SELECT decision_id, payload
-             FROM worker_queue
+             FROM engine_worker_queue
              WHERE tenant_id = ?1
              ORDER BY enqueued_at ASC, decision_id ASC
              LIMIT 1",
@@ -142,7 +129,7 @@ fn do_dequeue(
     };
 
     tx.execute(
-        "DELETE FROM worker_queue WHERE decision_id = ?1",
+        "DELETE FROM engine_worker_queue WHERE decision_id = ?1",
         rusqlite::params![decision_id],
     )
     .map_err(|e| e.to_string())?;

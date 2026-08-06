@@ -58,6 +58,11 @@ together at the same version.
 
 ### Changed
 
+- The database applies versioned migrations when it opens, and refuses to open
+  when it is newer than the binary. Each store created its own tables, so the
+  schema could only grow.
+- The engine worker queue table is `engine_worker_queue`. A host that keeps its
+  own tables in the same file can now have a queue of its own.
 - Every error has one shape: a `message`, a `code`, the `param` to correct, and
   `detail`. Events, triggers, and actions carried an error as a bare string with
   optional siblings. A worker can still send a plain string, and the engine

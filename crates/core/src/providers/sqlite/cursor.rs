@@ -7,34 +7,12 @@ use crate::processor::{CursorError, ProcessorCursorStore, StreamCursor, StreamRe
 
 use super::{parse_dt, SqliteDb};
 
-/// Stream heads come from `snapshots`, written by the event store on every
-/// append: `seq` there is the last event in the stream, and `shard_key` its
-/// shard hash. Pending work is the join of that against the cursors below.
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS projection_cursors (
-    projection_name TEXT NOT NULL,
-    tenant_id       TEXT NOT NULL,
-    session_id      TEXT NOT NULL,
-    seq             INTEGER NOT NULL,
-    version         INTEGER NOT NULL,
-    owner_id        TEXT,
-    updated_at      TEXT NOT NULL,
-    PRIMARY KEY (projection_name, tenant_id, session_id)
-);
-
-CREATE TABLE IF NOT EXISTS projection_seeds (
-    projection_name TEXT PRIMARY KEY,
-    created_at      TEXT NOT NULL
-);
-";
-
 pub struct SqliteCursorStore {
     db: SqliteDb,
 }
 
 impl SqliteCursorStore {
     pub fn new(db: SqliteDb) -> Result<Self, StoreError> {
-        db.run_schema(SCHEMA)?;
         Ok(Self { db })
     }
 }

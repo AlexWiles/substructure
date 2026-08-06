@@ -4,22 +4,6 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::event_store::StoreError;
 use crate::providers::sqlite::{parse_dt, spawn_err, SqliteDb};
 
-/// One row per turn, not per session: a queued turn takes its slot while the
-/// turn before it is still settling, and each must keep its own message.
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS slack_turn_streams (
-    tenant_id  TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    turn_id    TEXT NOT NULL,
-    start_seq  INTEGER NOT NULL,
-    started_at TEXT NOT NULL,
-    ts         TEXT,
-    version    INTEGER NOT NULL,
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (tenant_id, session_id, turn_id)
-);
-";
-
 /// The durable half of a live stream slot. The `sent` map is not here: it
 /// folds back out of the event log.
 #[derive(Debug, Clone, PartialEq)]
@@ -47,7 +31,6 @@ pub struct StreamStore {
 
 impl StreamStore {
     pub fn new(db: SqliteDb) -> Result<Self, StoreError> {
-        db.run_schema(SCHEMA)?;
         Ok(Self { db })
     }
 

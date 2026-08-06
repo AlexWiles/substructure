@@ -10,31 +10,6 @@ use crate::session::index::{
 
 use super::{parse_dt, sea_params, spawn_err, SqliteDb};
 
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS session_index (
-    tenant_id       TEXT NOT NULL,
-    session_id      TEXT NOT NULL,
-    seq             INTEGER NOT NULL,
-    first_event_at  TEXT,
-    last_event_at   TEXT,
-    wake_at         TEXT,
-    top_level       INTEGER NOT NULL,
-    agent_id        TEXT,
-    cost            TEXT NOT NULL,
-    sub_agent_cost  TEXT NOT NULL,
-    status_json     TEXT NOT NULL,
-    turn_id         TEXT,
-    updated_at      TEXT NOT NULL,
-    PRIMARY KEY (tenant_id, session_id)
-);
-CREATE INDEX IF NOT EXISTS idx_session_index_last_event
-  ON session_index (tenant_id, last_event_at DESC, session_id DESC);
-CREATE INDEX IF NOT EXISTS idx_session_index_top_level_last_event
-  ON session_index (tenant_id, top_level, last_event_at DESC, session_id DESC);
-CREATE INDEX IF NOT EXISTS idx_session_index_wake_at
-  ON session_index (tenant_id, wake_at);
-";
-
 #[derive(Iden)]
 enum SessionIndex {
     Table,
@@ -58,7 +33,6 @@ pub struct SqliteSessionIndexStore {
 
 impl SqliteSessionIndexStore {
     pub fn new(db: SqliteDb) -> Result<Self, StoreError> {
-        db.run_schema(SCHEMA)?;
         Ok(Self { db })
     }
 }
