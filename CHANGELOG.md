@@ -9,6 +9,12 @@ together at the same version.
 
 ## [Unreleased]
 
+### Added
+
+- Add support for MCP token auth.
+
+### Changed
+
 ## [0.3.0] - 2026-08-06
 
 ### Changed

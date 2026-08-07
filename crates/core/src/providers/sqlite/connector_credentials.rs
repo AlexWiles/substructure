@@ -1,22 +1,23 @@
 use async_trait::async_trait;
 use rusqlite::OptionalExtension;
 
-use crate::connectors::oauth::{TokenStore, Tokens};
+use crate::connectors::credential::{Credential, CredentialStore};
 use crate::event_store::StoreError;
 
 use super::SqliteDb;
 
 /// Authorized connections, in the engine's own database.
 ///
-/// The credential lives beside the sessions that use it: `subs mcp login`
-/// writes here and the engine reads here, so one environment is one file and
-/// one set of logins. Refresh rotates the credential, so the store has to be
-/// writable — a container's config directory usually is not.
-pub struct SqliteTokenStore {
+/// The credential lives beside the sessions that use it: `subs mcp login` and
+/// `subs mcp set-token` write here and the engine reads here, so one
+/// environment is one file and one set of credentials. Refresh rotates an OAuth
+/// grant, so the store has to be writable — a container's config directory
+/// usually is not.
+pub struct SqliteCredentialStore {
     db: SqliteDb,
 }
 
-impl SqliteTokenStore {
+impl SqliteCredentialStore {
     pub fn new(db: SqliteDb) -> Result<Self, StoreError> {
         Ok(Self { db })
     }
@@ -88,8 +89,8 @@ impl SqliteTokenStore {
 }
 
 #[async_trait]
-impl TokenStore for SqliteTokenStore {
-    async fn get(&self, tenant_id: &str, connection_id: &str) -> Option<Tokens> {
+impl CredentialStore for SqliteCredentialStore {
+    async fn get(&self, tenant_id: &str, connection_id: &str) -> Option<Credential> {
         let (tenant_id, connection_id) = (tenant_id.to_string(), connection_id.to_string());
         let reader = self.db.reader.clone();
         tokio::task::spawn_blocking(move || {
@@ -113,12 +114,12 @@ impl TokenStore for SqliteTokenStore {
         &self,
         tenant_id: &str,
         connection_id: &str,
-        tokens: Tokens,
+        credential: Credential,
     ) -> Result<(), String> {
         let (tenant_id, connection_id) = (tenant_id.to_string(), connection_id.to_string());
         let writer = self.db.writer.clone();
         tokio::task::spawn_blocking(move || {
-            let encoded = serde_json::to_string(&tokens).map_err(|e| e.to_string())?;
+            let encoded = serde_json::to_string(&credential).map_err(|e| e.to_string())?;
             let conn = writer.lock().map_err(|e| e.to_string())?;
             conn.execute(
                 "INSERT INTO connector_credentials (tenant_id, connection_id, tokens)
@@ -137,17 +138,17 @@ impl TokenStore for SqliteTokenStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connectors::oauth::ClientId;
+    use crate::connectors::oauth::{ClientId, Tokens};
     use std::time::Duration;
     use uuid::Uuid;
 
     /// A file per test: `:memory:` opens a shared-cache database, so in-memory
     /// stores would see each other's rows.
-    fn temp_store() -> (SqliteTokenStore, std::path::PathBuf) {
+    fn temp_store() -> (SqliteCredentialStore, std::path::PathBuf) {
         let path =
-            std::env::temp_dir().join(format!("core-connector-tokens-{}.db", Uuid::now_v7()));
+            std::env::temp_dir().join(format!("core-connector-credentials-{}.db", Uuid::now_v7()));
         let db = SqliteDb::open(path.to_str().unwrap(), Duration::from_secs(5)).unwrap();
-        (SqliteTokenStore::new(db).unwrap(), path)
+        (SqliteCredentialStore::new(db).unwrap(), path)
     }
 
     fn cleanup(path: &std::path::Path) {
@@ -156,8 +157,8 @@ mod tests {
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
     }
 
-    fn tokens(access: &str) -> Tokens {
-        Tokens {
+    fn oauth(access: &str) -> Credential {
+        Credential::Oauth(Box::new(Tokens {
             access_token: access.into(),
             refresh_token: Some("r".into()),
             expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
@@ -169,6 +170,21 @@ mod tests {
                 client_id: "c".into(),
                 client_secret: None,
             },
+        }))
+    }
+
+    fn token(value: &str) -> Credential {
+        Credential::Static {
+            token: value.into(),
+        }
+    }
+
+    /// What `get` answers with is the shape that was written, so a slot filled
+    /// by one command is never read as the other's.
+    fn access(credential: Credential) -> String {
+        match credential {
+            Credential::Oauth(tokens) => tokens.access_token,
+            Credential::Static { token } => token,
         }
     }
 
@@ -178,12 +194,12 @@ mod tests {
 
         assert!(store.get("default", "linear").await.is_none());
 
-        let first = tokens("access-1");
+        let first = oauth("access-1");
         store.put("default", "linear", first.clone()).await.unwrap();
         assert_eq!(store.get("default", "linear").await.unwrap(), first);
 
         // Rotation overwrites in place rather than accumulating rows.
-        let second = tokens("access-2");
+        let second = oauth("access-2");
         store
             .put("default", "linear", second.clone())
             .await
@@ -192,20 +208,45 @@ mod tests {
         cleanup(&path);
     }
 
+    /// One slot, either kind: setting a token over a login replaces it, which
+    /// is how a connection switched from `auth = "oauth"` to `auth = "token"`
+    /// stops carrying the grant it no longer declares.
+    #[tokio::test]
+    async fn a_static_token_shares_the_slot_with_a_grant() {
+        let (store, path) = temp_store();
+
+        store
+            .put("default", "github", token("ghp_1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get("default", "github").await.map(access).unwrap(),
+            "ghp_1"
+        );
+
+        let granted = oauth("access-1");
+        store
+            .put("default", "github", granted.clone())
+            .await
+            .unwrap();
+        assert_eq!(store.get("default", "github").await.unwrap(), granted);
+        cleanup(&path);
+    }
+
     #[tokio::test]
     async fn tenants_and_connections_do_not_leak_into_each_other() {
         let (store, path) = temp_store();
 
-        store.put("a", "linear", tokens("a-linear")).await.unwrap();
-        store.put("b", "linear", tokens("b-linear")).await.unwrap();
-        store.put("a", "sentry", tokens("a-sentry")).await.unwrap();
+        store.put("a", "linear", oauth("a-linear")).await.unwrap();
+        store.put("b", "linear", oauth("b-linear")).await.unwrap();
+        store.put("a", "sentry", oauth("a-sentry")).await.unwrap();
 
         assert_eq!(
-            store.get("a", "linear").await.unwrap().access_token,
+            store.get("a", "linear").await.map(access).unwrap(),
             "a-linear"
         );
         assert_eq!(
-            store.get("b", "linear").await.unwrap().access_token,
+            store.get("b", "linear").await.map(access).unwrap(),
             "b-linear"
         );
         assert!(store.get("b", "sentry").await.is_none());
@@ -219,20 +260,20 @@ mod tests {
         let (store, path) = temp_store();
 
         store
-            .put("default", "sentry", tokens("first"))
+            .put("default", "sentry", oauth("first"))
             .await
             .unwrap();
         store
-            .put("default", "sentry2", tokens("second"))
+            .put("default", "sentry2", oauth("second"))
             .await
             .unwrap();
 
         assert_eq!(
-            store.get("default", "sentry").await.unwrap().access_token,
+            store.get("default", "sentry").await.map(access).unwrap(),
             "first"
         );
         assert_eq!(
-            store.get("default", "sentry2").await.unwrap().access_token,
+            store.get("default", "sentry2").await.map(access).unwrap(),
             "second"
         );
 

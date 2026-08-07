@@ -20,27 +20,46 @@ url = "https://mcp.sentry.dev/mcp"
 
 [mcp.github]
 url = "https://api.githubcopilot.com/mcp/"
-auth = { token_env = "GITHUB_TOKEN" }
+auth = "token"
 prefix_tools = false
 ```
 
 The file holds names and references. A `token` written in the file is a parse
 error.
 
+Most connections need nothing but a URL. The engine asks the server how it
+authenticates: a server that challenges points at its OAuth metadata, and one
+that does not want a credential answers without challenging.
+
+Write `auth` for the one thing asking cannot answer — a static token — or to
+override a server whose discovery is broken.
+
+| `auth` | Means | Fill it with |
+| --- | --- | --- |
+| unset (default) | Ask the server. | `subs mcp login <id>`, if it wants one. |
+| `"token"` | A static token you hold. Nothing on the wire announces this. | `subs mcp set-token <id>` |
+| `"oauth"` | Use OAuth, whatever the server advertises. | `subs mcp login <id>` |
+| `"none"` | Send nothing, whatever the server says. | Nothing. |
+
 ## Authorize it
-
-A server that takes a static credential needs nothing more. The engine reads
-`$token_env` when it makes the call.
-
-Every other server uses OAuth. A person must consent in a browser.
 
 ```sh
 subs mcp login sentry
+subs mcp set-token github
 subs mcp list
 ```
 
-There is no `logout`. Delete the `[mcp.<id>]` section to disconnect. The
-credential goes with it.
+A token is typed at a prompt, piped in, or read from a variable — the same three
+ways `subs llm set-key` takes a key. It never appears in the command line.
+
+```sh
+subs mcp set-token github --env GITHUB_TOKEN
+gh auth token | subs mcp set-token github
+```
+
+`subs mcp delete-token <id>` empties a connection's credential without undeclaring
+it. Deleting the `[mcp.<id>]` section disconnects it for good, and the credential
+goes with it.
 
 The credential belongs to the id. Declare one server twice to connect two
 accounts. Authorize each id on its own.
@@ -72,12 +91,21 @@ With a `[remote]`, authorizing takes two steps.
   `[mcp.<id>]` in the file.
 - **Authorizing** is the consent.
 
-`subs mcp login` does both. A declared connection reaches nothing until someone
-consents.
+`subs mcp login` and `subs mcp set-token` each do both. A declared connection
+reaches nothing until it holds a credential.
 
-`auth` belongs to a local engine. It names a variable on this machine. `subs
-apply` and `subs mcp login` refuse a connection that carries one. Remove `auth`
-and authorize on the deployment instead.
+Changing `auth` on a connection that already holds one empties it: a credential
+obtained the other way is not what the file now says to send. Authorize it again.
+
+A server that wants a header other than `Authorization: Bearer` names it, and
+only under `auth = "token"`.
+
+```toml title="substructure.toml"
+[mcp.sentry]
+url = "https://mcp.sentry.dev/mcp"
+auth = "token"
+header = "sentry-bearer"
+```
 
 Some deployments allow only the URLs in their own catalog. The error lists them.
 

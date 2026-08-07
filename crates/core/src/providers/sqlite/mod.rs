@@ -1,4 +1,4 @@
-pub mod connector_tokens;
+pub mod connector_credentials;
 pub mod cursor;
 pub mod event_store;
 pub mod migrate;
@@ -14,7 +14,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::event_store::StoreError;
 
-pub use connector_tokens::SqliteTokenStore;
+pub use connector_credentials::SqliteCredentialStore;
 pub use cursor::SqliteCursorStore;
 pub use event_store::SqliteEventStore;
 pub use session_index::SqliteSessionIndexStore;

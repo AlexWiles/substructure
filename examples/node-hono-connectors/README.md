@@ -52,25 +52,27 @@ front of it, because `prefix_tools` is on by default.
 
 ## The connection
 
-`substructure.toml` holds the connections. The example server needs no
-credential, so this connection has no `auth`:
+`substructure.toml` holds the connections. A URL is usually the whole
+declaration: the engine asks the server what it wants. The example server wants
+nothing, so this is all of it:
 
 ```toml
 [mcp.issues]
 url = "http://localhost:4445/mcp"
 ```
 
-A real service needs one. Where it takes a static token the file names the
-variable holding it, never the token:
+A real service wants something. Nothing announces a static token, so a file that
+uses one says so, and `subs mcp set-token sentry` uploads it:
 
 ```toml
 [mcp.sentry]
 url = "https://mcp.sentry.dev/mcp"
-auth = { header = "Sentry-Bearer", token_env = "SENTRY_TOKEN" }
+auth = "token"
+header = "Sentry-Bearer"
 ```
 
-Where it takes OAuth, `subs mcp login sentry` opens a browser and stores the
-credential in the `db` this file names — which is why `.gitignore` covers
+Where it takes OAuth, `subs mcp login sentry` opens a browser. Either way the
+credential lands in the `db` this file names — which is why `.gitignore` covers
 `*.db*`.
 
 ## The filter

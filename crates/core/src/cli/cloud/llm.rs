@@ -8,7 +8,6 @@
 use anyhow::{bail, Context as _, Result};
 use clap::Subcommand;
 use serde::Serialize;
-use std::io::Read as _;
 
 use crate::api::v1::{LlmBlockView, LlmKeyRequest};
 
@@ -97,7 +96,7 @@ async fn set_key(block: String, env: Option<String>, scope: ProjectScope) -> Res
             .with_context(|| format!("${var} is not set"))?
             .trim()
             .to_string(),
-        None => read_key(&scope)?,
+        None => pickers::read_secret(&scope.globals, "Paste the key")?,
     };
     if key.is_empty() {
         bail!("no key given. Pipe it in, or pass --env <VAR>.");
@@ -136,21 +135,4 @@ async fn delete_key(block: String, scope: ProjectScope) -> Result<()> {
     }
     println!("Key removed for [llm.{block}]. Calls on it will fail until another is set.");
     Ok(())
-}
-
-/// The key, typed or piped. A person gets one prompt that ends at Enter and
-/// does not echo the key; a pipe is read to its end, since that is where the
-/// key ends. Trailing whitespace is the shell's, not the key's.
-fn read_key(scope: &ProjectScope) -> Result<String> {
-    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        if !pickers::interactive(&scope.globals) {
-            bail!("no key on stdin. Pipe it in, or pass --env <VAR>.");
-        }
-        return pickers::prompt_secret("Paste the key");
-    }
-    let mut buf = String::new();
-    std::io::stdin()
-        .read_to_string(&mut buf)
-        .context("reading the key from stdin")?;
-    Ok(buf.trim().to_string())
 }

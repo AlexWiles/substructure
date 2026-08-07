@@ -85,7 +85,6 @@ pub async fn run(cmd: ApplyCommand) -> Result<()> {
         .context("no substructure.toml found. Write one, or pass -c.")?;
     let path = found.path.clone();
     let config = found.config;
-    local_credentials(&config)?;
     let ctx = Context::with_config(&cmd.globals, Some(config.clone()))?;
     require_agents(&ctx).await?;
 
@@ -157,25 +156,6 @@ async fn require_agents(ctx: &Context) -> Result<()> {
         "this deployment does not hold per-agent configuration, so it cannot take this file. \
          Upgrade it, or use the CLI it shipped with."
     )
-}
-
-/// A credential the deployment cannot reach. `token_env` names a variable on
-/// this machine, which is the engine's half of a connection; consent for the
-/// deployment's copy is `subs mcp login`.
-fn local_credentials(env: &ProjectConfig) -> Result<()> {
-    let named: Vec<&str> = env
-        .mcp
-        .iter()
-        .filter(|(_, spec)| spec.auth.is_some())
-        .map(|(id, _)| id.as_str())
-        .collect();
-    if let Some(id) = named.first() {
-        bail!(
-            "[mcp.{id}] names `token_env`, which a deployment cannot read: it holds its own \
-             credential. Drop `auth` and authorize the connection there — `subs mcp login {id}`."
-        );
-    }
-    Ok(())
 }
 
 /// Create the project this file describes. The org comes from the pin, then the

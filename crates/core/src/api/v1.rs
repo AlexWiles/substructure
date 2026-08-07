@@ -60,6 +60,9 @@ pub struct McpConnection {
     pub status: String,
     #[serde(default)]
     pub scopes: String,
+    /// How it authenticates, where the file declared it. Absent ⇒ discovered.
+    #[serde(default)]
+    pub auth: Option<String>,
     #[serde(default)]
     pub granted_projects: Vec<String>,
 }
@@ -77,6 +80,20 @@ pub struct McpDeclareRequest {
     /// so the deployment answers with that project's own — two projects naming
     /// one id hold two credentials, and neither login touches the other.
     pub project_id: String,
+    /// How it authenticates. Omitted for OAuth, which is what a deployment that
+    /// predates static tokens assumes anyway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+}
+
+/// The token behind an `auth = "token"` connection. Sent once and never read
+/// back, like an LLM key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpTokenRequest {
+    pub token: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -215,6 +215,8 @@ fn command_path(cmd: &Command) -> &'static str {
         },
         Command::Mcp { command } => match command {
             mcp::McpCommand::Login { .. } => "mcp login",
+            mcp::McpCommand::SetToken { .. } => "mcp set-token",
+            mcp::McpCommand::DeleteToken { .. } => "mcp delete-token",
             mcp::McpCommand::List { .. } => "mcp list",
         },
         Command::Slack { command } => match command {

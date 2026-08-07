@@ -168,6 +168,25 @@ pub async fn pick_api_key(ctx: &Context, project_id: &str) -> Result<String> {
 
 /// A secret typed at the terminal: not echoed, and ended by Enter like every
 /// other prompt.
+/// A secret, typed or piped. A person gets one prompt that ends at Enter and
+/// does not echo it; a pipe is read to its end, since that is where the secret
+/// ends. Trailing whitespace is the shell's, not the secret's.
+pub fn read_secret(globals: &CloudGlobals, prompt: &str) -> Result<String> {
+    use std::io::Read as _;
+
+    if std::io::stdin().is_terminal() {
+        if !interactive(globals) {
+            bail!("nothing on stdin. Pipe it in, or pass --env <VAR>.");
+        }
+        return prompt_secret(prompt);
+    }
+    let mut buf = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buf)
+        .context("reading from stdin")?;
+    Ok(buf.trim().to_string())
+}
+
 pub fn prompt_secret(prompt: &str) -> Result<String> {
     Password::with_theme(&ColorfulTheme::default())
         .with_prompt(prompt)

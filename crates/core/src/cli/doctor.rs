@@ -10,6 +10,7 @@
 use anyhow::{Context as _, Result};
 
 use crate::api::v1::{Notice, NoticesResponse};
+use crate::cli::mcp::Needs;
 
 use super::cloud::context::Context as CloudContext;
 use super::cloud::project_config::{self, Found};
@@ -85,23 +86,18 @@ async fn here(found: &Found) -> Result<Vec<Notice>> {
         );
     }
 
-    for (id, spec) in config.connections() {
-        let Some(auth) = &spec.auth else { continue };
-        if env_value(&auth.token_env).is_none() {
-            out.push(
-                Notice::action(format!(
-                    "Set ${}, the credential for [mcp.{id}]",
-                    auth.token_env
-                ))
-                .with_command(format!("export {}=...", auth.token_env)),
-            );
-        }
-    }
-    for id in mcp::unauthorized_local(config).await? {
-        out.push(
-            Notice::action(format!("Authorize the [mcp.{id}] connection"))
+    for (id, needs) in mcp::unauthorized_local(config).await? {
+        out.push(match needs {
+            Needs::Token => Notice::action(format!("Set the token for [mcp.{id}]"))
+                .with_command(format!("subs mcp set-token {id}")),
+            Needs::Login => Notice::action(format!("Authorize the [mcp.{id}] connection"))
                 .with_command(format!("subs mcp login {id}")),
-        );
+            Needs::Declaration => Notice::action(format!(
+                "[mcp.{id}] wants a credential it publishes no way to get; declare \
+                 `auth = \"token\"` and set one"
+            ))
+            .with_command(format!("subs mcp set-token {id}")),
+        });
     }
 
     // Socket Mode is the engine's own Slack app, so its two tokens are this
@@ -174,8 +170,7 @@ mod tests {
             "[llm.claude]\ntype = \"anthropic\"\napi_key_env = \"NOT_SET_ANTHROPIC\"\n\
              [agent.support]\nllm = \"claude\"\nmodel = \"m\"\n\
              worker = \"https://w.test\"\nsigning_secret_env = \"NOT_SET_SECRET\"\n\
-             [mcp.sentry]\nurl = \"https://mcp.sentry.dev/mcp\"\n\
-             auth = { token_env = \"NOT_SET_SENTRY\" }\n\
+             [mcp.github]\nurl = \"https://api.github.test/mcp\"\nauth = \"token\"\n\
              [mcp.linear]\nurl = \"https://mcp.linear.app/mcp\"\n\
              [slack]\ndm = \"support\"\n",
         );
@@ -187,7 +182,7 @@ mod tests {
             said.contains("console.anthropic.com"),
             "the key is issued somewhere: {said}"
         );
-        assert!(said.contains("$NOT_SET_SENTRY"), "{said}");
+        assert!(said.contains("Set the token for [mcp.github]"), "{said}");
         assert!(
             said.contains("Authorize the [mcp.linear] connection"),
             "{said}"
@@ -196,13 +191,24 @@ mod tests {
         assert!(said.contains("$SLACK_BOT_TOKEN"), "{said}");
         assert!(said.contains("$NOT_SET_SECRET"), "{said}");
 
-        // A connection the engine authorizes is done from the command line;
-        // a variable is not something a command can set.
-        let authorize = notices
-            .iter()
-            .find(|n| n.message.contains("[mcp.linear]"))
-            .unwrap();
-        assert_eq!(authorize.command.as_deref(), Some("subs mcp login linear"));
+        // Each connection is offered the command its declared method takes;
+        // neither is a variable this machine's environment could hold.
+        let command = |needle: &str| {
+            notices
+                .iter()
+                .find(|n| n.message.contains(needle))
+                .unwrap()
+                .command
+                .clone()
+        };
+        assert_eq!(
+            command("[mcp.linear]").as_deref(),
+            Some("subs mcp login linear")
+        );
+        assert_eq!(
+            command("[mcp.github]").as_deref(),
+            Some("subs mcp set-token github")
+        );
     }
 
     /// A file that declares nothing to hold a credential for needs nothing.

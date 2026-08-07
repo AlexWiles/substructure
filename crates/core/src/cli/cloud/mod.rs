@@ -11,7 +11,7 @@ pub mod logout;
 pub mod notices;
 pub mod open;
 pub mod orgs;
-mod pickers;
+pub(crate) mod pickers;
 pub(crate) mod print;
 pub(crate) mod project_config;
 pub mod projects;

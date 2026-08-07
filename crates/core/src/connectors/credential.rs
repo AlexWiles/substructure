@@ -1,0 +1,387 @@
+//! The credential a connection dials with, whichever way it was obtained.
+//!
+//! One slot per connection: `subs mcp login` fills it with an OAuth grant and
+//! `subs mcp set-token` fills it with a static token, and the resolver below
+//! turns whichever landed there into headers. Keeping them in one slot is what
+//! lets a deployment hold either — the store is the seam, and neither kind ever
+//! reaches the event log or the file.
+
+use reqwest::header::HeaderMap;
+use serde::{Deserialize, Serialize};
+
+use super::mcp::auth_headers;
+use super::oauth::{refresh, require_secure, same_origin, OauthError, Tokens};
+use super::registry::{AuthKind, ConnectionSpec, CredentialResolver};
+use super::ConnectorError;
+
+/// What the store holds for one connection.
+///
+/// Untagged, and `Static` first: OAuth grants were written here before static
+/// tokens existed, as a bare `Tokens` object, and a stored credential outlives
+/// the release that wrote it. A `Tokens` has no `token` field, so the two
+/// shapes cannot be read for each other.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Credential {
+    Static { token: String },
+    Oauth(Box<Tokens>),
+}
+
+impl Credential {
+    /// What `auth` this credential answers to, for reporting a slot holding the
+    /// other kind.
+    pub fn kind(&self) -> AuthKind {
+        match self {
+            Self::Static { .. } => AuthKind::Token,
+            Self::Oauth(_) => AuthKind::Oauth,
+        }
+    }
+}
+
+/// Where credentials live. Keyed by the connection's id, so two ids naming one
+/// server hold two of them: `[mcp.sentry]` and `[mcp.sentry2]` at the same URL
+/// are two accounts.
+#[async_trait::async_trait]
+pub trait CredentialStore: Send + Sync {
+    async fn get(&self, tenant_id: &str, connection_id: &str) -> Option<Credential>;
+    /// Called on every refresh too, because a rotated refresh token invalidates
+    /// the one it replaced. A failure to persist is reported, not swallowed:
+    /// silently dropping a rotated token locks the connection out.
+    async fn put(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        credential: Credential,
+    ) -> Result<(), String>;
+}
+
+/// Resolves a connection's stored credential to headers.
+///
+/// Refresh happens here rather than at login: a long-running agent outlives its
+/// access token, and the resolver is the only place that sees every call.
+pub struct StoredCredentials {
+    store: std::sync::Arc<dyn CredentialStore>,
+    http: reqwest::Client,
+    /// One refresh at a time per connection. Rotation makes concurrent
+    /// refreshes a correctness problem, not just wasted work: the loser
+    /// persists a refresh token the server has already retired.
+    refreshing: tokio::sync::Mutex<
+        std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>,
+    >,
+}
+
+impl StoredCredentials {
+    pub fn new(store: std::sync::Arc<dyn CredentialStore>) -> Self {
+        Self {
+            store,
+            http: reqwest::Client::new(),
+            refreshing: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// A live access token for one OAuth connection, refreshed if it is close
+    /// to expiry. `url` is where the connection currently points, which the
+    /// stored credential has to have been issued for.
+    pub async fn access_token(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        url: &str,
+    ) -> Result<Option<String>, OauthError> {
+        let tokens = match self.store.get(tenant_id, connection_id).await {
+            Some(Credential::Oauth(tokens)) => *tokens,
+            Some(Credential::Static { .. }) => {
+                return Err(OauthError::Token(
+                    "a static token is stored for this connection, not an OAuth grant".into(),
+                ))
+            }
+            None => return Ok(None),
+        };
+        // The id is the key, so an edited `url` would otherwise send one
+        // server's token to another. `discover` binds the two at login, which
+        // makes this the same check read back.
+        if !same_origin(&tokens.resource, url) {
+            return Err(OauthError::Token(format!(
+                "the stored credential was issued for `{}`, not `{url}`",
+                tokens.resource
+            )));
+        }
+        if !tokens.stale() {
+            return Ok(Some(tokens.access_token));
+        }
+        if !tokens.refreshable() {
+            return Err(OauthError::Token(
+                "the access token expired and the server issued no refresh token".into(),
+            ));
+        }
+
+        let gate = {
+            let mut held = self.refreshing.lock().await;
+            held.entry(format!("{tenant_id}\u{0}{connection_id}"))
+                .or_default()
+                .clone()
+        };
+        let _guard = gate.lock().await;
+
+        // Another caller may have refreshed while we waited for the gate.
+        if let Some(Credential::Oauth(current)) = self.store.get(tenant_id, connection_id).await {
+            if !current.stale() {
+                return Ok(Some(current.access_token));
+            }
+        }
+
+        let next = refresh(&self.http, &tokens).await?;
+        self.store
+            .put(
+                tenant_id,
+                connection_id,
+                Credential::Oauth(Box::new(next.clone())),
+            )
+            .await
+            .map_err(OauthError::Token)?;
+        Ok(Some(next.access_token))
+    }
+
+    /// The grant a connection holds, as headers, or nothing where the slot is
+    /// empty.
+    async fn oauth_headers(
+        &self,
+        tenant_id: &str,
+        id: &str,
+        spec: &ConnectionSpec,
+    ) -> Result<Option<HeaderMap>, ConnectorError> {
+        match self.access_token(tenant_id, id, &spec.url).await {
+            // Checked again here, not only at login: the project file can name
+            // a different URL than the one authorized.
+            Ok(Some(token)) => {
+                secure(&spec.url)?;
+                auth_headers(None, &token).map(Some)
+            }
+            Ok(None) => Ok(None),
+            // A grant that cannot be renewed is reported even where the file
+            // declared nothing: the connection was authorized once, so falling
+            // back to sending nothing would lose that.
+            Err(e) => Err(ConnectorError::unauthorized(format!(
+                "connection `{id}` needs authorizing again: run `subs mcp login {id}` ({e})"
+            ))),
+        }
+    }
+
+    /// The static token for one connection, sent under whichever header the
+    /// connection declares.
+    async fn static_headers(
+        &self,
+        tenant_id: &str,
+        id: &str,
+        spec: &ConnectionSpec,
+    ) -> Result<HeaderMap, ConnectorError> {
+        match self.store.get(tenant_id, id).await {
+            Some(Credential::Static { token }) => {
+                secure(&spec.url)?;
+                auth_headers(spec.header.as_deref(), &token)
+            }
+            Some(Credential::Oauth(_)) => Err(mismatch(id, AuthKind::Token)),
+            None => Err(ConnectorError::unauthorized(format!(
+                "connection `{id}` has no token: run `subs mcp set-token {id}`"
+            ))),
+        }
+    }
+}
+
+/// Where the file declares a method, that is what this sends. Where it does
+/// not — the usual case — the slot decides: a grant is sent, and an empty slot
+/// sends nothing and lets the server say whether it minded. Asking the server
+/// is what discovery is, and its refusal is the answer.
+#[async_trait::async_trait]
+impl CredentialResolver for StoredCredentials {
+    async fn resolve(
+        &self,
+        tenant_id: &str,
+        id: &str,
+        spec: &ConnectionSpec,
+    ) -> Result<HeaderMap, ConnectorError> {
+        match spec.auth {
+            Some(AuthKind::None) => Ok(HeaderMap::new()),
+            Some(AuthKind::Token) => self.static_headers(tenant_id, id, spec).await,
+            Some(AuthKind::Oauth) => match self.oauth_headers(tenant_id, id, spec).await? {
+                Some(headers) => Ok(headers),
+                None => Err(ConnectorError::unauthorized(format!(
+                    "connection `{id}` is not authorized: run `subs mcp login {id}`"
+                ))),
+            },
+            None => Ok(self
+                .oauth_headers(tenant_id, id, spec)
+                .await?
+                .unwrap_or_default()),
+        }
+    }
+}
+
+fn secure(url: &str) -> Result<(), ConnectorError> {
+    require_secure(url).map_err(|e| ConnectorError::permanent(e.to_string()))
+}
+
+fn mismatch(id: &str, declared: AuthKind) -> ConnectorError {
+    let (holds, fix) = match declared {
+        AuthKind::Token => ("an OAuth grant", format!("subs mcp set-token {id}")),
+        _ => ("a static token", format!("subs mcp login {id}")),
+    };
+    ConnectorError::unauthorized(format!(
+        "connection `{id}` declares `auth = \"{}\"` but holds {holds}: run `{fix}`",
+        declared.as_str()
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::ConnectorProtocol;
+    use std::sync::Arc;
+
+    struct Slot(Option<Credential>);
+
+    #[async_trait::async_trait]
+    impl CredentialStore for Slot {
+        async fn get(&self, _: &str, _: &str) -> Option<Credential> {
+            self.0.clone()
+        }
+        async fn put(&self, _: &str, _: &str, _: Credential) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn spec(auth: Option<AuthKind>, header: Option<&str>) -> ConnectionSpec {
+        ConnectionSpec {
+            url: "https://example.test/mcp".to_string(),
+            protocol: ConnectorProtocol::Mcp,
+            auth,
+            header: header.map(str::to_string),
+            prefix_tools: true,
+        }
+    }
+
+    fn resolver(held: Option<Credential>) -> StoredCredentials {
+        StoredCredentials::new(Arc::new(Slot(held)))
+    }
+
+    fn stored_token() -> Credential {
+        Credential::Static {
+            token: "tok".into(),
+        }
+    }
+
+    fn granted() -> Credential {
+        Credential::Oauth(Box::new(Tokens {
+            access_token: "at".into(),
+            refresh_token: None,
+            expires_at: None,
+            scope: None,
+            issuer: "https://example.test".into(),
+            token_endpoint: "https://example.test/token".into(),
+            resource: "https://example.test/mcp".into(),
+            client: crate::connectors::oauth::ClientId::Registered {
+                client_id: "c".into(),
+                client_secret: None,
+            },
+        }))
+    }
+
+    #[tokio::test]
+    async fn a_static_token_defaults_to_bearer() {
+        let headers = resolver(Some(stored_token()))
+            .resolve("t", "github", &spec(Some(AuthKind::Token), None))
+            .await
+            .unwrap();
+        assert_eq!(headers.get("authorization").unwrap(), "Bearer tok");
+    }
+
+    #[tokio::test]
+    async fn a_declared_header_carries_the_token_raw() {
+        let headers = resolver(Some(stored_token()))
+            .resolve(
+                "t",
+                "sentry",
+                &spec(Some(AuthKind::Token), Some("sentry-bearer")),
+            )
+            .await
+            .unwrap();
+        assert_eq!(headers.get("sentry-bearer").unwrap(), "tok");
+        assert!(headers.get("authorization").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_token_connection_with_an_empty_slot_asks_for_one() {
+        let err = resolver(None)
+            .resolve("t", "github", &spec(Some(AuthKind::Token), None))
+            .await
+            .unwrap_err();
+        assert!(
+            err.needs_reauth,
+            "an unset credential takes the re-auth path"
+        );
+        assert!(err.to_string().contains("subs mcp set-token github"));
+    }
+
+    #[tokio::test]
+    async fn a_slot_holding_the_other_kind_is_reported_not_sent() {
+        let err = resolver(Some(stored_token()))
+            .resolve("t", "sentry", &spec(Some(AuthKind::Oauth), None))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("subs mcp login sentry"),
+            "got {err}"
+        );
+    }
+
+    /// The default. Nothing declared and nothing held sends nothing, so an open
+    /// server works with a bare URL and a protected one answers with its own
+    /// 401 — which is the discovery.
+    #[tokio::test]
+    async fn an_undeclared_connection_sends_what_it_holds_or_nothing() {
+        let headers = resolver(None)
+            .resolve("t", "open", &spec(None, None))
+            .await
+            .unwrap();
+        assert!(headers.is_empty());
+
+        let headers = resolver(Some(granted()))
+            .resolve("t", "linear", &spec(None, None))
+            .await
+            .unwrap();
+        assert_eq!(headers.get("authorization").unwrap(), "Bearer at");
+    }
+
+    #[tokio::test]
+    async fn auth_none_sends_nothing_and_asks_for_nothing() {
+        let headers = resolver(None)
+            .resolve("t", "open", &spec(Some(AuthKind::None), None))
+            .await
+            .unwrap();
+        assert!(headers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_token_never_crosses_plaintext_http() {
+        let mut spec = spec(Some(AuthKind::Token), None);
+        spec.url = "http://example.test/mcp".to_string();
+        let err = resolver(Some(stored_token()))
+            .resolve("t", "github", &spec)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not https"), "got {err}");
+    }
+
+    #[test]
+    fn an_oauth_grant_written_before_this_enum_still_reads() {
+        let stored = r#"{
+            "access_token": "at",
+            "issuer": "https://mcp.linear.app",
+            "token_endpoint": "https://mcp.linear.app/token",
+            "resource": "https://mcp.linear.app/mcp",
+            "client": {"kind": "registered", "client_id": "c"}
+        }"#;
+        let credential: Credential = serde_json::from_str(stored).unwrap();
+        assert_eq!(credential.kind(), AuthKind::Oauth);
+    }
+}

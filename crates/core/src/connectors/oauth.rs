@@ -10,7 +10,6 @@
 //! (RFC 8414 and OpenID Discovery), PKCE with `S256`, the `resource` indicator
 //! (RFC 8707) on both requests, and issuer validation (RFC 9207).
 
-use super::ConnectorError;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine;
 use chrono::{DateTime, Duration, Utc};
@@ -206,8 +205,51 @@ pub async fn discover(http: &Client, mcp_url: &str) -> Result<Discovered, OauthE
     Ok(Discovered { resource, server })
 }
 
-/// The `resource_metadata` URL a 401 challenge points at, if there is one.
-async fn probe(http: &Client, mcp_url: &str) -> Option<String> {
+/// What one unauthenticated request says about how a server authenticates.
+///
+/// Three answers, not two. A server that challenges without publishing where
+/// to authorize has told us only that it wants *something*, and no request can
+/// find out what — which is the case the file has to settle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Probed {
+    /// Did not ask for a credential. Weaker than "needs none": Hugging Face
+    /// answers an unauthenticated `tools/list` with a protocol complaint about
+    /// the session, and a server may still refuse a later call. It is grounds
+    /// for sending nothing, not for reporting that nothing is wanted.
+    NoChallenge,
+    /// Challenged, and publishes the metadata an OAuth flow needs.
+    Oauth,
+    /// Challenged, and publishes nothing to discover.
+    Protected,
+}
+
+/// Ask the server how it authenticates, by making a call and reading the
+/// refusal. Cheap, and the only thing that can answer: nothing in a manifest
+/// knows this and nothing in MCP announces it up front.
+pub async fn sniff(http: &Client, mcp_url: &str) -> Result<Probed, OauthError> {
+    require_secure(mcp_url)?;
+    let answered = unauthenticated(http, mcp_url).await?;
+    if !answered.challenged {
+        return Ok(Probed::NoChallenge);
+    }
+    if answered.metadata.is_some() {
+        return Ok(Probed::Oauth);
+    }
+    // Some servers publish the document without pointing at it from the
+    // challenge, so its absence is not the answer on its own.
+    match fetch_json::<ProtectedResource>(http, &prm_url(mcp_url)?).await {
+        Ok(_) => Ok(Probed::Oauth),
+        Err(_) => Ok(Probed::Protected),
+    }
+}
+
+struct Answered {
+    challenged: bool,
+    metadata: Option<String>,
+}
+
+/// One unauthenticated `tools/list`, which every MCP server answers.
+async fn unauthenticated(http: &Client, mcp_url: &str) -> Result<Answered, OauthError> {
     let response = http
         .post(mcp_url)
         .header(
@@ -217,9 +259,24 @@ async fn probe(http: &Client, mcp_url: &str) -> Option<String> {
         .json(&serde_json::json!({ "jsonrpc": "2.0", "id": 0, "method": "tools/list" }))
         .send()
         .await
-        .ok()?;
-    let challenge = response.headers().get(WWW_AUTHENTICATE)?.to_str().ok()?;
-    challenge_param(challenge, "resource_metadata")
+        .map_err(|e| OauthError::Discovery(format!("could not reach {mcp_url}: {e}")))?;
+    // Context7 refuses with 400 and still carries the challenge, so the status
+    // alone does not decide this.
+    let challenged = matches!(response.status().as_u16(), 401 | 403);
+    let metadata = response
+        .headers()
+        .get(WWW_AUTHENTICATE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|challenge| challenge_param(challenge, "resource_metadata"));
+    Ok(Answered {
+        challenged: challenged || metadata.is_some(),
+        metadata,
+    })
+}
+
+/// The `resource_metadata` URL a 401 challenge points at, if there is one.
+async fn probe(http: &Client, mcp_url: &str) -> Option<String> {
+    unauthenticated(http, mcp_url).await.ok()?.metadata
 }
 
 /// One parameter out of a `WWW-Authenticate` header. Values may be quoted or
@@ -237,7 +294,7 @@ pub fn challenge_param(challenge: &str, name: &str) -> Option<String> {
 /// A bearer credential must not cross the network in the clear. Loopback is
 /// exempt: a server on this machine has no certificate and nothing off-host to
 /// intercept it.
-fn require_secure(url: &str) -> Result<(), OauthError> {
+pub(crate) fn require_secure(url: &str) -> Result<(), OauthError> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| OauthError::Discovery(format!("`{url}` is not a URL: {e}")))?;
     if parsed.scheme() == "https" || is_loopback(url) {
@@ -337,10 +394,12 @@ pub async fn client_id(
             });
         }
     }
+    // The mechanisms are not named: a reader can act on neither, and what to do
+    // instead depends on who is asking. The CLI offers a token; a deployment
+    // has its own registered clients. Both say so themselves.
     let endpoint = server.registration_endpoint.as_deref().ok_or_else(|| {
         OauthError::Registration(format!(
-            "`{}` supports neither client metadata documents nor dynamic registration; \
-             register a client by hand and configure its id",
+            "`{}` does not support dynamic client registration",
             server.issuer
         ))
     })?;
@@ -595,132 +654,6 @@ fn random_token(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
     rand::rng().fill(&mut buf[..]);
     B64URL.encode(buf)
-}
-
-// ── Resolving a stored credential ────────────────────────────────────────
-
-/// Where authorized credentials live. Keyed by the connection's id, so two ids
-/// naming one server hold two logins: `[mcp.sentry]` and `[mcp.sentry2]` at the
-/// same URL are two accounts.
-#[async_trait::async_trait]
-pub trait TokenStore: Send + Sync {
-    async fn get(&self, tenant_id: &str, connection_id: &str) -> Option<Tokens>;
-    /// Called on every refresh, because a rotated refresh token invalidates
-    /// the one it replaced. A failure to persist is reported, not swallowed:
-    /// silently dropping a rotated token locks the connection out.
-    async fn put(&self, tenant_id: &str, connection_id: &str, tokens: Tokens)
-        -> Result<(), String>;
-}
-
-/// Credentials for connections authorized through OAuth.
-///
-/// Refresh happens here rather than at login: a long-running agent outlives
-/// its access token, and the resolver is the only place that sees every call.
-pub struct StoredCredentials {
-    store: std::sync::Arc<dyn TokenStore>,
-    http: Client,
-    /// One refresh at a time per connection. Rotation makes concurrent
-    /// refreshes a correctness problem, not just wasted work: the loser
-    /// persists a refresh token the server has already retired.
-    refreshing: tokio::sync::Mutex<
-        std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>,
-    >,
-}
-
-impl StoredCredentials {
-    pub fn new(store: std::sync::Arc<dyn TokenStore>) -> Self {
-        Self {
-            store,
-            http: Client::new(),
-            refreshing: tokio::sync::Mutex::new(std::collections::HashMap::new()),
-        }
-    }
-
-    /// A live access token for one connection, refreshed if it is close to
-    /// expiry. `url` is where the connection currently points, which the stored
-    /// credential has to have been issued for.
-    pub async fn access_token(
-        &self,
-        tenant_id: &str,
-        connection_id: &str,
-        url: &str,
-    ) -> Result<Option<String>, OauthError> {
-        let Some(tokens) = self.store.get(tenant_id, connection_id).await else {
-            return Ok(None);
-        };
-        // The id is the key, so an edited `url` would otherwise send one
-        // server's token to another. `discover` binds the two at login, which
-        // makes this the same check read back.
-        if !same_origin(&tokens.resource, url) {
-            return Err(OauthError::Token(format!(
-                "the stored credential was issued for `{}`, not `{url}`",
-                tokens.resource
-            )));
-        }
-        if !tokens.stale() {
-            return Ok(Some(tokens.access_token));
-        }
-        if !tokens.refreshable() {
-            return Err(OauthError::Token(
-                "the access token expired and the server issued no refresh token".into(),
-            ));
-        }
-
-        let gate = {
-            let mut held = self.refreshing.lock().await;
-            held.entry(format!("{tenant_id}\u{0}{connection_id}"))
-                .or_default()
-                .clone()
-        };
-        let _guard = gate.lock().await;
-
-        // Another caller may have refreshed while we waited for the gate.
-        if let Some(current) = self.store.get(tenant_id, connection_id).await {
-            if !current.stale() {
-                return Ok(Some(current.access_token));
-            }
-        }
-
-        let next = refresh(&self.http, &tokens).await?;
-        self.store
-            .put(tenant_id, connection_id, next.clone())
-            .await
-            .map_err(OauthError::Token)?;
-        Ok(Some(next.access_token))
-    }
-}
-
-/// Connections keep resolving through `token_env` where the project file names
-/// one; only a connection that names no variable consults the store. A server
-/// needing no credential still gets none, so declaring nothing keeps working.
-#[async_trait::async_trait]
-impl crate::connectors::registry::CredentialResolver for StoredCredentials {
-    async fn resolve(
-        &self,
-        tenant_id: &str,
-        id: &str,
-        spec: &crate::connectors::registry::ConnectionSpec,
-    ) -> Result<reqwest::header::HeaderMap, ConnectorError> {
-        if spec.auth.is_some() {
-            return crate::connectors::registry::EnvCredentials
-                .resolve(tenant_id, id, spec)
-                .await;
-        }
-        match self.access_token(tenant_id, id, &spec.url).await {
-            // Checked again here, not only at login: the project file can name
-            // a different URL than the one authorized.
-            Ok(Some(token)) => {
-                require_secure(&spec.url).map_err(|e| ConnectorError::permanent(e.to_string()))?;
-                crate::connectors::mcp::auth_headers(None, &token)
-            }
-            // Nothing stored: either a server wanting no credential, or one
-            // never logged in to. Its 401 tells them apart.
-            Ok(None) => Ok(reqwest::header::HeaderMap::new()),
-            Err(e) => Err(ConnectorError::unauthorized(format!(
-                "connection `{id}` needs authorizing again: run `subs mcp login {id}` ({e})"
-            ))),
-        }
-    }
 }
 
 #[cfg(test)]

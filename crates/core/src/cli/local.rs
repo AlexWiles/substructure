@@ -7,7 +7,7 @@ use crate::cli::auth::AuthWiring;
 use crate::cli::cloud::project_config::{self, ProjectConfig};
 use crate::cli::env::{EnvVars, ProviderEnv, ProviderKind};
 use crate::cli::DEFAULT_TENANT;
-use crate::connectors::oauth::StoredCredentials;
+use crate::connectors::credential::StoredCredentials;
 use crate::connectors::registry::{Connections, LocalRegistry};
 use crate::llm::{LlmProviderRegistry, LlmProviderTrait, LlmTask};
 use crate::providers::anthropic::{AnthropicConfig, AnthropicProvider};
@@ -15,7 +15,7 @@ use crate::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use crate::providers::openai::{OpenAiConfig, OpenAiProvider};
 use crate::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
 use crate::providers::sqlite::{
-    SqliteCursorStore, SqliteDb, SqliteEventStore, SqliteSessionIndexStore, SqliteTokenStore,
+    SqliteCredentialStore, SqliteCursorStore, SqliteDb, SqliteEventStore, SqliteSessionIndexStore,
     SqliteWakeStore, SqliteWorkerQueue,
 };
 use crate::runtime::connector::ConnectorTask;
@@ -215,7 +215,7 @@ pub(crate) async fn start_engine(
     let cursor_store = Arc::new(SqliteCursorStore::new(db.clone())?);
     let wake_store = Arc::new(SqliteWakeStore::new(db.clone())?);
     let session_index_store = Arc::new(SqliteSessionIndexStore::new(db.clone())?);
-    let token_store = Arc::new(SqliteTokenStore::new(db)?);
+    let token_store = Arc::new(SqliteCredentialStore::new(db)?);
     // The file is the whole declaration, so starting on it is also what applies
     // it: a connection taken out of the file is one whose credential is gone.
     let declared: Vec<String> = connectors.keys().cloned().collect();

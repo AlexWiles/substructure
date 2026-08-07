@@ -153,18 +153,19 @@ url = "https://mcp.sentry.dev/mcp"
 
 [mcp.github]
 url = "https://api.githubcopilot.com/mcp/"
-auth = { token_env = "GITHUB_TOKEN" }
+auth = "token"
 prefix_tools = false
 ```
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `url` | url | required | The server. |
-| `auth` | table | none | `{ token_env = "…" }` for a static credential. For an engine you run. |
+| `auth` | string | ask the server | Override how it authenticates: `"token"`, `"oauth"`, or `"none"`. |
+| `header` | string | `Authorization` | Header a static token rides in. Only under `auth = "token"`. |
 | `prefix_tools` | bool | `true` | Show the model `<id>__<tool>` instead of the connection's own names. |
 
-A `token` written in the file is a parse error. Authorize a server with
-`subs mcp login <id>`. See [Connectors](./40-connectors.md).
+A `token` written in the file is a parse error. Fill a connection with `subs mcp
+login <id>` or `subs mcp set-token <id>`. See [Connectors](./40-connectors.md).
 
 ## `[slack]`
 
@@ -242,7 +243,7 @@ The file names secrets. It never holds them.
 | --- | --- |
 | Provider key | `api_key_env` on the LLM block, for an engine you run. `subs llm set-key` for a deployment. |
 | Signing secret | `signing_secret_env` on the agent, for an engine you run. The deployment creates its own. |
-| Connector token | `auth.token_env` on the connection, or `subs mcp login`. |
+| Connector token | `subs mcp login`, or `subs mcp set-token`. |
 | Slack tokens | `$SLACK_APP_TOKEN` and `$SLACK_BOT_TOKEN`, or `subs slack connect`. |
 
 `subs apply` strips `api_key_env` and `signing_secret_env` before it sends.

@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use super::mcp::{auth_headers, McpClient};
+use super::mcp::McpClient;
+use super::oauth::Probed;
 use super::{ConnectorError, RemoteTool, ToolOutcome};
 use crate::protocol::ConnectorProtocol;
 
@@ -29,8 +30,18 @@ pub struct ConnectionSpec {
     /// copy would only be a way for the two to disagree. The loader stamps it.
     #[serde(skip)]
     pub protocol: ConnectorProtocol,
+    /// How this connection authenticates, when the file says. Absent is the
+    /// usual case: a server announces OAuth or answers without a challenge, so
+    /// asking it beats writing down what it would have said.
+    ///
+    /// Written for the one thing no request can discover — a static token — and
+    /// for a server whose discovery is broken enough to need overriding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth: Option<AuthSpec>,
+    pub auth: Option<AuthKind>,
+    /// Header carrying a static token. Absent ⇒ `Authorization: Bearer`.
+    /// Only under `auth = "token"`: OAuth binds its own header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
     /// Whether the model sees `<id>__<tool>` rather than the connection's own
     /// tool names. On by default, and the operator's call rather than the agent
     /// author's: only whoever configured the connections knows whether their
@@ -61,18 +72,76 @@ impl ConnectionSpec {
     }
 }
 
-/// How a connection is authenticated. The token is always *named*, never
-/// written: a file meant to be committed must not be able to hold a secret, so
-/// there is deliberately no inline `token` field and `deny_unknown_fields`
-/// turns an attempt to add one into a loud parse error.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AuthSpec {
-    /// Header carrying the credential. Absent ⇒ `Authorization: Bearer <token>`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub header: Option<String>,
-    /// Environment variable holding the token.
-    pub token_env: String,
+/// How a connection is authenticated, where the file overrides what asking the
+/// server would answer. Never *what with*: a file meant to be committed must
+/// not be able to hold a secret, so the credential itself is always set out of
+/// band — `subs mcp login` or `subs mcp set-token` — and an attempt to write
+/// one here is a loud parse error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthKind {
+    /// The MCP authorization spec's own scheme: discovery, consent, refresh.
+    Oauth,
+    /// A static token this deployment holds, sent on every call.
+    Token,
+    /// The server wants no credential, and saying so keeps it out of every
+    /// report of what is left to authorize.
+    None,
+}
+
+impl AuthKind {
+    /// The spelling the file uses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Oauth => "oauth",
+            Self::Token => "token",
+            Self::None => "none",
+        }
+    }
+
+    /// The reverse of `as_str`, for a store that keeps the word rather than
+    /// the enum.
+    pub fn parse(v: &str) -> Option<Self> {
+        match v {
+            "oauth" => Some(Self::Oauth),
+            "token" => Some(Self::Token),
+            "none" => Some(Self::None),
+            _ => None,
+        }
+    }
+}
+
+/// Hand-written so the shape this key used to take answers with the migration
+/// rather than with `invalid type: map`.
+impl<'de> Deserialize<'de> for AuthKind {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Kind;
+
+        impl<'de> serde::de::Visitor<'de> for Kind {
+            type Value = AuthKind;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str(r#""oauth", "token", or "none""#)
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<AuthKind, E> {
+                AuthKind::parse(v).ok_or_else(|| {
+                    E::custom(format!(
+                        r#"unknown auth `{v}`; use "oauth", "token", or "none""#
+                    ))
+                })
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, _: A) -> Result<AuthKind, A::Error> {
+                Err(serde::de::Error::custom(
+                    "`auth` is a string now: write `auth = \"token\"` and set the credential \
+                     with `subs mcp set-token <id>`",
+                ))
+            }
+        }
+
+        d.deserialize_any(Kind)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,36 +214,6 @@ pub trait CredentialResolver: Send + Sync {
     ) -> Result<HeaderMap, ConnectorError>;
 }
 
-/// Reads the token from the environment variable the connection names.
-///
-/// A missing or empty token is reported as needing re-auth rather than as a
-/// config error, so an unset credential locally takes the same path a revoked
-/// one will take in the cloud.
-pub struct EnvCredentials;
-
-#[async_trait]
-impl CredentialResolver for EnvCredentials {
-    async fn resolve(
-        &self,
-        _tenant_id: &str,
-        id: &str,
-        spec: &ConnectionSpec,
-    ) -> Result<HeaderMap, ConnectorError> {
-        let Some(auth) = &spec.auth else {
-            return Ok(HeaderMap::new());
-        };
-        match std::env::var(&auth.token_env) {
-            Ok(token) if !token.trim().is_empty() => {
-                auth_headers(auth.header.as_deref(), token.trim())
-            }
-            _ => Err(ConnectorError::unauthorized(format!(
-                "connection `{id}` has no credential: ${} is unset",
-                auth.token_env
-            ))),
-        }
-    }
-}
-
 /// One connection's tool list as fetched, with the prefix it expands under.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Offer {
@@ -190,6 +229,9 @@ pub struct Connections {
     credentials: Arc<dyn CredentialResolver>,
     http: reqwest::Client,
     clients: Mutex<HashMap<(String, String), Arc<McpClient>>>,
+    /// What each server answered an unauthenticated call with, keyed by URL:
+    /// one server gives one answer however many connections name it.
+    probed: Mutex<HashMap<String, Probed>>,
 }
 
 impl Connections {
@@ -202,6 +244,7 @@ impl Connections {
             credentials,
             http: reqwest::Client::new(),
             clients: Mutex::new(HashMap::new()),
+            probed: Mutex::new(HashMap::new()),
         }
     }
 
@@ -210,9 +253,10 @@ impl Connections {
     /// reading config again at prompt time, where a since-edited file would
     /// rename tools underneath a live session.
     pub async fn list_tools(&self, tenant_id: &str, id: &str) -> Result<Offer, ConnectorError> {
-        let spec = self.registry.resolve(tenant_id, id).await?;
-        let client = self.client(tenant_id, id).await?;
-        let tools = self.guard(tenant_id, id, client.list_tools().await).await?;
+        let (client, spec) = self.client(tenant_id, id).await?;
+        let tools = self
+            .guard(tenant_id, id, &spec, client.list_tools().await)
+            .await?;
         Ok(Offer {
             prefix: spec.prefix_for(id).map(str::to_string),
             tools,
@@ -226,18 +270,27 @@ impl Connections {
         name: &str,
         arguments: &Value,
     ) -> Result<ToolOutcome, ConnectorError> {
-        let client = self.client(tenant_id, id).await?;
-        self.guard(tenant_id, id, client.call_tool(name, arguments).await)
-            .await
+        let (client, spec) = self.client(tenant_id, id).await?;
+        self.guard(
+            tenant_id,
+            id,
+            &spec,
+            client.call_tool(name, arguments).await,
+        )
+        .await
     }
 
-    async fn client(&self, tenant_id: &str, id: &str) -> Result<Arc<McpClient>, ConnectorError> {
+    async fn client(
+        &self,
+        tenant_id: &str,
+        id: &str,
+    ) -> Result<(Arc<McpClient>, ConnectionSpec), ConnectorError> {
+        let spec = self.registry.resolve(tenant_id, id).await?;
         let key = (tenant_id.to_string(), id.to_string());
         if let Some(client) = self.clients.lock().await.get(&key) {
-            return Ok(client.clone());
+            return Ok((client.clone(), spec));
         }
 
-        let spec = self.registry.resolve(tenant_id, id).await?;
         let headers = self.credentials.resolve(tenant_id, id, &spec).await?;
         let client = match spec.protocol {
             ConnectorProtocol::Mcp => {
@@ -248,26 +301,75 @@ impl Connections {
         let mut clients = self.clients.lock().await;
         // Another caller may have won the race; keep whichever landed first so
         // one connection means one session.
-        Ok(clients.entry(key).or_insert(client).clone())
+        Ok((clients.entry(key).or_insert(client).clone(), spec))
     }
 
     /// Drop the cached client when the connection rejected its credential, so a
     /// refreshed token is picked up without restarting the engine.
+    ///
+    /// A refusal is also the answer to how the connection authenticates, where
+    /// the file did not say — so this is where a declaration-free connection
+    /// finds out, at the one moment it matters and at no cost until then.
     async fn guard<T>(
         &self,
         tenant_id: &str,
         id: &str,
+        spec: &ConnectionSpec,
         result: Result<T, ConnectorError>,
     ) -> Result<T, ConnectorError> {
-        if let Err(err) = &result {
-            if err.needs_reauth {
-                self.clients
-                    .lock()
-                    .await
-                    .remove(&(tenant_id.to_string(), id.to_string()));
-            }
+        let Err(err) = result else {
+            return result;
+        };
+        if !err.needs_reauth {
+            return Err(err);
         }
-        result
+        self.clients
+            .lock()
+            .await
+            .remove(&(tenant_id.to_string(), id.to_string()));
+        Err(match spec.auth {
+            // The file already said how. A refusal means the credential is
+            // wrong or spent, and the command that replaces it is the answer.
+            Some(AuthKind::Token) => ConnectorError::unauthorized(format!(
+                "connection `{id}` rejected its token: run `subs mcp set-token {id}` ({err})"
+            )),
+            Some(_) => err,
+            None => self.explain(id, spec).await.unwrap_or(err),
+        })
+    }
+
+    /// What a connection the file says nothing about wants, asked of the server
+    /// that just refused. Nothing to say is not an error: the original refusal
+    /// stands.
+    ///
+    /// Asked once per server per process. A refused connection is retried, and
+    /// probing on every attempt would double the traffic we send somewhere that
+    /// is already turning us away.
+    async fn explain(&self, id: &str, spec: &ConnectionSpec) -> Option<ConnectorError> {
+        // Dropped before the miss branch runs: a guard held across the `await`
+        // below would wait on a lock this task is the one holding.
+        let cached = self.probed.lock().await.get(&spec.url).copied();
+        let probed = match cached {
+            Some(probed) => probed,
+            None => {
+                let probed = crate::connectors::oauth::sniff(&self.http, &spec.url)
+                    .await
+                    .ok()?;
+                self.probed.lock().await.insert(spec.url.clone(), probed);
+                probed
+            }
+        };
+        match probed {
+            Probed::Oauth => Some(ConnectorError::unauthorized(format!(
+                "connection `{id}` is not authorized: run `subs mcp login {id}`"
+            ))),
+            Probed::Protected => Some(ConnectorError::unauthorized(format!(
+                "connection `{id}` wants a credential and publishes no way to obtain one. \
+                 If it accepts a static token, declare `auth = \"token\"` on [mcp.{id}] \
+                 and run `subs mcp set-token {id}`"
+            ))),
+            Probed::NoChallenge => None,
+        }
     }
 }
 
@@ -275,24 +377,12 @@ impl Connections {
 mod tests {
     use super::*;
 
-    fn spec(token_env: &str) -> ConnectionSpec {
-        ConnectionSpec {
-            url: "https://example.test/mcp".to_string(),
-            protocol: ConnectorProtocol::Mcp,
-            auth: Some(AuthSpec {
-                header: None,
-                token_env: token_env.to_string(),
-            }),
-            prefix_tools: true,
-        }
-    }
-
     #[test]
     fn an_inline_token_is_a_parse_error_not_a_silent_secret() {
         let err = toml::from_str::<ConnectionSpec>(
             r#"
             url = "https://example.test/mcp"
-            auth = { token = "sk-live-oops" }
+            token = "sk-live-oops"
         "#,
         )
         .unwrap_err();
@@ -303,10 +393,126 @@ mod tests {
     }
 
     #[test]
-    fn a_connection_defaults_to_mcp_and_needs_no_auth() {
+    fn the_old_auth_table_answers_with_the_migration() {
+        let err = toml::from_str::<ConnectionSpec>(
+            r#"
+            url = "https://example.test/mcp"
+            auth = { token_env = "GITHUB_TOKEN" }
+        "#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("subs mcp set-token"),
+            "a file written against the old shape is told what to write instead; got {err}"
+        );
+    }
+
+    #[test]
+    fn a_connection_defaults_to_mcp_and_to_discovery() {
         let spec: ConnectionSpec = toml::from_str(r#"url = "https://example.test/mcp""#).unwrap();
         assert_eq!(spec.protocol, ConnectorProtocol::Mcp);
-        assert_eq!(spec.auth, None);
+        assert_eq!(
+            spec.auth, None,
+            "a bare connection is discovered, not assumed"
+        );
+    }
+
+    #[test]
+    fn each_auth_kind_round_trips() {
+        for (written, kind) in [
+            ("oauth", AuthKind::Oauth),
+            ("token", AuthKind::Token),
+            ("none", AuthKind::None),
+        ] {
+            let spec: ConnectionSpec = toml::from_str(&format!(
+                "url = \"https://example.test/mcp\"\nauth = \"{written}\""
+            ))
+            .unwrap();
+            assert_eq!(spec.auth, Some(kind));
+        }
+    }
+
+    #[test]
+    fn an_unknown_auth_kind_names_the_ones_that_exist() {
+        let err = toml::from_str::<ConnectionSpec>(
+            r#"
+            url = "https://example.test/mcp"
+            auth = "bearer"
+        "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("\"token\""), "got {err}");
+    }
+
+    /// The probe is what makes a refusal explain itself, and a refused
+    /// connection is retried. Asking the server once per process is the
+    /// difference between one extra request and one per attempt.
+    #[tokio::test]
+    async fn a_server_is_asked_once_however_often_it_refuses() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let probes = Arc::new(AtomicUsize::new(0));
+        let counted = probes.clone();
+        let app = axum::Router::new().route(
+            "/mcp",
+            axum::routing::post(move || {
+                let counted = counted.clone();
+                async move {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    (
+                        axum::http::StatusCode::UNAUTHORIZED,
+                        [(
+                            "www-authenticate",
+                            "Bearer resource_metadata=\"http://127.0.0.1/.well-known/x\"",
+                        )],
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        struct NoCredential;
+        #[async_trait]
+        impl CredentialResolver for NoCredential {
+            async fn resolve(
+                &self,
+                _: &str,
+                _: &str,
+                _: &ConnectionSpec,
+            ) -> Result<HeaderMap, ConnectorError> {
+                Ok(HeaderMap::new())
+            }
+        }
+
+        let spec = ConnectionSpec {
+            url: url.clone(),
+            protocol: ConnectorProtocol::Mcp,
+            auth: None,
+            header: None,
+            prefix_tools: true,
+        };
+        let connections = Connections::new(
+            Arc::new(LocalRegistry::new(BTreeMap::from([(
+                "x".to_string(),
+                spec.clone(),
+            )]))),
+            Arc::new(NoCredential),
+        );
+
+        for _ in 0..3 {
+            let explained = connections
+                .explain("x", &spec)
+                .await
+                .expect("a 401 explains itself");
+            assert!(explained.to_string().contains("subs mcp login x"));
+        }
+        assert_eq!(
+            probes.load(Ordering::SeqCst),
+            1,
+            "the server is asked once, not once per refusal"
+        );
     }
 
     #[tokio::test]
@@ -314,29 +520,5 @@ mod tests {
         let registry = LocalRegistry::new(BTreeMap::new());
         let err = registry.resolve("t", "sentry").await.unwrap_err();
         assert_eq!(err, RegistryError::Unknown("sentry".to_string()));
-    }
-
-    #[tokio::test]
-    async fn a_missing_token_asks_for_re_auth() {
-        let err = EnvCredentials
-            .resolve("t", "sentry", &spec("SUBS_TEST_DEFINITELY_UNSET"))
-            .await
-            .unwrap_err();
-        assert!(
-            err.needs_reauth,
-            "an unset credential takes the re-auth path, not a config-error path"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_connection_without_auth_sends_no_credential_header() {
-        let spec = ConnectionSpec {
-            url: "https://example.test/mcp".to_string(),
-            protocol: ConnectorProtocol::Mcp,
-            auth: None,
-            prefix_tools: true,
-        };
-        let headers = EnvCredentials.resolve("t", "open", &spec).await.unwrap();
-        assert!(headers.is_empty());
     }
 }

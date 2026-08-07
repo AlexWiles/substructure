@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod credential;
 pub mod filter;
 pub mod mcp;
 pub mod oauth;

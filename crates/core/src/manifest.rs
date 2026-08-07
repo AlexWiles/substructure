@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use anyhow::{bail, Context as _, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::connectors::registry::ConnectionSpec;
+use crate::connectors::registry::{AuthKind, ConnectionSpec};
 use crate::protocol::{
     AgentConfig, AgentTool, ConnectorProtocol, Handler, LlmFormat, McpServer, McpTools,
     RetryConfig, SubAgent,
@@ -54,6 +54,7 @@ impl Manifest {
         for (id, spec) in &self.mcp {
             check_id(id).map_err(|e| anyhow::anyhow!("[mcp.{id}]: {e}"))?;
             check_url(&spec.url).map_err(|e| anyhow::anyhow!("[mcp.{id}]: {e}"))?;
+            check_connection(spec).map_err(|e| anyhow::anyhow!("[mcp.{id}]: {e}"))?;
         }
         for (id, spec) in &self.llm {
             check_llm(id, spec).map_err(|e| anyhow::anyhow!("[llm.{id}]: {e}"))?;
@@ -681,8 +682,18 @@ pub fn check_id(id: &str) -> Result<()> {
 
 /// Rejected while reading the document rather than at the first fetch, where it
 /// would surface as a discovery failure against a URL nobody meant to write.
-/// A token-backed connection never reaches the OAuth resolver's own check:
-/// `EnvCredentials` sends `$token_env` wherever the URL points.
+/// `header` carries a static token, so it says nothing under a method that
+/// binds its own. Reported rather than ignored: a file that names one means it
+/// to be sent.
+fn check_connection(spec: &ConnectionSpec) -> Result<()> {
+    if spec.header.is_some() && spec.auth != Some(AuthKind::Token) {
+        bail!("`header` carries a static token, so it needs `auth = \"token\"`");
+    }
+    Ok(())
+}
+
+/// Checked again where a credential is actually sent, but a URL the document
+/// should not have held is better reported while reading it.
 pub fn check_url(url: &str) -> Result<()> {
     let parsed = reqwest::Url::parse(url).with_context(|| format!("`{url}` is not a URL"))?;
     if parsed.scheme() == "https" || crate::connectors::oauth::is_loopback(url) {
@@ -905,6 +916,24 @@ mod tests {
         let m = connected(r#"["sentyr"]"#).unwrap();
         let err = m.validate().unwrap_err().to_string();
         assert!(err.contains("names no connection"), "{err}");
+    }
+
+    /// `header` only means something for a credential the file says to send
+    /// itself, so it is refused rather than ignored under the other methods.
+    #[test]
+    fn a_header_belongs_to_a_token_connection() {
+        let with = |auth: &str| {
+            manifest(&format!(
+                "[mcp.sentry]\nurl = \"https://mcp.sentry.dev/mcp\"\n\
+                 auth = \"{auth}\"\nheader = \"sentry-bearer\"\n"
+            ))
+            .validate()
+        };
+        with("token").unwrap();
+        for auth in ["oauth", "none"] {
+            let err = with(auth).unwrap_err().to_string();
+            assert!(err.contains("needs `auth = \"token\"`"), "{err}");
+        }
     }
 
     #[test]
