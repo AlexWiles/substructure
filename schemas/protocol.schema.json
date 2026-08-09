@@ -2080,8 +2080,19 @@
     },
     "McpTools": {
       "additionalProperties": false,
-      "description": "An MCP server's tool filter. Applied in order — capability predicates, then\n`include`, then `exclude` — and only ever narrowing, so a filter can never\nwiden what the connection grants.\n\n`include`/`exclude` are globs matched against the tool's name on the\nconnection, the name its own documentation uses, not the prefixed name the\nmodel sees. Capability predicates read the MCP annotations; a tool that\ncarries none fails the predicate, so an unannotated server yields nothing\nunder `read_only` rather than silently passing everything through.",
+      "description": "What the model sees of one connection, for one agent: which tools, and how\nthey reach the model.\n\nThe filter is applied in order — capability predicates, then `include`, then\n`exclude` — and only ever narrowing, so a filter can never widen what the\nconnection grants. `discovery` runs after it and removes nothing.\n\n`include`/`exclude` are globs matched against the tool's name on the\nconnection, the name its own documentation uses, not the prefixed name the\nmodel sees. Capability predicates read the MCP annotations; a tool that\ncarries none fails the predicate, so an unannotated server yields nothing\nunder `read_only` rather than silently passing everything through.",
       "properties": {
+        "discovery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolDiscovery"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How the surviving tools reach the model. Absent ⇒ [`ToolDiscovery::All`]."
+        },
         "exclude": {
           "items": {
             "type": "string"
@@ -2616,6 +2627,22 @@
       ],
       "title": "ToolCallFunction",
       "type": "object"
+    },
+    "ToolDiscovery": {
+      "description": "How a connection's tools reach the model.",
+      "oneOf": [
+        {
+          "const": "all",
+          "description": "One definition for each tool the filter kept.",
+          "type": "string"
+        },
+        {
+          "const": "search",
+          "description": "Two definitions for the whole connection: `<id>__find_tools` and\n`<id>__call_tool`. The pair is fixed for the session, and the provider\nkeys its cache on the front of the request, so the cache survives a find\nat turn thirty.",
+          "type": "string"
+        }
+      ],
+      "title": "ToolDiscovery"
     },
     "ToolInput": {
       "description": "The engine's classification of a tool call's arguments, delivered on the\n`tool.execute` trigger alongside the raw `arguments` string. Always on the\nwire — absence never carries meaning.",

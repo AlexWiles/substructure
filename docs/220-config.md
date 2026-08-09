@@ -131,7 +131,7 @@ tool = { max_attempts = 3 }
 | `model` | string | The model. Required when the section sets anything. |
 | `system` | string | The system prompt. |
 | `description` | string | What this agent does, shown to a parent that calls it. |
-| `mcp` | list | Connections. An id, or a table to take fewer tools or to go on without one that needs authorizing: `{ id, tools, auth_failure }`. `auth_failure` is `interrupt` (the default) or `degrade`. See [Connectors](./40-connectors.md#when-a-credential-stops-working). |
+| `mcp` | list | Connections. An id, or a table to take fewer tools, to put them behind a search, or to go on without one that needs authorizing: `{ id, tools, auth_failure }`. `tools` sets the filter and `discovery`; see [Tool discovery](./40-connectors.md#tool-discovery). `auth_failure` is `interrupt` (the default) or `degrade`; see [Connectors](./40-connectors.md#when-a-credential-stops-working). |
 | `sub_agents` | list of ids | Agents this one can call. |
 | `tools` | list | Browser tools. Each needs `handler = "client"`. |
 | `worker` | url | Where decisions go. Leave it off and the engine decides. |

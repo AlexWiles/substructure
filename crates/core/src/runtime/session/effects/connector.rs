@@ -189,12 +189,21 @@ impl SessionState {
             return;
         };
         let r = filter::resolve(&connector, offered, prefix);
+        let discovered = filter::discover(&connector, r.clone());
         tracing::info!(
             connection = %connection_id,
             offered = r.offered,
             resolved = r.tools.len(),
+            offered_to_model = discovered.tools.len(),
             "fetched connector tools"
         );
+        // The model can reach nothing. The cause is always a long id.
+        if discovered.tools.is_empty() && !r.tools.is_empty() {
+            tracing::error!(
+                connection = %connection_id,
+                "connection id is too long to name its search tools; shorten it"
+            );
+        }
         if !r.unmatched_include.is_empty() {
             tracing::warn!(
                 connection = %connection_id,

@@ -154,8 +154,12 @@ type McpTools = {
     read_only?: boolean
     non_destructive?: boolean
     idempotent?: boolean
+    discovery?: "all" | "search"
 }
 ```
+
+The first five keys say which tools the agent may reach. `discovery` says how
+they reach the model, and it is the next section.
 
 The engine applies the capability keys, then `include`, then `exclude`. Each one
 can only remove tools.
@@ -166,6 +170,36 @@ model sees.
 The capability keys read the connection's MCP annotations. A tool with no
 annotation fails them. Annotations are hints from the server. Use them to take
 fewer tools, not as a security boundary.
+
+## Tool discovery
+
+Filtering is one answer to a large connection. Search is the other. Set
+`discovery = "search"` and the model gets two tools for the whole connection.
+
+```toml title="substructure.toml"
+[agent.support]
+mcp = [{ id = "aws", tools = { discovery = "search" } }]
+```
+
+| `discovery` | The model sees |
+| --- | --- |
+| `"all"` (the default) | Each tool the filter kept. |
+| `"search"` | `aws__find_tools` and `aws__call_tool`, whatever the connection offers. |
+
+The model searches for the tool it wants, then names it to `call_tool`. Both
+tools are the engine's. A search reaches nothing: the engine answers from the
+list it read when the session opened.
+
+The filter still applies. A search does not show a tool the filter removed, and
+`call_tool` refuses one. The error names the tools the agent can reach.
+
+Use search when a connection has more tools than an agent needs at one time.
+Above about forty, a model chooses badly.
+
+Keep the default when the agent uses most of the tools each session.
+
+A third answer is [Sub-agents](./80-sub-agents.md): give the connection to a
+child agent, and the parent pays one tool.
 
 ## Names
 

@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::connectors::registry::{AuthKind, ConnectionSpec};
 use crate::protocol::{
     AgentConfig, AgentTool, AuthFailure, ConnectorProtocol, Handler, LlmFormat, McpServer,
-    McpTools, RetryConfig, SubAgent,
+    McpTools, RetryConfig, SubAgent, ToolDiscovery,
 };
 use crate::runtime::llm::{LlmBlock, LlmBlocks};
 use crate::runtime::worker::{AgentEntry, WorkerEndpoint};
@@ -329,9 +329,42 @@ pub enum McpRef {
 pub struct McpEntry {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tools: Option<McpTools>,
+    pub tools: Option<McpToolsEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_failure: Option<AuthFailure>,
+}
+
+/// The file's spelling of [`McpTools`], mirrored for the one reason
+/// [`McpEntry`] is: `deny_unknown_fields`. A misspelled `discovery` would
+/// otherwise read as no setting. [`McpTools`] documents the fields.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpToolsEntry {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub non_destructive: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotent: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery: Option<ToolDiscovery>,
+}
+
+impl McpToolsEntry {
+    fn to_wire(&self) -> McpTools {
+        McpTools {
+            include: self.include.clone(),
+            exclude: self.exclude.clone(),
+            read_only: self.read_only,
+            non_destructive: self.non_destructive,
+            idempotent: self.idempotent,
+            discovery: self.discovery,
+        }
+    }
 }
 
 impl McpRef {
@@ -353,7 +386,7 @@ impl McpRef {
             },
             Self::Filtered(entry) => McpServer {
                 id: entry.id.clone(),
-                tools: entry.tools.clone(),
+                tools: entry.tools.as_ref().map(McpToolsEntry::to_wire),
                 auth_failure: entry.auth_failure.unwrap_or_default(),
             },
         }
@@ -685,7 +718,7 @@ pub fn check_id(id: &str) -> Result<()> {
 }
 
 /// Rejected while reading the document rather than at the first fetch, where it
-/// would surface as a discovery failure against a URL nobody meant to write.
+/// would surface as a metadata failure against a URL nobody meant to write.
 /// `header` carries a static token, so it says nothing under a method that
 /// binds its own. Reported rather than ignored: a file that names one means it
 /// to be sent.
@@ -903,6 +936,44 @@ mod tests {
             .to_string();
         assert!(err.contains("tool"), "{err}");
         assert!(err.contains("unknown field"), "names the field: {err}");
+    }
+
+    #[test]
+    fn discovery_is_read_from_the_tools_table() {
+        let m = connected(r#"[{ id = "sentry", tools = { discovery = "search" } }]"#).unwrap();
+        m.validate().unwrap();
+        let agents = m.agents();
+        let mcp = &agents["support"].config.as_ref().expect("seeded").mcp;
+        assert_eq!(
+            mcp[0].tools.as_ref().expect("a table").discovery,
+            Some(ToolDiscovery::Search)
+        );
+
+        let m = connected(r#"[{ id = "sentry", tools = { read_only = true } }]"#).unwrap();
+        let agents = m.agents();
+        let mcp = &agents["support"].config.as_ref().expect("seeded").mcp;
+        assert!(
+            mcp[0].tools.as_ref().expect("a table").discovery.is_none(),
+            "unset ⇒ every tool, the behaviour that predates the key"
+        );
+    }
+
+    /// The same fault as a misspelled `tools`, one level down.
+    #[test]
+    fn a_misspelled_key_inside_the_tools_table_is_an_error() {
+        let err = connected(r#"[{ id = "sentry", tools = { discovry = "search" } }]"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("discovry"), "names the field: {err}");
+        assert!(err.contains("unknown field"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_discovery_value_is_an_error() {
+        let err = connected(r#"[{ id = "sentry", tools = { discovery = "lazy" } }]"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("lazy"), "names the value: {err}");
     }
 
     #[test]

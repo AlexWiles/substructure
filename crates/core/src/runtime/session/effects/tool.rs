@@ -17,7 +17,8 @@
 //! the tool failing, not the model.
 
 use super::{decision_queued, fail, mismatched, void_events, KindSpec, Outcome, SettleError};
-use crate::protocol::{ErrorCode, ErrorInfo};
+use crate::connectors::filter;
+use crate::protocol::{ConnectorTool, ConnectorToolKind, ErrorCode, ErrorInfo};
 use crate::protocol::{RetryOverride, RetryPolicy};
 use crate::runtime::session::command::SessionError;
 use crate::runtime::session::decision::{ToolHandler, Trigger};
@@ -199,10 +200,9 @@ pub(in crate::runtime::session) fn request(
 ) -> Result<Vec<EventPayload>, SessionError> {
     SessionState::ensure_internal(caller)?;
     let handler = state.tool_handler_for(&name);
-    let target = state.connector_tool_for(&name).map(|t| ConnectorTarget {
-        connector: t.connector,
-        remote_name: t.remote_name,
-    });
+    let target = state
+        .connector_tool_for(&name)
+        .map(|t| route_connector(state, &t, &arguments));
     // Resolved here, not at the seam: the default follows the handler, and a
     // client tool must stay unbounded — a deferred call waits for a human.
     let config = state.retry_config();
@@ -223,11 +223,46 @@ pub(in crate::runtime::session) fn request(
     })])
 }
 
+/// Where a call goes, frozen onto it. A `call_tool` names its tool in the
+/// arguments, so that name is put through the filter here — the boundary an
+/// offered tool passed at resolve time. A refused name leaves `remote_name`
+/// empty.
+fn route_connector(state: &SessionState, tool: &ConnectorTool, arguments: &str) -> ConnectorTarget {
+    let remote_name = match tool.kind {
+        ConnectorToolKind::Remote => tool.remote_name.clone(),
+        ConnectorToolKind::Find => String::new(),
+        ConnectorToolKind::Call => named_tool(arguments)
+            .filter(|named| {
+                state
+                    .connector_source(&tool.connector)
+                    .is_some_and(|(server, offer)| filter::kept(&server, &offer, named).is_some())
+            })
+            .unwrap_or_default(),
+    };
+    ConnectorTarget {
+        connector: tool.connector.clone(),
+        remote_name,
+        kind: tool.kind,
+    }
+}
+
+fn named_tool(arguments: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(arguments)
+        .ok()?
+        .get("tool")?
+        .as_str()
+        .map(str::to_string)
+}
+
 impl SessionState {
     /// The `output` schema the settling tool was declared with, resolved by
     /// lineage on the active path. `None` when the tool declared no output
-    /// contract or the call has no resolvable spec.
+    /// contract or the call has no resolvable spec. A `call_tool` is asked of
+    /// the connection instead.
     fn declared_output_schema(&self, tool_call_id: &str, name: &str) -> Option<serde_json::Value> {
+        if let Some(schema) = self.connector_output_schema(tool_call_id) {
+            return Some(schema);
+        }
         let tree = self.message_tree();
         let path = tree.path_to(tree.head_id.as_deref()?);
         match declared_tool(tool_call_id, name, &path, |id| self.llm_call(id)) {

@@ -30,7 +30,14 @@ use uuid::Uuid;
 use super::decision::{LlmHandler, ToolHandler, Trigger};
 use super::events::*;
 use crate::connectors::{filter, AuthNeed, RemoteTool};
-use crate::protocol::{ConnectorTool, Handler};
+use crate::protocol::{ConnectorTool, ConnectorToolKind, Handler, McpServer};
+
+/// What the engine answers for one of its own connector tools.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LocalAnswer {
+    Result(String),
+    Error(String),
+}
 use rust_decimal::Decimal;
 
 pub use crate::protocol::EffectKind;
@@ -1728,10 +1735,10 @@ impl SessionState {
         let resolutions = config.mcp.iter().filter_map(|connector| {
             let effect = self.effect(EffectKind::ConnectorSync, &connector.id)?;
             let sync = effect.connector()?;
-            effect
-                .tracking
-                .is_ready()
-                .then(|| filter::resolve(connector, &sync.tools, sync.prefix.as_deref()))
+            effect.tracking.is_ready().then(|| {
+                let resolved = filter::resolve(connector, &sync.tools, sync.prefix.as_deref());
+                filter::discover(connector, resolved)
+            })
         });
         let taken: Vec<&str> = config
             .tools
@@ -1740,6 +1747,76 @@ impl SessionState {
             .chain(config.sub_agents.iter().map(|s| s.id.as_str()))
             .collect();
         filter::merge(resolutions, taken)
+    }
+
+    /// The connection as the config in force names it, with the offer this
+    /// session recorded.
+    pub fn connector_source(&self, connector_id: &str) -> Option<(McpServer, Vec<RemoteTool>)> {
+        let config = self.resolve_agent_for(self.head_id.as_deref())?;
+        let server = config.mcp.into_iter().find(|c| c.id == connector_id)?;
+        let sync = self.connector_sync(connector_id)?;
+        Some((server, sync.tools.clone()))
+    }
+
+    /// The engine's answer to one of its own tools, or `None` when the call is
+    /// the connection's. Read from state, so a replay answers the same.
+    pub fn local_connector_answer(&self, tool_call_id: &str) -> Option<LocalAnswer> {
+        let tc = self.tool_call(tool_call_id)?;
+        let target = tc.target.as_ref()?;
+        if target.kind.is_remote() {
+            return None;
+        }
+        let Some((server, offer)) = self.connector_source(&target.connector) else {
+            return Some(LocalAnswer::Error(format!(
+                "connection `{}` is no longer configured",
+                target.connector
+            )));
+        };
+        match target.kind {
+            ConnectorToolKind::Remote => None,
+            ConnectorToolKind::Find => {
+                let query = serde_json::from_str::<serde_json::Value>(&tc.arguments)
+                    .ok()
+                    .and_then(|v| v.get("query")?.as_str().map(str::to_string))
+                    .unwrap_or_default();
+                Some(LocalAnswer::Result(filter::find_answer(
+                    &server, &offer, &query,
+                )))
+            }
+            // The filter refused the name. Report what the agent can reach.
+            ConnectorToolKind::Call => {
+                let named = serde_json::from_str::<serde_json::Value>(&tc.arguments)
+                    .ok()
+                    .and_then(|v| v.get("tool")?.as_str().map(str::to_string))
+                    .unwrap_or_default();
+                let reachable: Vec<&str> = filter::callable(&server, &offer)
+                    .iter()
+                    .map(|t| t.name.as_str())
+                    .collect();
+                Some(LocalAnswer::Error(format!(
+                    "`{}` has no tool `{named}` for this agent. It has: {}",
+                    target.connector,
+                    reachable.join(", ")
+                )))
+            }
+        }
+    }
+
+    /// The `output` contract of the tool a `call_tool` ran. The model was
+    /// offered the wrapper, which declares none, so the connection's own
+    /// contract would otherwise go unchecked.
+    pub(in crate::runtime::session) fn connector_output_schema(
+        &self,
+        tool_call_id: &str,
+    ) -> Option<serde_json::Value> {
+        let target = self.tool_call(tool_call_id)?.target.clone()?;
+        if target.kind != ConnectorToolKind::Call || target.remote_name.is_empty() {
+            return None;
+        }
+        let (server, offer) = self.connector_source(&target.connector)?;
+        filter::kept(&server, &offer, &target.remote_name)?
+            .output
+            .clone()
     }
 
     /// Connections the config in force on `leaf` names but has never fetched.

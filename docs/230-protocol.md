@@ -415,6 +415,7 @@ type McpTools = {
     read_only?: boolean         // these read the MCP annotations
     non_destructive?: boolean
     idempotent?: boolean
+    discovery?: "all" | "search" // omitted: "all". search offers two tools for the connection
 }
 ```
 

@@ -16,6 +16,7 @@ together at the same version.
 ### Added
 
 - Slackbot prompts for MCP reauth by default. Overrideable in config.
+- MCP tool search support.
 
 ## [0.3.1] - 2026-08-07
 

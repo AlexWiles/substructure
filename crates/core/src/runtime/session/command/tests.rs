@@ -5,11 +5,12 @@ use crate::runtime::session::reconcile::plan_reconcile;
 use chrono::Utc;
 
 use super::super::aggregate::{CommitContext, SessionAggregate};
-use super::super::state::{AgentVersion, Logged};
+use super::super::state::{AgentVersion, LocalAnswer, Logged};
 use super::*;
 use crate::connectors::{AuthNeed, RemoteTool};
 use crate::protocol::{
-    AgentTool, Handler, LlmTool, McpServer, McpTools, Message, RetryConfig, RetryOverride,
+    AgentTool, ConnectorToolKind, Handler, LlmTool, McpServer, McpTools, Message, RetryConfig,
+    RetryOverride, ToolDiscovery,
 };
 use crate::protocol::{Content, LlmResponse};
 use crate::runtime::retry::RetryTarget;
@@ -7087,6 +7088,247 @@ fn connector_tools_reach_the_model_and_route_to_the_engine() {
         agg.state.tool_call("tc-1").unwrap().handler,
         ToolHandler::Server,
         "the handler is frozen onto the call"
+    );
+}
+
+// ── Tool discovery ───────────────────────────────────────────────────
+
+fn searching_connector_config(ids: &[&str]) -> AgentConfig {
+    AgentConfig {
+        mcp: ids
+            .iter()
+            .map(|id| McpServer {
+                id: id.to_string(),
+                tools: Some(McpTools {
+                    discovery: Some(ToolDiscovery::Search),
+                    ..Default::default()
+                }),
+                auth_failure: Default::default(),
+            })
+            .collect(),
+        ..agent_config("m1")
+    }
+}
+
+fn session_with_searched_connector(id: &str, tools: &[&str]) -> SessionAggregate {
+    let mut agg = create_session_with_config(
+        "sess-1",
+        "tenant-a",
+        "user-1",
+        Some(searching_connector_config(&[id])),
+    );
+    settle_sync(&mut agg, id, tools);
+    agg
+}
+
+fn call(agg: &mut SessionAggregate, id: &str, name: &str, arguments: &str) -> Vec<EventPayload> {
+    dispatch(
+        agg,
+        CommandPayload::RequestToolCall {
+            tool_call_id: id.to_string(),
+            name: name.to_string(),
+            arguments: arguments.to_string(),
+            retry: None,
+        },
+        &system(),
+    )
+}
+
+#[test]
+fn a_searched_connector_offers_two_tools_however_many_it_has() {
+    let mut agg =
+        session_with_searched_connector("sentry", &["search_issues", "get_issue", "resolve_issue"]);
+    let events = dispatch(
+        &mut agg,
+        CommandPayload::RequestLlmCall {
+            llm: "claude".to_string(),
+            call_id: "call-1".to_string(),
+            request: LlmRequest {
+                model: "m1".to_string(),
+                messages: vec![],
+                tools: Some(vec![]),
+                temperature: None,
+                max_completion_tokens: None,
+                reasoning: None,
+            },
+            stream: false,
+            retry: RetryPolicy::no_retry(),
+            handler: LlmHandler::Server,
+            format: None,
+        },
+        &system(),
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::LlmCallDispatched(_))),
+        "the call dispatches; got {events:?}"
+    );
+    let offered: Vec<String> = agg
+        .state
+        .llm_call("call-1")
+        .unwrap()
+        .spec
+        .tools
+        .clone()
+        .expect("tools offered")
+        .into_iter()
+        .map(|t| t.name)
+        .collect();
+    assert_eq!(
+        offered,
+        ["sentry__find_tools", "sentry__call_tool"],
+        "three tools cost the request two definitions, and thirty would cost the same two"
+    );
+    assert_eq!(
+        agg.state.tool_handler_for("sentry__find_tools"),
+        ToolHandler::Server,
+        "both are the engine's to run"
+    );
+}
+
+#[test]
+fn find_tools_is_answered_from_the_recorded_offer_without_the_connection() {
+    let mut agg = session_with_searched_connector("sentry", &["search_issues", "list_projects"]);
+    let events = call(
+        &mut agg,
+        "tc-1",
+        "sentry__find_tools",
+        r#"{"query":"issues"}"#,
+    );
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, EventPayload::DecisionQueued(_))),
+        "the engine answers it; the worker is not asked to; got {events:?}"
+    );
+
+    let LocalAnswer::Result(result) = agg
+        .state
+        .local_connector_answer("tc-1")
+        .expect("the engine answers this one")
+    else {
+        panic!("a find is a result, not an error");
+    };
+    let answer: serde_json::Value = serde_json::from_str(&result).expect("json");
+    assert_eq!(answer["tools"][0]["name"], "search_issues");
+    assert_eq!(answer["matched"], 1);
+    assert_eq!(
+        agg.state
+            .tool_call("tc-1")
+            .unwrap()
+            .target
+            .as_ref()
+            .unwrap()
+            .kind,
+        ConnectorToolKind::Find,
+        "the route is frozen, so a config change cannot turn this into a remote call"
+    );
+    assert!(
+        agg.state
+            .tool_call("tc-1")
+            .unwrap()
+            .target
+            .as_ref()
+            .unwrap()
+            .remote_name
+            .is_empty(),
+        "it stands for no tool on the connection"
+    );
+}
+
+#[test]
+fn call_tool_freezes_the_named_tool_onto_the_call() {
+    let mut agg = session_with_searched_connector("sentry", &["search_issues"]);
+    call(
+        &mut agg,
+        "tc-1",
+        "sentry__call_tool",
+        r#"{"tool":"search_issues","arguments":{"q":"boom"}}"#,
+    );
+    let target = agg
+        .state
+        .tool_call("tc-1")
+        .unwrap()
+        .target
+        .clone()
+        .expect("a connector target");
+    assert_eq!(target.connector, "sentry");
+    assert_eq!(
+        target.remote_name, "search_issues",
+        "the executor calls the tool the model named, not the wrapper"
+    );
+    assert_eq!(target.kind, ConnectorToolKind::Call);
+    assert_eq!(
+        agg.state.tool_call("tc-1").unwrap().arguments,
+        r#"{"tool":"search_issues","arguments":{"q":"boom"}}"#,
+        "the call is recorded as the model made it; the wrapper is unwrapped on the wire"
+    );
+}
+
+#[test]
+fn call_tool_refuses_a_name_the_filter_removed_and_never_dials() {
+    let mut agg = create_session_with_config(
+        "sess-1",
+        "tenant-a",
+        "user-1",
+        Some(AgentConfig {
+            mcp: vec![McpServer {
+                id: "sentry".to_string(),
+                tools: Some(McpTools {
+                    exclude: vec!["resolve_*".to_string()],
+                    discovery: Some(ToolDiscovery::Search),
+                    ..Default::default()
+                }),
+                auth_failure: Default::default(),
+            }],
+            ..agent_config("m1")
+        }),
+    );
+    settle_sync(&mut agg, "sentry", &["search_issues", "resolve_issue"]);
+
+    call(
+        &mut agg,
+        "tc-1",
+        "sentry__call_tool",
+        r#"{"tool":"resolve_issue","arguments":{}}"#,
+    );
+    let LocalAnswer::Error(message) = agg
+        .state
+        .local_connector_answer("tc-1")
+        .expect("the engine answers this one")
+    else {
+        panic!("a refused name is an error, not a result");
+    };
+    assert!(
+        message.contains("resolve_issue"),
+        "the message names what the model asked for: {message}"
+    );
+    assert!(
+        message.contains("search_issues"),
+        "and what it could have asked for: {message}"
+    );
+    assert!(
+        agg.state
+            .tool_call("tc-1")
+            .unwrap()
+            .target
+            .as_ref()
+            .unwrap()
+            .remote_name
+            .is_empty(),
+        "an empty remote name is what keeps the connection out of it"
+    );
+}
+
+#[test]
+fn a_searched_connector_still_routes_an_unknown_name_to_the_worker() {
+    let agg = session_with_searched_connector("sentry", &["search_issues"]);
+    assert_eq!(
+        agg.state.tool_handler_for("sentry__search_issues"),
+        ToolHandler::Worker,
+        "the connection's own names are not offered, so one is not the engine's to run"
     );
 }
 

@@ -373,8 +373,33 @@ pub struct ConnectorTool {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<Value>,
     pub connector: String,
+    /// The protocol of the connection, not of this tool: the engine's own tools
+    /// carry `Mcp` whether or not they dial it.
     pub via: ConnectorProtocol,
     pub remote_name: String,
+    #[serde(default, skip_serializing_if = "ConnectorToolKind::is_remote")]
+    pub kind: ConnectorToolKind,
+}
+
+/// What the engine does with a call. `Find` and `Call` are the engine's own
+/// tools, and neither has a `remote_name`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(title = "ConnectorToolKind")]
+pub enum ConnectorToolKind {
+    /// Call `remote_name` on the connection.
+    #[default]
+    Remote,
+    /// Search the recorded offer. This reaches nothing.
+    Find,
+    /// Run the tool the arguments name.
+    Call,
+}
+
+impl ConnectorToolKind {
+    pub fn is_remote(&self) -> bool {
+        matches!(self, Self::Remote)
+    }
 }
 
 /// How the engine reaches a connection. Internal: the config says which
@@ -424,9 +449,12 @@ impl AuthFailure {
     }
 }
 
-/// An MCP server's tool filter. Applied in order — capability predicates, then
-/// `include`, then `exclude` — and only ever narrowing, so a filter can never
-/// widen what the connection grants.
+/// What the model sees of one connection, for one agent: which tools, and how
+/// they reach the model.
+///
+/// The filter is applied in order — capability predicates, then `include`, then
+/// `exclude` — and only ever narrowing, so a filter can never widen what the
+/// connection grants. `discovery` runs after it and removes nothing.
 ///
 /// `include`/`exclude` are globs matched against the tool's name on the
 /// connection, the name its own documentation uses, not the prefixed name the
@@ -446,6 +474,24 @@ pub struct McpTools {
     pub non_destructive: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotent: Option<bool>,
+    /// How the surviving tools reach the model. Absent ⇒ [`ToolDiscovery::All`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery: Option<ToolDiscovery>,
+}
+
+/// How a connection's tools reach the model.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(title = "ToolDiscovery")]
+pub enum ToolDiscovery {
+    /// One definition for each tool the filter kept.
+    #[default]
+    All,
+    /// Two definitions for the whole connection: `<id>__find_tools` and
+    /// `<id>__call_tool`. The pair is fixed for the session, and the provider
+    /// keys its cache on the front of the request, so the cache survives a find
+    /// at turn thirty.
+    Search,
 }
 
 /// A sub-agent the model can delegate to. Named by `id` (the child agent to spawn,

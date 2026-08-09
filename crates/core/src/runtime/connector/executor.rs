@@ -8,7 +8,7 @@ use crate::connectors::{ConnectorError, ToolOutcome};
 use crate::providers::memory_queue::TaskQueue;
 use crate::runtime::event_store::EventStore;
 use crate::runtime::session::command::{CommandPayload, Outcome, SettleError};
-use crate::runtime::session::state::EffectKind;
+use crate::runtime::session::state::{EffectKind, LocalAnswer};
 use crate::runtime::session::{execute, ConflictRetry, ExecuteInput};
 use crate::runtime::span::SpanContext;
 use crate::runtime::Caller;
@@ -110,6 +110,52 @@ async fn handle_task(store: &dyn EventStore, connections: &Connections, task: Co
                 command,
                 span,
                 "connector_call",
+            )
+            .await;
+        }
+
+        // Answered here, not at dispatch, so that a dispatch stays the marker
+        // it is for every other kind and one seam settles every tool call.
+        ConnectorTask::Answer {
+            session_id,
+            tenant_id,
+            tool_call_id,
+            attempt,
+            span,
+            ..
+        } => {
+            let session = match store.load(&tenant_id, &session_id).await {
+                Ok(session) => session,
+                Err(err) => {
+                    tracing::error!(
+                        session_id = %session_id,
+                        error = %err,
+                        "failed to load session to answer a connector tool"
+                    );
+                    return;
+                }
+            };
+            let Some(answer) = session.state.local_connector_answer(&tool_call_id) else {
+                tracing::error!(
+                    session_id = %session_id,
+                    tool_call_id = %tool_call_id,
+                    "no local answer for a call routed to the engine"
+                );
+                return;
+            };
+            let outcome = match answer {
+                LocalAnswer::Result(result) => Outcome::Tool { result },
+                LocalAnswer::Error(message) => {
+                    SettleError::new(ErrorInfo::new(ErrorCode::HandlerError, message), false).into()
+                }
+            };
+            submit(
+                store,
+                &session_id,
+                &tenant_id,
+                CommandPayload::settle(EffectKind::ToolCall, tool_call_id, Some(attempt), outcome),
+                span,
+                "connector_answer",
             )
             .await;
         }

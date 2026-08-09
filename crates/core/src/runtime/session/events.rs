@@ -7,8 +7,9 @@ use super::decision::{LlmHandler, ToolHandler, Trigger};
 use crate::connectors::{AuthNeed, RemoteTool};
 pub use crate::protocol::EffectKind;
 use crate::protocol::{
-    AgentConfig, DraftMessage, ErrorInfo, InterruptOrigin, LlmFormat, LlmRequest, LlmResponse,
-    Message, MessageTree, NewMessage, RetryPolicy, SessionOwner, WorkerState,
+    AgentConfig, ConnectorToolKind, DraftMessage, ErrorInfo, InterruptOrigin, LlmFormat,
+    LlmRequest, LlmResponse, Message, MessageTree, NewMessage, RetryPolicy, SessionOwner,
+    WorkerState,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,7 +264,11 @@ pub struct SubAgentErrored {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConnectorTarget {
     pub connector: String,
+    /// Empty for a `find_tools`, and for a `call_tool` whose name the filter
+    /// refused. An empty name is what keeps the connection out of the call.
     pub remote_name: String,
+    #[serde(default)]
+    pub kind: ConnectorToolKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
