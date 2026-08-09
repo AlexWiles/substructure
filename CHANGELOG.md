@@ -9,6 +9,14 @@ together at the same version.
 
 ## [Unreleased]
 
+### Changed
+
+- Improve MCP auth failure handling.
+
+### Added
+
+- Slackbot prompts for MCP reauth by default. Overrideable in config.
+
 ## [0.3.1] - 2026-08-07
 
 ### Added

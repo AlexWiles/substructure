@@ -151,6 +151,28 @@ result. Work after the resume goes into a new message.
 For the worker side, see the
 [`node-hono-tool-approval`](../examples/node-hono-tool-approval) example.
 
+### A message while a prompt is open
+
+The engine refuses a message while the session is parked, because the prompt
+owes an answer first. The bot posts the open question again rather than saying
+nothing, so a link in it comes back with it.
+
+## Authorizing a connection
+
+The bot raises a prompt of its own when a connection has no usable credential.
+It names the connection, says what happened to its credential, and links the
+page a person authorizes it on. See
+[Connectors](./40-connectors.md#when-a-credential-stops-working).
+
+The link is there when the file has a `[remote]` pinned to a project on the
+hosted cloud, which is the only deployment whose dashboard address follows from
+its API's. Anywhere else the prompt names `subs mcp login <id>`, which is what
+an operator runs where the engine is.
+
+`Retry` fetches the connection's tools again. The turn continues with them, or
+the same question comes back if the credential is still not good. The prompt is
+one per connection however many times a decision runs, so nobody is asked twice.
+
 ## Customizing what the bot shows
 
 Every Slack message goes through the decision loop. A decision response can

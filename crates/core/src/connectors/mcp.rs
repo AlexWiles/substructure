@@ -10,6 +10,7 @@
 //! opened — nothing in the engine consumes server-initiated requests.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE};
@@ -18,7 +19,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
-use super::{ConnectorError, RemoteTool, ToolAnnotations, ToolOutcome};
+use super::{AuthNeed, ConnectorError, CredentialSource, RemoteTool, ToolAnnotations, ToolOutcome};
 
 /// The revision we negotiate. The 2026-07-28 revision drops the handshake and
 /// the session id entirely, so moving to it deletes `SessionState` rather than
@@ -34,7 +35,7 @@ const MAX_TOOL_PAGES: usize = 50;
 pub struct McpClient {
     http: reqwest::Client,
     endpoint: String,
-    auth: HeaderMap,
+    auth: Arc<dyn CredentialSource>,
     next_id: AtomicU64,
     session: Mutex<SessionState>,
 }
@@ -48,9 +49,12 @@ struct SessionState {
 }
 
 impl McpClient {
-    /// `auth` carries the credential headers for this connection, already
-    /// resolved. The client never reads a token from anywhere else.
-    pub fn new(http: reqwest::Client, endpoint: impl Into<String>, auth: HeaderMap) -> Self {
+    /// The client reads a token from nowhere else.
+    pub fn new(
+        http: reqwest::Client,
+        endpoint: impl Into<String>,
+        auth: Arc<dyn CredentialSource>,
+    ) -> Self {
         Self {
             http,
             endpoint: endpoint.into(),
@@ -181,7 +185,7 @@ impl McpClient {
         let mut req = self
             .http
             .post(&self.endpoint)
-            .headers(self.auth.clone())
+            .headers(self.auth.headers().await?)
             // The spec requires both: the server picks one to answer with.
             .header(ACCEPT, "application/json, text/event-stream")
             .json(body);
@@ -207,9 +211,11 @@ impl McpClient {
             });
         }
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-            return Err(ConnectorError::unauthorized(format!(
-                "connection rejected the credential ({status})"
-            ))
+            // The registry knows which credential went out, and corrects this.
+            return Err(ConnectorError::unauthorized(
+                AuthNeed::Reauthorize,
+                format!("connection rejected the credential ({status})"),
+            )
             .into());
         }
         // A notification is answered with 202 and no body.
@@ -618,6 +624,15 @@ mod tests {
         }
     }
 
+    struct Fixed(HeaderMap);
+
+    #[async_trait::async_trait]
+    impl CredentialSource for Fixed {
+        async fn headers(&self) -> Result<HeaderMap, ConnectorError> {
+            Ok(self.0.clone())
+        }
+    }
+
     async fn serve(mock: Arc<Mock>) -> String {
         let app = Router::new().route("/mcp", post(handle)).with_state(mock);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -633,7 +648,7 @@ mod tests {
         McpClient::new(
             reqwest::Client::new(),
             url,
-            auth_headers(None, "tok").unwrap(),
+            Arc::new(Fixed(auth_headers(None, "tok").unwrap())),
         )
     }
 
@@ -756,9 +771,11 @@ mod tests {
         });
         let client = client_for(mock).await;
         let err = client.list_tools().await.unwrap_err();
-        assert!(
-            err.needs_reauth,
-            "401 is a re-auth signal, not a plain failure"
+        assert_eq!(
+            err.auth,
+            Some(AuthNeed::Reauthorize),
+            "401 is a re-auth signal, not a plain failure; the registry refines it \
+             against what the file declares"
         );
         assert!(
             !err.retryable,
@@ -771,7 +788,7 @@ mod tests {
         let client = McpClient::new(
             reqwest::Client::new(),
             "http://127.0.0.1:1/mcp",
-            HeaderMap::new(),
+            Arc::new(Fixed(HeaderMap::new())),
         );
         let err = client.list_tools().await.unwrap_err();
         assert!(err.retryable);

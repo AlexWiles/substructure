@@ -683,6 +683,42 @@ impl SlackBot {
         }
     }
 
+    /// The prompt's own words, so a link in it comes back too.
+    fn still_waiting(payload: &Value) -> Option<String> {
+        let display = display_of(payload)?;
+        Some(format!("Still waiting on this:\n\n{}", display.message))
+    }
+
+    /// The buttons stay on the message that has them, because two sets are two
+    /// ways to answer one prompt.
+    async fn remind_of_prompt(
+        &self,
+        ws: &Workspace,
+        thread: &Thread,
+        session_id: &str,
+        turn_id: Option<String>,
+    ) {
+        let Some(ctx) = self.ctx.get() else { return };
+        let Ok(session) = ctx.get_session(&ws.tenant_id, session_id).await else {
+            return;
+        };
+        let head = session.state.head_id.clone();
+        let Some(open) = session.state.active_interrupt_for(head.as_deref()) else {
+            return;
+        };
+        let Some(text) = Self::still_waiting(&open.payload) else {
+            return;
+        };
+        let meta = ReplyMeta {
+            turn_id,
+            session_id: Some(session_id.to_string()),
+            ..Default::default()
+        };
+        if let Err(e) = self.post(ws, thread, &text, &meta).await {
+            tracing::warn!(error = %e, %session_id, "slack: failed to repeat the open prompt");
+        }
+    }
+
     async fn submit(&self, ctx: &ChannelContext, ws: &Workspace, inbound: Inbound) {
         // Before the thread fetch: a channel nobody answers in costs no API
         // calls. A click is deliberately not gated the same way — a prompt
@@ -769,14 +805,15 @@ impl SlackBot {
             .await;
         match submitted {
             Ok(_) => {}
-            // A true redelivery of a message already taken, or a message while
-            // a prompt is open. Nothing to say: the first copy is queued or
-            // running, and an interrupt owes the user an answer first.
+            // A redelivery. The first copy is queued or running.
             Err(RuntimeError::Session(
-                SessionError::TurnAlreadyActive { .. }
-                | SessionError::TurnAlreadyCompleted { .. }
-                | SessionError::SessionInterrupted,
+                SessionError::TurnAlreadyActive { .. } | SessionError::TurnAlreadyCompleted { .. },
             )) => {}
+            // The message was refused, so silence leaves a person waiting.
+            Err(RuntimeError::Session(SessionError::SessionInterrupted)) => {
+                self.remind_of_prompt(ws, &thread, &session_id, turn_id)
+                    .await;
+            }
             Err(e) => {
                 let meta = ReplyMeta {
                     turn_id,
@@ -2145,6 +2182,23 @@ mod tests {
             channel: "C1".into(),
             ts: "1.0".into(),
         }
+    }
+
+    #[test]
+    fn a_refused_message_gets_the_open_prompt_back() {
+        let text = SlackBot::still_waiting(&serde_json::json!({
+            "message": "*sentry* needs to be authorized again.\n\n<https://app.test/x|Authorize>",
+            "metadata": { "options": [{ "label": "Retry", "value": {} }] },
+        }))
+        .expect("a prompt to repeat");
+
+        assert!(text.starts_with("Still waiting on this:"), "got {text}");
+        assert!(text.contains("https://app.test/x"), "got {text}");
+    }
+
+    #[test]
+    fn an_interrupt_with_nothing_to_say_is_not_repeated() {
+        assert!(SlackBot::still_waiting(&serde_json::json!({ "metadata": {} })).is_none());
     }
 
     #[tokio::test]

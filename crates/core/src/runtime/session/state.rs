@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 use super::decision::{LlmHandler, ToolHandler, Trigger};
 use super::events::*;
-use crate::connectors::{filter, RemoteTool};
+use crate::connectors::{filter, AuthNeed, RemoteTool};
 use crate::protocol::{ConnectorTool, Handler};
 use rust_decimal::Decimal;
 
@@ -121,6 +121,21 @@ impl EffectTracking {
             self.status
         );
         self.status = next;
+    }
+
+    /// Start a settled effect over, with its retry budget whole again. Not a
+    /// retry: the cause of every failed attempt has been corrected.
+    ///
+    /// `Completed` is the usual start. A fetch that succeeded proves only that
+    /// the credential was good then. Only a connector fetch takes this.
+    pub fn restart(&mut self, now: DateTime<Utc>) {
+        self.move_to(
+            EffectStatus::Pending,
+            &[EffectStatus::Failed, EffectStatus::Completed],
+        );
+        self.retry = RetryState::default();
+        self.deadline = self.retry_policy.attempt_deadline(now);
+        self.started_at = Some(now);
     }
 
     /// Re-armed for another attempt: a retry, or a re-request of work still queued.
@@ -471,8 +486,8 @@ pub struct ConnectorSyncState {
     /// terminally failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    #[serde(default)]
-    pub needs_reauth: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<AuthNeed>,
 }
 
 /// One anchored document write. Both typed channels — worker state and agent
@@ -1319,14 +1334,18 @@ impl SessionState {
                             tools: Vec::new(),
                             prefix: None,
                             error: None,
-                            needs_reauth: false,
+                            auth: None,
                         }),
                     );
                 }
                 // A retry re-arms the same entry rather than starting a new one:
-                // one connection, one fetch, however many attempts.
+                // one connection, one fetch, however many attempts. A settled
+                // effect starts over, because its attempts are spent.
                 if let Some(e) = self.effect_mut(EffectKind::ConnectorSync, &p.id) {
-                    e.tracking.dispatch(now);
+                    match e.tracking.status() {
+                        EffectStatus::Failed | EffectStatus::Completed => e.tracking.restart(now),
+                        _ => e.tracking.dispatch(now),
+                    }
                 }
             }
             EventPayload::ConnectorSyncCompleted(p) => {
@@ -1336,7 +1355,7 @@ impl SessionState {
                         sync.tools = p.tools.clone();
                         sync.prefix = p.prefix.clone();
                         sync.error = None;
-                        sync.needs_reauth = false;
+                        sync.auth = None;
                     }
                 }
             }
@@ -1345,8 +1364,17 @@ impl SessionState {
                     e.tracking.record_error(p.retryable, now);
                     if let Some(sync) = e.connector_mut() {
                         sync.error = Some(p.error.message.clone());
-                        sync.needs_reauth = p.needs_reauth;
+                        sync.auth = p.auth;
                     }
+                }
+            }
+            // The fetch does not change. Only the credential is not valid.
+            EventPayload::ConnectorAuthFailed(p) => {
+                if let Some(sync) = self
+                    .effect_mut(EffectKind::ConnectorSync, &p.id)
+                    .and_then(EffectState::connector_mut)
+                {
+                    sync.auth = Some(p.auth);
                 }
             }
             // Append-only, like the tree: `resolve_on_path` scans newest-first,

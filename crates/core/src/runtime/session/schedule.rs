@@ -538,6 +538,7 @@ mod tests {
             mcp: vec![McpServer {
                 id: connection.to_string(),
                 tools: None,
+                auth_failure: Default::default(),
             }],
         }
     }
@@ -589,7 +590,7 @@ mod tests {
                 tools: vec![],
                 prefix: None,
                 error: None,
-                needs_reauth: false,
+                auth: None,
             }),
         ));
         add_llm(&mut s, "call-1", EffectStatus::Queued);

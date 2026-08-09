@@ -268,6 +268,7 @@ type ClientContext = {
 | `message.send` | Write a message into a session. | Any trigger. |
 | `interrupt` | Pause the active branch. | Any trigger. |
 | `interrupt.resolve` | Clear an open interrupt and resume. | Any trigger. |
+| `connector.sync` | Fetch a connection's tools again. | Any trigger. |
 | `done` | End the turn. | Any trigger. |
 
 ```typescript
@@ -338,6 +339,7 @@ type Action =
           payload?: unknown
       }
     | { type: "interrupt.resolve"; interrupt_id: string; payload?: unknown }
+    | { type: "connector.sync"; id: string }
     | { type: "done"; data?: unknown }
 ```
 
@@ -346,6 +348,12 @@ over the current conversation.
 
 `llm.call` takes an `llm` to send one call to another block. The config stays as
 it is. See [LLMs](./70-llms.md).
+
+`connector.sync` names a connection the config in force already names. Use it
+after a person corrects a credential: the fetch runs again with a full retry
+budget, and the tools it returns replace the ones the session held. A decision
+that waits on the connection is delivered after the fetch settles. See
+[Connectors](./40-connectors.md#when-a-credential-stops-working).
 
 ## Errors
 

@@ -106,6 +106,22 @@
         "title": "AudioData",
         "type": "object"
       },
+      "AuthFailure": {
+        "description": "What a session does when a connection needs a person to authorize it. It\nbelongs to the pair: one credential serves an agent that stops and asks, and\nan agent that has nobody to ask.",
+        "oneOf": [
+          {
+            "const": "interrupt",
+            "description": "Stop and ask. A channel that cannot show the question degrades instead.",
+            "type": "string"
+          },
+          {
+            "const": "degrade",
+            "description": "Go on without this connection's tools.",
+            "type": "string"
+          }
+        ],
+        "title": "AuthFailure"
+      },
       "ClientContext": {
         "additionalProperties": false,
         "description": "Inputs a client declares on its run (the AG-UI `tools`/`context`/`state`/\n`forwardedProps`), forwarded to the worker on the `client.messages` decision.\n`tools` are the browser's frontend tools, normalized to client-handled\n[`AgentTool`]s; the engine layers them onto the proposed config by default, and\nthe worker may override (e.g. whitelist) by returning its own `agent`.",
@@ -628,6 +644,24 @@
             "required": [
               "type",
               "interrupt_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Fetch a connection's tools again, after a person replaced its\ncredential.",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "connector.sync",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "id"
             ],
             "type": "object"
           },
@@ -1473,6 +1507,9 @@
         "additionalProperties": false,
         "description": "An MCP server the agent draws tools from. `id` resolves against the engine's\nconnection registry — locally from `[mcp]` in `substructure.toml`, in the\ncloud from the connections an admin granted this app. The worker never names\na URL or a credential.",
         "properties": {
+          "auth_failure": {
+            "$ref": "#/components/schemas/AuthFailure"
+          },
           "id": {
             "type": "string"
           },

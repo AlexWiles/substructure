@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use super::mcp::auth_headers;
 use super::oauth::{refresh, require_secure, same_origin, OauthError, Tokens};
 use super::registry::{AuthKind, ConnectionSpec, CredentialResolver};
-use super::ConnectorError;
+use super::{AuthNeed, ConnectorError};
 
 /// What the store holds for one connection.
 ///
@@ -55,6 +55,14 @@ pub trait CredentialStore: Send + Sync {
     ) -> Result<(), String>;
 }
 
+/// What the slot holds. An empty slot is a failure to one caller below and not
+/// to the other.
+enum Held {
+    Grant(Tokens),
+    Empty,
+    Wrong(&'static str),
+}
+
 /// Resolves a connection's stored credential to headers.
 ///
 /// Refresh happens here rather than at login: a long-running agent outlives its
@@ -79,58 +87,103 @@ impl StoredCredentials {
         }
     }
 
-    /// A live access token for one OAuth connection, refreshed if it is close
-    /// to expiry. `url` is where the connection currently points, which the
-    /// stored credential has to have been issued for.
-    pub async fn access_token(
+    async fn access_token(
         &self,
         tenant_id: &str,
         connection_id: &str,
         url: &str,
     ) -> Result<Option<String>, OauthError> {
-        let tokens = match self.store.get(tenant_id, connection_id).await {
-            Some(Credential::Oauth(tokens)) => *tokens,
-            Some(Credential::Static { .. }) => {
-                return Err(OauthError::Token(
-                    "a static token is stored for this connection, not an OAuth grant".into(),
-                ))
-            }
-            None => return Ok(None),
+        let tokens = match self.grant(tenant_id, connection_id, url).await? {
+            Held::Grant(tokens) => tokens,
+            Held::Empty => return Ok(None),
+            Held::Wrong(why) => return Err(OauthError::Unrenewable(why.into())),
         };
-        // The id is the key, so an edited `url` would otherwise send one
-        // server's token to another. `discover` binds the two at login, which
-        // makes this the same check read back.
-        if !same_origin(&tokens.resource, url) {
-            return Err(OauthError::Token(format!(
-                "the stored credential was issued for `{}`, not `{url}`",
-                tokens.resource
-            )));
-        }
         if !tokens.stale() {
             return Ok(Some(tokens.access_token));
         }
         if !tokens.refreshable() {
-            return Err(OauthError::Token(
+            return Err(OauthError::Unrenewable(
                 "the access token expired and the server issued no refresh token".into(),
             ));
         }
+        self.renew(tenant_id, connection_id, &tokens)
+            .await
+            .map(Some)
+    }
 
+    /// Renew the grant whether or not it looks expired, because the server
+    /// refused what we sent. A server can revoke a token early, thus a refusal
+    /// is a better signal than the expiry we recorded.
+    ///
+    /// `Ok(false)` if there is nothing to renew.
+    async fn refresh_now(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        url: &str,
+    ) -> Result<bool, OauthError> {
+        let Held::Grant(tokens) = self.grant(tenant_id, connection_id, url).await? else {
+            return Ok(false);
+        };
+        if !tokens.refreshable() {
+            return Ok(false);
+        }
+        self.renew(tenant_id, connection_id, &tokens).await?;
+        Ok(true)
+    }
+
+    /// What the slot holds, checked against where the connection now points.
+    /// The id is the key, so an edited `url` would otherwise send one server's
+    /// token to another.
+    async fn grant(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        url: &str,
+    ) -> Result<Held, OauthError> {
+        let tokens = match self.store.get(tenant_id, connection_id).await {
+            Some(Credential::Oauth(tokens)) => *tokens,
+            Some(Credential::Static { .. }) => {
+                return Ok(Held::Wrong(
+                    "a static token is stored for this connection, not an OAuth grant",
+                ))
+            }
+            None => return Ok(Held::Empty),
+        };
+        if !same_origin(&tokens.resource, url) {
+            return Err(OauthError::Unrenewable(format!(
+                "the stored credential was issued for `{}`, not `{url}`",
+                tokens.resource
+            )));
+        }
+        Ok(Held::Grant(tokens))
+    }
+
+    /// Exchange `held` for a new access token, one caller at a time.
+    async fn renew(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        held: &Tokens,
+    ) -> Result<String, OauthError> {
         let gate = {
-            let mut held = self.refreshing.lock().await;
-            held.entry(format!("{tenant_id}\u{0}{connection_id}"))
+            let mut gates = self.refreshing.lock().await;
+            gates
+                .entry(format!("{tenant_id}\u{0}{connection_id}"))
                 .or_default()
                 .clone()
         };
         let _guard = gate.lock().await;
 
-        // Another caller may have refreshed while we waited for the gate.
+        // Adopt a token another caller landed. To refresh again would retire
+        // the one they just wrote.
         if let Some(Credential::Oauth(current)) = self.store.get(tenant_id, connection_id).await {
-            if !current.stale() {
-                return Ok(Some(current.access_token));
+            if current.access_token != held.access_token && !current.stale() {
+                return Ok(current.access_token);
             }
         }
 
-        let next = refresh(&self.http, &tokens).await?;
+        let next = refresh(&self.http, held).await?;
         self.store
             .put(
                 tenant_id,
@@ -139,7 +192,7 @@ impl StoredCredentials {
             )
             .await
             .map_err(OauthError::Token)?;
-        Ok(Some(next.access_token))
+        Ok(next.access_token)
     }
 
     /// The grant a connection holds, as headers, or nothing where the slot is
@@ -161,9 +214,7 @@ impl StoredCredentials {
             // A grant that cannot be renewed is reported even where the file
             // declared nothing: the connection was authorized once, so falling
             // back to sending nothing would lose that.
-            Err(e) => Err(ConnectorError::unauthorized(format!(
-                "connection `{id}` needs authorizing again: run `subs mcp login {id}` ({e})"
-            ))),
+            Err(e) => Err(refresh_failed(id, &e)),
         }
     }
 
@@ -181,9 +232,10 @@ impl StoredCredentials {
                 auth_headers(spec.header.as_deref(), &token)
             }
             Some(Credential::Oauth(_)) => Err(mismatch(id, AuthKind::Token)),
-            None => Err(ConnectorError::unauthorized(format!(
-                "connection `{id}` has no token: run `subs mcp set-token {id}`"
-            ))),
+            None => Err(ConnectorError::unauthorized(
+                AuthNeed::NeverAuthorized,
+                format!("connection `{id}` has no token: run `subs mcp set-token {id}`"),
+            )),
         }
     }
 }
@@ -205,9 +257,10 @@ impl CredentialResolver for StoredCredentials {
             Some(AuthKind::Token) => self.static_headers(tenant_id, id, spec).await,
             Some(AuthKind::Oauth) => match self.oauth_headers(tenant_id, id, spec).await? {
                 Some(headers) => Ok(headers),
-                None => Err(ConnectorError::unauthorized(format!(
-                    "connection `{id}` is not authorized: run `subs mcp login {id}`"
-                ))),
+                None => Err(ConnectorError::unauthorized(
+                    AuthNeed::NeverAuthorized,
+                    format!("connection `{id}` is not authorized: run `subs mcp login {id}`"),
+                )),
             },
             None => Ok(self
                 .oauth_headers(tenant_id, id, spec)
@@ -215,6 +268,40 @@ impl CredentialResolver for StoredCredentials {
                 .unwrap_or_default()),
         }
     }
+
+    async fn refresh(
+        &self,
+        tenant_id: &str,
+        id: &str,
+        spec: &ConnectionSpec,
+    ) -> Result<bool, ConnectorError> {
+        match spec.auth {
+            Some(AuthKind::None) | Some(AuthKind::Token) => Ok(false),
+            _ => self
+                .refresh_now(tenant_id, id, &spec.url)
+                .await
+                .map_err(|e| refresh_failed(id, &e)),
+        }
+    }
+}
+
+/// A refresh that failed, as either a spent grant or a passing fault. Logging
+/// in corrects every spent case.
+fn refresh_failed(id: &str, e: &OauthError) -> ConnectorError {
+    if !e.is_spent() {
+        return ConnectorError::retryable(format!("connection `{id}`: token refresh failed ({e})"));
+    }
+    let what = match e {
+        OauthError::Refused { code, .. } if code == "invalid_grant" => {
+            "the server retired its refresh token"
+        }
+        OauthError::Refused { .. } => "the server no longer knows this client",
+        _ => "its grant cannot be renewed",
+    };
+    ConnectorError::unauthorized(
+        AuthNeed::Reauthorize,
+        format!("connection `{id}`: {what}. Run `subs mcp login {id}` ({e})"),
+    )
 }
 
 fn secure(url: &str) -> Result<(), ConnectorError> {
@@ -226,10 +313,13 @@ fn mismatch(id: &str, declared: AuthKind) -> ConnectorError {
         AuthKind::Token => ("an OAuth grant", format!("subs mcp set-token {id}")),
         _ => ("a static token", format!("subs mcp login {id}")),
     };
-    ConnectorError::unauthorized(format!(
-        "connection `{id}` declares `auth = \"{}\"` but holds {holds}: run `{fix}`",
-        declared.as_str()
-    ))
+    ConnectorError::unauthorized(
+        AuthNeed::NeverAuthorized,
+        format!(
+            "connection `{id}` declares `auth = \"{}\"` but holds {holds}: run `{fix}`",
+            declared.as_str()
+        ),
+    )
 }
 
 #[cfg(test)]
@@ -315,9 +405,10 @@ mod tests {
             .resolve("t", "github", &spec(Some(AuthKind::Token), None))
             .await
             .unwrap_err();
-        assert!(
-            err.needs_reauth,
-            "an unset credential takes the re-auth path"
+        assert_eq!(
+            err.auth,
+            Some(AuthNeed::NeverAuthorized),
+            "an empty slot was never authorized; nothing is spent and nothing needs replacing"
         );
         assert!(err.to_string().contains("subs mcp set-token github"));
     }
@@ -328,6 +419,40 @@ mod tests {
             .resolve("t", "sentry", &spec(Some(AuthKind::Oauth), None))
             .await
             .unwrap_err();
+        assert!(
+            err.to_string().contains("subs mcp login sentry"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn a_passing_fault_at_the_token_endpoint_is_not_a_dead_grant() {
+        let transient = refresh_failed("sentry", &OauthError::Token("connection reset".into()));
+        assert_eq!(transient.auth, None);
+        assert!(transient.retryable);
+
+        let dead = refresh_failed(
+            "sentry",
+            &OauthError::Refused {
+                code: "invalid_grant".into(),
+                description: None,
+            },
+        );
+        assert_eq!(dead.auth, Some(AuthNeed::Reauthorize));
+        assert!(!dead.retryable);
+        assert!(dead.to_string().contains("retired its refresh token"));
+    }
+
+    #[test]
+    fn a_forgotten_client_registration_asks_for_the_same_correction() {
+        let err = refresh_failed(
+            "sentry",
+            &OauthError::Refused {
+                code: "invalid_client".into(),
+                description: None,
+            },
+        );
+        assert_eq!(err.auth, Some(AuthNeed::Reauthorize));
         assert!(
             err.to_string().contains("subs mcp login sentry"),
             "got {err}"

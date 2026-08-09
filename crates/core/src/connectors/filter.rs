@@ -267,6 +267,7 @@ mod tests {
         McpServer {
             id: id.to_string(),
             tools,
+            auth_failure: Default::default(),
         }
     }
 

@@ -86,14 +86,24 @@ impl KindSpec for ToolSpec {
 
     /// When the retry policy is exhausted the error is the result: the model
     /// sees it as the tool's answer and decides what to do.
+    ///
+    /// A refused credential goes to the connection. The fetch that offered this
+    /// tool was successful, thus only the connection can hold it.
     fn terminal(&self, state: &SessionState, id: &str, e: &SettleError) -> Vec<EventPayload> {
-        vec![decision_queued(Trigger::ToolFinished {
+        let mut events = vec![decision_queued(Trigger::ToolFinished {
             id: id.to_string(),
             ok: false,
             name: name_of(state, id),
             result: None,
             error: Some(e.error.clone()),
-        })]
+        })];
+        if let (Some(auth), Some(target)) = (e.auth, connector_target(state, id)) {
+            events.push(EventPayload::ConnectorAuthFailed(ConnectorAuthFailed {
+                id: target,
+                auth,
+            }));
+        }
+        events
     }
 
     fn dispatch(&self, state: &SessionState, id: &str) -> Vec<EventPayload> {
@@ -143,6 +153,13 @@ fn name_of(state: &SessionState, id: &str) -> String {
         .tool_call(id)
         .map(|t| t.name.clone())
         .unwrap_or_default()
+}
+
+fn connector_target(state: &SessionState, id: &str) -> Option<String> {
+    state
+        .tool_call(id)
+        .and_then(|t| t.target.as_ref())
+        .map(|t| t.connector.clone())
 }
 
 /// A tool result: record it and queue `tool.finished`. Also the client-view

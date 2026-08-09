@@ -186,8 +186,54 @@ The engine fetches a connection's tool list once per session, the first time a
 config names it. It never refreshes the list during a session, so the model
 never calls a tool that has disappeared.
 
-The turn waits while a fetch runs. If the fetch fails, the turn runs without
-those tools.
+The turn waits while a fetch runs. If the fetch fails for a reason that is not
+the credential, the turn runs without those tools.
+
+## When a credential stops working
+
+An access token outlives no long session. The engine renews one before it
+expires, and renews it again when a server refuses it, because a server can
+revoke a token before the expiry it gave. It then tries the call again.
+
+A registration the server has forgotten is repaired the same way. None of this
+reaches you.
+
+What a person must do is left when that fails, and it is one of three things.
+
+| The engine found | A person must |
+| --- | --- |
+| Nothing stored | Authorize the connection. |
+| A grant the server refuses | Authorize it again. |
+| A static token the server refuses | Set a new one with `subs mcp set-token`. |
+
+The session then stops and asks. In Slack the bot posts the question in the
+thread with a link, and a `Retry` button that fetches the tools again once a
+person has authorized it. See [Slack](./130-slack.md#authorizing-a-connection).
+
+Stopping is the default because the alternative is worse: an agent that answers
+from tools it no longer has reads exactly like one that used them.
+
+An agent with nobody to ask says so instead. Set `auth_failure` on the entry
+that names the connection.
+
+```toml title="substructure.toml"
+[agent.support]
+mcp = ["sentry"]                                       # stops and asks
+
+[agent.digest]
+mcp = [{ id = "sentry", auth_failure = "degrade" }]    # runs without it
+```
+
+Use `degrade` for an agent that runs on a schedule, or anywhere no person is
+watching. The turn goes on, the connection's tools are not offered, and the
+tool error tells the model the connection needs authorizing, so it reports the
+gap rather than answering around it.
+
+A session no channel can show a question in degrades whatever this says. A
+question nobody can see is a session that stops for good.
+
+A worker can author the fetch itself with the `connector.sync` action, which is
+what the `Retry` button proposes. See [Protocol](./230-protocol.md#actions).
 
 ## Next
 

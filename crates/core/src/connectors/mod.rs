@@ -52,15 +52,33 @@ pub struct ToolOutcome {
     pub is_error: bool,
 }
 
+/// The credential headers for one connection, read for each request. A
+/// credential replaced in the store thus reaches the next request, and the
+/// connector session stays.
+#[async_trait::async_trait]
+pub trait CredentialSource: Send + Sync {
+    async fn headers(&self) -> Result<reqwest::header::HeaderMap, ConnectorError>;
+}
+
+/// What a person must do before a connection operates again. The refresh path
+/// corrects everything else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthNeed {
+    NeverAuthorized,
+    Reauthorize,
+    /// No consent flow can replace a static token. An operator sets a new one.
+    TokenRejected,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConnectorError {
     pub message: String,
     /// Whether another attempt could plausibly succeed. Transport faults and 5xx
     /// are retryable; a rejected credential or an unknown tool is not.
     pub retryable: bool,
-    /// Set when the connection rejected our credential, so the caller can raise
-    /// a re-auth interrupt rather than settling the call as a plain failure.
-    pub needs_reauth: bool,
+    /// Set if the connection refused the credential.
+    pub auth: Option<AuthNeed>,
 }
 
 impl ConnectorError {
@@ -68,7 +86,7 @@ impl ConnectorError {
         Self {
             message: message.into(),
             retryable: false,
-            needs_reauth: false,
+            auth: None,
         }
     }
 
@@ -76,15 +94,15 @@ impl ConnectorError {
         Self {
             message: message.into(),
             retryable: true,
-            needs_reauth: false,
+            auth: None,
         }
     }
 
-    pub fn unauthorized(message: impl Into<String>) -> Self {
+    pub fn unauthorized(need: AuthNeed, message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
             retryable: false,
-            needs_reauth: true,
+            auth: Some(need),
         }
     }
 }

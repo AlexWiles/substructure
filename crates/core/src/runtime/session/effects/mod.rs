@@ -46,7 +46,7 @@ use super::schedule::Dep;
 use super::state::{
     new_call_id, EffectKind, EffectPayload, EffectTracking, QueueEntry, SessionState,
 };
-use crate::connectors::RemoteTool;
+use crate::connectors::{AuthNeed, RemoteTool};
 use crate::protocol::{EffectStatus, ErrorCode, ErrorInfo, LlmResponse};
 use crate::runtime::Caller;
 
@@ -76,13 +76,13 @@ pub enum Outcome {
 }
 
 /// A failed settle: the failure itself, plus what the engine decided about
-/// this attempt. `needs_reauth` is connector-only, absent for every other kind
-/// rather than modelled as its own command.
+/// this attempt. `auth` is connector-only, absent for every other kind rather
+/// than modelled as its own command.
 #[derive(Debug, Clone)]
 pub struct SettleError {
     pub error: ErrorInfo,
     pub retryable: bool,
-    pub needs_reauth: bool,
+    pub auth: Option<AuthNeed>,
 }
 
 impl SettleError {
@@ -90,12 +90,12 @@ impl SettleError {
         Self {
             error,
             retryable,
-            needs_reauth: false,
+            auth: None,
         }
     }
 
-    pub fn reauth(mut self, needs_reauth: bool) -> Self {
-        self.needs_reauth = needs_reauth;
+    pub fn auth(mut self, auth: Option<AuthNeed>) -> Self {
+        self.auth = auth;
         self
     }
 }

@@ -4,7 +4,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use super::decision::{LlmHandler, ToolHandler, Trigger};
-use crate::connectors::RemoteTool;
+use crate::connectors::{AuthNeed, RemoteTool};
 pub use crate::protocol::EffectKind;
 use crate::protocol::{
     AgentConfig, DraftMessage, ErrorInfo, InterruptOrigin, LlmFormat, LlmRequest, LlmResponse,
@@ -42,6 +42,8 @@ pub enum EventPayload {
     ConnectorSyncCompleted(Box<ConnectorSyncCompleted>),
     #[serde(rename = "connector.sync.errored")]
     ConnectorSyncErrored(ConnectorSyncErrored),
+    #[serde(rename = "connector.auth.failed")]
+    ConnectorAuthFailed(ConnectorAuthFailed),
     #[serde(rename = "sub_agent.requested")]
     SubAgentRequested(SubAgentRequested),
     #[serde(rename = "sub_agent.dispatched")]
@@ -217,10 +219,16 @@ pub struct ConnectorSyncErrored {
     pub error: ErrorInfo,
     #[serde(default)]
     pub retryable: bool,
-    /// The connection rejected the credential; a retry cannot help until it is
-    /// replaced.
-    #[serde(default)]
-    pub needs_reauth: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<AuthNeed>,
+}
+
+/// A tool call found that the credential is not valid. The call settles
+/// separately with its own error.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorAuthFailed {
+    pub id: String,
+    pub auth: AuthNeed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
