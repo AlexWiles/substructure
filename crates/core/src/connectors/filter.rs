@@ -90,26 +90,29 @@ pub fn resolve(connector: &McpServer, offered: &[RemoteTool], prefix: Option<&st
 
 /// How what the filter kept is put in front of the model.
 ///
-/// The search tools are always prefixed, even where the connection's tools are
-/// not. Two unprefixed connections would land on one name, [`merge`] would drop
-/// both, and neither connection would be reachable.
+/// A `Search` connection puts no tool of its own in the list. One pair of
+/// search tools stands for every searched connection of the agent, and
+/// [`search_tools`] gives it.
 ///
 /// `oversized` clears under `Search`: `call_tool` carries a name as an
 /// argument, where no name limit applies.
 pub fn discover(connector: &McpServer, resolution: Resolution) -> Resolution {
-    let discovery = connector
-        .tools
-        .as_ref()
-        .and_then(|t| t.discovery)
-        .unwrap_or_default();
-    match discovery {
+    match discovery(connector) {
         ToolDiscovery::All => resolution,
         ToolDiscovery::Search => Resolution {
-            tools: search_tools(&connector.id),
+            tools: Vec::new(),
             oversized: Vec::new(),
             ..resolution
         },
     }
+}
+
+pub fn discovery(connector: &McpServer) -> ToolDiscovery {
+    connector
+        .tools
+        .as_ref()
+        .and_then(|t| t.discovery)
+        .unwrap_or_default()
 }
 
 /// The tool a connection knows as `remote_name`, if the filter kept it.
@@ -133,30 +136,25 @@ pub fn callable<'a>(connector: &McpServer, offered: &'a [RemoteTool]) -> Vec<&'a
         .collect()
 }
 
-pub fn search_tool_name(connector_id: &str, kind: ConnectorToolKind) -> Option<String> {
-    let suffix = match kind {
-        ConnectorToolKind::Find => "find_tools",
-        ConnectorToolKind::Call => "call_tool",
-        ConnectorToolKind::Remote => return None,
-    };
-    Some(format!("{}{SEPARATOR}{suffix}", name_prefix(connector_id)))
-}
+pub const FIND_TOOLS: &str = "find_tools";
+pub const CALL_TOOL: &str = "call_tool";
 
-/// The two tools the engine answers for a connection under `Search`.
+/// The pair the engine answers for every searched connection of one agent.
 ///
-/// An id too long to name both yields neither: the model could then find a tool
-/// and not call it. `report_filter` reports this.
-fn search_tools(connector_id: &str) -> Vec<ConnectorTool> {
+/// One pair, not one for each connection: a model that does not know which
+/// connection holds a tool would otherwise search each one in turn.
+///
+/// Both definitions are constant. Nothing about which connections exist reaches
+/// them, so a connection added during a session does not rewrite the tool list,
+/// and the provider's cache holds. The catalog rides in the answer instead.
+pub fn search_tools() -> Vec<ConnectorTool> {
     let find = ConnectorTool {
-        name: match search_tool_name(connector_id, ConnectorToolKind::Find) {
-            Some(name) => name,
-            None => return Vec::new(),
-        },
-        description: format!(
-            "Search the tools of `{connector_id}`. Returns the name, the description, and the \
-             input schema of each match. Call this before `{connector_id}` work: its tools are \
-             not listed up front."
-        ),
+        name: FIND_TOOLS.to_string(),
+        description: "Search the tools of the connections this agent can reach. Their tools are \
+             not listed up front. Answers with the connections, and with the name, the \
+             description, and the input schema of each tool that matches. Leave the query empty \
+             to list every connection and every tool."
+            .to_string(),
         input: Some(serde_json::json!({
             "type": "object",
             "properties": {
@@ -168,43 +166,41 @@ fn search_tools(connector_id: &str) -> Vec<ConnectorTool> {
             "required": ["query"]
         })),
         output: None,
-        connector: connector_id.to_string(),
+        connector: String::new(),
         via: ConnectorProtocol::Mcp,
         remote_name: String::new(),
         kind: ConnectorToolKind::Find,
     };
     let call = ConnectorTool {
-        name: match search_tool_name(connector_id, ConnectorToolKind::Call) {
-            Some(name) => name,
-            None => return Vec::new(),
-        },
+        name: CALL_TOOL.to_string(),
         description: format!(
-            "Run one tool of `{connector_id}`. Name it exactly as \
-             `{connector_id}__find_tools` returned it, and pass its own arguments."
+            "Run one tool of a connection this agent can reach. Take `connector` and `tool` from \
+             `{FIND_TOOLS}`, and pass that tool's own arguments."
         ),
         input: Some(serde_json::json!({
             "type": "object",
             "properties": {
+                "connector": {
+                    "type": "string",
+                    "description": "The connection that holds the tool."
+                },
                 "tool": {
                     "type": "string",
-                    "description": "The tool's name on the connection."
+                    "description": "The tool's name on that connection."
                 },
                 "arguments": {
                     "type": "object",
                     "description": "The arguments that tool's own input schema declares."
                 }
             },
-            "required": ["tool"]
+            "required": ["connector", "tool"]
         })),
         output: None,
-        connector: connector_id.to_string(),
+        connector: String::new(),
         via: ConnectorProtocol::Mcp,
         remote_name: String::new(),
         kind: ConnectorToolKind::Call,
     };
-    if find.name.len() > MAX_NAME || call.name.len() > MAX_NAME {
-        return Vec::new();
-    }
     vec![find, call]
 }
 
@@ -215,25 +211,40 @@ const MAX_MATCHES: usize = 10;
 const K1: f64 = 1.2;
 const B: f64 = 0.75;
 
-/// The tools a query matches, best first, by BM25 over the name and the
-/// description. An empty query matches everything.
+/// One tool a search matched, and the connection that holds it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Match<'a> {
+    pub connector: &'a str,
+    pub tool: &'a RemoteTool,
+}
+
+/// The tools a query matches across every searched connection, best first, by
+/// BM25 over the name and the description. An empty query matches everything.
 ///
 /// Any term, not all: a model writes "find all open issues", not keywords. BM25
 /// is what keeps that useful — a term in every tool scores near zero.
-pub fn find<'a>(
-    connector: &McpServer,
-    offered: &'a [RemoteTool],
-    query: &str,
-) -> Vec<&'a RemoteTool> {
+pub fn find<'a>(searched: &'a [(McpServer, Vec<RemoteTool>)], query: &str) -> Vec<Match<'a>> {
+    let candidates: Vec<Match<'a>> = searched
+        .iter()
+        .flat_map(|(connector, offered)| {
+            callable(connector, offered)
+                .into_iter()
+                .map(|tool| Match {
+                    connector: connector.id.as_str(),
+                    tool,
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
     let terms = words(query);
-    let callable = callable(connector, offered);
-    if terms.is_empty() || callable.is_empty() {
-        return callable;
+    if terms.is_empty() || candidates.is_empty() {
+        return candidates;
     }
 
-    let docs: Vec<Vec<String>> = callable
+    let docs: Vec<Vec<String>> = candidates
         .iter()
-        .map(|tool| words(&format!("{} {}", tool.name, tool.description)))
+        .map(|m| words(&format!("{} {}", m.tool.name, m.tool.description)))
         .collect();
     let total = docs.len() as f64;
     let average_length = docs.iter().map(Vec::len).sum::<usize>() as f64 / total;
@@ -245,8 +256,8 @@ pub fn find<'a>(
         })
         .collect();
 
-    let mut scored: Vec<(f64, usize, &RemoteTool)> = Vec::new();
-    for (order, (tool, doc)) in callable.iter().zip(&docs).enumerate() {
+    let mut scored: Vec<(f64, usize, Match<'a>)> = Vec::new();
+    for (order, (found, doc)) in candidates.into_iter().zip(&docs).enumerate() {
         let length = doc.len() as f64 / average_length;
         let score: f64 = terms
             .iter()
@@ -257,7 +268,7 @@ pub fn find<'a>(
             })
             .sum();
         if score > 0.0 {
-            scored.push((score, order, tool));
+            scored.push((score, order, found));
         }
     }
     // The offer order breaks a tie, so a replay answers the same.
@@ -266,7 +277,7 @@ pub fn find<'a>(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(a.1.cmp(&b.1))
     });
-    scored.into_iter().map(|(_, _, tool)| tool).collect()
+    scored.into_iter().map(|(_, _, found)| found).collect()
 }
 
 /// Lower case words. `search_issues` is two.
@@ -285,25 +296,36 @@ fn frequency(doc: &[String], term: &str) -> f64 {
 /// definition, in the shape of the tool list, so one find is the full distance
 /// to a call. `matched` counts every match, including those past
 /// [`MAX_MATCHES`].
-pub fn find_answer(connector: &McpServer, offered: &[RemoteTool], query: &str) -> String {
-    let matched = find(connector, offered, query);
+pub fn find_answer(searched: &[(McpServer, Vec<RemoteTool>)], query: &str) -> String {
+    let matched = find(searched, query);
     let tools: Vec<serde_json::Value> = matched
         .iter()
         .take(MAX_MATCHES)
-        .map(|tool| {
+        .map(|m| {
             serde_json::json!({
-                "name": tool.name,
-                "description": tool.description,
-                "input": tool.input,
-                "output": tool.output,
+                "connector": m.connector,
+                "name": m.tool.name,
+                "description": m.tool.description,
+                "input": m.tool.input,
+                "output": m.tool.output,
+            })
+        })
+        .collect();
+    let connections: Vec<serde_json::Value> = searched
+        .iter()
+        .map(|(server, offered)| {
+            serde_json::json!({
+                "connector": server.id,
+                "tools": callable(server, offered).len(),
             })
         })
         .collect();
     let mut answer = serde_json::json!({
+        "connections": connections,
         "tools": tools,
         "matched": matched.len(),
-        "searched": callable(connector, offered).len(),
-        "call_with": search_tool_name(&connector.id, ConnectorToolKind::Call),
+        "searched": find(searched, "").len(),
+        "call_with": CALL_TOOL,
     });
     if matched.len() > tools.len() {
         answer["hint"] = serde_json::json!(format!(
@@ -763,6 +785,21 @@ mod tests {
 
     // ── discovery ────────────────────────────────────────────────────────
 
+    fn searched_pair(
+        id: &str,
+        filter: Option<McpTools>,
+        offered: &[RemoteTool],
+    ) -> Vec<(McpServer, Vec<RemoteTool>)> {
+        vec![(connector(id, Some(searching(filter))), offered.to_vec())]
+    }
+
+    fn found(matches: &[Match<'_>]) -> Vec<String> {
+        matches
+            .iter()
+            .map(|m| format!("{}:{}", m.connector, m.tool.name))
+            .collect()
+    }
+
     #[test]
     fn no_discovery_setting_offers_every_tool_as_before() {
         let offered = [read_only("search"), writer("delete")];
@@ -775,14 +812,14 @@ mod tests {
     }
 
     #[test]
-    fn search_offers_two_tools_whatever_the_connection_has() {
+    fn a_searched_connection_puts_no_tool_of_its_own_in_the_list() {
         let offered = [read_only("search"), writer("delete"), bare("list")];
         let r = offer(
             &connector("sentry", Some(searching(None))),
             &offered,
             Some("sentry"),
         );
-        assert_eq!(names(&r), vec!["sentry__find_tools", "sentry__call_tool"]);
+        assert!(r.tools.is_empty(), "one shared pair stands for them all");
         assert_eq!(
             r.offered, 3,
             "what the connection offered is still reported"
@@ -790,31 +827,82 @@ mod tests {
     }
 
     #[test]
-    fn the_search_tools_are_prefixed_even_where_the_connection_is_not() {
-        let offered = [read_only("search")];
-        let a = offer(&connector("sentry", Some(searching(None))), &offered, None);
-        let b = offer(&connector("github", Some(searching(None))), &offered, None);
-        assert_eq!(names(&a), vec!["sentry__find_tools", "sentry__call_tool"]);
-        assert_eq!(names(&b), vec!["github__find_tools", "github__call_tool"]);
-        let merged = merge([a, b], []);
+    fn one_pair_serves_every_searched_connection() {
+        let tools = search_tools();
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(
-            merged.tools.len(),
-            4,
-            "unprefixed search tools would collide and leave neither connection reachable"
+            names,
+            vec![FIND_TOOLS, CALL_TOOL],
+            "two definitions, whatever the agent connects to"
+        );
+        assert!(
+            !tools[0].description.contains("sentry"),
+            "no connection reaches a definition, so adding one cannot rewrite it: {}",
+            tools[0].description
+        );
+        assert_eq!(tools[0].kind, ConnectorToolKind::Find);
+        assert_eq!(tools[1].kind, ConnectorToolKind::Call);
+        assert!(
+            tools.iter().all(|t| t.connector.is_empty()),
+            "neither belongs to one connection"
         );
     }
 
     #[test]
-    fn a_connection_id_too_long_to_name_the_search_tools_offers_nothing() {
-        let long = "a".repeat(60);
-        let r = offer(
-            &connector(&long, Some(searching(None))),
-            &[read_only("search")],
-            None,
+    fn call_tool_asks_for_the_connection() {
+        let call = &search_tools()[1];
+        let required = call.input.as_ref().unwrap()["required"].clone();
+        assert_eq!(
+            required,
+            serde_json::json!(["connector", "tool"]),
+            "the name alone cannot say which connection holds the tool"
+        );
+    }
+
+    #[test]
+    fn a_find_ranks_across_connections() {
+        let searched = vec![
+            (
+                connector("sentry", Some(searching(None))),
+                vec![read_only("list_projects")],
+            ),
+            (
+                connector("linear", Some(searching(None))),
+                vec![read_only("search_issues")],
+            ),
+        ];
+        assert_eq!(
+            found(&find(&searched, "issues")),
+            vec!["linear:search_issues"],
+            "one call reaches every searched connection"
+        );
+        assert_eq!(
+            found(&find(&searched, "")).len(),
+            2,
+            "an empty query lists them all"
+        );
+    }
+
+    #[test]
+    fn search_cannot_reach_a_tool_the_filter_removed() {
+        let offered = [read_only("search_issues"), read_only("search_secrets")];
+        let searched = searched_pair(
+            "sentry",
+            Some(McpTools {
+                exclude: vec!["*_secrets".to_string()],
+                ..Default::default()
+            }),
+            &offered,
         );
         assert!(
-            r.tools.is_empty(),
-            "half a pair is worse than none: the model could find and not call"
+            kept(&searched[0].0, &offered, "search_secrets").is_none(),
+            "discovery re-presents what the filter kept; it never reaches past it"
+        );
+        assert!(kept(&searched[0].0, &offered, "search_issues").is_some());
+        assert_eq!(
+            found(&find(&searched, "search")),
+            vec!["sentry:search_issues"],
+            "an excluded tool is not findable either"
         );
     }
 
@@ -838,31 +926,6 @@ mod tests {
     }
 
     #[test]
-    fn search_cannot_reach_a_tool_the_filter_removed() {
-        let offered = [read_only("search_issues"), read_only("search_secrets")];
-        let c = connector(
-            "sentry",
-            Some(searching(Some(McpTools {
-                exclude: vec!["*_secrets".to_string()],
-                ..Default::default()
-            }))),
-        );
-        assert!(
-            kept(&c, &offered, "search_secrets").is_none(),
-            "discovery re-presents what the filter kept; it never reaches past it"
-        );
-        assert!(kept(&c, &offered, "search_issues").is_some());
-        assert_eq!(
-            find(&c, &offered, "search")
-                .iter()
-                .map(|t| t.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["search_issues"],
-            "an excluded tool is not findable either"
-        );
-    }
-
-    #[test]
     fn a_word_in_every_tool_does_not_beat_a_word_in_one() {
         let offered = [
             read_only("issue_list"),
@@ -870,13 +933,10 @@ mod tests {
             read_only("issue_resolve"),
             read_only("issue_search"),
         ];
-        let c = connector("sentry", Some(searching(None)));
-        let matched: Vec<String> = find(&c, &offered, "issue resolve")
-            .iter()
-            .map(|t| t.name.to_string())
-            .collect();
+        let searched = searched_pair("sentry", None, &offered);
         assert_eq!(
-            matched[0], "issue_resolve",
+            found(&find(&searched, "issue resolve"))[0],
+            "sentry:issue_resolve",
             "`issue` is in each of the four, so `resolve` decides"
         );
     }
@@ -884,9 +944,9 @@ mod tests {
     #[test]
     fn a_term_matches_a_longer_word_that_starts_with_it() {
         let offered = [read_only("search_issues")];
-        let c = connector("sentry", Some(searching(None)));
+        let searched = searched_pair("sentry", None, &offered);
         assert_eq!(
-            find(&c, &offered, "issue").len(),
+            find(&searched, "issue").len(),
             1,
             "a model writes the singular"
         );
@@ -895,19 +955,18 @@ mod tests {
     #[test]
     fn find_matches_any_word_and_ranks_by_how_many() {
         let offered = [read_only("list_projects"), read_only("search_issues")];
-        let c = connector("sentry", Some(searching(None)));
-        let matched = |q: &str| {
-            find(&c, &offered, q)
-                .iter()
-                .map(|t| t.name.to_string())
-                .collect::<Vec<_>>()
-        };
+        let searched = searched_pair("sentry", None, &offered);
+        let matched = |q: &str| found(&find(&searched, q));
 
-        assert_eq!(matched("issues"), vec!["search_issues"]);
-        assert_eq!(matched("ISSUES"), vec!["search_issues"], "case is ignored");
+        assert_eq!(matched("issues"), vec!["sentry:search_issues"]);
+        assert_eq!(
+            matched("ISSUES"),
+            vec!["sentry:search_issues"],
+            "case is ignored"
+        );
         assert_eq!(
             matched("does search_issues"),
-            vec!["search_issues", "list_projects"],
+            vec!["sentry:search_issues", "sentry:list_projects"],
             "the description is searched too, and the better match leads"
         );
         assert_eq!(matched("").len(), 2, "an empty query lists the connection");
@@ -916,44 +975,21 @@ mod tests {
     #[test]
     fn a_sentence_finds_the_tool_and_puts_it_first() {
         let offered = [read_only("list_projects"), read_only("search_issues")];
-        let c = connector("sentry", Some(searching(None)));
-        let matched: Vec<String> = find(&c, &offered, "find all the open issues")
-            .iter()
-            .map(|t| t.name.to_string())
-            .collect();
+        let searched = searched_pair("sentry", None, &offered);
         assert_eq!(
-            matched,
-            vec!["search_issues"],
+            found(&find(&searched, "find all the open issues")),
+            vec!["sentry:search_issues"],
             "`issues` matched; `find`, `all`, `the`, and `open` matched nothing and cost nothing"
-        );
-    }
-
-    #[test]
-    fn a_tool_that_carries_more_of_the_query_comes_first() {
-        let offered = [read_only("list_issues"), read_only("search_issues")];
-        let c = connector("sentry", Some(searching(None)));
-        let matched: Vec<String> = find(&c, &offered, "search issues")
-            .iter()
-            .map(|t| t.name.to_string())
-            .collect();
-        assert_eq!(
-            matched,
-            vec!["search_issues", "list_issues"],
-            "two words beat one, and the loser is still offered"
         );
     }
 
     #[test]
     fn ties_keep_the_order_the_connection_offered() {
         let offered = [read_only("b_issues"), read_only("a_issues")];
-        let c = connector("sentry", Some(searching(None)));
-        let matched: Vec<String> = find(&c, &offered, "issues")
-            .iter()
-            .map(|t| t.name.to_string())
-            .collect();
+        let searched = searched_pair("sentry", None, &offered);
         assert_eq!(
-            matched,
-            vec!["b_issues", "a_issues"],
+            found(&find(&searched, "issues")),
+            vec!["sentry:b_issues", "sentry:a_issues"],
             "a replay must answer the same, so a tie is never broken by chance"
         );
     }
@@ -963,9 +999,9 @@ mod tests {
         let offered: Vec<RemoteTool> = (0..15)
             .map(|i| read_only(&format!("issue_tool_{i}")))
             .collect();
-        let c = connector("sentry", Some(searching(None)));
+        let searched = searched_pair("sentry", None, &offered);
         let answer: serde_json::Value =
-            serde_json::from_str(&find_answer(&c, &offered, "issue")).expect("json");
+            serde_json::from_str(&find_answer(&searched, "issue")).expect("json");
         assert_eq!(
             answer["tools"].as_array().unwrap().len(),
             MAX_MATCHES,
@@ -979,13 +1015,17 @@ mod tests {
     }
 
     #[test]
-    fn a_find_answer_carries_the_schema_the_model_needs_to_call() {
+    fn a_find_answer_carries_what_the_model_needs_to_call() {
         let offered = [read_only("search_issues")];
-        let c = connector("sentry", Some(searching(None)));
+        let searched = searched_pair("sentry", None, &offered);
         let answer: serde_json::Value =
-            serde_json::from_str(&find_answer(&c, &offered, "issues")).expect("json");
+            serde_json::from_str(&find_answer(&searched, "issues")).expect("json");
         assert_eq!(answer["matched"], 1);
         assert_eq!(answer["searched"], 1);
+        assert_eq!(
+            answer["tools"][0]["connector"], "sentry",
+            "the match names its connection, which `call_tool` then needs"
+        );
         assert_eq!(
             answer["tools"][0]["name"], "search_issues",
             "a match reads as a tool definition, the shape the model already knows"
@@ -994,52 +1034,28 @@ mod tests {
             answer["tools"][0]["input"]["type"], "object",
             "the input schema rides along, so a find is the only round trip"
         );
-        assert!(
-            answer["tools"][0].get("description").is_some(),
-            "name, description, input, output — the tool list's own fields"
-        );
-        assert_eq!(
-            answer["call_with"], "sentry__call_tool",
-            "the answer names the tool that runs it"
-        );
-    }
-
-    #[test]
-    fn the_engines_own_tools_are_marked_as_its_own() {
-        let r = offer(
-            &connector("sentry", Some(searching(None))),
-            &[read_only("search")],
-            Some("sentry"),
-        );
-        assert_eq!(r.tools[0].kind, ConnectorToolKind::Find);
-        assert_eq!(r.tools[1].kind, ConnectorToolKind::Call);
-        assert!(
-            r.tools.iter().all(|t| t.remote_name.is_empty()),
-            "neither stands for a tool on the connection"
-        );
-        assert!(
-            r.tools.iter().all(|t| t.connector == "sentry"),
-            "both still name the connection they answer for"
-        );
+        assert_eq!(answer["call_with"], CALL_TOOL);
     }
 
     #[test]
     fn a_declared_tool_still_wins_its_name_against_a_search_tool() {
-        let r = offer(
-            &connector("sentry", Some(searching(None))),
-            &[read_only("search")],
-            Some("sentry"),
-        );
-        let merged = merge([r], ["sentry__find_tools"]);
+        let r = Resolution {
+            tools: search_tools(),
+            offered: 0,
+            unannotated: 0,
+            unmatched_include: Vec::new(),
+            oversized: Vec::new(),
+        };
+        let merged = merge([r], [FIND_TOOLS]);
         assert_eq!(
             merged
                 .tools
                 .iter()
                 .map(|t| t.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["sentry__call_tool"],
+            vec![CALL_TOOL],
             "the config's own name wins, the same as against any connector tool"
         );
-        assert_eq!(merged.collisions, vec!["sentry__find_tools".to_string()]);
+        assert_eq!(merged.collisions, vec![FIND_TOOLS.to_string()]);
     }
 }

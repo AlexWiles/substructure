@@ -19,7 +19,7 @@
 
 use super::{fail, mismatched, void_events, KindSpec, Outcome, SettleError};
 use crate::connectors::{filter, AuthNeed, RemoteTool};
-use crate::protocol::{AgentConfig, RetryPolicy};
+use crate::protocol::{AgentConfig, RetryPolicy, ToolDiscovery};
 use crate::runtime::retry::RetryTarget;
 use crate::runtime::session::events::*;
 use crate::runtime::session::schedule::Dep;
@@ -182,28 +182,21 @@ impl SessionState {
     /// on them anyway — an `include` that matches nothing is a typo for whoever
     /// wrote the config, not a runtime condition for the agent to handle.
     fn report_filter(&self, connection_id: &str, offered: &[RemoteTool], prefix: Option<&str>) {
-        let Some(connector) = self
-            .resolve_agent_for(self.head_id.as_deref())
-            .and_then(|c| c.mcp.into_iter().find(|c| c.id == connection_id))
-        else {
+        let Some(config) = self.resolve_agent_for(self.head_id.as_deref()) else {
+            return;
+        };
+        let Some(connector) = config.mcp.iter().find(|c| c.id == connection_id).cloned() else {
             return;
         };
         let r = filter::resolve(&connector, offered, prefix);
-        let discovered = filter::discover(&connector, r.clone());
+        let discovery = filter::discovery(&connector);
         tracing::info!(
             connection = %connection_id,
             offered = r.offered,
             resolved = r.tools.len(),
-            offered_to_model = discovered.tools.len(),
+            discovery = ?discovery,
             "fetched connector tools"
         );
-        // The model can reach nothing. The cause is always a long id.
-        if discovered.tools.is_empty() && !r.tools.is_empty() {
-            tracing::error!(
-                connection = %connection_id,
-                "connection id is too long to name its search tools; shorten it"
-            );
-        }
         if !r.unmatched_include.is_empty() {
             tracing::warn!(
                 connection = %connection_id,
@@ -211,12 +204,32 @@ impl SessionState {
                 "connector include patterns matched no tool"
             );
         }
-        if !r.oversized.is_empty() {
+        // A search carries a name as an argument, so no name is too long.
+        if !r.oversized.is_empty() && discovery == ToolDiscovery::All {
             tracing::warn!(
                 connection = %connection_id,
                 tools = ?r.oversized,
                 "connector tool names too long to offer; shorten the connection id or turn off prefixing"
             );
+        }
+        // A name the model will not see. The engine's own pair is called out:
+        // a worker that took one of those names on purpose is overriding the
+        // engine, and one that took it by accident has quietly turned off a
+        // connection the operator configured.
+        let merged = self.connector_tools_for_config(&config);
+        for name in &merged.collisions {
+            if name == filter::FIND_TOOLS || name == filter::CALL_TOOL {
+                tracing::warn!(
+                    tool = %name,
+                    "the config declares `{name}`, so the engine's own is not offered; \
+                     searched connections lose that half of the pair"
+                );
+            } else {
+                tracing::warn!(
+                    tool = %name,
+                    "tool name claimed twice; it is offered to the model by neither connector"
+                );
+            }
         }
         if r.unannotated > 0 {
             tracing::warn!(

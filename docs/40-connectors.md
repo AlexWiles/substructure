@@ -184,11 +184,35 @@ mcp = [{ id = "aws", tools = { discovery = "search" } }]
 | `discovery` | The model sees |
 | --- | --- |
 | `"all"` (the default) | Each tool the filter kept. |
-| `"search"` | `aws__find_tools` and `aws__call_tool`, whatever the connection offers. |
+| `"search"` | Nothing of its own. |
 
-The model searches for the tool it wants, then names it to `call_tool`. Both
-tools are the engine's. A search reaches nothing: the engine answers from the
-list it read when the session opened.
+An agent with one or more searched connections gets `find_tools` and
+`call_tool`. It gets one pair, whatever the number of connections. The model
+searches once and reads each of them.
+
+The two tools do not change during a session. Their names and their text say
+nothing about which connections exist, so a connection that an agent adds later
+does not change the request that the provider cached. The model reads the new
+connection in the next answer.
+
+```jsonc
+// find_tools
+{ "query": "open issues" }
+// call_tool
+{ "connector": "aws", "tool": "s3_list", "arguments": { "bucket": "logs" } }
+```
+
+An answer lists the connections of the agent, and it names the connection of
+each match. `call_tool` takes that name. Both tools are the engine's. A search
+reaches nothing: the engine answers from the list it read when it opened each
+connection.
+
+An agent can mix. A connection with `discovery = "all"` puts its own tools in
+the list, beside the pair.
+
+A search covers each connection of the agent, and not only the searched ones. A
+connection on `all` is listed up front and it is findable. Therefore one search
+covers the agent, and an answer of nothing means that the agent has nothing.
 
 The filter still applies. A search does not show a tool the filter removed, and
 `call_tool` refuses one. The error names the tools the agent can reach.

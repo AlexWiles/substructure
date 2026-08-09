@@ -7177,11 +7177,11 @@ fn a_searched_connector_offers_two_tools_however_many_it_has() {
         .collect();
     assert_eq!(
         offered,
-        ["sentry__find_tools", "sentry__call_tool"],
+        ["find_tools", "call_tool"],
         "three tools cost the request two definitions, and thirty would cost the same two"
     );
     assert_eq!(
-        agg.state.tool_handler_for("sentry__find_tools"),
+        agg.state.tool_handler_for("find_tools"),
         ToolHandler::Server,
         "both are the engine's to run"
     );
@@ -7190,12 +7190,7 @@ fn a_searched_connector_offers_two_tools_however_many_it_has() {
 #[test]
 fn find_tools_is_answered_from_the_recorded_offer_without_the_connection() {
     let mut agg = session_with_searched_connector("sentry", &["search_issues", "list_projects"]);
-    let events = call(
-        &mut agg,
-        "tc-1",
-        "sentry__find_tools",
-        r#"{"query":"issues"}"#,
-    );
+    let events = call(&mut agg, "tc-1", "find_tools", r#"{"query":"issues"}"#);
 
     assert!(
         !events
@@ -7244,8 +7239,8 @@ fn call_tool_freezes_the_named_tool_onto_the_call() {
     call(
         &mut agg,
         "tc-1",
-        "sentry__call_tool",
-        r#"{"tool":"search_issues","arguments":{"q":"boom"}}"#,
+        "call_tool",
+        r#"{"connector":"sentry","tool":"search_issues","arguments":{"q":"boom"}}"#,
     );
     let target = agg
         .state
@@ -7262,7 +7257,7 @@ fn call_tool_freezes_the_named_tool_onto_the_call() {
     assert_eq!(target.kind, ConnectorToolKind::Call);
     assert_eq!(
         agg.state.tool_call("tc-1").unwrap().arguments,
-        r#"{"tool":"search_issues","arguments":{"q":"boom"}}"#,
+        r#"{"connector":"sentry","tool":"search_issues","arguments":{"q":"boom"}}"#,
         "the call is recorded as the model made it; the wrapper is unwrapped on the wire"
     );
 }
@@ -7291,8 +7286,8 @@ fn call_tool_refuses_a_name_the_filter_removed_and_never_dials() {
     call(
         &mut agg,
         "tc-1",
-        "sentry__call_tool",
-        r#"{"tool":"resolve_issue","arguments":{}}"#,
+        "call_tool",
+        r#"{"connector":"sentry","tool":"resolve_issue","arguments":{}}"#,
     );
     let LocalAnswer::Error(message) = agg
         .state
@@ -7319,6 +7314,254 @@ fn call_tool_refuses_a_name_the_filter_removed_and_never_dials() {
             .remote_name
             .is_empty(),
         "an empty remote name is what keeps the connection out of it"
+    );
+}
+
+#[test]
+fn two_searched_connections_share_one_pair_and_one_search() {
+    let mut agg = create_session_with_config(
+        "sess-1",
+        "tenant-a",
+        "user-1",
+        Some(searching_connector_config(&["sentry", "linear"])),
+    );
+    settle_sync(&mut agg, "sentry", &["list_projects"]);
+    settle_sync(&mut agg, "linear", &["search_issues"]);
+
+    let offered: Vec<String> = agg
+        .state
+        .connector_tools(None)
+        .tools
+        .into_iter()
+        .map(|t| t.name)
+        .collect();
+    assert_eq!(
+        offered,
+        ["find_tools", "call_tool"],
+        "two connections cost the same two definitions as one"
+    );
+
+    call(&mut agg, "tc-1", "find_tools", r#"{"query":"issues"}"#);
+    let LocalAnswer::Result(result) = agg
+        .state
+        .local_connector_answer("tc-1")
+        .expect("the engine answers this one")
+    else {
+        panic!("a find is a result, not an error");
+    };
+    let answer: serde_json::Value = serde_json::from_str(&result).expect("json");
+    assert_eq!(
+        answer["tools"][0]["connector"], "linear",
+        "one search reaches both connections, and names the one that holds the tool"
+    );
+    assert_eq!(answer["searched"], 2, "both connections were searched");
+    assert_eq!(
+        answer["connections"],
+        serde_json::json!([
+            { "connector": "sentry", "tools": 1 },
+            { "connector": "linear", "tools": 1 }
+        ]),
+        "the catalog rides in the answer, where growth costs nothing"
+    );
+}
+
+/// The whole point of the search shape: a connection that arrives during a
+/// session must not move one byte of the tool list.
+#[test]
+fn a_connection_added_during_a_session_does_not_move_the_tool_list() {
+    let mut agg = session_with_searched_connector("sentry", &["list_projects"]);
+    let before = agg.state.connector_tools(None).tools;
+    assert_eq!(
+        before.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        ["find_tools", "call_tool"]
+    );
+
+    // The worker writes a config that names a second searched connection.
+    let d = open_decision(&mut agg, "and now linear");
+    dispatch(
+        &mut agg,
+        CommandPayload::SubmitWorkerDecision {
+            decision_id: d,
+            transcript: vec![node_msg("u2", Role::User, "and now linear")],
+            actions: vec![],
+            state: None,
+            agent: Some(searching_connector_config(&["sentry", "linear"])),
+            channels: Default::default(),
+        },
+        &machine(),
+    );
+    settle_sync(&mut agg, "linear", &["search_issues"]);
+
+    assert_eq!(
+        agg.state.connector_tools(None).tools,
+        before,
+        "the definitions are identical, so the provider's cache holds"
+    );
+
+    call(&mut agg, "tc-9", "find_tools", r#"{"query":"issues"}"#);
+    let LocalAnswer::Result(result) = agg
+        .state
+        .local_connector_answer("tc-9")
+        .expect("the engine answers this one")
+    else {
+        panic!("a find is a result");
+    };
+    let answer: serde_json::Value = serde_json::from_str(&result).expect("json");
+    assert_eq!(
+        answer["tools"][0]["connector"], "linear",
+        "the new connection reaches the model through the answer, not the tool list"
+    );
+}
+
+/// A listed connection is findable too, so one search covers the agent and an
+/// empty answer means the agent truly has nothing.
+#[test]
+fn a_search_covers_a_connection_that_lists_its_own_tools() {
+    let mut agg = create_session_with_config(
+        "sess-1",
+        "tenant-a",
+        "user-1",
+        Some(AgentConfig {
+            mcp: vec![
+                McpServer {
+                    id: "sentry".to_string(),
+                    tools: None,
+                    auth_failure: Default::default(),
+                },
+                McpServer {
+                    id: "aws".to_string(),
+                    tools: Some(McpTools {
+                        discovery: Some(ToolDiscovery::Search),
+                        ..Default::default()
+                    }),
+                    auth_failure: Default::default(),
+                },
+            ],
+            ..agent_config("m1")
+        }),
+    );
+    settle_sync(&mut agg, "sentry", &["search_issues"]);
+    settle_sync(&mut agg, "aws", &["s3_list"]);
+
+    let offered: Vec<String> = agg
+        .state
+        .connector_tools(None)
+        .tools
+        .into_iter()
+        .map(|t| t.name)
+        .collect();
+    assert_eq!(
+        offered,
+        ["sentry__search_issues", "find_tools", "call_tool"],
+        "the listed connection keeps its own tools, beside the pair"
+    );
+
+    call(&mut agg, "tc-1", "find_tools", r#"{"query":"issues"}"#);
+    let LocalAnswer::Result(result) = agg
+        .state
+        .local_connector_answer("tc-1")
+        .expect("the engine answers this one")
+    else {
+        panic!("a find is a result");
+    };
+    let answer: serde_json::Value = serde_json::from_str(&result).expect("json");
+    assert_eq!(
+        answer["tools"][0]["connector"], "sentry",
+        "a search that skipped the listed connection would report an absence that is not real"
+    );
+    assert_eq!(
+        answer["connections"].as_array().unwrap().len(),
+        2,
+        "the catalog covers the agent, not the searched half of it"
+    );
+
+    call(
+        &mut agg,
+        "tc-2",
+        "call_tool",
+        r#"{"connector":"sentry","tool":"search_issues","arguments":{}}"#,
+    );
+    let target = agg.state.tool_call("tc-2").unwrap().target.clone().unwrap();
+    assert_eq!(
+        target.remote_name, "search_issues",
+        "a listed tool has two routes, and both work"
+    );
+}
+
+/// The worker overrides the engine, and keeps whatever it did not override.
+#[test]
+fn a_worker_tool_takes_a_search_name_and_the_other_half_survives() {
+    let mut agg = create_session_with_config(
+        "sess-1",
+        "tenant-a",
+        "user-1",
+        Some(AgentConfig {
+            tools: vec![AgentTool {
+                name: "find_tools".to_string(),
+                description: "the worker's own discovery".to_string(),
+                input: None,
+                output: None,
+                handler: None,
+            }],
+            mcp: vec![McpServer {
+                id: "sentry".to_string(),
+                tools: Some(McpTools {
+                    discovery: Some(ToolDiscovery::Search),
+                    ..Default::default()
+                }),
+                auth_failure: Default::default(),
+            }],
+            ..agent_config("m1")
+        }),
+    );
+    settle_sync(&mut agg, "sentry", &["search_issues"]);
+
+    let merged = agg.state.connector_tools(None);
+    assert_eq!(
+        merged
+            .tools
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect::<Vec<_>>(),
+        ["call_tool"],
+        "the worker keeps the name it declared, and the engine keeps the rest"
+    );
+    assert_eq!(
+        merged.collisions,
+        vec!["find_tools".to_string()],
+        "the drop is recorded, so a report can name it"
+    );
+    assert_eq!(
+        agg.state.tool_handler_for("find_tools"),
+        ToolHandler::Worker,
+        "the worker runs its own"
+    );
+    assert_eq!(
+        agg.state.tool_handler_for("call_tool"),
+        ToolHandler::Server,
+        "and the engine still runs the executor the worker did not replace"
+    );
+}
+
+#[test]
+fn call_tool_refuses_a_connection_this_agent_does_not_have() {
+    let mut agg = session_with_searched_connector("sentry", &["search_issues"]);
+    call(
+        &mut agg,
+        "tc-1",
+        "call_tool",
+        r#"{"connector":"github","tool":"search_issues","arguments":{}}"#,
+    );
+    let LocalAnswer::Error(message) = agg
+        .state
+        .local_connector_answer("tc-1")
+        .expect("the engine answers this one")
+    else {
+        panic!("an unknown connection is an error");
+    };
+    assert!(
+        message.contains("github") && message.contains("sentry"),
+        "the message names what was asked for and what is there: {message}"
     );
 }
 

@@ -30,7 +30,7 @@ use uuid::Uuid;
 use super::decision::{LlmHandler, ToolHandler, Trigger};
 use super::events::*;
 use crate::connectors::{filter, AuthNeed, RemoteTool};
-use crate::protocol::{ConnectorTool, ConnectorToolKind, Handler, McpServer};
+use crate::protocol::{ConnectorTool, ConnectorToolKind, Handler, McpServer, ToolDiscovery};
 
 /// What the engine answers for one of its own connector tools.
 #[derive(Debug, Clone, PartialEq)]
@@ -1732,14 +1732,33 @@ impl SessionState {
     }
 
     pub fn connector_tools_for_config(&self, config: &AgentConfig) -> filter::Merged {
-        let resolutions = config.mcp.iter().filter_map(|connector| {
-            let effect = self.effect(EffectKind::ConnectorSync, &connector.id)?;
-            let sync = effect.connector()?;
-            effect.tracking.is_ready().then(|| {
-                let resolved = filter::resolve(connector, &sync.tools, sync.prefix.as_deref());
-                filter::discover(connector, resolved)
+        let mut resolutions: Vec<filter::Resolution> = config
+            .mcp
+            .iter()
+            .filter_map(|connector| {
+                let effect = self.effect(EffectKind::ConnectorSync, &connector.id)?;
+                let sync = effect.connector()?;
+                effect.tracking.is_ready().then(|| {
+                    let resolved = filter::resolve(connector, &sync.tools, sync.prefix.as_deref());
+                    filter::discover(connector, resolved)
+                })
             })
-        });
+            .collect();
+        // From the config alone. A fetch that has not settled must not decide
+        // whether a tool definition exists.
+        let declares_search = config
+            .mcp
+            .iter()
+            .any(|c| filter::discovery(c) == ToolDiscovery::Search);
+        if declares_search {
+            resolutions.push(filter::Resolution {
+                tools: filter::search_tools(),
+                offered: 0,
+                unannotated: 0,
+                unmatched_include: Vec::new(),
+                oversized: Vec::new(),
+            });
+        }
         let taken: Vec<&str> = config
             .tools
             .iter()
@@ -1758,6 +1777,30 @@ impl SessionState {
         Some((server, sync.tools.clone()))
     }
 
+    /// Every connection of the agent whose offer has arrived, with that offer.
+    /// What the pair of search tools answers over.
+    ///
+    /// Every connection, not only the searched ones. A connection on `all` is
+    /// listed up front *and* findable, so one search covers the agent and an
+    /// answer of nothing means nothing is there.
+    ///
+    /// Readiness belongs here and not in the tool list: a connection that
+    /// arrives during a session joins the next answer, and no definition moves.
+    pub fn searchable_connectors(&self) -> Vec<(McpServer, Vec<RemoteTool>)> {
+        let Some(config) = self.resolve_agent_for(self.head_id.as_deref()) else {
+            return Vec::new();
+        };
+        config
+            .mcp
+            .iter()
+            .filter(|c| {
+                self.effect(EffectKind::ConnectorSync, &c.id)
+                    .is_some_and(|e| e.tracking.is_ready())
+            })
+            .filter_map(|c| self.connector_source(&c.id))
+            .collect()
+    }
+
     /// The engine's answer to one of its own tools, or `None` when the call is
     /// the connection's. Read from state, so a replay answers the same.
     pub fn local_connector_answer(&self, tool_call_id: &str) -> Option<LocalAnswer> {
@@ -1766,36 +1809,38 @@ impl SessionState {
         if target.kind.is_remote() {
             return None;
         }
-        let Some((server, offer)) = self.connector_source(&target.connector) else {
-            return Some(LocalAnswer::Error(format!(
-                "connection `{}` is no longer configured",
-                target.connector
-            )));
+        let searchable = self.searchable_connectors();
+        let argument = |key: &str| {
+            serde_json::from_str::<serde_json::Value>(&tc.arguments)
+                .ok()
+                .and_then(|v| v.get(key)?.as_str().map(str::to_string))
+                .unwrap_or_default()
         };
         match target.kind {
             ConnectorToolKind::Remote => None,
-            ConnectorToolKind::Find => {
-                let query = serde_json::from_str::<serde_json::Value>(&tc.arguments)
-                    .ok()
-                    .and_then(|v| v.get("query")?.as_str().map(str::to_string))
-                    .unwrap_or_default();
-                Some(LocalAnswer::Result(filter::find_answer(
-                    &server, &offer, &query,
-                )))
-            }
-            // The filter refused the name. Report what the agent can reach.
+            ConnectorToolKind::Find => Some(LocalAnswer::Result(filter::find_answer(
+                &searchable,
+                &argument("query"),
+            ))),
+            // The filter refused the name, or the agent has no such connection.
             ConnectorToolKind::Call => {
-                let named = serde_json::from_str::<serde_json::Value>(&tc.arguments)
-                    .ok()
-                    .and_then(|v| v.get("tool")?.as_str().map(str::to_string))
-                    .unwrap_or_default();
-                let reachable: Vec<&str> = filter::callable(&server, &offer)
+                let (named_connector, named_tool) = (argument("connector"), argument("tool"));
+                let Some((server, offer)) = searchable
+                    .iter()
+                    .find(|(server, _)| server.id == named_connector)
+                else {
+                    let ids: Vec<&str> = searchable.iter().map(|(s, _)| s.id.as_str()).collect();
+                    return Some(LocalAnswer::Error(format!(
+                        "this agent has no connection `{named_connector}`. It has: {}",
+                        ids.join(", ")
+                    )));
+                };
+                let reachable: Vec<&str> = filter::callable(server, offer)
                     .iter()
                     .map(|t| t.name.as_str())
                     .collect();
                 Some(LocalAnswer::Error(format!(
-                    "`{}` has no tool `{named}` for this agent. It has: {}",
-                    target.connector,
+                    "`{named_connector}` has no tool `{named_tool}` for this agent. It has: {}",
                     reachable.join(", ")
                 )))
             }

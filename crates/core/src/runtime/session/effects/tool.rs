@@ -223,33 +223,46 @@ pub(in crate::runtime::session) fn request(
     })])
 }
 
-/// Where a call goes, frozen onto it. A `call_tool` names its tool in the
-/// arguments, so that name is put through the filter here — the boundary an
-/// offered tool passed at resolve time. A refused name leaves `remote_name`
-/// empty.
+/// Where a call goes, frozen onto it. A `call_tool` names its connection and
+/// its tool in the arguments, so both are put through the filter here — the
+/// boundary an offered tool passed at resolve time. A refused pair leaves
+/// `remote_name` empty.
 fn route_connector(state: &SessionState, tool: &ConnectorTool, arguments: &str) -> ConnectorTarget {
-    let remote_name = match tool.kind {
-        ConnectorToolKind::Remote => tool.remote_name.clone(),
-        ConnectorToolKind::Find => String::new(),
-        ConnectorToolKind::Call => named_tool(arguments)
-            .filter(|named| {
-                state
-                    .connector_source(&tool.connector)
-                    .is_some_and(|(server, offer)| filter::kept(&server, &offer, named).is_some())
-            })
-            .unwrap_or_default(),
-    };
-    ConnectorTarget {
-        connector: tool.connector.clone(),
-        remote_name,
-        kind: tool.kind,
+    match tool.kind {
+        ConnectorToolKind::Remote => ConnectorTarget {
+            connector: tool.connector.clone(),
+            remote_name: tool.remote_name.clone(),
+            kind: tool.kind,
+        },
+        ConnectorToolKind::Find => ConnectorTarget {
+            connector: String::new(),
+            remote_name: String::new(),
+            kind: tool.kind,
+        },
+        ConnectorToolKind::Call => {
+            let named_connector = argument(arguments, "connector").unwrap_or_default();
+            let named_tool = argument(arguments, "tool").unwrap_or_default();
+            let searched = state
+                .searchable_connectors()
+                .into_iter()
+                .find(|(server, _)| server.id == named_connector);
+            let remote_name = searched
+                .filter(|(server, offer)| filter::kept(server, offer, &named_tool).is_some())
+                .map(|_| named_tool)
+                .unwrap_or_default();
+            ConnectorTarget {
+                connector: named_connector,
+                remote_name,
+                kind: tool.kind,
+            }
+        }
     }
 }
 
-fn named_tool(arguments: &str) -> Option<String> {
+fn argument(arguments: &str, key: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(arguments)
         .ok()?
-        .get("tool")?
+        .get(key)?
         .as_str()
         .map(str::to_string)
 }
