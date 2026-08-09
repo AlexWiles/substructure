@@ -128,7 +128,7 @@ if (!verify(body, req.headers["x-substructure-signature"])) {
 ```
 
 The cloud creates a signing secret for each agent that has a worker. Read it
-with `subs agents show <id>`. See [Authentication](./190-auth.md).
+with `subs agents secret <id>`. See [Authentication](./190-auth.md).
 
 ## Recipes
 

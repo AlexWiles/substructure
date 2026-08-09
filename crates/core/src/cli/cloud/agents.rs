@@ -1,15 +1,15 @@
 //! `subs agents`: what the deployment holds for each agent the file declares.
 //!
 //! Read-only but for rotation — an agent exists because `substructure.toml`
-//! declares it, so there is nothing to create here. What this shows is the half
-//! the file cannot: the signing secret the deployment minted for a
-//! worker-hosted agent.
+//! declares it, so there is nothing to create here. Printing a signing secret
+//! is its own command: no other output carries one, so a secret reaches a
+//! terminal or a pipe only where that was the point.
 
 use anyhow::Result;
 use clap::Subcommand;
 use serde::Serialize;
 
-use crate::api::v1::Agent;
+use crate::api::v1::{Agent, AgentSecret};
 
 use super::context::Context;
 use super::print;
@@ -23,14 +23,20 @@ pub enum AgentsCommand {
         #[command(flatten)]
         scope: ProjectScope,
     },
-    /// Show one agent, including its signing secret.
+    /// Show one agent. Never its signing secret; see `subs agents secret`.
     Show {
         agent_id: String,
         #[command(flatten)]
         scope: ProjectScope,
     },
-    /// Mint a new signing secret for one agent (owner only). The old one stops
-    /// working as soon as this returns.
+    /// Print the signing secret for one agent, for a worker to verify with.
+    Secret {
+        agent_id: String,
+        #[command(flatten)]
+        scope: ProjectScope,
+    },
+    /// Mint a new signing secret for one agent. The old one stops working as
+    /// soon as this returns.
     RotateSecret {
         agent_id: String,
         #[command(flatten)]
@@ -39,6 +45,7 @@ pub enum AgentsCommand {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct Rotated<'a> {
     rotated: bool,
     id: &'a str,
@@ -49,6 +56,7 @@ pub async fn run(command: AgentsCommand) -> Result<()> {
     match command {
         AgentsCommand::List { scope } => list(scope).await,
         AgentsCommand::Show { agent_id, scope } => show(agent_id, scope).await,
+        AgentsCommand::Secret { agent_id, scope } => secret(agent_id, scope).await,
         AgentsCommand::RotateSecret { agent_id, scope } => rotate(agent_id, scope).await,
     }
 }
@@ -85,7 +93,8 @@ async fn list(scope: ProjectScope) -> Result<()> {
                 .map(|c| c.model.clone())
                 .unwrap_or_else(|| "-".into());
             let hosting = a.worker_url.clone().unwrap_or_else(|| "engine".into());
-            let secret = match a.secret_set {
+            // A secret exists for exactly the worker-hosted agents.
+            let secret = match a.worker_url.is_some() {
                 true => "set",
                 false => "-",
             };
@@ -118,17 +127,30 @@ async fn show(agent_id: String, scope: ProjectScope) -> Result<()> {
         }
         println!("model:    {}", config.model);
     }
-    match &agent.signing_secret {
-        Some(secret) => println!("secret:   {secret}"),
-        // Only a worker-hosted agent has one to show; the engine signs nothing.
-        None => println!("secret:   none (the engine decides for this agent)"),
+    Ok(())
+}
+
+/// The secret alone, on stdout: what a worker's environment needs, pipeable.
+async fn secret(agent_id: String, scope: ProjectScope) -> Result<()> {
+    let (ctx, project) = Context::from_project(&scope).await?;
+    let secret: AgentSecret = ctx
+        .client
+        .get(&format!(
+            "/api/v1/projects/{project}/agents/{agent_id}/secret"
+        ))
+        .await?;
+
+    if scope.globals.json {
+        return print::json(&secret);
     }
+
+    println!("{}", secret.signing_secret);
     Ok(())
 }
 
 async fn rotate(agent_id: String, scope: ProjectScope) -> Result<()> {
     let (ctx, project) = Context::from_project(&scope).await?;
-    let agent: Agent = ctx
+    let rotated: AgentSecret = ctx
         .client
         .post_json(
             &format!("/api/v1/projects/{project}/agents/{agent_id}/rotate-secret"),
@@ -136,7 +158,7 @@ async fn rotate(agent_id: String, scope: ProjectScope) -> Result<()> {
         )
         .await?;
 
-    let secret = agent.signing_secret.unwrap_or_default();
+    let secret = rotated.signing_secret;
     if scope.globals.json {
         return print::json(&Rotated {
             rotated: true,

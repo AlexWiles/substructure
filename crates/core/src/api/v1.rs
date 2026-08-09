@@ -189,8 +189,9 @@ pub struct LlmState {
     pub key_bound: bool,
 }
 
-/// One declared agent, as `subs agents` reads it. `signing_secret` is present
-/// only on the single-agent GET.
+/// One declared agent, as `subs agents` reads it. Never its signing secret: a
+/// secret is handed out only by the endpoint that exists to do it, and one
+/// exists exactly where `worker_url` does.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Agent {
@@ -199,10 +200,13 @@ pub struct Agent {
     pub config: Option<crate::protocol::AgentConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_url: Option<String>,
-    #[serde(default)]
-    pub secret_set: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub signing_secret: Option<String>,
+}
+
+/// One agent's signing secret, from the explicit read or a rotation.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSecret {
+    pub signing_secret: String,
 }
 
 /// One declared `[llm.*]` block, as `subs llm list` reads it.
