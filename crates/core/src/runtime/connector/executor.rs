@@ -64,6 +64,7 @@ async fn handle_task(store: &dyn EventStore, connections: &Connections, task: Co
                     Outcome::Connector {
                         prefix: offer.prefix,
                         tools: offer.tools,
+                        instructions: offer.instructions,
                     },
                 ),
                 Err(err) => CommandPayload::settle(

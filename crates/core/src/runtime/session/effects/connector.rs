@@ -35,7 +35,11 @@ impl KindSpec for ConnectorSpec {
 
     fn settle(&self, state: &SessionState, id: &str, outcome: Outcome) -> Vec<EventPayload> {
         match outcome {
-            Outcome::Connector { prefix, tools } => {
+            Outcome::Connector {
+                prefix,
+                tools,
+                instructions,
+            } => {
                 state.report_filter(id, &tools, prefix.as_deref());
                 // The run tail promotes whatever this fetch was parking.
                 vec![EventPayload::ConnectorSyncCompleted(Box::new(
@@ -43,6 +47,7 @@ impl KindSpec for ConnectorSpec {
                         id: id.to_string(),
                         prefix,
                         tools,
+                        instructions,
                     },
                 ))]
             }
@@ -218,11 +223,14 @@ impl SessionState {
         // connection the operator configured.
         let merged = self.connector_tools_for_config(&config);
         for name in &merged.collisions {
-            if name == filter::FIND_TOOLS || name == filter::CALL_TOOL {
+            if name == filter::TOOL_SEARCH
+                || name == filter::CALL_TOOL
+                || name == filter::LIST_TOOLS
+            {
                 tracing::warn!(
                     tool = %name,
                     "the config declares `{name}`, so the engine's own is not offered; \
-                     searched connections lose that half of the pair"
+                     searched connections lose that part of the set"
                 );
             } else {
                 tracing::warn!(

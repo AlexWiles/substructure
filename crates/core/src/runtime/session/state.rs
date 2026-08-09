@@ -29,8 +29,30 @@ use uuid::Uuid;
 
 use super::decision::{LlmHandler, ToolHandler, Trigger};
 use super::events::*;
+use super::tool_contract::classify_arguments;
 use crate::connectors::{filter, AuthNeed, RemoteTool};
 use crate::protocol::{ConnectorTool, ConnectorToolKind, Handler, McpServer, ToolDiscovery};
+
+/// One connection as the engine's own tools see it: what the agent declared,
+/// what the connection offered, and what it said it is for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Source {
+    pub server: McpServer,
+    pub offered: Vec<RemoteTool>,
+    pub instructions: Option<String>,
+}
+
+/// The tool's own arguments, out of the `call_tool` wrapper.
+///
+/// A model that sent them as a JSON string meant the object, and we hold the
+/// schema that says so. Refusing it would teach the model nothing.
+fn inner_arguments(raw: &serde_json::Value) -> String {
+    match raw.get("arguments") {
+        Some(serde_json::Value::String(text)) => text.clone(),
+        Some(value) => value.to_string(),
+        None => String::new(),
+    }
+}
 
 /// What the engine answers for one of its own connector tools.
 #[derive(Debug, Clone, PartialEq)]
@@ -489,6 +511,10 @@ pub struct ConnectorSyncState {
     /// The prefix its tools expand under, frozen at fetch time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix: Option<String>,
+    /// What the server said it is for. The only description of a connection
+    /// that the engine does not have to write itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
     /// Why the last attempt failed; `Some` only while the fetch is unsettled or
     /// terminally failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1340,6 +1366,7 @@ impl SessionState {
                         EffectPayload::ConnectorSync(ConnectorSyncState {
                             tools: Vec::new(),
                             prefix: None,
+                            instructions: None,
                             error: None,
                             auth: None,
                         }),
@@ -1361,6 +1388,7 @@ impl SessionState {
                     if let Some(sync) = e.connector_mut() {
                         sync.tools = p.tools.clone();
                         sync.prefix = p.prefix.clone();
+                        sync.instructions = p.instructions.clone();
                         sync.error = None;
                         sync.auth = None;
                     }
@@ -1770,11 +1798,15 @@ impl SessionState {
 
     /// The connection as the config in force names it, with the offer this
     /// session recorded.
-    pub fn connector_source(&self, connector_id: &str) -> Option<(McpServer, Vec<RemoteTool>)> {
+    pub fn connector_source(&self, connector_id: &str) -> Option<Source> {
         let config = self.resolve_agent_for(self.head_id.as_deref())?;
         let server = config.mcp.into_iter().find(|c| c.id == connector_id)?;
         let sync = self.connector_sync(connector_id)?;
-        Some((server, sync.tools.clone()))
+        Some(Source {
+            server,
+            offered: sync.tools.clone(),
+            instructions: sync.instructions.clone(),
+        })
     }
 
     /// Every connection of the agent whose offer has arrived, with that offer.
@@ -1786,7 +1818,7 @@ impl SessionState {
     ///
     /// Readiness belongs here and not in the tool list: a connection that
     /// arrives during a session joins the next answer, and no definition moves.
-    pub fn searchable_connectors(&self) -> Vec<(McpServer, Vec<RemoteTool>)> {
+    pub fn searchable_connectors(&self) -> Vec<Source> {
         let Some(config) = self.resolve_agent_for(self.head_id.as_deref()) else {
             return Vec::new();
         };
@@ -1809,7 +1841,6 @@ impl SessionState {
         if target.kind.is_remote() {
             return None;
         }
-        let searchable = self.searchable_connectors();
         let argument = |key: &str| {
             serde_json::from_str::<serde_json::Value>(&tc.arguments)
                 .ok()
@@ -1818,33 +1849,72 @@ impl SessionState {
         };
         match target.kind {
             ConnectorToolKind::Remote => None,
+            ConnectorToolKind::List => Some(LocalAnswer::Result(filter::list_answer(
+                &self.searchable_connectors(),
+            ))),
             ConnectorToolKind::Find => Some(LocalAnswer::Result(filter::find_answer(
-                &searchable,
+                &self.searchable_connectors(),
                 &argument("query"),
             ))),
-            // The filter refused the name, or the agent has no such connection.
-            ConnectorToolKind::Call => {
-                let (named_connector, named_tool) = (argument("connector"), argument("tool"));
-                let Some((server, offer)) = searchable
-                    .iter()
-                    .find(|(server, _)| server.id == named_connector)
-                else {
-                    let ids: Vec<&str> = searchable.iter().map(|(s, _)| s.id.as_str()).collect();
-                    return Some(LocalAnswer::Error(format!(
-                        "this agent has no connection `{named_connector}`. It has: {}",
-                        ids.join(", ")
-                    )));
-                };
-                let reachable: Vec<&str> = filter::callable(server, offer)
-                    .iter()
-                    .map(|t| t.name.as_str())
-                    .collect();
-                Some(LocalAnswer::Error(format!(
-                    "`{named_connector}` has no tool `{named_tool}` for this agent. It has: {}",
-                    reachable.join(", ")
-                )))
-            }
+            ConnectorToolKind::Call => Some(LocalAnswer::Error(
+                self.call_tool_fault(&tc.arguments)
+                    .unwrap_or_else(|| "the call could not be routed".to_string()),
+            )),
         }
+    }
+
+    /// Why a `call_tool` cannot be placed, if it cannot: an unknown connection,
+    /// a tool the filter refused, or arguments that break that tool's schema.
+    ///
+    /// One function for two callers. The route freezes an empty remote name
+    /// when this answers `Some`, and the answer reads the same fault again to
+    /// tell the model which of the three it was.
+    pub fn call_tool_fault(&self, arguments: &str) -> Option<String> {
+        let raw: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
+        let named = raw
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        let Some((_, remote)) = self.reachable_tool(&named) else {
+            let reachable: Vec<String> = self.reachable_names();
+            return Some(format!(
+                "no tool `{named}` for this agent. It has: {}",
+                reachable.join(", ")
+            ));
+        };
+        // The provider checked the wrapper, and holds no schema for what is
+        // inside it. The engine holds one, so the engine checks it.
+        classify_arguments(&inner_arguments(&raw), remote.input.as_ref())
+            .error()
+            .map(|e| format!("`{named}`: {e}"))
+    }
+
+    /// The connection and the tool one qualified name addresses, if the filter
+    /// kept it.
+    ///
+    /// Matched, never parsed: a connection id may hold the separator, so
+    /// splitting the name would address the wrong connection.
+    pub fn reachable_tool(&self, named: &str) -> Option<(String, RemoteTool)> {
+        self.searchable_connectors().into_iter().find_map(|source| {
+            filter::callable(&source.server, &source.offered)
+                .into_iter()
+                .find(|tool| filter::qualified_name(&source.server.id, &tool.name) == named)
+                .map(|tool| (source.server.id.clone(), tool.clone()))
+        })
+    }
+
+    fn reachable_names(&self) -> Vec<String> {
+        self.searchable_connectors()
+            .iter()
+            .flat_map(|source| {
+                filter::callable(&source.server, &source.offered)
+                    .into_iter()
+                    .map(|tool| filter::qualified_name(&source.server.id, &tool.name))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
     /// The `output` contract of the tool a `call_tool` ran. The model was
@@ -1858,8 +1928,8 @@ impl SessionState {
         if target.kind != ConnectorToolKind::Call || target.remote_name.is_empty() {
             return None;
         }
-        let (server, offer) = self.connector_source(&target.connector)?;
-        filter::kept(&server, &offer, &target.remote_name)?
+        let source = self.connector_source(&target.connector)?;
+        filter::kept(&source.server, &source.offered, &target.remote_name)?
             .output
             .clone()
     }

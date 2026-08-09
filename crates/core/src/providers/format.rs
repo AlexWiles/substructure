@@ -88,7 +88,7 @@ mod tests {
     #[test]
     fn anthropic_round_trip_omits_stream_and_maps_both_directions() {
         let body = LlmFormat::Anthropic.request_to_wire(&request());
-        assert_eq!(body["system"], "be nice");
+        assert_eq!(body["system"][0]["text"], "be nice");
         assert_eq!(body["max_tokens"], 64);
         assert!(body.get("stream").is_none(), "stream is the trigger's flag");
 

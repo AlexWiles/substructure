@@ -568,6 +568,7 @@ fn flow_connector_gating() -> Trace {
                     output: None,
                     annotations: Default::default(),
                 }],
+                instructions: None,
             },
         ),
         &system(),

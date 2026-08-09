@@ -17,7 +17,6 @@
 //! the tool failing, not the model.
 
 use super::{decision_queued, fail, mismatched, void_events, KindSpec, Outcome, SettleError};
-use crate::connectors::filter;
 use crate::protocol::{ConnectorTool, ConnectorToolKind, ErrorCode, ErrorInfo};
 use crate::protocol::{RetryOverride, RetryPolicy};
 use crate::runtime::session::command::SessionError;
@@ -234,25 +233,23 @@ fn route_connector(state: &SessionState, tool: &ConnectorTool, arguments: &str) 
             remote_name: tool.remote_name.clone(),
             kind: tool.kind,
         },
-        ConnectorToolKind::Find => ConnectorTarget {
+        ConnectorToolKind::List | ConnectorToolKind::Find => ConnectorTarget {
             connector: String::new(),
             remote_name: String::new(),
             kind: tool.kind,
         },
         ConnectorToolKind::Call => {
-            let named_connector = argument(arguments, "connector").unwrap_or_default();
-            let named_tool = argument(arguments, "tool").unwrap_or_default();
-            let searched = state
-                .searchable_connectors()
-                .into_iter()
-                .find(|(server, _)| server.id == named_connector);
-            let remote_name = searched
-                .filter(|(server, offer)| filter::kept(server, offer, &named_tool).is_some())
-                .map(|_| named_tool)
-                .unwrap_or_default();
+            let reached = state
+                .call_tool_fault(arguments)
+                .is_none()
+                .then(|| argument(arguments, "name").and_then(|n| state.reachable_tool(&n)))
+                .flatten();
             ConnectorTarget {
-                connector: named_connector,
-                remote_name,
+                connector: reached
+                    .as_ref()
+                    .map(|(id, _)| id.clone())
+                    .unwrap_or_default(),
+                remote_name: reached.map(|(_, t)| t.name).unwrap_or_default(),
                 kind: tool.kind,
             }
         }

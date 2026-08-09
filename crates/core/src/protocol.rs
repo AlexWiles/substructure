@@ -381,8 +381,8 @@ pub struct ConnectorTool {
     pub kind: ConnectorToolKind,
 }
 
-/// What the engine does with a call. `Find` and `Call` are the engine's own
-/// tools, and neither has a `remote_name`.
+/// What the engine does with a call. Every value but `Remote` is one of the
+/// engine's own tools, and none of those has a `remote_name`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[schemars(title = "ConnectorToolKind")]
@@ -390,6 +390,8 @@ pub enum ConnectorToolKind {
     /// Call `remote_name` on the connection.
     #[default]
     Remote,
+    /// Give each tool by name, from the recorded offer. This reaches nothing.
+    List,
     /// Search the recorded offer. This reaches nothing.
     Find,
     /// Run the tool the arguments name.

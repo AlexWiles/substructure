@@ -569,6 +569,7 @@ impl World {
                         Outcome::Connector {
                             prefix: None,
                             tools: vec![],
+                            instructions: None,
                         },
                     )
                 } else {

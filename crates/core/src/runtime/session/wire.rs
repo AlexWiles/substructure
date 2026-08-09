@@ -997,7 +997,7 @@ mod tests {
                 request, format, ..
             } => {
                 assert_eq!(format, Some(LlmFormat::Anthropic));
-                assert_eq!(request["system"], "be nice");
+                assert_eq!(request["system"][0]["text"], "be nice");
                 assert_eq!(request["messages"][0]["content"][0]["text"], "hi");
                 assert!(
                     request.get("stream").is_none(),

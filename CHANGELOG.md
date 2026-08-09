@@ -17,6 +17,7 @@ together at the same version.
 
 - Slackbot prompts for MCP reauth by default. Overrideable in config.
 - MCP tool search support.
+- Calls to Anthropic now set cache breakpoints.
 
 ## [0.3.1] - 2026-08-07
 

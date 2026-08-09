@@ -6464,6 +6464,7 @@ fn settle_sync(agg: &mut SessionAggregate, id: &str, tools: &[&str]) -> Vec<Even
             Outcome::Connector {
                 prefix: Some(id.to_string()),
                 tools: tools.iter().map(|t| remote_tool(t)).collect(),
+                instructions: None,
             },
         ),
         &system(),
@@ -7177,11 +7178,11 @@ fn a_searched_connector_offers_two_tools_however_many_it_has() {
         .collect();
     assert_eq!(
         offered,
-        ["find_tools", "call_tool"],
+        ["list_tools", "tool_search", "call_tool"],
         "three tools cost the request two definitions, and thirty would cost the same two"
     );
     assert_eq!(
-        agg.state.tool_handler_for("find_tools"),
+        agg.state.tool_handler_for("tool_search"),
         ToolHandler::Server,
         "both are the engine's to run"
     );
@@ -7190,7 +7191,7 @@ fn a_searched_connector_offers_two_tools_however_many_it_has() {
 #[test]
 fn find_tools_is_answered_from_the_recorded_offer_without_the_connection() {
     let mut agg = session_with_searched_connector("sentry", &["search_issues", "list_projects"]);
-    let events = call(&mut agg, "tc-1", "find_tools", r#"{"query":"issues"}"#);
+    let events = call(&mut agg, "tc-1", "tool_search", r#"{"query":"issues"}"#);
 
     assert!(
         !events
@@ -7207,7 +7208,7 @@ fn find_tools_is_answered_from_the_recorded_offer_without_the_connection() {
         panic!("a find is a result, not an error");
     };
     let answer: serde_json::Value = serde_json::from_str(&result).expect("json");
-    assert_eq!(answer["tools"][0]["name"], "search_issues");
+    assert_eq!(answer["tools"][0]["name"], "sentry__search_issues");
     assert_eq!(answer["matched"], 1);
     assert_eq!(
         agg.state
@@ -7240,7 +7241,7 @@ fn call_tool_freezes_the_named_tool_onto_the_call() {
         &mut agg,
         "tc-1",
         "call_tool",
-        r#"{"connector":"sentry","tool":"search_issues","arguments":{"q":"boom"}}"#,
+        r#"{"name":"sentry__search_issues","arguments":{"q":"boom"}}"#,
     );
     let target = agg
         .state
@@ -7257,7 +7258,7 @@ fn call_tool_freezes_the_named_tool_onto_the_call() {
     assert_eq!(target.kind, ConnectorToolKind::Call);
     assert_eq!(
         agg.state.tool_call("tc-1").unwrap().arguments,
-        r#"{"connector":"sentry","tool":"search_issues","arguments":{"q":"boom"}}"#,
+        r#"{"name":"sentry__search_issues","arguments":{"q":"boom"}}"#,
         "the call is recorded as the model made it; the wrapper is unwrapped on the wire"
     );
 }
@@ -7287,7 +7288,7 @@ fn call_tool_refuses_a_name_the_filter_removed_and_never_dials() {
         &mut agg,
         "tc-1",
         "call_tool",
-        r#"{"connector":"sentry","tool":"resolve_issue","arguments":{}}"#,
+        r#"{"name":"sentry__resolve_issue","arguments":{}}"#,
     );
     let LocalAnswer::Error(message) = agg
         .state
@@ -7337,11 +7338,11 @@ fn two_searched_connections_share_one_pair_and_one_search() {
         .collect();
     assert_eq!(
         offered,
-        ["find_tools", "call_tool"],
+        ["list_tools", "tool_search", "call_tool"],
         "two connections cost the same two definitions as one"
     );
 
-    call(&mut agg, "tc-1", "find_tools", r#"{"query":"issues"}"#);
+    call(&mut agg, "tc-1", "tool_search", r#"{"query":"issues"}"#);
     let LocalAnswer::Result(result) = agg
         .state
         .local_connector_answer("tc-1")
@@ -7351,8 +7352,8 @@ fn two_searched_connections_share_one_pair_and_one_search() {
     };
     let answer: serde_json::Value = serde_json::from_str(&result).expect("json");
     assert_eq!(
-        answer["tools"][0]["connector"], "linear",
-        "one search reaches both connections, and names the one that holds the tool"
+        answer["tools"][0]["name"], "linear__search_issues",
+        "one search reaches both connections, and the name says which holds the tool"
     );
     assert_eq!(answer["searched"], 2, "both connections were searched");
     assert_eq!(
@@ -7373,7 +7374,7 @@ fn a_connection_added_during_a_session_does_not_move_the_tool_list() {
     let before = agg.state.connector_tools(None).tools;
     assert_eq!(
         before.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
-        ["find_tools", "call_tool"]
+        ["list_tools", "tool_search", "call_tool"]
     );
 
     // The worker writes a config that names a second searched connection.
@@ -7398,7 +7399,7 @@ fn a_connection_added_during_a_session_does_not_move_the_tool_list() {
         "the definitions are identical, so the provider's cache holds"
     );
 
-    call(&mut agg, "tc-9", "find_tools", r#"{"query":"issues"}"#);
+    call(&mut agg, "tc-9", "tool_search", r#"{"query":"issues"}"#);
     let LocalAnswer::Result(result) = agg
         .state
         .local_connector_answer("tc-9")
@@ -7408,7 +7409,7 @@ fn a_connection_added_during_a_session_does_not_move_the_tool_list() {
     };
     let answer: serde_json::Value = serde_json::from_str(&result).expect("json");
     assert_eq!(
-        answer["tools"][0]["connector"], "linear",
+        answer["tools"][0]["name"], "linear__search_issues",
         "the new connection reaches the model through the answer, not the tool list"
     );
 }
@@ -7452,11 +7453,16 @@ fn a_search_covers_a_connection_that_lists_its_own_tools() {
         .collect();
     assert_eq!(
         offered,
-        ["sentry__search_issues", "find_tools", "call_tool"],
+        [
+            "sentry__search_issues",
+            "list_tools",
+            "tool_search",
+            "call_tool"
+        ],
         "the listed connection keeps its own tools, beside the pair"
     );
 
-    call(&mut agg, "tc-1", "find_tools", r#"{"query":"issues"}"#);
+    call(&mut agg, "tc-1", "tool_search", r#"{"query":"issues"}"#);
     let LocalAnswer::Result(result) = agg
         .state
         .local_connector_answer("tc-1")
@@ -7466,7 +7472,7 @@ fn a_search_covers_a_connection_that_lists_its_own_tools() {
     };
     let answer: serde_json::Value = serde_json::from_str(&result).expect("json");
     assert_eq!(
-        answer["tools"][0]["connector"], "sentry",
+        answer["tools"][0]["name"], "sentry__search_issues",
         "a search that skipped the listed connection would report an absence that is not real"
     );
     assert_eq!(
@@ -7479,7 +7485,7 @@ fn a_search_covers_a_connection_that_lists_its_own_tools() {
         &mut agg,
         "tc-2",
         "call_tool",
-        r#"{"connector":"sentry","tool":"search_issues","arguments":{}}"#,
+        r#"{"name":"sentry__search_issues","arguments":{}}"#,
     );
     let target = agg.state.tool_call("tc-2").unwrap().target.clone().unwrap();
     assert_eq!(
@@ -7497,7 +7503,7 @@ fn a_worker_tool_takes_a_search_name_and_the_other_half_survives() {
         "user-1",
         Some(AgentConfig {
             tools: vec![AgentTool {
-                name: "find_tools".to_string(),
+                name: "tool_search".to_string(),
                 description: "the worker's own discovery".to_string(),
                 input: None,
                 output: None,
@@ -7523,16 +7529,16 @@ fn a_worker_tool_takes_a_search_name_and_the_other_half_survives() {
             .iter()
             .map(|t| t.name.as_str())
             .collect::<Vec<_>>(),
-        ["call_tool"],
+        ["list_tools", "call_tool"],
         "the worker keeps the name it declared, and the engine keeps the rest"
     );
     assert_eq!(
         merged.collisions,
-        vec!["find_tools".to_string()],
+        vec!["tool_search".to_string()],
         "the drop is recorded, so a report can name it"
     );
     assert_eq!(
-        agg.state.tool_handler_for("find_tools"),
+        agg.state.tool_handler_for("tool_search"),
         ToolHandler::Worker,
         "the worker runs its own"
     );
@@ -7544,13 +7550,76 @@ fn a_worker_tool_takes_a_search_name_and_the_other_half_survives() {
 }
 
 #[test]
+fn call_tool_refuses_arguments_that_break_the_tools_own_schema() {
+    let mut agg = create_session_with_config(
+        "sess-1",
+        "tenant-a",
+        "user-1",
+        Some(searching_connector_config(&["sentry"])),
+    );
+    dispatch(
+        &mut agg,
+        CommandPayload::settle(
+            EffectKind::ConnectorSync,
+            "sentry".to_string(),
+            None,
+            Outcome::Connector {
+                prefix: Some("sentry".to_string()),
+                tools: vec![RemoteTool {
+                    name: "search_issues".to_string(),
+                    description: "search".to_string(),
+                    input: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": { "query": { "type": "string" } },
+                        "required": ["query"]
+                    })),
+                    output: None,
+                    annotations: Default::default(),
+                }],
+                instructions: None,
+            },
+        ),
+        &system(),
+    );
+
+    call(
+        &mut agg,
+        "tc-1",
+        "call_tool",
+        r#"{"name":"sentry__search_issues","arguments":{"query":7}}"#,
+    );
+    let LocalAnswer::Error(message) = agg
+        .state
+        .local_connector_answer("tc-1")
+        .expect("the engine answers this one")
+    else {
+        panic!("bad arguments are an error");
+    };
+    assert!(
+        message.contains("query"),
+        "the message names the field: {message}"
+    );
+    assert!(
+        agg.state
+            .tool_call("tc-1")
+            .unwrap()
+            .target
+            .as_ref()
+            .unwrap()
+            .remote_name
+            .is_empty(),
+        "the provider held no schema for the inner tool, so the engine stops the call"
+    );
+}
+
+#[test]
 fn call_tool_refuses_a_connection_this_agent_does_not_have() {
     let mut agg = session_with_searched_connector("sentry", &["search_issues"]);
     call(
         &mut agg,
         "tc-1",
         "call_tool",
-        r#"{"connector":"github","tool":"search_issues","arguments":{}}"#,
+        r#"{"name":"github__search_issues","arguments":{}}"#,
     );
     let LocalAnswer::Error(message) = agg
         .state

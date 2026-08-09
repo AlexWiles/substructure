@@ -113,13 +113,18 @@ fn answered_locally(target: &ConnectorTarget) -> bool {
 fn call_arguments(recorded: &str, kind: ConnectorToolKind) -> serde_json::Value {
     let value: serde_json::Value =
         serde_json::from_str(recorded).unwrap_or_else(|_| serde_json::json!({}));
-    match kind {
-        ConnectorToolKind::Call => value
-            .get("arguments")
-            .filter(|a| a.is_object())
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({})),
-        _ => value,
+    if kind != ConnectorToolKind::Call {
+        return value;
+    }
+    // A model that sent the object as a JSON string meant the object.
+    let inner = match value.get("arguments") {
+        Some(serde_json::Value::String(text)) => serde_json::from_str(text).unwrap_or_default(),
+        Some(other) => other.clone(),
+        None => serde_json::Value::Null,
+    };
+    match inner {
+        object @ serde_json::Value::Object(_) => object,
+        _ => serde_json::json!({}),
     }
 }
 
@@ -189,7 +194,7 @@ mod tests {
     fn a_call_tool_sends_the_inner_arguments_without_the_wrapper() {
         assert_eq!(
             call_arguments(
-                r#"{"tool":"search_issues","arguments":{"q":"boom"}}"#,
+                r#"{"name":"sentry__search_issues","arguments":{"q":"boom"}}"#,
                 ConnectorToolKind::Call
             ),
             serde_json::json!({ "q": "boom" }),
@@ -198,11 +203,23 @@ mod tests {
     }
 
     #[test]
+    fn a_call_tool_accepts_the_arguments_as_a_json_string() {
+        assert_eq!(
+            call_arguments(
+                r#"{"name":"sentry__search_issues","arguments":"{\"q\":\"boom\"}"}"#,
+                ConnectorToolKind::Call
+            ),
+            serde_json::json!({ "q": "boom" }),
+            "a model that stringified the object meant the object"
+        );
+    }
+
+    #[test]
     fn a_call_tool_with_no_arguments_sends_an_empty_object() {
         for recorded in [
-            r#"{"tool":"list_projects"}"#,
-            r#"{"tool":"list_projects","arguments":null}"#,
-            r#"{"tool":"list_projects","arguments":"nonsense"}"#,
+            r#"{"name":"sentry__list_projects"}"#,
+            r#"{"name":"sentry__list_projects","arguments":null}"#,
+            r#"{"name":"sentry__list_projects","arguments":"nonsense"}"#,
             "not json at all",
         ] {
             assert_eq!(

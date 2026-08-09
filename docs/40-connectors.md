@@ -174,7 +174,8 @@ fewer tools, not as a security boundary.
 ## Tool discovery
 
 Filtering is one answer to a large connection. Search is the other. Set
-`discovery = "search"` and the model gets two tools for the whole connection.
+`discovery = "search"` and the model searches for a tool instead of reading a
+list of them.
 
 ```toml title="substructure.toml"
 [agent.support]
@@ -186,29 +187,41 @@ mcp = [{ id = "aws", tools = { discovery = "search" } }]
 | `"all"` (the default) | Each tool the filter kept. |
 | `"search"` | Nothing of its own. |
 
-An agent with one or more searched connections gets `find_tools` and
-`call_tool`. It gets one pair, whatever the number of connections. The model
-searches once and reads each of them.
+An agent with one or more searched connections gets three tools. It gets one
+set, whatever the number of connections.
 
-The two tools do not change during a session. Their names and their text say
+```jsonc
+// list_tools — every tool, by name, with no schema
+{ }
+// tool_search — the tools that match, with their schemas
+{ "query": "open issues" }
+// call_tool
+{ "name": "aws__s3_list", "arguments": { "bucket": "logs" } }
+```
+
+Each tool does one thing. A model that does not know what is available calls
+`list_tools`. A model that knows what it wants calls `tool_search`. A search
+that matches nothing says so, and names `list_tools`.
+
+A list and a search give each tool one name, such as `aws__s3_list`. `call_tool`
+takes that name back, exactly as it was given. It is the same name the model
+calls directly when a connection lists its own tools.
+
+An answer also gives the connections of the agent: the number of tools of each
+one, and what the server said it is for.
+
+The three tools do not change during a session. Their names and their text say
 nothing about which connections exist, so a connection that an agent adds later
 does not change the request that the provider cached. The model reads the new
 connection in the next answer.
 
-```jsonc
-// find_tools
-{ "query": "open issues" }
-// call_tool
-{ "connector": "aws", "tool": "s3_list", "arguments": { "bucket": "logs" } }
-```
-
-An answer lists the connections of the agent, and it names the connection of
-each match. `call_tool` takes that name. Both tools are the engine's. A search
-reaches nothing: the engine answers from the list it read when it opened each
-connection.
+The engine answers `list_tools` and `tool_search` from the list it read when it
+opened each connection. Neither reaches the network. Before it runs a
+`call_tool`, the engine compares the arguments to the tool's own schema, because
+the provider has no schema for a tool it did not receive.
 
 An agent can mix. A connection with `discovery = "all"` puts its own tools in
-the list, beside the pair.
+the list, beside the three.
 
 A search covers each connection of the agent, and not only the searched ones. A
 connection on `all` is listed up front and it is findable. Therefore one search

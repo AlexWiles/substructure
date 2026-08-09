@@ -28,12 +28,35 @@ const DEFAULT_MAX_TOKENS: u64 = 4096;
 
 // ── Request wire format ──────────────────────────────────────────────────
 
+/// A cache breakpoint. Anthropic caches nothing without one, so a request that
+/// carries none is re-read in full on every turn.
+#[derive(Serialize, Clone, Copy)]
+struct CacheControl {
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+
+impl CacheControl {
+    fn ephemeral() -> Option<Self> {
+        Some(Self { kind: "ephemeral" })
+    }
+}
+
+#[derive(Serialize)]
+struct SystemBlock {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
+}
+
 #[derive(Serialize)]
 struct AnthropicBody {
     model: String,
     max_tokens: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: Option<Vec<SystemBlock>>,
     messages: Vec<AnthropicMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<AnthropicTool>>,
@@ -50,6 +73,8 @@ struct AnthropicTool {
     name: String,
     description: String,
     input_schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
 }
 
 #[derive(Serialize)]
@@ -63,19 +88,40 @@ struct AnthropicMessage {
 enum RequestBlock {
     Text {
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     Image {
         source: ImageSource,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     ToolUse {
         id: String,
         name: String,
         input: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     ToolResult {
         tool_use_id: String,
         content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
+}
+
+impl RequestBlock {
+    fn cache(&mut self) {
+        match self {
+            RequestBlock::Text { cache_control, .. }
+            | RequestBlock::Image { cache_control, .. }
+            | RequestBlock::ToolUse { cache_control, .. }
+            | RequestBlock::ToolResult { cache_control, .. } => {
+                *cache_control = CacheControl::ephemeral()
+            }
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -114,7 +160,10 @@ fn content_to_blocks(content: Option<&Content>) -> Vec<RequestBlock> {
             if s.is_empty() {
                 Vec::new()
             } else {
-                vec![RequestBlock::Text { text: s.clone() }]
+                vec![RequestBlock::Text {
+                    text: s.clone(),
+                    cache_control: None,
+                }]
             }
         }
         Some(Content::Parts(parts)) => parts.iter().filter_map(part_to_block).collect(),
@@ -123,7 +172,10 @@ fn content_to_blocks(content: Option<&Content>) -> Vec<RequestBlock> {
 
 fn part_to_block(part: &ContentPart) -> Option<RequestBlock> {
     match part {
-        ContentPart::Text { text } => Some(RequestBlock::Text { text: text.clone() }),
+        ContentPart::Text { text } => Some(RequestBlock::Text {
+            text: text.clone(),
+            cache_control: None,
+        }),
         ContentPart::ImageUrl { image_url } => Some(image_block(&image_url.url)),
         // Audio/video/file parts have no direct Messages API equivalent here.
         _ => None,
@@ -139,6 +191,7 @@ fn image_block(url: &str) -> RequestBlock {
                     media_type,
                     data: data.to_string(),
                 },
+                cache_control: None,
             };
         }
     }
@@ -146,6 +199,7 @@ fn image_block(url: &str) -> RequestBlock {
         source: ImageSource::Url {
             url: url.to_string(),
         },
+        cache_control: None,
     }
 }
 
@@ -195,7 +249,10 @@ fn build_body(
                 if let Some(c) = &msg.content {
                     let text = c.text_owned();
                     if !text.is_empty() {
-                        blocks.push(RequestBlock::Text { text });
+                        blocks.push(RequestBlock::Text {
+                            text,
+                            cache_control: None,
+                        });
                     }
                 }
                 if let Some(tcs) = &msg.tool_calls {
@@ -206,6 +263,7 @@ fn build_body(
                             id: tc.id.clone(),
                             name: tc.function.name.clone(),
                             input,
+                            cache_control: None,
                         });
                     }
                 }
@@ -224,23 +282,44 @@ fn build_body(
                     vec![RequestBlock::ToolResult {
                         tool_use_id,
                         content,
+                        cache_control: None,
                     }],
                 );
             }
         }
     }
 
-    let system = (!system_parts.is_empty()).then(|| system_parts.join("\n\n"));
+    // Three breakpoints, in the order the provider reads the request: after the
+    // tools, after the system prompt, and after the last block of the last
+    // message. The first two hold for the session. The third grows the cached
+    // part by one turn each turn, which is where the transcript is.
+    let system = (!system_parts.is_empty()).then(|| {
+        vec![SystemBlock {
+            kind: "text",
+            text: system_parts.join("\n\n"),
+            cache_control: CacheControl::ephemeral(),
+        }]
+    });
 
-    let tools = request.tools.as_ref().map(|ts| {
+    let tools: Option<Vec<AnthropicTool>> = request.tools.as_ref().map(|ts| {
         ts.iter()
             .map(|t| AnthropicTool {
                 name: t.name.clone(),
                 description: t.description.clone(),
                 input_schema: t.input_schema(),
+                cache_control: None,
             })
             .collect()
     });
+    let tools = tools.map(|mut ts| {
+        if let Some(last) = ts.last_mut() {
+            last.cache_control = CacheControl::ephemeral();
+        }
+        ts
+    });
+    if let Some(block) = turns.last_mut().and_then(|t| t.content.last_mut()) {
+        block.cache();
+    }
 
     let (thinking, output_config) = match request.reasoning.as_ref().and_then(|r| r.effort) {
         None | Some(ReasoningEffort::None) => (None, None),
@@ -852,7 +931,7 @@ mod tests {
             Some(false),
         );
         let v = serde_json::to_value(&body).unwrap();
-        assert_eq!(v["system"], "be nice");
+        assert_eq!(v["system"][0]["text"], "be nice");
         assert_eq!(v["max_tokens"], 4096);
         assert_eq!(v["stream"], false);
         assert_eq!(v["messages"][0]["role"], "user");
@@ -897,6 +976,57 @@ mod tests {
         assert_eq!(v["messages"][2]["content"][0]["tool_use_id"], "call_1");
         assert_eq!(v["messages"][2]["content"][0]["content"], "72F");
         assert_eq!(v["messages"][2]["content"][1]["tool_use_id"], "call_2");
+    }
+
+    #[test]
+    fn every_cacheable_part_of_the_request_carries_a_breakpoint() {
+        let mut r = req(vec![
+            msg(Role::System, Some("be nice")),
+            msg(Role::User, Some("hello")),
+        ]);
+        r.tools = Some(vec![
+            LlmTool {
+                name: "a".into(),
+                description: String::new(),
+                input: None,
+                output: None,
+            },
+            LlmTool {
+                name: "b".into(),
+                description: String::new(),
+                input: None,
+                output: None,
+            },
+        ]);
+        let v = request_to_wire(&r);
+        let mark = serde_json::json!({ "type": "ephemeral" });
+
+        assert_eq!(v["tools"][1]["cache_control"], mark, "after the tools");
+        assert!(
+            v["tools"][0].get("cache_control").is_none(),
+            "one breakpoint for the block, not one for each tool"
+        );
+        assert_eq!(v["system"][0]["cache_control"], mark, "after the system");
+        let turns = v["messages"].as_array().expect("messages");
+        let last = turns.last().expect("a turn");
+        let block = last["content"].as_array().unwrap().last().unwrap();
+        assert_eq!(
+            block["cache_control"], mark,
+            "after the last block, so the transcript is cached as it grows"
+        );
+    }
+
+    #[test]
+    fn a_request_with_no_tools_and_no_system_still_caches_the_transcript() {
+        let r = req(vec![msg(Role::User, Some("hello"))]);
+        let v = request_to_wire(&r);
+        assert!(v.get("system").is_none());
+        assert!(v.get("tools").is_none());
+        let block = v["messages"][0]["content"][0].clone();
+        assert_eq!(
+            block["cache_control"],
+            serde_json::json!({ "type": "ephemeral" })
+        );
     }
 
     #[test]

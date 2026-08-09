@@ -591,6 +591,7 @@ mod tests {
                 prefix: None,
                 error: None,
                 auth: None,
+                instructions: None,
             }),
         ));
         add_llm(&mut s, "call-1", EffectStatus::Queued);

@@ -246,6 +246,8 @@ impl CredentialSource for Resolved {
 pub struct Offer {
     pub prefix: Option<String>,
     pub tools: Vec<RemoteTool>,
+    /// What the server said it is for at the handshake, if it said anything.
+    pub instructions: Option<String>,
 }
 
 /// The engine's handle on its connections. Holds one live client per resolved
@@ -281,14 +283,16 @@ impl Connections {
     /// rename tools underneath a live session.
     pub async fn list_tools(&self, tenant_id: &str, id: &str) -> Result<Offer, ConnectorError> {
         let spec = self.registry.resolve(tenant_id, id).await?;
-        let tools = self
+        let (tools, instructions) = self
             .attempt(tenant_id, id, &spec, |client| async move {
-                client.list_tools().await
+                let tools = client.list_tools().await?;
+                Ok((tools, client.instructions().await))
             })
             .await?;
         Ok(Offer {
             prefix: spec.prefix_for(id).map(str::to_string),
             tools,
+            instructions,
         })
     }
 
