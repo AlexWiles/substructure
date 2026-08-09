@@ -30,11 +30,47 @@ pub enum OauthError {
     Registration(String),
     #[error("{0}")]
     Token(String),
+    /// The authorization server refused, in the shape RFC 6749 defines. The
+    /// code says whether another attempt can be successful.
+    #[error("{code}{}", .description.as_deref().map(|d| format!(": {d}")).unwrap_or_default())]
+    Refused {
+        code: String,
+        description: Option<String>,
+    },
+    /// The stored grant cannot produce another access token by itself.
+    #[error("{0}")]
+    Unrenewable(String),
     /// The authorization response named an issuer other than the one whose
     /// metadata we validated. The code is not redeemed and the error the
     /// response carried is not reported: neither can be trusted.
     #[error("authorization server mismatch: expected `{expected}`, got `{got}`")]
     IssuerMismatch { expected: String, got: String },
+}
+
+impl OauthError {
+    /// Whether what we hold is gone, and thus a person must authorize again.
+    ///
+    /// Only the server saying so counts. A network fault or an unwell token
+    /// endpoint says nothing about the grant, and to report those as spent
+    /// asks a person to correct something that is not broken.
+    pub fn is_spent(&self) -> bool {
+        match self {
+            Self::Unrenewable(_) => true,
+            Self::Refused { code, .. } => matches!(
+                code.as_str(),
+                "invalid_grant" | "invalid_client" | "unauthorized_client"
+            ),
+            _ => false,
+        }
+    }
+}
+
+/// An OAuth error response (RFC 6749 §5.2).
+#[derive(Debug, Deserialize)]
+struct ErrorResponse {
+    error: String,
+    #[serde(default)]
+    error_description: Option<String>,
 }
 
 /// What a protected MCP server says about itself (RFC 9728).
@@ -579,7 +615,7 @@ pub async fn refresh(http: &Client, tokens: &Tokens) -> Result<Tokens, OauthErro
     let refresh_token = tokens
         .refresh_token
         .clone()
-        .ok_or_else(|| OauthError::Token("no refresh token; authorize again".into()))?;
+        .ok_or_else(|| OauthError::Unrenewable("no refresh token; authorize again".into()))?;
     let form = vec![
         ("grant_type", "refresh_token".to_string()),
         ("refresh_token", refresh_token.clone()),
@@ -620,10 +656,18 @@ async fn post_token(
         .await
         .map_err(|e| OauthError::Token(format!("reading token response: {e}")))?;
     if !status.is_success() {
-        return Err(OauthError::Token(format!(
-            "token request refused (HTTP {}): {body}",
-            status.as_u16()
-        )));
+        // The code tells a spent grant from a server that is unwell, so parse
+        // it before falling back to the status.
+        return Err(match serde_json::from_str::<ErrorResponse>(&body) {
+            Ok(refusal) => OauthError::Refused {
+                code: refusal.error,
+                description: refusal.error_description,
+            },
+            Err(_) => OauthError::Token(format!(
+                "token request refused (HTTP {}): {body}",
+                status.as_u16()
+            )),
+        });
     }
     serde_json::from_str(&body)
         .map_err(|e| OauthError::Token(format!("decoding token response: {e}")))

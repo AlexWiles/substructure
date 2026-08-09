@@ -11,7 +11,7 @@ together at the same version.
 
 ### Changed
 
-- Improve MCP auth failure handling
+- Improve MCP auth failure handling.
 
 ## [0.3.1] - 2026-08-07
 

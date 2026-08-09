@@ -212,6 +212,18 @@ pub trait CredentialResolver: Send + Sync {
         id: &str,
         spec: &ConnectionSpec,
     ) -> Result<HeaderMap, ConnectorError>;
+
+    /// Replace the credential this connection dials with, after the server
+    /// refused it. `Ok(false)` if nothing can be replaced without a person,
+    /// which tells the caller not to try the same credential again.
+    async fn refresh(
+        &self,
+        _tenant_id: &str,
+        _id: &str,
+        _spec: &ConnectionSpec,
+    ) -> Result<bool, ConnectorError> {
+        Ok(false)
+    }
 }
 
 /// One connection's tool list as fetched, with the prefix it expands under.
@@ -253,9 +265,11 @@ impl Connections {
     /// reading config again at prompt time, where a since-edited file would
     /// rename tools underneath a live session.
     pub async fn list_tools(&self, tenant_id: &str, id: &str) -> Result<Offer, ConnectorError> {
-        let (client, spec) = self.client(tenant_id, id).await?;
+        let spec = self.registry.resolve(tenant_id, id).await?;
         let tools = self
-            .guard(tenant_id, id, &spec, client.list_tools().await)
+            .attempt(tenant_id, id, &spec, |client| async move {
+                client.list_tools().await
+            })
             .await?;
         Ok(Offer {
             prefix: spec.prefix_for(id).map(str::to_string),
@@ -270,28 +284,72 @@ impl Connections {
         name: &str,
         arguments: &Value,
     ) -> Result<ToolOutcome, ConnectorError> {
-        let (client, spec) = self.client(tenant_id, id).await?;
-        self.guard(
-            tenant_id,
-            id,
-            &spec,
-            client.call_tool(name, arguments).await,
-        )
+        let spec = self.registry.resolve(tenant_id, id).await?;
+        self.attempt(tenant_id, id, &spec, |client| async move {
+            client.call_tool(name, arguments).await
+        })
         .await
+    }
+
+    /// Run one operation against the connection, and once more with a fresh
+    /// credential if the first attempt was refused.
+    ///
+    /// The server is the authority on its own tokens. It can revoke one before
+    /// the expiry we recorded, thus a refusal is the signal to refresh, and the
+    /// expiry is only an optimization. Without this a refused-but-unexpired
+    /// token is sent again on every attempt and the connection never recovers.
+    async fn attempt<T, F, Fut>(
+        &self,
+        tenant_id: &str,
+        id: &str,
+        spec: &ConnectionSpec,
+        op: F,
+    ) -> Result<T, ConnectorError>
+    where
+        F: Fn(Arc<McpClient>) -> Fut,
+        Fut: std::future::Future<Output = Result<T, ConnectorError>>,
+    {
+        let first = op(self.client(tenant_id, id, spec).await?).await;
+        let Err(err) = first else {
+            return first;
+        };
+        if err.auth.is_none() {
+            return Err(err);
+        }
+        self.drop_client(tenant_id, id).await;
+        // A refresh that fails reports why: it knows whether the grant is spent
+        // or the server is merely unwell, which the refusal does not say.
+        if self.credentials.refresh(tenant_id, id, spec).await? {
+            let retried = op(self.client(tenant_id, id, spec).await?).await;
+            match retried {
+                Err(again) if again.auth.is_some() => {
+                    self.drop_client(tenant_id, id).await;
+                }
+                other => return other,
+            }
+        }
+        Err(self.explain_refusal(id, spec, err).await)
+    }
+
+    async fn drop_client(&self, tenant_id: &str, id: &str) {
+        self.clients
+            .lock()
+            .await
+            .remove(&(tenant_id.to_string(), id.to_string()));
     }
 
     async fn client(
         &self,
         tenant_id: &str,
         id: &str,
-    ) -> Result<(Arc<McpClient>, ConnectionSpec), ConnectorError> {
-        let spec = self.registry.resolve(tenant_id, id).await?;
+        spec: &ConnectionSpec,
+    ) -> Result<Arc<McpClient>, ConnectorError> {
         let key = (tenant_id.to_string(), id.to_string());
         if let Some(client) = self.clients.lock().await.get(&key) {
-            return Ok((client.clone(), spec));
+            return Ok(client.clone());
         }
 
-        let headers = self.credentials.resolve(tenant_id, id, &spec).await?;
+        let headers = self.credentials.resolve(tenant_id, id, spec).await?;
         let client = match spec.protocol {
             ConnectorProtocol::Mcp => {
                 Arc::new(McpClient::new(self.http.clone(), spec.url.clone(), headers))
@@ -301,33 +359,21 @@ impl Connections {
         let mut clients = self.clients.lock().await;
         // Another caller may have won the race; keep whichever landed first so
         // one connection means one session.
-        Ok((clients.entry(key).or_insert(client).clone(), spec))
+        Ok(clients.entry(key).or_insert(client).clone())
     }
 
-    /// Drop the cached client when the connection rejected its credential, so a
-    /// refreshed token is picked up without restarting the engine.
+    /// What a refusal that a refresh did not correct means.
     ///
     /// A refusal is also the answer to how the connection authenticates, where
     /// the file did not say — so this is where a declaration-free connection
     /// finds out, at the one moment it matters and at no cost until then.
-    async fn guard<T>(
+    async fn explain_refusal(
         &self,
-        tenant_id: &str,
         id: &str,
         spec: &ConnectionSpec,
-        result: Result<T, ConnectorError>,
-    ) -> Result<T, ConnectorError> {
-        let Err(err) = result else {
-            return result;
-        };
-        if err.auth.is_none() {
-            return Err(err);
-        }
-        self.clients
-            .lock()
-            .await
-            .remove(&(tenant_id.to_string(), id.to_string()));
-        Err(match spec.auth {
+        err: ConnectorError,
+    ) -> ConnectorError {
+        match spec.auth {
             // The file already said how. A refusal means the credential is
             // wrong or spent, and the command that replaces it is the answer.
             Some(AuthKind::Token) => ConnectorError::unauthorized(
@@ -338,7 +384,7 @@ impl Connections {
             ),
             Some(_) => err,
             None => self.explain(id, spec).await.unwrap_or(err),
-        })
+        }
     }
 
     /// What a connection the file says nothing about wants, asked of the server
@@ -383,6 +429,159 @@ impl Connections {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A server that accepts one credential and refuses every other one.
+    async fn serve_accepting(accepted: &'static str) -> String {
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+
+        let app = post(
+            move |headers: axum::http::HeaderMap, body: String| async move {
+                let sent = headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                if sent != format!("Bearer {accepted}") {
+                    return (reqwest::StatusCode::UNAUTHORIZED, "no").into_response();
+                }
+                let request: Value = serde_json::from_str(&body).unwrap_or_default();
+                let result = match request["method"].as_str().unwrap_or_default() {
+                    "initialize" => serde_json::json!({
+                        "protocolVersion": "2025-11-25",
+                        "capabilities": {},
+                        "serverInfo": { "name": "mock", "version": "0" },
+                    }),
+                    "notifications/initialized" => {
+                        return reqwest::StatusCode::ACCEPTED.into_response()
+                    }
+                    _ => {
+                        serde_json::json!({ "tools": [ { "name": "search", "inputSchema": {} } ] })
+                    }
+                };
+                serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "result": result })
+                    .to_string()
+                    .into_response()
+            },
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, axum::Router::new().route("/mcp", app)).await;
+        });
+        format!("http://{addr}/mcp")
+    }
+
+    /// Holds one token and replaces it on refresh, counting how often.
+    struct Rotating {
+        current: Mutex<String>,
+        next: Option<&'static str>,
+        refreshes: AtomicUsize,
+    }
+
+    impl Rotating {
+        fn new(current: &str, next: Option<&'static str>) -> Self {
+            Self {
+                current: Mutex::new(current.to_string()),
+                next,
+                refreshes: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl CredentialResolver for Rotating {
+        async fn resolve(
+            &self,
+            _: &str,
+            _: &str,
+            _: &ConnectionSpec,
+        ) -> Result<HeaderMap, ConnectorError> {
+            crate::connectors::mcp::auth_headers(None, &self.current.lock().await.clone())
+        }
+
+        async fn refresh(
+            &self,
+            _: &str,
+            _: &str,
+            _: &ConnectionSpec,
+        ) -> Result<bool, ConnectorError> {
+            self.refreshes.fetch_add(1, Ordering::SeqCst);
+            match self.next {
+                Some(next) => {
+                    *self.current.lock().await = next.to_string();
+                    Ok(true)
+                }
+                None => Ok(false),
+            }
+        }
+    }
+
+    async fn connections(url: String, credentials: Arc<Rotating>) -> Connections {
+        let spec = ConnectionSpec {
+            url,
+            protocol: ConnectorProtocol::Mcp,
+            auth: Some(AuthKind::Oauth),
+            header: None,
+            prefix_tools: true,
+        };
+        Connections::new(
+            Arc::new(LocalRegistry::new(BTreeMap::from([(
+                "sentry".to_string(),
+                spec,
+            )]))),
+            credentials,
+        )
+    }
+
+    /// A server can revoke a token before the expiry we recorded, so the
+    /// refusal is the signal to refresh. Without the retry the same unexpired
+    /// token goes out on every attempt and the connection never recovers.
+    #[tokio::test]
+    async fn a_refused_credential_is_refreshed_and_the_call_tried_again() {
+        let url = serve_accepting("fresh").await;
+        let credentials = Arc::new(Rotating::new("stale", Some("fresh")));
+        let offer = connections(url, credentials.clone())
+            .await
+            .list_tools("t", "sentry")
+            .await
+            .expect("the retry carries the refreshed token");
+
+        assert_eq!(offer.tools[0].name, "search");
+        assert_eq!(credentials.refreshes.load(Ordering::SeqCst), 1);
+    }
+
+    /// One retry, not a loop: a credential the server refuses twice needs a
+    /// person, and asking again only makes the wait longer.
+    #[tokio::test]
+    async fn a_credential_refused_after_refresh_asks_for_authorization() {
+        let url = serve_accepting("never-issued").await;
+        let credentials = Arc::new(Rotating::new("stale", Some("also-stale")));
+        let err = connections(url, credentials.clone())
+            .await
+            .list_tools("t", "sentry")
+            .await
+            .expect_err("the second refusal stands");
+
+        assert_eq!(err.auth, Some(AuthNeed::Reauthorize));
+        assert_eq!(credentials.refreshes.load(Ordering::SeqCst), 1);
+    }
+
+    /// Nothing to refresh means nothing to retry.
+    #[tokio::test]
+    async fn a_credential_that_cannot_be_refreshed_is_not_retried() {
+        let url = serve_accepting("never-issued").await;
+        let credentials = Arc::new(Rotating::new("stale", None));
+        let err = connections(url, credentials.clone())
+            .await
+            .list_tools("t", "sentry")
+            .await
+            .expect_err("a refusal it cannot correct");
+
+        assert_eq!(err.auth, Some(AuthNeed::Reauthorize));
+        assert_eq!(credentials.refreshes.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn an_inline_token_is_a_parse_error_not_a_silent_secret() {
